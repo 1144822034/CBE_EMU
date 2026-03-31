@@ -95,6 +95,6 @@ void drawFontString(u16 *gbkStr, int x, int y, u16 color)
 
 int mesureStringWidth(char *gbkStr)
 {
-    int len = strlen(gbkStr);
+    int len = strlen_gbk(gbkStr);
     return len * fontWidth;
 }

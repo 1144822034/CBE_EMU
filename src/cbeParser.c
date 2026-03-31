@@ -8,62 +8,88 @@ int sumCheck(int *memBuffer, int len)
     len /= 4;
     while (len-- > 0)
     {
+
         result += *(memBuffer++);
     }
     return result;
 }
 
+int sumCheckByBig(u8 *memBuffer, int len)
+{
+    int result = 0;
+    len /= 4;
+    while (len-- > 0)
+    {
+
+        result += (((memBuffer[0] << 24)) | ((memBuffer[1] << 16) | (memBuffer[2] << 8) | (memBuffer[3])));
+        memBuffer += 4;
+    }
+    return result;
+}
+
+static int check_interval_char_in_ram(u8 *ptr)
+{
+    if (!ptr)
+        return 0;
+    for (int i = 0; i < 8; ++i)
+    {
+        if (ptr[i] != 0xFE)
+            return 0;
+    }
+    return 1;
+}
 int parseCbeHeader(u8 *cbeFileBuffer, u32 size)
 {
 
     int v = 0;
     int n = 0;
-    u8 *filePtr;
-    for (int i = 0; i < 0x98; i++) // 头部信息固定0x98字节
+    u8 *filePtr = cbeFileBuffer;
+    // 头部信息固定0x98字节
+    // 共12组信息，前4组固定，然后得到一个偏移值
+    u32 params[5];
+    u32 pgParamsOffset[6];
+    u32 pgParams[6];
+    for (int i = 0; i < 5; i++)
     {
-        if (cbeFileBuffer[i] == 0xfe) // 直接忽略间隔符
-            continue;
-        // 按大端序读取4字节
-        v = (cbeFileBuffer[i] << 24) | (cbeFileBuffer[i + 1] << 16) | (cbeFileBuffer[i + 2] << 8) | cbeFileBuffer[i + 3];
-        i += 3;
-        if (n == 0)
+        n = i * 12;
+        if (!check_interval_char_in_ram(filePtr + n))
         {
-            g_cbeInfo.entryOffset = v;
+            printf("错误的cbe文件");
+            assert(0);
+            break;
         }
-        else if (n == 1)
-            printf("未知：%08x\n", v);
-        else if (n == 2)
-            printf("未知：%08x\n", v);
-        else if (n == 3)
-            printf("未知：%08x\n", v);
-        else if (n == 4)
-            printf("未知：%08x\n", v);
-        else if (n == 5)
-            printf("未知：%08x\n", v);
-        else if (n == 6)
-            g_cbeInfo.codeLen = v;
-        else if (n == 7)
-            g_cbeInfo.codeSign = v;
-        else if (n == 8)
-            g_cbeInfo.BssDataLen = v;
-        else if (n == 9)
-            g_cbeInfo.BssDataSign = v;
-        else if (n == 10)
-            g_cbeInfo.RwDataLen = v;
-        else if (n == 11)
-            g_cbeInfo.RwDataSign = v;
-        else
-            printf("未知部分：%08x\n", v);
-        n++;
+        n += 8;
+        params[i] = (filePtr[n++] << 24) | (filePtr[n++] << 16) | (filePtr[n++] << 8) | (filePtr[n++]);
     }
-
-    filePtr = cbeFileBuffer + 0x98;
+    filePtr = cbeFileBuffer + 68 + params[4];
+    // 继续读取6组数值
+    for (int i = 0; i < 6; i++)
+    {
+        n = i * 12;
+        if (!check_interval_char_in_ram(filePtr + n))
+        {
+            printf("错误的cbe文件");
+            assert(0);
+            break;
+        }
+        n += 8;
+        pgParams[i] = (filePtr[n++] << 24) | (filePtr[n++] << 16) | (filePtr[n++] << 8) | (filePtr[n++]);
+    }
+    int remainLen = 0x98 - (params[4] + 140);
+    filePtr = cbeFileBuffer + 0x98 - remainLen;
+    g_cbeInfo.codeLen = pgParams[0];
+    g_cbeInfo.codeSign = pgParams[1];
+    g_cbeInfo.BssDataLen = pgParams[2];
+    g_cbeInfo.BssDataSign = pgParams[3];
+    g_cbeInfo.RwDataLen = pgParams[4];
+    g_cbeInfo.RwDataSign = pgParams[5];
     int preCodeIntervalCount = 0;
     while (*filePtr == 0xfe)
     {
         preCodeIntervalCount++;
         filePtr++;
     }
+
     g_cbeInfo.preCodeIntervalCount = preCodeIntervalCount;
     g_cbeInfo.codeOffset = filePtr - cbeFileBuffer; // 代码段的实际起始位置
     filePtr += preCodeIntervalCount;                // 跳过间隔符
@@ -109,21 +135,55 @@ int parseCbeHeader(u8 *cbeFileBuffer, u32 size)
     }
     g_cbeInfo.DF_Data_Pacakage_Offset = filePtr - cbeFileBuffer;
 
-    printf("[cbeParser]entry %x\n", g_cbeInfo.entryOffset);
+    int sign = sumCheck(cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+    int bigSign = sumCheckByBig(cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+    if (sign == g_cbeInfo.codeSign)
+    {
+        g_cbeInfo.isBiggianProgram = 0;
+        g_cbeInfo.codeSignVerify = sign;
+        g_cbeInfo.BssDataSignVerify = sumCheck(cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        g_cbeInfo.RwDataSignVerify = sumCheck(cbeFileBuffer + g_cbeInfo.RwDataOffset, g_cbeInfo.RwDataLen);
+    }
+    else if (bigSign == g_cbeInfo.codeSign)
+    {
+        g_cbeInfo.isBiggianProgram = 1;
+        g_cbeInfo.codeSignVerify = bigSign;
+        g_cbeInfo.BssDataSignVerify = sumCheckByBig(cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        g_cbeInfo.RwDataSignVerify = sumCheckByBig(cbeFileBuffer + g_cbeInfo.RwDataOffset, g_cbeInfo.RwDataLen);
+    }
+    else
+    {
+        printf("code段签名验证失败，无论大端序还是小端序");
+        assert(0);
+    }
+
+    printf("[cbeParser]是否大端序 %d\n", g_cbeInfo.isBiggianProgram);
 
     printf("[cbeParser]codeOffset %x\n", g_cbeInfo.codeOffset);
     printf("[cbeParser]codeLen %x\n", g_cbeInfo.codeLen);
-    printf("[cbeParser]codeSign %x sumCheck %x\n", g_cbeInfo.codeSign, sumCheck(cbeFileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen));
+    printf("[cbeParser]codeSign %x sumCheck %x\n", g_cbeInfo.codeSign, g_cbeInfo.codeSignVerify);
 
     printf("[cbeParser]BssDataOffset %x\n", g_cbeInfo.BssDataOffset);
     printf("[cbeParser]bssDataLen %x\n", g_cbeInfo.BssDataLen);
-    printf("[cbeParser]bssDataSign %x sumCheck %x\n", g_cbeInfo.BssDataSign, sumCheck(cbeFileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen));
+    printf("[cbeParser]bssDataSign %x sumCheck %x\n", g_cbeInfo.BssDataSign, g_cbeInfo.BssDataSignVerify);
 
     printf("[cbeParser]RwDataOffset %x\n", g_cbeInfo.RwDataOffset);
     printf("[cbeParser]rwDataLen %x\n", g_cbeInfo.RwDataLen);
-    printf("[cbeParser]rwDataSign %x sumCheck %x\n", g_cbeInfo.RwDataSign, sumCheck(cbeFileBuffer + g_cbeInfo.RwDataOffset, g_cbeInfo.RwDataLen));
+    printf("[cbeParser]rwDataSign %x sumCheck %x\n", g_cbeInfo.RwDataSign, g_cbeInfo.RwDataSignVerify);
 
     printf("[cbeParser]DF_Data_Pacakage_Offset %x\n", g_cbeInfo.DF_Data_Pacakage_Offset);
     printf("[cbeParser]DF_DataPacakge_Size %x\n", g_cbeInfo.DF_DataPacakge_Size);
+
+    if (g_cbeInfo.BssDataSign != g_cbeInfo.BssDataSignVerify)
+    {
+        printf("bss段签名校验不通过");
+        assert(0);
+    }
+    if (g_cbeInfo.RwDataSign != g_cbeInfo.RwDataSignVerify)
+    {
+        printf("rw段签名校验不通过");
+        assert(0);
+    }
+
     return 1;
 }

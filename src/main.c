@@ -152,6 +152,11 @@ void keyEvent(int type, int key)
 {
     // printf("keyboard(%x,type=%d)\n", key, type);
     int skey = 0;
+    // F5导出Cpu信息
+    if (key == 0x4000003e && type == 4)
+    {
+        dumpCpuInfo();
+    }
     if (key >= 0x30 && key <= 0x39)
     { // 数字键盘1-9
         skey = key - 0x30;
@@ -326,7 +331,7 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "game_mota.cbe"
+#define LOAD_CBE_PATH "game_jianghu_lidian.cbe"
 
 void RunArmProgram(void *param)
 {
@@ -351,13 +356,11 @@ void RunArmProgram(void *param)
     char nameBuff[64] = LOAD_CBE_PATH;
     uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS, nameBuff, 64);
     // DF_DataPackage_SetFileLens();
-    changeTmp1 = 0x1c93f;
-    uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS + 512 + 4, &g_cbeInfo.DF_DataPacakge_Size, 4);
+    uc_mem_write(MTK, VM_DF_DataPackage_In_File_Length_ADDRESS, &g_cbeInfo.DF_DataPacakge_Size, 4);
     // DF_DataPackage_SetFileOffset()
-    changeTmp1 = 0x20ea2;
-    uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS + 512, &g_cbeInfo.DF_Data_Pacakage_Offset, 4);
+    uc_mem_write(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &g_cbeInfo.DF_Data_Pacakage_Offset, 4);
     changeTmp1 = 1;
-    uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS + 512 + 8, &changeTmp1, 1);
+    uc_mem_write(MTK, VM_DF_DataPackage_loadType_ADDRESS, &changeTmp1, 1);
     // 第一次入口初始化
     changeTmp1 = VM_Manager_Table_ADDRESS;
     uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1); // 传入CBE运行时数据内存地址
@@ -507,14 +510,20 @@ int main(int argc, char *args[])
     }
 
     InitVmEvent();
+    char *fileBuffer = readFile(LOAD_CBE_PATH, &changeTmp1);
+    // 分析前150字节
+    parseCbeHeader(fileBuffer, changeTmp1);
 
-    err = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &MTK);
+    if (g_cbeInfo.isBiggianProgram)
+        err = uc_open(UC_ARCH_ARM, UC_MODE_ARM | UC_MODE_BIG_ENDIAN, &MTK);
+    else
+        err = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &MTK);
+
     if (err)
     {
         printf("Failed on uc_open() with error returned: %u (%s)\n", err, uc_strerror(err));
         return NULL;
     }
-    uc_ctl_set_cpu_model(MTK, UC_CPU_ARM_CORTEX_A9);
 
     ROM_MEMPOOL = SDL_malloc(size_16mb);
     STACK_MEMPOOL = SDL_malloc(size_4mb);
@@ -530,6 +539,7 @@ int main(int argc, char *args[])
     InitVmMalloc();
     InitLcd();
     InitFontEngine();
+
     if (err)
     {
         printf("Failed mem  Rom map: %u (%s)\n", err, uc_strerror(err));
@@ -555,16 +565,10 @@ int main(int argc, char *args[])
 
     if (MTK != NULL)
     {
-        char *ptr1 = readFile(LOAD_CBE_PATH, &changeTmp1);
-        // 分析前150字节
-        parseCbeHeader(ptr1, changeTmp1);
         // 写入code段
-        uc_mem_write(MTK, ROM_ADDRESS, ptr1 + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
-        uc_mem_write(MTK, STACK_ADDRESS, ptr1 + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
-        uc_mem_write(MTK, STACK_ADDRESS + g_cbeInfo.BssDataLen, ptr1 + g_cbeInfo.RwDataOffset, g_cbeInfo.RwDataLen);
-        // 0x20e96 - 0x356
-
-        SDL_free(ptr1);
+        uc_mem_write(MTK, ROM_ADDRESS, fileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+        uc_mem_write(MTK, STACK_ADDRESS, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+        uc_mem_write(MTK, STACK_ADDRESS + g_cbeInfo.BssDataLen, fileBuffer + g_cbeInfo.RwDataOffset, g_cbeInfo.RwDataLen);
 
         changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 8, &changeTmp3, 4); // vmManager函数表地址
@@ -573,6 +577,7 @@ int main(int argc, char *args[])
         changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
         uc_mem_write(MTK, VM_Manager_Table_ADDRESS + 16, &changeTmp3, 4); // vcurAppFileName全局变量地址
 
+        SDL_free(fileBuffer);
         int i = 0;
         for (i = 0; i < (VM_MANAGER_FUNC_LIST_SIZE / 4); i++)
         {
@@ -762,11 +767,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     }
     if (address == VM_LOG_TRACE_ADDRESS)
     {
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_mem_read(MTK, tmp1, globalSprintfBuff, 64);
-        printf("[vm_log_trace]%x,%x,%x::%s\n", tmp1, tmp2, tmp3, globalSprintfBuff);
+        vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        printf("[vm_log_trace]%s\n", cbeTextString);
         // bx lr实现
         uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
         uc_reg_write(MTK, UC_ARM_REG_PC, &tmp1);
@@ -1067,9 +1069,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 16)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_read(MTK, tmp1, globalSprintfBuff, 256);
-            printf("[call]vMAssert(%s)\n", globalSprintfBuff);
+            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+            printf("[call]vMAssert(%s)\n", cbeTextString);
             assert(0);
         }
         else if (idx == 17)
@@ -1108,7 +1109,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 25)
         {
-            printf("[call]CDownGetServicePhone\n");
+            // ignore
+            //  printf("[call]CDownGetServicePhone\n");
+            //  uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            //  uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            //  u8 *s = cbeTextString;
+            //  *s++ = '1';
+            //  *s++ = '3';
+            //  *s++ = '8';
+            //  *s++ = '0';
+            //  *s++ = '0';
+            //  *s++ = '\0';
+            //  uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
         }
         else if (idx == 26)
         {
@@ -1422,7 +1434,18 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         }
         else if (idx == 106)
         {
-            printf("[call]CDownGetCompanyEx\n");
+            // ignore
+            //  printf("[call]CDownGetCompanyEx\n");
+            //  uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+            //  uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+            //  u8 *s = cbeTextString;
+            //  *s++ = 'e';
+            //  *s++ = 'm';
+            //  *s++ = 'u';
+            //  *s++ = '_';
+            //  *s++ = 'c';
+            //  *s++ = '\0';
+            //  uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
         }
         else if (idx == 107)
         {
@@ -1651,8 +1674,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         else if (idx == 8)
         {
             // todo
-            // printf("[call]vMGetStringWidth\n");
-            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+            // gbk_to_utf8(cbeTextString, sprintfBuff, 16);
+            // printf("[call]vMGetStringWidth(%s)\n", sprintfBuff);
             tmp1 = mesureStringWidth(cbeTextString);
             uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
@@ -1674,14 +1698,13 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         {
             // vMDrawStringEx(dstBuffer, text, x, y, color) GBK编码
             //  todo
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
             uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
             uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
             uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
             u16 color;
             uc_mem_read(MTK, tmp4, &color, 2);
-            uc_mem_read(MTK, tmp1, globalSprintfBuff, 256);
-            drawFontString(globalSprintfBuff, tmp2, tmp3, color);
+            vm_readStringByReg(UC_ARM_REG_R1, cbeTextString);
+            drawFontString(cbeTextString, tmp2, tmp3, color);
             // gbk_to_utf8(globalSprintfBuff, sprintfBuff, 256);
             // printf("[call]vMDrawStringEx(%d,%d,%s)\n", tmp2, tmp3, sprintfBuff);
         }
@@ -2355,7 +2378,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
             uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
             vm_DF_WriteInt(tmp1, tmp2, tmp3);
-            printf("[call]DF_WriteInt\n");
+            // printf("[call]DF_WriteInt\n");
         }
         else if (idx == 26)
         {

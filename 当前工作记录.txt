@@ -966,3 +966,4 @@ int __fastcall vMInitNetAppManager(int a1)
 
 0x122B2 + 0x16C2588 = 0x16D483A
 
+0x16CEBC0 - 0x16C2588 =

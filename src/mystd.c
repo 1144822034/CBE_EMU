@@ -30,7 +30,7 @@ void gbk_to_utf8(u8 *gbk, u8 *utf8, size_t outlen)
     if (cd == (iconv_t)-1)
         return;
 
-    size_t inlen = strlen_gbk(gbk);
+    size_t inlen = strlen(gbk);
     u8 *pin = (u8 *)gbk;
     u8 *pout = utf8;
 
@@ -63,28 +63,76 @@ int strlen_utf16(u8 *utf16)
         len++;
     return len;
 }
-
-int strlen_gbk(u8 *gbk)
+/* 返回下一个字符的字节长度：
+ *  1 -> ASCII 单字节
+ *  2 -> 合法 GBK 双字节
+ *  0 -> 无效/不完整（例如以单独的 GBK 前导字节结束）
+ */
+static int gbk_next_char_len(const unsigned char *s, size_t remaining)
 {
-    int len = 0;
-    while (*gbk)
+    if (remaining == 0 || s == NULL)
+        return 0;
+    unsigned char b1 = s[0];
+    if (b1 < 0x80)
     {
-        if (*gbk < 0x80)
+        return 1; /* ASCII */
+    }
+    /* GBK 双字节首字节范围 0x81 - 0xFE */
+    if (b1 >= 0x81 && b1 <= 0xFE)
+    {
+        if (remaining < 2)
+            return 0; /* 不足两字节 -> 不完整 */
+        unsigned char b2 = s[1];
+        /* GBK 次字节范围通常 0x40 - 0xFE，排除 0x7F */
+        if (b2 >= 0x40 && b2 <= 0xFE && b2 != 0x7F)
         {
-            // ASCII（1字节）
-            gbk += 1;
+            return 2;
         }
         else
         {
-            // GBK 双字节
-            if (*(gbk + 1) != 0)
-                gbk += 2;
-            else
-                break; // 防止越界
+            return 0; /* 非法次字节 */
         }
-        len++;
     }
-    return len;
+    /* 0x80 或其他不能作为 GBK 首字节的情况视为非法（返回 0） */
+    return 0;
+}
+
+/* 统计 GBK 字符串的字符数（以字为单位）并且可以选择是否严格验证：
+ * strict = 1 -> 如果遇到非法序列，立即返回 (size_t)-1 表示错误
+ * strict = 0 -> 遇到非法序列时把该字节当作单字节字符继续统计
+ */
+int strlen_gbk(u8 *s)
+{
+    int strict = 1;
+    if (s == NULL)
+        return 0;
+    u8 *p = (u8 *)s;
+    u8 bytes = strlen(s);
+    u8 i = 0;
+    u8 chars = 0;
+    while (i < bytes)
+    {
+        int len = gbk_next_char_len(p + i, bytes - i);
+        if (len == 1)
+        {
+            i += 1;
+            chars += 1;
+        }
+        else if (len == 2)
+        {
+            i += 2;
+            chars += 1;
+        }
+        else
+        { /* len == 0，非法或不完整 */
+            if (strict)
+                return (size_t)-1;
+            /* 宽松模式：把当前字节当作单字节处理，继续 */
+            i += 1;
+            chars += 1;
+        }
+    }
+    return chars;
 }
 
 int utf16_len(u8 *utf16)
