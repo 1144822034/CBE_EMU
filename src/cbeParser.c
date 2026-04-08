@@ -77,6 +77,11 @@ int parseCbeHeader(u8 *cbeFileBuffer, u32 size)
     }
     int remainLen = 0x98 - (params[4] + 140);
     filePtr = cbeFileBuffer + 0x98 - remainLen;
+    g_cbeInfo.headerInt1 = params[0];
+    g_cbeInfo.headerInt2 = params[1];
+    g_cbeInfo.headerInt3 = params[2];
+    g_cbeInfo.headerInt4 = params[3];
+
     g_cbeInfo.codeLen = pgParams[0];
     g_cbeInfo.codeSign = pgParams[1];
     g_cbeInfo.BssDataLen = pgParams[2];

@@ -41,6 +41,8 @@ u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;
 u32 IRQ_MASK_SET_H_Data;
 
+u32 Global_R9;
+
 u8 *ROM_MEMPOOL;
 u8 *STACK_MEMPOOL;
 u8 *PRAM_MEMPOOL;

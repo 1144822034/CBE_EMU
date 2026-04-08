@@ -5,7 +5,7 @@ VMBlock *vm_head;
 void InitVmMalloc()
 {
     vm_head = (VMBlock *)SDL_malloc(sizeof(VMBlock));
-    vm_head->addr = VM_Memory_Pool_ADDRESS;
+    vm_head->addr = VM_MALLOC_POOL_ADDRESS;
     vm_head->size = VM_MemoryBlock_SIZE;
     vm_head->used = 0;
     vm_head->next = NULL;
@@ -75,6 +75,6 @@ void vm_free(u32 addr)
 
         cur = cur->next;
     }
-    assert(0);
     printf("[vm_free] INVALID addr=0x%08X\n", addr);
+    assert(0);
 }

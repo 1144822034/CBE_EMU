@@ -224,6 +224,7 @@
 [vm_log_trace] vm_file_write SUcess,eb6214,d60e90
 [vm_log_trace]vMGetTotalSeconds seconds %d,69c39978,69c325b0
 [vm_log_trace]vMGetTotalSeconds seconds %d,69c39978,69c325b0
+//开始进入屏幕初始化
 [vm_log_trace]vmEnterWinEnter 3:%d,0,d61168
 [vm_log_trace]vmScreenPatchUpdate1:%x,%x,d22f9c,16e4560
 [vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,16e4560
@@ -342,6 +343,8 @@
 [vm_log_trace]TryChangeSubTScreen:%x,%x,d22f9c,0
 [vm_log_trace]TryChangeSubTScreen3:%x,%x,d22f9c,0
 [vm_log_trace]vmScreenPatchUpdate2:%x,%x,d22f9c,0
+
+//对应模拟器的输出
 [vm_log_trace]yangzhijieday111:%d,1e,525e21
 [vm_log_trace]vmScreenPatchUpdate3:%x,0,d61648
 [vm_log_trace][coolbar] xxl: ts event %d,x[%d] ,y[%d],1,70

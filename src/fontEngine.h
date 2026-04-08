@@ -17,4 +17,4 @@ int getFontHeight();
 u8 getFontBitMap(u16 unicode, char *bitmapData);
 void drawFontChar(u16 unicode, int x, int y, u16 color);
 int mesureStringWidth(char *str);
-void drawFontString(u16 *unicodeStr, int x, int y, u16 color);
+void drawFontString(u8 *unicodeStr, int x, int y, u16 color);

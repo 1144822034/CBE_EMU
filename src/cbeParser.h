@@ -3,6 +3,11 @@
 
 typedef struct cbeInfo
 {
+    u32 headerInt1;//不知道
+    u32 headerInt2;//代码段malloc大小
+    u32 headerInt3;//不知道
+    u32 headerInt4;//数据段malloc大小
+
     u32 preCodeIntervalCount;
     u32 codeOffset;
     u32 codeLen;

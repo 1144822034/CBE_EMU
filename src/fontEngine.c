@@ -14,10 +14,10 @@ void InitFontEngine()
     // 字体引擎初始化（如果有需要的话）
 
     int fileSize;
-    fontFileData = readFile("gb16.uc2.uc3", &fileSize);
+    fontFileData = readFile("font_gb.uc3", &fileSize);
     if (fontFileData == NULL)
     {
-        printf("Failed to load gb16.uc2.uc3\n");
+        printf("Failed to load font_gb.uc3\n");
         assert(0);
     }
     fontWidth = ((int *)fontFileData)[1];
@@ -28,23 +28,24 @@ void InitFontEngine()
     bitmapDataSize = (fontWidth * fontHeight) / 8;
     linePitch = fontWidth / 8;
 }
-int getFontWidth()
+inline int getFontWidth()
 {
     return fontWidth;
 }
 
-int getFontHeight()
+inline int getFontHeight()
 {
     return fontHeight;
 }
 // 一个字符32字节，16x16大小，一行16个像素点就是2字节，所以16x16就是32字节
-u8 getFontBitMap(u16 unicode, char *bitmapData)
+u8 getFontBitMap(u16 gbCode, char *bitmapData)
 {
+    // todo 二分法查找优化
     for (int i = 0; i < fontCount; i++)
     {
-        u16 *uni = (u16 *)(fontCharsStartPtr + i * 6);
+        u16 *gb = (u16 *)(fontCharsStartPtr + i * 6);
         u32 *off = (u32 *)(fontCharsStartPtr + i * 6 + 2);
-        if (uni[0] == unicode)
+        if (gb[0] == gbCode)
         {
             u32 offset = off[0];
             my_memcpy(bitmapData, fontFileData + offset, bitmapDataSize);
@@ -53,10 +54,10 @@ u8 getFontBitMap(u16 unicode, char *bitmapData)
     }
     return 0;
 }
-void drawFontChar(u16 unicode, int x, int y, u16 color)
+void drawFontChar(u16 gbCode, int x, int y, u16 color)
 {
     char *bitMapData = SDL_malloc(bitmapDataSize);
-    if (getFontBitMap(unicode, bitMapData))
+    if (getFontBitMap(gbCode, bitMapData))
     {
         for (int j = 0; j < fontHeight; j++)
         {
@@ -75,26 +76,38 @@ void drawFontChar(u16 unicode, int x, int y, u16 color)
     }
     else
     {
-        printf("字库中不存在字符%x，无法绘制", unicode);
+        printf("字库中不存在字符%x，无法绘制\n", gbCode);
     }
     SDL_free(bitMapData);
 }
 
-void drawFontString(u16 *gbkStr, int x, int y, u16 color)
+void drawFontString(u8 *gbkStr, int x, int y, u16 color)
 {
-    u8 strBuff[256];
-    gbk_to_unicode((u8 *)gbkStr, (u8 *)strBuff, 256);
-    int i = strlen_utf16(strBuff);
-    // fixme s=1时取值与内存真实值对不上?
-    for (int s = 1; s < i; s++) // 去掉utf16的ffeff头标识
+    u8 *start = gbkStr;
+    u32 i = 0;
+    u32 ri = 0;
+    u16 c;
+    while (1)
     {
-        u16 unicode23 = (strBuff[2 * s] << 8) | (strBuff[2 * s + 1]);
-        drawFontChar(unicode23, x + (s - 1) * fontWidth, y, color);
+        c = gbkStr[i];
+        if (c == 0)
+            break;
+        else if (c < 0x80)
+        {
+            drawFontChar((c << 8), x + (ri++) * fontWidth, y, color);
+            i += 1;
+        }
+        else
+        {
+            c = (gbkStr[i] ) | (gbkStr[i + 1]<< 8);
+            drawFontChar(c, x + (ri++) * fontWidth, y, color);
+            i += 2;
+        }
     }
 }
 
 int mesureStringWidth(char *gbkStr)
 {
     int len = strlen_gbk(gbkStr);
-    return len * fontWidth;
+    return len * getFontWidth();
 }

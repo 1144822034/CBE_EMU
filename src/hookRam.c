@@ -38,11 +38,31 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
-
+    if (type == UC_MEM_WRITE && address == 0x54000E4)
+    {
+        printf("write 0x54000E4: %x", value);
+        printf(" at %x\n", lastAddress);
+    }
 }
 void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x\n", address);
+    dumpCpuInfo();
+    while (1)
+        ;
+}
+void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
+{
+    printf("未处理的CPU中断:%x\n", intno);
+    // u32 pc;
+    // uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    // pc += 4;
+    // uc_reg_write(uc, UC_ARM_REG_PC, &pc);
+
+    vm_readStringByReg(UC_ARM_REG_R5, cbeTextString);
+    printf("%s", cbeTextString);
+    dumpCpuInfo();
+    assert(0);
 }
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data)

@@ -50,51 +50,18 @@ void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
     u8 *pin = (u8 *)gbk;
     u8 *pout = unicode;
 
-    memset(unicode, 0, outlen);
+    memset(pout, 0, outlen);
 
     iconv(cd, &pin, &inlen, &pout, &outlen);
     iconv_close(cd);
 }
 
-int strlen_utf16(u8 *utf16)
+int strlen_utf16(u16 *utf16)
 {
     int len = 0;
-    while (utf16[len * 2] != 0 || utf16[len * 2 + 1] != 0)
+    while (utf16[len] != 0)
         len++;
     return len;
-}
-/* 返回下一个字符的字节长度：
- *  1 -> ASCII 单字节
- *  2 -> 合法 GBK 双字节
- *  0 -> 无效/不完整（例如以单独的 GBK 前导字节结束）
- */
-static int gbk_next_char_len(const unsigned char *s, size_t remaining)
-{
-    if (remaining == 0 || s == NULL)
-        return 0;
-    unsigned char b1 = s[0];
-    if (b1 < 0x80)
-    {
-        return 1; /* ASCII */
-    }
-    /* GBK 双字节首字节范围 0x81 - 0xFE */
-    if (b1 >= 0x81 && b1 <= 0xFE)
-    {
-        if (remaining < 2)
-            return 0; /* 不足两字节 -> 不完整 */
-        unsigned char b2 = s[1];
-        /* GBK 次字节范围通常 0x40 - 0xFE，排除 0x7F */
-        if (b2 >= 0x40 && b2 <= 0xFE && b2 != 0x7F)
-        {
-            return 2;
-        }
-        else
-        {
-            return 0; /* 非法次字节 */
-        }
-    }
-    /* 0x80 或其他不能作为 GBK 首字节的情况视为非法（返回 0） */
-    return 0;
 }
 
 /* 统计 GBK 字符串的字符数（以字为单位）并且可以选择是否严格验证：
@@ -103,44 +70,43 @@ static int gbk_next_char_len(const unsigned char *s, size_t remaining)
  */
 int strlen_gbk(u8 *s)
 {
-    int strict = 1;
+    int strict = 0;
     if (s == NULL)
         return 0;
-    u8 *p = (u8 *)s;
-    u8 bytes = strlen(s);
-    u8 i = 0;
-    u8 chars = 0;
+    u32 bytes = strlen_utf16((u16 *)s) * 2;
+    u32 i = 0;
+    u32 count = 0;
+    int remaining = 0;
     while (i < bytes)
     {
-        int len = gbk_next_char_len(p + i, bytes - i);
-        if (len == 1)
+        remaining = bytes - i;
+        if (remaining == 0)
+            break;
+        u8 b1 = s[i];
+        if (b1 < 0x80)
         {
+            count += 1; /* ASCII */
             i += 1;
-            chars += 1;
         }
-        else if (len == 2)
+        /* GBK 双字节首字节范围 0x81 - 0xFE */
+        else if (b1 >= 0x81 && b1 <= 0xFE)
         {
+            if (remaining < 2)
+            {
+                printf("[1]未识别的GBK字符编码：%x\n", b1);
+                break; /* 不足两字节 -> 不完整 */
+            }
+            u8 b2 = s[i + 1];
+            count += 1;
             i += 2;
-            chars += 1;
         }
         else
-        { /* len == 0，非法或不完整 */
-            if (strict)
-                return (size_t)-1;
-            /* 宽松模式：把当前字节当作单字节处理，继续 */
-            i += 1;
-            chars += 1;
+        {
+            printf("[3]未识别的GBK字符编码：%x\n", b1);
+            break;
         }
     }
-    return chars;
-}
-
-int utf16_len(u8 *utf16)
-{
-    int len = 0;
-    while (*utf16++ != 0)
-        len++;
-    return len;
+    return count;
 }
 
 int ucs2_to_utf8(u8 *in, int ilen, u8 *out, int olen)
@@ -188,4 +154,28 @@ int ucs2_to_utf8(u8 *in, int ilen, u8 *out, int olen)
     }
 
     return length;
+}
+int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len)
+{
+    iconv_t cd;
+    char *inbuf = (char *)ucs2;
+    char *outbuf = gbk;
+
+    u32 inbytesleft = ucs2_len;
+    u32 outbytesleft = gbk_len;
+
+    cd = iconv_open("GBK", "UCS-2LE");
+    if (cd == (iconv_t)-1)
+        return -1;
+
+    memset(gbk, 0, gbk_len);
+
+    if (iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft) == (u32)-1)
+    {
+        iconv_close(cd);
+        return -2;
+    }
+
+    iconv_close(cd);
+    return 0;
 }
