@@ -40,6 +40,22 @@ void gbk_to_utf8(u8 *gbk, u8 *utf8, size_t outlen)
     iconv_close(cd);
 }
 
+void utf8_to_gbk(u8 *utf, u8 *gbk, size_t outlen)
+{
+    iconv_t cd = iconv_open("GBK", "UTF-8");
+    if (cd == (iconv_t)-1)
+        return;
+
+    size_t inlen = strlen(utf);
+    u8 *pin = (u8 *)utf;
+    u8 *pout = gbk;
+
+    memset(gbk, 0, outlen);
+
+    iconv(cd, &pin, &inlen, &pout, &outlen);
+    iconv_close(cd);
+}
+
 void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
 {
     iconv_t cd = iconv_open("UTF-16", "GBK");

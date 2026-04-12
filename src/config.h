@@ -8,8 +8,8 @@
 
 #define STACK_ADDRESS 0x2000000
 
-#define VM_Manager_Table_ADDRESS 0x3000000
-#define VM_FUNC_HK_TABLE_ADDRESS 0x4000000
+#define VM_Manager_Table_ADDRESS 0xa000000
+#define VM_FUNC_HK_TABLE_ADDRESS 0xc000000
 
 #define VM_Memory_Pool_ADDRESS 0x5000000 // vm_malloc的内存池起始地址
 #define VM_MEMPOOL_TOTAL_SIZE 0x1000000
@@ -21,7 +21,7 @@
 #define VM_MemoryBlock_PTR_OFFSET_ADDRESS (VM_MemoryBlock_PTR_ADDRESS + 4)
 #define VM_MemoryBlock_PTR_SIZE_ADDRESS (VM_MemoryBlock_PTR_OFFSET_ADDRESS + 4)
 
-#define VM_screenImageStruct_ADDRESS (VM_MemoryBlock_PTR_SIZE_ADDRESS + 128)//memblockPtr附近需要预留空间
+#define VM_screenImageStruct_ADDRESS (VM_MemoryBlock_PTR_SIZE_ADDRESS + 1024)//memblockPtr附近需要预留空间
 #define VM_screenImage_ADDRESS (VM_screenImageStruct_ADDRESS + 8)
 #define VM_screenImage_End_ADDRESS (VM_screenImage_ADDRESS + LCD_WIDTH * LCD_HEIGHT * LCD_PITCH)
 
@@ -49,19 +49,19 @@
 #define VM_MANAGER_SENSOR_TABLE_ADDRESS (VM_MANAGER_AUDIO_TABLE_ADDRESS + VM_MANAGER_TABLE_SIZE)
 #define VM_MANAGER_VMIM_TABLE_ADDRESS (VM_MANAGER_SENSOR_TABLE_ADDRESS + VM_MANAGER_TABLE_SIZE)
 #define VM_MANAGER_APPSTORE_TABLE_ADDRESS (VM_MANAGER_VMIM_TABLE_ADDRESS + VM_MANAGER_TABLE_SIZE)
-
-#define VM_DF_DataPackage_FilePath_ADDRESS (VM_MANAGER_VMIM_TABLE_ADDRESS + VM_MANAGER_TABLE_SIZE)
+#define VM_DF_DataPackage_FilePath_ADDRESS (VM_MANAGER_APPSTORE_TABLE_ADDRESS + VM_MANAGER_TABLE_SIZE)
 // 子项
 #define VM_DF_DataPackage_In_File_Offset_ADDRESS (VM_DF_DataPackage_FilePath_ADDRESS + 512)
 #define VM_DF_DataPackage_In_File_Length_ADDRESS (VM_DF_DataPackage_In_File_Offset_ADDRESS + 4)
-#define VM_DF_DataPackage_loadType_ADDRESS (VM_DF_DataPackage_In_File_Length_ADDRESS + 4)
+#define VM_DF_DataPackage_LoadType_ADDRESS (VM_DF_DataPackage_In_File_Length_ADDRESS + 4)
 
-#define VM_Str_Tmp_ADDRESS (VM_DF_DataPackage_FilePath_ADDRESS + 1024)
+#define VM_Str_Tmp_ADDRESS (VM_DF_DataPackage_LoadType_ADDRESS + 4)
 // fixme 别的地方会修改VM_DreamFactory_DataPackage_ADDRESS范围的地址，所以给了10240空间，需要仔细检查
 #define VM_DreamFactory_DataPackage_ADDRESS (VM_Str_Tmp_ADDRESS + 1024)
-#define VM_DreamFactory_MemoryBlock_ADDRESS (VM_DreamFactory_DataPackage_ADDRESS + 10240)
-#define VM_DreamFactoryResourceBuffer_ADDRESS (VM_DreamFactory_MemoryBlock_ADDRESS + 16)
-#define VM_CURR_APP_INFO_ADDRESS (VM_DreamFactoryResourceBuffer_ADDRESS + VM_MANAGER_TABLE_SIZE)
+#define VM_DreamFactory_MemoryBlock_ADDRESS (VM_DreamFactory_DataPackage_ADDRESS + 4096)
+#define VM_DreamFactoryResourceBuffer_ADDRESS (VM_DreamFactory_MemoryBlock_ADDRESS + 4)
+#define VM_DreamFactory_CharBuffer_ADDRESS (VM_DreamFactoryResourceBuffer_ADDRESS + 4)
+#define VM_CURR_APP_INFO_ADDRESS (VM_DreamFactory_CharBuffer_ADDRESS + 1024)
 #define VM_LOG_TRACE_ADDRESS (VM_CURR_APP_INFO_ADDRESS + 512)
 
 // 0x4000000开始是函数实现地址
@@ -87,8 +87,8 @@
 #define VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS (VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
 #define VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS (VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
 #define VM_MANAGER_VMIM_FUNC_LIST_ADDRESS (VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)//idx=20
-#define VM_DF_PACK_FUNC_LIST_ADDRESS (VM_MANAGER_VMIM_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
-#define VM_SCREEN_isInQuit_ADDRESS (VM_DF_PACK_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
+#define VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS (VM_MANAGER_VMIM_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
+#define VM_SCREEN_isInQuit_ADDRESS (VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE)
 #define VM_SCREEN_nextSubTScreen_ADDRESS (VM_SCREEN_isInQuit_ADDRESS + 4)
 #define VM_DF_GetFormatStringBuffer_ADDRESS (VM_SCREEN_nextSubTScreen_ADDRESS + 4)
 #define VM_MF_MemoryBlock_FUNC_LIST_ADDRESS (VM_DF_GetFormatStringBuffer_ADDRESS + 64)

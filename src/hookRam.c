@@ -38,11 +38,12 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
-    if (type == UC_MEM_WRITE && address == 0x54000E4)
-    {
-        printf("write 0x54000E4: %x", value);
-        printf(" at %x\n", lastAddress);
-    }
+    // if (type == UC_MEM_WRITE && ((address >= (0x0102954c + 88))&&(address <= (0x0102954c + 92))))
+    // {
+    //     printf("write[%x:", address);
+    //     printf("%x]", value);
+    //     printf(" at %x\n", lastAddress);
+    // }
 }
 void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {

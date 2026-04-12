@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <sys/stat.h>
 #include "config.h"
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 

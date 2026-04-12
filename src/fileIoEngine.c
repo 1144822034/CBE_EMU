@@ -1,4 +1,14 @@
 #include "fileIoEngine.h"
+
+int dirExists(char *path)
+{
+    struct stat info;
+
+    if (stat(path, &info) != 0)
+        return 0; // 路径不存在
+
+    return (info.st_mode & S_IFDIR) != 0; // 是否为目录
+}
 /**
  * 读取文件
  * 读取完成后需要释放
