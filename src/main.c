@@ -707,8 +707,8 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
         simulateTouchDown = evt->r0 == MR_MOUSE_DOWN;
         simulateTouchUp = evt->r0 == MR_MOUSE_UP;
         simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
-        simulateTouchX = (evt->r1 >> 16) & 0xffff;
-        simulateTouchY = evt->r1 & 0xffff;
+        simulateTouchX = evt->r1 & 0xffff;
+        simulateTouchY = (evt->r1 >> 16) & 0xffff;
         if (tScreenEventEntry == 0)
             return UC_ERR_OK;
 
@@ -815,7 +815,7 @@ void mouseEvent(int type, int x, int y)
     else if (y > 399)
         y = 399;
 
-    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (x << 16) | y);
+    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
 }
 
 void loop()
@@ -1206,8 +1206,8 @@ void RunArmProgram(void *param)
                                 simulateTouchDown = evt->r0 == MR_MOUSE_DOWN;
                                 simulateTouchUp = evt->r0 == MR_MOUSE_UP;
                                 simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
-                                simulateTouchX = (evt->r1 >> 16) & 0xffff;
-                                simulateTouchY = evt->r1 & 0xffff;
+                                simulateTouchX = evt->r1 & 0xffff;
+                                simulateTouchY = (evt->r1 >> 16) & 0xffff;
                             }
                         }
                     }
