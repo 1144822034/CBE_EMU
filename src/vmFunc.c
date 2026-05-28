@@ -50,6 +50,8 @@ void vm_DF_GetMemoryBlock();
 u32 vm_set_call_result(u32 r);
 void vm_initManagerTable();
 void vm_configManagerTable(u32 a, u32 b);
+void vm_InitDlRsManager(u32 tmp1);
+void vm_InitDlImageManager(u32 tmp1);
 // 真机
 // int off = 0
 // 虚拟
@@ -138,9 +140,11 @@ int vm_get_file_handle(char *nameBuf)
     {
         if (openFileList[i] == NULL)
         {
-            handle = i;
-            openFileList[i] = fopen(nameBuf, "rb");
-            return handle;
+            FILE *f = fopen(nameBuf, "rb");
+            if (f == NULL)
+                return -1;
+            openFileList[i] = f;
+            return i;
         }
     }
     return -1;
@@ -158,8 +162,20 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 {
     char rwBuff[128];
     char nameBuff[128];
-    uc_mem_read(MTK, namePtr, &nameBuff, 128);
-    printf("[vm_cbfs_vm_file_open] name=%s\n", nameBuff);
+    u8 rawName[256];
+    uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
+    memset(nameBuff, 0, sizeof(nameBuff));
+    if (rawName[0] != 0 && rawName[1] == 0)
+    {
+        u32 ucs2Len = 0;
+        while (ucs2Len + 1 < sizeof(rawName) && (rawName[ucs2Len] != 0 || rawName[ucs2Len + 1] != 0))
+            ucs2Len += 2;
+        ucs2_to_gbk(rawName, ucs2Len, nameBuff, sizeof(nameBuff));
+    }
+    else
+    {
+        vm_readStringByPtr(namePtr, nameBuff);
+    }
     uc_mem_read(MTK, rwPtr, &rwBuff, 128);
     int handle = vm_get_file_handle(nameBuff);
     return vm_set_call_result(handle);
@@ -167,6 +183,8 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 // ok
 int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 {
+    if (handle < 0 || handle >= 16 || openFileList[handle] == NULL || size <= 0)
+        return vm_set_call_result(-1);
     char *tmp = SDL_malloc(size);
     int readed = fread(tmp, 1, size, openFileList[handle]);
 
@@ -187,6 +205,8 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)
 // ok
 int vm_cbfs_vm_file_seek(int handle, int pos, int type)
 {
+    if (handle < 0 || handle >= 16 || openFileList[handle] == NULL)
+        return vm_set_call_result(-1);
     int r = fseek(openFileList[handle], pos, type);
     // printf("vm_cbfs_vm_file_seek:%x,%d\n", pos, type);
     return vm_set_call_result(r);
@@ -225,6 +245,8 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
 }
 int vm_cbfs_vm_file_getfilesize(int fileHandle)
 {
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
+        return vm_set_call_result(-1);
     FILE *f = openFileList[fileHandle];
     fseek(f, 0, SEEK_END);
     int r = ftell(f);
@@ -234,6 +256,8 @@ int vm_cbfs_vm_file_getfilesize(int fileHandle)
 // ok
 int vm_cbfs_vm_file_close(int fileHandle)
 {
+    if (fileHandle < 0 || fileHandle >= 16 || openFileList[fileHandle] == NULL)
+        return vm_set_call_result(-1);
     int r = fclose(openFileList[fileHandle]);
     openFileList[fileHandle] = NULL;
     return vm_set_call_result(r);
@@ -2071,7 +2095,7 @@ void vm_initManagerTable()
     vm_configManagerTable(VM_MANAGER_BILLING_TABLE_ADDRESS, VM_MANAGER_BILLING_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_UCS2_TABLE_ADDRESS, VM_MANAGER_UCS2_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_SCREEN_TABLE_ADDRESS, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS);
-    vm_configManagerTable(VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS, VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS);
+    uc_mem_write(MTK, VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS, emptyBuff, VM_MANAGER_TABLE_SIZE);
     vm_configManagerTable(VM_MANAGER_GAME_LCD_TABLE_ADDRESS, VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_NETAPP_TABLE_ADDRESS, VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_AUDIO_TABLE_ADDRESS, VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS);
@@ -2079,6 +2103,8 @@ void vm_initManagerTable()
     vm_configManagerTable(VM_MANAGER_VMIM_TABLE_ADDRESS, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS);
     vm_configManagerTable(VM_MANAGER_APPSTORE_TABLE_ADDRESS, VM_APPSTORE_FUNC_LIST_ADDRESS);
     vm_InitDlLoadManager(VM_DL_LOAD_MANAGER_ADDRESS);
+    vm_InitDlRsManager(VM_DL_RS_MANAGER_ADDRESS);
+    vm_InitDlImageManager(VM_DL_IMAGE_MANAGER_ADDRESS);
 }
 u32 vm_DF_GetDataPackage()
 {
@@ -2412,4 +2438,18 @@ void vm_InitDlLoadManager(u32 tmp1)
     vm_set_var(tmp1 + 32, tmp2 + 32);
     vm_set_var(tmp1 + 36, tmp2 + 36);
     vm_set_var(tmp1 + 40, tmp2 + 40);
+}
+
+void vm_InitDlRsManager(u32 tmp1)
+{
+    u32 tmp2 = VM_DL_RS_FUNC_LIST_ADDRESS;
+    for (u32 i = 0; i < 20; ++i)
+        vm_set_var(tmp1 + i * 4, tmp2 + i * 4);
+}
+
+void vm_InitDlImageManager(u32 tmp1)
+{
+    u32 tmp2 = VM_DL_IMAGE_FUNC_LIST_ADDRESS;
+    for (u32 i = 0; i < 12; ++i)
+        vm_set_var(tmp1 + i * 4, tmp2 + i * 4);
 }

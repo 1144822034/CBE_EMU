@@ -47,10 +47,13 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 }
 void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
-    printf("地址无法访问:%x\n", address);
+    printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
     dumpCpuInfo();
-    while (1)
-        ;
+    u32 sp;
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)
+        dumpVirtMemory(sp - 64, 128);
+    assert(0);
 }
 void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
 {
@@ -108,5 +111,7 @@ bool hookInsnInvalid(uc_engine *uc, void *user_data)
     }
 
     printf("指令无效:%x\n", insn);
+    dumpCpuInfo();
+    assert(0);
     return 0;
 }

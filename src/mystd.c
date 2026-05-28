@@ -58,11 +58,11 @@ void utf8_to_gbk(u8 *utf, u8 *gbk, size_t outlen)
 
 void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
 {
-    iconv_t cd = iconv_open("UTF-16", "GBK");
+    iconv_t cd = iconv_open("UCS-2LE", "GBK");
     if (cd == (iconv_t)-1)
         return;
 
-    size_t inlen = strlen_gbk(gbk);
+    size_t inlen = strlen((char *)gbk);
     u8 *pin = (u8 *)gbk;
     u8 *pout = unicode;
 
