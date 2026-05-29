@@ -712,14 +712,6 @@ static u32 vm_alloc_host_string(const char *text)
     return ptr;
 }
 
-static u32 vm_billing_get_wpay_file_name(void)
-{
-    const char *wpayPath = "./\\JHOnlineData\\Wpay9990Ker42WqvgaV100.CBM";
-    if (!vm_host_file_exists(wpayPath))
-        return 0;
-    return vm_alloc_host_string(wpayPath);
-}
-
 static bool vm_net_mock_has_installed_update(void)
 {
     return vm_net_mock_file_has_min_size("JHOnlineData/MMORPGTempcbm", 41) &&
@@ -2888,8 +2880,8 @@ static bool hook_vm_sys_manager_func(u32 address)
         else if (idx == 89)
         {
             // DEBUG_PRINT("[call]vmIsInnerApp\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            //这里只能返回1，要不然就会启动别的没安装的CBE文件
+            vm_set_call_result(1);
         }
         else if (idx == 90)
         {
@@ -4912,8 +4904,8 @@ static bool hook_vm_manager_billing_func(u32 address)
         }
         else if (idx == 19)
         {
-            tmp1 = vm_billing_get_wpay_file_name();
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            printf("[call]CDownGetFileNameByAppID\n");
+            vm_set_call_result(0);
         }
         else if (idx == 20)
         {
