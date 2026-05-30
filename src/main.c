@@ -115,9 +115,16 @@ int simulateTouchUp = 0;
 int simulateTouchDrag = 0;
 int simulateTouchX = 0;
 int simulateTouchY = 0;
+static int g_autoTouchConfigured = 0;
+static int g_autoTouchFired = 0;
+static u32 g_autoTouchTick = 0;
+static int g_autoTouchX = 0;
+static int g_autoTouchY = 0;
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
+static u32 g_currentScreenThis = 0;
+u32 g_currentScreenModuleBase = 0;
 
 u32 lastSprintfPtr = 0;
 static u8 *g_cbeFileBuffer = NULL;
@@ -176,13 +183,16 @@ static u32 g_lastStartupUpdateObj = 0xffffffff;
 static u8 g_lastStartupProgress = 0xff;
 static u8 g_lastStartupUpdateState = 0xff;
 static u8 g_startupAdvanceAfterUpdate = 0;
+static u8 g_startupUpdateCallbackDispatched = 0;
 static u8 g_installCheckFlagHookLogged = 0;
 static u8 g_installCheckFuncHookLogged = 0;
+static u32 g_currentFontType = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static void vm_net_trace(const char *fmt, ...);
 static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
+static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 
 static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 {
@@ -200,6 +210,64 @@ static bool vm_is_manager_func_stub_address(u32 address)
     if (vm_address_in_range(address, VM_APPSTORE_FUNC_LIST_ADDRESS, VM_MANAGER_FUNC_LIST_SIZE))
         return true;
     return false;
+}
+
+static int vm_lcd_coord_from_reg(u32 value)
+{
+    return (int)(int16_t)(value & 0xffff);
+}
+
+static int vm_lcd_adjust_single_gbk_x(const u8 *gbkText, int x, int y)
+{
+    static int hasPrev = 0;
+    static int prevRawX = 0;
+    static int prevAdjustedX = 0;
+    static int prevY = 0;
+
+    int len = gbkText ? strlen((const char *)gbkText) : 0;
+    if (len != 2 || gbkText[0] < 0x80)
+    {
+        hasPrev = 0;
+        return x;
+    }
+
+    int adjustedX = x;
+    if (hasPrev && y == prevY && x == prevRawX + getFontCellWidth())
+        adjustedX = prevAdjustedX + getFontWidth();
+
+    hasPrev = 1;
+    prevRawX = x;
+    prevAdjustedX = adjustedX;
+    prevY = y;
+    return adjustedX;
+}
+
+static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
+{
+    int dx = abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    while (1)
+    {
+        if (x0 >= 0 && x0 < LCD_WIDTH && y0 >= 0 && y0 < LCD_HEIGHT)
+            ((u16 *)Lcd_Cache_Buffer)[y0 * LCD_PITCH + x0] = color;
+        if (x0 == x1 && y0 == y1)
+            break;
+        int e2 = err * 2;
+        if (e2 >= dy)
+        {
+            err += dy;
+            x0 += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
+    }
 }
 
 static u32 vm_df_get_resource_by_id(u32 id)
@@ -327,6 +395,54 @@ static void scheduler_trace_startup_ui_object(const char *phase, u32 screenPtr)
 #endif
 }
 
+static uc_err vm_emu_start(u32 begin, u32 until);
+static bool vm_is_pool_entry(u32 entry);
+static void vm_restore_r9_for_entry(u32 entry);
+
+static uc_err scheduler_dispatch_startup_update_callback(u32 exitAddr, u32 thumbExitAddr)
+{
+    u8 updateState = 0;
+    u32 callbackTable = 0;
+    u32 updateCallbackTable = 0;
+    u32 callback = 0;
+
+    uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+    if (updateState == 0)
+        return UC_ERR_OK;
+
+    uc_mem_read(MTK, Global_R9 + 0x54b0, &callbackTable, 4);
+    if (callbackTable == 0)
+        return UC_ERR_OK;
+    updateCallbackTable = callbackTable + 0x88;
+    uc_mem_read(MTK, updateCallbackTable + 0x0c, &callback, 4);
+    if (callback == 0)
+        return UC_ERR_OK;
+
+    vm_net_trace("startup_update_callback state=%u table=%08x updateTable=%08x cb=%08x tick=%u\n",
+                 updateState, callbackTable, updateCallbackTable, callback, g_schedulerTick);
+    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+    uc_err err = vm_emu_start(callback, exitAddr);
+    if (err == UC_ERR_OK)
+    {
+        u32 startupObj = 0;
+        u32 nextScreen = 0;
+        u32 loaderCallback = 0;
+        u32 loaderArg0 = 0;
+        u32 loaderArg1 = 0;
+        u8 loaderFlag = 0;
+        uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
+        uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &nextScreen, 4);
+        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x04, &loaderCallback, 4);
+        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x08, &loaderArg0, 4);
+        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x0c, &loaderArg1, 4);
+        uc_mem_read(MTK, Global_R9 + 0x9c30 + 0x10, &loaderFlag, 1);
+        vm_net_trace("startup_update_after state=%u startupObj=%08x nextScreen=%08x screenChange=%u loader=%08x,%08x,%08x flag=%u tick=%u\n",
+                     updateState, startupObj, nextScreen, screenStructChange,
+                     loaderCallback, loaderArg0, loaderArg1, loaderFlag, g_schedulerTick);
+    }
+    return err;
+}
+
 u32 size_128mb = 1024 * 1024 * 128;
 u32 size_32mb = 1024 * 1024 * 32;
 u32 size_16mb = 1024 * 1024 * 16;
@@ -387,6 +503,8 @@ static void normalize_program_exit_pc(u32 fallbackPc)
 static uc_err vm_emu_start(u32 begin, u32 until)
 {
     g_currentEmuEntry = begin;
+    if (Global_R9)
+        vm_restore_r9_for_entry(begin);
     uc_err err = uc_emu_start(MTK, begin, until, 0, 0);
     normalize_program_exit_pc(begin);
     return err;
@@ -395,20 +513,122 @@ static uc_err vm_emu_start(u32 begin, u32 until)
 static uc_err vm_emu_start_count(u32 begin, u32 until, uint64_t count)
 {
     g_currentEmuEntry = begin;
+    if (Global_R9)
+        vm_restore_r9_for_entry(begin);
     uc_err err = uc_emu_start(MTK, begin, until, 0, count);
     normalize_program_exit_pc(begin);
     return err;
 }
 
+static bool vm_is_pool_entry(u32 entry)
+{
+    u32 pc = entry & ~1u;
+    return pc >= VM_Memory_Pool_ADDRESS && pc < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
+}
+
+static void vm_restore_r9_for_entry(u32 entry)
+{
+    u32 r9 = vm_is_pool_entry(entry) && g_currentScreenModuleBase ? g_currentScreenModuleBase : Global_R9;
+    if (r9)
+    {
+        if (vm_is_pool_entry(entry))
+        {
+            uc_reg_write(MTK, UC_ARM_REG_R9, &r9);
+            return;
+        }
+        uc_reg_write(MTK, UC_ARM_REG_R9, &r9);
+    }
+}
+
 static uc_err vm_call4(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
 {
     u32 lr = PROGRAM_EXIT_ADDR | 1;
+    vm_restore_r9_for_entry(entry);
     uc_reg_write(MTK, UC_ARM_REG_LR, &lr);
     uc_reg_write(MTK, UC_ARM_REG_R0, &r0);
     uc_reg_write(MTK, UC_ARM_REG_R1, &r1);
     uc_reg_write(MTK, UC_ARM_REG_R2, &r2);
     uc_reg_write(MTK, UC_ARM_REG_R3, &r3);
     return vm_emu_start(entry | 1, PROGRAM_EXIT_ADDR);
+}
+
+static uc_err vm_call4_preserve_regs(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    static const int preserveRegs[] = {
+        UC_ARM_REG_R0,
+        UC_ARM_REG_R1,
+        UC_ARM_REG_R2,
+        UC_ARM_REG_R3,
+        UC_ARM_REG_R4,
+        UC_ARM_REG_R5,
+        UC_ARM_REG_R6,
+        UC_ARM_REG_R7,
+        UC_ARM_REG_R8,
+        UC_ARM_REG_R9,
+        UC_ARM_REG_R10,
+        UC_ARM_REG_R11,
+        UC_ARM_REG_R12,
+        UC_ARM_REG_SP,
+        UC_ARM_REG_LR,
+        UC_ARM_REG_CPSR,
+    };
+    u32 saved[mySizeOf(preserveRegs)] = {0};
+    for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
+        uc_reg_read(MTK, preserveRegs[i], &saved[i]);
+
+    uc_err err = vm_call4(entry, r0, r1, r2, r3);
+
+    for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
+        uc_reg_write(MTK, preserveRegs[i], &saved[i]);
+    return err;
+}
+
+static uc_err vm_call4_preserve_regs_clear_stack_args(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    static const int preserveRegs[] = {
+        UC_ARM_REG_R0,
+        UC_ARM_REG_R1,
+        UC_ARM_REG_R2,
+        UC_ARM_REG_R3,
+        UC_ARM_REG_R4,
+        UC_ARM_REG_R5,
+        UC_ARM_REG_R6,
+        UC_ARM_REG_R7,
+        UC_ARM_REG_R8,
+        UC_ARM_REG_R9,
+        UC_ARM_REG_R10,
+        UC_ARM_REG_R11,
+        UC_ARM_REG_R12,
+        UC_ARM_REG_SP,
+        UC_ARM_REG_LR,
+        UC_ARM_REG_CPSR,
+    };
+    u32 saved[mySizeOf(preserveRegs)] = {0};
+    for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
+        uc_reg_read(MTK, preserveRegs[i], &saved[i]);
+
+    u32 sp = saved[13] - 32;
+    u8 zeroStackArgs[32] = {0};
+    uc_mem_write(MTK, sp, zeroStackArgs, sizeof(zeroStackArgs));
+    uc_reg_write(MTK, UC_ARM_REG_SP, &sp);
+
+    uc_err err = vm_call4(entry, r0, r1, r2, r3);
+
+    for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
+        uc_reg_write(MTK, preserveRegs[i], &saved[i]);
+    return err;
+}
+
+static void scheduler_prepare_screen_call(u32 screenThisPtr)
+{
+    if (screenThisPtr != g_currentScreenThis)
+    {
+        g_currentScreenThis = screenThisPtr;
+        g_currentScreenModuleBase = 0;
+    }
+    /* CBM screens pass through vmAddScreen from dynamic code; capture that
+     * caller's R9 there.  The screen object's first word is game data, not SB.
+     */
 }
 
 static u32 scheduler_get_tick_ms(void)
@@ -476,7 +696,7 @@ static uc_err scheduler_dispatch_timers(void)
         task->remainingTicks = 0;
         task->callback = 0;
         task->context = 0;
-        uc_err err = vm_call4(callback, context, 0, 0, 0);
+        uc_err err = vm_call4_preserve_regs(callback, context, 0, 0, 0);
         if (err != UC_ERR_OK)
             return err;
     }
@@ -589,7 +809,7 @@ static uc_err scheduler_dispatch_net_tasks(void)
                 uc_mem_read(MTK, Global_R9 + 0x9588 + 0x44, &netCb44, 4);
                 vm_net_trace("net_state_observe cb14=%08x cb44=%08x\n", netCb14, netCb44);
             }
-            uc_err err = vm_call4(task->callback, task->r0, task->r1, task->r2, task->eventType);
+            uc_err err = vm_call4_preserve_regs_clear_stack_args(task->callback, task->r0, task->r1, task->r2, task->eventType);
             if (task->eventType == 7)
             {
                 u8 updateFlags[4] = {0};
@@ -858,6 +1078,10 @@ static void hook_game_install_check_flag_callback(uc_engine *uc, uint64_t addres
 
     if (startupObj && localFlag == 0)
     {
+        /* The startup screen short-circuits at 0103b15a when this local flag is 0.
+         * Let it call the real install-query helper so only the install decision is
+         * overridden below, instead of forcing an internal screen transition.
+         */
         r0 = 1;
         uc_reg_write(uc, UC_ARM_REG_R0, &r0);
         if (!g_installCheckFlagHookLogged)
@@ -880,6 +1104,10 @@ static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t addres
     if ((lr & ~1u) == 0x0103b162)
     {
         u32 r0 = 0;
+        /* 0103b07c returns nonzero when the startup code should enter its install
+         * branch.  Firmware-side vmIsInnerApp/CDown state is not complete here yet,
+         * so make only this helper report "installed" for the startup caller.
+         */
         uc_reg_write(uc, UC_ARM_REG_R0, &r0);
         if (!g_installCheckFuncHookLogged)
         {
@@ -887,6 +1115,25 @@ static void hook_game_install_check_func_callback(uc_engine *uc, uint64_t addres
             g_installCheckFuncHookLogged = 1;
         }
         vm_bx(lr);
+    }
+}
+
+static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    (void)size;
+    (void)user_data;
+    if (!g_currentScreenModuleBase)
+        return;
+
+    u32 tracePc = (u32)address & ~1u;
+    u32 currentR9 = 0;
+    uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
+    if (currentR9 != g_currentScreenModuleBase)
+    {
+        if (tracePc >= 0x050175d0 && tracePc < 0x05017620)
+            vm_net_trace("pool_r9_fix pc=%08x r9=%08x -> %08x entry=%08x\n",
+                         tracePc, currentR9, g_currentScreenModuleBase, g_currentEmuEntry);
+        uc_reg_write(uc, UC_ARM_REG_R9, &g_currentScreenModuleBase);
     }
 }
 
@@ -923,7 +1170,8 @@ static bool vm_net_mock_put_bytes(u8 *out, u32 outCap, u32 *pos, const void *dat
 {
     if (*pos + len > outCap)
         return false;
-    memcpy(out + *pos, data, len);
+    if (len)
+        memcpy(out + *pos, data, len);
     *pos += len;
     return true;
 }
@@ -1014,7 +1262,7 @@ static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const c
 
 static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
 {
-    u32 pos = 9;
+    u32 pos = 11;
     u8 result = 1;
     if (outCap < pos)
         return 0;
@@ -1025,7 +1273,7 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
         result = 0;
     }
 
-    if (!vm_net_mock_put_int_field(out, outCap, &pos, "result", result))
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "result", &result, 1))
         return 0;
 
     out[0] = 'W';
@@ -1033,17 +1281,19 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     out[2] = (u8)(pos >> 8);
     out[3] = (u8)pos;
     out[4] = 1;
-    out[5] = 0x12;
-    out[6] = 5;
-    out[7] = (u8)((pos - 9) >> 8);
-    out[8] = (u8)(pos - 9);
+    out[5] = 1;
+    out[6] = 0x12;
+    out[7] = 5;
+    out[8] = 0;
+    out[9] = (u8)((pos - 5) >> 8);
+    out[10] = (u8)(pos - 5);
     vm_net_trace("mock_version_response result=%u delivered=%u\n", result, g_netMockUpdateDelivered);
     return pos;
 }
 
 static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
 {
-    u32 pos = 9;
+    u32 pos = 11;
     if (outCap < pos)
         return 0;
 
@@ -1069,10 +1319,46 @@ static u32 vm_net_mock_build_update_chunk_response(u8 *out, u32 outCap)
     out[2] = (u8)(pos >> 8);
     out[3] = (u8)pos;
     out[4] = 1;
-    out[5] = 0x12;
-    out[6] = 6;
-    out[7] = (u8)((pos - 9) >> 8);
-    out[8] = (u8)(pos - 9);
+    out[5] = 1;
+    out[6] = 0x12;
+    out[7] = 6;
+    out[8] = 0;
+    out[9] = (u8)((pos - 5) >> 8);
+    out[10] = (u8)(pos - 5);
+    return pos;
+}
+
+static u32 vm_net_mock_build_login_response(u8 *out, u32 outCap)
+{
+    u32 pos = 11;
+    if (outCap < pos)
+        return 0;
+
+    u8 actorInfo[512];
+    memset(actorInfo, 0, sizeof(actorInfo));
+    if (!vm_net_mock_put_object_entry(out, outCap, &pos, "actorinfo", actorInfo, sizeof(actorInfo)))
+        return 0;
+
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = 1;
+    out[5] = 1;
+    u8 topType = 2;
+    const char *topTypeSpec = getenv("CBE_LOGIN_TOP_TYPE");
+    if (topTypeSpec && topTypeSpec[0])
+    {
+        unsigned parsed = 0;
+        if (sscanf(topTypeSpec, "%u", &parsed) == 1)
+            topType = (u8)parsed;
+    }
+    out[6] = 1;
+    out[7] = topType;
+    out[8] = 0;
+    out[9] = (u8)((pos - 5) >> 8);
+    out[10] = (u8)(pos - 5);
+    vm_net_trace("mock_login_response actorinfo_zero top=1,1,%u len=%u\n", topType, pos);
     return pos;
 }
 
@@ -1084,6 +1370,26 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u32 hookedLen = vm_net_mock_build_response_from_rules(request, requestLen, out, outCap);
     if (hookedLen)
         return hookedLen;
+
+    if (vm_net_mock_request_contains(request, requestLen, "coreVer") &&
+        vm_net_mock_request_contains(request, requestLen, "appVer") &&
+        vm_net_mock_request_contains(request, requestLen, "username") &&
+        vm_net_mock_request_contains(request, requestLen, "password") &&
+        vm_net_mock_request_contains(request, requestLen, "imsi"))
+    {
+        hookedLen = vm_net_mock_load_response_file("net_mocks/login.bin", out, outCap);
+        if (hookedLen)
+        {
+            vm_net_trace("mock_default source=file-login len=%u\n", hookedLen);
+            return hookedLen;
+        }
+        hookedLen = vm_net_mock_build_login_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_trace("mock_default source=builtin-login len=%u\n", hookedLen);
+            return hookedLen;
+        }
+    }
 
     if (vm_net_mock_request_contains(request, requestLen, "start") && vm_net_mock_request_contains(request, requestLen, "id"))
     {
@@ -1340,6 +1646,36 @@ void mouseEvent(int type, int x, int y)
         y = 399;
 
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
+}
+
+static void scheduler_configure_auto_touch(void)
+{
+    if (g_autoTouchConfigured)
+        return;
+    g_autoTouchConfigured = 1;
+
+    const char *spec = getenv("CBE_AUTO_TOUCH");
+    if (spec == NULL || spec[0] == 0)
+        return;
+
+    unsigned tick = 300;
+    int x = LCD_WIDTH / 2;
+    int y = LCD_HEIGHT - 45;
+    sscanf(spec, "%u,%d,%d", &tick, &x, &y);
+    g_autoTouchTick = tick;
+    g_autoTouchX = x;
+    g_autoTouchY = y;
+}
+
+static void scheduler_fire_auto_touch(void)
+{
+    scheduler_configure_auto_touch();
+    if (g_autoTouchTick == 0 || g_autoTouchFired || g_schedulerTick < g_autoTouchTick)
+        return;
+    g_autoTouchFired = 1;
+    vm_net_trace("auto_touch tick=%u x=%d y=%d\n", g_schedulerTick, g_autoTouchX, g_autoTouchY);
+    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, MR_MOUSE_DOWN, (g_autoTouchY << 16) | (g_autoTouchX & 0xffff));
+    EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, MR_MOUSE_UP, (g_autoTouchY << 16) | (g_autoTouchX & 0xffff));
 }
 
 void loop()
@@ -1665,8 +2001,8 @@ void RunArmProgram(void *param)
 
     u32 exitAddr = PROGRAM_EXIT_ADDR;
     u32 thumbExitAddr = PROGRAM_EXIT_ADDR | 1;
-    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);     // 程序退出点
-    p = vm_emu_start(startAddr + 1, exitAddr); // thumb模式
+    uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
+    p = vm_emu_start(startAddr + 1, exitAddr);        // thumb模式
 
     // 第二次初始化
     if (p == UC_ERR_OK)
@@ -1695,6 +2031,7 @@ void RunArmProgram(void *param)
                 p = scheduler_tick();
                 if (p != UC_ERR_OK)
                     break;
+                scheduler_fire_auto_touch();
                 if (tScreenInitedPtr != vmAddedScreen)
                 {
                     uc_mem_read(MTK, vmAddedScreen, &tScreenInitEntry, 4);
@@ -1721,6 +2058,7 @@ void RunArmProgram(void *param)
                     printf("TScreen未设置render入口\n");
                     assert(0);
                 }
+                u32 screenBeforeCallback = vmAddedScreen;
                 p = scheduler_dispatch_tscreen_event(tScreenEventEntry, vmAddedScreen);
                 if (p != UC_ERR_OK)
                 {
@@ -1729,6 +2067,22 @@ void RunArmProgram(void *param)
                 }
                 if (screenStructChange == 1)
                     break;
+                if (vmAddedScreen != screenBeforeCallback)
+                    continue;
+                if (g_startupAdvanceAfterUpdate && !g_startupUpdateCallbackDispatched)
+                {
+                    g_startupUpdateCallbackDispatched = 1;
+                    p = scheduler_dispatch_startup_update_callback(exitAddr, thumbExitAddr);
+                    if (p != UC_ERR_OK)
+                    {
+                        printf("TScreen update callback异常:%s\n", uc_strerror(p));
+                        break;
+                    }
+                    if (screenStructChange == 1)
+                        break;
+                    if (vmAddedScreen != screenBeforeCallback)
+                        continue;
+                }
                 if (screenStructNotifyLoadRes == 1)
                 {
                     screenStructNotifyLoadRes = 0;
@@ -1771,7 +2125,9 @@ void RunArmProgram(void *param)
             {
                 uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &screenFuncPtr, 4); // 得到screen函数表地址的指针
                 if (screenFuncPtr >= Global_R9 && screenFuncPtr < ROM_ADDRESS + size_16mb)
-                    screenThisPtr = screenFuncPtr - 0x94;
+                {
+                    screenThisPtr = screenFuncPtr - 0x18;
+                }
                 uc_mem_read(MTK, screenFuncPtr, &screenInitEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 4, &screenDestoryEntry, 4);
                 uc_mem_read(MTK, screenFuncPtr + 8, &screenLogicEntry, 4);
@@ -1785,7 +2141,10 @@ void RunArmProgram(void *param)
 
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
             if (screenThisPtr)
+            {
+                scheduler_prepare_screen_call(screenThisPtr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+            }
             p = vm_emu_start(screenInitEntry, exitAddr);
             printf("ScreenInit Ok\n");
             if (p == UC_ERR_OK)
@@ -1795,6 +2154,7 @@ void RunArmProgram(void *param)
                     p = scheduler_tick();
                     if (p != UC_ERR_OK)
                         break;
+                    scheduler_fire_auto_touch();
                     if (screenStructChange == 1)
                         break;
                     if (screenStructNotifyLoadRes == 1)
@@ -1802,7 +2162,10 @@ void RunArmProgram(void *param)
                         screenStructNotifyLoadRes = 0;
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
                         if (screenThisPtr)
+                        {
+                            scheduler_prepare_screen_call(screenThisPtr);
                             uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                        }
                         p = vm_emu_start(screenResouceLoadEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
@@ -1834,23 +2197,61 @@ void RunArmProgram(void *param)
                                 simulateTouchX = evt->r1 & 0xffff;
                                 simulateTouchY = (evt->r1 >> 16) & 0xffff;
                             }
+                            if (screenThisPtr && vm_is_pool_entry(screenLogicEntry))
+                            {
+                                u32 eventType = 0;
+                                u32 eventArg = 0;
+                                if (evt->event == VM_EVENT_KEYBOARD)
+                                {
+                                    eventType = evt->r1 ? MR_KEY_PRESS : MR_KEY_RELEASE;
+                                    eventArg = evt->r0;
+                                }
+                                else
+                                {
+                                    eventType = evt->r0 == MR_MOUSE_UP ? 4 : 3;
+                                    eventArg = vm_malloc_var();
+                                    vm_set_var(eventArg, evt->r1);
+                                }
+                                uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                                scheduler_prepare_screen_call(screenThisPtr);
+                                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                                uc_reg_write(MTK, UC_ARM_REG_R1, &eventType);
+                                uc_reg_write(MTK, UC_ARM_REG_R2, &eventArg);
+                                p = vm_emu_start(screenLogicEntry, exitAddr);
+                                if (evt->event == VM_EVENT_TOUCHSCREEN)
+                                    vm_free_var(eventArg);
+                                if (p != UC_ERR_OK)
+                                {
+                                    printf("SCR_Event异常:%s\n", uc_strerror(p));
+                                    assert(0);
+                                }
+                            }
                         }
                     }
                     if (1)
                     {
-                        uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                        if (screenThisPtr)
-                            uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                        p = vm_emu_start(screenLogicEntry, exitAddr);
-                        if (p != UC_ERR_OK)
+                        if (!vm_is_pool_entry(screenLogicEntry))
                         {
-                            printf("SCR_Logic异常:%s\n", uc_strerror(p));
-                            assert(0);
+                            uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+                            if (screenThisPtr)
+                            {
+                                scheduler_prepare_screen_call(screenThisPtr);
+                                uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                            }
+                            p = vm_emu_start(screenLogicEntry, exitAddr);
+                            if (p != UC_ERR_OK)
+                            {
+                                printf("SCR_Logic异常:%s\n", uc_strerror(p));
+                                assert(0);
+                            }
                         }
 
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         if (screenThisPtr)
+                        {
+                            scheduler_prepare_screen_call(screenThisPtr);
                             uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                        }
                         p = vm_emu_start(screenRenderEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
@@ -1864,7 +2265,10 @@ void RunArmProgram(void *param)
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 if (screenThisPtr)
+                {
+                    scheduler_prepare_screen_call(screenThisPtr);
                     uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+                }
                 p = vm_emu_start(screenDestoryEntry, exitAddr);
                 if (p != UC_ERR_OK)
                 {
@@ -2085,347 +2489,347 @@ static bool hook_vm_manager_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
+    u32 idx = (address - VM_MANAGER_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS, 30);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 1)
+    {
+        tmp1 = VM_MANAGER_FILEIO_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetIoManager\n");
+    }
+    else if (idx == 2)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_LCD_FUNC_LIST_ADDRESS, 95);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 3)
+    {
+        tmp1 = VM_MANAGER_LCD_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetLcdManager\n");
+    }
+    else if (idx == 4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_TIMER_FUNC_LIST_ADDRESS, 10);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 5)
+    {
+        tmp1 = VM_MANAGER_TIMER_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetTimeManager\n");
+    }
+    else if (idx == 6)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_CTRL_FUNC_LIST_ADDRESS, 21);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 7)
+    {
+        tmp1 = VM_MANAGER_CTRL_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetCtrlManager\n");
+    }
+    else if (idx == 8)
+    {
+        // 传入指针写函数表
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMInitMemoryManager(%x)[%x]\n", tmp1, lastAddress);
+        for (tmp2 = 0; tmp2 < 27; tmp2++)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS, 30);
-            vm_set_call_result(tmp1);
+            tmp3 = VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
+            uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
         }
-        else if (idx == 1)
+    }
+    else if (idx == 9)
+    {
+        tmp1 = VM_MEMORY_MANAGER_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetMemoryManager\n");
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_BILLING_FUNC_LIST_ADDRESS, 38);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 11)
+    {
+        tmp1 = VM_MANAGER_BILLING_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetBillingManager\n");
+    }
+    else if (idx == 12)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 11);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 13)
+    {
+        tmp1 = VM_MANAGER_SCREEN_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetScreenManager\n");
+    }
+    else if (idx == 14)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
         {
-            tmp1 = VM_MANAGER_FILEIO_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetIoManager\n");
-        }
-        else if (idx == 2)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_LCD_FUNC_LIST_ADDRESS, 95);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 3)
-        {
-            tmp1 = VM_MANAGER_LCD_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetLcdManager\n");
-        }
-        else if (idx == 4)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_TIMER_FUNC_LIST_ADDRESS, 10);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 5)
-        {
-            tmp1 = VM_MANAGER_TIMER_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetTimeManager\n");
-        }
-        else if (idx == 6)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_CTRL_FUNC_LIST_ADDRESS, 21);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 7)
-        {
-            tmp1 = VM_MANAGER_CTRL_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetCtrlManager\n");
-        }
-        else if (idx == 8)
-        {
-            // 传入指针写函数表
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMInitMemoryManager(%x)[%x]\n", tmp1, lastAddress);
-            for (tmp2 = 0; tmp2 < 27; tmp2++)
+            for (tmp2 = 0; tmp2 < 43; tmp2++)
             {
-                tmp3 = VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
+                tmp3 = VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + tmp2 * 4;
                 uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
             }
         }
-        else if (idx == 9)
+        vm_set_call_result(0);
+    }
+    else if (idx == 15)
+    {
+        tmp1 = VM_MANAGER_NETWORK_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetNetManager\n");
+    }
+    else if (idx == 16)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_UCS2_FUNC_LIST_ADDRESS, 11);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 17)
+    {
+        tmp1 = VM_MANAGER_UCS2_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetUcs2StrManager\n");
+    }
+    else if (idx == 18)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_SYS_MANAGER_FUNC_LIST_ADDRESS, 115);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 19)
+    {
+        DEBUG_PRINT("[call]vMGetSysManager\n");
+        // 返回sys函数表地址
+        tmp1 = VM_SYS_MANAGER_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 20)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            uc_mem_write(MTK, tmp1, emptyBuff, VM_MANAGER_TABLE_SIZE);
+        vm_set_call_result(0);
+    }
+    else if (idx == 21)
+    {
+        uc_mem_write(MTK, VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS, emptyBuff, VM_MANAGER_TABLE_SIZE);
+        tmp1 = VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetDFScriptManager\n");
+    }
+    else if (idx == 22)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS, 24);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 23)
+    {
+        tmp1 = VM_MANAGER_GAME_LCD_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetGameLcdManager\n");
+    }
+    else if (idx == 24)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS, 40);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 25)
+    {
+        tmp1 = VM_MANAGER_GAME_UTIL_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetGameUtilManager\n");
+    }
+    else if (idx == 26)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
         {
-            tmp1 = VM_MEMORY_MANAGER_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetMemoryManager\n");
+            tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 8 * 4;
+            uc_mem_write(MTK, tmp1 + 8 * 4, &tmp3, 4);
+            tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 10 * 4;
+            uc_mem_write(MTK, tmp1 + 10 * 4, &tmp3, 4);
         }
-        else if (idx == 10)
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 27)
+    {
+        tmp1 = VM_MANAGER_DF_ENGINE_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetDFEnginelManager\n");
+    }
+    else if (idx == 28)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_BILLING_FUNC_LIST_ADDRESS, 38);
-            vm_set_call_result(tmp1);
+            tmp3 = VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + 60 * 4;
+            uc_mem_write(MTK, tmp1 + 60 * 4, &tmp3, 4);
         }
-        else if (idx == 11)
+        vm_set_call_result(0);
+    }
+    else if (idx == 29)
+    {
+        tmp1 = VM_MANAGER_NETAPP_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetNetAppManager\n");
+    }
+    else if (idx == 30)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS, 31);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 31)
+    {
+        tmp1 = VM_MANAGER_AUDIO_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetAudioManager\n");
+    }
+    else if (idx == 32)
+    {
+        // 传入指针写函数表
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        for (tmp2 = 0; tmp2 < 144; tmp2++)
         {
-            tmp1 = VM_MANAGER_BILLING_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetBillingManager\n");
+            tmp3 = VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + tmp2 * 4;
+            uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
         }
-        else if (idx == 12)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 11);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 13)
-        {
-            tmp1 = VM_MANAGER_SCREEN_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetScreenManager\n");
-        }
-        else if (idx == 14)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-            {
-                for (tmp2 = 0; tmp2 < 43; tmp2++)
-                {
-                    tmp3 = VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS + tmp2 * 4;
-                    uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
-                }
-            }
-            vm_set_call_result(0);
-        }
-        else if (idx == 15)
-        {
-            tmp1 = VM_MANAGER_NETWORK_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetNetManager\n");
-        }
-        else if (idx == 16)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_UCS2_FUNC_LIST_ADDRESS, 11);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 17)
-        {
-            tmp1 = VM_MANAGER_UCS2_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetUcs2StrManager\n");
-        }
-        else if (idx == 18)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_SYS_MANAGER_FUNC_LIST_ADDRESS, 115);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 19)
-        {
-            DEBUG_PRINT("[call]vMGetSysManager\n");
-            // 返回sys函数表地址
-            tmp1 = VM_SYS_MANAGER_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 20)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-                uc_mem_write(MTK, tmp1, emptyBuff, VM_MANAGER_TABLE_SIZE);
-            vm_set_call_result(0);
-        }
-        else if (idx == 21)
-        {
-            uc_mem_write(MTK, VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS, emptyBuff, VM_MANAGER_TABLE_SIZE);
-            tmp1 = VM_MANAGER_DF_SCRIPT_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetDFScriptManager\n");
-        }
-        else if (idx == 22)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS, 24);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 23)
-        {
-            tmp1 = VM_MANAGER_GAME_LCD_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetGameLcdManager\n");
-        }
-        else if (idx == 24)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS, 40);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 25)
-        {
-            tmp1 = VM_MANAGER_GAME_UTIL_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetGameUtilManager\n");
-        }
-        else if (idx == 26)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-            {
-                tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 8 * 4;
-                uc_mem_write(MTK, tmp1 + 8 * 4, &tmp3, 4);
-                tmp3 = VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS + 10 * 4;
-                uc_mem_write(MTK, tmp1 + 10 * 4, &tmp3, 4);
-            }
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 27)
-        {
-            tmp1 = VM_MANAGER_DF_ENGINE_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetDFEnginelManager\n");
-        }
-        else if (idx == 28)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-            {
-                tmp3 = VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS + 60 * 4;
-                uc_mem_write(MTK, tmp1 + 60 * 4, &tmp3, 4);
-            }
-            vm_set_call_result(0);
-        }
-        else if (idx == 29)
-        {
-            tmp1 = VM_MANAGER_NETAPP_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetNetAppManager\n");
-        }
-        else if (idx == 30)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS, 31);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 31)
-        {
-            tmp1 = VM_MANAGER_AUDIO_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetAudioManager\n");
-        }
-        else if (idx == 32)
-        {
-            // 传入指针写函数表
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            for (tmp2 = 0; tmp2 < 144; tmp2++)
-            {
-                tmp3 = VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + tmp2 * 4;
-                uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
-            }
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
 
-            DEBUG_PRINT("[call]vMInitGameManagerOld(%x,%X)[%x]\n", tmp1, tmp2, lastAddress);
-        }
-        else if (idx == 33)
+        DEBUG_PRINT("[call]vMInitGameManagerOld(%x,%X)[%x]\n", tmp1, tmp2, lastAddress);
+    }
+    else if (idx == 33)
+    {
+        tmp1 = VM_MANAGER_GAMEOLD_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetGameManagerOld\n");
+    }
+    else if (idx == 34)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
         {
-            tmp1 = VM_MANAGER_GAMEOLD_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetGameManagerOld\n");
-        }
-        else if (idx == 34)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
+            for (tmp2 = 0; tmp2 < 40; tmp2++)
             {
-                for (tmp2 = 0; tmp2 < 40; tmp2++)
-                {
-                    tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
-                    uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
-                }
+                tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
+                uc_mem_write(MTK, tmp1 + tmp2 * 4, &tmp3, 4);
             }
-            vm_set_call_result(0);
         }
-        else if (idx == 35)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS, 11);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 36)
-        {
-            tmp1 = VM_MANAGER_SENSOR_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetGSensorManager\n");
-        }
-        else if (idx == 37)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_STDIO_FUNC_LIST_ADDRESS, 22);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 38)
-        {
-            tmp1 = VM_MANAGER_STDIO_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetVmStdManager\n");
-        }
-        else if (idx == 39)
-        {
-            printf("[call]vMInitDlLoadManager\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_InitDlLoadManager(tmp1);
-        }
-        else if (idx == 40)
-        {
-            printf("[call]vMGetDlLoadManager\n");
-            vm_set_call_result(VM_DL_LOAD_MANAGER_ADDRESS);
-        }
-        else if (idx == 41)
-        {
-            vm_set_call_result(VM_DL_RS_MANAGER_ADDRESS);
-        }
-        else if (idx == 42)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_InitDlRsManager(tmp1);
-        }
-        else if (idx == 43)
-        {
-            vm_set_call_result(VM_DL_IMAGE_MANAGER_ADDRESS);
-        }
-        else if (idx == 44)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_InitDlImageManager(tmp1);
-        }
-        else if (idx == 45)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS, 6);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 46)
-        {
-            tmp1 = VM_MANAGER_VMIM_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetVmImManager\n");
-        }
-        else if (idx == 49)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_configManagerTableCount(tmp1, VM_VIDEO_FUNC_LIST_ADDRESS, 38);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 50)
-        {
-            printf("[call]VmGetVideoManager\n");
-            vm_set_call_result(VM_VIDEO_MANAGER_ADDRESS);
-        }
-        else if (idx == 51)
-        {
-            printf("[call]VmGetDlWPayManager\n");
-            vm_set_call_result(VM_DL_PAY_MANAGER_ADDRESS);
-        }
-        else
-        {
-            printf("[impl]vmManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+        vm_set_call_result(0);
+    }
+    else if (idx == 35)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS, 11);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 36)
+    {
+        tmp1 = VM_MANAGER_SENSOR_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetGSensorManager\n");
+    }
+    else if (idx == 37)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_STDIO_FUNC_LIST_ADDRESS, 22);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 38)
+    {
+        tmp1 = VM_MANAGER_STDIO_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetVmStdManager\n");
+    }
+    else if (idx == 39)
+    {
+        printf("[call]vMInitDlLoadManager\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_InitDlLoadManager(tmp1);
+    }
+    else if (idx == 40)
+    {
+        printf("[call]vMGetDlLoadManager\n");
+        vm_set_call_result(VM_DL_LOAD_MANAGER_ADDRESS);
+    }
+    else if (idx == 41)
+    {
+        vm_set_call_result(VM_DL_RS_MANAGER_ADDRESS);
+    }
+    else if (idx == 42)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_InitDlRsManager(tmp1);
+    }
+    else if (idx == 43)
+    {
+        vm_set_call_result(VM_DL_IMAGE_MANAGER_ADDRESS);
+    }
+    else if (idx == 44)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_InitDlImageManager(tmp1);
+    }
+    else if (idx == 45)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_MANAGER_VMIM_FUNC_LIST_ADDRESS, 6);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 46)
+    {
+        tmp1 = VM_MANAGER_VMIM_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetVmImManager\n");
+    }
+    else if (idx == 49)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_configManagerTableCount(tmp1, VM_VIDEO_FUNC_LIST_ADDRESS, 38);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 50)
+    {
+        printf("[call]VmGetVideoManager\n");
+        vm_set_call_result(VM_VIDEO_MANAGER_ADDRESS);
+    }
+    else if (idx == 51)
+    {
+        printf("[call]VmGetDlWPayManager\n");
+        vm_set_call_result(VM_DL_PAY_MANAGER_ADDRESS);
+    }
+    else
+    {
+        printf("[impl]vmManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_sys_manager_func(u32 address)
@@ -2435,666 +2839,662 @@ static bool hook_vm_sys_manager_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_SYS_MANAGER_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
+    u32 idx = (address - VM_SYS_MANAGER_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        printf("[call]vMIsSimReady\n");
+        assert(0);
+    }
+    else if (idx == 1)
+    {
+        printf("[call]vmSysIsHaveNetWork\n");
+        assert(0);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]vMIsSystemReady\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        /*
+ven_setting_getDefaultSIM(3, &v2, v1);
+if ( ven_util_getMccMnc((unsigned __int8)v2, &v4, &n2) )
+return 1;
+vm_log_trace("[coolbar] xxl: master sim get MCC %d, MNC %d", (unsigned __int16)v4, (unsigned __int16)n2);
+if ( !(_WORD)n2 || (unsigned __int16)n2 == 2 )
+return 2;
+if ( (unsigned __int16)n2 == 1 )
+return 3;
+return 4;
+        */
+        tmp1 = 3;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetOperator\n");
+    }
+    else if (idx == 4)
+    {
+        DEBUG_PRINT("[call]vMGetIMEI\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "111111111111111");
+        tmp3 = strlen((char *)cbeTextString) + 1;
+        if (tmp2 && tmp2 < tmp3)
+            tmp3 = tmp2;
+        if (tmp3 > 0)
         {
-            printf("[call]vMIsSimReady\n");
-            assert(0);
+            if (tmp3 <= strlen((char *)cbeTextString))
+                cbeTextString[tmp3 - 1] = 0;
+            uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
         }
-        else if (idx == 1)
+        vm_set_call_result(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vMGetIMSI\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "N6206");
+        tmp3 = strlen((char *)cbeTextString) + 1;
+        if (tmp2 && tmp2 < tmp3)
+            tmp3 = tmp2;
+        if (tmp3 > 0)
         {
-            printf("[call]vmSysIsHaveNetWork\n");
-            assert(0);
+            if (tmp3 <= strlen((char *)cbeTextString))
+                cbeTextString[tmp3 - 1] = 0;
+            uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
         }
-        else if (idx == 2)
+        vm_set_call_result(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vMGetPrjVersion\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]vMIsCallConnect\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]vMIsDCopen\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]vMGetStkCardStatus\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]vMGetActiveSim\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]vmGetCoolbarlistInit\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 14)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 15)
+    {
+        DEBUG_PRINT("[call]vMAudioIsSupportInCb\n");
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 16)
+    {
+        u32 line = 0;
+        u32 lr = 0;
+        u32 sp = 0;
+        vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &line);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        printf("[call]vMAssert(%s:%u, lr:%x, sp:%x, last:%x)\n", cbeTextString, line, lr, sp, lastAddress);
+        vm_net_trace("vMAssert file=%s line=%u lr=%08x sp=%08x last=%08x\n", cbeTextString, line, lr, sp, lastAddress);
+        for (u32 off = 0; off < 0x80; off += 4)
         {
-            printf("[call]vMIsSystemReady\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            /*
-  ven_setting_getDefaultSIM(3, &v2, v1);
-  if ( ven_util_getMccMnc((unsigned __int8)v2, &v4, &n2) )
-    return 1;
-  vm_log_trace("[coolbar] xxl: master sim get MCC %d, MNC %d", (unsigned __int16)v4, (unsigned __int16)n2);
-  if ( !(_WORD)n2 || (unsigned __int16)n2 == 2 )
-    return 2;
-  if ( (unsigned __int16)n2 == 1 )
-    return 3;
-  return 4;
-            */
-            tmp1 = 3;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetOperator\n");
-        }
-        else if (idx == 4)
-        {
-            DEBUG_PRINT("[call]vMGetIMEI\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "111111111111111");
-            tmp3 = strlen((char *)cbeTextString) + 1;
-            if (tmp2 && tmp2 < tmp3)
-                tmp3 = tmp2;
-            if (tmp3 > 0)
+            u32 word = 0;
+            if (uc_mem_read(MTK, sp + off, &word, 4) != UC_ERR_OK)
+                break;
+            printf("assert_stack[%02x]=%08x\n", off, word);
+            if ((word >= 0x01000000 && word < 0x01100000) ||
+                (word >= 0x1000000 && word < 0x1100000) ||
+                (word >= ROM_ADDRESS && word < ROM_ADDRESS + 0x800000))
             {
-                if (tmp3 <= strlen((char *)cbeTextString))
-                    cbeTextString[tmp3 - 1] = 0;
-                uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
+                vm_net_trace("vMAssert_stack off=%02x word=%08x\n", off, word);
             }
-            vm_set_call_result(0);
         }
-        else if (idx == 5)
-        {
-            printf("[call]vMGetIMSI\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "N6206");
-            tmp3 = strlen((char *)cbeTextString) + 1;
-            if (tmp2 && tmp2 < tmp3)
-                tmp3 = tmp2;
-            if (tmp3 > 0)
-            {
-                if (tmp3 <= strlen((char *)cbeTextString))
-                    cbeTextString[tmp3 - 1] = 0;
-                uc_mem_write(MTK, tmp1, cbeTextString, tmp3);
-            }
-            vm_set_call_result(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vMGetPrjVersion\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]vMIsCallConnect\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]vMIsDCopen\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]vMGetStkCardStatus\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]vMGetActiveSim\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]vmGetCoolbarlistInit\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 14)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 15)
-        {
-            DEBUG_PRINT("[call]vMAudioIsSupportInCb\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 16)
-        {
-            u32 line = 0;
-            u32 lr = 0;
-            u32 sp = 0;
-            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &line);
-            uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
-            printf("[call]vMAssert(%s:%u, lr:%x, sp:%x, last:%x)\n", cbeTextString, line, lr, sp, lastAddress);
-            vm_net_trace("vMAssert file=%s line=%u lr=%08x sp=%08x last=%08x\n", cbeTextString, line, lr, sp, lastAddress);
-            for (u32 off = 0; off < 0x80; off += 4)
-            {
-                u32 word = 0;
-                if (uc_mem_read(MTK, sp + off, &word, 4) != UC_ERR_OK)
-                    break;
-                printf("assert_stack[%02x]=%08x\n", off, word);
-                if ((word >= 0x01000000 && word < 0x01100000) ||
-                    (word >= 0x1000000 && word < 0x1100000) ||
-                    (word >= ROM_ADDRESS && word < ROM_ADDRESS + 0x800000))
-                {
-                    vm_net_trace("vMAssert_stack off=%02x word=%08x\n", off, word);
-                }
-            }
-            dumpCpuInfo();
-            fflush(stdout);
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            // DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
-            cbeTextString[0] = '.';
-            cbeTextString[1] = 0;
-            cbeTextString[2] = '/';
-            cbeTextString[3] = 0;
-            cbeTextString[4] = 0;
-            cbeTextString[5] = 0;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, tmp1, cbeTextString, 6);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]CoolBarDynamicGetVerByAppID\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]Res_GetCoolBarFullPath\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]vMGSenserIsSupportInCb\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]vMSysHandler\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            DEBUG_PRINT("[call]vMGetKeyNum\n");
-            tmp1 = 33;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]vMIsSupportTP\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            printf("[call]CDownGetCompany\n");
-            assert(0);
-        }
-        else if (idx == 25)
-        {
-            // ignore
-            DEBUG_PRINT("[call]CDownGetServicePhone\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            u8 *s = cbeTextString;
-            *s++ = 'c';
-            *s++ = 'b';
-            *s++ = 'e';
-            *s++ = '_';
-            *s++ = 'e';
-            *s++ = 'm';
-            *s++ = 'u';
-            *s++ = '\0';
-            uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]vMIsSupportIdleMenu\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]CDownGetData\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            DEBUG_PRINT("[call]GetCoolBarKernelCurrentVersion(返回46)\n");
-            tmp1 = 46;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]CoolBar_DownLoad_GetFile\n");
-            assert(0);
-        }
-        else if (idx == 32)
-        {
-            printf("[call]CoolBar_DownLoad_Stop\n");
-            assert(0);
-        }
-        else if (idx == 33)
-        {
-            vm_set_call_result(0x3ea);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]vmSysIsVisibleApp\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]cDownSetForceUpdate\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]cDownGetModeAndVersion\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            printf("[call]mmiDynamicSetForceUpdate\n");
-            assert(0);
-        }
-        else if (idx == 38)
-        {
-            printf("[call]mmiDunamicGetModeAndVersion\n");
-            assert(0);
-        }
-        else if (idx == 39)
-        {
-            printf("[call]vMSwitchLog\n");
-            assert(0);
-        }
-        else if (idx == 40)
-        {
-            printf("[call]Coolbar_GetResStatus\n");
-            assert(0);
-        }
-        else if (idx == 41)
-        {
-            printf("[call]coolbar_Update_Tfold\n");
-            assert(0);
-        }
-        else if (idx == 42)
-        {
-            printf("[call]CoolBar_EnterDmIn\n");
-            assert(0);
-        }
-        else if (idx == 43)
-        {
-            printf("[call]vmInputText\n");
-            assert(0);
-        }
-        else if (idx == 44)
-        {
-            printf("[call]vmInputPassword\n");
-            assert(0);
-        }
-        else if (idx == 45)
-        {
-            printf("[call]vmInputClose\n");
-            assert(0);
-        }
-        else if (idx == 46)
-        {
-            printf("[call]vmInputIsOpen\n");
-            assert(0);
-        }
-        else if (idx == 47)
-        {
-            printf("[call]VmGetRand\n");
-            assert(0);
-        }
-        else if (idx == 48)
-        {
-            printf("[call]srand\n");
-            assert(0);
-        }
-        else if (idx == 49)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "+8613800100500");
-            uc_mem_write(MTK, tmp1, cbeTextString, strlen((char *)cbeTextString) + 1);
-            vm_set_call_result(0);
-        }
-        else if (idx == 50)
-        {
-            printf("[call]VmGetPrjCustom\n");
-            assert(0);
-        }
-        else if (idx == 51)
-        {
-            printf("[call]CBGetNetInfo\n");
-            assert(0);
-        }
-        else if (idx == 52)
-        {
-            printf("[call]VmGetCbNum\n");
-            assert(0);
-        }
-        else if (idx == 53)
-        {
-            printf("[call]LzssEncode\n");
-            assert(0);
-        }
-        else if (idx == 54)
-        {
-            printf("[call]LzssDecode\n");
-            assert(0);
-        }
-        else if (idx == 55)
-        {
-            printf("[call]DMenuUpdateMenu\n");
-            assert(0);
-        }
-        else if (idx == 56)
-        {
-            printf("[call]CDownUpdateMenu\n");
-            assert(0);
-        }
-        else if (idx == 57)
-        {
-            printf("[call]CbGetPlatfomName\n");
-            assert(0);
-        }
-        else if (idx == 58)
-        {
-            printf("[call]vMInnerAppInfo\n");
-            assert(0);
-        }
-        else if (idx == 59)
-        {
-            printf("[call]vMGetInnerAppIcon\n");
-            assert(0);
-        }
-        else if (idx == 60)
-        {
-            printf("[call]CDownGetAppType\n");
-            assert(0);
-        }
-        else if (idx == 61)
-        {
-            printf("[call]vmSetGQQRunings\n");
-            assert(0);
-        }
-        else if (idx == 62)
-        {
-            printf("[call]p_vmGetGQQRunings\n");
-            assert(0);
-        }
-        else if (idx == 63)
-        {
-            printf("[call]vmGetQQAddress\n");
-            assert(0);
-        }
-        else if (idx == 64)
-        {
-            printf("[call]GetCurrentScreenType\n");
-            assert(0);
-        }
-        else if (idx == 65)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 66)
-        {
-            printf("[call]VmDlGetIMEI\n");
-            assert(0);
-        }
-        else if (idx == 68)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            if (tmp1 && tmp2)
-                uc_mem_write(MTK, tmp1, emptyBuff, tmp2 > sizeof(emptyBuff) ? sizeof(emptyBuff) : tmp2);
-            vm_set_call_result(0);
-        }
-        else if (idx == 69)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 70)
-        {
-            printf("[call]coolbar_GetAppNameByIdFromList\n");
-            assert(0);
-        }
-        else if (idx == 71)
-        {
-            printf("[call]coolbar_Update_DeleteAppInfo\n");
-            assert(0);
-        }
-        else if (idx == 72)
-        {
-            printf("[call]VmGetDMenuFileName\n");
-            assert(0);
-        }
-        else if (idx == 73)
-        {
-            printf("[call]VmGetCDownFileName\n");
-            assert(0);
-        }
-        else if (idx == 74)
-        {
-            printf("[call]GetCDownAppUrl\n");
-            assert(0);
-        }
-        else if (idx == 75)
-        {
-            printf("[call]vmDlGetPreAppId\n");
-            assert(0);
-        }
-        else if (idx == 76)
-        {
-            printf("[call]Coolbar_ParseDownDataFile\n");
-            assert(0);
-        }
-        else if (idx == 77)
-        {
-            printf("[call]CoolBar_DownLoad_CBE\n");
-            assert(0);
-        }
-        else if (idx == 78)
-        {
-            printf("[call]Coolbar_PreLoadAppEx\n");
-            assert(0);
-        }
-        else if (idx == 79)
-        {
-            tmp1 = Global_R9;
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 80)
-        {
-            // todo
-            DEBUG_PRINT("[call]vMGetGameWinState\n");
-            tmp2 = 1; // running
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 81)
-        {
-            printf("[call]CDownGetHideText\n");
-            assert(0);
-        }
-        else if (idx == 82)
-        {
-            printf("[call]vMPhbMultiSelectEntry\n");
-            assert(0);
-        }
-        else if (idx == 83)
-        {
-            printf("[call]vmSetCurActiveSim\n");
-            assert(0);
-        }
-        else if (idx == 84)
-        {
-            printf("[call]vmGetAllSimStatus\n");
-            assert(0);
-        }
-        else if (idx == 85)
-        {
-            printf("[call]VmSendMMS\n");
-            assert(0);
-        }
-        else if (idx == 86)
-        {
-            printf("[call]VmGetFocusWinID\n");
-            assert(0);
-        }
-        else if (idx == 87)
-        {
-            printf("[call]VmIsWinOpen\n");
-            assert(0);
-        }
-        else if (idx == 88)
-        {
-            printf("[call]vmIsIdleWinFocus\n");
-            assert(0);
-        }
-        else if (idx == 89)
-        {
-            // DEBUG_PRINT("[call]vmIsInnerApp\n");
-            //这里只能返回1，要不然就会启动别的没安装的CBE文件
-            vm_set_call_result(1);
-        }
-        else if (idx == 90)
-        {
-            // DEBUG_PRINT("[call]vmGetInnerAppVer\n");
-            tmp1 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 91)
-        {
-            printf("[call]VmGetMixMenuLength\n");
-            assert(0);
-        }
-        else if (idx == 92)
-        {
-            printf("[call]VmGetMixMenudata\n");
-            assert(0);
-        }
-        else if (idx == 93)
-        {
-            printf("[call]VmGetWpayCBMInfo\n");
-            assert(0);
-        }
-        else if (idx == 94)
-        {
-            printf("[call]VMGetCurVerAllInfo\n");
-            assert(0);
-        }
-        else if (idx == 95)
-        {
-            printf("[call]vMSetFpsSleepFlag\n");
-            assert(0);
-        }
-        else if (idx == 96)
-        {
-            printf("[call]cbSetSmsCenterNum\n");
-            assert(0);
-        }
-        else if (idx == 97)
-        {
-            printf("[call]vmGetBuildTime\n");
-            assert(0);
-        }
-        else if (idx == 98)
-        {
-            printf("[call]vmGetUsedTimes\n");
-            assert(0);
-        }
-        else if (idx == 99)
-        {
-            printf("[call]vmSysGetBatteryInfo\n");
-            assert(0);
-        }
-        else if (idx == 100)
-        {
-            printf("[call]vmSysSetLcdBright\n");
-            assert(0);
-        }
-        else if (idx == 101)
-        {
-            printf("[call]vmSysResetLcdBright\n");
-            assert(0);
-        }
-        else if (idx == 102)
-        {
-            printf("[call]vmSysSetPowerSaveMode\n");
-            assert(0);
-        }
-        else if (idx == 103)
-        {
-            printf("[call]vMGetOperatorMCC\n");
-            assert(0);
-        }
-        else if (idx == 104)
-        {
-            printf("[call]vMGetOperatorMNC\n");
-            assert(0);
-        }
-        else if (idx == 105)
-        {
-            printf("[call]VmSupportAppSotre\n");
-            assert(0);
-        }
-        else if (idx == 106)
-        {
-            //  printf("[call]CDownGetCompanyEx\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            u8 *s = cbeTextString;
-            *s++ = '\0';
-            uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
-        }
-        else if (idx == 107)
-        {
-            printf("[call]vmSysGetCurrLcdLightInfo\n");
-            assert(0);
-        }
-        else if (idx == 108)
-        {
-            printf("[call]vmSysStartVibration\n");
-            assert(0);
-        }
-        else if (idx == 109)
-        {
-            printf("[call]vmSysStopVibration\n");
-            assert(0);
-        }
-        else if (idx == 110)
-        {
-            printf("[call]vmSysOpenBrowser\n");
-            assert(0);
-        }
-        else if (idx == 111)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_sys_set_setting_profile(tmp1);
-        }
-        else if (idx == 112)
-        {
-            vm_sys_get_setting_profile();
-        }
-        else if (idx == 113)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_sys_get_setting_profile_name(tmp1, tmp2, tmp3);
-        }
-        else if (idx == 114)
-        {
-            printf("[call]vmSysSaveContactPerson\n");
-            assert(0);
-        }
-        else
-        {
+        dumpCpuInfo();
+        fflush(stdout);
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        // DEBUG_PRINT("[call]Coolbar_GetCoolbarDirPath\n");
+        cbeTextString[0] = '.';
+        cbeTextString[1] = 0;
+        cbeTextString[2] = '/';
+        cbeTextString[3] = 0;
+        cbeTextString[4] = 0;
+        cbeTextString[5] = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_mem_write(MTK, tmp1, cbeTextString, 6);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]CoolBarDynamicGetVerByAppID\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]Res_GetCoolBarFullPath\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]vMGSenserIsSupportInCb\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]vMSysHandler\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        DEBUG_PRINT("[call]vMGetKeyNum\n");
+        tmp1 = 33;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]vMIsSupportTP\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]CDownGetCompany\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        // ignore
+        DEBUG_PRINT("[call]CDownGetServicePhone\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        u8 *s = cbeTextString;
+        *s++ = 'c';
+        *s++ = 'b';
+        *s++ = 'e';
+        *s++ = '_';
+        *s++ = 'e';
+        *s++ = 'm';
+        *s++ = 'u';
+        *s++ = '\0';
+        uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]vMIsSupportIdleMenu\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]CDownGetData\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        DEBUG_PRINT("[call]GetCoolBarKernelCurrentVersion(返回46)\n");
+        tmp1 = 46;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]CoolBar_DownLoad_GetFile\n");
+        assert(0);
+    }
+    else if (idx == 32)
+    {
+        printf("[call]CoolBar_DownLoad_Stop\n");
+        assert(0);
+    }
+    else if (idx == 33)
+    {
+        vm_set_call_result(0x3ea);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]vmSysIsVisibleApp\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]cDownSetForceUpdate\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]cDownGetModeAndVersion\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        printf("[call]mmiDynamicSetForceUpdate\n");
+        assert(0);
+    }
+    else if (idx == 38)
+    {
+        printf("[call]mmiDunamicGetModeAndVersion\n");
+        assert(0);
+    }
+    else if (idx == 39)
+    {
+        printf("[call]vMSwitchLog\n");
+        assert(0);
+    }
+    else if (idx == 40)
+    {
+        printf("[call]Coolbar_GetResStatus\n");
+        assert(0);
+    }
+    else if (idx == 41)
+    {
+        printf("[call]coolbar_Update_Tfold\n");
+        assert(0);
+    }
+    else if (idx == 42)
+    {
+        printf("[call]CoolBar_EnterDmIn\n");
+        assert(0);
+    }
+    else if (idx == 43)
+    {
+        vm_set_call_result(1);
+    }
+    else if (idx == 44)
+    {
+        vm_set_call_result(1);
+    }
+    else if (idx == 45)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 46)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 47)
+    {
+        printf("[call]VmGetRand\n");
+        assert(0);
+    }
+    else if (idx == 48)
+    {
+        printf("[call]srand\n");
+        assert(0);
+    }
+    else if (idx == 49)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "+8613800100500");
+        uc_mem_write(MTK, tmp1, cbeTextString, strlen((char *)cbeTextString) + 1);
+        vm_set_call_result(0);
+    }
+    else if (idx == 50)
+    {
+        printf("[call]VmGetPrjCustom\n");
+        assert(0);
+    }
+    else if (idx == 51)
+    {
+        printf("[call]CBGetNetInfo\n");
+        assert(0);
+    }
+    else if (idx == 52)
+    {
+        printf("[call]VmGetCbNum\n");
+        assert(0);
+    }
+    else if (idx == 53)
+    {
+        printf("[call]LzssEncode\n");
+        assert(0);
+    }
+    else if (idx == 54)
+    {
+        printf("[call]LzssDecode\n");
+        assert(0);
+    }
+    else if (idx == 55)
+    {
+        printf("[call]DMenuUpdateMenu\n");
+        assert(0);
+    }
+    else if (idx == 56)
+    {
+        printf("[call]CDownUpdateMenu\n");
+        assert(0);
+    }
+    else if (idx == 57)
+    {
+        printf("[call]CbGetPlatfomName\n");
+        assert(0);
+    }
+    else if (idx == 58)
+    {
+        printf("[call]vMInnerAppInfo\n");
+        assert(0);
+    }
+    else if (idx == 59)
+    {
+        printf("[call]vMGetInnerAppIcon\n");
+        assert(0);
+    }
+    else if (idx == 60)
+    {
+        printf("[call]CDownGetAppType\n");
+        assert(0);
+    }
+    else if (idx == 61)
+    {
+        printf("[call]vmSetGQQRunings\n");
+        assert(0);
+    }
+    else if (idx == 62)
+    {
+        printf("[call]p_vmGetGQQRunings\n");
+        assert(0);
+    }
+    else if (idx == 63)
+    {
+        printf("[call]vmGetQQAddress\n");
+        assert(0);
+    }
+    else if (idx == 64)
+    {
+        printf("[call]GetCurrentScreenType\n");
+        assert(0);
+    }
+    else if (idx == 65)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 66)
+    {
+        printf("[call]VmDlGetIMEI\n");
+        assert(0);
+    }
+    else if (idx == 68)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (tmp1 && tmp2)
+            uc_mem_write(MTK, tmp1, emptyBuff, tmp2 > sizeof(emptyBuff) ? sizeof(emptyBuff) : tmp2);
+        vm_set_call_result(0);
+    }
+    else if (idx == 69)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 70)
+    {
+        printf("[call]coolbar_GetAppNameByIdFromList\n");
+        assert(0);
+    }
+    else if (idx == 71)
+    {
+        printf("[call]coolbar_Update_DeleteAppInfo\n");
+        assert(0);
+    }
+    else if (idx == 72)
+    {
+        printf("[call]VmGetDMenuFileName\n");
+        assert(0);
+    }
+    else if (idx == 73)
+    {
+        printf("[call]VmGetCDownFileName\n");
+        assert(0);
+    }
+    else if (idx == 74)
+    {
+        printf("[call]GetCDownAppUrl\n");
+        assert(0);
+    }
+    else if (idx == 75)
+    {
+        printf("[call]vmDlGetPreAppId\n");
+        assert(0);
+    }
+    else if (idx == 76)
+    {
+        printf("[call]Coolbar_ParseDownDataFile\n");
+        assert(0);
+    }
+    else if (idx == 77)
+    {
+        printf("[call]CoolBar_DownLoad_CBE\n");
+        assert(0);
+    }
+    else if (idx == 78)
+    {
+        printf("[call]Coolbar_PreLoadAppEx\n");
+        assert(0);
+    }
+    else if (idx == 79)
+    {
+        tmp1 = Global_R9;
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 80)
+    {
+        // todo
+        DEBUG_PRINT("[call]vMGetGameWinState\n");
+        tmp2 = 1; // running
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 81)
+    {
+        printf("[call]CDownGetHideText\n");
+        assert(0);
+    }
+    else if (idx == 82)
+    {
+        printf("[call]vMPhbMultiSelectEntry\n");
+        assert(0);
+    }
+    else if (idx == 83)
+    {
+        printf("[call]vmSetCurActiveSim\n");
+        assert(0);
+    }
+    else if (idx == 84)
+    {
+        printf("[call]vmGetAllSimStatus\n");
+        assert(0);
+    }
+    else if (idx == 85)
+    {
+        printf("[call]VmSendMMS\n");
+        assert(0);
+    }
+    else if (idx == 86)
+    {
+        printf("[call]VmGetFocusWinID\n");
+        assert(0);
+    }
+    else if (idx == 87)
+    {
+        printf("[call]VmIsWinOpen\n");
+        assert(0);
+    }
+    else if (idx == 88)
+    {
+        printf("[call]vmIsIdleWinFocus\n");
+        assert(0);
+    }
+    else if (idx == 89)
+    {
+        // DEBUG_PRINT("[call]vmIsInnerApp\n");
+        // 这里只能返回1，要不然就会启动别的没安装的CBE文件
+        vm_set_call_result(1);
+    }
+    else if (idx == 90)
+    {
+        // DEBUG_PRINT("[call]vmGetInnerAppVer\n");
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 91)
+    {
+        printf("[call]VmGetMixMenuLength\n");
+        assert(0);
+    }
+    else if (idx == 92)
+    {
+        printf("[call]VmGetMixMenudata\n");
+        assert(0);
+    }
+    else if (idx == 93)
+    {
+        printf("[call]VmGetWpayCBMInfo\n");
+        assert(0);
+    }
+    else if (idx == 94)
+    {
+        printf("[call]VMGetCurVerAllInfo\n");
+        assert(0);
+    }
+    else if (idx == 95)
+    {
+        printf("[call]vMSetFpsSleepFlag\n");
+        assert(0);
+    }
+    else if (idx == 96)
+    {
+        printf("[call]cbSetSmsCenterNum\n");
+        assert(0);
+    }
+    else if (idx == 97)
+    {
+        printf("[call]vmGetBuildTime\n");
+        assert(0);
+    }
+    else if (idx == 98)
+    {
+        printf("[call]vmGetUsedTimes\n");
+        assert(0);
+    }
+    else if (idx == 99)
+    {
+        printf("[call]vmSysGetBatteryInfo\n");
+        assert(0);
+    }
+    else if (idx == 100)
+    {
+        printf("[call]vmSysSetLcdBright\n");
+        assert(0);
+    }
+    else if (idx == 101)
+    {
+        printf("[call]vmSysResetLcdBright\n");
+        assert(0);
+    }
+    else if (idx == 102)
+    {
+        printf("[call]vmSysSetPowerSaveMode\n");
+        assert(0);
+    }
+    else if (idx == 103)
+    {
+        printf("[call]vMGetOperatorMCC\n");
+        assert(0);
+    }
+    else if (idx == 104)
+    {
+        printf("[call]vMGetOperatorMNC\n");
+        assert(0);
+    }
+    else if (idx == 105)
+    {
+        printf("[call]VmSupportAppSotre\n");
+        assert(0);
+    }
+    else if (idx == 106)
+    {
+        //  printf("[call]CDownGetCompanyEx\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        u8 *s = cbeTextString;
+        *s++ = '\0';
+        uc_mem_write(MTK, tmp1, cbeTextString, tmp2);
+    }
+    else if (idx == 107)
+    {
+        printf("[call]vmSysGetCurrLcdLightInfo\n");
+        assert(0);
+    }
+    else if (idx == 108)
+    {
+        printf("[call]vmSysStartVibration\n");
+        assert(0);
+    }
+    else if (idx == 109)
+    {
+        printf("[call]vmSysStopVibration\n");
+        assert(0);
+    }
+    else if (idx == 110)
+    {
+        printf("[call]vmSysOpenBrowser\n");
+        assert(0);
+    }
+    else if (idx == 111)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_sys_set_setting_profile(tmp1);
+    }
+    else if (idx == 112)
+    {
+        vm_sys_get_setting_profile();
+    }
+    else if (idx == 113)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_sys_get_setting_profile_name(tmp1, tmp2, tmp3);
+    }
+    else if (idx == 114)
+    {
+        printf("[call]vmSysSaveContactPerson\n");
+        assert(0);
+    }
+    else
+    {
 
-            printf("[impl]vmManagerSys调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+        printf("[impl]vmManagerSys调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_memory_manager_func(u32 address)
@@ -3104,154 +3504,154 @@ static bool hook_vm_memory_manager_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            DEBUG_PRINT("[call]DF_InitMemory\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 1)
-        {
-            DEBUG_PRINT("[call]DF_ReleaseMemory\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 2)
-        {
-            // 参数1申请的内存块地址，参数2申请的内存大小，返回1
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            DEBUG_PRINT("[call]DF_Malloc_IN(%x,%x)\n", tmp1, tmp2);
-            tmp3 = vm_malloc(tmp2);
-            uc_mem_write(MTK, tmp1, &tmp3, 4);
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 3)
-        {
-            DEBUG_PRINT("[call]DF_Free\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_read(MTK, tmp1, &tmp2, 4);
-            vm_free(tmp2);
-            tmp2 = 0;
-            uc_mem_write(MTK, tmp1, &tmp2, 4);
-        }
-        else if (idx == 4)
-        {
-            DEBUG_PRINT("[call]DF_Memory_gc\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 5)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // int* p_g_memoryBlock
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
-            DEBUG_PRINT("[call]initMemoryBlock(%x,%x)\n", tmp1, tmp2);
-            vm_initMemoryBlock(tmp1, tmp2);
-        }
-        else if (idx == 6)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_MF_MemoryBlock_Malloc(tmp1, tmp2);
-            DEBUG_PRINT("[call]MF_MemoryBlock_Malloc(%x,%x)\n", tmp1, tmp2);
-        }
-        else if (idx == 7)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_MF_MemoryBlock_Reset(tmp1);
-            DEBUG_PRINT("[call]MF_MemoryBlock_Reset\n");
-        }
-        else if (idx == 8)
-        {
-            DEBUG_PRINT("[call]getMemoryBlockPtr\n");
-            tmp1 = VM_MemoryBlock_PTR_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 9)
-        {
-            DEBUG_PRINT("[call]MF_InitGmemoryBlock\n");
-            vm_initMemoryBlock(VM_MemoryBlock_PTR_ADDRESS, VM_MemoryBlock_SIZE);
-            vm_set_call_result(VM_MemoryBlock_PTR_ADDRESS);
-        }
-        else if (idx == 10)
-        {
-            // todo
-            DEBUG_PRINT("[call]MF_ReleaseGmemoryBlock\n");
-            vm_MF_resetGmemoryBlock();
-        }
-        else if (idx == 11)
-        {
-            // todo
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // size
-            DEBUG_PRINT("[call]MF_resetGmemoryBlock\n");
-            vm_MF_resetGmemoryBlock(tmp1);
-        }
-        else if (idx == 12)
-        {
-            // todo
-            DEBUG_PRINT("[call]MF_MallocGmemoryBlock\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp3);
-            tmp1 = VM_DreamFactory_MemoryBlock_ADDRESS;
-            uc_mem_read(MTK, tmp1, &tmp2, 4);
-            vm_MF_MemoryBlock_Malloc(tmp2, tmp3);
-        }
-        else if (idx == 13)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // size
-            tmp2 = vm_malloc(tmp1);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 14)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-                vm_free(tmp1);
-            tmp1 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]DF_Memory_AttachPointer\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]MF_MemoryBlock_Release\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]DF_InitMemoryEx\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]GAME_Image_realloc\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]DF_Malloc_debug\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]mallocBigMen_debug\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]CoolbarGetshareMemAlloced\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmMemManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        DEBUG_PRINT("[call]DF_InitMemory\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 1)
+    {
+        DEBUG_PRINT("[call]DF_ReleaseMemory\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 2)
+    {
+        // 参数1申请的内存块地址，参数2申请的内存大小，返回1
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        DEBUG_PRINT("[call]DF_Malloc_IN(%x,%x)\n", tmp1, tmp2);
+        tmp3 = vm_malloc(tmp2);
+        uc_mem_write(MTK, tmp1, &tmp3, 4);
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 3)
+    {
+        DEBUG_PRINT("[call]DF_Free\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_mem_read(MTK, tmp1, &tmp2, 4);
+        vm_free(tmp2);
+        tmp2 = 0;
+        uc_mem_write(MTK, tmp1, &tmp2, 4);
+    }
+    else if (idx == 4)
+    {
+        DEBUG_PRINT("[call]DF_Memory_gc\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 5)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // int* p_g_memoryBlock
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
+        DEBUG_PRINT("[call]initMemoryBlock(%x,%x)\n", tmp1, tmp2);
+        vm_initMemoryBlock(tmp1, tmp2);
+    }
+    else if (idx == 6)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_MF_MemoryBlock_Malloc(tmp1, tmp2);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Malloc(%x,%x)\n", tmp1, tmp2);
+    }
+    else if (idx == 7)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_MF_MemoryBlock_Reset(tmp1);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Reset\n");
+    }
+    else if (idx == 8)
+    {
+        DEBUG_PRINT("[call]getMemoryBlockPtr\n");
+        tmp1 = VM_MemoryBlock_PTR_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 9)
+    {
+        DEBUG_PRINT("[call]MF_InitGmemoryBlock\n");
+        vm_initMemoryBlock(VM_MemoryBlock_PTR_ADDRESS, VM_MemoryBlock_SIZE);
+        vm_set_call_result(VM_MemoryBlock_PTR_ADDRESS);
+    }
+    else if (idx == 10)
+    {
+        // todo
+        DEBUG_PRINT("[call]MF_ReleaseGmemoryBlock\n");
+        vm_MF_resetGmemoryBlock();
+    }
+    else if (idx == 11)
+    {
+        // todo
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // size
+        DEBUG_PRINT("[call]MF_resetGmemoryBlock\n");
+        vm_MF_resetGmemoryBlock(tmp1);
+    }
+    else if (idx == 12)
+    {
+        // todo
+        DEBUG_PRINT("[call]MF_MallocGmemoryBlock\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp3);
+        tmp1 = VM_DreamFactory_MemoryBlock_ADDRESS;
+        uc_mem_read(MTK, tmp1, &tmp2, 4);
+        vm_MF_MemoryBlock_Malloc(tmp2, tmp3);
+    }
+    else if (idx == 13)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // size
+        tmp2 = vm_malloc(tmp1);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 14)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            vm_free(tmp1);
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]DF_Memory_AttachPointer\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]MF_MemoryBlock_Release\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]DF_InitMemoryEx\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]GAME_Image_realloc\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]DF_Malloc_debug\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]mallocBigMen_debug\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]CoolbarGetshareMemAlloced\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmMemManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_lcd_func(u32 address)
@@ -3261,299 +3661,190 @@ static bool hook_vm_manager_lcd_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_LCD_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            // DEBUG_PRINT("[call]vMGetCurrMainScreenImage\n");
-            tmp1 = VM_screenImageStruct_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 2)
-        {
-            DEBUG_PRINT("[call]vMGetLCDBuffer\n");
-            tmp1 = VM_screenImage_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 3)
-        {
-            UpdateLcd();
-            vm_set_call_result(0);
-        }
-        else if (idx == 4)
-        {
-            DEBUG_PRINT("[call]vMGetCurrFontType\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 5)
-        {
-            // todo
-            DEBUG_PRINT("[call]vMSetCurrFontType\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 6)
-        {
-            DEBUG_PRINT("[call]vMGetFontWidth\n");
-            tmp1 = getFontWidth();
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 7)
-        {
-            tmp1 = getFontHeight();
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]vMGetFontHeight\n");
-        }
-        else if (idx == 8)
-        {
-            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
-            tmp1 = mesureStringWidth(cbeTextString);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-            DEBUG_PRINT("[call]vMGetStringWidth(%d,%x)\n", tmp1, cbeTextString[0]);
-            // tmp1 = mesureStringWidth(cbeTextString);
-        }
-        else if (idx == 9)
-        {
-            // todo
-            DEBUG_PRINT("[call]vMGetStringHeight\n");
-            tmp1 = 18;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 10)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
-            vm_trace_lcd_text("vMDrawString", idx, tmp1, (int)tmp2, (int)tmp3, (u16)tmp4, cbeTextString);
-            drawFontString(cbeTextString, tmp2, tmp3, (u16)tmp4);
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 11)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            u16 color;
-            uc_mem_read(MTK, tmp4, &color, 2);
-            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+    u32 idx = (address - VM_MANAGER_LCD_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        // DEBUG_PRINT("[call]vMGetCurrMainScreenImage\n");
+        tmp1 = VM_screenImageStruct_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 2)
+    {
+        DEBUG_PRINT("[call]vMGetLCDBuffer\n");
+        tmp1 = VM_screenImage_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 3)
+    {
+        UpdateLcd();
+        vm_set_call_result(0);
+    }
+    else if (idx == 4)
+    {
+        DEBUG_PRINT("[call]vMGetCurrFontType\n");
+        tmp1 = g_currentFontType;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 5)
+    {
+        DEBUG_PRINT("[call]vMSetCurrFontType\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        g_currentFontType = tmp1;
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 6)
+    {
+        DEBUG_PRINT("[call]vMGetFontWidth\n");
+        tmp1 = (g_currentFontType == 0) ? getFontCellWidth() : getFontWidth();
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 7)
+    {
+        tmp1 = getFontHeight();
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]vMGetFontHeight\n");
+    }
+    else if (idx == 8)
+    {
+        vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+        tmp1 = mesureStringWidth(cbeTextString);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
+        DEBUG_PRINT("[call]vMGetStringWidth(%d,%x)\n", tmp1, cbeTextString[0]);
+        // tmp1 = mesureStringWidth(cbeTextString);
+    }
+    else if (idx == 9)
+    {
+        // todo
+        DEBUG_PRINT("[call]vMGetStringHeight\n");
+        tmp1 = 18;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_readStringGbkByReg(UC_ARM_REG_R0, cbeTextString);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        x = vm_lcd_adjust_single_gbk_x(cbeTextString, x, y);
+        vm_trace_lcd_text("vMDrawString", idx, tmp1, x, y, (u16)tmp4, cbeTextString);
+        drawFontString(cbeTextString, x, y, (u16)tmp4);
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 11)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        u16 color;
+        uc_mem_read(MTK, tmp4, &color, 2);
+        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
 
-            // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-            DEBUG_PRINT("[call]vMDrawStringEx(%d,%d,%s)\n", tmp2, tmp3, sprintfBuff);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            vm_trace_lcd_text("vMDrawStringEx", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
+        // gbk_to_utf8(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
+        DEBUG_PRINT("[call]vMDrawStringEx(%d,%d,%s)\n", tmp2, tmp3, sprintfBuff);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        vm_trace_lcd_text("vMDrawStringEx", idx, tmp1, x, y, color, cbeTextString);
 
-            drawFontString(cbeTextString, tmp2, tmp3, color);
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 12)
+        drawFontString(cbeTextString, x, y, color);
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 12)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        u16 color = 0xffff;
+        uc_mem_read(MTK, tmp4 + 16, &color, 2);
+        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        vm_trace_lcd_text("vMShowStringClipAlign", idx, tmp1, x, y, color, cbeTextString);
+        drawFontString(cbeTextString, x, y, color);
+        vm_set_call_result(1);
+    }
+    else if (idx == 13)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        u16 color = 0xffff;
+        uc_mem_read(MTK, tmp4 + 16, &color, 2);
+        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        vm_trace_lcd_text("vMShowStringClip", idx, tmp1, x, y, color, cbeTextString);
+        drawFontString(cbeTextString, x, y, color);
+        vm_set_call_result(1);
+    }
+    else if (idx == 14)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        u16 color = 0xffff;
+        uc_mem_read(MTK, tmp4 + 16, &color, 2);
+        vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        int x = vm_lcd_coord_from_reg(tmp2);
+        int y = vm_lcd_coord_from_reg(tmp3);
+        vm_trace_lcd_text("vMShowStringRect", idx, tmp1, x, y, color, cbeTextString);
+        drawFontString(cbeTextString, x, y, color);
+        vm_set_call_result(1);
+    }
+    else if (idx == 15)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        u16 color = 0xffff;
+        uc_mem_read(MTK, tmp5, &color, 2);
+        vm_lcd_draw_line(vm_lcd_coord_from_reg(tmp1), vm_lcd_coord_from_reg(tmp2),
+                         vm_lcd_coord_from_reg(tmp3), vm_lcd_coord_from_reg(tmp4), color);
+        vm_set_call_result(1);
+    }
+    else if (idx == 16)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        u16 color = 0xffff;
+        uc_mem_read(MTK, tmp5, &color, 2);
+        vm_lcd_draw_line(vm_lcd_coord_from_reg(tmp1), vm_lcd_coord_from_reg(tmp2),
+                         vm_lcd_coord_from_reg(tmp3), vm_lcd_coord_from_reg(tmp4), color);
+        vm_set_call_result(1);
+    }
+    else if (idx == 17)
+    {
+        u32 rectH, rectColor;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        uc_mem_read(MTK, tmp5, &rectH, 4);
+        uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
+        int x = vm_lcd_coord_from_reg(tmp1);
+        int y = vm_lcd_coord_from_reg(tmp2);
+        int w = vm_lcd_coord_from_reg(tmp3);
+        int h = (int)rectH;
+        u16 color = (u16)rectColor;
+        if (w > 0 && h > 0)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            u16 color = 0xffff;
-            uc_mem_read(MTK, tmp4 + 16, &color, 2);
-            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            vm_trace_lcd_text("vMShowStringClipAlign", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
-            drawFontString(cbeTextString, tmp2, tmp3, color);
-            vm_set_call_result(1);
-        }
-        else if (idx == 13)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            u16 color = 0xffff;
-            uc_mem_read(MTK, tmp4 + 16, &color, 2);
-            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            vm_trace_lcd_text("vMShowStringClip", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
-            drawFontString(cbeTextString, tmp2, tmp3, color);
-            vm_set_call_result(1);
-        }
-        else if (idx == 14)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            u16 color = 0xffff;
-            uc_mem_read(MTK, tmp4 + 16, &color, 2);
-            vm_readStringGbkByReg(UC_ARM_REG_R1, cbeTextString);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            vm_trace_lcd_text("vMShowStringRect", idx, tmp1, (int)tmp2, (int)tmp3, color, cbeTextString);
-            drawFontString(cbeTextString, tmp2, tmp3, color);
-            vm_set_call_result(1);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]vMDrawLineEx\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]vMDrawLine\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            u32 rectH, rectColor;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
-            uc_mem_read(MTK, tmp5, &rectH, 4);
-            uc_mem_read(MTK, tmp5 + 4, &rectColor, 4);
-            int x = (int)tmp1;
-            int y = (int)tmp2;
-            int w = (int)tmp3;
-            int h = (int)rectH;
-            u16 color = (u16)rectColor;
-            if (w > 0 && h > 0)
-            {
-                if (x < 0)
-                {
-                    w += x;
-                    x = 0;
-                }
-                if (y < 0)
-                {
-                    h += y;
-                    y = 0;
-                }
-                if (x + w > LCD_WIDTH)
-                    w = LCD_WIDTH - x;
-                if (y + h > LCD_HEIGHT)
-                    h = LCD_HEIGHT - y;
-            }
-            if (w > 0 && h > 0)
-            {
-                u16 *rowBuf = (u16 *)cbeTextString;
-                for (int col = 0; col < w; col++)
-                    rowBuf[col] = color;
-                u32 top = y * LCD_WIDTH + x;
-                uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
-                for (int col = 0; col < w; col++)
-                    ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
-                if (h > 1)
-                {
-                    u32 bottom = (y + h - 1) * LCD_WIDTH + x;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
-                    for (int col = 0; col < w; col++)
-                        ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
-                }
-                for (int row = 1; row < h - 1; row++)
-                {
-                    u32 left = (y + row) * LCD_WIDTH + x;
-                    ((u16 *)Lcd_Cache_Buffer)[left] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
-                    if (w > 1)
-                    {
-                        u32 right = left + w - 1;
-                        ((u16 *)Lcd_Cache_Buffer)[right] = color;
-                        uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
-                    }
-                }
-            }
-            vm_set_call_result(1);
-        }
-        else if (idx == 18)
-        {
-            u32 dstImage, dstPixels, rectH, rectColor;
-            u16 dstW, dstH;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            uc_mem_read(MTK, tmp4, &rectH, 4);
-            uc_mem_read(MTK, tmp4 + 4, &rectColor, 4);
-            uc_mem_read(MTK, dstImage, &dstPixels, 4);
-            uc_mem_read(MTK, dstImage + 4, &dstW, 2);
-            uc_mem_read(MTK, dstImage + 6, &dstH, 2);
-            if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
-            {
-                dstPixels = VM_screenImage_ADDRESS;
-                dstW = LCD_WIDTH;
-                dstH = LCD_HEIGHT;
-            }
-            int x = (int)tmp1;
-            int y = (int)tmp2;
-            int w = (int)tmp3;
-            int h = (int)rectH;
-            u16 color = (u16)rectColor;
-            if (w > 0 && h > 0)
-            {
-                if (x < 0)
-                {
-                    w += x;
-                    x = 0;
-                }
-                if (y < 0)
-                {
-                    h += y;
-                    y = 0;
-                }
-                if (x + w > dstW)
-                    w = dstW - x;
-                if (y + h > dstH)
-                    h = dstH - y;
-            }
-            if (w > 0 && h > 0)
-            {
-                u16 *rowBuf = (u16 *)cbeTextString;
-                for (int col = 0; col < w; col++)
-                    rowBuf[col] = color;
-                u32 top = y * dstW + x;
-                uc_mem_write(MTK, dstPixels + top * 2, rowBuf, w * 2);
-                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
-                    for (int col = 0; col < w; col++)
-                        ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
-                if (h > 1)
-                {
-                    u32 bottom = (y + h - 1) * dstW + x;
-                    uc_mem_write(MTK, dstPixels + bottom * 2, rowBuf, w * 2);
-                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
-                        for (int col = 0; col < w; col++)
-                            ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
-                }
-                for (int row = 1; row < h - 1; row++)
-                {
-                    u32 left = (y + row) * dstW + x;
-                    uc_mem_write(MTK, dstPixels + left * 2, &color, 2);
-                    if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
-                        ((u16 *)Lcd_Cache_Buffer)[left] = color;
-                    if (w > 1)
-                    {
-                        u32 right = left + w - 1;
-                        uc_mem_write(MTK, dstPixels + right * 2, &color, 2);
-                        if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
-                            ((u16 *)Lcd_Cache_Buffer)[right] = color;
-                    }
-                }
-            }
-            vm_set_call_result(1);
-        }
-        else if (idx == 19)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
-            u32 fillH, fillColor;
-            uc_mem_read(MTK, tmp5, &fillH, 4);
-            uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
-            int x = (int)tmp1;
-            int y = (int)tmp2;
-            int w = (int)tmp3;
-            int h = (int)fillH;
             if (x < 0)
             {
                 w += x;
@@ -3568,43 +3859,65 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 w = LCD_WIDTH - x;
             if (y + h > LCD_HEIGHT)
                 h = LCD_HEIGHT - y;
-            if (w > 0 && h > 0)
+        }
+        if (w > 0 && h > 0)
+        {
+            u16 *rowBuf = (u16 *)cbeTextString;
+            for (int col = 0; col < w; col++)
+                rowBuf[col] = color;
+            u32 top = y * LCD_WIDTH + x;
+            uc_mem_write(MTK, VM_screenImage_ADDRESS + top * 2, rowBuf, w * 2);
+            for (int col = 0; col < w; col++)
+                ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+            if (h > 1)
             {
-                u16 color = (u16)fillColor;
-                for (int row = 0; row < h; row++)
+                u32 bottom = (y + h - 1) * LCD_WIDTH + x;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + bottom * 2, rowBuf, w * 2);
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+            }
+            for (int row = 1; row < h - 1; row++)
+            {
+                u32 left = (y + row) * LCD_WIDTH + x;
+                ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + left * 2, &color, 2);
+                if (w > 1)
                 {
-                    u32 off = (y + row) * LCD_WIDTH + x;
-                    for (int col = 0; col < w; col++)
-                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                    u32 right = left + w - 1;
+                    ((u16 *)Lcd_Cache_Buffer)[right] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + right * 2, &color, 2);
                 }
             }
-            vm_set_call_result(1);
         }
-        else if (idx == 20)
+        vm_set_call_result(1);
+    }
+    else if (idx == 18)
+    {
+        u32 dstImage, dstPixels, rectH, rectColor;
+        u16 dstW, dstH;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        uc_mem_read(MTK, tmp4, &rectH, 4);
+        uc_mem_read(MTK, tmp4 + 4, &rectColor, 4);
+        uc_mem_read(MTK, dstImage, &dstPixels, 4);
+        uc_mem_read(MTK, dstImage + 4, &dstW, 2);
+        uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+        if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
-            u32 dstImage, dstPixels, fillH, fillColor;
-            u16 dstW, dstH;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
-            uc_mem_read(MTK, tmp4, &fillH, 4);
-            uc_mem_read(MTK, tmp4 + 4, &fillColor, 4);
-            uc_mem_read(MTK, dstImage, &dstPixels, 4);
-            uc_mem_read(MTK, dstImage + 4, &dstW, 2);
-            uc_mem_read(MTK, dstImage + 6, &dstH, 2);
-            if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
-            {
-                dstPixels = VM_screenImage_ADDRESS;
-                dstW = LCD_WIDTH;
-                dstH = LCD_HEIGHT;
-            }
-            int x = (int)tmp1;
-            int y = (int)tmp2;
-            int w = (int)tmp3;
-            int h = (int)fillH;
+            dstPixels = VM_screenImage_ADDRESS;
+            dstW = LCD_WIDTH;
+            dstH = LCD_HEIGHT;
+        }
+        int x = vm_lcd_coord_from_reg(tmp1);
+        int y = vm_lcd_coord_from_reg(tmp2);
+        int w = vm_lcd_coord_from_reg(tmp3);
+        int h = (int)rectH;
+        u16 color = (u16)rectColor;
+        if (w > 0 && h > 0)
+        {
             if (x < 0)
             {
                 w += x;
@@ -3619,416 +3932,531 @@ static bool hook_vm_manager_lcd_func(u32 address)
                 w = dstW - x;
             if (y + h > dstH)
                 h = dstH - y;
-            if (w > 0 && h > 0)
+        }
+        if (w > 0 && h > 0)
+        {
+            u16 *rowBuf = (u16 *)cbeTextString;
+            for (int col = 0; col < w; col++)
+                rowBuf[col] = color;
+            u32 top = y * dstW + x;
+            uc_mem_write(MTK, dstPixels + top * 2, rowBuf, w * 2);
+            if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[top + col] = color;
+            if (h > 1)
             {
-                u16 color = (u16)fillColor;
-                u16 *rowBuf = (u16 *)cbeTextString;
-                for (int row = 0; row < h; row++)
-                {
-                    u32 off = (y + row) * dstW + x;
+                u32 bottom = (y + h - 1) * dstW + x;
+                uc_mem_write(MTK, dstPixels + bottom * 2, rowBuf, w * 2);
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
                     for (int col = 0; col < w; col++)
-                        rowBuf[col] = color;
+                        ((u16 *)Lcd_Cache_Buffer)[bottom + col] = color;
+            }
+            for (int row = 1; row < h - 1; row++)
+            {
+                u32 left = (y + row) * dstW + x;
+                uc_mem_write(MTK, dstPixels + left * 2, &color, 2);
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                    ((u16 *)Lcd_Cache_Buffer)[left] = color;
+                if (w > 1)
+                {
+                    u32 right = left + w - 1;
+                    uc_mem_write(MTK, dstPixels + right * 2, &color, 2);
                     if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
-                    {
-                        for (int col = 0; col < w; col++)
-                            ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
-                    }
-                    uc_mem_write(MTK, dstPixels + off * 2, rowBuf, w * 2);
+                        ((u16 *)Lcd_Cache_Buffer)[right] = color;
                 }
             }
-            vm_set_call_result(1);
         }
-        else if (idx == 21)
+        vm_set_call_result(1);
+    }
+    else if (idx == 19)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp5);
+        u32 fillH, fillColor;
+        uc_mem_read(MTK, tmp5, &fillH, 4);
+        uc_mem_read(MTK, tmp5 + 4, &fillColor, 4);
+        int x = vm_lcd_coord_from_reg(tmp1);
+        int y = vm_lcd_coord_from_reg(tmp2);
+        int w = vm_lcd_coord_from_reg(tmp3);
+        int h = (int)fillH;
+        if (x < 0)
         {
-            printf("[call]vMFillRectWithImage\n");
-            assert(0);
+            w += x;
+            x = 0;
         }
-        else if (idx == 22)
+        if (y < 0)
         {
-            printf("[call]vMFillRectWithImageEx\n");
-            assert(0);
+            h += y;
+            y = 0;
         }
-        else if (idx == 23)
+        if (x + w > LCD_WIDTH)
+            w = LCD_WIDTH - x;
+        if (y + h > LCD_HEIGHT)
+            h = LCD_HEIGHT - y;
+        if (w > 0 && h > 0)
         {
-            printf("[call]vMCreateImage\n");
-            assert(0);
+            u16 color = (u16)fillColor;
+            for (int row = 0; row < h; row++)
+            {
+                u32 off = (y + row) * LCD_WIDTH + x;
+                for (int col = 0; col < w; col++)
+                    ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+            }
         }
-        else if (idx == 24)
+        vm_set_call_result(1);
+    }
+    else if (idx == 20)
+    {
+        u32 dstImage, dstPixels, fillH, fillColor;
+        u16 dstW, dstH;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
+        uc_mem_read(MTK, tmp4, &fillH, 4);
+        uc_mem_read(MTK, tmp4 + 4, &fillColor, 4);
+        uc_mem_read(MTK, dstImage, &dstPixels, 4);
+        uc_mem_read(MTK, dstImage + 4, &dstW, 2);
+        uc_mem_read(MTK, dstImage + 6, &dstH, 2);
+        if (dstImage == VM_screenImageStruct_ADDRESS || dstPixels == 0 || dstW == 0 || dstH == 0 || dstW > LCD_WIDTH || dstH > LCD_HEIGHT)
         {
-            printf("[call]vMCreateImageFromInRes\n");
-            assert(0);
+            dstPixels = VM_screenImage_ADDRESS;
+            dstW = LCD_WIDTH;
+            dstH = LCD_HEIGHT;
         }
-        else if (idx == 25)
+        int x = vm_lcd_coord_from_reg(tmp1);
+        int y = vm_lcd_coord_from_reg(tmp2);
+        int w = vm_lcd_coord_from_reg(tmp3);
+        int h = (int)fillH;
+        if (x < 0)
         {
-            // vMDrawImageWithClipEx(p_mscreenImage ,ptr2 ,0:x? ,0:y? ,0xbc:x2 ,1:y2? ,0 ,3)
-            // vMDrawImageWithClipEx(dst, src, sx, sy, w, h, dx, dy)原图的sx,sy，目标图的dx,dy
-            vM_DrawImageWithClipEx();
+            w += x;
+            x = 0;
         }
-        else if (idx == 26)
+        if (y < 0)
         {
-            vm_vMDrawImageClipAndAlphaEx();
+            h += y;
+            y = 0;
         }
-        else if (idx == 27)
+        if (x + w > dstW)
+            w = dstW - x;
+        if (y + h > dstH)
+            h = dstH - y;
+        if (w > 0 && h > 0)
         {
-            printf("[call]vMDrawImage\n");
-            assert(0);
+            u16 color = (u16)fillColor;
+            u16 *rowBuf = (u16 *)cbeTextString;
+            for (int row = 0; row < h; row++)
+            {
+                u32 off = (y + row) * dstW + x;
+                for (int col = 0; col < w; col++)
+                    rowBuf[col] = color;
+                if (dstPixels == VM_screenImage_ADDRESS && dstW == LCD_WIDTH)
+                {
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                }
+                uc_mem_write(MTK, dstPixels + off * 2, rowBuf, w * 2);
+            }
         }
-        else if (idx == 28)
-        {
-            printf("[call]vMDrawImageEx\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]vMDrawImageWithAlpha\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]vMDrawImageWithClip\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]vMDrawImageWithClip2\n");
-            assert(0);
-        }
-        else if (idx == 32)
-        {
-            printf("[call]vMDrawImageClipAndAlpha\n");
-            assert(0);
-        }
-        else if (idx == 33)
-        {
-            printf("[call]vMDrawImageClipAndAlpha2\n");
-            assert(0);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]vMGetImageWidth\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]vMGetImageHeight\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]vMDestoryImage\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            DEBUG_PRINT("[call]vMIsBacklightOn\n");
-            tmp2 = 1;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 38)
-        {
-            DEBUG_PRINT("[call]vMCtrlBacklight\n");
-            tmp2 = 1;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 39)
-        {
-            // DEBUG_PRINT("[call]vMGB2UCS2\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-            gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-            tmp3 = strlen_utf16((u16 *)sprintfBuff);
-            uc_mem_write(MTK, tmp2, sprintfBuff, (tmp3 + 1) * 2);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
-        }
-        else if (idx == 40)
-        {
-            printf("[call]vMUCS2GB\n");
-            assert(0);
-        }
-        else if (idx == 41)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 42)
-        {
-            printf("[call]vmResGetTxtWithDataPackage\n");
-            assert(0);
-        }
-        else if (idx == 43)
-        {
-            printf("[call]vmResGetDefTxt\n");
-            assert(0);
-        }
-        else if (idx == 44)
-        {
-            printf("[call]vmResGetTxtForGame\n");
-            assert(0);
-        }
-        else if (idx == 45)
-        {
-            printf("[call]IMG_InitDataPage\n");
-            assert(0);
-        }
-        else if (idx == 46)
-        {
-            printf("[call]IMG_InitInnerDataPageEx\n");
-            assert(0);
-        }
-        else if (idx == 47)
-        {
-            printf("[call]IMG_ReleaseDataPage\n");
-            assert(0);
-        }
-        else if (idx == 48)
-        {
-            printf("[call]IMG_InitDataPageEx\n");
-            assert(0);
-        }
-        else if (idx == 49)
-        {
-            printf("[call]IMG_CreateImageFormIdEx\n");
-            assert(0);
-        }
-        else if (idx == 50)
-        {
-            DEBUG_PRINT("[call]IMG_CreateImageFormStream\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_IMG_CreateImageFormStream(tmp1, tmp2);
-        }
-        else if (idx == 51)
-        {
-            printf("[call]vMDrawStandardImage\n");
-            assert(0);
-        }
-        else if (idx == 52)
-        {
-            printf("[call]vMGetStandardImageDimension\n");
-            assert(0);
-        }
-        else if (idx == 53)
-        {
-            printf("[call]vMGetStandardImageType\n");
-            assert(0);
-        }
-        else if (idx == 54)
-        {
-            printf("[call]vMDrawStandardImageEx\n");
-            assert(0);
-        }
-        else if (idx == 55)
-        {
-            vm_set_call_result(1);
-        }
-        else if (idx == 56)
-        {
-            vm_set_call_result(1);
-        }
-        else if (idx == 57)
-        {
-            vm_set_call_result(1);
-        }
-        else if (idx == 58)
-        {
-            printf("[call]IMG_InitDataPageTxt\n");
-            assert(0);
-        }
-        else if (idx == 59)
-        {
-            assert(0);
-            printf("[call]gddiAllocMemory\n");
-        }
-        else if (idx == 60)
-        {
-            printf("[call]gddiFreeMemory\n");
-            assert(0);
-        }
-        else if (idx == 61)
-        {
-            printf("[call]gddiImageData\n");
-            assert(0);
-        }
-        else if (idx == 62)
-        {
-            printf("[call]gddiRegImageCodecHandler\n");
-            assert(0);
-        }
-        else if (idx == 63)
-        {
-            DEBUG_PRINT("[call]vMGetCharWidth\n");
-            tmp1 = getFontWidth();
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 64)
-        {
-            printf("[call]vMDrawUcs2String\n");
-            assert(0);
-        }
-        else if (idx == 65)
-        {
-            printf("[call]vMDrawUcs2StringBorder\n");
-            assert(0);
-        }
-        else if (idx == 66)
-        {
-            printf("[call]vMDrawUcs2StringEx\n");
-            assert(0);
-        }
-        else if (idx == 67)
-        {
-            printf("[call]vMDrawUcs2StringClipAlignBorder\n");
-            assert(0);
-        }
-        else if (idx == 68)
-        {
-            printf("[call]vMDrawUcs2StringClipAlign\n");
-            assert(0);
-        }
-        else if (idx == 69)
-        {
-            printf("[call]vMDrawUcs2StringClipBorder\n");
-            assert(0);
-        }
-        else if (idx == 70)
-        {
-            printf("[call]vMDrawUcs2StringClip\n");
-            assert(0);
-        }
-        else if (idx == 71)
-        {
-            printf("[call]vMDrawUcs2StringRect\n");
-            assert(0);
-        }
-        else if (idx == 72)
-        {
-            printf("[call]vMGetUcs2StringWidth\n");
-            assert(0);
-        }
-        else if (idx == 73)
-        {
-            printf("[call]vMGetUcs2StringHeight\n");
-            assert(0);
-        }
-        else if (idx == 74)
-        {
-            DEBUG_PRINT("[call]vMAllowBackLight\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 75)
-        {
-            printf("[call]vM_CB_GetIsNeedRefreshLcd\n");
-            assert(0);
-        }
-        else if (idx == 76)
-        {
-            printf("[call]vM_CB_SetIsNeedRefreshLcd\n");
-            assert(0);
-        }
-        else if (idx == 77)
-        {
-            printf("[call]vM_CB_LCD_InvalidateRect_Enable\n");
-            assert(0);
-        }
-        else if (idx == 78)
-        {
-            printf("[call]vM_CB_SetVideoIsNeedClosed\n");
-            assert(0);
-        }
-        else if (idx == 79)
-        {
-            printf("[call]vM_CB_GetVideoIsNeedClosed\n");
-            assert(0);
-        }
-        else if (idx == 80)
-        {
-            printf("[call]vMDrawUcs2StringRectEx\n");
-            assert(0);
-        }
+        vm_set_call_result(1);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]vMFillRectWithImage\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]vMFillRectWithImageEx\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]vMCreateImage\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]vMCreateImageFromInRes\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        // vMDrawImageWithClipEx(p_mscreenImage ,ptr2 ,0:x? ,0:y? ,0xbc:x2 ,1:y2? ,0 ,3)
+        // vMDrawImageWithClipEx(dst, src, sx, sy, w, h, dx, dy)原图的sx,sy，目标图的dx,dy
+        vM_DrawImageWithClipEx();
+    }
+    else if (idx == 26)
+    {
+        vm_vMDrawImageClipAndAlphaEx();
+    }
+    else if (idx == 27)
+    {
+        printf("[call]vMDrawImage\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]vMDrawImageEx\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]vMDrawImageWithAlpha\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]vMDrawImageWithClip\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]vMDrawImageWithClip2\n");
+        assert(0);
+    }
+    else if (idx == 32)
+    {
+        printf("[call]vMDrawImageClipAndAlpha\n");
+        assert(0);
+    }
+    else if (idx == 33)
+    {
+        printf("[call]vMDrawImageClipAndAlpha2\n");
+        assert(0);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]vMGetImageWidth\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]vMGetImageHeight\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]vMDestoryImage\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        DEBUG_PRINT("[call]vMIsBacklightOn\n");
+        tmp2 = 1;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 38)
+    {
+        DEBUG_PRINT("[call]vMCtrlBacklight\n");
+        tmp2 = 1;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 39)
+    {
+        // DEBUG_PRINT("[call]vMGB2UCS2\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
+        tmp3 = strlen_utf16((u16 *)sprintfBuff);
+        uc_mem_write(MTK, tmp2, sprintfBuff, (tmp3 + 1) * 2);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
+    }
+    else if (idx == 40)
+    {
+        printf("[call]vMUCS2GB\n");
+        assert(0);
+    }
+    else if (idx == 41)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 42)
+    {
+        printf("[call]vmResGetTxtWithDataPackage\n");
+        assert(0);
+    }
+    else if (idx == 43)
+    {
+        printf("[call]vmResGetDefTxt\n");
+        assert(0);
+    }
+    else if (idx == 44)
+    {
+        printf("[call]vmResGetTxtForGame\n");
+        assert(0);
+    }
+    else if (idx == 45)
+    {
+        printf("[call]IMG_InitDataPage\n");
+        assert(0);
+    }
+    else if (idx == 46)
+    {
+        printf("[call]IMG_InitInnerDataPageEx\n");
+        assert(0);
+    }
+    else if (idx == 47)
+    {
+        printf("[call]IMG_ReleaseDataPage\n");
+        assert(0);
+    }
+    else if (idx == 48)
+    {
+        printf("[call]IMG_InitDataPageEx\n");
+        assert(0);
+    }
+    else if (idx == 49)
+    {
+        printf("[call]IMG_CreateImageFormIdEx\n");
+        assert(0);
+    }
+    else if (idx == 50)
+    {
+        DEBUG_PRINT("[call]IMG_CreateImageFormStream\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_IMG_CreateImageFormStream(tmp1, tmp2);
+    }
+    else if (idx == 51)
+    {
+        printf("[call]vMDrawStandardImage\n");
+        assert(0);
+    }
+    else if (idx == 52)
+    {
+        printf("[call]vMGetStandardImageDimension\n");
+        assert(0);
+    }
+    else if (idx == 53)
+    {
+        printf("[call]vMGetStandardImageType\n");
+        assert(0);
+    }
+    else if (idx == 54)
+    {
+        printf("[call]vMDrawStandardImageEx\n");
+        assert(0);
+    }
+    else if (idx == 55)
+    {
+        vm_set_call_result(1);
+    }
+    else if (idx == 56)
+    {
+        vm_set_call_result(1);
+    }
+    else if (idx == 57)
+    {
+        vm_set_call_result(1);
+    }
+    else if (idx == 58)
+    {
+        printf("[call]IMG_InitDataPageTxt\n");
+        assert(0);
+    }
+    else if (idx == 59)
+    {
+        assert(0);
+        printf("[call]gddiAllocMemory\n");
+    }
+    else if (idx == 60)
+    {
+        printf("[call]gddiFreeMemory\n");
+        assert(0);
+    }
+    else if (idx == 61)
+    {
+        printf("[call]gddiImageData\n");
+        assert(0);
+    }
+    else if (idx == 62)
+    {
+        printf("[call]gddiRegImageCodecHandler\n");
+        assert(0);
+    }
+    else if (idx == 63)
+    {
+        DEBUG_PRINT("[call]vMGetCharWidth\n");
+        tmp1 = getFontWidth();
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 64)
+    {
+        printf("[call]vMDrawUcs2String\n");
+        assert(0);
+    }
+    else if (idx == 65)
+    {
+        printf("[call]vMDrawUcs2StringBorder\n");
+        assert(0);
+    }
+    else if (idx == 66)
+    {
+        printf("[call]vMDrawUcs2StringEx\n");
+        assert(0);
+    }
+    else if (idx == 67)
+    {
+        printf("[call]vMDrawUcs2StringClipAlignBorder\n");
+        assert(0);
+    }
+    else if (idx == 68)
+    {
+        printf("[call]vMDrawUcs2StringClipAlign\n");
+        assert(0);
+    }
+    else if (idx == 69)
+    {
+        printf("[call]vMDrawUcs2StringClipBorder\n");
+        assert(0);
+    }
+    else if (idx == 70)
+    {
+        printf("[call]vMDrawUcs2StringClip\n");
+        assert(0);
+    }
+    else if (idx == 71)
+    {
+        printf("[call]vMDrawUcs2StringRect\n");
+        assert(0);
+    }
+    else if (idx == 72)
+    {
+        printf("[call]vMGetUcs2StringWidth\n");
+        assert(0);
+    }
+    else if (idx == 73)
+    {
+        printf("[call]vMGetUcs2StringHeight\n");
+        assert(0);
+    }
+    else if (idx == 74)
+    {
+        DEBUG_PRINT("[call]vMAllowBackLight\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 75)
+    {
+        printf("[call]vM_CB_GetIsNeedRefreshLcd\n");
+        assert(0);
+    }
+    else if (idx == 76)
+    {
+        printf("[call]vM_CB_SetIsNeedRefreshLcd\n");
+        assert(0);
+    }
+    else if (idx == 77)
+    {
+        printf("[call]vM_CB_LCD_InvalidateRect_Enable\n");
+        assert(0);
+    }
+    else if (idx == 78)
+    {
+        printf("[call]vM_CB_SetVideoIsNeedClosed\n");
+        assert(0);
+    }
+    else if (idx == 79)
+    {
+        printf("[call]vM_CB_GetVideoIsNeedClosed\n");
+        assert(0);
+    }
+    else if (idx == 80)
+    {
+        printf("[call]vMDrawUcs2StringRectEx\n");
+        assert(0);
+    }
 
-        // result 区（从 idx=81 开始）
-        else if (idx == 81)
-        {
-            printf("[call]vMSetCbeFontDataPtr\n");
-            assert(0);
-        }
-        else if (idx == 82)
-        {
-            printf("[call]vMGetFontHeightEx\n");
-            assert(0);
-        }
-        else if (idx == 83)
-        {
-            printf("[call]vMGetFontWidthEx\n");
-            assert(0);
-        }
-        else if (idx == 84)
-        {
-            printf("[call]vMGetStringHeightEx\n");
-            assert(0);
-        }
-        else if (idx == 85)
-        {
-            printf("[call]vMGetStringWidthEx\n");
-            assert(0);
-        }
-        else if (idx == 86)
-        {
-            printf("[call]vMShowStringEx\n");
-            assert(0);
-        }
-        else if (idx == 87)
-        {
-            printf("[call]vMShowString\n");
-            assert(0);
-        }
-        else if (idx == 88)
-        {
-            printf("[call]vMShowStringClipAlign\n");
-            assert(0);
-        }
-        else if (idx == 89)
-        {
-            printf("[call]vMShowStringClip\n");
-            assert(0);
-        }
-        else if (idx == 90)
-        {
-            printf("[call]vMShowStringRect\n");
-            assert(0);
-        }
-        else if (idx == 91)
-        {
-            printf("[call]vM_InvalidateLcdEx\n");
-            assert(0);
-        }
-        else if (idx == 92)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 93)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 94)
-        {
-            printf("[call]vMUTF82UCS2\n");
-            assert(0);
-        }
-        else if (idx == 95)
-        {
-            printf("[call]vMUCS2UTF8\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmLcdManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    // result 区（从 idx=81 开始）
+    else if (idx == 81)
+    {
+        printf("[call]vMSetCbeFontDataPtr\n");
+        assert(0);
+    }
+    else if (idx == 82)
+    {
+        printf("[call]vMGetFontHeightEx\n");
+        assert(0);
+    }
+    else if (idx == 83)
+    {
+        printf("[call]vMGetFontWidthEx\n");
+        assert(0);
+    }
+    else if (idx == 84)
+    {
+        printf("[call]vMGetStringHeightEx\n");
+        assert(0);
+    }
+    else if (idx == 85)
+    {
+        printf("[call]vMGetStringWidthEx\n");
+        assert(0);
+    }
+    else if (idx == 86)
+    {
+        printf("[call]vMShowStringEx\n");
+        assert(0);
+    }
+    else if (idx == 87)
+    {
+        printf("[call]vMShowString\n");
+        assert(0);
+    }
+    else if (idx == 88)
+    {
+        printf("[call]vMShowStringClipAlign\n");
+        assert(0);
+    }
+    else if (idx == 89)
+    {
+        printf("[call]vMShowStringClip\n");
+        assert(0);
+    }
+    else if (idx == 90)
+    {
+        printf("[call]vMShowStringRect\n");
+        assert(0);
+    }
+    else if (idx == 91)
+    {
+        printf("[call]vM_InvalidateLcdEx\n");
+        assert(0);
+    }
+    else if (idx == 92)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 93)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 94)
+    {
+        printf("[call]vMUTF82UCS2\n");
+        assert(0);
+    }
+    else if (idx == 95)
+    {
+        printf("[call]vMUCS2UTF8\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmLcdManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_fileio_func(u32 address)
@@ -4038,188 +4466,188 @@ static bool hook_vm_manager_fileio_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_cbfs_vm_file_open(tmp1, tmp2, tmp3);
-            DEBUG_PRINT("[call]cbfs_vm_file_open\n");
-        }
-        else if (idx == 2)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_close\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_cbfs_vm_file_close(tmp1);
-        }
-        else if (idx == 3)
-        {
-            DEBUG_PRINT("[call]vm_file_exist\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_cbfs_vm_file_exists(tmp1, tmp2);
-        }
-        else if (idx == 4)
-        {
-            DEBUG_PRINT("[call]vm_file_direxist\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // 盘符,数字1,2,3
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_dir_exists(tmp2);
-        }
-        else if (idx == 5)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_read\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_cbfs_vm_file_read(tmp1, tmp2, tmp3);
-        }
-        else if (idx == 6)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_write\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_cbfs_vm_file_write(tmp1, tmp2, tmp3);
-        }
-        else if (idx == 7)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_seek\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_cbfs_vm_file_seek(tmp1, tmp2, tmp3);
-        }
-        else if (idx == 8)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_tell\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_cbfs_vm_file_tell(tmp1);
-        }
-        else if (idx == 9)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_getfilesize\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_cbfs_vm_file_getfilesize(tmp1);
-        }
-        else if (idx == 10)
-        {
-            DEBUG_PRINT("[call]cbfs_vm_file_delete\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_cbfs_vm_file_delete(tmp1, tmp2);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]cbfs_vm_file_rename\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_set_call_result(0);
-        }
-        else if (idx == 13)
-        {
-            printf("[call]cbfs_vm_file_rmdir\n");
-            assert(0);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]cbfs_vm_find_first\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]cbfs_vm_find_next\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]cbfs_vm_find_close\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]vm_get_freespace\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]vm_get_sdcardStatus\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]vm_GetFilenameFromPath\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]vm_file_getMp3Dir\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]vm_file_getMp4Dir\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]vm_file_getPicDir\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]vm_file_getBookDir\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 25)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]vm_file_getSysDir\n");
-            assert(0);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]vm_fmgr_select_entry\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]vm_get_freespace_ex\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]vm_get_sdcardStatusEx\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]vm_get_fullname\n");
-            assert(0);
-        }
+    u32 idx = (address - VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_cbfs_vm_file_open(tmp1, tmp2, tmp3);
+        DEBUG_PRINT("[call]cbfs_vm_file_open\n");
+    }
+    else if (idx == 2)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_close\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_cbfs_vm_file_close(tmp1);
+    }
+    else if (idx == 3)
+    {
+        DEBUG_PRINT("[call]vm_file_exist\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_cbfs_vm_file_exists(tmp1, tmp2);
+    }
+    else if (idx == 4)
+    {
+        DEBUG_PRINT("[call]vm_file_direxist\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // 盘符,数字1,2,3
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_dir_exists(tmp2);
+    }
+    else if (idx == 5)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_read\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_cbfs_vm_file_read(tmp1, tmp2, tmp3);
+    }
+    else if (idx == 6)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_write\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_cbfs_vm_file_write(tmp1, tmp2, tmp3);
+    }
+    else if (idx == 7)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_seek\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_cbfs_vm_file_seek(tmp1, tmp2, tmp3);
+    }
+    else if (idx == 8)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_tell\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_cbfs_vm_file_tell(tmp1);
+    }
+    else if (idx == 9)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_getfilesize\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_cbfs_vm_file_getfilesize(tmp1);
+    }
+    else if (idx == 10)
+    {
+        DEBUG_PRINT("[call]cbfs_vm_file_delete\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_cbfs_vm_file_delete(tmp1, tmp2);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]cbfs_vm_file_rename\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_set_call_result(0);
+    }
+    else if (idx == 13)
+    {
+        printf("[call]cbfs_vm_file_rmdir\n");
+        assert(0);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]cbfs_vm_find_first\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]cbfs_vm_find_next\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]cbfs_vm_find_close\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]vm_get_freespace\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]vm_get_sdcardStatus\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]vm_GetFilenameFromPath\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]vm_file_getMp3Dir\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]vm_file_getMp4Dir\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]vm_file_getPicDir\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]vm_file_getBookDir\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 25)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]vm_file_getSysDir\n");
+        assert(0);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]vm_fmgr_select_entry\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]vm_get_freespace_ex\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]vm_get_sdcardStatusEx\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]vm_get_fullname\n");
+        assert(0);
+    }
 
-        else
-        {
-            printf("[impl]vmFileIoManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    else
+    {
+        printf("[impl]vmFileIoManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_stdio_func(u32 address)
@@ -4229,226 +4657,226 @@ static bool hook_vm_manager_stdio_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_STDIO_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
+    u32 idx = (address - VM_MANAGER_STDIO_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp2 && tmp3)
+            vm_memcpy(tmp1, tmp2, tmp3);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 2)
+    {
+        vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
+        tmp1 = strlen(cbeTextString);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+        DEBUG_PRINT("[call]strlen\n");
+    }
+    else if (idx == 3)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp3)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            if (tmp1 && tmp2 && tmp3)
-                vm_memcpy(tmp1, tmp2, tmp3);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+            u8 fill[256];
+            memset(fill, tmp2 & 0xff, sizeof(fill));
+            for (u32 off = 0; off < tmp3; off += sizeof(fill))
+                uc_mem_write(MTK, tmp1 + off, fill, SDL_min((u32)sizeof(fill), tmp3 - off));
         }
-        else if (idx == 2)
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        DEBUG_PRINT("[call]sprintf(%x,%x,%x)\n", tmp1, tmp2, tmp3);
+        vm_sprintf_return_buffer();
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vm_log_trace\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        DEBUG_PRINT("[call]VmGetRand\n");
+        tmp1 = currentTime;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vsprintf\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        if (tmp1 && tmp2 && tmp3)
         {
-            vm_readStringByReg(UC_ARM_REG_R0, cbeTextString);
-            tmp1 = strlen(cbeTextString);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-            DEBUG_PRINT("[call]strlen\n");
-        }
-        else if (idx == 3)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            if (tmp1 && tmp3)
+            u8 ch = 0;
+            u32 i = 0;
+            for (; i < tmp3; ++i)
             {
-                u8 fill[256];
-                memset(fill, tmp2 & 0xff, sizeof(fill));
-                for (u32 off = 0; off < tmp3; off += sizeof(fill))
-                    uc_mem_write(MTK, tmp1 + off, fill, SDL_min((u32)sizeof(fill), tmp3 - off));
-            }
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 4)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            DEBUG_PRINT("[call]sprintf(%x,%x,%x)\n", tmp1, tmp2, tmp3);
-            vm_sprintf_return_buffer();
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vm_log_trace\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            DEBUG_PRINT("[call]VmGetRand\n");
-            tmp1 = currentTime;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vsprintf\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            if (tmp1 && tmp2 && tmp3)
-            {
-                u8 ch = 0;
-                u32 i = 0;
-                for (; i < tmp3; ++i)
-                {
-                    uc_mem_read(MTK, tmp2 + i, &ch, 1);
-                    uc_mem_write(MTK, tmp1 + i, &ch, 1);
-                    if (ch == 0)
-                        break;
-                }
-                if (i < tmp3)
-                {
-                    u8 zero[64] = {0};
-                    for (++i; i < tmp3; i += sizeof(zero))
-                        uc_mem_write(MTK, tmp1 + i, zero, SDL_min((u32)sizeof(zero), tmp3 - i));
-                }
-            }
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 9)
-        {
-            DEBUG_PRINT("[call]strcpy\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_strcpy(tmp1, tmp2);
-        }
-        else if (idx == 10)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            if (tmp1 && tmp2)
-            {
-                int dstLen = vm_strlen(tmp1);
-                vm_readStringByPtr(tmp2, cbeTextString);
-                uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen(cbeTextString) + 1);
-            }
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 11)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_readStringByPtr(tmp1, cbeTextString);
-            tmp1 = (u32)strtol((char *)cbeTextString, NULL, 10);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]memmove\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_readStringByPtr(tmp1, cbeTextString);
-            tmp1 = (u32)atoi((char *)cbeTextString);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]vMpow\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            u8 strA[1024] = {0};
-            u8 strB[1024] = {0};
-            if (tmp1)
-                vm_readStringByPtr(tmp1, strA);
-            if (tmp2)
-                vm_readStringByPtr(tmp2, strB);
-            tmp1 = (u32)strcmp((char *)strA, (char *)strB);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 16)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            int cmp = 0;
-            for (u32 i = 0; i < tmp3; ++i)
-            {
-                u8 a = 0, b = 0;
-                uc_mem_read(MTK, tmp1 + i, &a, 1);
-                uc_mem_read(MTK, tmp2 + i, &b, 1);
-                if (a != b)
-                {
-                    cmp = (int)a - (int)b;
+                uc_mem_read(MTK, tmp2 + i, &ch, 1);
+                uc_mem_write(MTK, tmp1 + i, &ch, 1);
+                if (ch == 0)
                     break;
-                }
             }
-            tmp1 = (u32)cmp;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 17)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            int cmp = 0;
-            for (u32 i = 0; i < tmp3; ++i)
+            if (i < tmp3)
             {
-                u8 a = 0, b = 0;
-                uc_mem_read(MTK, tmp1 + i, &a, 1);
-                uc_mem_read(MTK, tmp2 + i, &b, 1);
-                if (a != b || a == 0 || b == 0)
-                {
-                    cmp = (int)a - (int)b;
-                    break;
-                }
+                u8 zero[64] = {0};
+                for (++i; i < tmp3; i += sizeof(zero))
+                    uc_mem_write(MTK, tmp1 + i, zero, SDL_min((u32)sizeof(zero), tmp3 - i));
             }
-            tmp1 = (u32)cmp;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
         }
-        else if (idx == 18)
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 9)
+    {
+        DEBUG_PRINT("[call]strcpy\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_strcpy(tmp1, tmp2);
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        if (tmp1 && tmp2)
         {
-            printf("[call]setjmp\n");
-            assert(0);
+            int dstLen = vm_strlen(tmp1);
+            vm_readStringByPtr(tmp2, cbeTextString);
+            uc_mem_write(MTK, tmp1 + dstLen, cbeTextString, strlen(cbeTextString) + 1);
         }
-        else if (idx == 19)
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 11)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        tmp1 = (u32)strtol((char *)cbeTextString, NULL, 10);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]memmove\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        tmp1 = (u32)atoi((char *)cbeTextString);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]vMpow\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        u8 strA[1024] = {0};
+        u8 strB[1024] = {0};
+        if (tmp1)
+            vm_readStringByPtr(tmp1, strA);
+        if (tmp2)
+            vm_readStringByPtr(tmp2, strB);
+        tmp1 = (u32)strcmp((char *)strA, (char *)strB);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 16)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        int cmp = 0;
+        for (u32 i = 0; i < tmp3; ++i)
         {
-            printf("[call]longjmp\n");
-            assert(0);
+            u8 a = 0, b = 0;
+            uc_mem_read(MTK, tmp1 + i, &a, 1);
+            uc_mem_read(MTK, tmp2 + i, &b, 1);
+            if (a != b)
+            {
+                cmp = (int)a - (int)b;
+                break;
+            }
         }
-        else if (idx == 20)
+        tmp1 = (u32)cmp;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 17)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        int cmp = 0;
+        for (u32 i = 0; i < tmp3; ++i)
         {
-            printf("[call]atof\n");
-            assert(0);
+            u8 a = 0, b = 0;
+            uc_mem_read(MTK, tmp1 + i, &a, 1);
+            uc_mem_read(MTK, tmp2 + i, &b, 1);
+            if (a != b || a == 0 || b == 0)
+            {
+                cmp = (int)a - (int)b;
+                break;
+            }
         }
-        else if (idx == 21)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_readStringByPtr(tmp1, cbeTextString);
-            vm_readStringByPtr(tmp2, sprintfBuff);
-            tmp3 = strcasecmp((char *)cbeTextString, (char *)sprintfBuff);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
-        }
-        else if (idx == 22)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_readStringByPtr(tmp1, cbeTextString);
-            vm_readStringByPtr(tmp2, sprintfBuff);
-            tmp4 = strncasecmp((char *)cbeTextString, (char *)sprintfBuff, tmp3);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp4);
-        }
-        else
-        {
-            printf("[impl]vmStdIoManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+        tmp1 = (u32)cmp;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]setjmp\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]longjmp\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]atof\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        vm_readStringByPtr(tmp2, sprintfBuff);
+        tmp3 = strcasecmp((char *)cbeTextString, (char *)sprintfBuff);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp3);
+    }
+    else if (idx == 22)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_readStringByPtr(tmp1, cbeTextString);
+        vm_readStringByPtr(tmp2, sprintfBuff);
+        tmp4 = strncasecmp((char *)cbeTextString, (char *)sprintfBuff, tmp3);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp4);
+    }
+    else
+    {
+        printf("[impl]vmStdIoManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_timer_func(u32 address)
@@ -4458,67 +4886,67 @@ static bool hook_vm_manager_timer_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_TIMER_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            scheduler_start_timer(tmp1, tmp2, tmp3);
-        }
-        else if (idx == 1)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            scheduler_stop_timer(tmp1);
-        }
-        else if (idx == 2)
-        {
-            tmp1 = scheduler_get_tick_ms();
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 3)
-        {
-            tmp1 = (u32)time(NULL);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 4)
-        {
-            tmp1 = (u32)time(NULL);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 5)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]VmSetSysTime\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]VmSetSysDate\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]vMIncreaseTime\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]vMDecreaseTime\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmTimerManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_TIMER_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        scheduler_start_timer(tmp1, tmp2, tmp3);
+    }
+    else if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        scheduler_stop_timer(tmp1);
+    }
+    else if (idx == 2)
+    {
+        tmp1 = scheduler_get_tick_ms();
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 3)
+    {
+        tmp1 = (u32)time(NULL);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 4)
+    {
+        tmp1 = (u32)time(NULL);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 5)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]VmSetSysTime\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]VmSetSysDate\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]vMIncreaseTime\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]vMDecreaseTime\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmTimerManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_ctrl_func(u32 address)
@@ -4528,16 +4956,16 @@ static bool hook_vm_manager_ctrl_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_CTRL_FUNC_LIST_ADDRESS) / 4;
+    u32 idx = (address - VM_MANAGER_CTRL_FUNC_LIST_ADDRESS) / 4;
 
-        {
-            printf("[impl]vmCtrlManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    {
+        printf("[impl]vmCtrlManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_network_func(u32 address)
@@ -4547,103 +4975,103 @@ static bool hook_vm_manager_network_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-        DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
-        if (idx == 0)
-        {
+    u32 idx = (address - VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS) / 4;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+    DEBUG_PRINT("[probe_net_idx] idx=%u r0=%x r1=%x r2=%x r3=%x last=%x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
+    if (idx == 0)
+    {
+        tmp5 = g_nextNetConnectId++;
+        if (tmp5 == 0)
             tmp5 = g_nextNetConnectId++;
-            if (tmp5 == 0)
-                tmp5 = g_nextNetConnectId++;
-            if (tmp4)
-                uc_mem_write(MTK, tmp4, &tmp5, 4);
-            scheduler_register_net_channel(tmp5, tmp3, tmp4);
-            vm_net_trace("open_channel host=%08x type=%u cb=%08x ctx=%08x connect=%u last=%08x\n", tmp1, tmp2, tmp3, tmp4, tmp5, lastAddress);
-            u8 netState = 1;
-            uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
-            scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
-            vm_set_call_result(1);
-        }
-        else if (idx == 1)
+        if (tmp4)
+            uc_mem_write(MTK, tmp4, &tmp5, 4);
+        scheduler_register_net_channel(tmp5, tmp3, tmp4);
+        vm_net_trace("open_channel host=%08x type=%u cb=%08x ctx=%08x connect=%u last=%08x\n", tmp1, tmp2, tmp3, tmp4, tmp5, lastAddress);
+        u8 netState = 1;
+        uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
+        scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
+        vm_set_call_result(1);
+    }
+    else if (idx == 1)
+    {
+        vm_net_trace("send_call connect=%u len=%u data=%08x r3=%08x last=%08x\n", tmp1, tmp2, tmp3, tmp4, lastAddress);
+        vm_net_mock_on_send(tmp1, tmp3, tmp2);
+        vm_set_call_result(tmp2);
+    }
+    else if (idx == 2)
+    {
+        vm_net_trace("close_channel connect=%u last=%08x\n", tmp1, lastAddress);
+        scheduler_unregister_net_channel(tmp1);
+        u8 netState = 0;
+        uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
+        vm_set_call_result(0);
+    }
+    else if (idx == 3)
+    {
+        tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
+        if (tmp1)
         {
-            vm_net_trace("send_call connect=%u len=%u data=%08x r3=%08x last=%08x\n", tmp1, tmp2, tmp3, tmp4, lastAddress);
-            vm_net_mock_on_send(tmp1, tmp3, tmp2);
-            vm_set_call_result(tmp2);
+            tmp2 = 0;
+            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+            vm_bx(tmp1);
+            return;
         }
-        else if (idx == 2)
-        {
-            vm_net_trace("close_channel connect=%u last=%08x\n", tmp1, lastAddress);
-            scheduler_unregister_net_channel(tmp1);
-            u8 netState = 0;
-            uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
-            vm_set_call_result(0);
-        }
-        else if (idx == 3)
-        {
-            tmp1 = vm_get_var(Global_R9 + 0x5a3c + 0x10);
-            if (tmp1)
-            {
-                tmp2 = 0;
-                uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-                vm_bx(tmp1);
-                return;
-            }
-            vm_set_call_result(0);
-        }
-        else if (idx == 6 || idx == 7 || idx == 18)
-        {
-            vm_net_trace("open_channel_ex idx=%u r0=%08x r1=%08x cb=%08x ctx=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
-            scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
-            vm_set_call_result(1);
-        }
-        else if (idx == 17)
-        {
-            vm_net_trace("http_get_ex r0=%08x cb=%08x ctx=%08x last=%08x\n", tmp1, tmp2, tmp3, lastAddress);
-            scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
-            vm_set_call_result(1);
-        }
-        else if (idx == 4 || idx == 19 || idx == 20 || idx == 29 || idx == 30)
-        {
-            vm_net_trace("net_success_stub idx=%u r0=%08x r1=%08x r2=%08x r3=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
-            vm_set_call_result(1);
-        }
-        else if (idx == 35)
-        {
-            g_netUpLinkData = 0;
-            g_netDownLinkData = 0;
-            g_netMockResponseOffset = 0;
-            vm_net_trace("net_data_reset\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 36)
-        {
-            if (tmp1)
-                uc_mem_write(MTK, tmp1, &g_netUpLinkData, 4);
-            if (tmp2)
-                uc_mem_write(MTK, tmp2, &g_netDownLinkData, 4);
-            vm_net_trace("net_get_data up=%u down=%u upPtr=%08x downPtr=%08x\n", g_netUpLinkData, g_netDownLinkData, tmp1, tmp2);
-            vm_set_call_result(g_netDownLinkData);
-        }
-        else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 8 || idx == 9 || idx == 10 || idx == 11 || idx == 14 || idx == 15 || idx == 16 || idx == 22 || idx == 23 || idx == 26 || idx == 27 || idx == 28 || idx == 31 || idx == 32 || idx == 38 || idx == 40)
-        {
-            vm_set_call_result(0);
-        }
-        else
-        {
-            printf("[impl]vmNetWorkManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+        vm_set_call_result(0);
+    }
+    else if (idx == 6 || idx == 7 || idx == 18)
+    {
+        vm_net_trace("open_channel_ex idx=%u r0=%08x r1=%08x cb=%08x ctx=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
+        scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
+        vm_set_call_result(1);
+    }
+    else if (idx == 17)
+    {
+        vm_net_trace("http_get_ex r0=%08x cb=%08x ctx=%08x last=%08x\n", tmp1, tmp2, tmp3, lastAddress);
+        scheduler_queue_net_task(tmp1, 0, tmp2, tmp3);
+        vm_set_call_result(1);
+    }
+    else if (idx == 4 || idx == 19 || idx == 20 || idx == 29 || idx == 30)
+    {
+        vm_net_trace("net_success_stub idx=%u r0=%08x r1=%08x r2=%08x r3=%08x last=%08x\n", idx, tmp1, tmp2, tmp3, tmp4, lastAddress);
+        vm_set_call_result(1);
+    }
+    else if (idx == 35)
+    {
+        g_netUpLinkData = 0;
+        g_netDownLinkData = 0;
+        g_netMockResponseOffset = 0;
+        vm_net_trace("net_data_reset\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 36)
+    {
+        if (tmp1)
+            uc_mem_write(MTK, tmp1, &g_netUpLinkData, 4);
+        if (tmp2)
+            uc_mem_write(MTK, tmp2, &g_netDownLinkData, 4);
+        vm_net_trace("net_get_data up=%u down=%u upPtr=%08x downPtr=%08x\n", g_netUpLinkData, g_netDownLinkData, tmp1, tmp2);
+        vm_set_call_result(g_netDownLinkData);
+    }
+    else if (idx == 5 || idx == 12 || idx == 13 || idx == 21 || idx == 24 || idx == 25 || idx == 33 || idx == 34 || idx == 37 || idx == 39 || idx == 41 || idx == 42)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 8 || idx == 9 || idx == 10 || idx == 11 || idx == 14 || idx == 15 || idx == 16 || idx == 22 || idx == 23 || idx == 26 || idx == 27 || idx == 28 || idx == 31 || idx == 32 || idx == 38 || idx == 40)
+    {
+        vm_set_call_result(0);
+    }
+    else
+    {
+        printf("[impl]vmNetWorkManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_game_util_func(u32 address)
@@ -4653,203 +5081,203 @@ static bool hook_vm_manager_game_util_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 2)
-        {
-            printf("[call]CdRectPoint\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]Sqrt\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            vm_set_call_result(0);
-        }
-        else if (idx == 11)
-        {
-            uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 12)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_by_id(tmp1);
-        }
-        else if (idx == 13)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_by_file_name(tmp1);
-        }
-        else if (idx == 14)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_name_by_id(tmp1);
-        }
-        else if (idx == 15)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp1 = vm_df_get_resource_id_by_file_name(tmp1);
-        }
-        else if (idx == 16)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_t_resource(tmp1, 0);
-        }
-        else if (idx == 17)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_t_resource(tmp1, 1);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]DF_DataPackage_ShowFileList\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            DEBUG_PRINT("[call]DF_String_Equal\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_String_Equal(tmp1, tmp2);
-        }
-        else if (idx == 20)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            tmp1 = vm_DF_ReadShort(tmp1, tmp2);
-            DEBUG_PRINT("[call]DF_ReadShort(%x)\n", tmp1);
-        }
-        else if (idx == 21)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            tmp1 = vm_DF_ReadInt(tmp1, tmp2);
-            DEBUG_PRINT("[call]DF_ReadInt(%x)\n", tmp1);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]DF_File_ReadShort\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]DF_File_ReadInt\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_DF_WriteShort(tmp1, tmp2, tmp3);
-            DEBUG_PRINT("[call]DF_WriteShort\n");
-        }
-        else if (idx == 25)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            vm_DF_WriteInt(tmp1, tmp2, tmp3);
-            DEBUG_PRINT("[call]DF_WriteInt\n");
-        }
-        else if (idx == 26)
-        {
-            DEBUG_PRINT("[call]DF_ReadString\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_ReadString(tmp1, tmp2);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]DF_ReadStringEx\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]DF_File_ReadString\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]DF_File_ReadToBuffer\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]DF_ReadString2\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            DEBUG_PRINT("[call]DF_GetMemoryBlock\n");
-            vm_DF_GetMemoryBlock();
-        }
-        else if (idx == 32)
-        {
-            DEBUG_PRINT("[call]DF_Sin\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_Sin(tmp1);
-        }
+    u32 idx = (address - VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 2)
+    {
+        printf("[call]CdRectPoint\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]Sqrt\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        vm_set_call_result(0);
+    }
+    else if (idx == 11)
+    {
+        uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 12)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_by_id(tmp1);
+    }
+    else if (idx == 13)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_by_file_name(tmp1);
+    }
+    else if (idx == 14)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_name_by_id(tmp1);
+    }
+    else if (idx == 15)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        tmp1 = vm_df_get_resource_id_by_file_name(tmp1);
+    }
+    else if (idx == 16)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_t_resource(tmp1, 0);
+    }
+    else if (idx == 17)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_t_resource(tmp1, 1);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]DF_DataPackage_ShowFileList\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        DEBUG_PRINT("[call]DF_String_Equal\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_String_Equal(tmp1, tmp2);
+    }
+    else if (idx == 20)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        tmp1 = vm_DF_ReadShort(tmp1, tmp2);
+        DEBUG_PRINT("[call]DF_ReadShort(%x)\n", tmp1);
+    }
+    else if (idx == 21)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        tmp1 = vm_DF_ReadInt(tmp1, tmp2);
+        DEBUG_PRINT("[call]DF_ReadInt(%x)\n", tmp1);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]DF_File_ReadShort\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]DF_File_ReadInt\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_DF_WriteShort(tmp1, tmp2, tmp3);
+        DEBUG_PRINT("[call]DF_WriteShort\n");
+    }
+    else if (idx == 25)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        vm_DF_WriteInt(tmp1, tmp2, tmp3);
+        DEBUG_PRINT("[call]DF_WriteInt\n");
+    }
+    else if (idx == 26)
+    {
+        DEBUG_PRINT("[call]DF_ReadString\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_ReadString(tmp1, tmp2);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]DF_ReadStringEx\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]DF_File_ReadString\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]DF_File_ReadToBuffer\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]DF_ReadString2\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        DEBUG_PRINT("[call]DF_GetMemoryBlock\n");
+        vm_DF_GetMemoryBlock();
+    }
+    else if (idx == 32)
+    {
+        DEBUG_PRINT("[call]DF_Sin\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_DF_Sin(tmp1);
+    }
 
-        // result 区
-        else if (idx == 33)
-        {
-            DEBUG_PRINT("[call]DF_Cos\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_DF_Sin(tmp1 + 90);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]DF_Degree\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]DF_CollectionTest\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]DF_SwapVal\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            DEBUG_PRINT("[call]DF_GetFormatString\n");
-            vm_DF_GetFormatString();
-        }
-        else if (idx == 38)
-        {
-            DEBUG_PRINT("[call]Storage_Date\n");
-            // todo
-            tmp1 = currentTime;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 39)
-        {
-            printf("[call]vMstricmp\n");
-            assert(0);
-        }
-        else if (idx == 40)
-        {
-            printf("[call]vMstrnicmp\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmGameUtilManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    // result 区
+    else if (idx == 33)
+    {
+        DEBUG_PRINT("[call]DF_Cos\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_DF_Sin(tmp1 + 90);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]DF_Degree\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]DF_CollectionTest\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]DF_SwapVal\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        DEBUG_PRINT("[call]DF_GetFormatString\n");
+        vm_DF_GetFormatString();
+    }
+    else if (idx == 38)
+    {
+        DEBUG_PRINT("[call]Storage_Date\n");
+        // todo
+        tmp1 = currentTime;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 39)
+    {
+        printf("[call]vMstricmp\n");
+        assert(0);
+    }
+    else if (idx == 40)
+    {
+        printf("[call]vMstrnicmp\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmGameUtilManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_df_engine_func(u32 address)
@@ -4859,30 +5287,30 @@ static bool hook_vm_manager_df_engine_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 8)
-        {
-            tmp1 = 0;
-            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            tmp1 = VM_MemoryBlock_PTR_ADDRESS;
-            uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
-            vm_set_call_result(0);
-        }
-        else if (idx == 10)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_initDFDataPackage(tmp1, tmp2);
-        }
-        else
-        {
-            printf("[impl]vmDfEngineManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 8)
+    {
+        tmp1 = 0;
+        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        tmp1 = VM_MemoryBlock_PTR_ADDRESS;
+        uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+        vm_set_call_result(0);
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_initDFDataPackage(tmp1, tmp2);
+    }
+    else
+    {
+        printf("[impl]vmDfEngineManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_billing_func(u32 address)
@@ -4892,234 +5320,234 @@ static bool hook_vm_manager_billing_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_BILLING_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
+    u32 idx = (address - VM_MANAGER_BILLING_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]BILLING_GetRemainDay\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]BILLING_Pay\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        printf("[call]BILLING_PayMoreTimes\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]BILLING_IsRegisterBillingInfo\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]BILLING_RegisterBillingInfo\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]BILLING_SetBillingStatus\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]BILLING_GetBillingStatus\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]BILLING_IsNeedPay\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]BILLING_IsInTryStatus\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]BIllING_OpenBillingPromptWin\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]CDownGetTryDay\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        printf("[call]BILLING_PayForCBB\n");
+        assert(0);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]BILLING_PayForPwd\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]CDownGetOption5\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]Billing_SendSpecSms\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]Billing_CancelSms\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]CDownIsMonthApp\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        if (!vm_host_file_exists("Wpay9990Ker42WqvgaV100.CBM"))
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            tmp1 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 2)
-        {
-            printf("[call]BILLING_GetRemainDay\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]BILLING_Pay\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            printf("[call]BILLING_PayMoreTimes\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]BILLING_IsRegisterBillingInfo\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]BILLING_RegisterBillingInfo\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]BILLING_SetBillingStatus\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]BILLING_GetBillingStatus\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]BILLING_IsNeedPay\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]BILLING_IsInTryStatus\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]BIllING_OpenBillingPromptWin\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]CDownGetTryDay\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            printf("[call]BILLING_PayForCBB\n");
-            assert(0);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]BILLING_PayForPwd\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]CDownGetOption5\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]Billing_SendSpecSms\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]Billing_CancelSms\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]CDownIsMonthApp\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            if (!vm_host_file_exists("Wpay9990Ker42WqvgaV100.CBM"))
-            {
-                if (tmp2)
-                    vm_set_var(tmp2, 0);
-                vm_net_trace("CDownGetFileNameByAppID appid=%u missing Wpay9990Ker42WqvgaV100.CBM -> 0\n", tmp1);
-                vm_set_call_result(0);
-            }
-            else
-            {
-                u32 namePtr = vm_alloc_host_string("Wpay9990Ker42Wqvga");
-                u8 type = 0;
-                u16 version = 100;
-                if (tmp2)
-                    uc_mem_write(MTK, tmp2, &namePtr, 4);
-                if (tmp3)
-                    uc_mem_write(MTK, tmp3, &type, 1);
-                if (tmp4)
-                    uc_mem_write(MTK, tmp4, &version, 2);
-                vm_net_trace("CDownGetFileNameByAppID appid=%u nameOut=%08x typeOut=%08x verOut=%08x name=%08x version=%u\n", tmp1, tmp2, tmp3, tmp4, namePtr, version);
-                vm_set_call_result(1);
-            }
-        }
-        else if (idx == 20)
-        {
-            printf("[call]CDownGetPayTimes\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]BILLING_NewMonthPay\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]BILLING_NewMonthCancel\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]BILLING_CleanAppMonthBillInfo\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            printf("[call]BILLING_GetValidDayByAppId\n");
-            assert(0);
-        }
-        else if (idx == 25)
-        {
-            printf("[call]CDownGetBillSmsAddr\n");
-            assert(0);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]CDownGetBillSmsSuf\n");
-            assert(0);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]BILLING_Pay2\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]Billing_GetAppUsedStatus\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            assert(0);
-            printf("[call]Billing_SetAppUsedStatus\n");
-        }
-        else if (idx == 30)
-        {
-            printf("[call]CDownGetPayTipContent\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]BILLING_Pay3\n");
-            assert(0);
-        }
-        else if (idx == 32)
-        {
-            printf("[call]BILLING_SendRegisterSms\n");
-            assert(0);
-        }
-
-        // result 区
-        else if (idx == 33)
-        {
-            printf("[call]CDownGetOption8\n");
-            assert(0);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]CDownGetOption9\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]CDownGetOption10\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]BILLING_Register\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            printf("[call]BILLING_PayForCBB3\n");
-            assert(0);
-        }
-        else if (idx == 38)
-        {
-            printf("[call]CDownIsWPay\n");
-            assert(0);
+            if (tmp2)
+                vm_set_var(tmp2, 0);
+            vm_net_trace("CDownGetFileNameByAppID appid=%u missing Wpay9990Ker42WqvgaV100.CBM -> 0\n", tmp1);
+            vm_set_call_result(0);
         }
         else
         {
-            printf("[impl]vmBillingManager调用位置:%d\n", idx);
-            assert(0);
+            u32 namePtr = vm_alloc_host_string("Wpay9990Ker42Wqvga");
+            u8 type = 0;
+            u16 version = 100;
+            if (tmp2)
+                uc_mem_write(MTK, tmp2, &namePtr, 4);
+            if (tmp3)
+                uc_mem_write(MTK, tmp3, &type, 1);
+            if (tmp4)
+                uc_mem_write(MTK, tmp4, &version, 2);
+            vm_net_trace("CDownGetFileNameByAppID appid=%u nameOut=%08x typeOut=%08x verOut=%08x name=%08x version=%u\n", tmp1, tmp2, tmp3, tmp4, namePtr, version);
+            vm_set_call_result(1);
         }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    }
+    else if (idx == 20)
+    {
+        printf("[call]CDownGetPayTimes\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]BILLING_NewMonthPay\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]BILLING_NewMonthCancel\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]BILLING_CleanAppMonthBillInfo\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]BILLING_GetValidDayByAppId\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        printf("[call]CDownGetBillSmsAddr\n");
+        assert(0);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]CDownGetBillSmsSuf\n");
+        assert(0);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]BILLING_Pay2\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]Billing_GetAppUsedStatus\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        assert(0);
+        printf("[call]Billing_SetAppUsedStatus\n");
+    }
+    else if (idx == 30)
+    {
+        printf("[call]CDownGetPayTipContent\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]BILLING_Pay3\n");
+        assert(0);
+    }
+    else if (idx == 32)
+    {
+        printf("[call]BILLING_SendRegisterSms\n");
+        assert(0);
+    }
+
+    // result 区
+    else if (idx == 33)
+    {
+        printf("[call]CDownGetOption8\n");
+        assert(0);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]CDownGetOption9\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]CDownGetOption10\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]BILLING_Register\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        printf("[call]BILLING_PayForCBB3\n");
+        assert(0);
+    }
+    else if (idx == 38)
+    {
+        printf("[call]CDownIsWPay\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmBillingManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_ucs2_func(u32 address)
@@ -5129,81 +5557,81 @@ static bool hook_vm_manager_ucs2_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_UCS2_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            vm_readStringUCS2ByReg(UC_ARM_REG_R0, cbeTextString);
-            tmp1 = strlen_utf16(cbeTextString);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 2)
-        {
-            printf("[call]vmutStrcpyUcs2\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
-            vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
-            uc_mem_write(MTK, tmp1, cbeTextString, (strlen_utf16(cbeTextString) + 1) * 2);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]vmutStrcatUcs2\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_readStringByPtr(tmp2, cbeTextString);
-            gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
-            tmp3 = strlen_utf16((u16 *)sprintfBuff);
-            uc_mem_write(MTK, tmp1, sprintfBuff, (tmp3 + 1) * 2);
-            vm_set_call_result(tmp1);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vmutStrncpyUcs2\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            assert(0);
-            printf("[call]vmutExpandStrncpy\n");
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vmutExpandMemcpy\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]vmutStrchrUcs2\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]vmutStrcmpUcs2\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]vmutStricmpUcs2\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]vmutStrncmpUcs2\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmUCS2StrManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_UCS2_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        vm_readStringUCS2ByReg(UC_ARM_REG_R0, cbeTextString);
+        tmp1 = strlen_utf16(cbeTextString);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]vmutStrcpyUcs2\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // dst
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // src
+        vm_readStringUCS2ByReg(UC_ARM_REG_R1, cbeTextString);
+        uc_mem_write(MTK, tmp1, cbeTextString, (strlen_utf16(cbeTextString) + 1) * 2);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]vmutStrcatUcs2\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_readStringByPtr(tmp2, cbeTextString);
+        gbk_to_unicode(cbeTextString, sprintfBuff, mySizeOf(sprintfBuff));
+        tmp3 = strlen_utf16((u16 *)sprintfBuff);
+        uc_mem_write(MTK, tmp1, sprintfBuff, (tmp3 + 1) * 2);
+        vm_set_call_result(tmp1);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vmutStrncpyUcs2\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        assert(0);
+        printf("[call]vmutExpandStrncpy\n");
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vmutExpandMemcpy\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]vmutStrchrUcs2\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]vmutStrcmpUcs2\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]vmutStricmpUcs2\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]vmutStrncmpUcs2\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmUCS2StrManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_screen_func(u32 address)
@@ -5213,37 +5641,72 @@ static bool hook_vm_manager_screen_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
+    u32 idx = (address - VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_net_trace("screen_manager idx=0 change r0=%08x last=%08x\n", tmp1, lastAddress);
+        uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+        tmp2 = 0;
+        uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+        screenStructChange = 1;
+        vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
+    }
+    else if (idx == 4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vmAddedScreen = tmp1;
+        vm_net_trace("screen_manager idx=4 add r0=%08x last=%08x\n", tmp1, lastAddress);
+        if (lastAddress >= VM_Memory_Pool_ADDRESS && lastAddress < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
         {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+            u32 moduleBase = 0;
+            uc_reg_read(MTK, UC_ARM_REG_R9, &moduleBase);
+            if (moduleBase)
+            {
+                g_currentScreenThis = tmp1 - 0x18;
+                g_currentScreenModuleBase = moduleBase;
+                vm_net_trace("screen_manager idx=4 module_context this=%08x r9=%08x last=%08x\n",
+                             g_currentScreenThis, g_currentScreenModuleBase, lastAddress);
+            }
+        }
+        u32 startupObj = 0;
+        uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
+        if (startupObj == 0 && tmp1 != 0 && g_lastStartupScreenState != 0xff)
+        {
+            /* Firmware's screen manager maintains a focused screen stack.  The
+             * emulator still has a single active screen slot, so after startup
+             * vmAddScreen promotes the newly added screen to the active slot.
+             */
             tmp2 = 0;
+            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
             uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
             screenStructChange = 1;
-            vm_set_call_result(VM_SCREEN_isInQuit_ADDRESS);
+            vm_net_trace("screen_manager idx=4 promote_to_change screen=%08x last=%08x\n", tmp1, lastAddress);
         }
-        else if (idx == 4)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vmAddedScreen = tmp1;
-            vm_set_call_result(0);
-        }
-        else if (idx == 6)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_net_trace("screen_manager idx=6 r0=%08x r1=%08x last=%08x\n", tmp1, tmp2, lastAddress);
-            vm_set_call_result(0);
-        }
-        else
-        {
-            printf("[impl]vmScreenManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+        vm_set_call_result(0);
+    }
+    else if (idx == 5)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_net_trace("screen_manager idx=5 r0=%08x r1=%08x last=%08x\n", tmp1, tmp2, lastAddress);
+        vm_set_call_result(1);
+    }
+    else if (idx == 6)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_net_trace("screen_manager idx=6 r0=%08x r1=%08x last=%08x\n", tmp1, tmp2, lastAddress);
+        vm_set_call_result(0);
+    }
+    else
+    {
+        printf("[impl]vmScreenManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_df_script_func(u32 address)
@@ -5253,21 +5716,21 @@ static bool hook_vm_manager_df_script_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            tmp1 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else
-        {
-            printf("[impl]vmDfScriptManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        tmp1 = 0;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else
+    {
+        printf("[impl]vmDfScriptManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_game_lcd_func(u32 address)
@@ -5277,37 +5740,37 @@ static bool hook_vm_manager_game_lcd_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            printf("[call]IMG_CreateImageFormRes\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_IMG_CreateImageFormRes(tmp1);
-        }
-        else if (idx == 11)
-        {
-            DEBUG_PRINT("[call]IMG_Destory\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_IMG_Destory(tmp1);
-        }
-        else if (idx == 20)
-        {
-            DEBUG_PRINT("[call]GetStreamDataFormRes\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
-        }
-        else
-        {
-            printf("[impl]vmGameLcdManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        printf("[call]IMG_CreateImageFormRes\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_IMG_CreateImageFormRes(tmp1);
+    }
+    else if (idx == 11)
+    {
+        DEBUG_PRINT("[call]IMG_Destory\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_IMG_Destory(tmp1);
+    }
+    else if (idx == 20)
+    {
+        DEBUG_PRINT("[call]GetStreamDataFormRes\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
+    }
+    else
+    {
+        printf("[impl]vmGameLcdManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_netapp_func(u32 address)
@@ -5317,30 +5780,30 @@ static bool hook_vm_manager_netapp_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 60)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            tmp4 = 0;
-            if (tmp1)
-                uc_mem_write(MTK, tmp1, &tmp4, 2);
-            if (tmp2)
-                uc_mem_write(MTK, tmp2, &tmp4, 2);
-            if (tmp3)
-                uc_mem_write(MTK, tmp3, &tmp4, 1);
-            vm_set_call_result(0);
-        }
-        else
-        {
-            printf("[impl]vmNetAppManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 60)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        tmp4 = 0;
+        if (tmp1)
+            uc_mem_write(MTK, tmp1, &tmp4, 2);
+        if (tmp2)
+            uc_mem_write(MTK, tmp2, &tmp4, 2);
+        if (tmp3)
+            uc_mem_write(MTK, tmp3, &tmp4, 1);
+        vm_set_call_result(0);
+    }
+    else
+    {
+        printf("[impl]vmNetAppManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_audio_func(u32 address)
@@ -5350,177 +5813,177 @@ static bool hook_vm_manager_audio_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            DEBUG_PRINT("[call]vMAudioSetVolume\n");
-            // void方法
-        }
-        else if (idx == 2)
-        {
-            printf("[call]vMAudioPlayByData\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]vMAudioPlayWithDataPackage\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            DEBUG_PRINT("[call]vMAudioPlayForGame(a1,a2)\n");
-            tmp1 = 0; // pasue stop playing
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vMAudioPlayForApp\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]vMAudioPause\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vMAudioResume\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            // todo
-            DEBUG_PRINT("[call]vMAudioStop\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 9)
-        {
-            // todo
-            //  printf("[call]vMAduioGetState\n");
-            tmp1 = 1; // pasue stop playing
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]vm_mp3PlayBystream\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]vm_mp3PauseByStream\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]vm_mp3ResumeByStream\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            printf("[call]vm_mp3StopBystream\n");
-            assert(0);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]vm_mp3PlayByFile\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]vm_mp3PauseByFile\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]vm_mp3ResumeByFile\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]vm_mp3StopByFile\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]vMAudioget_progress_time\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]vmMp3StreamInit\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]CB_AUD_StartPlay_Init\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]CB_AUD_StopPlay\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]CB_AUD_WriteVoiceData\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]vMStartAudioRecord_async\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            printf("[call]vMStopAudioRecord_async\n");
-            assert(0);
-        }
-        else if (idx == 25)
-        {
-            printf("[call]vMSetAmrRecBS\n");
-            assert(0);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]vm_mp3PlayByFileEx\n");
-            assert(0);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]vMStartAudioRecordEx\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]vMStopAudioRecordEx\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]CB_AUD_StartPlay_InitEx\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]CB_AUD_StartPlayEx\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]CB_AUD_StopPlayEx\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmAudioManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        DEBUG_PRINT("[call]vMAudioSetVolume\n");
+        // void方法
+    }
+    else if (idx == 2)
+    {
+        printf("[call]vMAudioPlayByData\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]vMAudioPlayWithDataPackage\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        DEBUG_PRINT("[call]vMAudioPlayForGame(a1,a2)\n");
+        tmp1 = 0; // pasue stop playing
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vMAudioPlayForApp\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]vMAudioPause\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vMAudioResume\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        // todo
+        DEBUG_PRINT("[call]vMAudioStop\n");
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 9)
+    {
+        // todo
+        //  printf("[call]vMAduioGetState\n");
+        tmp1 = 1; // pasue stop playing
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]vm_mp3PlayBystream\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]vm_mp3PauseByStream\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]vm_mp3ResumeByStream\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        printf("[call]vm_mp3StopBystream\n");
+        assert(0);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]vm_mp3PlayByFile\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]vm_mp3PauseByFile\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]vm_mp3ResumeByFile\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]vm_mp3StopByFile\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]vMAudioget_progress_time\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]vmMp3StreamInit\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]CB_AUD_StartPlay_Init\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]CB_AUD_StopPlay\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]CB_AUD_WriteVoiceData\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]vMStartAudioRecord_async\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]vMStopAudioRecord_async\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        printf("[call]vMSetAmrRecBS\n");
+        assert(0);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]vm_mp3PlayByFileEx\n");
+        assert(0);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]vMStartAudioRecordEx\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]vMStopAudioRecordEx\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]CB_AUD_StartPlay_InitEx\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]CB_AUD_StartPlayEx\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]CB_AUD_StopPlayEx\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmAudioManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_sensor_func(u32 address)
@@ -5530,16 +5993,16 @@ static bool hook_vm_manager_sensor_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS) / 4;
-        if (1)
-        {
-            printf("[impl]vmSensorManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS) / 4;
+    if (1)
+    {
+        printf("[impl]vmSensorManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_vmim_func(u32 address)
@@ -5549,53 +6012,53 @@ static bool hook_vm_manager_vmim_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_VMIM_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            printf("[call]vmDlFuncSms\n");
-            assert(0);
-        }
-        else if (idx == 1)
-        {
-            printf("[call]vmDlFuncMakeCall\n");
-            assert(0);
-        }
-        else if (idx == 2)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_nv_read(tmp1);
-        }
-        else if (idx == 3)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_nv_write(tmp1);
-        }
-        else if (idx == 4)
-        {
-            printf("[call]vmDlFuncReleaseCall\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vmDlFuncMakeCallEx\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]vmDlFuncGetApsManager\n");
-            tmp1 = VM_MANAGER_APPSTORE_TABLE_ADDRESS;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
+    u32 idx = (address - VM_MANAGER_VMIM_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        printf("[call]vmDlFuncSms\n");
+        assert(0);
+    }
+    else if (idx == 1)
+    {
+        printf("[call]vmDlFuncMakeCall\n");
+        assert(0);
+    }
+    else if (idx == 2)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_nv_read(tmp1);
+    }
+    else if (idx == 3)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_nv_write(tmp1);
+    }
+    else if (idx == 4)
+    {
+        printf("[call]vmDlFuncReleaseCall\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vmDlFuncMakeCallEx\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]vmDlFuncGetApsManager\n");
+        tmp1 = VM_MANAGER_APPSTORE_TABLE_ADDRESS;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
 
-        else
-        {
-            printf("[impl]vmVmImManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    else
+    {
+        printf("[impl]vmVmImManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_manager_gameold_func(u32 address)
@@ -5605,457 +6068,457 @@ static bool hook_vm_manager_gameold_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
+    u32 idx = (address - VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        printf("[call]IMG_CreateImageFormRes\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_IMG_CreateImageFormRes(tmp1);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]IMG_Destory\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_IMG_Destory(tmp1);
+    }
+    else if (idx == 12)
+    {
+        tmp2 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        // DEBUG_PRINT("[call]GAME_isKeyDown(%d)\n", tmp1);
+        if (simulatePress == 1)
         {
-            printf("[call]IMG_CreateImageFormRes\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_IMG_CreateImageFormRes(tmp1);
+            tmp2 = (tmp1 & (1 << simulateKey)) != 0; // 0按下
         }
-        else if (idx == 11)
-        {
-            printf("[call]IMG_Destory\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_IMG_Destory(tmp1);
-        }
-        else if (idx == 12)
-        {
-            tmp2 = 0;
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            // DEBUG_PRINT("[call]GAME_isKeyDown(%d)\n", tmp1);
-            if (simulatePress == 1)
-            {
-                tmp2 = (tmp1 & (1 << simulateKey)) != 0; // 0按下
-            }
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 13)
-        {
-            // printf("[call]GAME_isKeyHold\n");
-            vm_set_call_result(0);
-        }
-        else if (idx == 24)
-        {
-            DEBUG_PRINT("[call]GetStreamDataFormRes\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
-            vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
-        }
-        else if (idx == 51)
-        {
-            printf("[call]CdRectPoint\n");
-            assert(0);
-        }
-        else if (idx == 58)
-        {
-            printf("[call]Sqrt\n");
-            assert(0);
-        }
-        else if (idx == 59)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // int* p_g_memoryBlock
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
-            DEBUG_PRINT("[call]initMemoryBlock(%x,%x)\n", tmp1, tmp2);
-            vm_initMemoryBlock(tmp1, tmp2);
-        }
-        else if (idx == 61)
-        {
-            // p_isInQuit = &isInQuit;
-            // ::nextSubTScreen = nextSubTScreen;
-            // return p_isInQuit;
-            // 传入一个函数表地址  执行顺序 0 -> 8 -> 12 -> 8 -> 12 -> 4
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 13)
+    {
+        // printf("[call]GAME_isKeyHold\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 24)
+    {
+        DEBUG_PRINT("[call]GetStreamDataFormRes\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
+    }
+    else if (idx == 51)
+    {
+        printf("[call]CdRectPoint\n");
+        assert(0);
+    }
+    else if (idx == 58)
+    {
+        printf("[call]Sqrt\n");
+        assert(0);
+    }
+    else if (idx == 59)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // int* p_g_memoryBlock
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
+        DEBUG_PRINT("[call]initMemoryBlock(%x,%x)\n", tmp1, tmp2);
+        vm_initMemoryBlock(tmp1, tmp2);
+    }
+    else if (idx == 61)
+    {
+        // p_isInQuit = &isInQuit;
+        // ::nextSubTScreen = nextSubTScreen;
+        // return p_isInQuit;
+        // 传入一个函数表地址  执行顺序 0 -> 8 -> 12 -> 8 -> 12 -> 4
 
-            // MEMORY:016E4380 DCD 0x16C65FD Init
-            // MEMORY:016E4384 DCD 0x16C6357 Distroy
-            // MEMORY:016E4388 DCD 0x16C61D1 Logic
-            // MEMORY:016E438C DCD 0x16C4D61 Render
-            // MEMORY:016E4390 DCD 0x16C4D59 Pause
-            // MEMORY:016E4394 DCD 0x16C4D3B Remuse
-            // MEMORY:016E4398 DCD 0x16C4D2D LoadResource
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
-            uc_mem_read(MTK, tmp1 + 8, &tmp2, 4);
-            DEBUG_PRINT("[call]SCREEN_ChangeScreen(%x)\n", tmp1);
-            tmp1 = VM_SCREEN_isInQuit_ADDRESS;
-            tmp2 = 0;
-            uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
-            screenStructChange = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 62)
+        // MEMORY:016E4380 DCD 0x16C65FD Init
+        // MEMORY:016E4384 DCD 0x16C6357 Distroy
+        // MEMORY:016E4388 DCD 0x16C61D1 Logic
+        // MEMORY:016E438C DCD 0x16C4D61 Render
+        // MEMORY:016E4390 DCD 0x16C4D59 Pause
+        // MEMORY:016E4394 DCD 0x16C4D3B Remuse
+        // MEMORY:016E4398 DCD 0x16C4D2D LoadResource
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_mem_write(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &tmp1, 4);
+        uc_mem_read(MTK, tmp1 + 8, &tmp2, 4);
+        DEBUG_PRINT("[call]SCREEN_ChangeScreen(%x)\n", tmp1);
+        tmp1 = VM_SCREEN_isInQuit_ADDRESS;
+        tmp2 = 0;
+        uc_mem_write(MTK, VM_SCREEN_isInQuit_ADDRESS, &tmp2, 4);
+        screenStructChange = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 62)
+    {
+        u32 lr = 0;
+        u32 screenPtr = vmAddedScreen;
+        u32 entry0 = 0, entry4 = 0, entry8 = 0, entry12 = 0, entry16 = 0, entry20 = 0, entry24 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        if (screenPtr)
         {
-            u32 lr = 0;
-            u32 screenPtr = vmAddedScreen;
-            u32 entry0 = 0, entry4 = 0, entry8 = 0, entry12 = 0, entry16 = 0, entry20 = 0, entry24 = 0;
-            uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-            if (screenPtr)
-            {
-                uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
-                uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
-                uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
-                uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
-                uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
-                uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
-                uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
-            }
-            vm_net_trace("screen_notify_load_res lr=%08x screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
-                         lr, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24);
-            screenStructNotifyLoadRes = 1;
-            DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
+            uc_mem_read(MTK, screenPtr + 0x00, &entry0, 4);
+            uc_mem_read(MTK, screenPtr + 0x04, &entry4, 4);
+            uc_mem_read(MTK, screenPtr + 0x08, &entry8, 4);
+            uc_mem_read(MTK, screenPtr + 0x0c, &entry12, 4);
+            uc_mem_read(MTK, screenPtr + 0x10, &entry16, 4);
+            uc_mem_read(MTK, screenPtr + 0x14, &entry20, 4);
+            uc_mem_read(MTK, screenPtr + 0x18, &entry24, 4);
         }
-        else if (idx == 63)
-        {
-            // DEBUG_PRINT("[call]SCREEN_IsPointerHold\n");
-            tmp1 = simulateTouchPress;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 64)
-        {
-            // DEBUG_PRINT("[call]SCREEN_IsPointerDown(%d)\n", simulateTouchPress);
-            tmp1 = simulateTouchDown;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 65)
-        {
-            // DEBUG_PRINT("[call]SCREEN_IsPointerUp\n");
-            tmp1 = simulateTouchUp;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 66)
-        {
-            // DEBUG_PRINT("[call]SCREEN_IsPointerDrag\n");
-            tmp1 = simulateTouchDrag;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 67)
-        {
-            // DEBUG_PRINT("[call]SCREEN_GetPointerX(%d)\n", simulateTouchX);
-            tmp1 = simulateTouchX; // x坐标
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 68)
-        {
-            // DEBUG_PRINT("[call]SCREEN_GetPointerY(%d)\n", simulateTouchY);
-            tmp1 = simulateTouchY; // y坐标
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 69)
-        {
-            printf("[call]Get_CurKeyDownState\n");
-            assert(0);
-        }
+        vm_net_trace("screen_notify_load_res lr=%08x screen=%08x table=%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+                     lr, screenPtr, entry0, entry4, entry8, entry12, entry16, entry20, entry24);
+        screenStructNotifyLoadRes = 1;
+        DEBUG_PRINT("[call]SCREEN_NotifyLoadResource(entry:0x%x)\n", tmp2);
+    }
+    else if (idx == 63)
+    {
+        // DEBUG_PRINT("[call]SCREEN_IsPointerHold\n");
+        tmp1 = simulateTouchPress;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 64)
+    {
+        // DEBUG_PRINT("[call]SCREEN_IsPointerDown(%d)\n", simulateTouchPress);
+        tmp1 = simulateTouchDown;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 65)
+    {
+        // DEBUG_PRINT("[call]SCREEN_IsPointerUp\n");
+        tmp1 = simulateTouchUp;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 66)
+    {
+        // DEBUG_PRINT("[call]SCREEN_IsPointerDrag\n");
+        tmp1 = simulateTouchDrag;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 67)
+    {
+        // DEBUG_PRINT("[call]SCREEN_GetPointerX(%d)\n", simulateTouchX);
+        tmp1 = simulateTouchX; // x坐标
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 68)
+    {
+        // DEBUG_PRINT("[call]SCREEN_GetPointerY(%d)\n", simulateTouchY);
+        tmp1 = simulateTouchY; // y坐标
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 69)
+    {
+        printf("[call]Get_CurKeyDownState\n");
+        assert(0);
+    }
 
-        else if (idx == 81)
-        {
-            // DreamFactory_DataPackage = 0;
-            tmp1 = 0;
-            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            // MemoryBlockPtr = (int (*)())getMemoryBlockPtr();
-            // DreamFactory_MemoryBlock = MemoryBlockPtr;
-            tmp1 = VM_MemoryBlock_PTR_ADDRESS;
-            uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
-            DEBUG_PRINT("[call]initDreamFactoryEngine\n");
-        }
-        else if (idx == 82)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            DEBUG_PRINT("[call]DF_SetDataPackage(%x)\n", tmp1);
-        }
-        else if (idx == 83)
-        {
-            DEBUG_PRINT("[call]DF_GetDataPackage\n");
-            uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 84)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_by_id(tmp1);
-        }
-        else if (idx == 85)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_by_file_name(tmp1);
-        }
-        else if (idx == 86)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_name_by_id(tmp1);
-        }
-        else if (idx == 87)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_resource_id_by_file_name(tmp1);
-        }
-        else if (idx == 88)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_t_resource(tmp1, 0);
-        }
-        else if (idx == 89)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_df_get_t_resource(tmp1, 1);
-        }
-        else if (idx == 90)
-        {
-            printf("[call]DF_DataPackage_ShowFileList\n");
-            assert(0);
-        }
-        else if (idx == 91)
-        {
-            printf("[call]DF_String_Equal\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_String_Equal(tmp1, tmp2);
-        }
-        else if (idx == 92)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            tmp1 = vm_DF_ReadShort(tmp1, tmp2);
-            DEBUG_PRINT("[call]DF_ReadShort(%x)\n", tmp1);
-        }
-        else if (idx == 93)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_ReadInt(tmp1, tmp2);
-            DEBUG_PRINT("[call]DF_ReadInt\n");
-        }
-        else if (idx == 94)
-        {
-            printf("[call]DF_File_ReadShort\n");
-            assert(0);
-        }
-        else if (idx == 95)
-        {
-            printf("[call]DF_File_ReadInt\n");
-            assert(0);
-        }
-        else if (idx == 96)
-        {
-            printf("[call]DF_WriteShort\n");
-            assert(0);
-        }
-        else if (idx == 97)
-        {
-            printf("[call]DF_WriteInt\n");
-            assert(0);
-        }
-        else if (idx == 98)
-        {
-            DEBUG_PRINT("[call]DF_ReadString\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_ReadString(tmp1, tmp2);
-        }
-        else if (idx == 99)
-        {
-            printf("[call]DF_ReadStringEx\n");
-            assert(0);
-        }
-        else if (idx == 100)
-        {
-            printf("[call]DF_File_ReadString\n");
-            assert(0);
-        }
-        else if (idx == 101)
-        {
-            printf("[call]DF_File_ReadToBuffer\n");
-            assert(0);
-        }
-        else if (idx == 102)
-        {
-            printf("[call]DF_ReadString2\n");
-            assert(0);
-        }
-        else if (idx == 103)
-        {
-            DEBUG_PRINT("[call]DF_GetMemoryBlock\n");
-            vm_DF_GetMemoryBlock();
-        }
-        else if (idx == 104)
-        {
-            printf("[call]DF_Sin\n");
-            assert(0);
-        }
-        else if (idx == 105)
-        {
-            printf("[call]DF_Cos\n");
-            assert(0);
-        }
-        else if (idx == 106)
-        {
-            printf("[call]DF_Degree\n");
-            assert(0);
-        }
-        else if (idx == 107)
-        {
-            printf("[call]DF_CollectionTest\n");
-            assert(0);
-        }
-        else if (idx == 108)
-        {
-            printf("[call]DF_SwapVal\n");
-            assert(0);
-        }
-        else if (idx == 109)
-        {
-            DEBUG_PRINT("[call]DF_GetFormatString\n");
-            vm_DF_GetFormatString();
-        }
-        else if (idx == 111)
-        {
-            // 传入指针写函数表
-            printf("[call]initDFDataPackage\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
-            vm_initDFDataPackage(tmp1, tmp2);
-        }
+    else if (idx == 81)
+    {
+        // DreamFactory_DataPackage = 0;
+        tmp1 = 0;
+        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        // MemoryBlockPtr = (int (*)())getMemoryBlockPtr();
+        // DreamFactory_MemoryBlock = MemoryBlockPtr;
+        tmp1 = VM_MemoryBlock_PTR_ADDRESS;
+        uc_mem_write(MTK, VM_DreamFactory_MemoryBlock_ADDRESS, &tmp1, 4);
+        DEBUG_PRINT("[call]initDreamFactoryEngine\n");
+    }
+    else if (idx == 82)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_mem_write(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        DEBUG_PRINT("[call]DF_SetDataPackage(%x)\n", tmp1);
+    }
+    else if (idx == 83)
+    {
+        DEBUG_PRINT("[call]DF_GetDataPackage\n");
+        uc_mem_read(MTK, VM_DreamFactory_DataPackage_ADDRESS, &tmp1, 4);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 84)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_by_id(tmp1);
+    }
+    else if (idx == 85)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_by_file_name(tmp1);
+    }
+    else if (idx == 86)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_name_by_id(tmp1);
+    }
+    else if (idx == 87)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_resource_id_by_file_name(tmp1);
+    }
+    else if (idx == 88)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_t_resource(tmp1, 0);
+    }
+    else if (idx == 89)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_df_get_t_resource(tmp1, 1);
+    }
+    else if (idx == 90)
+    {
+        printf("[call]DF_DataPackage_ShowFileList\n");
+        assert(0);
+    }
+    else if (idx == 91)
+    {
+        printf("[call]DF_String_Equal\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_String_Equal(tmp1, tmp2);
+    }
+    else if (idx == 92)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        tmp1 = vm_DF_ReadShort(tmp1, tmp2);
+        DEBUG_PRINT("[call]DF_ReadShort(%x)\n", tmp1);
+    }
+    else if (idx == 93)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_ReadInt(tmp1, tmp2);
+        DEBUG_PRINT("[call]DF_ReadInt\n");
+    }
+    else if (idx == 94)
+    {
+        printf("[call]DF_File_ReadShort\n");
+        assert(0);
+    }
+    else if (idx == 95)
+    {
+        printf("[call]DF_File_ReadInt\n");
+        assert(0);
+    }
+    else if (idx == 96)
+    {
+        printf("[call]DF_WriteShort\n");
+        assert(0);
+    }
+    else if (idx == 97)
+    {
+        printf("[call]DF_WriteInt\n");
+        assert(0);
+    }
+    else if (idx == 98)
+    {
+        DEBUG_PRINT("[call]DF_ReadString\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_ReadString(tmp1, tmp2);
+    }
+    else if (idx == 99)
+    {
+        printf("[call]DF_ReadStringEx\n");
+        assert(0);
+    }
+    else if (idx == 100)
+    {
+        printf("[call]DF_File_ReadString\n");
+        assert(0);
+    }
+    else if (idx == 101)
+    {
+        printf("[call]DF_File_ReadToBuffer\n");
+        assert(0);
+    }
+    else if (idx == 102)
+    {
+        printf("[call]DF_ReadString2\n");
+        assert(0);
+    }
+    else if (idx == 103)
+    {
+        DEBUG_PRINT("[call]DF_GetMemoryBlock\n");
+        vm_DF_GetMemoryBlock();
+    }
+    else if (idx == 104)
+    {
+        printf("[call]DF_Sin\n");
+        assert(0);
+    }
+    else if (idx == 105)
+    {
+        printf("[call]DF_Cos\n");
+        assert(0);
+    }
+    else if (idx == 106)
+    {
+        printf("[call]DF_Degree\n");
+        assert(0);
+    }
+    else if (idx == 107)
+    {
+        printf("[call]DF_CollectionTest\n");
+        assert(0);
+    }
+    else if (idx == 108)
+    {
+        printf("[call]DF_SwapVal\n");
+        assert(0);
+    }
+    else if (idx == 109)
+    {
+        DEBUG_PRINT("[call]DF_GetFormatString\n");
+        vm_DF_GetFormatString();
+    }
+    else if (idx == 111)
+    {
+        // 传入指针写函数表
+        printf("[call]initDFDataPackage\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // size
+        vm_initDFDataPackage(tmp1, tmp2);
+    }
 
-        else if (idx == 134)
-        {
-            printf("[call]memcpy\n");
-            assert(0);
-        }
-        else if (idx == 135)
-        {
-            printf("[call]strlen\n");
-            assert(0);
-        }
-        else if (idx == 136)
-        {
-            printf("[call]memset\n");
-            assert(0);
-        }
-        else if (idx == 137)
-        {
-            printf("[call]sprintf\n");
-            assert(0);
-        }
-        else if (idx == 138)
-        {
-            printf("[call]vm_log_trace\n");
-            assert(0);
-        }
-        else if (idx == 139)
-        {
-            printf("[call]VmGetRand\n");
-            assert(0);
-        }
-        else if (idx == 140)
-        {
-            printf("[call]vsprintf\n");
-            assert(0);
-        }
-        else if (idx == 141)
-        {
-            printf("[call]strncpy\n");
-            assert(0);
-        }
-        else if (idx == 142)
-        {
-            DEBUG_PRINT("[call]strcpy\n");
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_strcpy(tmp1, tmp2);
-        }
-        else if (idx == 143)
-        {
-            printf("[call]strcat\n");
-            assert(0);
-        }
-        else if (idx == 144)
-        {
-            printf("[call]atol\n");
-            assert(0);
-        }
+    else if (idx == 134)
+    {
+        printf("[call]memcpy\n");
+        assert(0);
+    }
+    else if (idx == 135)
+    {
+        printf("[call]strlen\n");
+        assert(0);
+    }
+    else if (idx == 136)
+    {
+        printf("[call]memset\n");
+        assert(0);
+    }
+    else if (idx == 137)
+    {
+        printf("[call]sprintf\n");
+        assert(0);
+    }
+    else if (idx == 138)
+    {
+        printf("[call]vm_log_trace\n");
+        assert(0);
+    }
+    else if (idx == 139)
+    {
+        printf("[call]VmGetRand\n");
+        assert(0);
+    }
+    else if (idx == 140)
+    {
+        printf("[call]vsprintf\n");
+        assert(0);
+    }
+    else if (idx == 141)
+    {
+        printf("[call]strncpy\n");
+        assert(0);
+    }
+    else if (idx == 142)
+    {
+        DEBUG_PRINT("[call]strcpy\n");
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_strcpy(tmp1, tmp2);
+    }
+    else if (idx == 143)
+    {
+        printf("[call]strcat\n");
+        assert(0);
+    }
+    else if (idx == 144)
+    {
+        printf("[call]atol\n");
+        assert(0);
+    }
 
-        // result 区 (从 a1+144 开始)
-        else if (idx == 145)
-        {
-            printf("[call]memmove\n");
-            assert(0);
-        }
-        else if (idx == 146)
-        {
-            printf("[call]atoi\n");
-            assert(0);
-        }
-        else if (idx == 147)
-        {
-            printf("[call]BILLING_GetPayNumByAppId\n");
-            assert(0);
-        }
-        else if (idx == 148)
-        {
-            printf("[call]BILLING_GetRemainDay\n");
-            assert(0);
-        }
-        else if (idx == 149)
-        {
-            printf("[call]BILLING_Pay\n");
-            assert(0);
-        }
-        else if (idx == 150)
-        {
-            printf("[call]BILLING_PayMoreTimes\n");
-            assert(0);
-        }
-        else if (idx == 151)
-        {
-            printf("[call]BILLING_IsRegisterBillingInfo\n");
-            assert(0);
-        }
-        else if (idx == 152)
-        {
-            printf("[call]BILLING_RegisterBillingInfo\n");
-            assert(0);
-        }
-        else if (idx == 153)
-        {
-            printf("[call]BILLING_SetBillingStatus\n");
-            assert(0);
-        }
-        else if (idx == 154)
-        {
-            printf("[call]BILLING_GetBillingStatus\n");
-            assert(0);
-        }
-        else if (idx == 155)
-        {
-            printf("[call]BILLING_IsNeedPay\n");
-            assert(0);
-        }
-        else if (idx == 156)
-        {
-            printf("[call]BILLING_IsInTryStatus\n");
-            assert(0);
-        }
-        else if (idx == 157)
-        {
-            printf("[call]Game_OpenBillingPromptWin\n");
-            assert(0);
-        }
-        else if (idx == 158)
-        {
-            printf("[call]vMstricmp\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmGameOldManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    // result 区 (从 a1+144 开始)
+    else if (idx == 145)
+    {
+        printf("[call]memmove\n");
+        assert(0);
+    }
+    else if (idx == 146)
+    {
+        printf("[call]atoi\n");
+        assert(0);
+    }
+    else if (idx == 147)
+    {
+        printf("[call]BILLING_GetPayNumByAppId\n");
+        assert(0);
+    }
+    else if (idx == 148)
+    {
+        printf("[call]BILLING_GetRemainDay\n");
+        assert(0);
+    }
+    else if (idx == 149)
+    {
+        printf("[call]BILLING_Pay\n");
+        assert(0);
+    }
+    else if (idx == 150)
+    {
+        printf("[call]BILLING_PayMoreTimes\n");
+        assert(0);
+    }
+    else if (idx == 151)
+    {
+        printf("[call]BILLING_IsRegisterBillingInfo\n");
+        assert(0);
+    }
+    else if (idx == 152)
+    {
+        printf("[call]BILLING_RegisterBillingInfo\n");
+        assert(0);
+    }
+    else if (idx == 153)
+    {
+        printf("[call]BILLING_SetBillingStatus\n");
+        assert(0);
+    }
+    else if (idx == 154)
+    {
+        printf("[call]BILLING_GetBillingStatus\n");
+        assert(0);
+    }
+    else if (idx == 155)
+    {
+        printf("[call]BILLING_IsNeedPay\n");
+        assert(0);
+    }
+    else if (idx == 156)
+    {
+        printf("[call]BILLING_IsInTryStatus\n");
+        assert(0);
+    }
+    else if (idx == 157)
+    {
+        printf("[call]Game_OpenBillingPromptWin\n");
+        assert(0);
+    }
+    else if (idx == 158)
+    {
+        printf("[call]vMstricmp\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmGameOldManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_df_datapackage_func(u32 address)
@@ -6065,94 +6528,94 @@ static bool hook_vm_df_datapackage_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_LoadPackage(tmp1, tmp2);
-            printf("[call]DF_DataPackage_LoadPackage\n");
-        }
-        else if (idx == 2)
-        {
-            vm_set_call_result(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]DF_DataPackage_LoadFromTResource\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            printf("[call]DF_DataPackage_LoadFormTCard\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
-            VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
-            printf("[call]DF_DataPackage_DoLoading\n");
-        }
-        else if (idx == 6)
-        {
-            printf("[call]DF_DataPackage_LocateDataPackage\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_LocateDataPackage(tmp1, tmp2);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]DF_DataPackage_GetFile\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_GetFile(tmp1, tmp2);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]DF_DataPackage_GetFileByID\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_GetFileByID(tmp1, tmp2);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]DF_DataPackage_GetFileNameByID\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_GetFileNameByID(tmp1, tmp2);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]DF_DataPackage_GetFileID\n");
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_GetFileID(tmp1, tmp2);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]DF_DataPackage_ShowFileList\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_DF_DataPackage_InitTxt(tmp1, tmp2);
-            printf("[call]DF_DataPackage_InitTxt\n");
-        }
+    u32 idx = (address - VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_LoadPackage(tmp1, tmp2);
+        printf("[call]DF_DataPackage_LoadPackage\n");
+    }
+    else if (idx == 2)
+    {
+        vm_set_call_result(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]DF_DataPackage_LoadFromTResource\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        printf("[call]DF_DataPackage_LoadFormTCard\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
+        printf("[call]DF_DataPackage_DoLoading\n");
+    }
+    else if (idx == 6)
+    {
+        printf("[call]DF_DataPackage_LocateDataPackage\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_LocateDataPackage(tmp1, tmp2);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]DF_DataPackage_GetFile\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_GetFile(tmp1, tmp2);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]DF_DataPackage_GetFileByID\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_GetFileByID(tmp1, tmp2);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]DF_DataPackage_GetFileNameByID\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_GetFileNameByID(tmp1, tmp2);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]DF_DataPackage_GetFileID\n");
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_GetFileID(tmp1, tmp2);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]DF_DataPackage_ShowFileList\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_InitTxt(tmp1, tmp2);
+        printf("[call]DF_DataPackage_InitTxt\n");
+    }
 
-        else
-        {
-            printf("[impl]DF_PACKAGE_调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    else
+    {
+        printf("[impl]DF_PACKAGE_调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_mf_memoryblock_func(u32 address)
@@ -6162,37 +6625,37 @@ static bool hook_vm_mf_memoryblock_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_MF_MemoryBlock_Malloc(tmp1, tmp2);
-            DEBUG_PRINT("[call]MF_MemoryBlock_Malloc\n");
-        }
-        else if (idx == 2)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_MF_MemoryBlock_Reset(tmp1);
-            DEBUG_PRINT("[call]MF_MemoryBlock_Reset\n");
-        }
-        else if (idx == 3)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            vm_MF_MemoryBlock_Release(tmp1);
-            DEBUG_PRINT("[call]MF_MemoryBlock_Release\n");
-        }
-        else
-        {
-            printf("[impl]MF_MemoryBlock_调用位置:%d\n", idx);
-            assert(0);
-        }
+    u32 idx = (address - VM_MF_MemoryBlock_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_MF_MemoryBlock_Malloc(tmp1, tmp2);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Malloc\n");
+    }
+    else if (idx == 2)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_MF_MemoryBlock_Reset(tmp1);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Reset\n");
+    }
+    else if (idx == 3)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_MF_MemoryBlock_Release(tmp1);
+        DEBUG_PRINT("[call]MF_MemoryBlock_Release\n");
+    }
+    else
+    {
+        printf("[impl]MF_MemoryBlock_调用位置:%d\n", idx);
+        assert(0);
+    }
 
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_appstore_func(u32 address)
@@ -6202,210 +6665,210 @@ static bool hook_vm_appstore_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_APPSTORE_FUNC_LIST_ADDRESS) / 4;
-        idx += 1;
-        if (idx == 1)
-        {
-            printf("[call]VmAppStoreInstall\n");
-            assert(0);
-        }
-        else if (idx == 2)
-        {
-            printf("[call]VmAppStoreUninstallEx\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]VmAppStoreUninstall\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]VmAppStoreGetAppInfo\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]VmAppStoreGetInstalledAppInfos\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]VmAppStoreReleaseAppInfos\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]VmAppStorePushMsg\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]VmAppStoreRunJavaAp\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]VmAppStoreRunJavaApEx\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]VmAppStoreRunCbeAp\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]VmAppStoreSupportJava\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            printf("[call]VmAppStoreGetPath\n");
-            assert(0);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]VmGetPhoneType\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]VmGetAppNumByType\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]VmGetPhoneSupportApType\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]VmAppGetHasLocalIcon\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]VmAppRunApByIdAndName\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]VmAppAddShortCutMenu\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]VmAppDelShortCutMenu\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]CoolBar_DownLoad_AppFile\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]GetApsDownAppUrl\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]Coolbar_PreLoadAppByName\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            printf("[call]Coolbar_ParseApsDownDataFile\n");
-            assert(0);
-        }
-        else if (idx == 25)
-        {
-            printf("[call]CoolBar_DownLoad_Stop\n");
-            assert(0);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]VmAppQueryStcExist\n");
-            assert(0);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]VmPreCheckInstallAppPlace\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]VmGetInstallFileSystem\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]VmSetInstallFileSystem\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]VmSetRunAppFileSystem\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]VmGetRunAppFileSystem\n");
-            tmp1 = 1;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
-        }
-        else if (idx == 32)
-        {
-            printf("[call]VmAutoSelectAppDownPlace\n");
-            assert(0);
-        }
+    u32 idx = (address - VM_APPSTORE_FUNC_LIST_ADDRESS) / 4;
+    idx += 1;
+    if (idx == 1)
+    {
+        printf("[call]VmAppStoreInstall\n");
+        assert(0);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]VmAppStoreUninstallEx\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]VmAppStoreUninstall\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]VmAppStoreGetAppInfo\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]VmAppStoreGetInstalledAppInfos\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]VmAppStoreReleaseAppInfos\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]VmAppStorePushMsg\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]VmAppStoreRunJavaAp\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]VmAppStoreRunJavaApEx\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]VmAppStoreRunCbeAp\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]VmAppStoreSupportJava\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        printf("[call]VmAppStoreGetPath\n");
+        assert(0);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]VmGetPhoneType\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]VmGetAppNumByType\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]VmGetPhoneSupportApType\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]VmAppGetHasLocalIcon\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]VmAppRunApByIdAndName\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]VmAppAddShortCutMenu\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]VmAppDelShortCutMenu\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]CoolBar_DownLoad_AppFile\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]GetApsDownAppUrl\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]Coolbar_PreLoadAppByName\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]Coolbar_ParseApsDownDataFile\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        printf("[call]CoolBar_DownLoad_Stop\n");
+        assert(0);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]VmAppQueryStcExist\n");
+        assert(0);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]VmPreCheckInstallAppPlace\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]VmGetInstallFileSystem\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]VmSetInstallFileSystem\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]VmSetRunAppFileSystem\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]VmGetRunAppFileSystem\n");
+        tmp1 = 1;
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
+    }
+    else if (idx == 32)
+    {
+        printf("[call]VmAutoSelectAppDownPlace\n");
+        assert(0);
+    }
 
-        // result 区
-        else if (idx == 33)
-        {
-            printf("[call]VmGetApsVerNum\n");
-            assert(0);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]VmReadAppStoreCbeVersion\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]VmWriteAppStoreCbeVersion\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]VmGetSecurityCode\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            printf("[call]VmGetSecurityCodeEx\n");
-            assert(0);
-        }
-        else if (idx == 38)
-        {
-            printf("[call]VmSetAppStoreName\n");
-            assert(0);
-        }
-        else if (idx == 39)
-        {
-            printf("[call]VmGetAppStoreName\n");
-            assert(0);
-        }
-        else
-        {
-            printf("[impl]vmAPPStoreManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    // result 区
+    else if (idx == 33)
+    {
+        printf("[call]VmGetApsVerNum\n");
+        assert(0);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]VmReadAppStoreCbeVersion\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]VmWriteAppStoreCbeVersion\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]VmGetSecurityCode\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        printf("[call]VmGetSecurityCodeEx\n");
+        assert(0);
+    }
+    else if (idx == 38)
+    {
+        printf("[call]VmSetAppStoreName\n");
+        assert(0);
+    }
+    else if (idx == 39)
+    {
+        printf("[call]VmGetAppStoreName\n");
+        assert(0);
+    }
+    else
+    {
+        printf("[impl]vmAPPStoreManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_dl_load_func(u32 address)
@@ -6415,70 +6878,70 @@ static bool hook_vm_dl_load_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_DL_LOAD_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            printf("[call]vlDlSetCurrContextAddress\n");
-            assert(0);
-        }
-        else if (idx == 1)
-        {
-            printf("[call]vlDlSetContextAddress\n");
-            assert(0);
-        }
-        else if (idx == 2)
-        {
-            printf("[call]vlDlUnLoadCurrApp\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]vlDlUnLoadApp\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            printf("[call]vmDlParseAndCopy\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vlDlLoadApp\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]vlDlLoadAppEx\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vlDlAppIsInDl\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]vmGetcurrInnerAppId\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]CBInnerInit_qqIn\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]VmGetCBEInfoByFileName\n");
-            assert(0);
-        }
-        else
-        {
-            printf("vmDLLoadManager位置:%d\n", idx);
-            assert(0);
-        } // bx lr实现
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_DL_LOAD_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        printf("[call]vlDlSetCurrContextAddress\n");
+        assert(0);
+    }
+    else if (idx == 1)
+    {
+        printf("[call]vlDlSetContextAddress\n");
+        assert(0);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]vlDlUnLoadCurrApp\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]vlDlUnLoadApp\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        printf("[call]vmDlParseAndCopy\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vlDlLoadApp\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]vlDlLoadAppEx\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vlDlAppIsInDl\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]vmGetcurrInnerAppId\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]CBInnerInit_qqIn\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]VmGetCBEInfoByFileName\n");
+        assert(0);
+    }
+    else
+    {
+        printf("vmDLLoadManager位置:%d\n", idx);
+        assert(0);
+    } // bx lr实现
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_dl_pay_func(u32 address)
@@ -6505,44 +6968,44 @@ static bool hook_vm_dl_rs_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_DL_RS_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            vm_DF_GetDataPackage();
-        }
-        else if (idx == 10)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-            vm_IMG_CreateImageFormStream(tmp1, tmp2);
-        }
-        else if (idx == 16)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-                vm_free(tmp1);
-            vm_set_call_result(0);
-        }
-        else if (idx == 17)
-        {
-            vm_set_call_result(VM_DF_DataPackage_In_File_Offset_ADDRESS);
-        }
-        else if (idx == 18)
-        {
-            vm_set_call_result(VM_DF_DataPackage_FilePath_ADDRESS);
-        }
-        else if (idx == 19)
-        {
-            vm_set_call_result(VM_DF_DataPackage_In_File_Length_ADDRESS);
-        }
-        else
-        {
-            printf("[impl]vmDlRsManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_DL_RS_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        vm_DF_GetDataPackage();
+    }
+    else if (idx == 10)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_IMG_CreateImageFormStream(tmp1, tmp2);
+    }
+    else if (idx == 16)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            vm_free(tmp1);
+        vm_set_call_result(0);
+    }
+    else if (idx == 17)
+    {
+        vm_set_call_result(VM_DF_DataPackage_In_File_Offset_ADDRESS);
+    }
+    else if (idx == 18)
+    {
+        vm_set_call_result(VM_DF_DataPackage_FilePath_ADDRESS);
+    }
+    else if (idx == 19)
+    {
+        vm_set_call_result(VM_DF_DataPackage_In_File_Length_ADDRESS);
+    }
+    else
+    {
+        printf("[impl]vmDlRsManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_dl_image_func(u32 address)
@@ -6552,28 +7015,28 @@ static bool hook_vm_dl_image_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_DL_IMAGE_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 4)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            tmp2 = vm_malloc(tmp1);
-            uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
-        }
-        else if (idx == 5)
-        {
-            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-            if (tmp1)
-                vm_free(tmp1);
-            vm_set_call_result(0);
-        }
-        else
-        {
-            printf("[impl]vmDlImageManager调用位置:%d\n", idx);
-            assert(0);
-        }
-        uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
-        vm_bx(tmp1);
-        return true;
+    u32 idx = (address - VM_DL_IMAGE_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 4)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        tmp2 = vm_malloc(tmp1);
+        uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 5)
+    {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        if (tmp1)
+            vm_free(tmp1);
+        vm_set_call_result(0);
+    }
+    else
+    {
+        printf("[impl]vmDlImageManager调用位置:%d\n", idx);
+        assert(0);
+    }
+    uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+    vm_bx(tmp1);
+    return true;
 }
 
 static bool hook_vm_video_func(u32 address)
@@ -6583,203 +7046,203 @@ static bool hook_vm_video_func(u32 address)
 
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-        u32 idx = (address - VM_VIDEO_FUNC_LIST_ADDRESS) / 4;
-        if (idx == 0)
-        {
-            printf("[call]vM_CB_ISP_ServiceOpen\n");
-            assert(0);
-        }
-        else if (idx == 1)
-        {
-            printf("[call]vM_CB_ISP_ServiceClose\n");
-            assert(0);
-        }
-        else if (idx == 2)
-        {
-            printf("[call]vM_CB_VideoParamSet\n");
-            assert(0);
-        }
-        else if (idx == 3)
-        {
-            printf("[call]vM_CB_VideoAFrameDisp\n");
-            assert(0);
-        }
-        else if (idx == 4)
-        {
-            printf("[call]vM_CB_Video_IRAM_mem_Init\n");
-            assert(0);
-        }
-        else if (idx == 5)
-        {
-            printf("[call]vM_CB_Video_IRAM_mem_malloc\n");
-            assert(0);
-        }
-        else if (idx == 6)
-        {
-            printf("[call]vM_CB_Video_IRAM_mem_Free\n");
-            assert(0);
-        }
-        else if (idx == 7)
-        {
-            printf("[call]vM_CB_Video_Iram_mem_Close\n");
-            assert(0);
-        }
-        else if (idx == 8)
-        {
-            printf("[call]vMOpenVideoMedia\n");
-            assert(0);
-        }
-        else if (idx == 9)
-        {
-            printf("[call]vMCloseVideoMedia\n");
-            assert(0);
-        }
-        else if (idx == 10)
-        {
-            printf("[call]vMStartCameraCaptureImage\n");
-            assert(0);
-        }
-        else if (idx == 11)
-        {
-            printf("[call]vMStopCameraCaptureImage\n");
-            assert(0);
-        }
-        else if (idx == 12)
-        {
-            printf("[call]vMIsDoubleCamera\n");
-            assert(0);
-        }
-        else if (idx == 13)
-        {
-            printf("[call]vMSetCamearaLocation\n");
-            assert(0);
-        }
-        else if (idx == 14)
-        {
-            printf("[call]CoolbarVideoDec_Init\n");
-            assert(0);
-        }
-        else if (idx == 15)
-        {
-            printf("[call]CoolbarVideoDecoding_Frame\n");
-            assert(0);
-        }
-        else if (idx == 16)
-        {
-            printf("[call]CoolbarVideoDec_Output\n");
-            assert(0);
-        }
-        else if (idx == 17)
-        {
-            printf("[call]CoolbarVideoDec_OutputEx\n");
-            assert(0);
-        }
-        else if (idx == 18)
-        {
-            printf("[call]CoolbarVideoDec_Parm\n");
-            assert(0);
-        }
-        else if (idx == 19)
-        {
-            printf("[call]CoolbarVideoDec_ParmEx\n");
-            assert(0);
-        }
-        else if (idx == 20)
-        {
-            printf("[call]CoolbarVideoDec_Close\n");
-            assert(0);
-        }
-        else if (idx == 21)
-        {
-            printf("[call]CoolbarVideoEnc_Init\n");
-            assert(0);
-        }
-        else if (idx == 22)
-        {
-            printf("[call]CoolbarVideoEnc_frame\n");
-            assert(0);
-        }
-        else if (idx == 23)
-        {
-            printf("[call]CoolbarVideoEnc_Close\n");
-            assert(0);
-        }
-        else if (idx == 24)
-        {
-            printf("[call]CoolbarVideoEnc_ExWH\n");
-            assert(0);
-        }
-        else if (idx == 25)
-        {
-            printf("[call]CoolBar_VPP_PicScaling\n");
-            assert(0);
-        }
-        else if (idx == 26)
-        {
-            printf("[call]CoolBar_VPP_PicUpturn\n");
-            assert(0);
-        }
-        else if (idx == 27)
-        {
-            printf("[call]vMSetCamSampTime\n");
-            assert(0);
-        }
-        else if (idx == 28)
-        {
-            printf("[call]vMIsVideoPlayerRun\n");
-            assert(0);
-        }
-        else if (idx == 29)
-        {
-            printf("[call]vMPlayVideo\n");
-            assert(0);
-        }
-        else if (idx == 30)
-        {
-            printf("[call]vMRegPlayVideoCb\n");
-            assert(0);
-        }
-        else if (idx == 31)
-        {
-            printf("[call]vMGetMediaFileInfo\n");
-            assert(0);
-        }
-        else if (idx == 32)
-        {
-            printf("[call]vMPlayStreamingVideo\n");
-            assert(0);
-        }
-        else if (idx == 33)
-        {
-            printf("[call]vMStopStreamingVideo\n");
-            assert(0);
-        }
-        else if (idx == 34)
-        {
-            printf("[call]vMSetDownloadInterface\n");
-            assert(0);
-        }
-        else if (idx == 35)
-        {
-            printf("[call]vMGetStreamingVideoHandle\n");
-            assert(0);
-        }
-        else if (idx == 36)
-        {
-            printf("[call]vMGetStreamingInfo\n");
-            assert(0);
-        }
-        else if (idx == 37)
-        {
-            printf("[call]vMStreamingFileChange\n");
-            assert(0);
-        }
-        else
-        {
-            printf("vmVideoManager位置:%d \n", idx);
-            assert(0);
-        }
-        return true;
+    u32 idx = (address - VM_VIDEO_FUNC_LIST_ADDRESS) / 4;
+    if (idx == 0)
+    {
+        printf("[call]vM_CB_ISP_ServiceOpen\n");
+        assert(0);
+    }
+    else if (idx == 1)
+    {
+        printf("[call]vM_CB_ISP_ServiceClose\n");
+        assert(0);
+    }
+    else if (idx == 2)
+    {
+        printf("[call]vM_CB_VideoParamSet\n");
+        assert(0);
+    }
+    else if (idx == 3)
+    {
+        printf("[call]vM_CB_VideoAFrameDisp\n");
+        assert(0);
+    }
+    else if (idx == 4)
+    {
+        printf("[call]vM_CB_Video_IRAM_mem_Init\n");
+        assert(0);
+    }
+    else if (idx == 5)
+    {
+        printf("[call]vM_CB_Video_IRAM_mem_malloc\n");
+        assert(0);
+    }
+    else if (idx == 6)
+    {
+        printf("[call]vM_CB_Video_IRAM_mem_Free\n");
+        assert(0);
+    }
+    else if (idx == 7)
+    {
+        printf("[call]vM_CB_Video_Iram_mem_Close\n");
+        assert(0);
+    }
+    else if (idx == 8)
+    {
+        printf("[call]vMOpenVideoMedia\n");
+        assert(0);
+    }
+    else if (idx == 9)
+    {
+        printf("[call]vMCloseVideoMedia\n");
+        assert(0);
+    }
+    else if (idx == 10)
+    {
+        printf("[call]vMStartCameraCaptureImage\n");
+        assert(0);
+    }
+    else if (idx == 11)
+    {
+        printf("[call]vMStopCameraCaptureImage\n");
+        assert(0);
+    }
+    else if (idx == 12)
+    {
+        printf("[call]vMIsDoubleCamera\n");
+        assert(0);
+    }
+    else if (idx == 13)
+    {
+        printf("[call]vMSetCamearaLocation\n");
+        assert(0);
+    }
+    else if (idx == 14)
+    {
+        printf("[call]CoolbarVideoDec_Init\n");
+        assert(0);
+    }
+    else if (idx == 15)
+    {
+        printf("[call]CoolbarVideoDecoding_Frame\n");
+        assert(0);
+    }
+    else if (idx == 16)
+    {
+        printf("[call]CoolbarVideoDec_Output\n");
+        assert(0);
+    }
+    else if (idx == 17)
+    {
+        printf("[call]CoolbarVideoDec_OutputEx\n");
+        assert(0);
+    }
+    else if (idx == 18)
+    {
+        printf("[call]CoolbarVideoDec_Parm\n");
+        assert(0);
+    }
+    else if (idx == 19)
+    {
+        printf("[call]CoolbarVideoDec_ParmEx\n");
+        assert(0);
+    }
+    else if (idx == 20)
+    {
+        printf("[call]CoolbarVideoDec_Close\n");
+        assert(0);
+    }
+    else if (idx == 21)
+    {
+        printf("[call]CoolbarVideoEnc_Init\n");
+        assert(0);
+    }
+    else if (idx == 22)
+    {
+        printf("[call]CoolbarVideoEnc_frame\n");
+        assert(0);
+    }
+    else if (idx == 23)
+    {
+        printf("[call]CoolbarVideoEnc_Close\n");
+        assert(0);
+    }
+    else if (idx == 24)
+    {
+        printf("[call]CoolbarVideoEnc_ExWH\n");
+        assert(0);
+    }
+    else if (idx == 25)
+    {
+        printf("[call]CoolBar_VPP_PicScaling\n");
+        assert(0);
+    }
+    else if (idx == 26)
+    {
+        printf("[call]CoolBar_VPP_PicUpturn\n");
+        assert(0);
+    }
+    else if (idx == 27)
+    {
+        printf("[call]vMSetCamSampTime\n");
+        assert(0);
+    }
+    else if (idx == 28)
+    {
+        printf("[call]vMIsVideoPlayerRun\n");
+        assert(0);
+    }
+    else if (idx == 29)
+    {
+        printf("[call]vMPlayVideo\n");
+        assert(0);
+    }
+    else if (idx == 30)
+    {
+        printf("[call]vMRegPlayVideoCb\n");
+        assert(0);
+    }
+    else if (idx == 31)
+    {
+        printf("[call]vMGetMediaFileInfo\n");
+        assert(0);
+    }
+    else if (idx == 32)
+    {
+        printf("[call]vMPlayStreamingVideo\n");
+        assert(0);
+    }
+    else if (idx == 33)
+    {
+        printf("[call]vMStopStreamingVideo\n");
+        assert(0);
+    }
+    else if (idx == 34)
+    {
+        printf("[call]vMSetDownloadInterface\n");
+        assert(0);
+    }
+    else if (idx == 35)
+    {
+        printf("[call]vMGetStreamingVideoHandle\n");
+        assert(0);
+    }
+    else if (idx == 36)
+    {
+        printf("[call]vMGetStreamingInfo\n");
+        assert(0);
+    }
+    else if (idx == 37)
+    {
+        printf("[call]vMStreamingFileChange\n");
+        assert(0);
+    }
+    else
+    {
+        printf("vmVideoManager位置:%d \n", idx);
+        assert(0);
+    }
+    return true;
 }
 static void hook_vm_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
@@ -6959,12 +7422,16 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 {
     uc_hook hook;
     uc_err err;
-#define ADD_MANAGER_CODE_HOOK_RANGE(begin, end, cb) \
-    do \
-    { \
+    err = uc_hook_add(uc, &hook, UC_HOOK_CODE, hook_vm_pool_code_callback, NULL,
+                      VM_Memory_Pool_ADDRESS, VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE - 1);
+    if (err != UC_ERR_OK)
+        return err;
+#define ADD_MANAGER_CODE_HOOK_RANGE(begin, end, cb)                       \
+    do                                                                    \
+    {                                                                     \
         err = uc_hook_add(uc, &hook, UC_HOOK_CODE, cb, NULL, begin, end); \
-        if (err != UC_ERR_OK) \
-            return err; \
+        if (err != UC_ERR_OK)                                             \
+            return err;                                                   \
     } while (0)
 #define ADD_MANAGER_CODE_HOOK(begin, cb) ADD_MANAGER_CODE_HOOK_RANGE(begin, begin + VM_MANAGER_FUNC_LIST_SIZE - 1, cb)
 
@@ -6997,6 +7464,9 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
     ADD_MANAGER_CODE_HOOK(VM_DL_RS_FUNC_LIST_ADDRESS, hook_vm_dl_rs_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_DL_IMAGE_FUNC_LIST_ADDRESS, hook_vm_dl_image_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_VIDEO_FUNC_LIST_ADDRESS, hook_vm_video_code_callback);
+    /* Narrow game startup install check hook.  LCD text tracing maps the visible
+     * "正在安装中/获取版本信息" states back to 0103b15a -> 0103b07c.
+     */
     ADD_MANAGER_CODE_HOOK_RANGE(0x0103b07c, 0x0103b07d, hook_game_install_check_func_callback);
     ADD_MANAGER_CODE_HOOK_RANGE(0x0103b15a, 0x0103b15b, hook_game_install_check_flag_callback);
 
@@ -7049,7 +7519,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         return;
     }
     u32 tracePc = (u32)address & ~1u;
-    if (tracePc == 0x10035a2 || tracePc == 0x100369c || tracePc == 0x103489a || tracePc == 0x103b2d6 ||
+    if (tracePc == 0x10035a2 || tracePc == 0x100369c || tracePc == 0x1003cfc || tracePc == 0x103489a || tracePc == 0x103b2d6 ||
         tracePc == 0x103b45a || tracePc == 0x103b4aa || tracePc == 0x103b4f4 || tracePc == 0x103b51a ||
         tracePc == 0x103b584 || tracePc == 0x103b59a || tracePc == 0x103b620 || tracePc == 0x103b684 ||
         tracePc == 0x10346e0 || tracePc == 0x103467a || tracePc == 0x10346c6 || tracePc == 0x10346cc ||
@@ -7059,15 +7529,28 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         tracePc == 0x103755e || tracePc == 0x103757e || tracePc == 0x1037588 || tracePc == 0x1037598 ||
         tracePc == 0x10372d6 || tracePc == 0x103730e || tracePc == 0x1037318 || tracePc == 0x1037324 ||
         tracePc == 0x1037334 || tracePc == 0x1037348 || tracePc == 0x1037358 || tracePc == 0x1037378 ||
-        tracePc == 0x103745e)
+        tracePc == 0x103745e || tracePc == 0x1044a12 || tracePc == 0x1044a54 || tracePc == 0x1044aa8 ||
+        tracePc == 0x1004f54 || tracePc == 0x1004f8a || tracePc == 0x1004e9c)
     {
-        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, lr = 0;
+        u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, lr = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
         uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
         uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        uc_reg_read(MTK, UC_ARM_REG_R4, &r4);
         uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
         vm_net_trace("pc_trace pc=%08x r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n", tracePc, r0, r1, r2, r3, lr);
+        if (tracePc == 0x1004f8a || tracePc == 0x1004e9c)
+        {
+            u32 actor = (tracePc == 0x1004e9c) ? r0 : r4;
+            u32 actorData = 0, animTable = 0;
+            if (actor)
+                uc_mem_read(MTK, actor + 0x0c, &actorData, 4);
+            if (actorData)
+                uc_mem_read(MTK, actorData + 0x0c, &animTable, 4);
+            vm_net_trace("actor_trace pc=%08x actor=%08x actorData=%08x animTable=%08x lr=%08x\n",
+                         tracePc, actor, actorData, animTable, lr);
+        }
         if (tracePc == 0x1033b9a && r1)
         {
             u8 bytes[16] = {0};

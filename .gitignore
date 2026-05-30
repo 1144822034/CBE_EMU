@@ -11,4 +11,5 @@ build
 obj
 *.err
 *.log
+*.out
 bin/JHOnlineData

@@ -13,6 +13,7 @@ typedef struct fontChar
 
 void InitFontEngine();
 int getFontWidth();
+int getFontCellWidth();
 int getFontHeight();
 u8 getFontBitMap(u16 unicode, char *bitmapData);
 void drawFontChar(u16 unicode, int x, int y, u16 color);

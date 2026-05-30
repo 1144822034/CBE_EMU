@@ -1644,8 +1644,10 @@ void vm_DF_GetMemoryBlock()
 void vm_initMemoryBlock(p_g_memoryBlock, size)
 {
     int tmp1, tmp2, tmp3, tmp4;
-    // p_g_memoryBlock[0] = 新的内存块地址
-    tmp1 = VM_MF_MemoryBlock_POOL_ADDRESS;
+    // p_g_memoryBlock[0] = 新的内存块地址。全局块使用固定池；其它块需要独立
+    // backing storage，避免多个 MemoryBlock 互相覆盖 actor/资源解析结果。
+    tmp1 = (p_g_memoryBlock == VM_MemoryBlock_PTR_ADDRESS) ? VM_MF_MemoryBlock_POOL_ADDRESS : vm_malloc(size);
+    VM_RESOURCE_TRACE("memory_block_init ptr=%08x base=%08x size=%08x\n", p_g_memoryBlock, tmp1, size);
     uc_mem_write(MTK, p_g_memoryBlock, &tmp1, 4);
     // p_g_memoryBlock[1] = offset
     tmp1 = 0;
@@ -1685,19 +1687,7 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
 
 void vm_MF_MemoryBlock_Reset(int a1)
 {
-    int tmp;
-    int size;
-    u32 v;
-    uc_mem_read(MTK, a1, &tmp, 4);
-    uc_mem_read(MTK, a1 + 8, &size, 4);
-
-    for (int i = 0; i < size; i++)
-    {
-        v = 0;
-        uc_mem_write(MTK, tmp + i, &v, 1);
-    }
-
-    v = 0;
+    u32 v = 0;
     uc_mem_write(MTK, a1 + 4, &v, 4); // offset重置为0
     return vm_set_call_result(v);
 }
@@ -1744,8 +1734,8 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
         {
             u32 file_id = 0; // 第一次应该返回0x1c
             uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
-            VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d index=%d local=1\n",
-                              a1, traceName, (int16_t)file_id, i);
+            VM_RESOURCE_TRACE("df_get_file_id hit pkg=%08x name=%s id=%d index=%d local=1 str=%08x names=%08x ids=%08x count=%d\n",
+                              a1, traceName, (int16_t)file_id, i, str_ptr, base_ptr, id_base, count1);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
         }
@@ -2600,11 +2590,12 @@ void vm_IMG_CreateImageFormRes(u32 a1)
         }
         else
         {
-            // Data = (*(_DWORD *)(DataPackage[4] + 4 * a1) + DataPackage[6]);
-            // todo
-            uc_mem_read(MTK, DataPackage + 16 + 4 * a1, &tmp1, 4);
-            uc_mem_read(MTK, DataPackage + 6 * 4, &tmp2, 4);
-            Data = tmp1 + tmp2;
+            u32 dataBase = 0;
+            u32 offsetBase = 0;
+            uc_mem_read(MTK, DataPackage + 16, &dataBase, 4);
+            uc_mem_read(MTK, DataPackage + 24, &offsetBase, 4);
+            uc_mem_read(MTK, dataBase + 4 * a1, &tmp1, 4);
+            Data = tmp1 + offsetBase;
         }
         VM_RESOURCE_TRACE("img_create_res id=%u dataPackage=%08x flag=%u data=%08x\n", a1, DataPackage, tmp2, Data);
         return vm_IMG_CreateImageFormStream(Data, 0);

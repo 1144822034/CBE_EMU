@@ -37,6 +37,11 @@ inline int getFontHeight()
 {
     return fontHeight;
 }
+
+inline int getFontCellWidth()
+{
+    return fontWidth / 2;
+}
 // 一个字符32字节，16x16大小，一行16个像素点就是2字节，所以16x16就是32字节
 u8 getFontBitMap(u16 gbCode, char *bitmapData)
 {
@@ -57,18 +62,25 @@ u8 getFontBitMap(u16 gbCode, char *bitmapData)
 void drawFontChar(u16 gbCode, int x, int y, u16 color)
 {
     char *bitMapData = SDL_malloc(bitmapDataSize);
+    if (bitMapData == NULL)
+        return;
     if (getFontBitMap(gbCode, bitMapData))
     {
         for (int j = 0; j < fontHeight; j++)
         {
+            int py = y + j;
+            if (py < 0 || py >= LCD_HEIGHT)
+                continue;
             for (int i = 0; i < fontWidth; i++)
             {
+                int px = x + i;
+                if (px < 0 || px >= LCD_WIDTH)
+                    continue;
                 int byteIndex = j * linePitch + i / 8;
                 int bitIndex = 7 - (i % 8);
                 if ((bitMapData[byteIndex] >> bitIndex) & 1)
                 {
-                    // 设置像素点
-                    int offset = (y + j) * LCD_WIDTH + (x + i);
+                    int offset = py * LCD_WIDTH + px;
                     ((u16 *)Lcd_Cache_Buffer)[offset] = color;
                 }
             }
@@ -94,13 +106,15 @@ void drawFontString(u8 *gbkStr, int x, int y, u16 color)
             break;
         else if (c < 0x80)
         {
-            drawFontChar((c << 8), x + (ri++) * fontWidth, y, color);
+            drawFontChar((c << 8), x + ri, y, color);
+            ri += getFontCellWidth();
             i += 1;
         }
         else
         {
             c = (gbkStr[i] ) | (gbkStr[i + 1]<< 8);
-            drawFontChar(c, x + (ri++) * fontWidth, y, color);
+            drawFontChar(c, x + ri, y, color);
+            ri += fontWidth;
             i += 2;
         }
     }
@@ -108,6 +122,7 @@ void drawFontString(u8 *gbkStr, int x, int y, u16 color)
 
 int mesureStringWidth(char *gbkStr)
 {
-    int len = strlen_gbk(gbkStr);
-    return len * getFontWidth();
+    if (gbkStr == NULL)
+        return 0;
+    return (int)strlen(gbkStr) * getFontCellWidth();
 }

@@ -96,18 +96,12 @@ int strcpy_utf16(u16 *dst, u16 *src)
  */
 int strlen_gbk(u8 *s)
 {
-    int strict = 0;
     if (s == NULL)
         return 0;
-    u32 bytes = strlen_utf16((u16 *)s) * 2;
     u32 i = 0;
     u32 count = 0;
-    int remaining = 0;
-    while (i < bytes)
+    while (s[i] != 0)
     {
-        remaining = bytes - i;
-        if (remaining == 0)
-            break;
         u8 b1 = s[i];
         if (b1 < 0x80)
         {
@@ -117,18 +111,15 @@ int strlen_gbk(u8 *s)
         /* GBK 双字节首字节范围 0x81 - 0xFE */
         else if (b1 >= 0x81 && b1 <= 0xFE)
         {
-            if (remaining < 2)
-            {
-                printf("[1]未识别的GBK字符编码：%x\n", b1);
+            if (s[i + 1] == 0)
                 break; /* 不足两字节 -> 不完整 */
-            }
-            u8 b2 = s[i + 1];
             count += 1;
             i += 2;
         }
         else
         {
-            printf("[3]未识别的GBK字符编码：%x\n", b1);
+            count += 1;
+            i += 1;
             break;
         }
     }

@@ -3,6 +3,7 @@
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
+bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
 void handleLcdReg(uint64_t address, u32 data, uint64_t value);
 void handleTouchScreenReg(uint64_t address, u32 data, uint64_t value);
 
@@ -105,7 +106,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     //     printf(" at %x\n", lastAddress);
     // }
 }
-void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
+bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
     dumpCpuInfo();
@@ -128,6 +129,7 @@ void hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
     if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)
         dumpVirtMemory(sp - 64, 128);
     assert(0);
+    return false;
 }
 void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
 {
