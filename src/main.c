@@ -116,6 +116,16 @@ int simulateTouchUp = 0;
 int simulateTouchDrag = 0;
 int simulateTouchX = 0;
 int simulateTouchY = 0;
+static int g_vmInputOpen = 0;
+static int g_vmInputPassword = 0;
+static u32 g_vmInputCallback = 0;
+static u32 g_vmInputBuffer = 0;
+static u32 g_vmInputMaxLen = 0;
+static u32 g_vmInputInputType = 0;
+static int g_vmInputOverlayX = 12;
+static int g_vmInputOverlayY = 348;
+static int g_vmInputOverlayW = 216;
+static int g_vmInputOverlayH = 22;
 static int g_autoTouchConfigured = 0;
 static int g_autoTouchFired = 0;
 static u32 g_autoTouchTick = 0;
@@ -1555,6 +1565,8 @@ static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
     return vm_set_call_result(copyLen);
 }
 
+static uc_err scheduler_dispatch_input_event(vm_event *evt);
+
 static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
 {
     simulateKey = 0;
@@ -1566,6 +1578,9 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
     vm_event *evt = DequeueVMEvent();
     if (evt == NULL)
         return UC_ERR_OK;
+
+    if (evt->event == VM_EVENT_INPUT_CHAR || evt->event == VM_EVENT_INPUT_BACKSPACE || evt->event == VM_EVENT_INPUT_DONE)
+        return scheduler_dispatch_input_event(evt);
 
     if (evt->event == VM_EVENT_KEYBOARD)
     {
@@ -1603,6 +1618,223 @@ static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screen
     }
 
     return UC_ERR_OK;
+}
+
+static u32 vm_input_read_u16(u32 addr)
+{
+    u16 value = 0;
+    if (addr)
+        uc_mem_read(MTK, addr, &value, sizeof(value));
+    return value;
+}
+
+static void vm_input_write_u16(u32 addr, u16 value)
+{
+    if (addr)
+        uc_mem_write(MTK, addr, &value, sizeof(value));
+}
+
+static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen);
+
+static void vm_lcd_fill_rect_local(int x, int y, int w, int h, u16 color)
+{
+    if (x < 0)
+    {
+        w += x;
+        x = 0;
+    }
+    if (y < 0)
+    {
+        h += y;
+        y = 0;
+    }
+    if (x + w > LCD_WIDTH)
+        w = LCD_WIDTH - x;
+    if (y + h > LCD_HEIGHT)
+        h = LCD_HEIGHT - y;
+    if (w <= 0 || h <= 0)
+        return;
+
+    for (int row = 0; row < h; ++row)
+    {
+        u32 off = (y + row) * LCD_WIDTH + x;
+        for (int col = 0; col < w; ++col)
+            ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+    }
+}
+
+static void vm_lcd_draw_rect_local(int x, int y, int w, int h, u16 color)
+{
+    vm_lcd_fill_rect_local(x, y, w, 1, color);
+    vm_lcd_fill_rect_local(x, y + h - 1, w, 1, color);
+    vm_lcd_fill_rect_local(x, y, 1, h, color);
+    vm_lcd_fill_rect_local(x + w - 1, y, 1, h, color);
+}
+
+static void vm_input_draw_overlay(void)
+{
+    if (!g_vmInputOpen || !g_vmInputBuffer)
+        return;
+
+    u32 len = vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen ? g_vmInputMaxLen : 0x100);
+    u32 srcBytes = (len + 1) * 2;
+    if (srcBytes > mySizeOf(cbeTextString))
+        srcBytes = mySizeOf(cbeTextString);
+    uc_mem_read(MTK, g_vmInputBuffer, cbeTextString, srcBytes);
+
+    memset(sprintfBuff, 0, mySizeOf(sprintfBuff));
+    if (g_vmInputPassword)
+    {
+        u32 maskLen = len < 30 ? len : 30;
+        memset(sprintfBuff, '*', maskLen);
+        sprintfBuff[maskLen] = 0;
+    }
+    else
+    {
+        ucs2_to_gbk(cbeTextString, srcBytes, sprintfBuff, mySizeOf(sprintfBuff));
+    }
+
+    int x = g_vmInputOverlayX;
+    int y = g_vmInputOverlayY;
+    int w = g_vmInputOverlayW;
+    int h = g_vmInputOverlayH;
+    vm_lcd_fill_rect_local(x, y, w, h, 0x0148);
+    vm_lcd_draw_rect_local(x, y, w, h, 0x9fe6);
+    vm_lcd_draw_rect_local(x + 1, y + 1, w - 2, h - 2, 0x2b6d);
+    u8 hintGbk[64] = {0};
+    utf8_to_gbk((u8 *)"已进入输入状态", hintGbk, sizeof(hintGbk));
+    drawFontString(hintGbk, x + 4, y - 18, 0xffe0);
+    drawFontString(sprintfBuff, x + 5, y + 4, 0xffff);
+    if ((clock() / (CLOCKS_PER_SEC / 2)) % 2 == 0)
+    {
+        int caretX = x + 6 + mesureStringWidth((char *)sprintfBuff);
+        if (caretX > x + w - 8)
+            caretX = x + w - 8;
+        vm_lcd_fill_rect_local(caretX, y + 4, 1, h - 8, 0xffff);
+    }
+}
+
+static void vm_lcd_update_with_input_overlay(void)
+{
+    vm_input_draw_overlay();
+    UpdateLcd();
+}
+
+static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
+{
+    if (!addr || maxLen == 0)
+        return 0;
+
+    for (u32 i = 0; i < maxLen; ++i)
+    {
+        if (vm_input_read_u16(addr + i * 2) == 0)
+            return i;
+    }
+    return maxLen;
+}
+
+static void vm_input_append_char(u32 ch)
+{
+    if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen <= 1)
+        return;
+
+    if (ch < 0x20 || ch > 0x7e)
+        return;
+
+    u32 len = vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen);
+    if (len + 1 >= g_vmInputMaxLen)
+        return;
+
+    vm_input_write_u16(g_vmInputBuffer + len * 2, (u16)ch);
+    vm_input_write_u16(g_vmInputBuffer + (len + 1) * 2, 0);
+}
+
+static void vm_input_backspace(void)
+{
+    if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen == 0)
+        return;
+
+    u32 len = vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen);
+    if (len == 0)
+        return;
+
+    vm_input_write_u16(g_vmInputBuffer + (len - 1) * 2, 0);
+}
+
+static uc_err vm_input_finish(u32 result)
+{
+    if (!g_vmInputOpen)
+        return UC_ERR_OK;
+
+    u32 callback = g_vmInputCallback;
+    u32 buffer = g_vmInputBuffer;
+    g_vmInputOpen = 0;
+    g_vmInputCallback = 0;
+    g_vmInputBuffer = 0;
+    g_vmInputMaxLen = 0;
+    g_vmInputInputType = 0;
+    g_vmInputPassword = 0;
+
+    if (!callback)
+        return UC_ERR_OK;
+
+    return vm_call4_preserve_regs(callback, result ? 1 : 0, buffer, callback, 0);
+}
+
+static uc_err scheduler_dispatch_input_event(vm_event *evt)
+{
+    if (evt->event == VM_EVENT_INPUT_CHAR)
+    {
+        vm_input_append_char(evt->r0);
+        return UC_ERR_OK;
+    }
+    if (evt->event == VM_EVENT_INPUT_BACKSPACE)
+    {
+        vm_input_backspace();
+        return UC_ERR_OK;
+    }
+    if (evt->event == VM_EVENT_INPUT_DONE)
+        return vm_input_finish(evt->r0);
+
+    return UC_ERR_OK;
+}
+
+static void vm_input_open(u32 callback, u32 param, int password)
+{
+    if (!callback || !param)
+    {
+        printf("[vmInput] invalid callback=%08x param=%08x\n", callback, param);
+        assert(0);
+    }
+
+    u32 buffer = 0;
+    u32 maxLen = 0;
+    u32 prompt = 0;
+    u32 inputType = 0;
+    uc_mem_read(MTK, param, &buffer, 4);
+    uc_mem_read(MTK, param + 4, &maxLen, 4);
+    uc_mem_read(MTK, param + 8, &prompt, 4);
+    uc_mem_read(MTK, param + 12, &inputType, 4);
+
+    if (!buffer || maxLen == 0)
+    {
+        printf("[vmInput] invalid buffer=%08x maxLen=%u param=%08x\n", buffer, maxLen, param);
+        assert(0);
+    }
+
+    g_vmInputOpen = 1;
+    g_vmInputPassword = password ? 1 : 0;
+    g_vmInputCallback = callback;
+    g_vmInputBuffer = buffer;
+    g_vmInputMaxLen = maxLen & 0xffff;
+    if (g_vmInputMaxLen == 0)
+        g_vmInputMaxLen = maxLen;
+    g_vmInputInputType = inputType & 0xff;
+    g_vmInputOverlayX = 12;
+    g_vmInputOverlayY = password ? 372 : 344;
+    g_vmInputOverlayW = 216;
+    g_vmInputOverlayH = 22;
+    vm_set_call_result(1);
 }
 
 static uc_err scheduler_tick(void)
@@ -1748,6 +1980,19 @@ void loop()
             switch (ev.type)
             {
             case SDL_KEYDOWN:
+                if (g_vmInputOpen)
+                {
+                    SDL_Keycode key = ev.key.keysym.sym;
+                    if (key == SDLK_RETURN || key == SDLK_KP_ENTER)
+                        EnqueueVMEvent(VM_EVENT_INPUT_DONE, 0, 0);
+                    else if (key == SDLK_ESCAPE)
+                        EnqueueVMEvent(VM_EVENT_INPUT_DONE, 1, 0);
+                    else if (key == SDLK_BACKSPACE)
+                        EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
+                    else if (key >= 0x20 && key <= 0x7e)
+                        EnqueueVMEvent(VM_EVENT_INPUT_CHAR, key, 0);
+                    break;
+                }
                 if (isKeyDown == SDLK_UNKNOWN)
                 {
                     isKeyDown = ev.key.keysym.sym;
@@ -1755,6 +2000,8 @@ void loop()
                 }
                 break;
             case SDL_KEYUP:
+                if (g_vmInputOpen)
+                    break;
                 if (isKeyDown == ev.key.keysym.sym)
                 {
                     isKeyDown = SDLK_UNKNOWN;
@@ -2158,7 +2405,7 @@ void RunArmProgram(void *param)
                 p = vm_emu_start(tScreenRenderEntry, exitAddr);
                 if (p != UC_ERR_OK)
                     break;
-                UpdateLcd();
+                vm_lcd_update_with_input_overlay();
                 SDL_Delay(100);
             }
         }
@@ -2234,6 +2481,15 @@ void RunArmProgram(void *param)
                     vm_event *evt = DequeueVMEvent();
                     if (evt != NULL)
                     {
+                        if (evt->event == VM_EVENT_INPUT_CHAR || evt->event == VM_EVENT_INPUT_BACKSPACE || evt->event == VM_EVENT_INPUT_DONE)
+                        {
+                            p = scheduler_dispatch_input_event(evt);
+                            if (p != UC_ERR_OK)
+                            {
+                                printf("SCR_Input异常:%s\n", uc_strerror(p));
+                                assert(0);
+                            }
+                        }
                         if (evt->event == VM_EVENT_KEYBOARD || evt->event == VM_EVENT_TOUCHSCREEN)
                         {
                             if (evt->event == VM_EVENT_KEYBOARD)
@@ -2256,8 +2512,10 @@ void RunArmProgram(void *param)
                                 u32 eventArg = 0;
                                 if (evt->event == VM_EVENT_KEYBOARD)
                                 {
-                                    eventType = evt->r1 ? MR_KEY_PRESS : MR_KEY_RELEASE;
-                                    eventArg = evt->r0;
+                                    u32 keyMask = evt->r0 < 31 ? (1u << evt->r0) : 0;
+                                    eventType = evt->r1 ? 0 : 1;
+                                    eventArg = vm_malloc_var();
+                                    vm_set_var(eventArg, keyMask);
                                 }
                                 else
                                 {
@@ -2271,7 +2529,7 @@ void RunArmProgram(void *param)
                                 uc_reg_write(MTK, UC_ARM_REG_R1, &eventType);
                                 uc_reg_write(MTK, UC_ARM_REG_R2, &eventArg);
                                 p = vm_emu_start(screenLogicEntry, exitAddr);
-                                if (evt->event == VM_EVENT_TOUCHSCREEN)
+                                if (evt->event == VM_EVENT_KEYBOARD || evt->event == VM_EVENT_TOUCHSCREEN)
                                     vm_free_var(eventArg);
                                 if (p != UC_ERR_OK)
                                 {
@@ -2313,7 +2571,7 @@ void RunArmProgram(void *param)
                             assert(0);
                         }
                     }
-                    UpdateLcd();
+                    vm_lcd_update_with_input_overlay();
                     SDL_Delay(100);
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
@@ -2444,7 +2702,7 @@ int main(int argc, char *args[])
 
     InitVmMalloc();
     InitLcd();
-    UpdateLcd();
+    vm_lcd_update_with_input_overlay();
     InitFontEngine();
 
     if (err)
@@ -3177,19 +3435,29 @@ return 4;
     }
     else if (idx == 43)
     {
-        vm_set_call_result(1);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_input_open(tmp1, tmp2, 0);
     }
     else if (idx == 44)
     {
-        vm_set_call_result(1);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_input_open(tmp1, tmp2, 1);
     }
     else if (idx == 45)
     {
+        g_vmInputOpen = 0;
+        g_vmInputCallback = 0;
+        g_vmInputBuffer = 0;
+        g_vmInputMaxLen = 0;
+        g_vmInputInputType = 0;
+        g_vmInputPassword = 0;
         vm_set_call_result(0);
     }
     else if (idx == 46)
     {
-        vm_set_call_result(0);
+        vm_set_call_result(g_vmInputOpen ? 1 : 0);
     }
     else if (idx == 47)
     {
@@ -3730,7 +3998,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 3)
     {
-        UpdateLcd();
+        vm_lcd_update_with_input_overlay();
         vm_set_call_result(0);
     }
     else if (idx == 4)
@@ -4249,8 +4517,33 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 40)
     {
-        printf("[call]vMUCS2GB\n");
-        assert(0);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); // src UCS2
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); // dst GBK
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); // dst max bytes
+        if (tmp1 == 0 || tmp2 == 0 || tmp3 == 0 || tmp3 > 0xfff0)
+        {
+            vm_set_call_result(0);
+        }
+        else
+        {
+            u32 ucs2Len = vm_input_wcslen_limit(tmp1, 0x7ff8);
+            u32 srcBytes = (ucs2Len + 1) * 2;
+            if (srcBytes > mySizeOf(cbeTextString))
+                srcBytes = mySizeOf(cbeTextString);
+            uc_mem_read(MTK, tmp1, cbeTextString, srcBytes);
+
+            u32 outLen = tmp3;
+            if (outLen > mySizeOf(sprintfBuff))
+                outLen = mySizeOf(sprintfBuff);
+            int conv = ucs2_to_gbk(cbeTextString, srcBytes, sprintfBuff, outLen);
+            if (conv < 0)
+            {
+                sprintfBuff[0] = 0;
+                outLen = 1;
+            }
+            uc_mem_write(MTK, tmp2, sprintfBuff, outLen);
+            vm_set_call_result(strlen((char *)sprintfBuff));
+        }
     }
     else if (idx == 41)
     {
