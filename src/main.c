@@ -4517,7 +4517,6 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 9)
     {
-        // todo
         DEBUG_PRINT("[call]vMGetStringHeight\n");
         tmp1 = 18;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
@@ -8561,6 +8560,28 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             }
             vm_net_trace("net_wrapper_state pc=%08x mgr=%08x mgrState=%u mgrCb14=%08x mgrCb44=%08x cur=%08x curState=%u curCb14=%08x curCb44=%08x r7=%08x\n",
                          tracePc, netObj, state, cb14, cb44, g_netCurrentObject, curState, curCb14, curCb44, r7);
+        }
+        if (tracePc == 0x103b15a || tracePc == 0x103b162 || tracePc == 0x103b176 || tracePc == 0x103b198)
+        {
+            u32 startupObj = 0;
+            u32 updateInfo = 0;
+            u8 localFlag = 0xff;
+            u8 state = 0xff;
+            u16 stateDetail = 0;
+            u8 hasLocalUpdate = 0;
+            u8 updateState = 0;
+            uc_mem_read(MTK, Global_R9 + 0x9928 + 0x10, &startupObj, 4);
+            uc_mem_read(MTK, Global_R9 + 0x9928 + 0x0c, &updateInfo, 4);
+            uc_mem_read(MTK, Global_R9 + 0x5496, &hasLocalUpdate, 1);
+            uc_mem_read(MTK, Global_R9 + 0x4cb6, &updateState, 1);
+            if (startupObj)
+            {
+                uc_mem_read(MTK, startupObj + 0x140, &localFlag, 1);
+                uc_mem_read(MTK, startupObj + 0x3d, &state, 1);
+                uc_mem_read(MTK, startupObj + 0x160, &stateDetail, 2);
+            }
+            vm_net_trace("startup_install_decision pc=%08x startupObj=%08x updateInfo=%08x localFlag=%u state=%u detail=%04x hasLocalUpdate=%u updateState=%u r0=%08x r1=%08x lr=%08x\n",
+                         tracePc, startupObj, updateInfo, localFlag, state, stateDetail, hasLocalUpdate, updateState, r0, r1, lr);
         }
         if (tracePc == 0x100015c || tracePc == 0x1000164 || tracePc == 0x1000166 ||
             tracePc == 0x1000172 || tracePc == 0x100017c)

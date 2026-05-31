@@ -206,6 +206,57 @@ int vm_memcpy(int dstAddr, int srcAddr, int len)
     uc_mem_read(MTK, srcAddr, &buff, len);
     uc_mem_write(MTK, dstAddr, &buff, len);
 }
+
+static void vm_file_normalize_host_path(const char *src, char *dst, size_t dstSize)
+{
+    size_t pos = 0;
+    if (dstSize == 0)
+        return;
+    dst[0] = 0;
+    if (src == NULL)
+        return;
+
+    while (*src == '\\' || *src == '/')
+        ++src;
+    if (src[0] == '.' && (src[1] == '\\' || src[1] == '/'))
+    {
+        src += 2;
+        while (*src == '\\' || *src == '/')
+            ++src;
+    }
+
+    while (*src && pos + 1 < dstSize)
+    {
+        char ch = *src++;
+        if (ch == '\\')
+            ch = '/';
+        dst[pos++] = ch;
+    }
+    while (pos > 1 && dst[pos - 1] == '/')
+        --pos;
+    dst[pos] = 0;
+}
+
+static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
+{
+    u8 rawName[256];
+    memset(out, 0, outSize);
+    if (outSize == 0)
+        return;
+    uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
+    if (rawName[0] != 0 && rawName[1] == 0)
+    {
+        u32 ucs2Len = 0;
+        while (ucs2Len + 1 < sizeof(rawName) && (rawName[ucs2Len] != 0 || rawName[ucs2Len + 1] != 0))
+            ucs2Len += 2;
+        ucs2_to_gbk(rawName, ucs2Len, out, outSize);
+    }
+    else
+    {
+        vm_read_string_by_ptr_limited(namePtr, out, outSize);
+    }
+}
+
 static int vm_is_pseudo_dir_path(const char *nameBuf)
 {
     char normalized[256];
@@ -218,17 +269,8 @@ static int vm_is_pseudo_dir_path(const char *nameBuf)
     if (strcmp(nameBuf, "./") == 0 || strcmp(nameBuf, ".\\") == 0)
         return 1;
 
-    len = strlen(nameBuf);
-    if (len >= sizeof(normalized))
-        len = sizeof(normalized) - 1;
-    memcpy(normalized, nameBuf, len);
-    normalized[len] = 0;
-
-    for (size_t i = 0; normalized[i]; ++i)
-    {
-        if (normalized[i] == '\\')
-            normalized[i] = '/';
-    }
+    vm_file_normalize_host_path(nameBuf, normalized, sizeof(normalized));
+    len = strlen(normalized);
 
     while (len > 0 && (normalized[len - 1] == '/' || normalized[len - 1] == '\\'))
         normalized[--len] = 0;
@@ -273,12 +315,14 @@ static int vm_file_mode_is_writeable(const char *mode)
 
 static void vm_file_make_dir(const char *path)
 {
-    if (path == NULL || path[0] == 0 || strcmp(path, ".") == 0)
+    char normalized[256];
+    vm_file_normalize_host_path(path, normalized, sizeof(normalized));
+    if (normalized[0] == 0 || strcmp(normalized, ".") == 0)
         return;
 #ifdef _WIN32
-    _mkdir(path);
+    _mkdir(normalized);
 #else
-    mkdir(path, 0755);
+    mkdir(normalized, 0755);
 #endif
 }
 
@@ -349,8 +393,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
 {
     int handle = -1;
     char binaryMode[8];
+    char normalizedName[256];
     const char *openMode = mode;
-    if (vm_file_ext_requires_binary(nameBuf) && mode && strchr(mode, 'b') == NULL)
+    vm_file_normalize_host_path(nameBuf, normalizedName, sizeof(normalizedName));
+    if (normalizedName[0] == 0)
+        snprintf(normalizedName, sizeof(normalizedName), "%s", nameBuf);
+    if (vm_file_ext_requires_binary(normalizedName) && mode && strchr(mode, 'b') == NULL)
     {
         snprintf(binaryMode, sizeof(binaryMode), "%sb", mode);
         openMode = binaryMode;
@@ -359,28 +407,28 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
     {
         if (openFileList[i] == NULL)
         {
-            if (vm_is_pseudo_dir_path(nameBuf))
+            if (vm_is_pseudo_dir_path(normalizedName))
             {
                 openFileList[i] = VM_PSEUDO_DIR_HANDLE;
-                snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", nameBuf);
+                snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
                 return i;
             }
-            FILE *f = fopen(nameBuf, openMode);
+            FILE *f = fopen(normalizedName, openMode);
             if (f == NULL && vm_file_mode_is_writeable(openMode))
             {
-                vm_file_ensure_parent_dirs(nameBuf);
-                f = fopen(nameBuf, openMode);
+                vm_file_ensure_parent_dirs(normalizedName);
+                f = fopen(normalizedName, openMode);
                 if (f == NULL)
-                    f = fopen(nameBuf, "wb+");
+                    f = fopen(normalizedName, "wb+");
             }
             if (f == NULL)
             {
-                vm_fileio_trace("file_open_fail path=%s mode=%s\n", nameBuf, openMode);
+                vm_fileio_trace("file_open_fail path=%s mode=%s\n", normalizedName, openMode);
                 return -1;
             }
             openFileList[i] = f;
-            snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", nameBuf);
-            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, nameBuf, openMode);
+            snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
+            vm_fileio_trace("file_open handle=%d path=%s mode=%s\n", i, normalizedName, openMode);
             return i;
         }
     }
@@ -391,10 +439,13 @@ int vm_dir_exists(int a1)
     if (a1 == 0)
         return vm_set_call_result(0);
     char nameBuf[1024];
-    vm_readStringByPtr(a1, nameBuf);
-    if (strcmp(nameBuf, ".") == 0)
+    vm_read_path_string(a1, nameBuf, sizeof(nameBuf));
+    char normalizedName[256];
+    vm_file_normalize_host_path(nameBuf, normalizedName, sizeof(normalizedName));
+    if (strcmp(normalizedName, ".") == 0)
         return vm_set_call_result(0);
-    int r = dirExists(nameBuf);
+    int r = dirExists(normalizedName);
+    vm_fileio_trace("dir_exists raw=%s normalized=%s result=%d last=%08x\n", nameBuf, normalizedName, r, lastAddress);
     return vm_set_call_result(r);
 }
 
@@ -406,18 +457,7 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     char mode[8];
     u8 rawName[256];
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
-    memset(nameBuff, 0, sizeof(nameBuff));
-    if (rawName[0] != 0 && rawName[1] == 0)
-    {
-        u32 ucs2Len = 0;
-        while (ucs2Len + 1 < sizeof(rawName) && (rawName[ucs2Len] != 0 || rawName[ucs2Len + 1] != 0))
-            ucs2Len += 2;
-        ucs2_to_gbk(rawName, ucs2Len, nameBuff, sizeof(nameBuff));
-    }
-    else
-    {
-        vm_read_string_by_ptr_limited(namePtr, nameBuff, sizeof(nameBuff));
-    }
+    vm_read_path_string(namePtr, nameBuff, sizeof(nameBuff));
     if (rwPtr)
         uc_mem_read(MTK, rwPtr, &rwBuff, 128);
     rwBuff[sizeof(rwBuff) - 1] = 0;
@@ -526,26 +566,31 @@ int vm_cbfs_vm_file_tell(int fileHandle)
 int vm_cbfs_vm_file_exists(int disk, int namePtr)
 {
     u8 charBuffer[1024];
-    vm_readStringByPtr(namePtr, charBuffer);
-    if (vm_is_pseudo_dir_path((char *)charBuffer))
+    vm_read_path_string(namePtr, (char *)charBuffer, sizeof(charBuffer));
+    char normalizedName[256];
+    vm_file_normalize_host_path((char *)charBuffer, normalizedName, sizeof(normalizedName));
+    if (vm_is_pseudo_dir_path(normalizedName))
         return vm_set_call_result(1);
-    FILE *f = fopen(charBuffer, "rb");
+    FILE *f = fopen(normalizedName, "rb");
     u32 r = 0;
     if (f != NULL)
     {
         r = 1;
         fclose(f);
     }
+    vm_fileio_trace("file_exists raw=%s normalized=%s result=%u last=%08x\n", charBuffer, normalizedName, r, lastAddress);
     return vm_set_call_result(r);
 }
 
 int vm_cbfs_vm_file_delete(int disk, int namePtr)
 {
     u8 charBuffer[1024];
-    vm_readStringByPtr(namePtr, charBuffer);
-    if (vm_is_pseudo_dir_path((char *)charBuffer) || vm_is_cbm_resource_path((char *)charBuffer))
+    vm_read_path_string(namePtr, (char *)charBuffer, sizeof(charBuffer));
+    char normalizedName[256];
+    vm_file_normalize_host_path((char *)charBuffer, normalizedName, sizeof(normalizedName));
+    if (vm_is_pseudo_dir_path(normalizedName) || vm_is_cbm_resource_path(normalizedName))
         return vm_set_call_result(0);
-    FILE *f = fopen(charBuffer, "rb");
+    FILE *f = fopen(normalizedName, "rb");
     u32 r = 0;
     if (f != NULL)
     {
@@ -553,7 +598,7 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
         fclose(f);
     }
     if (r == 1)
-        unlink(charBuffer);
+        unlink(normalizedName);
     return vm_set_call_result(r);
 }
 int vm_cbfs_vm_file_getfilesize(int fileHandle)

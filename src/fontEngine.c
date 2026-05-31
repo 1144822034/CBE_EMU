@@ -124,5 +124,20 @@ int mesureStringWidth(char *gbkStr)
 {
     if (gbkStr == NULL)
         return 0;
-    return (int)strlen(gbkStr) * getFontCellWidth();
+    int width = 0;
+    for (u32 i = 0; gbkStr[i] != 0;)
+    {
+        u8 ch = (u8)gbkStr[i];
+        if (ch < 0x80)
+        {
+            width += getFontCellWidth();
+            i += 1;
+        }
+        else
+        {
+            width += getFontWidth();
+            i += gbkStr[i + 1] ? 2 : 1;
+        }
+    }
+    return width;
 }

@@ -1,6 +1,6 @@
 CC := gcc
 
-OBJS := obj/*.o
+OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/main.o
 
 UNICORN = Lib/unicorn-2.1.4/unicorn-import.lib
 
@@ -10,7 +10,7 @@ SDL2 = Lib/sdl2-2.0.10
 # gcc  -o main.exe main.c -lmingw32 -Wl,-subsystem,windows -L./lib -lSDL2main -lSDL2
 # -mwindows 关闭控制台窗口
 # -lwinhttp http通信库
-all: obj/gifDecode.o obj/vmFunc.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/main.o build
+all: $(OBJS) build
 
 obj/cbeParser.o: src/cbeParser.c
 	$(CC) -g  -w -c src/cbeParser.c -o obj/cbeParser.o
@@ -24,9 +24,7 @@ obj/fileIoEngine.o: src/fileIoEngine.c
 	$(CC) -g  -w -c src/fileIoEngine.c -o obj/fileIoEngine.o
 obj/lcd.o: src/lcd.c
 	$(CC) -g  -w -c src/lcd.c -o obj/lcd.o
-obj/main.o: src/main.c
-	$(CC) -g  -w -c src/main.c -o obj/main.o
-obj/vmFunc.o: src/vmFunc.c
+obj/main.o: src/main.c src/vmFunc.c src/hookRam.c src/vmEvent.c
 	$(CC) -g  -w -c src/main.c -o obj/main.o
 obj/gifDecode.o: src/gifDecode.c
 	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o

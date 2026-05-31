@@ -105,6 +105,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
         if (uc_mem_read(uc, Global_R9 + 0x9928 + 0x10, &debugUiObj, 4) == UC_ERR_OK && debugUiObj != 0)
         {
             u32 stateAddr = debugUiObj + 0x3d;
+            u32 localInstallFlagAddr = debugUiObj + 0x140;
             if (address <= stateAddr && stateAddr < address + size)
             {
                 u32 pc = 0, lr = 0;
@@ -118,6 +119,22 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 {
                     fprintf(fp, "startup_state_write addr=%08x size=%u old=%u new=%u pc=%08x lr=%08x last=%08x\n",
                             (u32)address, size, oldState, newState, pc, lr, lastAddress);
+                    fclose(fp);
+                }
+            }
+            if (address <= localInstallFlagAddr && localInstallFlagAddr < address + size)
+            {
+                u32 pc = 0, lr = 0;
+                u8 oldFlag = 0;
+                u8 newFlag = (u8)(value >> ((localInstallFlagAddr - (u32)address) * 8));
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                uc_mem_read(uc, localInstallFlagAddr, &oldFlag, 1);
+                FILE *fp = fopen("net_trace.log", "a");
+                if (fp)
+                {
+                    fprintf(fp, "startup_local_install_flag_write addr=%08x size=%u old=%u new=%u pc=%08x lr=%08x last=%08x\n",
+                            (u32)address, size, oldFlag, newFlag, pc, lr, lastAddress);
                     fclose(fp);
                 }
             }
