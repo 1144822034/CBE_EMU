@@ -50,6 +50,19 @@ static void vm_fileio_trace_bytes(const char *tag, int handle, const char *path,
     fclose(fp);
 }
 
+static void vm_lcd_image_trace(const char *fmt, ...)
+{
+    FILE *fp = fopen("net_trace.log", "a");
+    if (fp == NULL)
+        return;
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(fp, fmt, args);
+    va_end(args);
+    fclose(fp);
+}
+
 #if TRACE_RESOURCE_IO
 #define VM_RESOURCE_TRACE(...) vm_fileio_trace(__VA_ARGS__)
 #else
@@ -2190,8 +2203,9 @@ typedef struct {
 */
 void vM_DrawImageWithClipEx()
 {
-    int srcInfo, srcX, srcY, w, h, dstX, dstY, sp, dstPtr, srcPtr;
-    u16 src_w, src_h;
+    int dstInfo, srcInfo, srcX, srcY, w, h, dstX, dstY, sp, dstPtr, srcPtr;
+    u16 dst_w, dst_h, src_w, src_h;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &dstInfo);
     uc_reg_read(MTK, UC_ARM_REG_R1, &srcInfo);
     uc_reg_read(MTK, UC_ARM_REG_R2, &srcX);
     uc_reg_read(MTK, UC_ARM_REG_R3, &srcY);
@@ -2203,6 +2217,17 @@ void vM_DrawImageWithClipEx()
     uc_mem_read(MTK, srcInfo, &srcPtr, 4);
     uc_mem_read(MTK, srcInfo + 4, &src_w, 2);
     uc_mem_read(MTK, srcInfo + 6, &src_h, 2);
+    uc_mem_read(MTK, dstInfo, &dstPtr, 4);
+    uc_mem_read(MTK, dstInfo + 4, &dst_w, 2);
+    uc_mem_read(MTK, dstInfo + 6, &dst_h, 2);
+    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
+    {
+        dstPtr = VM_screenImage_ADDRESS;
+        dst_w = LCD_WIDTH;
+        dst_h = LCD_HEIGHT;
+    }
+    int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
+    u8 tmpBuffer[480];
     // u8 buffer[188];
     // uc_mem_read(MTK, srcPtr, buffer, 188);
     // printf("vM_DrawImageWithClipEx(srcPtr:%x,srcX:%d,srcY:%d,clipW:%d,clipH:%d,dstX:%d,dstY:%d)\n", srcPtr, srcX, srcY, w, h, dstX, dstY);
@@ -2239,30 +2264,37 @@ void vM_DrawImageWithClipEx()
         h += dstY;
         dstY = 0;
     }
-    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+    if (dstX >= dst_w || dstY >= dst_h)
         return;
-    if (dstX + w > LCD_WIDTH)
-        w = LCD_WIDTH - dstX;
-    if (dstY + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - dstY;
+    if (dstX + w > dst_w)
+        w = dst_w - dstX;
+    if (dstY + h > dst_h)
+        h = dst_h - dstY;
     if (w <= 0 || h <= 0)
         return;
 
+    if ((dstX <= 205 && dstX + w >= 190) || h > 120)
+        vm_lcd_image_trace("lcd_image api=vMDrawImageWithClipEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+                           srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
+                           srcX, srcY, w, h, dstX, dstY, lastAddress);
+
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
-    int dstImgPicth = 2 * LCD_WIDTH;
+    int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
     int copyBytes = w * 2;
     for (int i = 0; i < h; i++)
     {
         int srcOffset = (i + srcY) * srcImgPitch + srcX * 2;
         u32 dstScreenOffset = (i + dstY) * dstImgPicth + dstX * 2;
 
-        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
+        uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
         if (r != UC_ERR_OK)
         {
             printf("读取内存错误");
             assert(0);
         }
-        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
+        uc_mem_write(MTK, dstPtr + dstScreenOffset, tmpBuffer, copyBytes);
+        if (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH)
+            memcpy(Lcd_Cache_Buffer + dstScreenOffset, tmpBuffer, copyBytes);
     }
 }
 u16 blend565(u16 dst, u16 src, u8 a)
@@ -2285,8 +2317,9 @@ u16 blend565(u16 dst, u16 src, u8 a)
 }
 void vm_vMDrawImageClipAndAlphaEx()
 {
-    int srcInfo, srcX, srcY, w, h, dstX, dstY, sp, dstPtr, srcPtr;
-    u16 src_w, src_h;
+    int dstInfo, srcInfo, srcX, srcY, w, h, dstX, dstY, sp, dstPtr, srcPtr;
+    u16 dst_w, dst_h, src_w, src_h;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &dstInfo);
     uc_reg_read(MTK, UC_ARM_REG_R1, &srcInfo);
     uc_reg_read(MTK, UC_ARM_REG_R2, &srcX);
     uc_reg_read(MTK, UC_ARM_REG_R3, &srcY);
@@ -2298,7 +2331,18 @@ void vm_vMDrawImageClipAndAlphaEx()
     uc_mem_read(MTK, srcInfo, &srcPtr, 4);
     uc_mem_read(MTK, srcInfo + 4, &src_w, 2);
     uc_mem_read(MTK, srcInfo + 6, &src_h, 2);
+    uc_mem_read(MTK, dstInfo, &dstPtr, 4);
+    uc_mem_read(MTK, dstInfo + 4, &dst_w, 2);
+    uc_mem_read(MTK, dstInfo + 6, &dst_h, 2);
+    if (dstInfo == VM_screenImageStruct_ADDRESS || dstPtr == 0 || dst_w == 0 || dst_h == 0 || dst_w > LCD_WIDTH || dst_h > LCD_HEIGHT)
+    {
+        dstPtr = VM_screenImage_ADDRESS;
+        dst_w = LCD_WIDTH;
+        dst_h = LCD_HEIGHT;
+    }
+    int origSrcX = srcX, origSrcY = srcY, origW = w, origH = h, origDstX = dstX, origDstY = dstY;
     u8 tmpBuffer[480];
+    u8 dstBuffer[480];
     // printf("vMDrawImageClipAndAlphaEx(sx:%d,sy:%d,w:%d,h:%d,dx:%d,dy:%d)\n", srcX, srcY, w, h, dstX, dstY);
     if (srcPtr == 0 || w <= 0 || h <= 0 || src_w == 0 || src_h == 0)
         return;
@@ -2333,17 +2377,22 @@ void vm_vMDrawImageClipAndAlphaEx()
         h += dstY;
         dstY = 0;
     }
-    if (dstX >= LCD_WIDTH || dstY >= LCD_HEIGHT)
+    if (dstX >= dst_w || dstY >= dst_h)
         return;
-    if (dstX + w > LCD_WIDTH)
-        w = LCD_WIDTH - dstX;
-    if (dstY + h > LCD_HEIGHT)
-        h = LCD_HEIGHT - dstY;
+    if (dstX + w > dst_w)
+        w = dst_w - dstX;
+    if (dstY + h > dst_h)
+        h = dst_h - dstY;
     if (w <= 0 || h <= 0)
         return;
 
+    if ((dstX <= 205 && dstX + w >= 190) || h > 120)
+        vm_lcd_image_trace("lcd_image api=vMDrawImageClipAndAlphaEx srcInfo=%08x srcPtr=%08x srcDim=%u,%u orig sx=%d sy=%d w=%d h=%d dx=%d dy=%d clipped sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+                           srcInfo, srcPtr, src_w, src_h, origSrcX, origSrcY, origW, origH, origDstX, origDstY,
+                           srcX, srcY, w, h, dstX, dstY, lastAddress);
+
     int srcImgPitch = (((4 - src_w) & 3) + src_w) * 2; // 源图片的宽度按4像素对齐后再x2就是原图片一行像素占用的字节数
-    int dstImgPicth = 2 * LCD_WIDTH;
+    int dstImgPicth = (((4 - dst_w) & 3) + dst_w) * 2;
     int copyBytes = w * 2;
     int special_alpha_map = 0;
 
@@ -2363,7 +2412,10 @@ void vm_vMDrawImageClipAndAlphaEx()
             printf("读取内存错误");
             assert(0);
         }
-        u16 *dstBasePtr = ((u16 *)(Lcd_Cache_Buffer + dstScreenOffset));
+        int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH);
+        u16 *dstBasePtr = dstIsScreen ? ((u16 *)(Lcd_Cache_Buffer + dstScreenOffset)) : (u16 *)dstBuffer;
+        if (!dstIsScreen)
+            uc_mem_read(MTK, dstPtr + dstScreenOffset, dstBasePtr, copyBytes);
         if (!special_alpha_map)
         {
             for (u16 col = 0; col < w; ++col)
@@ -2395,7 +2447,7 @@ void vm_vMDrawImageClipAndAlphaEx()
                 }
             }
         }
-        uc_mem_write(MTK, VM_screenImage_ADDRESS + dstScreenOffset, Lcd_Cache_Buffer + dstScreenOffset, copyBytes);
+        uc_mem_write(MTK, dstPtr + dstScreenOffset, dstBasePtr, copyBytes);
     }
 }
 

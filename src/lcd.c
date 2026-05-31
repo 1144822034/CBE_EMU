@@ -19,14 +19,24 @@ void InitLcd()
 void UpdateLcd()
 {
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
+    if (!sfc)
+        return;
+
+    if (SDL_MUSTLOCK(sfc) && SDL_LockSurface(sfc) != 0)
+        return;
+
     for (int i = 0; i < LCD_HEIGHT; i++)
     {
+        u32 *dstRow = (u32 *)((u8 *)sfc->pixels + i * sfc->pitch);
         for (int j = 0; j < LCD_WIDTH; j++)
         {
             u32 offset = j + i * LCD_WIDTH;
             u16 color = ((u16 *)Lcd_Cache_Buffer)[offset];
-            *((u32 *)sfc->pixels + offset) = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color), PIXEL565B(color));
+            dstRow[j] = SDL_MapRGB(sfc->format, PIXEL565R(color), PIXEL565G(color), PIXEL565B(color));
         }
     }
+
+    if (SDL_MUSTLOCK(sfc))
+        SDL_UnlockSurface(sfc);
     SDL_UpdateWindowSurface(window);
 }
