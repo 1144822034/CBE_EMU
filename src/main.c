@@ -1478,7 +1478,7 @@ static u8 vm_net_mock_env_u8(const char *name, u8 fallback)
 
 static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
 {
-    u32 pos = 11;
+    u32 pos = 5;
     u8 result = 1;
     if (outCap < pos)
         return 0;
