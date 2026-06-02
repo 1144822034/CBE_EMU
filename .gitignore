@@ -15,3 +15,7 @@ obj
 *.i64
 *.til
 bin/JHOnlineData
+firmware/raw/*
+!firmware/raw/.gitkeep
+samples/raw/*
+!samples/raw/.gitkeep

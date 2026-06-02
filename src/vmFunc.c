@@ -1722,7 +1722,7 @@ void vm_sprintf()
                         uc_mem_read(MTK, tmp4 + (tmp2 - 3) * 4, &tmp5, 4);
                     }
                     vm_readStringByPtr(tmp5, spBuffer);
-                    printf(spBuffer);
+                    printf("%s", spBuffer);
                 }
                 else
                 {
@@ -2419,8 +2419,9 @@ void vM_DrawImageWithClipEx()
         uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
         if (r != UC_ERR_OK)
         {
-            printf("读取内存错误");
-            assert(0);
+            vm_lcd_image_trace("lcd_image_read_fail api=vMDrawImageWithClipEx err=%u srcInfo=%08x srcPtr=%08x srcDim=%u,%u srcOffset=%d copyBytes=%d row=%d sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+                               r, srcInfo, srcPtr, src_w, src_h, srcOffset, copyBytes, i, srcX, srcY, w, h, dstX, dstY, lastAddress);
+            return;
         }
         uc_mem_write(MTK, dstPtr + dstScreenOffset, tmpBuffer, copyBytes);
         if (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH)
@@ -2539,8 +2540,9 @@ void vm_vMDrawImageClipAndAlphaEx()
         uc_err r = uc_mem_read(MTK, srcPtr + srcOffset, tmpBuffer, copyBytes);
         if (r != UC_ERR_OK)
         {
-            printf("读取内存错误");
-            assert(0);
+            vm_lcd_image_trace("lcd_image_read_fail api=vMDrawImageClipAndAlphaEx err=%u srcInfo=%08x srcPtr=%08x srcDim=%u,%u srcOffset=%d copyBytes=%d row=%d sx=%d sy=%d w=%d h=%d dx=%d dy=%d last=%08x\n",
+                               r, srcInfo, srcPtr, src_w, src_h, srcOffset, copyBytes, row, srcX, srcY, w, h, dstX, dstY, lastAddress);
+            return;
         }
         int dstIsScreen = (dstPtr == VM_screenImage_ADDRESS && dst_w == LCD_WIDTH);
         u16 *dstBasePtr = dstIsScreen ? ((u16 *)(Lcd_Cache_Buffer + dstScreenOffset)) : (u16 *)dstBuffer;
