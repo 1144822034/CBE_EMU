@@ -28,6 +28,7 @@ Treat the repository as a long-running reverse-engineering project. Prefer prese
 3. Prefer implementing emulator or server behavior that matches the observed client/platform contract over patching game logic to force progress.
 4. Do not silently replace existing reverse-engineering notes. Extend them and preserve prior findings unless they are clearly disproven.
 5. Keep filenames stable once they start being referenced by notes, scripts, or prompts.
+6. Do not add runtime guards, hook branches, or emulator shims that skip the game's own parser, scene, draw, or state-machine logic just to force progress. If the game reaches bad state, treat it as evidence of a missing platform/server/resource contract and fix that upstream contract instead.
 
 ## Documentation Rules
 
@@ -63,6 +64,7 @@ Preferred sequence for new features:
 - Reuse existing helpers before adding new ad hoc code paths.
 - For network mock behavior, prefer helper builders in `src/main.c` over handwritten packet assembly.
 - Keep diagnostic logging scoped and easy to remove after verification.
+- Trace-only hooks are acceptable when they do not alter guest registers, memory, return values, or control flow. Hooks that `vm_bx()` around client code, suppress draw/parser calls, clamp client state, or skip table updates require an explicit post-boundary user request and should be treated as temporary experiments, not project fixes.
 - Avoid broad refactors while chasing an unverified reverse-engineering hypothesis.
 - For runtime/UI repro steps, do not add or use automatic clicking/input by default. The user drives manual interaction, and Codex should prefer inspecting the resulting logs and traces unless the user explicitly asks for input automation.
 

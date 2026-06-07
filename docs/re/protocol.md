@@ -748,14 +748,14 @@ For current `type=2/3` game-entry responses, the mock needs:
 
 - default response subtype `0x1A`
 - `scene = "00蓬莱仙岛_01"` as GBK bytes
-- `posinfo` carrying two `i16` coordinates, currently `120,120`
+- `posinfo` carrying two tagged `i16` coordinates. The current mock default is `223,382`, matching the first entry spawn point parsed from `bin/JHOnlineData/c00蓬莱仙岛_01.sce`.
 
 If actor resource offsets need deeper decoding later, prefer reverse-engineering the `actorinfo` layout from CBE `0x0100FA88` rather than forcing actor state by direct global writes.
 
 Status notes:
 
 - `confirmed`: the listed field names are observed in the client and current mock flow
-- `confirmed`: current mock-driven entry requires subtype `0x1A`, GBK `scene`, and `posinfo = (120,120)` to progress
+- `confirmed`: current mock-driven entry requires a scene-channel object carrying GBK `scene` and `posinfo` to progress
 - `hypothesis`: exact semantics and full binary layout for `actorinfo`, `playerinfo`, `npcinfo`, `rolesinfo`, `roleinfo`, `iteminfo`, `giftinfo`, and `battleinfo` are not yet fully decoded
 
 ### `actorinfo` trailing string and `R9+0x5E46`
@@ -902,10 +902,10 @@ Latest confirmed limitation:
 
 - after the corrected `actorinfo` tail lands, scene loading can now reach a later local crash from the same broad consumer family: `sub_100F094()` calls selector helper `sub_1004E10()` with a live selector object whose internal table pointer at `selector+0x0C` is still null
 - this is currently treated as a local scene-init contract gap, not as proof that the `1/2/10` wire shape above is fully semantically correct
-- the emulator now carries a narrow blocker-removal guard at `0x01004E10` that no-ops only the null-table selector update while preserving the rest of the `1/2/10` path for further observation
+- earlier builds carried a blocker-removal guard at `0x01004E10`, but this class of runtime skip guard has since been removed. The remaining work is to identify which real init/resource path should populate the selector table.
 - after that guard, the next live crash is even later in the same scene-local family: `scene_draw_status_panels()` reaches the left portrait block and tries to `BLX` `sceneHudCurrentPortraitWidget->draw(+0x18)` with a null callback
 - runtime evidence already shows the six portrait UI actor resources (`ui_h_* / ui_hw_*`) loading successfully before this point, so the remaining issue is currently classified as a local portrait-widget init/callback gap rather than a network/resource-body miss
-- the emulator now carries a second narrow blocker-removal guard at `0x010146DA` that skips only this null portrait draw callback and preserves the rest of the HUD draw pass for further observation
+- earlier builds also carried a `0x010146DA` portrait null-callback guard; that guard is removed under the no-parser/draw-bypass rule.
 
 ## Legacy Source
 
@@ -1249,9 +1249,7 @@ Current scene-strip note:
 - the current runtime build adds only read-only local draw-owner traces for that strip (`trace_progress_strip_shape` / `trace_progress_strip_draw`); no new wire contract is inferred from the strip yet
 - the first rerun with those traces confirms the point more strongly: the earliest hits all come from startup/loading helper `sub_100337C()` tiling a `36x36` image into an off-screen `240x400` buffer (`last=0100413e/lr=01004141`), so that batch is local overlay rendering noise rather than evidence for any later scene-side packet wait
 - the newest rerun refines that again: the same helper is re-entered from `scene_rebuild_runtime_nodes()` during live scene bootstrap at `tick=182` with `sceneTickGate=1,1`, and then no further strip-region writes appear after steady `loadFlags=0,0,0` scene ticks resume. So the visible strip now looks like a stale locally redrawn bootstrap overlay, not a missing WT response
-- the current runtime build therefore applies a local blocker-removal shim only at that UI layer: when `sub_1003568()` is re-entered from the confirmed scene-bootstrap caller set with `sceneTickGate=1,1`, the emulator suppresses the stale overlay draw and logs `trace_loading_overlay_suppressed`. This does not add or change any WT protocol response
-- the newest rerun continues that pattern: after the accepted scene follow-up and healthy HUD meter values, the next blocker is still local rather than wire-level. `scene_draw_node_overhead_overlay()` calls a selector-backed helper through `node+0x18`; on the live path that selector is still `0x05400018` with `selector+0x0C == 0`, so the crash at `0x01004EA8` is now being handled by a narrow local guard (`trace_scene_selector_draw_guard`) instead of by adding or changing any network payload
-- follow-up rerun evidence narrows that local blocker family further: the same null selector is consumed by more than one branch inside `scene_draw_node_overhead_overlay()`. After the first guarded callsite at `lr=0x01045653` is skipped, a later same-function callsite at `lr=0x01045859` reaches the same `0x01004E9C/0x01004EA8` helper. The current runtime guard therefore covers the whole `scene_draw_node_overhead_overlay()` range rather than only the first selector-draw branch, still without changing any WT protocol response
+- earlier builds tried a local blocker-removal shim for the stale overlay draw at `sub_1003568()` and selector guards around `scene_draw_node_overhead_overlay()`. These are now removed because they bypass guest draw/init logic. The evidence still identifies the local scene/UI contract gaps, but the fix must come from the upstream resource/init/server behavior that should dismiss the overlay and populate selector state.
 - latest steady-scene evidence also refines the current `1/2/10` interpretation: the self actor is being published into `sceneCurrentNode` successfully, but with bad spatial state. `trace_scene_current_node_publish` at `scene_rebuild_runtime_nodes()` shows `current=0x05400000 actor=10001 occupied=1 drawAt/step!=0`, while the same node carries `grid=50,50` and `target=0,0`. So the active issue is no longer “self actor missing from the wire payload”; it is “the current published node has wrong runtime coordinates/visual state”.
 - newest static decompile of `parse_actorinfo_response()` at `0x0100FA88` sharpens one part of that spatial mapping:
   - after `primaryDisplayMax` and `secondaryDisplayMax`, the fresh-enter actorinfo path reads two `u8` values and stores them into the snapshot actor structure at `+0x11E/+0x120`
@@ -1302,6 +1300,13 @@ Current scene-strip note:
   - the visible fragmented actor is now stronger evidence for a local move-entry/world-to-screen state bug than for a missing actor wire field
   - separate from that, a new post-scene interaction request family now needs mock coverage:
     - `WT len=61 hdr=2/10 objs=1/2/10,1/14/14,1/14/4,1/14/5,1/14/6`
+- current mock coverage update:
+  - status: `confirmed` for dispatch boundary, `hypothesis` for full `14/*` semantics
+  - IDA `net_business_response_dispatch()` (`0x01012E4C`) dispatches server response kinds `2..7`, `0x0A`, `0x14..0x1E`; it has no `kind=14` response consumer
+  - therefore `src/main.c` now handles this exact `len=61` request with a narrow built-in `1/2/10 otherinfo` response only, reusing the confirmed compact self-node tuple consumed by `net_handle_actor_move_info()` case `10`
+  - the `1/14/14,1/14/4,1/14/5,1/14/6` request objects remain protocol evidence for future request-side semantics rather than fields we should echo as server response objects
+  - first manual rerun after adding this mock did not trigger the `len=61` family again: `net_packets.log` stopped at the accepted `WT len=49` scene-resource follow-up, while `net_trace.log` continued through scene `draw_pass/status_panels/actor_pass` ticks and contained no `unhandled_packet`, `assert(0)`, or `builtin-scene-interaction-followup` marker
+  - second manual rerun produced the same protocol result: a fresh session reached `source=builtin-scene-resource-followup` at tick `143` and then continued local scene ticks, with no outbound `WT len=61` and no new unhandled/assert marker in `bin/logs/*.log`
 - corrected interpretation of the existing `1/2/10 otherinfo` family:
   - static decompile of `sub_100F094()` shows that this blob is not a compact `(actorId, visual, name, target, ...)` tuple
   - it is a typed scene-record stream:
@@ -1354,6 +1359,11 @@ Current scene-strip note:
     - `2` = point token type, misread as actorTag
     - `223,382` = portal spawn point, misread as grid/point fields
     - `8,1,5,1,...` = portal meta8 payload, misread as property grammar
+- runtime-guard status for this collision:
+  - status: `removed`
+  - superseded attempts: one guard skipped the whole callback at `parse_actor_motion_descriptor()` `0x0100DB32`; another skipped only the append-count write at `sub_100F094()` `0x0100F468`
+  - reason for removal: these guards changed guest control flow/table publication to force progress, which violates the project rule that the game should advance through correct platform/server/resource contracts rather than emulator-side parser/draw bypasses
+  - current direction: keep the portal-tail evidence above as a confirmed resource/parser mismatch, but fix it by identifying the upstream scene/resource/callback contract that should prevent `sub_100F094()` from consuming portal tokens as actor records
 - static caller-chain follow-up narrows where that bad pairing is introduced:
   - `scene_hud_main_panel_init()` (`0x010352AE`) simply forwards its stacked extras into the generic initializer at `*(R9+0x5C58)+0x10`
   - `scene_rebuild_runtime_nodes()` (`0x0100F8B8..0x0100F8F6`) is the caller that first copies `currentMapIdText` into `parserNodeOrScenePtr->currentName`, then invokes `scene_hud_main_panel_init()` with stacked extras `{ currentNamePtr, 10, sub_100F094+1 }`
@@ -1391,6 +1401,42 @@ Current scene-strip note:
 - implication:
   - the current misroute is no longer best summarized as “mode 10 must be wrong”
   - stronger reading is “fresh scene-enter is pairing the actorinfo-derived scene key with a non-null `sub_100F094` callback on a mode-10 panel family that is also used elsewhere with callback disabled”
+- newest parser-vs-builder comparison:
+  - `vm_net_mock_build_actor_info()` currently matches the confirmed `parse_actorinfo_response()` (`0x0100FA88`) fresh-enter read order for the fields relevant to the visible self actor:
+    - `actorId=10001`
+    - `visualVariant=job-1`
+    - `visualGroup=sex+1`
+    - role/name string
+    - player/display strings
+    - HP/MP current/base/display-max scalars
+    - target bytes
+    - `shortLabel`
+    - direct preview image
+    - trailing actor `.actor` resource
+    - actor-resource scalar
+    - trailing scene key
+    - final two signed-16 scalars
+  - evidence: full decompile of `parse_actorinfo_response()` at `0x0100FA88..0x0100FD22` cross-checked with `src/main.c:vm_net_mock_build_actor_info()`.
+  - `vm_net_mock_append_actor_other_empty10_object()` matches `sub_1012958()` (`0x01012958`) as a compact `otherinfo` tuple:
+    - `u32 actorId`
+    - `u8 visualVariant`
+    - `u8 visualGroup`
+    - `string labelText`
+    - `i16/u8 target pair as consumed by the reader helpers`
+    - two short/long label strings
+    - final grid `i16/i16`
+  - evidence: `net_handle_actor_move_info()` case `10` at `0x01012DD6` calls `sub_1012958()`; `sub_1012958()` then calls `scene_node_find_or_create()` and does not touch the body/world move-entry table.
+  - `vm_net_mock_build_group_type1_response()`, `vm_net_mock_build_scene_resource_followup_response()`, and `vm_net_mock_build_scene_interaction_followup_response()` do not currently contain a confirmed field-order mismatch that can explain the bad body/world entry. The latest logs show the bad entry is produced before the later `scene-resource-followup` response is consumed.
+  - runtime evidence: latest `bin/logs/net_trace.log` shows `trace_actor_motion_callback_handoff ... tailShorts=3,2,223,382,8,1,5,1`, then `trace_actor_move_entry_append ... actorId=1 box=203,402,240,422`, before the accepted `source=builtin-scene-resource-followup`.
+  - conclusion: the current body/world sprite defect should not be fixed by rewriting `actorinfo`, `1/2/10 otherinfo`, or `14/*` response builders unless new parser evidence appears. The confirmed mismatch remains the local pairing of a valid actorinfo scene key with `sub_100F094+1`, causing `.sce` portal tokens to be consumed as a move-entry stream.
+- newest coordinate-alignment experiment:
+  - status: `confirmed useful`, but final visual correctness still needs operator observation
+  - IDA `parse_scene_response_entry()` (`0x010396D6`) reads server field `posinfo` as two tagged `i16` values and forwards them into the active scene object method `+116` together with the scene string.
+  - `ui_apply_named_posinfo_target()` (`0x0100E9B8`) consumes the same `posinfo` grammar for the `0x1B/12` target/location family.
+  - `tools/inspect_sce.py` parses the active `c00蓬莱仙岛_01.sce` first edge portal as spawn point `(223,382)`, while the older mock still sent `posinfo=(120,120)` and defaulted actorinfo/otherinfo grid fields to `12,10`.
+  - `src/main.c` now defaults scene `posinfo`, the `0x1B/12` target `posinfo`, actorinfo trailing grid/motion words, and compact `1/2/10 otherinfo` grid words to `(223,382)`, with `CBE_SCENE_POS_X/Y` and the existing actor grid env vars kept as overrides.
+  - runtime evidence from the next rerun confirms the value reaches the active protagonist node: `trace_scene_current_node_draw ... actorId=10001 ... grid=223,382 ... screen=103,65`, replacing the earlier `grid=12,10` / `screen=0,-67`.
+  - the portal-derived body/world entry still appears as `actorId=1`, `box=203,402,240,422`, and `screen=-118,-347`; keep it as a separate local scene-resource/callback question rather than the primary self-actor coordinate seed.
 - a further static split now identifies the alternate name source used by that callback-disabled branch:
   - in `sub_100F094()`, parsed property kind `0x12` stores a string into `R9+0x5C64+0x74` (`0x5CD8`)
   - property kind `0x16` separately stores the centered status text into `R9+0x5C64+0x78` (`0x5CDC`)
