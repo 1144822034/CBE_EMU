@@ -24,3 +24,4 @@ samples/raw/*
 samples/
 tmp/
 tools/
+bin/nvram/

@@ -758,6 +758,36 @@ Status notes:
 - `confirmed`: current mock-driven entry requires a scene-channel object carrying GBK `scene` and `posinfo` to progress
 - `hypothesis`: exact semantics and full binary layout for `actorinfo`, `playerinfo`, `npcinfo`, `rolesinfo`, `roleinfo`, `iteminfo`, `giftinfo`, and `battleinfo` are not yet fully decoded
 
+### Mock Player Position Persistence
+
+Status: `confirmed` for current mock behavior; `hypothesis` for the full live-server save contract.
+
+Confirmed runtime/request evidence:
+
+- normal in-map walking emits repeated `WT len=32 hdr=2/1 objs=1/2/1` packets with a single `moveinfo` field
+- the observed `moveinfo` value is a 10-byte blob such as `03 03 03 00 00 00 00 00 00 00`; this looks like a compact direction/step stream rather than absolute coordinates
+- `net_handle_actor_move_info()` only consumes server `moveinfo` on subtype `2`; subtype `1` upload acks can remain empty without parser side effects
+- current client scene nodes expose the already-applied local position at `currentNode+0x18/+0x1A` and target at `currentNode+0x11E/+0x120`, as traced by `trace_scene_current_node_publish` / `trace_scene_current_node_draw`
+
+Current mock-server behavior:
+
+- when a `2/1 moveinfo` upload is received, the emulator reads the current player scene node without modifying guest memory and persists `scene,x,y` to `nvram/jhol_mock_player_pos.bin`
+- scene-change responses also persist the target scene and spawn point selected from `mapID/exitID`
+- later login/scene-entry builders reuse that persisted state for:
+  - the `actorinfo` scene key and actor grid/motion arguments
+  - `30/1` / `30/2` scene fields
+  - `posinfo`
+- `CBE_SCENE_KEY`, `CBE_SCENE_POS_X`, and `CBE_SCENE_POS_Y` remain explicit environment overrides for controlled reruns
+
+The live-server save timing is still not fully proven. The current mock treats the already-applied local node position at upload time as the authoritative server-side last position.
+
+Correction after the next rerun:
+
+- do not persist arbitrary scene text read through best-effort guest-label decoding
+- evidence: a saved non-canonical scene key was fed back into later scene/resource fields; the client then emitted `18/7 type=6 name=c00蓬莱仙岛_01` and attempted to download/update that scene key, while storage trace showed the local open path degraded to raw `c00...`
+- current code now only reuses a persisted scene key if it matches a known canonical internal scene key; otherwise it keeps the saved coordinates but falls back to the default safe scene key
+- this preserves position memory while avoiding scene-key encoding contamination of the resource-update path
+
 ### `actorinfo` trailing string and `R9+0x5E46`
 
 Status: `mixed`

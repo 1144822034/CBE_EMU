@@ -4064,6 +4064,40 @@ Suggested entry format:
 - next verification:
   - rebuild and rerun manually. Expected trace is `selected=rb` for `CBE/江湖OL.CBE`, followed by a successful 4-byte package-size read at offset `353281` and no `vm_malloc` assertion.
 
+## 2026-06-09 change: persist mock player map position
+
+- problem:
+  - after relaunching/re-entering the game, the mock always rebuilt `actorinfo` / scene `posinfo` from fixed defaults (`c00蓬莱仙岛_01`, `223,382`), so the player returned to the initial spawn point.
+- evidence:
+  - runtime logs show normal walking sends `WT len=32 hdr=2/1 objs=1/2/1` with field `moveinfo`.
+  - packet dumps show `moveinfo` is a 10-byte compact stream (`03 03 03 ...`, `01 01 ...`, etc.), not an absolute `posx/posy` pair.
+  - existing trace helpers confirm the current local player node already carries applied coordinates at `currentNode+0x18/+0x1A` and target coordinates at `+0x11E/+0x120`.
+- changed:
+  - added a mock-server position state file `nvram/jhol_mock_player_pos.bin`.
+  - on `2/1 moveinfo` upload, the mock now reads the current scene node read-only and saves `scene,x,y` as server-side last position.
+  - scene-change responses also save the selected target scene/spawn from `mapID/exitID`.
+  - login/scene-entry builders now reuse the saved scene/position for `actorinfo`, scene fields, and `posinfo`, while `CBE_SCENE_KEY`, `CBE_SCENE_POS_X`, and `CBE_SCENE_POS_Y` remain override knobs.
+- status:
+  - confirmed: current mock now has a persistent location source instead of hardcoded spawn-only state.
+  - hypothesis: live-server position persistence timing is approximated by saving the already-applied client node position when the movement upload arrives.
+- validation:
+  - `make` passed after the source change.
+
+## 2026-06-09 rerun: position persistence polluted scene resource key
+
+- verified from the newest manual run:
+  - after relaunch, the client entered an unwanted `18/7 type=6` update loop for scene key `c00蓬莱仙岛_01`.
+  - storage trace showed the local resource path had degraded to raw `c00...` bytes and was rejected/open-failed, then renamed from `MMORPGTempbin` into the malformed scene-key cache path.
+  - this happened immediately after the position persistence change, so the likely regression was feeding a saved best-effort decoded scene string back into `actorinfo` / scene fields.
+- conclusion:
+  - confirmed: saving coordinates is still useful, but arbitrary guest-label scene text is not safe to persist and replay as a wire/resource key.
+- changed:
+  - added a whitelist/normalization check for persisted scene keys.
+  - old persisted files with bad scene keys are accepted for coordinates, but their scene field is ignored and replaced in memory with the default canonical scene key.
+  - move-upload snapshots therefore keep last position without poisoning the resource-update path.
+- validation:
+  - `make` passed after the fix.
+
 ## 2026-06-09 new unhandled `4/1` challenge/menu request
 
 - verified from the newest manual run:
