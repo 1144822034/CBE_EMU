@@ -705,3 +705,42 @@ Suggested entry format for additional questions:
         - static final-consumer review changes the `previewImage(+0x10A)` interpretation: `scene_draw_node_overhead_overlay()` (`0x01045578`) treats that string as an optional overhead badge/icon resource, not as body-frame art.
         - current mock was still writing `h_warriorwalk1.gif` there, which is now the strongest evidence-backed explanation for the actor-art fragments.
         - `src/main.c` now defaults `CBE_ACTOR_PREVIEW_IMAGE` / `previewImage(+0x10A)` to empty while preserving explicit env override. Next run should confirm `trace_scene_actorinfo_snapshot ... preview=<empty>` and whether the fragments disappear.
+      - latest follow-up:
+        - visual confirmation: the protagonist remains visible and the actor-fragment artifact is gone after defaulting `previewImage(+0x10A)` to empty.
+        - new unhandled post-scene-change request: `WT len=44 hdr=25/5 objs=1/25/5,1/6/1,1/6/13,1/6/14,1/2/10,1/25/5 count=6`.
+        - `src/main.c` now handles this as `builtin-scene-task-subset-followup`, using the already parser-safe empty task/other/banner replies and no trailing `30/1`.
+        - next run should determine whether omitting `30/1` is sufficient after scene change, or whether a scene-key-aware finalize packet is still required.
+      - latest WT44 loading update:
+        - confirmed: omitting `30/1` is not sufficient for the post-scene-change WT44 path. The packet is handled, but runtime continues `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1` and `trace_progress_strip_wrapper_tick ... caller=010460ca dst=20,188` until `sub_1013BDC()` fires `scene_widget_timeout_message` (`0x01013C84`, text `网络连接超时!`).
+        - static support: IDA `net_handle_scene_channel_dispatch()` (`0x01039B8A`) routes subtype `1` to `parse_scene_response_entry()` and subtype `2` to `parse_scene_posinfo_field()`. The successful first-scene resource follow-up shows trailing `30/1` followed by `sceneState=7 loadFlags=0,0,0`.
+        - confirmed negative: appending scene-aware `30/1` to the WT44 response is too late. The new run shows `mock_scene_task_subset_followup_response ... trailingSceneEnter=1 ... len=228`, followed by `trace_business_dispatch_state label=early_gate_off ... dispatchGate=0 objectCount=6`.
+        - changed: `src/main.c` now appends scene-aware trailing `30/1 scene+posinfo` directly to `mock_scene_change_combo_response()` so it is in the same dispatch window as `30/2`; WT44 is back to parser-safe task/other/banner objects only.
+        - newest result: that combo `30/1` is consumed before the gate closes (`trace_business_handler ... kind=30 subtype=1`) and restores `sceneState=7`, but it still does not suppress the second-map moving strip; the tail remains `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1`.
+        - the WT44 follow-up is no longer the direct blocker: it is handled, arrives after `dispatchGate=0`, and takes `early_gate_off` as expected.
+        - newest write-trace result:
+          - confirmed: `sub_103478E()` / `0x01034796` opens `R9+0x5530` from the outgoing request object's byte `+5` when the post-scene-change WT44 is sent.
+          - confirmed: the WT44 response then hits `net_business_response_dispatch()` `early_gate_off` at `0x01012F42`; only `R9+0x5531` is cleared at `0x010348F6`, so no handler clears `R9+0x5530`.
+          - newest negative result: pre-bundling the WT44 task/other/banner subset inside `mock_scene_change_combo_response()` before trailing `30/1` was consumed (`objects=10 ... taskSubset=1`) but did not suppress the later `WT len=44`; the late response still hit `early_gate_off`, and only the later `sub_1013BDC()` timeout cleared `R9+0x5530`.
+          - newest callback trace:
+            - first-scene normal path: `sub_1013BDC()` sees `waitObjFlag10=7`, calls `R9+0x554C == 0x0103478F`, sends WT49, returns `R0=0x31`, clears `waitObjFlag10`, and the response dispatches while the business gate is open.
+            - second-map path still sends WT44 after the scene-change combo has closed the business gate; the first trace cap missed the second-map callback boundary.
+          - current trace-only next step: watch writes to `R9+0x5564` (`waitObj+0x10`) plus the refined `0x01013C00..0x01013C04` callback boundary to learn which consumed scene-change object reactivates the wait object before the late WT44 send.
+          - newest refinement:
+            - confirmed by alloc trace: `30/2` / `sub_1049188()` contributes the first `25/5` object, but does not explain the whole WT44.
+            - confirmed by IDA: `scene_runtime_tick()` (`0x01014E54..0x01014EEE`) has a `[R4+1]` one-shot branch that queues `6/1`, `6/13`, `6/14`, `2/10 Type=101`, and another `25/5`, then clears `[R4+1]`.
+            - next run should use the expanded `trace_scene_runtime_tick label=oneshot_sync_check/oneshot_sync_clear` to determine who sets `[R4+1]` on the second-map transition and whether the correct server behavior is to avoid that branch or to keep the business dispatch gate open long enough for its response.
+          - newest trace correction:
+            - `R4` is `R9+0x5C64`, so `[R4+1]` is `R9+0x5C65`.
+            - the previous one-shot trace cap was consumed by the normal first-map branch. `src/main.c` now watches writes to `R9+0x5C64..0x5C66` and filters empty one-shot checks so the second-map setter should be visible in the next run.
+          - newest result:
+            - confirmed: `R9+0x5C65` is set by `scene_runtime_init_and_sync()` at `0x01013010`, before the second-map scene-change response. The late WT44 is a normal scene-runtime one-shot sync.
+            - current hypothesis under test: the server should not close the scene business gate in the scene-change combo before this one-shot response. The mock now defers `27/12`/`30/1` scene completion into the one-shot subset response.
+          - correction:
+            - confirmed negative: deferring `30/2` too causes map bounce-back to the previous scene.
+            - current narrower experiment restores `30/2` in the scene-change combo and defers only the later scene-completion tail.
+          - latest correction:
+            - confirmed negative: restoring early `30/2` prevents bounce-back but still closes the business gate before WT44.
+            - new hypothesis under test: defer `30/2` itself into the one-shot WT44 response, rather than using deferred `30/1`.
+          - latest result:
+            - confirmed negative: deferring `30/2` also causes bounce-back.
+            - current code is restored to early scene-change completion plus parser-safe WT44 subset. Next investigation should identify a valid completion/clear path for `R9+0x5530` without moving `30/2` out of the scene-change combo.

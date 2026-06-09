@@ -85,3 +85,16 @@ Confirmed by firmware static analysis (`8533n_7835.axf`):
 - `CdRectPoint(left, top, right, bottom, x, y)` returns true when `x` and `y` are inside the rectangle using inclusive bounds
 - concrete predicate: `right >= x && left <= x && bottom >= y && top <= y`
 - the emulator should implement the same contract for both the newer `vm_manager_game_util` slot `idx=2` and the legacy `vm_manager_gameold` slot `idx=51`
+
+## UCS-2 File Paths
+
+Confirmed runtime/platform contract:
+
+- CBE file APIs may pass ASCII resource names inside UCS-2LE path buffers
+- valid ASCII filename characters include `+`, as seen in `./\JHOnlineData\+num.gif`
+- the emulator must detect that buffer as UCS-2LE and convert it before host path normalization
+
+Evidence:
+
+- after entering the first map portal, piclib requested `+num.gif`; raw memory held the complete UCS-2LE path, but the earlier detector rejected `+` and decoded only `.`
+- that misclassification returned a pseudo-directory handle instead of opening `JHOnlineData/+num.gif`

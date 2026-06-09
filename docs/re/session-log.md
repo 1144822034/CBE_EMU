@@ -3513,6 +3513,30 @@ Suggested entry format:
   - rerun manually and check that `trace_scene_actorinfo_snapshot ... preview=<empty>` (or blank) appears.
   - if the actor-adjacent fragments disappear while the protagonist remains visible, mark the root cause as confirmed mismatch: server mock wrote a body GIF into the optional overhead badge field.
 
+## 2026-06-08 rerun: post-scene-change WT44 task subset handled
+
+- verified from the newest manual run:
+  - the `previewImage(+0x10A)` default-empty change fixes the actor-fragment symptom visually: protagonist remains visible and the stray walk-GIF fragments are gone.
+  - after manual movement/transition, the client emits a new unhandled packet:
+    - `WT len=44 hdr=25/5 objs=1/25/5,1/6/1,1/6/13,1/6/14,1/2/10,1/25/5 count=6`
+    - payload includes final `Type=101`, matching the already known task/other/banner follow-up family from the earlier WT49 request.
+- interpretation:
+  - this is the WT49 scene-resource follow-up subset after a scene-change path, without `12/1` and `7/42`.
+  - because the request no longer carries a scene key, appending the old default trailing `30/1` would risk re-entering the previous default map. Treat that trailing scene-enter side effect as unconfirmed for this WT44 shape.
+- changed:
+  - added `builtin-scene-task-subset-followup`, which recognizes the WT44 subset and replies only with already parser-safe objects:
+    - `6/1 taskinfo=<empty>`
+    - `6/13 tasktypes=<six empty tagged-i8 records>`
+    - `6/14 action=0, tasknum=0, taskinfo=<empty>`
+    - `2/10 othernum=0, otherinfo=<empty>`
+    - `25/5 result=4`
+  - no `30/1` is appended for this subset.
+- validation:
+  - `make` succeeds after the builder change.
+- next verification:
+  - rerun manually and look for `mock_default source=builtin-scene-task-subset-followup`.
+  - then check whether the client proceeds to another packet family or whether the scene-change loading gates remain at `0,0`/`1,1`.
+
 ## 2026-06-08 side fix: restore portal move-entry after preview fix
 
 - user screenshot after the `previewImage(+0x10A)` empty-default fix confirms the actor-art fragments are gone and the protagonist is visible, but the bottom-center transfer marker is missing.
@@ -3527,3 +3551,325 @@ Suggested entry format:
 - next verification:
   - close the running emulator, rebuild, then rerun manually.
   - expected result: `trace_actor_move_entry_append ... actorId=1 grid=223,382 ... kind=2` returns, bottom-center transfer marker is visible again, and `trace_scene_actorinfo_snapshot ... preview=` remains empty so the old fragments do not return.
+
+## 2026-06-08 side fix: transfer-load `+num.gif` path decoding
+
+- confirmed from the latest transfer crash/run:
+  - after stepping onto the restored portal, the client does not emit a new unhandled network request before the crash; `net_packets.log` ends after normal `2/1 moveinfo` acks and a safe `2/10` otherinfo response.
+  - the new-map local load reaches `trace_actor_motion_descriptor_context ... name=00蓬莱仙岛_02.sce`, appends two portal/body move entries from that `.sce`, sends `scene_send_map_enter_request`, and then enters local piclib/resource preload.
+  - the last storage trace is the piclib request for `+num.gif`: raw memory contains the full UCS-2 path `./\JHOnlineData\+num.gif`, but `vm_read_path_string()` decoded it as only `.` and `vm_get_file_handle()` returned handle `4` through the pseudo-dir path instead of opening the real file.
+- root cause:
+  - platform path detector `vm_path_looks_like_ucs2_le()` allowed ASCII path characters such as `/`, `\`, `.`, `_`, and `-`, but not `+`.
+  - `+num.gif` was therefore misclassified as a narrow C string and truncated at the first UCS-2 NUL after `.`, making the later resource reader consume a pseudo-directory handle.
+- changed:
+  - `src/vmFunc.c::vm_path_looks_like_ucs2_le()` now accepts `+` as a valid ASCII path character in UCS-2 paths.
+- evidence:
+  - runtime trace: `trace_piclib_resource_dispatch ... name=+num.gif` followed by storage `file_open_request ... name=.` and `file_open_raw_name ... hex=2e002f005c004a...5c002b006e0075006d002e00670069006600`.
+  - local asset check: `bin/JHOnlineData/+num.gif` exists and has a plausible wrapped length header (`0x00000271`, file size `629`).
+- next verification:
+  - rebuild, rerun manually, and confirm storage now logs `file_open handle=... path=JHOnlineData/+num.gif` plus the expected `file_read` lines before any later transfer-load fault.
+
+## 2026-06-08 side fix: scene-change response follows requested mapID
+
+- verified from the next manual run:
+  - the previous `+num.gif` bug is fixed: `storage_trace.log` now records `file_open handle=4 path=JHOnlineData/+num.gif`, reads length `0x271`, reads the 625-byte body, and closes the file.
+  - the client then advances to a new blocker: full-screen loading with repeated `trace_loading_overlay_call ... overlayState=3`.
+- confirmed mismatch:
+  - the live transfer request is `WT len=89` with `1/2/3 mapID=00蓬莱仙岛_02.sce exitID=1`, plus `1/27/11`, `1/27/4(type=1)`, and `1/7/42`.
+  - the old `mock_scene_change_combo_response` replied with fixed `30/2.scene=c00蓬莱仙岛_01` and default spawn `(223,382)`, then sent `27/11` before `27/12` and omitted requested `27/4` / `7/42`.
+  - runtime evidence after that reply was `sceneState=1`, `loadFlags=1,0,0`, dispatch gate closed, and the loading screen resumed.
+- local scene evidence:
+  - `tools/inspect_sce.py bin/JHOnlineData/00蓬莱仙岛_02.sce` shows `entry_id=1` spawn point `(128,45)`.
+  - `net_trace.log` already showed the local descriptor path opening `00蓬莱仙岛_02.sce` before the server response, so the server should not force the scene name back to `_01`.
+- changed:
+  - `src/main.c::mock_scene_change_combo_response` now derives scene and `posinfo` from the requested `mapID/exitID`.
+  - for `00蓬莱仙岛_02.sce + exitID=1`, it sends scene `00蓬莱仙岛_02.sce` and `posinfo=(128,45)`.
+  - the response now includes `27/12` before `27/11`, then requested `27/4`, and `7/42` when requested.
+- validation:
+  - `make` succeeds after the scene-change builder change.
+- next verification:
+  - rerun manually and confirm `mock_scene_change_combo_response ... scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45` appears.
+  - if loading still persists, compare whether `sceneState` reaches `7` or remains `1`, and whether a later `25/5` or `27/*` packet is still being queued after the dispatch gate closes.
+
+## 2026-06-08 follow-up: scene-change combo needs scene-aware trailing `30/1`
+
+- verified from the latest manual run:
+  - the second-map transfer response is now scene-correct: `mock_scene_change_combo_response ... scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45`.
+  - the follow-up `WT len=44 hdr=25/5 objs=1/25/5,1/6/1,1/6/13,1/6/14,1/2/10,1/25/5 count=6` is handled by `builtin-scene-task-subset-followup`, so this is no longer an unhandled-packet wait.
+  - adding scene-aware `30/1` to the WT44 response is too late: the latest run shows `mock_scene_task_subset_followup_response ... trailingSceneEnter=1 ... len=228`, but dispatch immediately exits through `trace_business_dispatch_state label=early_gate_off ... dispatchGate=0 objectCount=6`.
+  - because the late `30/1` is never consumed, runtime keeps the real loading widget active: `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1` and paired `trace_progress_strip_wrapper_tick ... caller=010460ca dst=20,188`.
+- static evidence:
+  - IDA `net_handle_scene_channel_dispatch()` (`0x01039B8A`) sends subtype `1` to `parse_scene_response_entry()` and subtype `2` to `parse_scene_posinfo_field()`.
+  - runtime from the first scene-resource follow-up shows the same contract: after dispatching trailing `kind=30 subtype=1`, `runtime_state ... sceneState=7 loadFlags=0,0,0` and subsequent loading-widget entries have `gate5530=0`.
+- changed:
+  - `mock_scene_change_combo_response()` now appends trailing `30/1 scene+posinfo` in the same dispatch window as `30/2`, using the requested scene-change target instead of the default scene key.
+  - `vm_net_mock_build_scene_task_subset_followup_response()` is back to parser-safe task/other/banner objects only; its event is expected to arrive after the dispatch gate has already closed.
+- validation:
+  - `make` succeeds after the builder-only change.
+- next verification:
+  - rerun manually and check for `mock_scene_change_combo_response ... objects=6 ... trailingSceneEnter=1 scene=00蓬莱仙岛_02.sce pos=128,45`.
+  - expected runtime evidence is `trace_business_handler ... kind=30 subtype=1` within the scene-change combo dispatch, followed by `runtime_state ... sceneState=7 loadFlags=0,0,0`, no `scene_widget_timeout_message`, and no moving center strip after the map-title prompt.
+
+## 2026-06-09 rerun: combo `30/1` consumed but loading gate remains
+
+- verified from the newest available log set:
+  - the scene-change combo now has the intended shape: `mock_scene_change_combo_response objects=6 ... trailingSceneEnter=1 scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45 len=303`.
+  - the trailing scene-enter object is consumed before the dispatch gate closes: `trace_business_dispatch_item ... index=5 ... kind=30 subtype=1` and `trace_business_handler ... kind=30 subtype=1`.
+  - after that dispatch, the client is back on the expected scene state: `runtime_state ... sceneGate=0 sceneState=7`, but the first snapshot still has `loadFlags=1,0,0`.
+  - the WT44 task subset response is handled and arrives after the scene dispatch gate is closed: `trace_business_dispatch_state label=early_gate_off ... objectCount=5`, then `runtime_state ... loadFlags=0,0,0`.
+  - the visible moving strip still persists after the handled packets: `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1 ... activeScreen=01053f78`, paired with `trace_progress_strip_wrapper_tick ... caller=010460ca dst=20,188`.
+- corrected interpretation:
+  - scene-aware `30/1` in the combo is now confirmed partial, not sufficient. It restores the `sceneState=7` side effect but does not clear the second-map loading owner.
+  - there is no new unhandled WT44 packet in this log. The next boundary is the local owner gate read as `R9+0x5530` by `loading_gif_widget_draw()` / `sub_1013BDC()`, not another blind reshuffle of WT44 fields.
+- instrumentation status:
+  - `src/main.c` now includes read-only write tracing for `R9+0x552C`, `R9+0x5530`, and `R9+0x5531`.
+  - the inspected logs are older than the rebuilt `bin/main.exe`, so the lack of `loadingGate_R9_5530` write lines in this log is not evidence that the field is never written.
+- validation:
+  - `make` succeeds with the added loading-owner write trace.
+- next verification:
+  - rerun manually with the current `bin/main.exe` and inspect for `trace_scene_loading_owner_write field=loadingGate_R9_5530`.
+  - if the only clear is still the `scene_widget_timeout_message` branch, analyze the `sub_1013BDC()` callback/`R9+0x552C` completion condition before changing more packet builders.
+
+## 2026-06-09 rerun: WT44 late response leaves `R9+0x5530` stuck
+
+- verified from the new write-trace run:
+  - this run used the rebuilt binary: `net_trace.log` is newer than `bin/main.exe` and contains `loadingGate_R9_5530` trace lines.
+  - the first scene flow still demonstrates the normal clear path: when WT49 dispatches while the scene business gate is open, handlers such as `7/42` and `27/4` clear `R9+0x5530`, and later widget entries have `gate5530=0`.
+  - on the second-map scene-change path, the combo response is consumed correctly:
+    - `mock_scene_change_combo_response objects=6 ... trailingSceneEnter=1 scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45`
+    - `trace_business_handler ... kind=30 subtype=1`
+    - `runtime_state ... sceneGate=0 sceneState=7`
+  - immediately after that, the client sends the WT44 task subset. The send wrapper `sub_103478E()` copies the outgoing request object's byte `+5` into `R9+0x5530` at `0x01034796`, setting it to `1`.
+  - the mock WT44 response arrives after `30/1` has closed `sceneObj+0x164`, so `net_business_response_dispatch()` exits through `early_gate_off` at `0x01012F42`.
+  - `net_wrapper_event_dispatch()` clears only `R9+0x5531` at `0x010348F6`; no business parser runs to clear `R9+0x5530`.
+- conclusion:
+  - the remaining moving strip is no longer an unknown local residue and no longer an unhandled-packet wait. It is a late-response sequencing bug: a request opens the loading gate after scene dispatch has closed, then its response cannot reach the clearing parser.
+- changed:
+  - `mock_scene_change_combo_response()` now pre-bundles the WT44 task/other/banner subset for the observed second-map request shape, before trailing `30/1`.
+  - to stay within the confirmed practical 10-object limit, that combo keeps `30/2`, `27/12`, `27/4`, `7/42`, `6/1`, `6/13`, `6/14`, `2/10`, `25/5`, and `30/1`, and omits the empty `27/11` object only in this specific experiment.
+- validation:
+  - `make` succeeds after the builder change.
+- next verification:
+  - rerun manually and check the scene-change marker:
+    - expected: `mock_scene_change_combo_response objects=10 ... fb11empty=0 ... taskSubset=1 ... trailingSceneEnter=1`.
+  - then check whether the later `WT len=44` disappears. If it still appears, inspect whether `loadingGate_R9_5530` is cleared before/after its `early_gate_off`.
+
+## 2026-06-09 rerun: pre-bundled WT44 subset is negative
+
+- verified from the newest manual run:
+  - the experimental 10-object combo was consumed: `mock_scene_change_combo_response objects=10 ... fb11empty=0 ... taskSubset=1 ... trailingSceneEnter=1`.
+  - it did not suppress the later post-scene-change request. The client still sent `WT len=44 hdr=25/5 objs=1/25/5,1/6/1,1/6/13,1/6/14,1/2/10,1/25/5`.
+  - the WT44 mock response was queued as `builtin-scene-task-subset-followup responseLen=177`, but its data event entered `net_business_response_dispatch()` with `dispatchGate=0` and exited at `early_gate_off` (`0x01012F42`).
+  - after that event, `R9+0x5530` remained `1`, and the loading widget continued through `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1` plus `trace_progress_strip_wrapper_tick ... dst=20,188`.
+  - only the later timeout path cleared it: `trace_scene_loading_owner_write field=loadingGate_R9_5530 ... pc=01013c6a`, followed by `trace_scene_message_request label=scene_widget_timeout_message ... text=网络连接超时!`.
+- conclusion:
+  - pre-bundling the parser-safe task/other/banner subset inside the scene-change combo is confirmed negative. It neither suppresses WT44 nor closes the request lifecycle.
+  - the next boundary is the local `sub_1013BDC()` wait-callback branch that calls `R9+0x554C`; in the failing run that callback sends WT44 from `0x01013C02..0x01013C05`.
+- changed:
+  - reverted the 10-object task-subset scene-change experiment so `mock_scene_change_combo_response()` again mirrors the requested scene-change family plus scene-aware trailing `30/1`.
+  - added read-only `trace_scene_loading_callback_gate` at `0x01013BDC`, `0x01013C00`, `0x01013C02`, and `0x01013C04` to log `R9+0x5540`, `*(R9+0x5540+0x10)`, `R9+0x554C`, the callback return in `R0`, and the loading gate bytes.
+- validation:
+  - `make` succeeds after this trace-only/code cleanup change.
+
+## 2026-06-09 rerun: wait callback trace confirms normal first-scene timing
+
+- verified from the newest manual run:
+  - the first map's normal resource follow-up is driven by `sub_1013BDC()` calling the wait callback at `R9+0x554C == 0x0103478F`.
+  - before the callback, `trace_scene_loading_callback_gate ... waitObj=01056124 waitObjFlag10=7 gate5530=0 gate5531=0`.
+  - the callback sends `WT len=49` from `0x01013C05`; after `BLX`, `R0=0x31`, `waitObjFlag10=0`, `gate5530=1`, and `gate5531=1`.
+  - that WT49 response dispatches while `sceneObj+0x164` is still open, so handlers run and clear `R9+0x5530`; the normal first scene ends with `sceneState=7 loadFlags=0,0,0`.
+- second-map state:
+  - the scene-change combo is back to the parser-faithful shape: `mock_scene_change_combo_response objects=6 ... fb11empty=1 ... taskSubset=0 ... trailingSceneEnter=1`.
+  - it consumes `30/2`, `27/12`, `27/11`, `27/4`, `7/42`, and `30/1`, restoring `sceneState=7`.
+  - immediately after the combo data event, the same callback path sends `WT len=44` from `0x01013C05`; the response reaches `early_gate_off` and leaves `R9+0x5530=1`.
+- instrumentation correction:
+  - the first version of `trace_scene_loading_callback_gate` spent its 96-line cap on idle `0x01013BDC` entries before the second-map callback. It proved the first-map timing but missed the second-map callback boundary.
+  - the trace now skips idle entry logs, raises the cap to 160, and keeps callback-boundary logs.
+  - `vm_net_trace_scene_loading_owner_write` now also watches `R9+0x5540`, `R9+0x554C`, and `R9+0x5564` (`waitObj+0x10`) with a 256-line cap, so the next run should identify the parser/site that reactivates the WT44 wait after scene-change completion.
+- validation:
+  - `make` succeeds after this trace refinement.
+
+## 2026-06-09 rerun: WT44 is built by outgoing event objects after `30/2`
+
+- verified from the newest manual run:
+  - IDA shows `R9+0x5564` is not a separate business flag. It is `eventObj+0x10`, the current outgoing WT object count. `event_packet_add_field()` increments it at `0x0103460E`; `event_packet_init()` clears it at `0x01034702`.
+  - `sub_1013BDC()` tests that count via `*(*(R9+0x5520+0x20)+0x10)`. If it is nonzero and `R9+0x5531 == 0`, it calls the send callback at `R9+0x554C`.
+  - on the second-map scene-change response, `sub_1013BDC()` sends the request with `waitObjFlag10=4` before the combo response dispatches. That request is the scene-change WT89.
+  - while the combo is being consumed, the `30/2` handler allocates a new outgoing object: after `trace_business_handler ... kind=30 subtype=2`, `event_packet_add_field()` writes `R9+0x5564` from `0` to `1`.
+  - after the combo completes, the object count continues from `1` to `6`, and `sub_1013BDC()` sends `WT len=44` from the same callback path. Its response still reaches `early_gate_off`.
+- static evidence:
+  - IDA `sub_1049188()` (`0x01049188`) calls `alloc_outgoing_game_event(2, 0, 25, 5)` at `0x01049192`, then clears fields on the active scene/UI object. This matches the first object in WT44 (`1/25/5`).
+  - IDA `event_packet_add_field()` (`0x010345D4`) takes the outgoing event object, initializes a slot with `sub_1034518()`, optionally sets byte `+5`, and increments `eventObj+0x10` at `0x0103460E`.
+- changed:
+  - added read-only `trace_alloc_outgoing_game_event` at `alloc_outgoing_game_event()` entry/return (`0x0100E2E4`, `0x0100E302`) to capture each outgoing object's caller and kind/subtype in the next run.
+- hypothesis:
+  - `30/2` in the scene-change combo may be the direct cause of the late WT44 follow-up. If the next run confirms all WT44 objects are emitted from `30/2`/scene-change side effects, the next builder experiment should test whether the scene-change response can complete with scene-aware `30/1` plus the requested `27/*`/`7/42` family but without `30/2`.
+- validation:
+  - `make` succeeds after adding this trace.
+
+## 2026-06-09 rerun: WT44 tail comes from `scene_runtime_tick`
+
+- verified from the newest manual run:
+  - the scene-change combo remains parser-valid and scene-aware: `mock_scene_change_combo_response objects=6 ... trailingSceneEnter=1 scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45`.
+  - `30/2` is confirmed as the source of only the first late outgoing object: after `trace_business_handler ... kind=30 subtype=2`, `trace_alloc_outgoing_game_event ... lr=01049197 ... regs=...,00000019,00000005`, matching `sub_1049188()` (`0x01049188`) and object `25/5`.
+  - after the combo dispatch returns, the outgoing object count continues from `1` to `6`; the final traced objects are `2/10` from caller `0x0100EDA0` and `25/5` from caller `0x0100ED8E`.
+  - the resulting request is still `WT len=44 hdr=25/5 objs=1/25/5,1/6/1,1/6/13,1/6/14,1/2/10,1/25/5 count=6`, and its response still reaches `early_gate_off` at `0x01012F42`.
+- static evidence:
+  - IDA `scene_runtime_tick()` (`0x01014E54..0x01014EEE`) gates a one-shot sync on `[R4+1] == 1`, directly queues `6/1`, `6/13`, and `6/14`, clears `[R4+1]` at `0x01014EE6`, then calls `send_game_event_type(101)` (`0x0100ED90`, `2/10`) and `send_default_scene_event()` (`0x0100ED80`, `25/5`).
+  - therefore `30/2` is not the whole WT44 source. Removing only `30/2` is still a hypothesis and may merely change the late request shape instead of preventing it.
+- changed:
+  - expanded read-only `trace_scene_runtime_tick` to log the real `R4` tick-state pointer, `[R4+0..4]`, `R6+0x0D`, and the existing scene/loading fields.
+  - added trace points at `0x01014E54` (`oneshot_sync_check`) and `0x01014EE6` (`oneshot_sync_clear`) to observe the one-shot sync branch without patching it.
+- validation:
+  - `make` succeeds after the trace-only change.
+- next verification:
+  - rerun manually and check `trace_scene_runtime_tick label=oneshot_sync_check/oneshot_sync_clear`.
+  - if `[R4+1]` is set only after a specific scene-change handler, identify that handler before changing builders. If it is expected normal behavior, the server-side fix likely needs a sequencing/response-shape change that lets the WT44 response dispatch before the business gate closes, not another forced local clear.
+
+## 2026-06-09 rerun: second-map WT44 still late; one-shot trace cap corrected
+
+- verified from the newest manual run:
+  - this run used the rebuilt trace binary (`net_trace.log` newer than `bin/main.exe`) and again reproduced the stuck strip.
+  - the second-map scene-change combo is unchanged and parser-consumed:
+    - `mock_scene_change_combo_response objects=6 ... trailingSceneEnter=1 scene=00蓬莱仙岛_02.sce exitId=1 pos=128,45`
+    - dispatch order: `30/2`, `27/12`, `27/11`, `27/4`, `7/42`, `30/1`.
+  - after `30/2`, `sub_1049188()` creates the first outgoing `25/5`; after the combo finishes, `eventObj+0x10` increments through the remaining one-shot sync objects and `sub_1013BDC()` sends `WT len=44`.
+  - the WT44 response still reaches `net_business_response_dispatch()` with `dispatchGate=0` and exits at `early_gate_off` (`0x01012F42`), leaving `R9+0x5530=1` until the timeout branch clears it at `0x01013C6A`.
+- instrumentation correction:
+  - the first `oneshot_sync_*` trace captured the normal first-map one-shot branch at tick 255, but its cap was exhausted before the second-map branch around tick 472.
+  - `R4` in `scene_runtime_tick()` is confirmed as `R9+0x5C64`; the branch gate `[R4+1]` is therefore `R9+0x5C65`.
+- changed:
+  - expanded `vm_net_trace_scene_loading_owner_write()` to watch `R9+0x5C64`, `R9+0x5C65`, and `R9+0x5C66`.
+  - filtered empty `oneshot_sync_check` entries and raised the `trace_scene_runtime_tick` cap so the next run should preserve the second-map one-shot boundary.
+- validation:
+  - `make` succeeds after the trace-only change.
+- next verification:
+  - rerun manually and inspect `trace_scene_loading_owner_write field=sceneTickOneShot_R9_5C65` near the second-map transition.
+  - that write PC should identify whether the one-shot WT44 is caused by `30/2`, `27/12`, `27/4`, `30/1`, or scene-runtime init outside the packet parser.
+
+## 2026-06-09 rerun: one-shot WT44 is scene-runtime init, not a parser side effect
+
+- verified from the newest manual run:
+  - `sceneTickOneShot_R9_5C65` is set on both first-map and second-map scene initialization by `scene_runtime_init_and_sync()` at `0x01013010`.
+  - the second-map write occurs before the scene-change response is dispatched: `trace_scene_loading_owner_write field=sceneTickOneShot_R9_5C65 ... pc=01013010 lr=01039d1b tick=325`.
+  - IDA confirms `0x01013010` is the fixed initialization write `STRB #1, [R4,#1]`, with `R4 = R9+0x5C64`; it is not a field-specific packet parser side effect.
+  - the later WT44 is therefore the normal scene-runtime one-shot sync family. The failure is sequencing: the current scene-change combo closes the business dispatch gate before that one-shot response arrives.
+- changed:
+  - for the observed portal scene-change request shape (`2/3` plus `27/11`, `27/4`, `7/42`, no `12/1`), `mock_scene_change_combo_response()` now defers gate-closing scene completion.
+  - that combo keeps only the non-closing requested family (`27/11`, `27/4`, `7/42`) and records the requested scene/exit target.
+  - `mock_scene_task_subset_followup_response()` now accepts the one-shot task subset by object shape instead of fixed length, then appends the deferred scene completion objects while the gate should still be open:
+    - parser-safe `6/1`, `6/13`, `6/14`, `2/10`, `25/5`
+    - scene-aware `27/12`, `27/11`, `27/4`, trailing `30/1`
+- validation:
+  - `make` succeeds after the builder sequencing experiment.
+- next verification:
+  - rerun manually and check for `mock_scene_change_combo_response ... deferredSceneCompletion=1 trailingSceneEnter=0`.
+  - expected follow-up is `mock_scene_task_subset_followup_response ... deferredSceneCompletion=1 trailingSceneEnter=1 lateDispatchExpected=0`.
+  - success criteria: the WT44 response enters `net_business_response_dispatch()` with `dispatchGate=1`, consumes the deferred `30/1`, and no longer leaves `R9+0x5530=1` / timeout strip active.
+
+## 2026-06-09 correction: fully deferring `30/2` causes map bounce-back
+
+- user-observed result:
+  - after entering the next map, the client immediately returns to the previous map.
+- verified from logs:
+  - the experimental scene-change combo had only three objects and omitted `30/2`: `mock_scene_change_combo_response objects=3 ... trailingSceneEnter=0 deferredSceneCompletion=1 scene=00蓬莱仙岛_02.sce`.
+  - the client then consumed only `27/11`, `27/4`, and `7/42`, leaving `sceneState=0` after that response.
+  - the one-shot subset response later consumed a trailing `30/1`, but the client then emitted a new scene-change request back to `c00蓬莱仙岛_01`, matching the visual bounce-back.
+- conclusion:
+  - fully deferring `30/2` is confirmed negative. `30/2` is needed early to commit the requested scene-change target.
+- changed:
+  - restored `30/2` inside `mock_scene_change_combo_response()` for the portal scene-change path.
+  - kept the narrower experiment of deferring later scene-completion tail objects (`27/12` / trailing `30/1`) into the one-shot subset response.
+- validation:
+  - `make` succeeds after this correction.
+- next verification:
+  - rerun manually and confirm `mock_scene_change_combo_response ... sceneChangeResult=1 ... deferredSceneCompletion=1`.
+  - if bounce-back is gone but the progress strip returns, compare whether `30/2` alone closes the gate early enough to make the one-shot subset response hit `early_gate_off`.
+
+## 2026-06-09 correction: early `30/2` prevents bounce but still closes the gate
+
+- user-observed result:
+  - restoring early `30/2` removes the map bounce-back, but the progress strip returns.
+- verified from logs:
+  - the scene-change combo marker is `mock_scene_change_combo_response objects=4 ... sceneChangeResult=1 ... deferredSceneCompletion=1`.
+  - `30/2` immediately closes the business gate at `trace_scene_dispatch_gate_write ... pc=0103980e`.
+  - the one-shot subset response is built as deferred completion (`mock_scene_task_subset_followup_response ... deferredSceneCompletion=1 ... len=369`) but still reaches `early_gate_off` with `dispatchGate=0`.
+- conclusion:
+  - early `30/2` is sufficient to prevent bounce-back but too early for the one-shot WT44 timing.
+- changed:
+  - replaced the deferred `30/1` experiment with a narrower deferred `30/2` experiment:
+    - scene-change combo again omits `30/2`, leaving the business gate open.
+    - one-shot subset response appends the remembered scene-change `30/2 scene+posinfo` as its final object.
+  - rationale: `30/2` is the confirmed scene-change commit path and also clears `R9+0x5530`; putting it at the end of the one-shot response should allow that response to dispatch before the gate closes.
+- validation:
+  - `make` succeeds after this builder-only change.
+- next verification:
+  - rerun manually and check:
+    - `mock_scene_change_combo_response ... sceneChangeResult=0 ... deferredSceneCompletion=1`
+    - `mock_scene_task_subset_followup_response ... deferredSceneChangeResult=1`
+    - the WT44 response dispatches with `dispatchGate=1`, consumes final `30/2`, and does not bounce back or leave `gate5530=1`.
+
+## 2026-06-09 correction: deferred `30/2` also bounces back
+
+- user-observed result:
+  - deferring `30/2` into the one-shot response again makes the client enter the next map and immediately return to the previous map.
+- verified from logs:
+  - the scene-change combo was marked `sceneChangeResult=0 ... deferredSceneCompletion=1`.
+  - after the one-shot response, the client emitted another scene-change request back to `c00蓬莱仙岛_01`.
+- conclusion:
+  - both variants that omit `30/2` from the immediate scene-change combo are confirmed negative. The client needs early `30/2` to commit the requested target map before later runtime ticks.
+  - the remaining progress-strip issue should not be solved by moving scene completion into WT44.
+- changed:
+  - reverted the deferred scene-completion experiments.
+  - `mock_scene_change_combo_response()` is back to the complete early scene-change response.
+  - `mock_scene_task_subset_followup_response()` is back to parser-safe task/other/banner objects only.
+- validation:
+  - `make` succeeds after reverting the experiment.
+
+## 2026-06-09 experiment: split `30/2` scene ack from `posinfo`
+
+- checked latest submitted logs:
+  - `bin/logs/net_trace.log` and `net_packets.log` were written at `09:56`, before the rebuilt `bin/main.exe` at `09:57`.
+  - those logs still show the old negative experiment marker: `mock_scene_change_combo_response ... sceneChangeResult=0 ... deferredSceneCompletion=1`.
+  - therefore they confirm the already-known bounce-back failure when early `30/2` is omitted, but they do not test the restored/new binary.
+- new static evidence:
+  - IDA `parse_scene_posinfo_field()` (`0x01039770`) reads `result`, `scene`, then optional `posinfo`.
+  - when `result==1` and `posinfo` exists, it applies the scene/position and closes the scene business dispatch gate by writing `sceneObj+0x164=0` at `0x0103980E`.
+  - regardless of `posinfo`, it still calls `sub_10491AE()` at `0x0103993C`; that path calls `sub_1049188()` and creates the follow-up `25/5` event.
+  - IDA `ui_apply_named_posinfo_target()` (`0x0100E9B8`) used by `27/12` also closes the same gate at `0x0100EA6A`, so `27/12` must not remain in the early scene-change combo for this experiment.
+- changed:
+  - added `vm_net_mock_put_scene_ack_without_posinfo()` for a `30/2` object containing only `result`, `type`, and `scene`.
+  - `mock_scene_change_combo_response()` now sends that early `30/2` ack without `posinfo`, then mirrors the requested non-closing follow-up objects (`27/11`, `27/4`, `7/42`).
+  - `mock_scene_task_subset_followup_response()` now appends the deferred scene-position completion while the gate should still be open: `27/12`, `27/11`, `27/4`, then full `30/2 result/type/scene/posinfo`.
+- status:
+  - hypothesis under test: early `30/2` without `posinfo` may be enough to avoid bounce-back while keeping the business gate open for the normal WT44 one-shot response.
+- validation:
+  - `make` succeeds after this builder-only experiment.
+- next verification:
+  - rerun manually with the rebuilt binary and check for:
+    - `mock_scene_change_combo_response ... sceneChangeResult=1 trailingSceneEnter=0 deferredSceneCompletion=1`
+    - `mock_scene_task_subset_followup_response ... deferredSceneChangeResult=1 deferredSceneCompletion=1 lateDispatchExpected=0`
+    - no immediate request back to `c00蓬莱仙岛_01`
+    - the WT44 response entering business dispatch instead of `early_gate_off`.
+
+## 2026-06-09 rerun: split `30/2` works, empty `25/5` reentrant flush is suspect
+
+- verified from the newest manual run:
+  - the split scene-change experiment is confirmed positive for the previous loading strip:
+    - `mock_scene_change_combo_response objects=4 ... sceneChangeResult=1 trailingSceneEnter=0 deferredSceneCompletion=1`
+    - the following WT44 response is not blocked by the scene dispatch gate: `trace_business_dispatch_state label=entry ... dispatchGate=1 objectCount=9`
+    - the deferred full `30/2` is consumed at index 8, closes `sceneObj+0x164` at `0x0103980E`, and clears `R9+0x5530` at `0x010491A8` / `0x01039946`.
+  - this disproves the older hypothesis that the active strip must wait for timeout in this shape. The relevant gate after WT44 is `R9+0x5531`, not `R9+0x5530`.
+  - immediately after WT44 completion, `sub_1013BDC()` sends a short empty `WT len=9 hdr=25/5`. The mock replies with `builtin-scene-default-event responseLen=23`, and because `vm_net_mock_on_send()` immediately flushes short `25/5`, the response is dispatched while the client's send wrapper is still on the stack:
+    - `queue_data_event_immediate_flush ... tick=438`
+    - data event hits `early_gate_off` with `dispatchGate=0`, then clears `R9+0x5531` at `0x010348F6`
+    - after returning to the send wrapper, `0x010347E8` writes `R9+0x5531` back to `1`
+  - later local movement requests continue to append `2/1 moveinfo` objects until the outgoing WT object count reaches the cap (`eventObj+0x10 == 10`). At tick 1042 the next scene init cannot enqueue its `2/3`, `27/11`, `27/4`, or `7/42` requests because the same object queue is full.
+- changed:
+  - kept the parser-safe `25/5 -> 25/12 result=4` response, but removed the special same-stack immediate flush for short `25/5`.
+  - hypothesis: delivering that response asynchronously lets the client send wrapper set `R9+0x5531` first, then lets the normal network callback clear it afterward, avoiding the stale gate and queue fill.
+- validation:
+  - rebuild required after this source change.
+- next verification:
+  - rerun manually and check that `builtin-scene-default-event` no longer logs `queue_data_event_immediate_flush`.
+  - success marker: after the short `25/5` response, `R9+0x5531` should return to `0`, and later movement should not fill `eventObj+0x10` to cap 10 before the next scene-enter request.
