@@ -2405,4 +2405,13 @@ Newest runtime result:
   - with that gate stuck, later local movement requests append `2/1 moveinfo` objects until `eventObj+0x10` reaches cap 10; a later scene init then cannot enqueue its normal `2/3`, `27/11`, `27/4`, or `7/42` requests.
 - current mock timing:
   - short `25/5` responses remain enabled as `25/12 result=4`, but they are now queued like normal async network data instead of being immediately flushed in the same call stack.
-  - status: `hypothesis under test`; this is a mock network timing correction, not a client global/state patch.
+  - status: `confirmed timing correction`; this is a mock network timing fix, not a client global/state patch.
+
+Follow-up runtime confirmation:
+
+- no `queue_data_event_immediate_flush` marker appears for short `25/5`.
+- repeated scene changes now continue past the previous queue-cap blocker:
+  - `c00蓬莱仙岛_03.sce exitID=0` is requested at tick `4653`.
+  - `00蓬莱仙岛_02.sce exitID=0` is requested at tick `4864`.
+- no `count=10 cap=10`, `scene_widget_timeout_message`, `unhandled_packet`, or `assert(0)` marker appears in the run.
+- the remaining post-movement `early_gate_off` entries come from empty `2/1 moveinfo` / `2/10` acks after scene dispatch has closed; they are not confirmed blockers because later scene-change sends still succeed.

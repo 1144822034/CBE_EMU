@@ -3873,3 +3873,48 @@ Suggested entry format:
 - next verification:
   - rerun manually and check that `builtin-scene-default-event` no longer logs `queue_data_event_immediate_flush`.
   - success marker: after the short `25/5` response, `R9+0x5531` should return to `0`, and later movement should not fill `eventObj+0x10` to cap 10 before the next scene-enter request.
+
+## 2026-06-09 rerun: async short `25/5` fixes queue-cap blocker
+
+- verified from the newest manual run:
+  - `builtin-scene-default-event` responses are still built as `25/12 result=4`, but no `queue_data_event_immediate_flush` marker appears.
+  - the short `25/5` response is queued and fired on the next scheduler turn, e.g. tick `4655` send / tick `4656` fire and tick `4866` send / tick `4867` fire.
+  - after those responses, `runtime_state` stays `sceneState=7` with `loadFlags=0,0,0`; no `scene_widget_timeout_message`, `unhandled_packet`, or `assert(0)` marker appears.
+  - the prior queue-cap failure is gone. The client successfully sends later scene-enter requests:
+    - tick `4651`: `trace_scene_send_map_enter_request`, then `2/3 mapID=c00蓬莱仙岛_03.sce exitID=0`.
+    - tick `4862`: another `trace_scene_send_map_enter_request`, then `2/3 mapID=00蓬莱仙岛_02.sce exitID=0`.
+  - grep found no `count=10 cap=10` in the new run.
+  - remaining `early_gate_off` entries after movement are the known `2/1 moveinfo` empty acks and `2/10` refresh acks arriving after scene dispatch has closed; they clear the wrapper gate and do not block subsequent scene-change sends in this run.
+- conclusion:
+  - confirmed: same-stack immediate flush for short `25/5` was a mock network timing bug.
+  - confirmed partial: split `30/2` plus deferred full `30/2` handles repeated portal scene changes without the earlier stuck loading strip or queue-cap failure.
+- next check:
+  - visually confirm whether any user-visible progress widget persists after the map title prompt. Current trace only shows transition-local progress ticks; steady `loading_gif_widget_draw_entry` lines have `flag10=0 gate5530=0`.
+
+## 2026-06-09 superseded hypothesis: map-switch progress fill as signed LCD rectangles
+
+- user-observed problem:
+  - the full-screen map-switch loading panel advances to the next scene, but the visible progress frame stays empty/0% for the whole load.
+- evidence:
+  - runtime trace shows transition-local progress fill calls while scene loading is active: `lcd_shape api=vMFillRectEx x=197 y=41/48/.../97 w=6 h=-13 color=000000c4 last=010034fc`.
+  - IDA maps `last=0x010034FC` into `sub_100337C()`, where the game calls the LCD manager `+0x4C` fill-rect slot.
+  - initial interpretation treated `h=-13` as an intentional negative-height rectangle and current emulator clipping as the draw blocker.
+- changed:
+  - added signed-rectangle normalization for LCD rectangle clipping in `src/main.c`.
+  - `vMDrawRect`, `vMDrawRectEx`, `vMFillRect`, and `vMFillRectEx` now normalize negative width/height before clipping and drawing.
+- status:
+  - superseded by the next entry: the `h=-13` trace was a parameter-shift artifact from decoding a 5-argument `FillRect` as `FillRectEx`.
+
+## 2026-06-09 correction: loading progress fill was a 5-arg FillRect call
+
+- new evidence from the next rerun:
+  - the prior `lcd_shape api=vMFillRectEx x=197 y=41/48/... w=6 h=-13 color=000000c4 last=010034fc` trace does not match the visible horizontal progress frame.
+  - IDA `sub_100337C()` shows `0x010034FC` calls the picture/resource table fill helper with logical arguments `x=33`, `y=n210+9`, `w=sub_104D538(max,174*counter)`, `h=imageHeight-18`, `color=0xFFF3`.
+  - therefore the earlier trace was a parameter-shift artifact: the emulator treated `R0=33` as a destination image pointer for `FillRectEx`, so the real `y=197` became logged as `x=197`, the real `w=progress` became logged as `y`, and the real color became logged as `h=-13`.
+- changed:
+  - added a `vMFillRectEx` compatibility path in `src/main.c`: if `R0` is a plausible coordinate rather than an image pointer, decode the call as 5-argument `FillRect(x,y,w,h,color)`.
+  - kept signed-rectangle normalization as a general clipping helper, but the loading progress issue is no longer classified as confirmed negative-height drawing.
+- expected next trace:
+  - `last=010034fc` should now appear as `lcd_shape api=vMFillRectCompat x=33 y=197 w=<increasing> h=6 color=0000fff3`.
+- validation:
+  - rebuild required, then rerun manually and confirm the full-screen loading progress bar fills horizontally.

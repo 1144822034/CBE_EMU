@@ -301,12 +301,68 @@ static int vm_lcd_coord_from_reg(u32 value)
     return (int)(int16_t)(value & 0xffff);
 }
 
+static void vm_lcd_normalize_signed_rect(int *x, int *y, int *w, int *h)
+{
+    if (*w < 0)
+    {
+        *x += *w;
+        *w = -*w;
+    }
+    if (*h < 0)
+    {
+        *y += *h;
+        *h = -*h;
+    }
+}
+
+static bool vm_lcd_clip_rect(int *x, int *y, int *w, int *h, int maxW, int maxH)
+{
+    vm_lcd_normalize_signed_rect(x, y, w, h);
+
+    if (*x < 0)
+    {
+        *w += *x;
+        *x = 0;
+    }
+    if (*y < 0)
+    {
+        *h += *y;
+        *y = 0;
+    }
+    if (*x + *w > maxW)
+        *w = maxW - *x;
+    if (*y + *h > maxH)
+        *h = maxH - *y;
+
+    return *w > 0 && *h > 0;
+}
+
+static bool vm_lcd_looks_like_fillrect_compat(u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    int x = vm_lcd_coord_from_reg(r0);
+    int y = vm_lcd_coord_from_reg(r1);
+    int w = vm_lcd_coord_from_reg(r2);
+    int h = vm_lcd_coord_from_reg(r3);
+
+    return r0 <= 0xffffu &&
+           x > -LCD_WIDTH &&
+           x < LCD_WIDTH &&
+           y > -LCD_HEIGHT &&
+           y < LCD_HEIGHT &&
+           w > -LCD_WIDTH &&
+           w <= LCD_WIDTH &&
+           h > -LCD_HEIGHT &&
+           h <= LCD_HEIGHT;
+}
+
 static bool vm_trace_progress_strip_region_overlap(int x, int y, int w, int h)
 {
     const int regionLeft = 16;
     const int regionTop = 200;
     const int regionRight = 224;
     const int regionBottom = 286;
+
+    vm_lcd_normalize_signed_rect(&x, &y, &w, &h);
 
     if (w <= 0 || h <= 0)
         return false;
@@ -11873,24 +11929,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         }
         u16 color = (u16)rectColor;
         vm_trace_lcd_shape("vMDrawRect", x, y, w, h, rectColor);
-        if (w > 0 && h > 0)
-        {
-            if (x < 0)
-            {
-                w += x;
-                x = 0;
-            }
-            if (y < 0)
-            {
-                h += y;
-                y = 0;
-            }
-            if (x + w > LCD_WIDTH)
-                w = LCD_WIDTH - x;
-            if (y + h > LCD_HEIGHT)
-                h = LCD_HEIGHT - y;
-        }
-        if (w > 0 && h > 0)
+        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
             u16 *rowBuf = (u16 *)cbeTextString;
             for (int col = 0; col < w; col++)
@@ -11947,24 +11986,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int h = vm_lcd_coord_from_reg(rectH);
         u16 color = (u16)rectColor;
         vm_trace_lcd_shape("vMDrawRectEx", x, y, w, h, rectColor);
-        if (w > 0 && h > 0)
-        {
-            if (x < 0)
-            {
-                w += x;
-                x = 0;
-            }
-            if (y < 0)
-            {
-                h += y;
-                y = 0;
-            }
-            if (x + w > dstW)
-                w = dstW - x;
-            if (y + h > dstH)
-                h = dstH - y;
-        }
-        if (w > 0 && h > 0)
+        if (vm_lcd_clip_rect(&x, &y, &w, &h, dstW, dstH))
         {
             u16 *rowBuf = (u16 *)cbeTextString;
             for (int col = 0; col < w; col++)
@@ -12022,21 +12044,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
             h = vm_lcd_coord_from_reg(fillH);
         }
         vm_trace_lcd_shape("vMFillRect", x, y, w, h, fillColor);
-        if (x < 0)
-        {
-            w += x;
-            x = 0;
-        }
-        if (y < 0)
-        {
-            h += y;
-            y = 0;
-        }
-        if (x + w > LCD_WIDTH)
-            w = LCD_WIDTH - x;
-        if (y + h > LCD_HEIGHT)
-            h = LCD_HEIGHT - y;
-        if (w > 0 && h > 0)
+        if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
         {
             u16 color = (u16)fillColor;
             for (int row = 0; row < h; row++)
@@ -12051,8 +12059,8 @@ static bool hook_vm_manager_lcd_func(u32 address)
     }
     else if (idx == 20)
     {
-        u32 dstImage, dstPixels, fillH, fillColor;
-        u16 dstW, dstH;
+        u32 dstImage, dstPixels = 0, fillH = 0, fillColor = 0;
+        u16 dstW = 0, dstH = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &dstImage);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp2);
@@ -12060,6 +12068,31 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_SP, &tmp4);
         uc_mem_read(MTK, tmp4, &fillH, 4);
         uc_mem_read(MTK, tmp4 + 4, &fillColor, 4);
+
+        if (vm_lcd_looks_like_fillrect_compat(dstImage, tmp1, tmp2, tmp3))
+        {
+            int x = vm_lcd_coord_from_reg(dstImage);
+            int y = vm_lcd_coord_from_reg(tmp1);
+            int w = vm_lcd_coord_from_reg(tmp2);
+            int h = vm_lcd_coord_from_reg(tmp3);
+            vm_trace_lcd_shape("vMFillRectCompat", x, y, w, h, fillH);
+            if (vm_lcd_clip_rect(&x, &y, &w, &h, LCD_WIDTH, LCD_HEIGHT))
+            {
+                u16 color = (u16)fillH;
+                for (int row = 0; row < h; row++)
+                {
+                    u32 off = (y + row) * LCD_WIDTH + x;
+                    for (int col = 0; col < w; col++)
+                        ((u16 *)Lcd_Cache_Buffer)[off + col] = color;
+                    uc_mem_write(MTK, VM_screenImage_ADDRESS + off * 2, Lcd_Cache_Buffer + off * 2, w * 2);
+                }
+            }
+            vm_set_call_result(1);
+            uc_reg_read(MTK, UC_ARM_REG_LR, &tmp1);
+            vm_bx(tmp1);
+            return true;
+        }
+
         uc_mem_read(MTK, dstImage, &dstPixels, 4);
         uc_mem_read(MTK, dstImage + 4, &dstW, 2);
         uc_mem_read(MTK, dstImage + 6, &dstH, 2);
@@ -12074,21 +12107,7 @@ static bool hook_vm_manager_lcd_func(u32 address)
         int w = vm_lcd_coord_from_reg(tmp3);
         int h = vm_lcd_coord_from_reg(fillH);
         vm_trace_lcd_shape("vMFillRectEx", x, y, w, h, fillColor);
-        if (x < 0)
-        {
-            w += x;
-            x = 0;
-        }
-        if (y < 0)
-        {
-            h += y;
-            y = 0;
-        }
-        if (x + w > dstW)
-            w = dstW - x;
-        if (y + h > dstH)
-            h = dstH - y;
-        if (w > 0 && h > 0)
+        if (vm_lcd_clip_rect(&x, &y, &w, &h, dstW, dstH))
         {
             u16 color = (u16)fillColor;
             u16 *rowBuf = (u16 *)cbeTextString;

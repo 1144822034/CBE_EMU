@@ -98,3 +98,17 @@ Evidence:
 
 - after entering the first map portal, piclib requested `+num.gif`; raw memory held the complete UCS-2LE path, but the earlier detector rejected `+` and decoded only `.`
 - that misclassification returned a pseudo-directory handle instead of opening `JHOnlineData/+num.gif`
+
+## LCD FillRect Compatibility
+
+Confirmed runtime/platform contract:
+
+- some client-side drawing wrappers call the LCD fill-rect slot with the 5-argument `FillRect(x, y, w, h, color)` convention even when the emulator hook reaches the adjacent `FillRectEx` entry point
+- when the first register is clearly a small screen coordinate instead of an image pointer, the emulator must decode the call as 5-argument `FillRect`
+
+Evidence:
+
+- Jianghu OL loading overlay `sub_100337C()` calls its resource/picture table `reserved19` at `0x010034FC`
+- IDA decompilation shows that call's logical arguments are `x=33`, `y=n210+9`, `w=sub_104D538(...)`, `h=imageHeight-18`, `color=0xFFF3`
+- runtime trace before the compatibility fix logged the same call as `lcd_shape api=vMFillRectEx x=197 y=41/48/... w=6 h=-13 color=000000c4 last=010034fc`
+- that trace shape is now classified as a calling-convention mismatch: the emulator shifted the 5-argument call by treating `R0=33` as a destination image pointer
