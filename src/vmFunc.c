@@ -824,8 +824,22 @@ static void vm_file_select_mode(int openMode, const char *modeHint, char *mode, 
         for (size_t i = 0; modeHint[i] && pos + 1 < sizeof(hint); ++i)
         {
             char ch = modeHint[i];
-            if (ch == 'r' || ch == 'w' || ch == 'a' || ch == 'b' || ch == '+')
-                hint[pos++] = ch;
+            if (ch == 'r' || ch == 'w' || ch == 'a')
+            {
+                if (pos == 0)
+                    hint[pos++] = ch;
+                else
+                    break;
+            }
+            else if ((ch == 'b' || ch == '+') && pos > 0)
+            {
+                if (strchr(hint, ch) == NULL)
+                    hint[pos++] = ch;
+            }
+            else
+            {
+                break;
+            }
         }
         if (pos)
         {
@@ -1731,7 +1745,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         char rwBuffer[] = {"rb"}; // 注意，windows中要按二进制读取，真机中的r = windows中的rb
         u32 ptr = vm_malloc(4);
         // vm中新建"r"内存
-        uc_mem_write(MTK, ptr, &rwBuffer, 2);
+        uc_mem_write(MTK, ptr, &rwBuffer, sizeof(rwBuffer));
         fileHandle = vm_cbfs_vm_file_open(2, pathPtr, ptr);
         vm_free(ptr);
         if (fileHandle < 0)

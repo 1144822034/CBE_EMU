@@ -2415,3 +2415,112 @@ Follow-up runtime confirmation:
   - `00蓬莱仙岛_02.sce exitID=0` is requested at tick `4864`.
 - no `count=10 cap=10`, `scene_widget_timeout_message`, `unhandled_packet`, or `assert(0)` marker appears in the run.
 - the remaining post-movement `early_gate_off` entries come from empty `2/1 moveinfo` / `2/10` acks after scene dispatch has closed; they are not confirmed blockers because later scene-change sends still succeed.
+
+### 2026-06-09 short `7/18` item/use request
+
+- observed request:
+  - `WT len=9 hdr=7/18 objs=1/7/18 count=1`
+  - runtime source: `sub_102C2E8` sends `alloc_outgoing_game_event(10, 1, 7, 18)` at `0x0102C2FE` after a HUD/touch action, then writes `R9+0x7A28+3=1`, `R9+0x7A28+4=1`, and `R9+0x7A28+2=0`.
+- parser evidence:
+  - the main kind-7 handler `net_handle_misc_player_fields()` (`0x01011C88`) does not handle subtype `18`.
+  - the matching UI-local response parser is `sub_102C104` (`0x0102C104`), which handles kind `7` subtype `17`, `34`, and `4`.
+  - for subtype `17`, it reads fields in this order: `result`, `useinfo` blob/string, `pcimg`. It then shows `useinfo` on `result == 1`; otherwise it shows the local `网络异常!` string.
+- current mock:
+  - `builtin-item-use18` responds to short `7/18` with `1/7/17 { result=1, useinfo="OK", pcimg=0 }`.
+- status:
+  - response field order is `confirmed` from IDA.
+  - end-to-end consumption is `hypothesis`: in the latest failing trace the scene business dispatch gate was already closed (`sceneObj+0x164 == 0`), so the next run must verify whether this response is consumed or still reaches `early_gate_off`.
+
+Newest runtime result:
+
+- confirmed:
+  - `builtin-item-use18` removes the previous unhandled/assert path. `bin/logs/net_packets.log` now records `source=builtin-item-use18 responseLen=48 WT len=9 hdr=7/18 objs=1/7/18 count=1`.
+  - the response bytes are a parser-shaped `1/7/17` object (`result=1`, `useinfo=OK`, `pcimg=0`), matching `sub_102C104` field order.
+  - the response is not consumed on this run: it enters `net_business_response_dispatch()` at tick `226` with `dispatchGate=0` and exits through `early_gate_off` at `0x01012F42`.
+  - only the wrapper block gate `R9+0x5531` is cleared at `0x010348F6`; `R9+0x5530` remains `1`, and the loading strip continues with `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1`.
+- implication:
+  - the remaining problem is not a missing `7/18` mock response field. It is a delivery/dispatch sequencing problem for post-map HUD data while `sceneObj+0x164` is closed.
+  - IDA `net_business_response_dispatch()` confirms that the scene-gate check occurs before packet unpacking/object iteration, so the UI-local `sub_102C104` parser cannot see the otherwise parser-shaped `7/17` object in this path.
+- instrumentation:
+  - `trace_business_dispatch_state` now also logs `R9+0x5D30` fallback callback plus the active `R9+0x5EF0` manager child/cb10, so the next run can distinguish a real fallback-channel contract from a normal object-loop response blocked by `early_gate_off`.
+
+Newest correction after the practise-info panel run:
+
+- confirmed:
+  - the active manager child callback at the blocked response is `managerChildCb10=0x0102CB47`, i.e. `sub_102CB46`, not `sub_102C104`.
+  - `sub_102CB46` handles kind `7` subtype `18` and reads fields in this order: `todaypasthour`, `todaypastmin`, `getexp`, `todaylasthour`, `todaylastmin`, `alllasthour`, `alllastmin`, `isgold`.
+  - therefore the earlier `7/18 -> 7/17 { result/useinfo/pcimg }` response was a mismatch for the visible `修炼信息` panel.
+- current mock:
+  - `builtin-practise-info18` now responds with kind `7` subtype `18` and the confirmed practise fields, using zero current/today values and `alllasthour=2`.
+  - the response remains on the normal business event `7` path. A narrow experiment queued this one response as event `6`, but the latest run proves that is not the correct transport contract.
+- confirmed negative transport experiment:
+  - packet log: `source=builtin-practise-info18 responseLen=151 WT len=9 hdr=7/18 objs=1/7/18 count=1`, and the response bytes contain the confirmed fields (`todaypasthour`, `todaypastmin`, `getexp`, `todaylasthour`, `todaylastmin`, `alllasthour`, `alllastmin`, `isgold`).
+  - runtime trace: `queue_data_event ... event=6 len=151`, then `fire_event ... event=6`.
+  - `net_business_response_dispatch()` is entered at tick `165` with `r3=6`, `dispatchGate=0`, `fallbackCb=05083027`, `managerChild=01058af8`, and `managerChildCb10=0102cb47`.
+  - the dispatcher then logs only `fallback_exit`; no `trace_practise_info_parser` line appears.
+  - therefore event `6` does not call the active manager-child parser `sub_102CB46` and does not clear `R9+0x5530`.
+- remaining status:
+  - confirmed: the `7/18` field shape is now aligned with `sub_102CB46`.
+  - confirmed: fallback event `6` is not the delivery path for this response.
+  - unresolved: the normal event `7` object loop is still blocked after map entry because `sceneObj+0x164 == 0`; the next investigation should target response ownership / scene dispatch-gate sequencing rather than changing the practise-info fields.
+
+Follow-up numeric encoding correction:
+
+- confirmed runtime evidence:
+  - after the keep-gate response was fixed, the later `7/18` response entered `sub_102CB46`: `trace_practise_info_parser label=entry ... kind=7 subtype=18`.
+  - the loading gate then cleared through the normal business-handler path, so the stuck progress strip disappeared.
+  - however, the first `u16` encoding experiment displayed huge values; `after_fields` logged values such as `29807`, `26469`, `24940`, and `26995`, which correspond to ASCII/GBK-ish string fragments rather than the intended `0/2` minute/hour values.
+  - `getexp`, which was encoded with the existing integer/u32 helper, remained sane.
+- corrected mock behavior:
+  - `builtin-practise-info18` now encodes all time fields with the normal integer/u32 object-value helper even though `sub_102CB46` stores them into 16-bit fields.
+  - current synthetic values are:
+    - `todaypasthour=0`, `todaypastmin=15`
+    - `getexp=120`
+    - `todaylasthour=1`, `todaylastmin=45`
+    - `alllasthour=1`, `alllastmin=45`
+    - `isgold=0`
+
+Current first-scene gate experiment:
+
+- evidence:
+  - the first-scene WT49 response currently reaches the object loop while `sceneObj+0x164 == 1`.
+  - in the newest trace, `27/12` closes that gate at `0x0100EA6A` before the later practise-info UI request; the trailing `30/1` then writes the already-zero gate again at `0x01039766`.
+  - IDA confirms `ui_apply_named_posinfo_target()` (`0x0100E9B8`) closes the gate unconditionally, and `parse_scene_response_entry()` (`0x010396EA`) closes it when `posinfo` is present.
+  - once closed, `net_business_response_dispatch()` checks the gate before packet unpacking, so the active manager-child parser cannot see later `7/18` responses.
+- hypothesis under test:
+  - the first-scene resource follow-up may be closing the business dispatch gate too early for post-map HUD/business responses.
+- current mock experiment:
+  - for the first-scene WT49 shape (`12/1 + 7/42` present), `mock_scene_resource_followup_response` defaults to `CBE_FIRST_SCENE_KEEP_BUSINESS_GATE=1`.
+  - in that mode it omits the `27/12/27/11/27/4` fb-target trio and replaces the full `30/1 scene+posinfo` with a non-closing `30/2 result+scene` ack without `posinfo`.
+  - this is a server-response experiment only; it does not patch the client gate or call the practise parser directly.
+- next runtime markers:
+  - positive: `mock_scene_resource_followup_response ... keepBusinessGate=1`, no close write at `0x0100EA6A/0x01039766` in the first-scene WT49 window, and later `7/18` reaches `trace_practise_info_parser`.
+  - negative: map completion regresses, scene state/load flags stick, or the later `7/18` still reaches `early_gate_off`; in that case restore the old builder with `CBE_FIRST_SCENE_KEEP_BUSINESS_GATE=0` while continuing gate/ownership research.
+
+### 2026-06-09 scene/menu `4/1` challenge interaction request
+
+- observed request:
+  - `WT len=60 hdr=4/1 objs=1/4/1(id=105) count=1`
+  - fields: `id=105`, `index=1`, `posx=142`, `posy=310`
+  - runtime trigger: map screen touch path (`activeScreen=01053f78`, `currentThis=01053f60`) after several handled `2/1 moveinfo` uploads; no loading widget gate was active (`gate5530=0` in the tail trace).
+- static evidence:
+  - `net_business_response_dispatch()` (`0x01012E4C`) routes kind `4` response objects to `net_handle_login_or_name_result()` (`0x0101258A`).
+  - `net_handle_login_or_name_result()` handles subtype `14` by reading only `result` and mapping result values `2..7` to local duel/challenge failure messages; subtype `15`/`17` read `name`; subtype `1` is not a confirmed response parser path.
+  - `sub_1037ED4()` (`0x01037ED4`) constructs the matching outgoing `1/4/1` object and writes `id`, `index`, `posx`, and `posy`. Its only direct static caller is `task_hall_activate_selected_entry()` action `13` (`0x01049370`), while the newest runtime touch also shows the scene/menu child callback family around `0x0101AA0B`.
+- current mock:
+  - `builtin-challenge-interaction` recognizes the exact single-object `1/4/1` request with `id/index/posx/posy`.
+  - it returns `1/4/14 { result=4 }`, a parser-safe local failure path, instead of trying to start battle or mutate local state.
+- status:
+  - confirmed: outgoing request field names/order from runtime bytes and IDA `sub_1037ED4()`.
+  - confirmed: response field order for the chosen failure path from IDA `net_handle_login_or_name_result()`.
+  - hypothesis: the real success response may involve battle module setup or another packet family; that contract is not implemented yet.
+
+Newest runtime result:
+
+- confirmed:
+  - the unhandled/assert path is gone. Packet log shows `source=builtin-challenge-interaction responseLen=23 WT len=60 hdr=4/1 objs=1/4/1(id=105) count=1`.
+  - response bytes are the intended `1/4/14 { result=4 }`: `mock_challenge_interaction_response response=4/14 result=4 len=23`.
+  - no `unhandled_packet`, `assert(0)`, `scene_widget_timeout_message`, `count=10 cap=10`, or immediate-flush marker appears in this run.
+- caveat:
+  - the response is delivered after the scene business gate has already closed (`runtime_state pre_data_event ... sceneGate=0` at tick `893`), so this run does not confirm that `net_handle_login_or_name_result()` consumed the `4/14` object.
+  - the outgoing request still opens the local loading owner (`flag10=1 gate5530=1` around ticks `892..897`), and it clears only after the next movement upload/ack path. Treat the current `4/14` response as packet-layer coverage plus parser-shaped evidence, not as a confirmed success/clear contract.

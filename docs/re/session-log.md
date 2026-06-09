@@ -3891,6 +3891,27 @@ Suggested entry format:
 - next check:
   - visually confirm whether any user-visible progress widget persists after the map title prompt. Current trace only shows transition-local progress ticks; steady `loading_gif_widget_draw_entry` lines have `flag10=0 gate5530=0`.
 
+## 2026-06-09 rerun: unhandled short `7/18`
+
+- verified from the newest manual run:
+  - previous loading/queue-cap issue remains fixed, but a new HUD/touch action emits an unhandled short request:
+    - `WT len=9 hdr=7/18 objs=1/7/18 count=1`
+    - packet log ends with `unhandled_packet` / `assert(0)`.
+  - runtime source is confirmed by trace:
+    - `trace_alloc_outgoing_game_event ... lr=0102c301 ... regs=0000000a,00000001,00000007,00000012`
+    - IDA `sub_102C2E8` sends `alloc_outgoing_game_event(10,1,7,18)` at `0x0102C2FE`.
+  - static parser evidence:
+    - `net_handle_misc_player_fields()` (`0x01011C88`) does not handle subtype `18`.
+    - nearby UI-local parser `sub_102C104` handles kind `7` subtype `17`, `34`, and `4`.
+    - for subtype `17`, `sub_102C104` reads `result`, `useinfo`, then `pcimg`; `result == 1` shows the `useinfo` text, while failure shows local `网络异常!`.
+- changed:
+  - added `builtin-item-use18`, which answers short `7/18` as `1/7/17 { result=1, useinfo="OK", pcimg=0 }`.
+- status:
+  - field order is confirmed by IDA.
+  - end-to-end consumption is still hypothesis because the failing trace had `sceneObj+0x164 == 0`; a normal business response may still reach `early_gate_off`. The next run must verify whether `trace_business_handler` reaches the `7/17` UI parser path or whether the scene dispatch gate remains the blocker.
+- validation:
+  - rebuild required after this source change.
+
 ## 2026-06-09 superseded hypothesis: map-switch progress fill as signed LCD rectangles
 
 - user-observed problem:
@@ -3918,3 +3939,158 @@ Suggested entry format:
   - `last=010034fc` should now appear as `lcd_shape api=vMFillRectCompat x=33 y=197 w=<increasing> h=6 color=0000fff3`.
 - validation:
   - rebuild required, then rerun manually and confirm the full-screen loading progress bar fills horizontally.
+
+## 2026-06-09 rerun: `7/18` handled but `7/17` response is gate-blocked
+
+- verified from the newest manual run:
+  - the previous `WT len=9 hdr=7/18` unhandled/assert path is gone. Packet log now shows `source=builtin-item-use18 responseLen=48`.
+  - the mock response is the intended `1/7/17` shape: trace logs `mock_item_use18_response response=7/17 result=1 useinfo=OK pcimg=0 len=48`.
+  - the request opens the loading owner at `0x01034796`: `trace_scene_loading_owner_write field=loadingGate_R9_5530 ... old=0 new=1`.
+  - the queued response fires one tick later, but `net_business_response_dispatch()` sees `dispatchGate=0` and exits at `early_gate_off` (`0x01012F42`) before unpack/object iteration.
+  - wrapper cleanup clears only `R9+0x5531` at `0x010348F6`; `R9+0x5530` remains `1`, and the loading strip continues with `trace_loading_gif_widget_draw_entry ... flag10=1 gate5530=1`.
+- conclusion:
+  - `7/18` is now handled at the mock packet level.
+  - `7/17` field order remains confirmed by IDA `sub_102C104`, but end-to-end consumption is not confirmed. The current blocker is response delivery while the scene business dispatch gate is closed.
+- changed:
+  - added read-only trace fields to `trace_business_dispatch_state`: `fallbackCb=R9+0x5D30`, `manager=R9+0x5EF0`, `managerChild`, and `managerChildCb10`.
+- validation:
+  - rebuild required after the trace-only source change.
+- next:
+  - rerun manually and inspect the gate-blocked `7/17` entry. If `managerChildCb10` resolves to the UI-local `sub_102C104` family, the likely contract is that this response must enter the normal object loop before `sceneObj+0x164` closes. If `fallbackCb` points to a relevant parser, test the alternate delivery contract separately.
+
+## 2026-06-09 rerun: practise-info panel expects `7/18`, not `7/17`
+
+- verified from the newest manual run:
+  - the visible screen is `修炼信息`, and tapping it emits the same short `WT len=9 hdr=7/18`.
+  - `builtin-item-use18` still replies, but the event enters `net_business_response_dispatch()` with `dispatchGate=0` and takes `early_gate_off`.
+  - the new trace shows the active manager child callback at that moment is `managerChildCb10=0102cb47`.
+  - IDA maps `0x0102CB47` to `sub_102CB46`, which handles kind `7` subtype `18`.
+- static correction:
+  - `sub_102CB46` reads `todaypasthour`, `todaypastmin`, `getexp`, `todaylasthour`, `todaylastmin`, `alllasthour`, `alllastmin`, and `isgold`.
+  - the previous `7/17 result/useinfo/pcimg` response matches `sub_102C104`, but that is not the active parser for the current `修炼信息` panel.
+- changed:
+  - renamed the mock path to `builtin-practise-info18`.
+  - changed the response object to kind `7` subtype `18` with the confirmed practise-info fields.
+  - added a narrow transport experiment: this one short response is queued as event `6` so it can exercise the existing fallback path instead of the scene-gated event `7` object loop.
+  - added read-only `trace_practise_info_parser` at `0x0102CB46` and `0x0102CC0E`.
+- validation:
+  - rebuild required.
+- next:
+  - rerun manually. If `trace_practise_info_parser ... kind=7 subtype=18` appears and `R9+0x5530` clears, the field correction plus fallback-channel hypothesis is confirmed partial. If not, fallback event `6` is a confirmed negative and the remaining problem is still dispatch ownership/gate sequencing.
+
+## 2026-06-09 rerun: fallback event `6` does not reach practise parser
+
+- verified from the newest manual run:
+  - the mock now builds the corrected practise response: `source=builtin-practise-info18 responseLen=151 WT len=9 hdr=7/18 objs=1/7/18 count=1`.
+  - packet bytes contain the `sub_102CB46` field order: `todaypasthour`, `todaypastmin`, `getexp`, `todaylasthour`, `todaylastmin`, `alllasthour`, `alllastmin`, `isgold`.
+  - the transport experiment queued that response as event `6`: `queue_data_event ... event=6 len=151`.
+  - at tick `165`, `net_business_response_dispatch()` is entered with `r3=6`, `dispatchGate=0`, `fallbackCb=05083027`, `managerChild=01058af8`, and `managerChildCb10=0102cb47`.
+  - the dispatcher logs `fallback_exit`, but no `trace_practise_info_parser` entry appears, and `R9+0x5530` remains `1`; the progress strip continues drawing.
+- conclusion:
+  - confirmed negative: event `6` fallback delivery does not call the active manager-child parser `sub_102CB46`.
+  - confirmed: the current blocker is no longer the `7/18` field order. It is response delivery while the normal event `7` object loop is gated off after map entry.
+- changed:
+  - reverted the `7/18` response back to default event `7` delivery. The corrected `builtin-practise-info18` packet body remains.
+- validation:
+  - rebuild required after this source change.
+
+## 2026-06-09 experiment: keep first-scene business gate open
+
+- new evidence:
+  - `event=6` fallback is confirmed negative, so the corrected `7/18` response must reach the normal event `7` object loop.
+  - the first-scene WT49 response closes `sceneObj+0x164` before the later `修炼信息` request:
+    - `27/12` closes it at `0x0100EA6A`.
+    - trailing `30/1` with `posinfo` writes the already-zero gate at `0x01039766`.
+  - IDA confirms those are parser side effects, not draw/UI artifacts:
+    - `ui_apply_named_posinfo_target()` (`0x0100E9B8`) closes the gate unconditionally.
+    - `parse_scene_response_entry()` (`0x010396EA`) closes the gate when `posinfo` is present.
+- changed:
+  - added the builder experiment `CBE_FIRST_SCENE_KEEP_BUSINESS_GATE` (default `1`) for the first-scene WT49 response.
+  - in that mode, `mock_scene_resource_followup_response` omits the gate-closing `27/12/27/11/27/4` trio and replaces full `30/1 scene+posinfo` with non-closing `30/2 result+scene` without `posinfo`.
+  - this is intentionally a server-response experiment, not a client global write or direct parser call.
+- next verification:
+  - rerun manually and check whether `mock_scene_resource_followup_response ... keepBusinessGate=1` is followed by a later `trace_practise_info_parser` for `7/18`.
+  - if map completion regresses or `7/18` still hits `early_gate_off`, rerun with `CBE_FIRST_SCENE_KEEP_BUSINESS_GATE=0` to restore the previous first-scene response while continuing gate/ownership research.
+- validation:
+  - rebuild required.
+
+## 2026-06-09 rerun: first keep-gate packet was malformed
+
+- verified from the newest manual run:
+  - the experiment marker appeared: `mock_scene_resource_followup_response ... trailingSceneEnter=0 keepBusinessGate=1 len=280`.
+  - the gate-closing writes at `0x0100EA6A` and `0x01039766` no longer appeared in that WT49 response window.
+  - however, `net_business_response_dispatch()` failed at unpack time: `trace_business_dispatch_state label=unpack_error ... r0=00000004 objectCount=7`.
+- root cause:
+  - the experiment branch wrote the `30/2 result/type/scene` fields directly into the WT stream without wrapping them in a `1/30/2` object header and object-length footer.
+  - therefore this run is not evidence against the keep-gate hypothesis; it only exposed a malformed mock packet.
+- changed:
+  - fixed `mock_scene_resource_followup_response` keep-gate branch to wrap the non-closing `30/2` ack with `vm_net_mock_begin_wt_object(..., 1, 0x1e, 2, ...)` and `vm_net_mock_finish_wt_object(...)`.
+- validation:
+  - rebuild required.
+
+## 2026-06-09 rerun: practise parser reached, time-field encoding corrected
+
+- verified from the newest manual run:
+  - fixed keep-gate WT49 now unpacks successfully: `mock_scene_resource_followup_response ... keepBusinessGate=1 len=286`, followed by `after_unpack_ok`.
+  - the response consumes seven objects, including the non-closing `kind=30 subtype=2`.
+  - the later `7/18` response enters the active manager-child parser: `trace_practise_info_parser label=entry ... kind=7 subtype=18 managerChildCb10=0102cb47`.
+  - the normal business handler then clears `R9+0x5530`; this matches the user-observed progress strip disappearing immediately.
+- remaining mismatch:
+  - the visible practise panel showed huge time values.
+  - trace after fields showed `today=29807:26469` and `all=24940:26995`, proving the prior `u16` object encoding was not accepted by the packet getter used at `sub_102CB46`.
+  - `getexp` stayed sane because it was already encoded with the regular integer/u32 helper.
+- changed:
+  - encoded all practise time fields with `vm_net_mock_put_object_u32()` while keeping the same parser field names.
+  - current synthetic values are `today=0:15`, `getexp=120`, `todayLast=1:45`, `allLast=1:45`, `isgold=0`.
+- validation:
+  - rebuild required.
+
+## 2026-06-09 rerun: crash while entering dynamic game CBM
+
+- verified from the newest manual run:
+  - after `dlCbm: enter game 111 cbmName is JHOnlineData\mmGameMstarWqvga.cbm`, the client called `DF_DataPackage_LoadPackage` twice and then crashed with `[vm_malloc] FAILED size=21521016`.
+  - storage trace shows the second package load reopened the embedded main package path:
+    - `file_open_request ... name=CBE/����OL.CBE hint=rbH...flowerStyle.gif selected=rbwr`
+    - `file_seek ... pos=353281 ... result=353281`
+    - `file_read ... size=4 result=0`
+  - the selected host mode was wrong. The intended guest hint was `rb`, but the hint buffer was not NUL-terminated and the emulator scanned later guest bytes, collecting `w`/`r` from adjacent resource text.
+  - `bin/CBE/江湖OL.cbe` was found at zero bytes after the bad writable open; it was restored from the tracked git blob to the expected `834345` bytes.
+- conclusion:
+  - confirmed root cause: this crash is a VM file-open mode contract bug, not a network packet or scene parser problem.
+  - the bogus `21521016` allocation is downstream of a failed package-size read after opening the main CBE package with a corrupted mode string.
+- changed:
+  - `vm_file_select_mode()` now accepts only a leading `r`/`w`/`a` token plus optional `b`/`+`, and stops at the first non-mode byte.
+  - `vm_DF_DataPackage_LoadFormTCardEx()` now writes the full NUL-terminated `"rb"` hint into guest memory before calling `vm_cbfs_vm_file_open`.
+- next verification:
+  - rebuild and rerun manually. Expected trace is `selected=rb` for `CBE/江湖OL.CBE`, followed by a successful 4-byte package-size read at offset `353281` and no `vm_malloc` assertion.
+
+## 2026-06-09 new unhandled `4/1` challenge/menu request
+
+- verified from the newest manual run:
+  - packet tail ends with `WT len=60 hdr=4/1 objs=1/4/1(id=105) count=1`.
+  - decoded fields are `id=105`, `index=1`, `posx=142`, `posy=310`.
+  - the request follows scene/menu touch dispatch on the settled map screen; repeated loading-widget entries in the same tail have `flag10=0 gate5530=0`.
+- static evidence:
+  - `sub_1037ED4()` (`0x01037ED4`) builds a `1/4/1` request and writes `id`, `index`, `posx`, `posy`.
+  - `net_business_response_dispatch()` (`0x01012E4C`) dispatches kind `4` responses to `net_handle_login_or_name_result()` (`0x0101258A`).
+  - `net_handle_login_or_name_result()` handles `4/14` by reading only `result`; values `2..7` select local duel/challenge failure messages. It does not implement a confirmed `4/1` response branch.
+- changed:
+  - added `builtin-challenge-interaction` for the exact single-object `1/4/1 id/index/posx/posy` request.
+  - current response is `1/4/14 { result=4 }`, a parser-safe failure response. This avoids guessing the success/battle-start contract and does not write CBE globals.
+- validation:
+  - rebuild required.
+
+## 2026-06-09 rerun: `4/1` packet handled, parser consumption still gated
+
+- verified from the newest manual run:
+  - the previous `4/1` unhandled/assert path is gone:
+    - `mock_challenge_interaction_response response=4/14 result=4 len=23`
+    - `source=builtin-challenge-interaction responseLen=23 WT len=60 hdr=4/1 objs=1/4/1(id=105) count=1`
+  - no `unhandled_packet`, `assert(0)`, `scene_widget_timeout_message`, `count=10 cap=10`, or `queue_data_event_immediate_flush` marker appears.
+- caveat:
+  - the response fires while the scene business gate is already closed: `runtime_state label=pre_data_event ... sceneGate=0` at tick `893`.
+  - no `trace_business_dispatch_item ... kind=4` line appears for this response window; the business-dispatch trace cap is also already exhausted by then, so this is strong but not perfect evidence that `4/14` did not enter `net_handle_login_or_name_result()` on this run.
+  - the request briefly opens the local loading owner (`flag10=1 gate5530=1` ticks `892..897`), and the next `2/1 moveinfo` path clears `gate5530` at tick `898`.
+- conclusion:
+  - confirmed: packet-layer handling for `4/1` is fixed.
+  - not confirmed: the final success/failure challenge contract. The current response remains a parser-shaped failure placeholder, not proof of the real battle-start protocol.

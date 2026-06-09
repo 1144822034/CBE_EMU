@@ -3484,6 +3484,10 @@ static void vm_net_trace_business_dispatch_state(const char *label, u32 pc)
     u8 dispatchGate = 0;
     u32 objectCount = 0;
     u32 objectBase = 0;
+    u32 fallbackCb = 0;
+    u32 manager = 0;
+    u32 managerChild = 0;
+    u32 managerChildCb10 = 0;
 
     if (s_businessDispatchTraceCount >= 96)
         return;
@@ -3500,10 +3504,15 @@ static void vm_net_trace_business_dispatch_state(const char *label, u32 pc)
             uc_mem_read(MTK, sceneObj + 0x164, &dispatchGate, 1);
         uc_mem_read(MTK, Global_R9 + 0x5590, &objectCount, 4);
         uc_mem_read(MTK, Global_R9 + 0x5598, &objectBase, 4);
+        uc_mem_read(MTK, Global_R9 + 0x5D30, &fallbackCb, 4);
+        manager = Global_R9 + 0x5EF0;
+        uc_mem_read(MTK, manager, &managerChild, 4);
+        if (managerChild)
+            uc_mem_read(MTK, managerChild + 0x10, &managerChildCb10, 4);
     }
 
     ++s_businessDispatchTraceCount;
-    vm_net_trace("trace_business_dispatch_state label=%s pc=%08x lr=%08x last=%08x tick=%u r0=%08x r1=%08x r2=%08x r3=%08x sceneObj=%08x dispatchGate=%u objectCount=%u objectBase=%08x activeScreen=%08x currentThis=%08x count=%u\n",
+    vm_net_trace("trace_business_dispatch_state label=%s pc=%08x lr=%08x last=%08x tick=%u r0=%08x r1=%08x r2=%08x r3=%08x sceneObj=%08x dispatchGate=%u objectCount=%u objectBase=%08x fallbackCb=%08x manager=%08x managerChild=%08x managerChildCb10=%08x activeScreen=%08x currentThis=%08x count=%u\n",
                  label ? label : "?",
                  pc,
                  lr,
@@ -3517,6 +3526,10 @@ static void vm_net_trace_business_dispatch_state(const char *label, u32 pc)
                  dispatchGate,
                  objectCount,
                  objectBase,
+                 fallbackCb,
+                 manager,
+                 managerChild,
+                 managerChildCb10,
                  vmAddedScreen,
                  g_currentScreenThis,
                  s_businessDispatchTraceCount);
@@ -3556,6 +3569,61 @@ static void vm_net_trace_business_dispatch_item(u32 pc)
                  vmAddedScreen,
                  g_currentScreenThis,
                  s_businessDispatchItemTraceCount);
+}
+
+static void vm_net_trace_practise_info_parser(const char *label, u32 pc)
+{
+    u32 lr = 0;
+    u32 packet = 0;
+    u32 kind = 0;
+    u32 subtype = 0;
+    u8 gate5530 = 0;
+    u8 gate5531 = 0;
+    u16 todayHour = 0;
+    u16 todayMin = 0;
+    u32 getExp = 0;
+    u16 allHour = 0;
+    u16 allMin = 0;
+    u8 isGold = 0;
+
+    if (!Global_R9)
+        return;
+
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_R0, &packet);
+    if (packet)
+    {
+        uc_mem_read(MTK, packet + 4, &kind, 4);
+        uc_mem_read(MTK, packet + 8, &subtype, 4);
+    }
+    uc_mem_read(MTK, Global_R9 + 0x5530, &gate5530, 1);
+    uc_mem_read(MTK, Global_R9 + 0x5531, &gate5531, 1);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 0x10, &todayHour, 2);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 0x12, &todayMin, 2);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 0x14, &getExp, 4);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 0x1C, &allHour, 2);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 0x1E, &allMin, 2);
+    uc_mem_read(MTK, Global_R9 + 0x7A28 + 3, &isGold, 1);
+
+    vm_net_trace("trace_practise_info_parser label=%s pc=%08x lr=%08x last=%08x tick=%u packet=%08x kind=%u subtype=%u gate5530=%u gate5531=%u today=%u:%u getexp=%u all=%u:%u isgold=%u activeScreen=%08x currentThis=%08x\n",
+                 label ? label : "?",
+                 pc,
+                 lr,
+                 lastAddress,
+                 g_schedulerTick,
+                 packet,
+                 kind,
+                 subtype,
+                 gate5530,
+                 gate5531,
+                 todayHour,
+                 todayMin,
+                 getExp,
+                 allHour,
+                 allMin,
+                 isGold,
+                 vmAddedScreen,
+                 g_currentScreenThis);
 }
 
 static void vm_net_trace_tasktypes_case13_stream(const char *label, u32 pc)
@@ -6432,6 +6500,12 @@ static bool vm_net_mock_put_object_ascii_digit(u8 *out, u32 outCap, u32 *pos, co
     return vm_net_mock_put_object_u8(out, outCap, pos, name, (u8)('0' + digit));
 }
 
+static bool vm_net_mock_put_object_u16(u8 *out, u32 outCap, u32 *pos, const char *name, u16 value)
+{
+    u8 encoded[] = {0x00, 0x02, (u8)(value >> 8), (u8)value};
+    return vm_net_mock_put_object_entry(out, outCap, pos, name, encoded, sizeof(encoded));
+}
+
 static bool vm_net_mock_put_object_u32(u8 *out, u32 outCap, u32 *pos, const char *name, u32 value)
 {
     u8 encoded[] = {0x00, 0x04, (u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value};
@@ -7575,6 +7649,51 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     return pos;
 }
 
+static bool vm_net_mock_is_challenge_interaction_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 4 || object.subtype != 1)
+        return false;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           vm_net_mock_request_contains(request, requestLen, "id") &&
+           vm_net_mock_request_contains(request, requestLen, "index") &&
+           vm_net_mock_request_contains(request, requestLen, "posx") &&
+           vm_net_mock_request_contains(request, requestLen, "posy");
+}
+
+static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u32 requestLen,
+                                                            u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
+        return 0;
+    /*
+     * sub_1037ED4 builds the observed 4/1 id/index/posx/posy request. The
+     * confirmed kind-4 response parser handles subtype 14 by reading only
+     * result and mapping values 2..7 to local duel/challenge failure messages.
+     * Return a parser-safe failure until the success/battle-start contract is
+     * recovered.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 14, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 4))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_challenge_interaction_response response=4/14 result=4 len=%u\n", pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *request, u32 requestLen,
                                                                  u8 *out, u32 outCap)
 {
@@ -7724,24 +7843,47 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 pos = 5;
     u8 objectCount = 0;
     bool includeSkillBooks = false;
+    bool keepBusinessGate = false;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
         return 0;
 
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
+    keepBusinessGate = includeSkillBooks &&
+                       vm_net_mock_env_u8("CBE_FIRST_SCENE_KEEP_BUSINESS_GATE", 1) != 0;
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                            includeSkillBooks, true, true,
                                                            includeSkillBooks ? false : true, false,
-                                                           includeSkillBooks))
+                                                           includeSkillBooks && !keepBusinessGate))
         return 0;
-    if (!vm_net_mock_append_scene_enter_object(out, outCap, &pos))
+    if (keepBusinessGate)
+    {
+        u32 objectStart = 0;
+        /*
+         * Probe the first-scene contract without forcing client globals:
+         * 27/12 and full 30/1 both close sceneObj+0x164 before later local
+         * HUD responses. A 30/2 result/scene ack without posinfo exercises the
+         * scene completion follow-up path but avoids that close branch.
+         */
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, vm_net_mock_scene_key_name()))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+    }
+    else if (!vm_net_mock_append_scene_enter_object(out, outCap, &pos))
+    {
         return 0;
+    }
     objectCount += 1;
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    vm_net_trace("mock_scene_resource_followup_response objects=%u skillBooks=%u taskinfo=empty tasktypes=6xempty task14=zero othernum=0 result25_5=%u fbFull12_11_4Info=%u trailingSceneEnter=1 len=%u\n",
+    vm_net_trace("mock_scene_resource_followup_response objects=%u skillBooks=%u taskinfo=empty tasktypes=6xempty task14=zero othernum=0 result25_5=%u fbFull12_11_4Info=%u trailingSceneEnter=%u keepBusinessGate=%u len=%u\n",
                  objectCount, includeSkillBooks ? 1u : 0u, includeSkillBooks ? 0u : 1u,
-                 includeSkillBooks ? 1u : 0u, pos);
+                 (includeSkillBooks && !keepBusinessGate) ? 1u : 0u,
+                 keepBusinessGate ? 0u : 1u,
+                 keepBusinessGate ? 1u : 0u,
+                 pos);
     return pos;
 }
 
@@ -7810,6 +7952,42 @@ static u32 vm_net_mock_build_short_wt_control_echo_response(const u8 *request, u
     vm_net_trace("mock_short_wt_control_echo kind=%u subtype=%u len=%u\n",
                  kind, subtype, requestLen);
     return vm_net_mock_copy_response(request, requestLen, out, outCap);
+}
+
+static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (outCap < pos)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 18, &objectStart))
+        return 0;
+    /*
+     * sub_102CB46 handles the active practise-info panel. For subtype 18 it
+     * reads todaypasthour, todaypastmin, getexp, todaylasthour,
+     * todaylastmin, alllasthour, alllastmin, then isgold.
+     */
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypasthour", 0))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypastmin", 15))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "getexp", 120))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylasthour", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylastmin", 45))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllasthour", 1))
+        return 0;
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllastmin", 45))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "isgold", 0))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_trace("mock_practise_info18_response response=7/18 today=0:15 getexp=120 last=1:45 all=1:45 isgold=0 len=%u\n", pos);
+    return pos;
 }
 
 static bool vm_net_mock_is_login_tail_skill_request(const u8 *request, u32 requestLen)
@@ -8788,6 +8966,17 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    if (vm_net_mock_is_short_wt_control_packet(request, requestLen, 7, 18))
+    {
+        hookedLen = vm_net_mock_build_practise_info18_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_trace("mock_default source=builtin-practise-info18 len=%u\n", hookedLen);
+            vm_net_log_handled_packet("builtin-practise-info18", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
     hookedLen = vm_net_mock_build_scene_resource_followup_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -8817,6 +9006,14 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     {
         vm_net_trace("mock_default source=builtin-actor-moveinfo-ack len=%u\n", hookedLen);
         vm_net_log_handled_packet("builtin-actor-moveinfo-ack", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_challenge_interaction_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_trace("mock_default source=builtin-challenge-interaction len=%u\n", hookedLen);
+        vm_net_log_handled_packet("builtin-challenge-interaction", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -8988,6 +9185,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     bool immediateFlushAfterData = false;
     bool queueTitleRoleStage4 = false;
     bool queueTitleRoleStage4AfterMain = false;
+    u32 responseEventType = 7;
     u32 queuedRoleStage4Len = 0;
     u32 queuedRoleStage4Ptr = 0;
     u8 queuedRoleStage4[256];
@@ -9045,8 +9243,8 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
                                       channel->callback,
                                       channel->context);
         }
-        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=7 len=%u\n", connectId, channel->callback, channel->context, g_netMockResponseLen);
-        scheduler_queue_net_event(7, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
+        vm_net_trace("queue_data_event connect=%u cb=%08x ctx=%08x event=%u len=%u\n", connectId, channel->callback, channel->context, responseEventType, g_netMockResponseLen);
+        scheduler_queue_net_event(responseEventType, responsePtr, g_netMockResponseLen, g_netMockResponseLen, channel->callback, channel->context);
         if (queueTitleRoleStage4 && queueTitleRoleStage4AfterMain)
         {
             vm_net_trace("queue_login_followup_event connect=%u cb=%08x ctx=%08x event=7 len=%u label=title-mode15-after-main\n",
@@ -16057,6 +16255,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
         vm_net_trace_business_dispatch_state("unpack_error", (u32)address);
     if (address == 0x1012F8E)
         vm_net_trace_business_dispatch_state("fallback_exit", (u32)address);
+    if (address == 0x102CB46)
+        vm_net_trace_practise_info_parser("entry", (u32)address);
+    if (address == 0x102CC0E)
+        vm_net_trace_practise_info_parser("after_fields", (u32)address);
     if (address == 0x1010228 || address == 0x101022A)
     {
         u32 lr = 0;

@@ -99,6 +99,22 @@ Evidence:
 - after entering the first map portal, piclib requested `+num.gif`; raw memory held the complete UCS-2LE path, but the earlier detector rejected `+` and decoded only `.`
 - that misclassification returned a pseudo-directory handle instead of opening `JHOnlineData/+num.gif`
 
+## File Open Mode Hints
+
+Confirmed runtime/platform contract:
+
+- VM file-open mode hints must be parsed as a short leading token, not as a whole guest-memory scan
+- valid leading tokens start with one of `r`, `w`, or `a`, followed only by optional `b` and `+`
+- if a non-mode byte appears, the emulator must stop parsing and fall back to the token already read or to the `openMode` default
+- emulator-created mode strings passed back through guest memory must include a trailing NUL
+
+Evidence:
+
+- after a map switch, `DF_DataPackage_LoadPackage` reopened `CBE/江湖OL.CBE` via `vm_DF_DataPackage_LoadFormTCardEx`
+- the trace showed `hint=rbH...flowerStyle.gif selected=rbwr`; the old parser scavenged `w` and `r` from adjacent guest memory after an unterminated `rb`
+- the host opened the main CBE package with writable `rbwr` semantics, then `file_read size=4 result=0` at offset `353281`
+- the failed package-size read led to `[vm_malloc] FAILED size=21521016` and the assertion crash
+
 ## LCD FillRect Compatibility
 
 Confirmed runtime/platform contract:
