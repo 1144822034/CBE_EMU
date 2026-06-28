@@ -1,42 +1,211 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>CBE Emulator</title>
   <style>
+    :root {
+      --bg: #0e1013;
+      --panel: #191d22;
+      --panel-strong: #232932;
+      --line: #343b46;
+      --text: #f2f5f7;
+      --muted: #9ba6b2;
+      --accent: #48c7a0;
+      --danger: #e4796e;
+      --canvas-width: min(calc(100vw - 24px), 330px);
+      --canvas-height: min(calc(100vh - 246px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 550px);
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
     html,
     body {
       margin: 0;
       width: 100%;
       height: 100%;
-      background: #111;
+      background: var(--bg);
+      color: var(--text);
     }
 
     body {
+      overflow: hidden;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
+    }
+
+    .app {
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
       display: grid;
-      place-items: center;
+      grid-template-columns: 1fr;
+      grid-template-rows: minmax(0, auto) auto;
+      gap: 12px;
+      align-items: center;
+      align-content: center;
+      justify-content: center;
+      padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
       overflow: hidden;
     }
 
+    .screen {
+      display: grid;
+      place-items: center;
+      width: 100%;
+      min-width: 0;
+    }
+
     canvas {
-      width: min(100vw, 480px);
-      height: min(100vh, 800px);
+      width: auto;
+      height: var(--canvas-height);
+      max-height: var(--canvas-height);
+      max-width: var(--canvas-width);
+      aspect-ratio: 3 / 5;
       image-rendering: pixelated;
       background: #000;
       outline: none;
+      box-shadow: 0 0 0 1px #000, 0 18px 42px rgba(0, 0, 0, .36);
+    }
+
+    .controls {
+      width: min(100%, 224px);
+      justify-self: center;
+      touch-action: none;
+    }
+
+    .dpad {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(54px, 64px));
+      grid-template-rows: repeat(3, 54px);
+      gap: 7px;
+      justify-content: center;
+    }
+
+    .control-button {
+      width: 100%;
+      min-width: 0;
+      height: 54px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--panel-strong), var(--panel));
+      color: var(--text);
+      font: 700 16px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 8px 18px rgba(0, 0, 0, .22);
+      touch-action: none;
+    }
+
+    .control-button[data-key="up"] {
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    .control-button[data-key="leftSoft"] {
+      grid-column: 1;
+      grid-row: 1;
+      border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+      color: #071512;
+      background: linear-gradient(180deg, #6ae0bd, var(--accent));
+    }
+
+    .control-button[data-key="rightSoft"] {
+      grid-column: 3;
+      grid-row: 1;
+      border-color: color-mix(in srgb, var(--danger) 48%, var(--line));
+      color: #1f0808;
+      background: linear-gradient(180deg, #f39b92, var(--danger));
+    }
+
+    .control-button[data-key="left"] {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .control-button[data-key="right"] {
+      grid-column: 3;
+      grid-row: 2;
+    }
+
+    .control-button[data-key="ok"] {
+      grid-column: 2;
+      grid-row: 2;
+      border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+    }
+
+    .control-button[data-key="down"] {
+      grid-column: 2;
+      grid-row: 3;
+    }
+
+    .control-button:active,
+    .control-button.is-active {
+      transform: translateY(1px);
+      filter: brightness(1.18);
+      box-shadow: inset 0 2px 8px rgba(0, 0, 0, .34), 0 4px 10px rgba(0, 0, 0, .2);
+    }
+
+    .arrow {
+      font-size: 26px;
+      line-height: 1;
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        gap: 10px;
+        padding: max(8px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+      }
+    }
+
+    @media (max-width: 380px) {
+      .controls {
+        width: min(100%, 164px);
+      }
+
+      .dpad {
+        grid-template-columns: repeat(3, 50px);
+        grid-template-rows: repeat(3, 50px);
+      }
+
+      .control-button {
+        height: 50px;
+      }
     }
   </style>
 </head>
 <body>
-  <canvas id="canvas" width="240" height="400" tabindex="0"></canvas>
+  <main class="app">
+    <section class="screen" aria-label="游戏画面">
+      <canvas id="canvas" width="240" height="400" tabindex="0"></canvas>
+    </section>
+
+    <nav class="controls" aria-label="游戏按键">
+      <div class="dpad">
+        <button class="control-button" type="button" data-key="leftSoft">左软</button>
+        <button class="control-button" type="button" data-key="up" aria-label="上"><span class="arrow">▲</span></button>
+        <button class="control-button" type="button" data-key="rightSoft">右软</button>
+        <button class="control-button" type="button" data-key="left" aria-label="左"><span class="arrow">◀</span></button>
+        <button class="control-button" type="button" data-key="ok">OK</button>
+        <button class="control-button" type="button" data-key="right" aria-label="右"><span class="arrow">▶</span></button>
+        <button class="control-button" type="button" data-key="down" aria-label="下"><span class="arrow">▼</span></button>
+      </div>
+    </nav>
+  </main>
+
   <script>
     var cbeParams = new URLSearchParams(window.location.search);
     var cbeArgs = cbeParams.getAll("arg");
     var cbeBuildVersion = cbeParams.get("v") || String(Date.now());
+    var cbeCanvas = document.getElementById("canvas");
     var Module = {
       arguments: cbeArgs,
-      canvas: document.getElementById("canvas"),
+      canvas: cbeCanvas,
       locateFile: function(path) {
         if (path.endsWith(".data") || path.endsWith(".wasm")) {
           return "build/" + path + "?v=" + encodeURIComponent(cbeBuildVersion);
@@ -49,6 +218,131 @@
     var cbeScript = document.createElement("script");
     cbeScript.src = "build/cbe-emu.js?v=" + encodeURIComponent(cbeBuildVersion);
     document.body.appendChild(cbeScript);
+
+    var cbeVirtualKeys = {
+      up: { key: "w", code: "KeyW", keyCode: 87 },
+      down: { key: "s", code: "KeyS", keyCode: 83 },
+      left: { key: "a", code: "KeyA", keyCode: 65 },
+      right: { key: "d", code: "KeyD", keyCode: 68 },
+      ok: { key: "f", code: "KeyF", keyCode: 70 },
+      leftSoft: { key: "q", code: "KeyQ", keyCode: 81 },
+      rightSoft: { key: "e", code: "KeyE", keyCode: 69 }
+    };
+    var cbeKeyboardMap = {
+      ArrowUp: "up",
+      ArrowDown: "down",
+      ArrowLeft: "left",
+      ArrowRight: "right",
+      " ": "ok"
+    };
+    var cbeActiveKeys = {};
+    var cbePointerKeys = {};
+
+    function cbeFocusCanvas() {
+      try {
+        cbeCanvas.focus({ preventScroll: true });
+      } catch (err) {
+        cbeCanvas.focus();
+      }
+    }
+
+    function cbeCreateKeyEvent(type, spec) {
+      var event = new KeyboardEvent(type, {
+        key: spec.key,
+        code: spec.code,
+        bubbles: true,
+        cancelable: true
+      });
+      try {
+        Object.defineProperty(event, "keyCode", { get: function() { return spec.keyCode; } });
+        Object.defineProperty(event, "which", { get: function() { return spec.keyCode; } });
+        Object.defineProperty(event, "charCode", { get: function() { return type === "keypress" ? spec.keyCode : 0; } });
+      } catch (err) {
+      }
+      return event;
+    }
+
+    function cbeEmitKey(keyName, type) {
+      var spec = cbeVirtualKeys[keyName];
+      if (!spec) {
+        return;
+      }
+      cbeCanvas.dispatchEvent(cbeCreateKeyEvent(type, spec));
+    }
+
+    function cbePressKey(keyName) {
+      if (cbeActiveKeys[keyName]) {
+        return;
+      }
+      cbeActiveKeys[keyName] = true;
+      cbeFocusCanvas();
+      cbeEmitKey(keyName, "keydown");
+      document.querySelectorAll('[data-key="' + keyName + '"]').forEach(function(button) {
+        button.classList.add("is-active");
+      });
+    }
+
+    function cbeReleaseKey(keyName) {
+      if (!cbeActiveKeys[keyName]) {
+        return;
+      }
+      cbeActiveKeys[keyName] = false;
+      cbeEmitKey(keyName, "keyup");
+      document.querySelectorAll('[data-key="' + keyName + '"]').forEach(function(button) {
+        button.classList.remove("is-active");
+      });
+    }
+
+    document.querySelectorAll(".control-button[data-key]").forEach(function(button) {
+      button.addEventListener("pointerdown", function(event) {
+        var keyName = button.dataset.key;
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        cbePointerKeys[event.pointerId] = keyName;
+        cbePressKey(keyName);
+      });
+
+      button.addEventListener("pointerup", function(event) {
+        event.preventDefault();
+        var keyName = cbePointerKeys[event.pointerId] || button.dataset.key;
+        delete cbePointerKeys[event.pointerId];
+        cbeReleaseKey(keyName);
+      });
+
+      button.addEventListener("pointercancel", function(event) {
+        var keyName = cbePointerKeys[event.pointerId] || button.dataset.key;
+        delete cbePointerKeys[event.pointerId];
+        cbeReleaseKey(keyName);
+      });
+    });
+
+    window.addEventListener("blur", function() {
+      Object.keys(cbeActiveKeys).forEach(cbeReleaseKey);
+      cbePointerKeys = {};
+    });
+
+    document.addEventListener("keydown", function(event) {
+      var keyName = cbeKeyboardMap[event.key];
+      if (!keyName || event.repeat) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      cbePressKey(keyName);
+    }, true);
+
+    document.addEventListener("keyup", function(event) {
+      var keyName = cbeKeyboardMap[event.key];
+      if (!keyName) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      cbeReleaseKey(keyName);
+    }, true);
+
+    cbeCanvas.addEventListener("click", cbeFocusCanvas);
+    cbeFocusCanvas();
   </script>
 </body>
 </html>
