@@ -1,5 +1,7 @@
 #include "config.h"
 #include <iconv.h>
+#include <stddef.h>
+#include <string.h>
 
 void my_memcpy(void *dest, void *src, int len);
 void my_memset(void *dest, u8 value, int len);

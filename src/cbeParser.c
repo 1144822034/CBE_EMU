@@ -1,15 +1,16 @@
 #include "cbeParser.h"
+#include <stdio.h>
 
 cbeInfo g_cbeInfo;
 
-int sumCheck(int *memBuffer, int len)
+int sumCheck(u8 *memBuffer, int len)
 {
     int result = 0;
     len /= 4;
     while (len-- > 0)
     {
-
-        result += *(memBuffer++);
+        result += (int)(memBuffer[0] | (memBuffer[1] << 8) | (memBuffer[2] << 16) | (memBuffer[3] << 24));
+        memBuffer += 4;
     }
     return result;
 }

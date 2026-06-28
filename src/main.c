@@ -17,6 +17,10 @@ static void vm_note_battle_mp_write(uc_engine *uc, uc_mem_type type,
 #include "hookRam.c"
 #include "vmEvent.c"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #ifdef GDB_SERVER_SUPPORT
 #include "gdb_client.c"
 pthread_t gdb_server_mutex;
@@ -4172,81 +4176,100 @@ static void vm_autotest_tick(void)
 }
 
 
+static bool vm_poll_host_events_once(void)
+{
+    SDL_Event ev;
+    bool keepRunning = true;
+
+    vm_input_sync_sdl_text_input();
+    while (SDL_PollEvent(&ev))
+    {
+        if (ev.type == SDL_QUIT)
+        {
+            keepRunning = false;
+            break;
+        }
+        switch (ev.type)
+        {
+        case SDL_KEYDOWN:
+            if (g_vmInputOpen)
+            {
+                SDL_Keycode key = ev.key.keysym.sym;
+                if (key == SDLK_RETURN || key == SDLK_KP_ENTER)
+                    EnqueueVMEvent(VM_EVENT_INPUT_DONE, 0, 0);
+                else if (key == SDLK_ESCAPE)
+                    EnqueueVMEvent(VM_EVENT_INPUT_DONE, 1, 0);
+                else if (key == SDLK_BACKSPACE)
+                    EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
+                break;
+            }
+            if (isKeyDown == SDLK_UNKNOWN)
+            {
+                isKeyDown = ev.key.keysym.sym;
+                keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
+            }
+            break;
+        case SDL_KEYUP:
+            if (g_vmInputOpen)
+                break;
+            if (isKeyDown == ev.key.keysym.sym)
+            {
+                isKeyDown = SDLK_UNKNOWN;
+                keyEvent(MR_KEY_RELEASE, ev.key.keysym.sym);
+            }
+            break;
+        case SDL_MOUSEMOTION:
+            if (isMouseDown)
+            {
+                mouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
+            }
+            break;
+        case SDL_MOUSEBUTTONDOWN:
+            isMouseDown = true;
+            mouseEvent(MR_MOUSE_DOWN, ev.button.x, ev.button.y);
+            break;
+        case SDL_MOUSEBUTTONUP:
+            isMouseDown = false;
+            mouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
+            break;
+        case SDL_TEXTINPUT:
+            if (g_vmInputOpen)
+            {
+                g_vmInputComposition[0] = 0;
+                vm_input_enqueue_utf8_text(ev.text.text);
+            }
+            break;
+        case SDL_TEXTEDITING:
+            if (g_vmInputOpen)
+            {
+                snprintf(g_vmInputComposition, sizeof(g_vmInputComposition),
+                         "%s", ev.edit.text);
+            }
+            break;
+        }
+    }
+    vm_autotest_tick();
+    return keepRunning;
+}
+
+static void vm_host_delay(u32 ms)
+{
+#ifdef __EMSCRIPTEN__
+    if (!vm_poll_host_events_once())
+        exit(0);
+    emscripten_sleep(ms);
+#else
+    SDL_Delay(ms);
+#endif
+}
+
 void loop()
 {
     void *thread_ret;
-    SDL_Event ev;
     bool isLoop = true;
     while (isLoop)
     {
-        vm_input_sync_sdl_text_input();
-        while (SDL_PollEvent(&ev))
-        {
-            if (ev.type == SDL_QUIT)
-            {
-                isLoop = false;
-                break;
-            }
-            switch (ev.type)
-            {
-            case SDL_KEYDOWN:
-                if (g_vmInputOpen)
-                {
-                    SDL_Keycode key = ev.key.keysym.sym;
-                    if (key == SDLK_RETURN || key == SDLK_KP_ENTER)
-                        EnqueueVMEvent(VM_EVENT_INPUT_DONE, 0, 0);
-                    else if (key == SDLK_ESCAPE)
-                        EnqueueVMEvent(VM_EVENT_INPUT_DONE, 1, 0);
-                    else if (key == SDLK_BACKSPACE)
-                        EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
-                    break;
-                }
-                if (isKeyDown == SDLK_UNKNOWN)
-                {
-                    isKeyDown = ev.key.keysym.sym;
-                    keyEvent(MR_KEY_PRESS, ev.key.keysym.sym);
-                }
-                break;
-            case SDL_KEYUP:
-                if (g_vmInputOpen)
-                    break;
-                if (isKeyDown == ev.key.keysym.sym)
-                {
-                    isKeyDown = SDLK_UNKNOWN;
-                    keyEvent(MR_KEY_RELEASE, ev.key.keysym.sym);
-                }
-                break;
-            case SDL_MOUSEMOTION:
-                if (isMouseDown)
-                {
-                    mouseEvent(MR_MOUSE_MOVE, ev.motion.x, ev.motion.y);
-                }
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                isMouseDown = true;
-                mouseEvent(MR_MOUSE_DOWN, ev.button.x, ev.button.y);
-                break;
-            case SDL_MOUSEBUTTONUP:
-                isMouseDown = false;
-                mouseEvent(MR_MOUSE_UP, ev.button.x, ev.button.y);
-                break;
-            case SDL_TEXTINPUT:
-                if (g_vmInputOpen)
-                {
-                    g_vmInputComposition[0] = 0;
-                    vm_input_enqueue_utf8_text(ev.text.text);
-                }
-                break;
-            case SDL_TEXTEDITING:
-                if (g_vmInputOpen)
-                {
-                    snprintf(g_vmInputComposition, sizeof(g_vmInputComposition),
-                             "%s", ev.edit.text);
-                }
-                break;
-            }
-        }
-        vm_autotest_tick();
+        isLoop = vm_poll_host_events_once();
         SDL_Delay(5);
     }
     g_vmInputSdlTextInputWanted = 0;
@@ -4394,6 +4417,29 @@ static u32 vm_persist_write_file(const char *path, const u8 *buffer, u32 size)
     return (u32)writeLen;
 }
 
+static u32 vm_read_installed_inner_app_version(void)
+{
+    FILE *fp = fopen("JHOnlineData/mmorpg_updateversioncbm", "rb");
+    u8 bytes[40];
+    u32 version = 0;
+    if (fp == NULL)
+        return 0;
+    size_t readLen = fread(bytes, 1, sizeof(bytes), fp);
+    fclose(fp);
+    if (readLen < 4)
+        return 0;
+    for (size_t i = 0; i + 3 < readLen; i += 4)
+    {
+        u32 value = (u32)bytes[i] |
+                    ((u32)bytes[i + 1] << 8) |
+                    ((u32)bytes[i + 2] << 16) |
+                    ((u32)bytes[i + 3] << 24);
+        if (value > version)
+            version = value;
+    }
+    return version;
+}
+
 
 static u32 vm_nv_read(u32 reqPtr)
 {
@@ -4509,7 +4555,11 @@ void RunArmProgram(void *param)
     // DF_DataPackage_SetFullPaths()
     // 当前运行的文件名
     char nameBuff[64] = LOAD_CBE_PATH;
+#ifdef __EMSCRIPTEN__
+    snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "CBE/\275\255\272\376OL.CBE");
+#else
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
+#endif
     uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS, cbeTextString, 64);
     // DF_DataPackage_SetFileLens();
     uc_mem_write(MTK, VM_DF_DataPackage_In_File_Length_ADDRESS, &g_cbeInfo.DF_DataPacakge_Size, 4);
@@ -4613,7 +4663,7 @@ void RunArmProgram(void *param)
                 if (p != UC_ERR_OK)
                     break;
                 vm_lcd_update_with_input_overlay();
-                SDL_Delay(100);
+                vm_host_delay(100);
             }
         }
         while (p == UC_ERR_OK)
@@ -4644,7 +4694,7 @@ void RunArmProgram(void *param)
                     uc_mem_read(MTK, Global_R9 + 0x9588 + 0x30, &waitNet30, 4);
                     uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &waitNextScreen, 4);
                 }
-                SDL_Delay(100);
+                vm_host_delay(100);
             }
             if (p != UC_ERR_OK)
                 break;
@@ -4850,7 +4900,7 @@ void RunArmProgram(void *param)
                             break;
                     }
                     vm_lcd_update_with_input_overlay();
-                    SDL_Delay(100);
+                    vm_host_delay(100);
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 if (screenThisPtr)
@@ -4961,9 +5011,19 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
+    char *fileBuffer;
+#ifdef __EMSCRIPTEN__
+    fileBuffer = readFile(LOAD_CBE_PATH, &changeTmp1);
+#else
     char nameBuff[64] = LOAD_CBE_PATH;
     utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
-    char *fileBuffer = readFile(cbeTextString, &changeTmp1);
+    fileBuffer = readFile(cbeTextString, &changeTmp1);
+#endif
+    if (fileBuffer == NULL)
+    {
+        printf("Failed to load CBE: %s\n", LOAD_CBE_PATH);
+        return -1;
+    }
     g_cbeFileBuffer = (u8 *)fileBuffer;
     g_cbeFileSize = changeTmp1;
     // 分析前150字节
@@ -5053,14 +5113,18 @@ int main(int argc, char *args[])
         // 启动emu线程
         changeTmp1 = ROM_ADDRESS;
 
-        pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
+        printf("Unicorn Engine Initialized\n");
+#ifdef __EMSCRIPTEN__
+        RunArmProgram((void *)changeTmp1);
+#else
+        pthread_create(&EmuThread, NULL, RunArmProgram, (void *)changeTmp1);
         pthread_create(&MainUpdareThread, NULL, MainUpdateTask, NULL);
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
 #endif
-        printf("Unicorn Engine Initialized\n");
 
         loop();
+#endif
     }
     return 0;
 }
@@ -5968,7 +6032,7 @@ return 4;
     else if (idx == 90)
     {
         // DEBUG_PRINT("[call]vmGetInnerAppVer\n");
-        tmp1 = 0;
+        tmp1 = vm_read_installed_inner_app_version();
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
     }
     else if (idx == 91)

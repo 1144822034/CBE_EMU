@@ -9,10 +9,17 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
+#else
+#include <strings.h>
+#define _stricmp strcasecmp
 #endif
 
 FILE *openFileList[16];
 static char openFileNames[16][256];
+
+#ifdef __EMSCRIPTEN__
+#include "../web/build/wasm_path_aliases.inc"
+#endif
 
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
 static void vm_trim_mmorpg_tempdata_header(void)
@@ -52,12 +59,12 @@ int vm_DF_DataPackage_LoadPackage(int a1, int a2);
 int vm_DF_DataPackage_InitTxt(int a1, int a2);
 
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr);
-void vm_DF_WriteShort(bufPtr, offsetPtr, value);
+u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value);
 int vm_DF_ReadInt(int a1, int a2);
-void vm_DF_WriteInt(bufPtr, offsetPtr, value);
+u32 vm_DF_WriteInt(u32 bufPtr, u32 offsetPtr, u32 value);
 
 int vm_DF_Malloc_IN(int a1, int a2);
-int vm_DF_ReadStringEx(int a1, int a2, int a3);
+int vm_DF_ReadStringEx(u32 a1, u32 a2, u32 a3);
 bool vm_DF_String_Equal(int a1, int a2);
 int vm_DF_DataPackage_LocateDataPackage(int a1, int a2);
 int vm_DF_DataPackage_GetPackageID(int a1, int a2);
@@ -75,7 +82,10 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle);
 int vm_cbfs_vm_file_tell(int fileHandle);
 int vm_cbfs_vm_file_close(int fileHandle);
 int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr);
-void vm_initDFDataPackage(u32 a1, u32 a2);
+u32 vm_initDFDataPackage(u32 a1, u32 a2);
+void vm_readStringByPtr(u32 ptr, u8 *dst);
+void vm_readStringByReg(uc_arm_reg reg, u8 *dst);
+void vm_InitDlLoadManager(u32 tmp1);
 void vm_sprintf();
 void vm_DF_GetFormatString();
 void vm_DF_GetMemoryBlock();
@@ -245,23 +255,161 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
     return sawWideChar;
 }
 
+#ifdef __EMSCRIPTEN__
+static void vm_wasm_normalize_alias_key(const char *src, char *dst, size_t dstSize)
+{
+    size_t pos = 0;
+    if (dstSize == 0)
+        return;
+    dst[0] = 0;
+    if (src == NULL)
+        return;
+    while (*src == '\\' || *src == '/')
+        ++src;
+    if (src[0] == '.' && (src[1] == '\\' || src[1] == '/'))
+    {
+        src += 2;
+        while (*src == '\\' || *src == '/')
+            ++src;
+    }
+    while (*src && pos + 1 < dstSize)
+    {
+        char ch = *src++;
+        dst[pos++] = (ch == '\\') ? '/' : ch;
+    }
+    while (pos > 1 && dst[pos - 1] == '/')
+        --pos;
+    dst[pos] = 0;
+}
+
+static const char *vm_wasm_lookup_utf8_path_alias(const char *path)
+{
+    char normalized[256];
+    vm_wasm_normalize_alias_key(path, normalized, sizeof(normalized));
+    for (int i = 0; i < g_wasm_path_alias_count; ++i)
+    {
+        if (_stricmp(normalized, g_wasm_path_aliases[i].gbk) == 0 ||
+            _stricmp(normalized, g_wasm_path_aliases[i].utf8) == 0)
+            return g_wasm_path_aliases[i].utf8;
+    }
+    return NULL;
+}
+#endif
+
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
+    char decoded[256];
     memset(out, 0, outSize);
+    memset(decoded, 0, sizeof(decoded));
     if (outSize == 0)
         return;
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     u32 ucs2Len = 0;
     if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
     {
-        ucs2_to_gbk(rawName, ucs2Len, out, outSize);
+#ifdef __EMSCRIPTEN__
+        ucs2_to_utf8(rawName, ucs2Len, (u8 *)decoded, sizeof(decoded));
+#else
+        ucs2_to_gbk(rawName, ucs2Len, (u8 *)decoded, sizeof(decoded));
+#endif
     }
     else
     {
-        vm_read_string_by_ptr_limited(namePtr, out, outSize);
+        vm_read_string_by_ptr_limited(namePtr, decoded, sizeof(decoded));
     }
+
+#ifdef __EMSCRIPTEN__
+    const char *aliasPath = vm_wasm_lookup_utf8_path_alias(decoded);
+    if (aliasPath != NULL)
+    {
+        snprintf(out, outSize, "%s", aliasPath);
+        out[outSize - 1] = 0;
+        return;
+    }
+
+    int hasHighByte = 0;
+    for (const u8 *p = (const u8 *)decoded; *p; ++p)
+    {
+        if (*p >= 0x80)
+        {
+            hasHighByte = 1;
+            break;
+        }
+    }
+    if (hasHighByte)
+    {
+        u8 utf8Path[256] = {0};
+        gbk_to_utf8((u8 *)decoded, utf8Path, sizeof(utf8Path));
+        if (utf8Path[0] != 0)
+        {
+            aliasPath = vm_wasm_lookup_utf8_path_alias((char *)utf8Path);
+            snprintf(out, outSize, "%s", aliasPath ? aliasPath : (char *)utf8Path);
+            out[outSize - 1] = 0;
+            return;
+        }
+    }
+#endif
+    snprintf(out, outSize, "%s", decoded);
     out[outSize - 1] = 0;
+}
+
+static FILE *vm_file_fopen_resolved(const char *path, const char *mode, char *resolvedName, size_t resolvedSize)
+{
+    FILE *fp = NULL;
+    char inputPath[256];
+    if (path == NULL || path[0] == 0)
+        return NULL;
+    snprintf(inputPath, sizeof(inputPath), "%s", path);
+    if (resolvedName != NULL && resolvedSize > 0)
+        resolvedName[0] = 0;
+
+#ifdef __EMSCRIPTEN__
+    const char *aliasPath = vm_wasm_lookup_utf8_path_alias(inputPath);
+    if (aliasPath != NULL)
+    {
+        fp = fopen(aliasPath, mode);
+        if (fp != NULL)
+        {
+            if (resolvedName != NULL && resolvedSize > 0)
+                snprintf(resolvedName, resolvedSize, "%s", aliasPath);
+            return fp;
+        }
+    }
+#endif
+
+    fp = fopen(inputPath, mode);
+    if (fp != NULL && resolvedName != NULL && resolvedSize > 0)
+        snprintf(resolvedName, resolvedSize, "%s", inputPath);
+    return fp;
+}
+
+static int vm_file_stat_resolved(const char *path, struct stat *st, char *resolvedName, size_t resolvedSize)
+{
+    char inputPath[256];
+    if (path == NULL || path[0] == 0 || st == NULL)
+        return -1;
+    snprintf(inputPath, sizeof(inputPath), "%s", path);
+    if (resolvedName != NULL && resolvedSize > 0)
+        resolvedName[0] = 0;
+
+#ifdef __EMSCRIPTEN__
+    const char *aliasPath = vm_wasm_lookup_utf8_path_alias(inputPath);
+    if (aliasPath != NULL && stat(aliasPath, st) == 0)
+    {
+        if (resolvedName != NULL && resolvedSize > 0)
+            snprintf(resolvedName, resolvedSize, "%s", aliasPath);
+        return 0;
+    }
+#endif
+
+    if (stat(inputPath, st) == 0)
+    {
+        if (resolvedName != NULL && resolvedSize > 0)
+            snprintf(resolvedName, resolvedSize, "%s", inputPath);
+        return 0;
+    }
+    return -1;
 }
 
 static int vm_is_pseudo_dir_path(const char *nameBuf)
@@ -285,7 +433,7 @@ static int vm_is_pseudo_dir_path(const char *nameBuf)
     if (len == 0)
         return 0;
 
-    return stat(normalized, &st) == 0 && (st.st_mode & S_IFDIR);
+    return vm_file_stat_resolved(normalized, &st, NULL, 0) == 0 && (st.st_mode & S_IFDIR);
 }
 
 static int vm_is_cbm_resource_path(const char *nameBuf)
@@ -405,7 +553,7 @@ static int vm_file_is_invalid_named_resource_cache(const char *normalizedName, c
     if (!vm_path_has_high_byte(normalizedName + 13))
         return 0;
 
-    fp = fopen(normalizedName, "rb");
+    fp = vm_file_fopen_resolved(normalizedName, "rb", NULL, 0);
     if (fp == NULL)
         return 0;
     if (fseek(fp, 0, SEEK_END) == 0)
@@ -443,7 +591,7 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
     if ((baseName[0] == 'c' || baseName[0] == 'b') &&
         snprintf(sceneName, sizeof(sceneName), "%s.sce", normalizedName) < (int)sizeof(sceneName))
     {
-        fp = fopen(sceneName, "rb");
+        fp = vm_file_fopen_resolved(sceneName, "rb", sceneName, sizeof(sceneName));
         if (fp != NULL)
         {
             fclose(fp);
@@ -453,7 +601,7 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
     }
     if (snprintf(resolvedName, resolvedSize, "%s.map", normalizedName) >= (int)resolvedSize)
         return 0;
-    fp = fopen(resolvedName, "rb");
+    fp = vm_file_fopen_resolved(resolvedName, "rb", resolvedName, resolvedSize);
     if (fp == NULL)
         return 0;
     fclose(fp);
@@ -469,7 +617,7 @@ static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, con
         return 0;
     if (snprintf(resolvedName, resolvedSize, "JHOnlineData/%s", normalizedName) >= (int)resolvedSize)
         return 0;
-    fp = fopen(resolvedName, "rb");
+    fp = vm_file_fopen_resolved(resolvedName, "rb", resolvedName, resolvedSize);
     if (fp == NULL)
         return 0;
     fclose(fp);
@@ -601,19 +749,23 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 snprintf(openFileNames[i], sizeof(openFileNames[i]), "%s", normalizedName);
                 return i;
             }
-            FILE *f = fopen(normalizedName, openMode);
+            FILE *f = vm_file_fopen_resolved(normalizedName, openMode, resolvedName, sizeof(resolvedName));
+            if (f != NULL)
+                snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
             if (f == NULL && vm_file_try_resolve_jhonline_dsh_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
-                f = fopen(resolvedName, openMode);
+                f = vm_file_fopen_resolved(resolvedName, openMode, resolvedName, sizeof(resolvedName));
                 if (f != NULL)
                     snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
             }
             if (f == NULL && vm_file_mode_is_writeable(openMode))
             {
                 vm_file_ensure_parent_dirs(normalizedName);
-                f = fopen(normalizedName, openMode);
+                f = vm_file_fopen_resolved(normalizedName, openMode, resolvedName, sizeof(resolvedName));
                 if (f == NULL)
-                    f = fopen(normalizedName, "wb+");
+                    f = vm_file_fopen_resolved(normalizedName, "wb+", resolvedName, sizeof(resolvedName));
+                if (f != NULL && resolvedName[0] != 0)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
             }
             if (f == NULL)
             {
@@ -636,7 +788,8 @@ int vm_dir_exists(int a1)
     vm_file_normalize_host_path(nameBuf, normalizedName, sizeof(normalizedName));
     if (strcmp(normalizedName, ".") == 0)
         return vm_set_call_result(0);
-    int r = dirExists(normalizedName);
+    struct stat st;
+    int r = vm_file_stat_resolved(normalizedName, &st, NULL, 0) == 0 && (st.st_mode & S_IFDIR);
     return vm_set_call_result(r);
 }
 
@@ -646,43 +799,12 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     char rwBuff[128] = {0};
     char nameBuff[256];
     char mode[8];
-    u8 rawName[256];
-    u32 pc = 0, lr = 0;
-    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     vm_read_path_string(namePtr, nameBuff, sizeof(nameBuff));
     if (rwPtr)
         uc_mem_read(MTK, rwPtr, &rwBuff, 128);
     rwBuff[sizeof(rwBuff) - 1] = 0;
     vm_file_select_mode(openMode, rwBuff, mode, sizeof(mode));
     int handle = vm_get_file_handle(nameBuff, mode);
-    if (handle < 0)
-    {
-        u32 r[8] = {0};
-        uc_reg_read(MTK, UC_ARM_REG_R0, &r[0]);
-        uc_reg_read(MTK, UC_ARM_REG_R1, &r[1]);
-        uc_reg_read(MTK, UC_ARM_REG_R2, &r[2]);
-        uc_reg_read(MTK, UC_ARM_REG_R3, &r[3]);
-        uc_reg_read(MTK, UC_ARM_REG_R4, &r[4]);
-        uc_reg_read(MTK, UC_ARM_REG_R5, &r[5]);
-        uc_reg_read(MTK, UC_ARM_REG_R6, &r[6]);
-        uc_reg_read(MTK, UC_ARM_REG_LR, &r[7]);
-        for (u32 i = 4; i <= 6; ++i)
-        {
-            if ((r[i] >= ROM_ADDRESS && r[i] < ROM_ADDRESS + 0x1000000) ||
-                (r[i] >= VM_Memory_Pool_ADDRESS && r[i] < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
-                (r[i] >= STACK_ADDRESS && r[i] < STACK_ADDRESS + 0x100000))
-            {
-                u8 bytes[96] = {0};
-                if (uc_mem_read(MTK, r[i], bytes, sizeof(bytes)) == UC_ERR_OK)
-                {
-                    char tag[64];
-                    snprintf(tag, sizeof(tag), "file_open_fail_mem_r%u_%08x", i, r[i]);
-                }
-            }
-        }
-    }
     return vm_set_call_result(handle);
 }
 // ok
@@ -772,12 +894,12 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
     vm_file_normalize_host_path((char *)charBuffer, normalizedName, sizeof(normalizedName));
     if (vm_is_pseudo_dir_path(normalizedName))
         return vm_set_call_result(1);
-    FILE *f = fopen(normalizedName, "rb");
+    char resolvedName[256];
+    FILE *f = vm_file_fopen_resolved(normalizedName, "rb", resolvedName, sizeof(resolvedName));
     if (f == NULL)
     {
-        char resolvedName[256];
         if (vm_file_try_resolve_jhonline_dsh_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)))
-            f = fopen(resolvedName, "rb");
+            f = vm_file_fopen_resolved(resolvedName, "rb", resolvedName, sizeof(resolvedName));
     }
     u32 r = 0;
     if (f != NULL)
@@ -796,7 +918,8 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
     vm_file_normalize_host_path((char *)charBuffer, normalizedName, sizeof(normalizedName));
     if (vm_is_pseudo_dir_path(normalizedName) || vm_is_cbm_resource_path(normalizedName))
         return vm_set_call_result(0);
-    FILE *f = fopen(normalizedName, "rb");
+    char resolvedName[256];
+    FILE *f = vm_file_fopen_resolved(normalizedName, "rb", resolvedName, sizeof(resolvedName));
     u32 r = 0;
     if (f != NULL)
     {
@@ -804,7 +927,7 @@ int vm_cbfs_vm_file_delete(int disk, int namePtr)
         fclose(f);
     }
     if (r == 1)
-        unlink(normalizedName);
+        unlink(resolvedName[0] ? resolvedName : normalizedName);
     return vm_set_call_result(r);
 }
 
@@ -845,6 +968,10 @@ int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr)
     }
 
     vm_file_ensure_parent_dirs(finalNewName);
+    char resolvedOldName[256];
+    struct stat oldStat;
+    if (vm_file_stat_resolved(oldName, &oldStat, resolvedOldName, sizeof(resolvedOldName)) == 0)
+        snprintf(oldName, sizeof(oldName), "%s", resolvedOldName);
     r = rename(oldName, finalNewName);
     if (r != 0)
     {
@@ -1063,7 +1190,7 @@ u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
     return vm_set_call_result(ret);
 }
 
-void vm_DF_WriteShort(bufPtr, offsetPtr, value)
+u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value)
 {
     u32 offset, ret;
     uc_mem_read(MTK, offsetPtr, &offset, 4);
@@ -1091,7 +1218,7 @@ int vm_DF_ReadInt(int a1, int a2)
     vm_set_var(a2, offset);
     return vm_set_call_result(result);
 }
-void vm_DF_WriteInt(a1, a2, value)
+u32 vm_DF_WriteInt(u32 a1, u32 a2, u32 value)
 {
     u32 offset, ret;
     u8 arr[4];
@@ -1114,7 +1241,7 @@ int vm_DF_Malloc_IN(int a1, int a2)
     vm_set_var(a1, ptr);
     return vm_set_call_result(1);
 }
-int vm_DF_ReadStringEx(int a1, int a2, int a3)
+int vm_DF_ReadStringEx(u32 a1, u32 a2, u32 a3)
 {
     u32 offset;
     u8 len;
@@ -1450,7 +1577,6 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
     vm_cbfs_vm_file_seek(fileHandle, fileSeekPos, 0);
 
     int size = vm_DF_File_ReadInt(fileHandle);
-    // printf("DF_DataPackage_LoadFormTCard2:%x\n", size);
 
     int bufferPtr = 0;
     if (1)
@@ -1484,8 +1610,6 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         offset = vm_get_var(ptr);
         vm_free_var(ptr);
     }
-
-    // printf("DF_DataPackage_LoadFormTCard3333:%x,%x\n", count, minus1);
 
     while (i < count)
     {
@@ -1605,7 +1729,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
                         for (int j = 0; j < arr_cnt; j++)
                         {
                             vm_set_var(ptr, blockOffset);
-                            vm_DF_ReadStringEx((int *)(res_stringPtr + 4 * j), pfBuffer, ptr);
+                            vm_DF_ReadStringEx(res_stringPtr + 4 * j, pfBuffer, ptr);
                             blockOffset = vm_get_var(ptr);
 
                             vm_set_var_short(res_intPtr + 2 * j, idx++);
@@ -1732,7 +1856,7 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     return vm_DF_DataPackage_LoadFromTResource(a1, a2);
 }
 
-void vm_initDFDataPackage(u32 a1, u32 a2)
+u32 vm_initDFDataPackage(u32 a1, u32 a2)
 {
     u32 tmp2, tmp3, tmp4;
     tmp2 = 0;

@@ -1026,6 +1026,16 @@ static FILE *vm_net_mock_fopen_response_file(const char *path)
     if (fp != NULL)
         return fp;
 
+#ifdef __EMSCRIPTEN__
+    const char *wasmPath = vm_wasm_lookup_utf8_path_alias(path);
+    if (wasmPath != NULL)
+    {
+        fp = fopen(wasmPath, "rb");
+        if (fp != NULL)
+            return fp;
+    }
+#endif
+
 #ifdef _WIN32
     char exePath[MAX_PATH];
     DWORD exeLen = GetModuleFileNameA(NULL, exePath, sizeof(exePath));
@@ -1070,7 +1080,7 @@ static u32 vm_net_mock_load_response_file(const char *path, u8 *out, u32 outCap)
 
 static bool vm_net_mock_file_has_data(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return false;
     fseek(fp, 0, SEEK_END);
@@ -1081,7 +1091,7 @@ static bool vm_net_mock_file_has_data(const char *path)
 
 static bool vm_net_mock_file_has_min_size(const char *path, long minSize)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return false;
     fseek(fp, 0, SEEK_END);
@@ -1092,7 +1102,7 @@ static bool vm_net_mock_file_has_min_size(const char *path, long minSize)
 
 static long vm_net_mock_file_size(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return -1;
     if (fseek(fp, 0, SEEK_END) != 0)
@@ -1107,7 +1117,7 @@ static long vm_net_mock_file_size(const char *path)
 
 static u32 vm_net_mock_file_checksum(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return 0;
     u32 sum = 2166136261u;
@@ -1123,7 +1133,7 @@ static u32 vm_net_mock_file_checksum(const char *path)
 
 static bool vm_host_file_exists(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return false;
     fclose(fp);

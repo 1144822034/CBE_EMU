@@ -1,4 +1,5 @@
 #include "lcd.h"
+#include <string.h>
 
 #define PIXEL565R(v) ((((u32)v >> 11) << 3) & 0xff) // 5位红色
 #define PIXEL565G(v) ((((u32)v >> 5) << 2) & 0xff)  // 6位绿色

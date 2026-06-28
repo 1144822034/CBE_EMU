@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CBE Emulator</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #111;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    canvas {
+      width: min(100vw, 480px);
+      height: min(100vh, 800px);
+      image-rendering: pixelated;
+      background: #000;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="240" height="400" tabindex="0"></canvas>
+  <script>
+    var cbeParams = new URLSearchParams(window.location.search);
+    var cbeArgs = cbeParams.getAll("arg");
+    var cbeBuildVersion = cbeParams.get("v") || String(Date.now());
+    var Module = {
+      arguments: cbeArgs,
+      canvas: document.getElementById("canvas"),
+      locateFile: function(path) {
+        if (path.endsWith(".data") || path.endsWith(".wasm")) {
+          return "build/" + path + "?v=" + encodeURIComponent(cbeBuildVersion);
+        }
+        return path;
+      },
+      print: console.log.bind(console),
+      printErr: console.error.bind(console)
+    };
+    var cbeScript = document.createElement("script");
+    cbeScript.src = "build/cbe-emu.js?v=" + encodeURIComponent(cbeBuildVersion);
+    document.body.appendChild(cbeScript);
+  </script>
+</body>
+</html>

@@ -6,6 +6,8 @@ bin/Rom/moral-i9.bin
 *.id2
 *.nam
 build
+web/build/
+web/fs/
 .vscode
 .ideassssss
 obj

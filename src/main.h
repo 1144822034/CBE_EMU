@@ -6,7 +6,13 @@
 #include <stdlib.h>
 #include <time.h>
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
+#ifdef __EMSCRIPTEN__
+#include "../Lib/unicorn-wasm/unicorn.h"
+#define uc_hook_add(uc, hh, type, callback, user_data, begin, end) \
+    uc_hook_add(uc, hh, type, callback, user_data, begin, end, 0)
+#else
 #include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"
+#endif
 #include <pthread.h>
 #include "config.h"
 #include "fileIoEngine.h"
@@ -36,6 +42,7 @@ void handleEvent_EMU(uc_engine *uc, uint64_t address, uint32_t size, void *user_
 bool isIRQ_Disable(u32 cpsr);
 bool isIrqMode(u32 cpsr);
 void dumpCpuInfo();
+void dumpVirtMemory(u32 addr, u32 len);
 
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;
