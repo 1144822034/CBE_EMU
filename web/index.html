@@ -325,7 +325,9 @@
   <script>
     var cbeParams = new URLSearchParams(window.location.search);
     var cbeArgs = cbeParams.getAll("arg");
-    var cbeBuildVersion = cbeParams.get("v") || String(Date.now());
+    var cbeRequestedBuildVersion = cbeParams.get("v") || "";
+    var cbeBuildVersion = cbeRequestedBuildVersion || "dev";
+    var cbeDataPackageBuffer = null;
     var cbeDebugOutput = cbeParams.get("debug") === "1";
     var cbeCanvas = document.getElementById("canvas");
     var cbeProgress = document.getElementById("preloadProgress");
@@ -456,28 +458,159 @@
       }
     }
 
-    var Module = {
-      arguments: cbeArgs,
-      canvas: cbeCanvas,
-      locateFile: function(path) {
-        if (path.endsWith(".data") || path.endsWith(".wasm")) {
-          return "build/" + path + "?v=" + encodeURIComponent(cbeBuildVersion);
+    function cbeBuildAssetUrl(path, version) {
+      return "build/" + path + "?v=" + encodeURIComponent(version || cbeBuildVersion);
+    }
+
+    function cbeResolveBuildVersion() {
+      if (cbeRequestedBuildVersion) {
+        return Promise.resolve(cbeRequestedBuildVersion);
+      }
+      cbeSetProgress(Math.max(cbeProgressValue, 0.01), true, "正在检查构建版本...");
+      return fetch("build/cbe-version.json?check=" + encodeURIComponent(String(Date.now())), {
+        cache: "no-store"
+      }).then(function(response) {
+        if (!response.ok) {
+          throw new Error("version status " + response.status);
         }
-        return path;
-      },
-      setStatus: cbeSetStatus,
-      monitorRunDependencies: cbeMonitorRunDependencies,
-      onRuntimeInitialized: function() {
-        cbeSetProgress(1, true, "加载完成");
-        cbeHideProgressSoon();
-      },
-      print: cbePrint,
-      printErr: cbePrintErr
-    };
-    window.Module = Module;
-    var cbeScript = document.createElement("script");
-    cbeScript.src = "build/cbe-emu.js?v=" + encodeURIComponent(cbeBuildVersion);
-    document.body.appendChild(cbeScript);
+        return response.json();
+      }).then(function(manifest) {
+        if (manifest && manifest.version) {
+          return String(manifest.version);
+        }
+        return "dev";
+      }).catch(function(error) {
+        cbePrintErr("[warn] version manifest unavailable:", error && error.message ? error.message : error);
+        return "dev";
+      });
+    }
+
+    function cbeDownloadDataPackage(url) {
+      return new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.responseType = "arraybuffer";
+        xhr.onprogress = function(event) {
+          if (event.lengthComputable && event.total > 0) {
+            var ratio = Math.max(0, Math.min(1, event.loaded / event.total));
+            cbeSetProgress(Math.min(0.86, ratio * 0.86), true,
+              "正在下载数据文件 " + Math.round(ratio * 100) + "% (" +
+              cbeFormatBytes(event.loaded) + " / " + cbeFormatBytes(event.total) + ")");
+          } else if (event.loaded) {
+            cbeSetProgress(Math.max(cbeProgressValue, 0.04), true,
+              "正在下载数据文件 " + cbeFormatBytes(event.loaded));
+          } else {
+            cbeSetProgress(Math.max(cbeProgressValue, 0.04), true, "正在下载数据文件...");
+          }
+        };
+        xhr.onerror = function() {
+          reject(new Error("data download failed"));
+        };
+        xhr.onload = function() {
+          if ((xhr.status >= 200 && xhr.status < 300) || (xhr.status === 0 && xhr.response)) {
+            cbeSetProgress(Math.max(cbeProgressValue, 0.86), true, "数据文件下载完成");
+            resolve(xhr.response);
+          } else {
+            reject(new Error("data status " + xhr.status));
+          }
+        };
+        xhr.send(null);
+      });
+    }
+
+    function cbeLoadDataPackage(version) {
+      var dataUrl = cbeBuildAssetUrl("cbe-emu.data", version);
+      var cacheName = "cbe-emu-data-v1";
+
+      if (!("caches" in window)) {
+        cbePrint("[cache] data cache storage unavailable");
+        return cbeDownloadDataPackage(dataUrl).catch(function(error) {
+          cbePrintErr("[warn] data preload failed:", error && error.message ? error.message : error);
+          return null;
+        });
+      }
+
+      return caches.open(cacheName).then(function(cache) {
+        return cache.match(dataUrl).then(function(cachedResponse) {
+          if (cachedResponse) {
+            cbePrint("[cache] data hit version=" + version);
+            cbeSetProgress(Math.max(cbeProgressValue, 0.86), true, "正在读取已缓存的数据文件...");
+            return cachedResponse.arrayBuffer();
+          }
+
+          cbePrint("[cache] data miss version=" + version);
+          return cbeDownloadDataPackage(dataUrl).then(function(buffer) {
+            var response = new Response(buffer.slice(0), {
+              headers: {
+                "Content-Type": "application/octet-stream",
+                "X-CBE-Version": version
+              }
+            });
+            cache.put(dataUrl, response).then(function() {
+              cbePrint("[cache] data stored version=" + version);
+              var keepUrl = new URL(dataUrl, window.location.href).href;
+              cache.keys().then(function(keys) {
+                keys.forEach(function(request) {
+                  if (request.url.indexOf("/build/cbe-emu.data?v=") >= 0 &&
+                      request.url !== keepUrl) {
+                    cache.delete(request);
+                  }
+                });
+              }).catch(function() {});
+            }).catch(function(error) {
+              cbePrintErr("[warn] data cache write failed:", error && error.message ? error.message : error);
+            });
+            return buffer;
+          });
+        });
+      }).catch(function(error) {
+        cbePrintErr("[warn] data cache unavailable:", error && error.message ? error.message : error);
+        return cbeDownloadDataPackage(dataUrl).catch(function(downloadError) {
+          cbePrintErr("[warn] data preload failed:", downloadError && downloadError.message ? downloadError.message : downloadError);
+          return null;
+        });
+      });
+    }
+
+    var Module = null;
+
+    function cbeStartWasm(version, dataPackageBuffer) {
+      cbeBuildVersion = version || "dev";
+      cbeDataPackageBuffer = dataPackageBuffer || null;
+      cbeSetProgress(Math.max(cbeProgressValue, 0.87), true, "正在启动模拟器...");
+
+      Module = {
+        arguments: cbeArgs,
+        canvas: cbeCanvas,
+        locateFile: function(path) {
+          if (path.endsWith(".data") || path.endsWith(".wasm")) {
+            return cbeBuildAssetUrl(path, cbeBuildVersion);
+          }
+          return path;
+        },
+        getPreloadedPackage: function(packageName) {
+          if (cbeDataPackageBuffer && packageName.indexOf("cbe-emu.data") >= 0) {
+            var buffer = cbeDataPackageBuffer;
+            cbeDataPackageBuffer = null;
+            return buffer;
+          }
+          return null;
+        },
+        setStatus: cbeSetStatus,
+        monitorRunDependencies: cbeMonitorRunDependencies,
+        onRuntimeInitialized: function() {
+          cbeSetProgress(1, true, "加载完成");
+          cbeHideProgressSoon();
+        },
+        print: cbePrint,
+        printErr: cbePrintErr
+      };
+      window.Module = Module;
+
+      var cbeScript = document.createElement("script");
+      cbeScript.src = cbeBuildAssetUrl("cbe-emu.js", cbeBuildVersion);
+      document.body.appendChild(cbeScript);
+    }
 
     var cbeVirtualKeys = {
       up: { key: "w", code: "KeyW", keyCode: 87 },
@@ -499,7 +632,7 @@
     var cbePointerKeys = {};
 
     function cbeInputFunction(name) {
-      var fn = Module["_" + name];
+      var fn = Module && Module["_" + name];
       return typeof fn === "function" ? fn : null;
     }
 
@@ -904,6 +1037,15 @@
     cbeSetProgress(0.01, true, "准备加载数据文件...");
     cbeSyncControlWidth();
     cbeFocusCanvas();
+    cbeResolveBuildVersion().then(function(version) {
+      cbeBuildVersion = version || "dev";
+      return cbeLoadDataPackage(cbeBuildVersion).then(function(buffer) {
+        cbeStartWasm(cbeBuildVersion, buffer);
+      });
+    }).catch(function(error) {
+      cbePrintErr("[warn] wasm bootstrap failed:", error && error.message ? error.message : error);
+      cbeStartWasm(cbeBuildVersion || "dev", null);
+    });
   </script>
 </body>
 </html>
