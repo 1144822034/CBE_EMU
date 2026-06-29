@@ -13,12 +13,28 @@
 static void vm_note_battle_mp_write(uc_engine *uc, uc_mem_type type,
                                     uint64_t address, uint32_t size,
                                     int64_t value);
+static int g_vmProfileEnabled = 0;
+static u32 g_vmProfileThresholdMs = 32;
+static u32 vm_profile_now_ms(void);
+static u32 vm_profile_elapsed_ms(u32 startMs);
+static void vm_profile_log(const char *kind, const char *label, u32 elapsedMs,
+                           u32 entry, u32 screenThis, u32 extra);
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#define VM_DEFAULT_FRAME_DELAY_MS 8
+#else
+#define VM_DEFAULT_FRAME_DELAY_MS 100
+#endif
+
+static u32 g_vmFrameDelayMs = VM_DEFAULT_FRAME_DELAY_MS;
+#ifdef __EMSCRIPTEN__
+static u32 g_vmYieldBudgetMs = 32;
+static u32 g_vmLastYieldTick = 0;
+static u32 g_vmCallbackSliceStartMs = 0;
 #endif
 
 #ifdef GDB_SERVER_SUPPORT
@@ -787,6 +803,54 @@ static uc_err vm_emu_start_count(u32 begin, u32 until, uint64_t count)
     return err;
 }
 
+static u32 vm_profile_now_ms(void)
+{
+    return SDL_GetTicks();
+}
+
+static u32 vm_profile_elapsed_ms(u32 startMs)
+{
+    return SDL_GetTicks() - startMs;
+}
+
+static void vm_profile_log(const char *kind, const char *label, u32 elapsedMs,
+                           u32 entry, u32 screenThis, u32 extra)
+{
+    if (!g_vmProfileEnabled || elapsedMs < g_vmProfileThresholdMs)
+        return;
+    printf("[perf] %s label=%s ms=%u entry=%08x this=%08x extra=%08x last=%08x\n",
+           kind ? kind : "span", label ? label : "-",
+           elapsedMs, entry, screenThis, extra, lastAddress);
+}
+
+static uc_err vm_profiled_emu_start(const char *label, u32 begin, u32 until,
+                                    u32 screenThis, u32 extra)
+{
+    u32 startMs = vm_profile_now_ms();
+    uc_err err = vm_emu_start(begin, until);
+    u32 elapsedMs = vm_profile_elapsed_ms(startMs);
+    vm_profile_log("emu", label, elapsedMs, begin, screenThis, extra);
+    return err;
+}
+
+static void vm_profile_note_callback_resume(void)
+{
+#ifdef __EMSCRIPTEN__
+    if (g_vmProfileEnabled)
+        g_vmCallbackSliceStartMs = vm_profile_now_ms();
+#endif
+}
+
+static void vm_profile_log_callback_slice(const char *label)
+{
+#ifdef __EMSCRIPTEN__
+    if (!g_vmProfileEnabled || g_vmCallbackSliceStartMs == 0)
+        return;
+    vm_profile_log("callback", label, vm_profile_elapsed_ms(g_vmCallbackSliceStartMs),
+                   0, 0, 0);
+#endif
+}
+
 static bool vm_is_pool_entry(u32 entry)
 {
     u32 pc = entry & ~1u;
@@ -823,6 +887,29 @@ static void vm_restore_main_r9_for_rom_code(u32 pc)
     {
         ++s_restoreMainR9LimitCount;
     }
+}
+
+static void vm_restore_main_r9_on_code_boundary(u32 pc)
+{
+    enum
+    {
+        VM_CODE_REGION_OTHER = 0,
+        VM_CODE_REGION_ROM = 1,
+        VM_CODE_REGION_POOL = 2
+    };
+    static u8 s_lastCodeRegion = VM_CODE_REGION_OTHER;
+    u32 normalizedPc = pc & ~1u;
+    u8 region = VM_CODE_REGION_OTHER;
+
+    if (normalizedPc >= ROM_ADDRESS && normalizedPc < ROM_ADDRESS + size_16mb)
+        region = VM_CODE_REGION_ROM;
+    else if (normalizedPc >= VM_Memory_Pool_ADDRESS &&
+             normalizedPc < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        region = VM_CODE_REGION_POOL;
+
+    if (region == VM_CODE_REGION_ROM && s_lastCodeRegion != VM_CODE_REGION_ROM)
+        vm_restore_main_r9_for_rom_code(normalizedPc);
+    s_lastCodeRegion = region;
 }
 
 static uc_err vm_call4(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
@@ -1695,9 +1782,14 @@ static void vm_input_draw_overlay(void)
 
 static void vm_lcd_update_with_input_overlay(void)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+#ifndef __EMSCRIPTEN__
     vm_input_draw_overlay();
+#endif
     UpdateLcd();
+    vm_profile_log("host", "lcd_update", vm_profile_elapsed_ms(profileStartMs),
+                   VM_screenImage_ADDRESS, 0, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
 }
 
 static u32 vm_input_wcslen_limit(u32 addr, u32 maxLen)
@@ -1780,6 +1872,67 @@ static uc_err scheduler_dispatch_input_event(vm_event *evt)
 
     return UC_ERR_OK;
 }
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_is_open(void)
+{
+    return g_vmInputOpen ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_is_password(void)
+{
+    return g_vmInputPassword ? 1 : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_type(void)
+{
+    return (int)g_vmInputInputType;
+}
+
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_max_len(void)
+{
+    return (int)g_vmInputMaxLen;
+}
+
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_len(void)
+{
+    if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen == 0)
+        return 0;
+    return (int)vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen);
+}
+
+EMSCRIPTEN_KEEPALIVE int cbe_web_input_char_at(int index)
+{
+    if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen == 0 || index < 0)
+        return 0;
+
+    u32 len = vm_input_wcslen_limit(g_vmInputBuffer, g_vmInputMaxLen);
+    if ((u32)index >= len)
+        return 0;
+
+    return (int)vm_input_read_u16(g_vmInputBuffer + (u32)index * 2);
+}
+
+EMSCRIPTEN_KEEPALIVE void cbe_web_input_char(u32 ch)
+{
+    if (!g_vmInputOpen)
+        return;
+    if (ch >= 0x20 && ch <= 0xffff)
+        EnqueueVMEvent(VM_EVENT_INPUT_CHAR, ch, 0);
+}
+
+EMSCRIPTEN_KEEPALIVE void cbe_web_input_backspace(void)
+{
+    if (g_vmInputOpen)
+        EnqueueVMEvent(VM_EVENT_INPUT_BACKSPACE, 0, 0);
+}
+
+EMSCRIPTEN_KEEPALIVE void cbe_web_input_done(int result)
+{
+    if (g_vmInputOpen)
+        EnqueueVMEvent(VM_EVENT_INPUT_DONE, result ? 1 : 0, 0);
+}
+#endif
 
 static void vm_input_open(u32 callback, u32 param, int password)
 {
@@ -2069,6 +2222,90 @@ static void vm_autotest_init(int argc, char *args[])
         g_autotestStateFile = fopen("autotest/state.txt", "w");
         printf("[info][autotest] enabled shot_ms=%u max_ms=%u actions=%u\n",
                g_autotestShotIntervalMs, g_autotestMaxMs, g_autotestActionCount);
+    }
+}
+
+static void vm_perf_parse_args(int argc, char *args[])
+{
+    const char *envFrameMs = getenv("CBE_FRAME_MS");
+    const char *envProfile = getenv("CBE_PROFILE");
+    const char *envProfileMs = getenv("CBE_PROFILE_MS");
+#ifdef __EMSCRIPTEN__
+    const char *envYieldMs = getenv("CBE_YIELD_MS");
+#endif
+    const char *prefixFrameMs = "--frame-ms=";
+    const char *prefixProfileMs = "--profile-ms=";
+#ifdef __EMSCRIPTEN__
+    const char *prefixYieldMs = "--yield-ms=";
+#endif
+    size_t prefixFrameMsLen = strlen(prefixFrameMs);
+    size_t prefixProfileMsLen = strlen(prefixProfileMs);
+#ifdef __EMSCRIPTEN__
+    size_t prefixYieldMsLen = strlen(prefixYieldMs);
+#endif
+
+    if (envFrameMs != NULL && envFrameMs[0] != 0)
+    {
+        u32 value = (u32)strtoul(envFrameMs, NULL, 10);
+        if (value > 0 && value <= 1000)
+            g_vmFrameDelayMs = value;
+    }
+    if (envProfile != NULL && envProfile[0] != 0 && strcmp(envProfile, "0") != 0)
+        g_vmProfileEnabled = 1;
+    if (envProfileMs != NULL && envProfileMs[0] != 0)
+    {
+        u32 value = (u32)strtoul(envProfileMs, NULL, 10);
+        if (value > 0 && value <= 10000)
+        {
+            g_vmProfileThresholdMs = value;
+            g_vmProfileEnabled = 1;
+        }
+    }
+#ifdef __EMSCRIPTEN__
+    if (envYieldMs != NULL && envYieldMs[0] != 0)
+    {
+        u32 value = (u32)strtoul(envYieldMs, NULL, 10);
+        if (value > 0 && value <= 1000)
+            g_vmYieldBudgetMs = value;
+    }
+#endif
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(args[i], prefixFrameMs, prefixFrameMsLen) == 0)
+        {
+            u32 value = (u32)strtoul(args[i] + prefixFrameMsLen, NULL, 10);
+            if (value > 0 && value <= 1000)
+                g_vmFrameDelayMs = value;
+        }
+        else if (strcmp(args[i], "--profile") == 0 ||
+                 strcmp(args[i], "--profile-screen") == 0)
+        {
+            g_vmProfileEnabled = 1;
+        }
+        else if (strncmp(args[i], prefixProfileMs, prefixProfileMsLen) == 0)
+        {
+            u32 value = (u32)strtoul(args[i] + prefixProfileMsLen, NULL, 10);
+            if (value > 0 && value <= 10000)
+            {
+                g_vmProfileThresholdMs = value;
+                g_vmProfileEnabled = 1;
+            }
+        }
+#ifdef __EMSCRIPTEN__
+        else if (strncmp(args[i], prefixYieldMs, prefixYieldMsLen) == 0)
+        {
+            u32 value = (u32)strtoul(args[i] + prefixYieldMsLen, NULL, 10);
+            if (value > 0 && value <= 1000)
+                g_vmYieldBudgetMs = value;
+        }
+#endif
+    }
+    if (g_vmProfileEnabled)
+    {
+        printf("[info][perf] profile enabled threshold_ms=%u frame_ms=%u\n",
+               g_vmProfileThresholdMs, g_vmFrameDelayMs);
+        vm_profile_note_callback_resume();
     }
 }
 
@@ -4257,9 +4494,32 @@ static void vm_host_delay(u32 ms)
 #ifdef __EMSCRIPTEN__
     if (!vm_poll_host_events_once())
         exit(0);
+    vm_profile_log_callback_slice("host_delay");
     emscripten_sleep(ms);
+    vm_profile_note_callback_resume();
+    g_vmLastYieldTick = SDL_GetTicks();
 #else
     SDL_Delay(ms);
+#endif
+}
+
+static void vm_host_yield(void)
+{
+#ifdef __EMSCRIPTEN__
+    u32 now = SDL_GetTicks();
+    if (g_vmLastYieldTick == 0)
+    {
+        g_vmLastYieldTick = now;
+        return;
+    }
+    if (now - g_vmLastYieldTick < g_vmYieldBudgetMs)
+        return;
+    if (!vm_poll_host_events_once())
+        exit(0);
+    vm_profile_log_callback_slice("host_yield");
+    emscripten_sleep(0);
+    vm_profile_note_callback_resume();
+    g_vmLastYieldTick = SDL_GetTicks();
 #endif
 }
 
@@ -4574,14 +4834,18 @@ void RunArmProgram(void *param)
     u32 exitAddr = PROGRAM_EXIT_ADDR;
     u32 thumbExitAddr = PROGRAM_EXIT_ADDR | 1;
     uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
-    p = vm_emu_start(startAddr + 1, exitAddr);        // thumb模式
+    p = vm_profiled_emu_start("startup_thumb", startAddr + 1, exitAddr, 0, 0);        // thumb模式
+    if (p == UC_ERR_OK)
+        vm_host_yield();
 
     // 第二次初始化
     if (p == UC_ERR_OK)
     {
         uc_mem_read(MTK, VM_Manager_Table_ADDRESS, &startAddr, 4);
         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-        p = vm_emu_start(startAddr, exitAddr);
+        p = vm_profiled_emu_start("startup_second", startAddr, exitAddr, 0, 0);
+        if (p == UC_ERR_OK)
+            vm_host_yield();
     }
 
     if (p == UC_ERR_OK)
@@ -4610,12 +4874,14 @@ void RunArmProgram(void *param)
                     {
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
-                        p = vm_emu_start(tScreenInitEntry, exitAddr);
+                        p = vm_profiled_emu_start("tscreen_init", tScreenInitEntry, exitAddr,
+                                                  vmAddedScreen, 0);
                         if (p != UC_ERR_OK)
                         {
                             printf("TScreen init异常:%s\n", uc_strerror(p));
                             break;
                         }
+                        vm_host_yield();
                     }
                     tScreenInitedPtr = vmAddedScreen;
                 }
@@ -4649,21 +4915,24 @@ void RunArmProgram(void *param)
                     {
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
-                        p = vm_emu_start(tScreenResourceLoadEntry, exitAddr);
+                        p = vm_profiled_emu_start("tscreen_resource_load", tScreenResourceLoadEntry,
+                                                  exitAddr, vmAddedScreen, 0);
                         if (p != UC_ERR_OK)
                         {
                             printf("TScreen resource load异常:%s\n", uc_strerror(p));
                             break;
                         }
+                        vm_host_yield();
                     }
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 uc_reg_write(MTK, UC_ARM_REG_R0, &vmAddedScreen);
-                p = vm_emu_start(tScreenRenderEntry, exitAddr);
+                p = vm_profiled_emu_start("tscreen_render", tScreenRenderEntry, exitAddr,
+                                          vmAddedScreen, 0);
                 if (p != UC_ERR_OK)
                     break;
                 vm_lcd_update_with_input_overlay();
-                vm_host_delay(100);
+                vm_host_delay(g_vmFrameDelayMs);
             }
         }
         while (p == UC_ERR_OK)
@@ -4694,7 +4963,7 @@ void RunArmProgram(void *param)
                     uc_mem_read(MTK, Global_R9 + 0x9588 + 0x30, &waitNet30, 4);
                     uc_mem_read(MTK, VM_SCREEN_nextSubTScreen_ADDRESS, &waitNextScreen, 4);
                 }
-                vm_host_delay(100);
+                vm_host_delay(g_vmFrameDelayMs);
             }
             if (p != UC_ERR_OK)
                 break;
@@ -4734,18 +5003,24 @@ void RunArmProgram(void *param)
             if (g_screenResumeExisting)
             {
                 if (screenRemuseEntry)
-                    p = vm_emu_start(screenRemuseEntry, exitAddr);
+                    p = vm_profiled_emu_start("screen_resume", screenRemuseEntry, exitAddr,
+                                              screenThisPtr, screenFuncPtr);
                 else
                     p = UC_ERR_OK;
+                if (p == UC_ERR_OK)
+                    vm_host_yield();
                 printf("ScreenResume Ok\n");
                 g_screenResumeExisting = 0;
             }
             else
             {
                 if (screenInitEntry)
-                    p = vm_emu_start(screenInitEntry, exitAddr);
+                    p = vm_profiled_emu_start("screen_init", screenInitEntry, exitAddr,
+                                              screenThisPtr, screenFuncPtr);
                 else
                     p = UC_ERR_OK;
+                if (p == UC_ERR_OK)
+                    vm_host_yield();
                 vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
                                  lastAddress, screenThisPtr, screenInitEntry, screenLogicEntry, screenRenderEntry);
                 printf("ScreenInit Ok\n");
@@ -4772,12 +5047,14 @@ void RunArmProgram(void *param)
                         }
                         if (screenResouceLoadEntry)
                         {
-                            p = vm_emu_start(screenResouceLoadEntry, exitAddr);
+                            p = vm_profiled_emu_start("screen_resource_load", screenResouceLoadEntry,
+                                                      exitAddr, screenThisPtr, screenFuncPtr);
                             if (p != UC_ERR_OK)
                             {
                                 printf("SCR_ResourceLoad异常:%s\n", uc_strerror(p));
                                 assert(0);
                             }
+                            vm_host_yield();
                         }
                         else
                         {
@@ -4840,7 +5117,8 @@ void RunArmProgram(void *param)
                                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                                 uc_reg_write(MTK, UC_ARM_REG_R1, &eventType);
                                 uc_reg_write(MTK, UC_ARM_REG_R2, &eventArg);
-                                p = vm_emu_start(screenLogicEntry, exitAddr);
+                                p = vm_profiled_emu_start("screen_logic_input", screenLogicEntry,
+                                                          exitAddr, screenThisPtr, eventType);
                                 if (evt->event == VM_EVENT_KEYBOARD || evt->event == VM_EVENT_TOUCHSCREEN)
                                     vm_free_var(eventArg);
                                 if (p != UC_ERR_OK)
@@ -4848,9 +5126,16 @@ void RunArmProgram(void *param)
                                     printf("SCR_Event异常:%s\n", uc_strerror(p));
                                     assert(0);
                                 }
-                                p = scheduler_flush_post_vm_business_send_ready("screen_logic_input");
+                                {
+                                    u32 profileStartMs = vm_profile_now_ms();
+                                    p = scheduler_flush_post_vm_business_send_ready("screen_logic_input");
+                                    vm_profile_log("host", "flush_screen_logic_input",
+                                                   vm_profile_elapsed_ms(profileStartMs),
+                                                   screenLogicEntry, screenThisPtr, eventType);
+                                }
                                 if (p != UC_ERR_OK)
                                     break;
+                                vm_host_yield();
                                 if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                                     break;
                             }
@@ -4868,15 +5153,23 @@ void RunArmProgram(void *param)
                                 scheduler_prepare_screen_call(screenThisPtr);
                                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                             }
-                            p = vm_emu_start(screenLogicEntry, exitAddr);
+                            p = vm_profiled_emu_start("screen_logic", screenLogicEntry, exitAddr,
+                                                      screenThisPtr, screenFuncPtr);
                             if (p != UC_ERR_OK)
                             {
                                 printf("SCR_Logic异常:%s\n", uc_strerror(p));
                                 assert(0);
                             }
-                            p = scheduler_flush_post_vm_business_send_ready("screen_logic");
+                            {
+                                u32 profileStartMs = vm_profile_now_ms();
+                                p = scheduler_flush_post_vm_business_send_ready("screen_logic");
+                                vm_profile_log("host", "flush_screen_logic",
+                                               vm_profile_elapsed_ms(profileStartMs),
+                                               screenLogicEntry, screenThisPtr, screenFuncPtr);
+                            }
                             if (p != UC_ERR_OK)
                                 break;
+                            vm_host_yield();
                             if (screenStructChange == 1 || g_screenRemovedWithoutNext)
                                 break;
                         }
@@ -4889,7 +5182,8 @@ void RunArmProgram(void *param)
                             scheduler_prepare_screen_call(screenThisPtr);
                             uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                         }
-                        p = vm_emu_start(screenRenderEntry, exitAddr);
+                        p = vm_profiled_emu_start("screen_render", screenRenderEntry, exitAddr,
+                                                  screenThisPtr, screenFuncPtr);
                         if (p != UC_ERR_OK)
                         {
                             dumpCpuInfo();
@@ -4900,7 +5194,7 @@ void RunArmProgram(void *param)
                             break;
                     }
                     vm_lcd_update_with_input_overlay();
-                    vm_host_delay(100);
+                    vm_host_delay(g_vmFrameDelayMs);
                 }
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                 if (screenThisPtr)
@@ -4916,12 +5210,14 @@ void RunArmProgram(void *param)
                 {
                     if (screenDestoryEntry)
                     {
-                        p = vm_emu_start(screenDestoryEntry, exitAddr);
+                        p = vm_profiled_emu_start("screen_destroy", screenDestoryEntry, exitAddr,
+                                                  screenThisPtr, screenFuncPtr);
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_Destory异常\n");
                             break;
                         }
+                        vm_host_yield();
                     }
                     else
                     {
@@ -4982,6 +5278,7 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_autotest_init(argc, args);
+    vm_perf_parse_args(argc, args);
 
     // SetConsoleOutputCP(CP_UTF8);
     // while(1);
@@ -5063,12 +5360,39 @@ int main(int argc, char *args[])
         return NULL;
     }
 
-    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    if (g_autotestEnabled)
+    {
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE,
+                          hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    }
+    else
+    {
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK,
+                          hookCodeCallBack, 0, ROM_ADDRESS, ROM_ADDRESS + size_16mb - 1);
+        if (err == UC_ERR_OK)
+            err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK,
+                              hookCodeCallBack, 0, PROGRAM_EXIT_ADDR,
+                              PROGRAM_EXIT_ADDR + 0xfff);
+        if (err == UC_ERR_OK)
+            err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK,
+                              hookCodeCallBack, 0, VM_LOG_NOOP_ADDRESS,
+                              VM_LOG_NOOP_ADDRESS + 3);
+    }
     if (err == UC_ERR_OK)
         err = add_manager_code_hooks(MTK);
     //    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_BLOCK, hookBlockCallBack, 0, 0, 0xFFFFFFFF);
 
-    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    if (err == UC_ERR_OK)
+    {
+#ifdef GDB_SERVER_SUPPORT
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                          hookRamCallBack, 0, 0, 0xFFFFFFFF);
+#else
+        if (g_autotestEnabled)
+            err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                              hookRamCallBack, 0, 0, 0xFFFFFFFF);
+#endif
+    }
 
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
     err = uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
@@ -10380,7 +10704,8 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 {
     uc_hook hook;
     uc_err err;
-    err = uc_hook_add(uc, &hook, UC_HOOK_CODE, hook_vm_pool_code_callback, NULL,
+    err = uc_hook_add(uc, &hook, g_autotestEnabled ? UC_HOOK_CODE : UC_HOOK_BLOCK,
+                      hook_vm_pool_code_callback, NULL,
                       VM_Memory_Pool_ADDRESS, VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE - 1);
     if (err != UC_ERR_OK)
         return err;
@@ -10431,16 +10756,20 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
-    vm_restore_main_r9_for_rom_code((u32)address);
-    vm_autotest_note_startup_pc((u32)address & ~1u);
-    vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
-    vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
-    vm_autotest_note_shop_parser_pc((u32)address & ~1u);
-    vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
-    vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
-    vm_note_stream_read_i16_pc((u32)address & ~1u);
-    vm_note_net_wrapper_pc((u32)address & ~1u);
-    vm_note_battle_mp_pc((u32)address & ~1u);
+    u32 pc = (u32)address & ~1u;
+    vm_restore_main_r9_on_code_boundary(pc);
+    if (g_autotestEnabled)
+    {
+        vm_autotest_note_startup_pc(pc);
+        vm_autotest_note_scene_actor_parser_pc(pc);
+        vm_autotest_note_backpack_parser_pc(pc);
+        vm_autotest_note_shop_parser_pc(pc);
+        vm_autotest_note_role_attr_page_pc(pc);
+        vm_note_mmgame_transfer_parser_pc(pc);
+        vm_note_stream_read_i16_pc(pc);
+        vm_note_net_wrapper_pc(pc);
+        vm_note_battle_mp_pc(pc);
+    }
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

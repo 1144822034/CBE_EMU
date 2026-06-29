@@ -810,6 +810,7 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 // ok
 int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     u32 pc = 0;
     u32 lr = 0;
     u32 r0 = 0;
@@ -840,6 +841,8 @@ int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
     {
     }
     SDL_free(tmp);
+    vm_profile_log("host", "file_read", vm_profile_elapsed_ms(profileStartMs),
+                   pc, (u32)bufferPtr, (u32)size);
     return vm_set_call_result(readed);
 }
 // ok
@@ -1830,8 +1833,10 @@ int vm_DF_DataPackage_LoadFormTCard(int a1)
 
 int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     u8 n2 = 0;
     u32 inFileOffset = 0;
+    int result = 0;
 
     if (a3)
     {
@@ -1841,7 +1846,10 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
         if (n2 == 1)
         {
             // TF卡加载
-            return vm_DF_DataPackage_LoadFormTCard(a1);
+            result = vm_DF_DataPackage_LoadFormTCard(a1);
+            vm_profile_log("host", "df_do_loading_tcard", vm_profile_elapsed_ms(profileStartMs),
+                           (u32)a1, (u32)a2, (u32)a3);
+            return result;
         }
 
         if (n2 == 2)
@@ -1853,7 +1861,10 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     if (a2 == 0)
 
     // 默认走资源加载
-    return vm_DF_DataPackage_LoadFromTResource(a1, a2);
+    result = vm_DF_DataPackage_LoadFromTResource(a1, a2);
+    vm_profile_log("host", "df_do_loading_resource", vm_profile_elapsed_ms(profileStartMs),
+                   (u32)a1, (u32)a2, (u32)a3);
+    return result;
 }
 
 u32 vm_initDFDataPackage(u32 a1, u32 a2)
@@ -2402,11 +2413,14 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
 
 int vm_DF_DataPackage_GetFile(int a1, int namePtr)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     int FileID = vm_DF_DataPackage_GetFileID(a1, namePtr);
     int data = vm_DF_DataPackage_GetFileByID(a1, FileID);
     char fileName[128] = {0};
     if (namePtr)
         vm_readStringByPtr(namePtr, fileName);
+    vm_profile_log("host", "df_get_file", vm_profile_elapsed_ms(profileStartMs),
+                   (u32)data, (u32)namePtr, (u32)FileID);
     return data;
 }
 
@@ -2497,10 +2511,13 @@ void vm_DF_GetResourceNameByID(int a1)
 }
 int vm_DF_GetTResource(int a1)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     u32 DreamFactoryResourceBuffer; // r0
     // todo DF_FactoryCharB_Init();
     DreamFactoryResourceBuffer = vm_DF_GetResourceByFileName(a1);
     uc_mem_write(MTK, VM_DreamFactoryResourceBuffer_ADDRESS, &DreamFactoryResourceBuffer, 4);
+    vm_profile_log("host", "df_get_t_resource", vm_profile_elapsed_ms(profileStartMs),
+                   DreamFactoryResourceBuffer, (u32)a1, 0);
     return DreamFactoryResourceBuffer;
 }
 
@@ -2793,6 +2810,7 @@ void vm_vMDrawImageClipAndAlphaEx()
 
 int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     u32 v3 = a2;
     u8 n3 = 0;
     u8 b1 = 0, b2 = 0, b3 = 0, b4 = 0;
@@ -2810,6 +2828,8 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
 
     if (a1 == 0)
     {
+        vm_profile_log("host", "img_create_stream", vm_profile_elapsed_ms(profileStartMs),
+                       a1, v3, 0);
         return vm_set_call_result(0);
     }
 
@@ -2859,10 +2879,13 @@ int vm_IMG_CreateImageFormStream(u32 a1, u32 a2)
         tmp8 = 0;
         uc_mem_write(uc, v3 + 8, &tmp8, 1);
     }
+    vm_profile_log("host", "img_create_stream", vm_profile_elapsed_ms(profileStartMs),
+                   a1, v3, n3);
     return vm_set_call_result(v3);
 }
 int vm_gifDecode(int gifBufferPtr, int resultPtr)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     char buffer[1024 * 256]; // 由于不知道图片大小，预先读取64kb
     char ret[32];
     int mallocSize = 0;
@@ -2887,6 +2910,8 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
         if (p.pixels)
             free_mem(p.pixels);
         uc_mem_write(MTK, resultPtr, ret, sizeof(vm_img_result));
+        vm_profile_log("host", "gif_decode_fallback", vm_profile_elapsed_ms(profileStartMs),
+                       (u32)gifBufferPtr, (u32)resultPtr, (u32)dictSize);
         return vm_set_call_result(resultPtr);
     }
 
@@ -2901,11 +2926,14 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
     vr->need_free = 1;
     free_mem(p.pixels);
     uc_mem_write(MTK, resultPtr, ret, retSize);
+    vm_profile_log("host", "gif_decode", vm_profile_elapsed_ms(profileStartMs),
+                   (u32)gifBufferPtr, (u32)resultPtr, (u32)mallocSize);
     return vm_set_call_result(resultPtr);
 }
 
 int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
 {
+    u32 profileStartMs = vm_profile_now_ms();
     u8 hdr[8];
     uc_mem_read(MTK, pngBufferPtr, hdr, sizeof(hdr));
 
@@ -2976,6 +3004,8 @@ int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
     ret.height = (short)h;
     ret.need_free = 1;
     uc_mem_write(MTK, resultPtr, &ret, sizeof(ret));
+    vm_profile_log("host", "png_decode", vm_profile_elapsed_ms(profileStartMs),
+                   (u32)pngBufferPtr, (u32)resultPtr, pixelBytes);
     return vm_set_call_result(resultPtr);
 }
 

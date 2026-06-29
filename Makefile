@@ -17,8 +17,8 @@ WASM_PATH_ALIASES := $(WASM_BUILD_DIR)/wasm_path_aliases.inc
 WASM_SRCS := src/gifDecode.c src/cbeParser.c src/mystd.c src/fontEngine.c src/vmMalloc.c src/fileIoEngine.c src/lcd.c src/main.c
 WASM_INCLUDED_SRCS := src/mock-server.c src/vmFunc.c src/hookRam.c src/vmEvent.c
 WASM_COMPAT_FLAGS := -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=return-mismatch -Wno-error=return-type -Wno-error=incompatible-pointer-types -Wno-error=int-conversion
-WASM_CFLAGS := -std=gnu11 -Os -w $(WASM_COMPAT_FLAGS) -D__USE_MINGW_ANSI_STDIO=1 -Isrc
-WASM_SETTINGS := -s EXPORTED_FUNCTIONS="['_main','_malloc','_free']" -s ALLOW_MEMORY_GROWTH=1 -s ALLOW_TABLE_GROWTH=1 -s USE_SDL=2 -s USE_ZLIB=1 -s WASM=1 -s FORCE_FILESYSTEM=1 -s SUPPORT_LONGJMP=emscripten -s DISABLE_EXCEPTION_THROWING=0 -s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=65536
+WASM_CFLAGS := -std=gnu11 -O3 -DNDEBUG -w $(WASM_COMPAT_FLAGS) -D__USE_MINGW_ANSI_STDIO=1 -Isrc
+WASM_SETTINGS := -s EXPORTED_FUNCTIONS="['_main','_malloc','_free','_cbe_web_input_is_open','_cbe_web_input_is_password','_cbe_web_input_type','_cbe_web_input_max_len','_cbe_web_input_len','_cbe_web_input_char_at','_cbe_web_input_char','_cbe_web_input_backspace','_cbe_web_input_done']" -s ALLOW_MEMORY_GROWTH=0 -s INITIAL_MEMORY=134217728 -s ALLOW_TABLE_GROWTH=1 -s USE_SDL=2 -s USE_ZLIB=1 -s WASM=1 -s FORCE_FILESYSTEM=1 -s SUPPORT_LONGJMP=emscripten -s DISABLE_EXCEPTION_THROWING=0 -s ASSERTIONS=0 -s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=65536
 
 # -Wl,-subsystem,windows gets rid of the console window
 # gcc  -o main.exe main.c -lmingw32 -Wl,-subsystem,windows -L./lib -lSDL2main -lSDL2

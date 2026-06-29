@@ -14,8 +14,11 @@
       --muted: #9ba6b2;
       --accent: #48c7a0;
       --danger: #e4796e;
+      --progress: #79d8ff;
+      --key-size: 54px;
       --canvas-width: min(calc(100vw - 24px), 330px);
-      --canvas-height: min(calc(100vh - 246px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 550px);
+      --canvas-height: min(calc(100vh - 302px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 550px);
+      --control-width: var(--canvas-width);
     }
 
     * {
@@ -38,14 +41,64 @@
       user-select: none;
     }
 
+    .preload-progress {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 20;
+      width: 100%;
+      min-height: 34px;
+      padding: max(7px, env(safe-area-inset-top)) 12px 8px;
+      background: rgba(14, 16, 19, .94);
+      border-bottom: 1px solid rgba(255, 255, 255, .08);
+      box-shadow: 0 8px 22px rgba(0, 0, 0, .28);
+      opacity: 1;
+      transition: opacity .22s ease;
+    }
+
+    .preload-progress[hidden] {
+      display: block;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .preload-progress-label {
+      width: min(100%, 520px);
+      margin: 0 auto 6px;
+      color: var(--text);
+      font: 600 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .preload-progress-track {
+      width: min(100%, 520px);
+      height: 4px;
+      margin: 0 auto;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .11);
+    }
+
+    .preload-progress-fill {
+      width: 0;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--progress));
+      box-shadow: 0 0 14px rgba(121, 216, 255, .42);
+      transition: width .16s ease;
+    }
+
     .app {
       width: 100%;
       height: 100%;
       min-height: 100%;
       display: grid;
       grid-template-columns: 1fr;
-      grid-template-rows: minmax(0, auto) auto;
-      gap: 12px;
+      grid-template-rows: minmax(0, auto) auto auto;
+      gap: 8px;
       align-items: center;
       align-content: center;
       justify-content: center;
@@ -73,23 +126,24 @@
     }
 
     .controls {
-      width: min(100%, 224px);
+      width: min(100%, var(--control-width));
       justify-self: center;
       touch-action: none;
     }
 
     .dpad {
       display: grid;
-      grid-template-columns: repeat(3, minmax(54px, 64px));
-      grid-template-rows: repeat(3, 54px);
-      gap: 7px;
-      justify-content: center;
+      grid-template-columns: var(--key-size) minmax(var(--key-size), 1fr) var(--key-size);
+      grid-template-rows: repeat(3, var(--key-size));
+      gap: 7px 0;
+      align-items: center;
+      justify-content: stretch;
     }
 
     .control-button {
-      width: 100%;
+      width: var(--key-size);
       min-width: 0;
-      height: 54px;
+      height: var(--key-size);
       border: 1px solid var(--line);
       border-radius: 8px;
       background: linear-gradient(180deg, var(--panel-strong), var(--panel));
@@ -98,6 +152,7 @@
       display: grid;
       place-items: center;
       cursor: pointer;
+      justify-self: center;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 8px 18px rgba(0, 0, 0, .22);
       touch-action: none;
     }
@@ -110,6 +165,7 @@
     .control-button[data-key="leftSoft"] {
       grid-column: 1;
       grid-row: 1;
+      justify-self: start;
       border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
       color: #071512;
       background: linear-gradient(180deg, #6ae0bd, var(--accent));
@@ -118,6 +174,7 @@
     .control-button[data-key="rightSoft"] {
       grid-column: 3;
       grid-row: 1;
+      justify-self: end;
       border-color: color-mix(in srgb, var(--danger) 48%, var(--line));
       color: #1f0808;
       background: linear-gradient(180deg, #f39b92, var(--danger));
@@ -126,11 +183,13 @@
     .control-button[data-key="left"] {
       grid-column: 1;
       grid-row: 2;
+      justify-self: start;
     }
 
     .control-button[data-key="right"] {
       grid-column: 3;
       grid-row: 2;
+      justify-self: end;
     }
 
     .control-button[data-key="ok"] {
@@ -156,21 +215,72 @@
       line-height: 1;
     }
 
+    .text-input-panel {
+      width: min(100%, var(--control-width));
+      min-width: 0;
+      justify-self: center;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 46px 54px;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .text-input-panel[hidden] {
+      display: none;
+    }
+
+    .text-input {
+      width: 100%;
+      min-width: 0;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      outline: none;
+      background: #11161b;
+      color: var(--text);
+      font: 600 16px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 0 10px;
+      box-shadow: inset 0 1px 6px rgba(0, 0, 0, .35);
+      user-select: text;
+    }
+
+    .text-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(72, 199, 160, .18), inset 0 1px 6px rgba(0, 0, 0, .35);
+    }
+
+    .text-input::placeholder {
+      color: var(--muted);
+      opacity: .86;
+    }
+
+    .text-action {
+      width: 100%;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--panel-strong), var(--panel));
+      color: var(--text);
+      font: 800 15px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+
+    .text-action:active {
+      transform: translateY(1px);
+      filter: brightness(1.16);
+    }
+
     @media (max-width: 760px) {
       .app {
-        gap: 10px;
+        gap: 8px;
         padding: max(8px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
       }
     }
 
     @media (max-width: 380px) {
-      .controls {
-        width: min(100%, 164px);
-      }
-
-      .dpad {
-        grid-template-columns: repeat(3, 50px);
-        grid-template-rows: repeat(3, 50px);
+      :root {
+        --key-size: 50px;
       }
 
       .control-button {
@@ -180,10 +290,23 @@
   </style>
 </head>
 <body>
+  <div class="preload-progress" id="preloadProgress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+    <div class="preload-progress-label" id="preloadProgressLabel">准备加载</div>
+    <div class="preload-progress-track">
+      <div class="preload-progress-fill" id="preloadProgressFill"></div>
+    </div>
+  </div>
+
   <main class="app">
     <section class="screen" aria-label="游戏画面">
       <canvas id="canvas" width="240" height="400" tabindex="0"></canvas>
     </section>
+
+    <div class="text-input-panel" id="textInputPanel" aria-label="文本输入" hidden>
+      <input class="text-input" id="textInput" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" inputmode="text" aria-label="文本输入" placeholder="请输入文本，按 OK 确认">
+      <button class="text-action" type="button" data-text-action="backspace" aria-label="退格">⌫</button>
+      <button class="text-action" type="button" data-text-action="done" aria-label="确认">OK</button>
+    </div>
 
     <nav class="controls" aria-label="游戏按键">
       <div class="dpad">
@@ -197,12 +320,142 @@
       </div>
     </nav>
   </main>
+  <textarea id="cbeLogExport" aria-hidden="true" hidden></textarea>
 
   <script>
     var cbeParams = new URLSearchParams(window.location.search);
     var cbeArgs = cbeParams.getAll("arg");
     var cbeBuildVersion = cbeParams.get("v") || String(Date.now());
+    var cbeDebugOutput = cbeParams.get("debug") === "1";
     var cbeCanvas = document.getElementById("canvas");
+    var cbeProgress = document.getElementById("preloadProgress");
+    var cbeProgressLabel = document.getElementById("preloadProgressLabel");
+    var cbeProgressFill = document.getElementById("preloadProgressFill");
+    var cbeLogExport = document.getElementById("cbeLogExport");
+    var cbeTextPanel = document.getElementById("textInputPanel");
+    var cbeTextInput = document.getElementById("textInput");
+    var cbeProgressValue = 0;
+    var cbeProgressHideTimer = 0;
+    var cbeRunDependencyTotal = 0;
+    var cbeTextActive = false;
+    var cbeTextValue = "";
+    var cbeTextDraftValue = "";
+    var cbeTextDirty = false;
+    var cbeTextComposing = false;
+    window.__cbeLogs = [];
+
+    function cbeStoreLog(level, argsLike) {
+      if (!cbeDebugOutput && level !== "error") {
+        return;
+      }
+      var args = Array.prototype.slice.call(argsLike);
+      var text = args.map(function(value) {
+        return typeof value === "string" ? value : String(value);
+      }).join(" ");
+      window.__cbeLogs.push({ level: level, text: text, time: performance.now() });
+      if (window.__cbeLogs.length > 1000) {
+        window.__cbeLogs.splice(0, window.__cbeLogs.length - 1000);
+      }
+      if (cbeDebugOutput && cbeLogExport) {
+        cbeLogExport.value = window.__cbeLogs.map(function(entry) {
+          return entry.time.toFixed(1) + " " + entry.level + " " + entry.text;
+        }).join("\n");
+      }
+    }
+
+    function cbePrint() {
+      cbeStoreLog("log", arguments);
+      if (cbeDebugOutput) {
+        console.log.apply(console, arguments);
+      }
+    }
+
+    function cbePrintErr() {
+      cbeStoreLog("error", arguments);
+      console.error.apply(console, arguments);
+    }
+
+    function cbeFormatBytes(value) {
+      if (!Number.isFinite(value) || value <= 0) {
+        return "0 B";
+      }
+      if (value >= 1048576) {
+        return (value / 1048576).toFixed(value >= 10485760 ? 0 : 1) + " MB";
+      }
+      if (value >= 1024) {
+        return (value / 1024).toFixed(value >= 10240 ? 0 : 1) + " KB";
+      }
+      return Math.round(value) + " B";
+    }
+
+    function cbeSetProgress(value, visible, label) {
+      if (!cbeProgress || !cbeProgressFill) {
+        return;
+      }
+      var nextValue = Math.max(0, Math.min(1, Number(value) || 0));
+      cbeProgressValue = Math.max(cbeProgressValue, nextValue);
+      cbeProgress.hidden = visible === false;
+      cbeProgressFill.style.width = Math.round(cbeProgressValue * 100) + "%";
+      cbeProgress.setAttribute("aria-valuenow", String(Math.round(cbeProgressValue * 100)));
+      if (cbeProgressLabel && label) {
+        cbeProgressLabel.textContent = label;
+      }
+      if (cbeProgressHideTimer) {
+        clearTimeout(cbeProgressHideTimer);
+        cbeProgressHideTimer = 0;
+      }
+    }
+
+    function cbeHideProgressSoon() {
+      if (cbeProgressHideTimer) {
+        clearTimeout(cbeProgressHideTimer);
+      }
+      cbeProgressHideTimer = setTimeout(function() {
+        if (cbeProgress) {
+          cbeProgress.hidden = true;
+        }
+      }, 420);
+    }
+
+    function cbeSetStatus(text) {
+      var statusText = text || "";
+      var byteMatch = /\((\d+)\/(\d+)\)/.exec(statusText);
+      if (byteMatch) {
+        var loaded = Number(byteMatch[1]);
+        var total = Math.max(1, Number(byteMatch[2]));
+        var ratio = Math.max(0, Math.min(1, loaded / total));
+        cbeSetProgress(Math.min(0.86, ratio * 0.86), true,
+          "正在下载数据文件 " + Math.round(ratio * 100) + "% (" +
+          cbeFormatBytes(loaded) + " / " + cbeFormatBytes(total) + ")");
+      } else if (statusText.indexOf("Downloading data") >= 0) {
+        cbeSetProgress(Math.max(cbeProgressValue, 0.02), true, "正在下载数据文件...");
+      } else if (statusText === "Running...") {
+        cbeSetProgress(Math.max(cbeProgressValue, 0.98), true, "正在启动模拟器...");
+      } else if (statusText === "") {
+        cbeHideProgressSoon();
+      }
+    }
+
+    function cbeMonitorRunDependencies(left) {
+      if (left > cbeRunDependencyTotal) {
+        cbeRunDependencyTotal = left;
+      }
+      if (left > 0) {
+        var loadedRatio = cbeRunDependencyTotal > 0 ? (cbeRunDependencyTotal - left) / cbeRunDependencyTotal : 0;
+        cbeSetProgress(Math.max(cbeProgressValue, 0.86 + loadedRatio * 0.12), true,
+          "正在加载 MEMFS 文件 " + Math.round((0.86 + loadedRatio * 0.12) * 100) + "%");
+      } else {
+        cbeSetProgress(Math.max(cbeProgressValue, 0.98), true, "正在完成加载...");
+      }
+    }
+
+    function cbeSyncControlWidth() {
+      var rect = cbeCanvas.getBoundingClientRect();
+      if (rect.width > 0) {
+        document.documentElement.style.setProperty("--control-width", Math.round(rect.width) + "px");
+      }
+    }
+
     var Module = {
       arguments: cbeArgs,
       canvas: cbeCanvas,
@@ -212,9 +465,16 @@
         }
         return path;
       },
-      print: console.log.bind(console),
-      printErr: console.error.bind(console)
+      setStatus: cbeSetStatus,
+      monitorRunDependencies: cbeMonitorRunDependencies,
+      onRuntimeInitialized: function() {
+        cbeSetProgress(1, true, "加载完成");
+        cbeHideProgressSoon();
+      },
+      print: cbePrint,
+      printErr: cbePrintErr
     };
+    window.Module = Module;
     var cbeScript = document.createElement("script");
     cbeScript.src = "build/cbe-emu.js?v=" + encodeURIComponent(cbeBuildVersion);
     document.body.appendChild(cbeScript);
@@ -238,7 +498,256 @@
     var cbeActiveKeys = {};
     var cbePointerKeys = {};
 
+    function cbeInputFunction(name) {
+      var fn = Module["_" + name];
+      return typeof fn === "function" ? fn : null;
+    }
+
+    function cbeIsInputOpen() {
+      var fn = cbeInputFunction("cbe_web_input_is_open");
+      return !!(fn && fn());
+    }
+
+    function cbeIsInputPassword() {
+      var fn = cbeInputFunction("cbe_web_input_is_password");
+      return !!(fn && fn());
+    }
+
+    function cbeInputType() {
+      var fn = cbeInputFunction("cbe_web_input_type");
+      return fn ? fn() : 0;
+    }
+
+    function cbeInputMaxChars() {
+      var fn = cbeInputFunction("cbe_web_input_max_len");
+      var maxLen = fn ? fn() : 0;
+      return maxLen > 1 ? maxLen - 1 : 0;
+    }
+
+    function cbeNormalizeInputText(text) {
+      var chars = Array.from(text || "");
+      var out = [];
+      for (var i = 0; i < chars.length; ++i) {
+        var code = chars[i].codePointAt(0);
+        if (code >= 0x20 && code <= 0xffff) {
+          out.push(chars[i]);
+        }
+      }
+      return out.join("");
+    }
+
+    function cbePrepareInputValue(rawValue) {
+      var nextValue = cbeNormalizeInputText(rawValue);
+      var maxChars = cbeInputMaxChars();
+      var nextChars = Array.from(nextValue);
+      if (maxChars > 0 && nextChars.length > maxChars) {
+        nextValue = nextChars.slice(0, maxChars).join("");
+      }
+      return nextValue;
+    }
+
+    function cbeReadInputText() {
+      var lenFn = cbeInputFunction("cbe_web_input_len");
+      var charFn = cbeInputFunction("cbe_web_input_char_at");
+      if (!lenFn || !charFn) {
+        return "";
+      }
+      var len = Math.max(0, lenFn());
+      var chars = [];
+      for (var i = 0; i < len; ++i) {
+        var code = charFn(i);
+        if (code >= 0x20 && code <= 0xffff) {
+          chars.push(String.fromCharCode(code));
+        }
+      }
+      return chars.join("");
+    }
+
+    function cbeSetTextCaretEnd() {
+      try {
+        var end = cbeTextInput.value.length;
+        cbeTextInput.setSelectionRange(end, end);
+      } catch (err) {
+      }
+    }
+
+    function cbeFocusTextInput() {
+      if (!cbeTextActive || !cbeIsInputOpen()) {
+        return false;
+      }
+      try {
+        cbeTextInput.focus({ preventScroll: true });
+      } catch (err) {
+        cbeTextInput.focus();
+      }
+      cbeSetTextCaretEnd();
+      return true;
+    }
+
+    function cbeConfigureTextInput() {
+      var maxChars = cbeInputMaxChars();
+      var isPassword = cbeIsInputPassword();
+      cbeTextInput.type = isPassword ? "password" : "text";
+      cbeTextInput.maxLength = maxChars > 0 ? maxChars : 524288;
+      var inputType = cbeInputType();
+      var isNumeric = inputType === 1 || inputType === 2;
+      cbeTextInput.inputMode = isNumeric ? "numeric" : "text";
+      cbeTextInput.placeholder = isPassword ? "请输入密码，按 OK 确认" :
+        (isNumeric ? "请输入数字，按 OK 确认" : "请输入文本，按 OK 确认");
+    }
+
+    function cbeSetDraftInputValue(rawValue) {
+      var nextValue = cbePrepareInputValue(rawValue);
+      if (cbeTextInput.value !== nextValue) {
+        cbeTextInput.value = nextValue;
+      }
+      cbeTextDraftValue = nextValue;
+      cbeTextDirty = cbeTextDraftValue !== cbeTextValue;
+      return nextValue;
+    }
+
+    function cbeCommitInputValue(rawValue) {
+      if (!cbeIsInputOpen()) {
+        cbeTextValue = rawValue || "";
+        cbeTextDraftValue = cbeTextValue;
+        cbeTextDirty = false;
+        return;
+      }
+
+      var nextValue = cbeSetDraftInputValue(rawValue);
+      var nextChars = Array.from(nextValue);
+      var oldChars = Array.from(cbeTextValue);
+      var prefix = 0;
+      while (prefix < oldChars.length &&
+             prefix < nextChars.length &&
+             oldChars[prefix] === nextChars[prefix]) {
+        ++prefix;
+      }
+
+      var backspaceFn = cbeInputFunction("cbe_web_input_backspace");
+      var charFn = cbeInputFunction("cbe_web_input_char");
+      if (!backspaceFn || !charFn) {
+        cbeTextValue = nextValue;
+        cbeTextDraftValue = nextValue;
+        cbeTextDirty = false;
+        return;
+      }
+
+      for (var i = oldChars.length - 1; i >= prefix; --i) {
+        backspaceFn();
+      }
+      for (var j = prefix; j < nextChars.length; ++j) {
+        charFn(nextChars[j].codePointAt(0));
+      }
+      cbeTextValue = nextValue;
+      cbeTextDraftValue = nextValue;
+      cbeTextDirty = false;
+    }
+
+    function cbeSyncTextInputFromWasm(force) {
+      if (!cbeTextActive || cbeTextComposing) {
+        return;
+      }
+      cbeConfigureTextInput();
+      if (!force && (document.activeElement === cbeTextInput || cbeTextDirty)) {
+        return;
+      }
+      var wasmText = cbeReadInputText();
+      if (wasmText !== cbeTextValue) {
+        cbeTextValue = wasmText;
+        cbeTextDraftValue = wasmText;
+        cbeTextDirty = false;
+        cbeTextInput.value = wasmText;
+      }
+    }
+
+    function cbeSetTextInputOpen(open) {
+      if (open && !cbeTextActive) {
+        cbeTextActive = true;
+        cbeTextComposing = false;
+        cbeConfigureTextInput();
+        cbeTextValue = cbeReadInputText();
+        cbeTextDraftValue = cbeTextValue;
+        cbeTextDirty = false;
+        cbeTextInput.value = cbeTextValue;
+        cbeTextPanel.hidden = false;
+        cbeSetTextCaretEnd();
+        cbeSyncControlWidth();
+      } else if (!open && cbeTextActive) {
+        cbeTextActive = false;
+        cbeTextComposing = false;
+        cbeTextValue = "";
+        cbeTextDraftValue = "";
+        cbeTextDirty = false;
+        cbeTextInput.value = "";
+        cbeTextPanel.hidden = true;
+      } else if (open) {
+        cbeSyncTextInputFromWasm(false);
+      }
+    }
+
+    function cbePollTextInputState() {
+      if (cbeInputFunction("cbe_web_input_is_open")) {
+        cbeSetTextInputOpen(cbeIsInputOpen());
+      }
+    }
+
+    function cbeFinishTextInput(result) {
+      if (!cbeIsInputOpen()) {
+        return false;
+      }
+      if (cbeTextComposing) {
+        cbeTextComposing = false;
+      }
+      if (!result) {
+        cbeCommitInputValue(cbeTextInput.value);
+      }
+      var fn = cbeInputFunction("cbe_web_input_done");
+      if (fn) {
+        fn(result ? 1 : 0);
+      }
+      try {
+        cbeTextInput.blur();
+        cbeCanvas.focus({ preventScroll: true });
+      } catch (err) {
+        cbeCanvas.focus();
+      }
+      return true;
+    }
+
+    function cbeTextInputBackspace() {
+      if (!cbeIsInputOpen()) {
+        return false;
+      }
+      var chars = Array.from(cbeTextInput.value);
+      if (chars.length > 0) {
+        chars.pop();
+        cbeSetDraftInputValue(chars.join(""));
+      }
+      cbeFocusTextInput();
+      return true;
+    }
+
+    function cbeHandleTextVirtualKey(keyName) {
+      if (!cbeIsInputOpen()) {
+        return false;
+      }
+      if (keyName === "leftSoft") {
+        return cbeFinishTextInput(0);
+      }
+      if (keyName === "rightSoft") {
+        return cbeFinishTextInput(1);
+      }
+      if (keyName === "ok") {
+        return cbeFocusTextInput();
+      }
+      return false;
+    }
+
     function cbeFocusCanvas() {
+      if (cbeFocusTextInput()) {
+        return;
+      }
       try {
         cbeCanvas.focus({ preventScroll: true });
       } catch (err) {
@@ -272,6 +781,9 @@
 
     function cbePressKey(keyName) {
       if (cbeActiveKeys[keyName]) {
+        return;
+      }
+      if (cbeHandleTextVirtualKey(keyName)) {
         return;
       }
       cbeActiveKeys[keyName] = true;
@@ -322,6 +834,9 @@
     });
 
     document.addEventListener("keydown", function(event) {
+      if (event.target === cbeTextInput) {
+        return;
+      }
       var keyName = cbeKeyboardMap[event.key];
       if (!keyName || event.repeat) {
         return;
@@ -332,6 +847,9 @@
     }, true);
 
     document.addEventListener("keyup", function(event) {
+      if (event.target === cbeTextInput) {
+        return;
+      }
       var keyName = cbeKeyboardMap[event.key];
       if (!keyName) {
         return;
@@ -341,7 +859,50 @@
       cbeReleaseKey(keyName);
     }, true);
 
+    cbeTextInput.addEventListener("compositionstart", function() {
+      cbeTextComposing = true;
+    });
+
+    cbeTextInput.addEventListener("compositionend", function() {
+      cbeTextComposing = false;
+      cbeSetDraftInputValue(cbeTextInput.value);
+    });
+
+    cbeTextInput.addEventListener("input", function() {
+      if (!cbeTextComposing) {
+        cbeSetDraftInputValue(cbeTextInput.value);
+      }
+    });
+
+    cbeTextInput.addEventListener("keydown", function(event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        cbeFinishTextInput(0);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cbeFinishTextInput(1);
+      }
+    });
+
+    document.querySelectorAll(".text-action[data-text-action]").forEach(function(button) {
+      button.addEventListener("click", function(event) {
+        event.preventDefault();
+        if (button.dataset.textAction === "backspace") {
+          cbeTextInputBackspace();
+        } else if (button.dataset.textAction === "done") {
+          cbeFinishTextInput(0);
+        }
+      });
+    });
+
     cbeCanvas.addEventListener("click", cbeFocusCanvas);
+    window.addEventListener("resize", cbeSyncControlWidth);
+    if ("ResizeObserver" in window) {
+      new ResizeObserver(cbeSyncControlWidth).observe(cbeCanvas);
+    }
+    window.setInterval(cbePollTextInputState, 120);
+    cbeSetProgress(0.01, true, "准备加载数据文件...");
+    cbeSyncControlWidth();
     cbeFocusCanvas();
   </script>
 </body>

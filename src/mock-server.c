@@ -2027,6 +2027,7 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
     (void)user_data;
 
     u32 pc = (u32)address & ~1u;
+    vm_restore_main_r9_on_code_boundary(pc);
     u32 moduleR9 = g_currentScreenModuleBase;
     u32 inferredCodeBase = 0;
     u32 inferredModuleR9 = 0;
