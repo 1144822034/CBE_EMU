@@ -128,7 +128,7 @@ monster count. `HandleBattleStartMsg(0x66CC)` copies the selected scene monster
 row once per left-side unit and has explicit placement branches for counts
 `1`, `2`, and `3`. The mock therefore rolls `1..3` for scene-monster battles,
 writes that value as `left_count`, and keeps the right-side player count at
-`1`. Server-side battle state stores the same count and keeps independent HP
+`1` for solo battles. Server-side battle state stores the same count and keeps independent HP
 slots for each monster wire (`wire 1..N`). The aggregate `enemyhp` trace value
 is only the sum of those slots for logging, status, and victory checks. Do not
 damage a pooled `per_monster_hp * count` value: runtime showed that this desyncs
@@ -137,6 +137,169 @@ monster or make terminal death fall on the player. Settlement EXP/copper and
 per-monster drop rolls still scale by the count. The durable backpack refresh
 remains the post-battle `7/7 type=1` additive row, with `count_delta` equal to
 the number of items dropped in that battle, not the role's total stack count.
+
+2026-07-15 team-battle update: `mmBattleMstarWqvga.cbm`
+`HandleServerBattleCmd(0x7BD0)` routes both subtype `5` and subtype `10` to
+`HandleBattleStartMsg(0x66CC)`. There is no separate client command for a
+party member's passive entry. For subtype `5`, every right-side row is resolved
+through `sub_66A4(0x66A4)`, which compares the row id with `teamRow+36` in up
+to four imported team rows. `BattleScene_CreateCharList(0x642A)` imports that
+team table from the main CBE before parsing the start packet. Therefore the
+server must send the normal `1/4/5` object to each same-scene member and every
+right-side id must be the id already present in that particular observer's
+team table.
+
+The mock now freezes the same-scene team members when the leader's `4/1`
+challenge is accepted. The leader response and each passive member response
+use `right_count=2..3`, followed by one vitals row per frozen member. Because
+test accounts can share persistent role id `10001`, rows are encoded with the
+same observer-specific `0x6Axxxxxx` collision mapping used by the team roster;
+the observer's own id remains unchanged. Passive starts are delivered through
+the existing event-7 scene poll as an isolated two-object packet:
+
+```text
+1/2/2 { moveinfo }       # seed the selected scene monster row
+1/4/5 { side, battleinfo }
+```
+
+The battle event is emitted before ordinary movement/social poll objects so
+the client cannot continue parsing scene updates after `0x66CC` switches into
+the battle screen. Members in another scene, offline members, and stale scene
+transitions are excluded. No CBE globals or screen state are forced.
+
+### 2026-07-15 shared team battle actions
+
+Runtime after synchronized entry exposed a second boundary. Both clients had
+the same two-role `4/5` start, but each account's first `4/2` operation reduced
+its own copy of the monster HP (`60 -> 45` and independently `60 -> 40`). The
+generated `4/6` was returned only to the requester, while the peer received
+only main-CBE group HP/MP notices. A group `5/11` update does not replay the
+battle-module action queue, so it cannot synchronize monster HP or animations.
+
+The action wire mapping is derived from three client functions:
+
+- `mmBattle:sub_6BF0(0x6BF0)` rearranges the subtype-5 action/display table by
+  copying the right-side party first and the left-side monsters after it.
+- `mmBattle:sub_2B26(0x2B26)` converts an internal fighter index into the
+  outgoing `4/2 index` when `side=1`.
+- `mmBattle:CalcTargetSideIndex(0x6CE8)` converts each server `4/6` actor and
+  child target wire back to the internal fighter array.
+
+For subtype 5 with `side=1`, `left_count=M` monsters and `right_count=P` party
+members, let the reordered display index be `d` (`party 0..P-1`, then monsters
+`P..P+M-1`). The actual server wire is not that display index directly:
+
+```text
+display_to_wire(d) = d >= M ? d - M : P + d
+wire_to_display(w) = w < P  ? M + w : w - P
+```
+
+Runtime negative evidence caught the earlier direct-order assumption. With one
+monster and two members, the client selected the monster and sent `4/2 index=1`.
+The direct-order mock changed that to target wire 2; `CalcTargetSideIndex(2)`
+then resolved to display member 0, visibly producing a teammate-on-teammate
+attack. The correct permutation for `M=1, P=2` is:
+
+```text
+leader display 0 -> wire 2
+member display 1 -> wire 0
+monster display 2 -> wire 1
+```
+
+The shared battle builder now uses this permutation for player actors, selected
+monster targets, monster counter actors, death records, and live-monster lookup.
+The request `index` is retained whenever it maps to a live monster.
+
+The service now keeps monster slots and the turn counter in the service-local
+team battle instead of trusting the restored per-account copy. Before handling
+each `1/4/2 { index, Operate }`, it loads that shared snapshot and selects the
+actor wire from the requester's frozen party position. After building the
+normal `1/4/6 { actionnum, actioninfo, optional teaminfo }`, it commits the
+shared snapshot and queues the same action object for every other participant.
+The existing event-7 poll delivers queued battle actions before scene movement
+or social notices.
+
+Action events use a bounded eight-entry ring with a per-participant delivered
+mask, so a participant can receive an older teammate action without replaying
+its own newer action. Skill `teaminfo` role ids are rewritten through the same
+observer-specific role-id mapping used by the team roster. On victory, only
+the `4/6` action object is shared; each observer builds its own `4/7` settlement
+under that account's restored role state, preventing the leader's EXP, money,
+or drop row from being copied into another account.
+
+The solo action builder normally bundles a complete player-plus-monster round
+into every offensive `4/6`. That rule cannot be reused unchanged by a party:
+runtime showed `bundle=1` and monster counters after each member's operation.
+The service-local battle now also owns a round serial and an acted-member mask.
+The required mask is recomputed from frozen members whose shared HP is nonzero:
+
+```text
+on member action:
+  reject if member is dead or its bit is already set
+  resolve_monsters = (acted_mask | member_bit) == alive_mask
+  build the normal 4/6 with monster actions enabled only when resolve_monsters
+  for a non-final member, commit server state but retain its actioninfo by submit order
+  return a zero-object WT acknowledgement (never an empty 4/6 action list)
+  on the final member, concatenate every retained player action before its
+    player-plus-monster actioninfo and publish one combined 4/6 to all members
+  reset acted_mask and the retained action list only after publishing that round
+```
+
+The first implementation only suppressed monster records in non-final responses.
+Runtime logs proved that its mask was correct (`resolve=0 bundle=0 counters=0` for
+the first member and `resolve=1 bundle=1` for the last), but the first member still
+received an independent `4/6`. Once that local list ended, the battle UI entered
+its enemy phase before the peer had submitted. `HandleBattleActionMsg(0x6EB0)`
+confirms that subtype 6 is the client action-list parser: it opens `actioninfo`,
+reads `actionnum`, and creates the local action slots. Therefore the synchronization
+boundary must cover the entire `4/6`, not merely the monster records inside it.
+
+The revised path leaves solo combat unchanged. Team members who submit early get
+a valid five-byte WT packet with zero objects, so their network request completes
+without calling the battle action-list parser. Non-battle companion objects (for
+example an item inventory refresh) remain in that direct acknowledgement. The
+last still-alive member releases one combined player-actions-then-monster-actions
+`4/6`; the same object is queued for peers. Duplicate or dead-member operations
+also receive a zero-object WT acknowledgement and cannot advance shared enemy HP
+or trigger the solo deferred-enemy-turn fallback.
+
+2026-07-16 first retest negative evidence: the intended defer path logged
+`team_battle_round_capture_failed`, immediately followed by `merge_failed` and
+`team_battle_action_queue`. The fail-open branch therefore published the original
+single-member `4/6`, explaining why runtime behavior had not changed. The cause
+was an encoder/decoder mismatch inside the mock: `actioninfo` is emitted through
+`vm_net_mock_put_object_raw()` as one object-entry `be16 value_len + value`, but
+the capture code used the blob reader, which expects the extra nested length from
+`vm_net_mock_put_object_blob()`. Team-round capture now parses only the bounded
+response `1/4/6` object and walks its exact object-entry grammar. A successful
+non-final submission must log `team_battle_round_capture` and
+`team_battle_round_defer ... resp=5`; either `capture_failed` or an immediate
+`team_battle_action_queue` remains a protocol failure.
+
+2026-07-16 terminal-round correction: runtime with two monsters showed the
+ordinary barrier working through the first kill. After round 1 left slots
+`0/5/0`, the first submitter in round 2 killed the final monster while
+`acted=00 alive=03 resolve=0`. The wrapper nevertheless released immediately
+because it used `context.resolvesRound || enemyhp==0`. That terminal shortcut
+bypassed the party mask even though no client had seen the killing action yet.
+
+The team path now treats a non-final `enemyhp==0` as a pending terminal round:
+it captures the killing `actioninfo`, suppresses both early `4/6` and early
+`4/7`, and keeps `battleFinished` false. Remaining living members' `4/2`
+requests count as submitted choices without fabricating attacks against an
+already-dead target. The last required submission publishes the captured
+attack/death list together with that observer's own `4/7`; peers continue to
+build their own settlement when consuming the shared terminal event. Expected
+trace order is `terminal_capture -> capture -> defer`, followed only after the
+last member by `terminal_release -> action_queue`.
+
+Member vitals are committed at the same shared-state boundary. The active
+session's online HP, max HP, MP, and max MP are replaced with the shared battle
+values before the next service poll, and an existing group subtype `5/11 hsp`
+notice is queued for every roster observer. `HP=0` is preserved as a real
+death value. This makes the death record inside `4/6` and the party HUD update
+refer to the same snapshot instead of waiting until respawn changes the role
+database again.
 
 The scene actor HP/MP fields copied by subtype 5 are not populated by
 `scene_node_find_or_create(0x0100EFC4)`. They live inside the raw move blob that

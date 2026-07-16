@@ -45,6 +45,14 @@ static const char *g_vm_mock_service_active_account_id = NULL;
 static u8 g_vmNetMockFollowupResponse[65536];
 static u32 g_vmNetMockFollowupResponseLen = 0;
 static u32 g_vmNetMockFollowupResponseEventType = 7;
+/* Nonzero only while a service-side team battle operation is being built.
+ * The values describe the subtype-5 right-side roster in server wire order. */
+static u8 g_vm_net_mock_team_battle_party_count_current = 0;
+static u8 g_vm_net_mock_team_battle_actor_slot_current = 0;
+/* The ordinary solo builder bundles monster actions with every offensive
+ * operation.  During a synchronized party battle this flag is armed only for
+ * the last still-alive member that has not acted in the current round. */
+static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
 
 #define VM_MOCK_SERVICE_FRAME_SIZE 20
 #define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
@@ -394,6 +402,35 @@ static u8 vm_net_mock_battle_enemy_count_current(void)
     return g_mockBattleEnemyCountCurrent;
 }
 
+/* subtype-5 does not leave the action/display table in the same order as the
+ * parsed battle-start rows.  sub_6BF0(0x6BF0) copies the right-side party
+ * first and the left-side monsters after it.  The wire conversion functions
+ * sub_2B26/CalcTargetSideIndex then rotate that display index by the original
+ * left/right counts.  Keep this exact permutation for every team action:
+ *
+ *   display -> wire: display >= monsters ? display-monsters : party+display
+ *   wire -> display: wire < party ? monsters+wire : wire-party
+ */
+static u8 vm_net_mock_team_battle_display_to_wire_slot(u8 displaySlot)
+{
+    u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
+    u8 monsterCount = vm_net_mock_battle_enemy_count_current();
+
+    return displaySlot >= monsterCount
+               ? (u8)(displaySlot - monsterCount)
+               : (u8)(partyCount + displaySlot);
+}
+
+static u8 vm_net_mock_team_battle_wire_to_display_slot(u8 wireSlot)
+{
+    u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
+    u8 monsterCount = vm_net_mock_battle_enemy_count_current();
+
+    return wireSlot < partyCount
+               ? (u8)(monsterCount + wireSlot)
+               : (u8)(wireSlot - partyCount);
+}
+
 static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
                                                   u8 *playerSlotOut, u8 *enemySlotOut)
 {
@@ -402,6 +439,16 @@ static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
 
     if (side == 1)
     {
+        if (g_mockBattleSceneMonsterStartActive != 0 &&
+            playerOnRight &&
+            g_vm_net_mock_team_battle_party_count_current >= 2)
+        {
+            u8 firstMonsterDisplay = g_vm_net_mock_team_battle_party_count_current;
+
+            playerSlot = vm_net_mock_team_battle_display_to_wire_slot(
+                g_vm_net_mock_team_battle_actor_slot_current);
+            enemySlot = vm_net_mock_team_battle_display_to_wire_slot(firstMonsterDisplay);
+        }
         /*
          * Battle.cbm CalcTargetSideIndex(0x6CE8) remaps wire slots through the
          * side/group counts loaded by the battle-start packet. For subtype 5
@@ -410,7 +457,7 @@ static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
          * index is still translated separately below, because Callback_Unknown2()
          * reports the selected unit through sub_2B26().
          */
-        if (g_mockBattleSceneMonsterStartActive != 0)
+        else if (g_mockBattleSceneMonsterStartActive != 0)
         {
             playerSlot = 1;
             enemySlot = 0;
@@ -482,6 +529,22 @@ static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
                                                    u8 fallbackEnemySlot,
                                                    u8 *enemyIndexOut)
 {
+    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
+        g_vm_net_mock_team_battle_party_count_current >= 2)
+    {
+        u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
+        u8 enemyCount = vm_net_mock_battle_enemy_count_current();
+        u8 displaySlot = vm_net_mock_team_battle_wire_to_display_slot(wireSlot);
+
+        if (displaySlot >= partyCount &&
+            displaySlot < (u8)(partyCount + enemyCount))
+        {
+            if (enemyIndexOut)
+                *enemyIndexOut = (u8)(displaySlot - partyCount);
+            return true;
+        }
+        return false;
+    }
     if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
     {
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
@@ -587,6 +650,16 @@ static u8 vm_net_mock_battle_enemy_wire_for_index(u8 enemyIndex,
 {
     u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
+    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
+        g_vm_net_mock_team_battle_party_count_current >= 2)
+    {
+        u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
+
+        if (enemyIndex >= enemyCount)
+            enemyIndex = (u8)(enemyCount - 1);
+        return vm_net_mock_team_battle_display_to_wire_slot(
+            (u8)(partyCount + enemyIndex));
+    }
     if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
     {
         if (enemyIndex >= enemyCount)
@@ -662,6 +735,18 @@ static u8 vm_net_mock_battle_target_wire_slot_from_request(u8 requestIndex,
                                                            u8 side,
                                                            u8 fallbackEnemySlot)
 {
+    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
+        g_vm_net_mock_team_battle_party_count_current >= 2)
+    {
+        if (vm_net_mock_battle_enemy_wire_is_alive(requestIndex,
+                                                   playerOnRight,
+                                                   side,
+                                                   fallbackEnemySlot))
+            return requestIndex;
+        return vm_net_mock_battle_first_alive_enemy_wire(playerOnRight,
+                                                         side,
+                                                         fallbackEnemySlot);
+    }
     if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
     {
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
@@ -10086,7 +10171,10 @@ enum
     VM_MOCK_SERVICE_PEER_SYNC_MAX = 16,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4,
     VM_MOCK_SERVICE_TEAM_MAX = 16,
-    VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3
+    VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3,
+    VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX = 8,
+    VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX = 2048,
+    VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX = 512
 };
 
 typedef struct
@@ -10124,6 +10212,28 @@ typedef struct
     char sourceName[32];
     u32 queuedTick;
 } vm_mock_service_social_notice;
+
+typedef struct
+{
+    bool valid;
+    bool terminalVictory;
+    u32 serial;
+    u32 sourceClientId;
+    u8 deliveredMask;
+    u16 objectLen;
+    u8 objectData[VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX];
+} vm_mock_service_team_battle_event;
+
+typedef struct
+{
+    bool valid;
+    u32 serial;
+    u32 sourceClientId;
+    u8 memberIndex;
+    u8 actionCount;
+    u16 actionInfoLen;
+    u8 actionInfo[VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX];
+} vm_mock_service_team_battle_round_action;
 
 typedef struct vm_mock_service_client_session
 {
@@ -10177,6 +10287,7 @@ typedef struct vm_mock_service_client_session
     bool teamInviteReplyActive;
     u32 teamInviteSourceClientId;
     u32 teamInviteSourceWireId;
+    u32 pendingTeamBattleSerial;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -10196,6 +10307,36 @@ typedef struct
     u32 leaderClientId;
     u8 memberCount;
     u32 memberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    bool battleActive;
+    u32 battleSerial;
+    u32 battleLeaderClientId;
+    u32 battleEnemyId;
+    u32 battleSceneMonsterIndex;
+    u32 battleSceneMonsterX;
+    u32 battleSceneMonsterY;
+    u8 battleMonsterCount;
+    u8 battleSide;
+    u8 battleMemberCount;
+    u32 battleMemberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    char battleScene[64];
+    bool battleFinished;
+    u32 battleTurnCounter;
+    u32 battleEnemyHpSlots[3];
+    u32 battleEnemyHpMaxSlots[3];
+    u32 battleEnemyHpCurrent;
+    u32 battleEnemyHpMax;
+    u32 battleMemberHp[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u32 battleMemberHpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u32 battleMemberMp[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u32 battleMemberMpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u8 battleRoundActedMask;
+    u32 battleRoundSerial;
+    bool battleRoundTerminalPending;
+    u32 battleRoundActionSerial;
+    vm_mock_service_team_battle_round_action
+        battleRoundActions[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u32 battleActionSerial;
+    vm_mock_service_team_battle_event battleEvents[VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX];
 } vm_mock_service_team;
 
 static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
@@ -10659,6 +10800,7 @@ static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_
     team->leaderClientId = leader->clientId;
     team->memberCount = 1;
     team->memberClientIds[0] = leader->clientId;
+    leader->pendingTeamBattleSerial = 0;
     printf("[info][mock-service] team_create leader=%08x/%u\n",
            leader->clientId, leader->onlineRoleId);
     return team;
@@ -10674,6 +10816,7 @@ static bool vm_mock_service_team_add_member(vm_mock_service_team *team,
     {
         return false;
     }
+    member->pendingTeamBattleSerial = 0;
     team->memberClientIds[team->memberCount++] = member->clientId;
     printf("[info][mock-service] team_add leader=%08x member=%08x/%u count=%u\n",
            team->leaderClientId, member->clientId, member->onlineRoleId, team->memberCount);
@@ -10691,6 +10834,7 @@ static void vm_mock_service_team_notify_leave(vm_mock_service_team *team,
             vm_mock_service_find_client_session(team->memberClientIds[member]);
         if (peer != NULL && peer->clientId != leaver->clientId)
         {
+            peer->pendingTeamBattleSerial = 0;
             (void)vm_mock_service_session_enqueue_social_notice(
                 peer, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE, 0,
                 leaver, NULL, leaver->accountId);
@@ -10725,6 +10869,7 @@ static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *l
         return false;
 
     leaderLeaves = team->leaderClientId == leaver->clientId;
+    leaver->pendingTeamBattleSerial = 0;
     vm_mock_service_team_notify_leave(team, leaver);
     if (leaderLeaves)
     {
@@ -11295,6 +11440,167 @@ static bool vm_mock_service_session_scene_is_visible(const vm_mock_service_clien
         return false;
     }
     return vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene);
+}
+
+static u8 vm_mock_service_team_collect_battle_members(
+    const vm_mock_service_team *team,
+    const char *scene,
+    u32 memberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX])
+{
+    u8 count = 0;
+
+    if (memberClientIds != NULL)
+        memset(memberClientIds, 0, sizeof(u32) * VM_MOCK_SERVICE_TEAM_MEMBER_MAX);
+    if (team == NULL || !team->active || memberClientIds == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return 0;
+    }
+    for (u8 i = 0; i < team->memberCount && count < VM_MOCK_SERVICE_TEAM_MEMBER_MAX; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+        if (!vm_mock_service_session_scene_is_visible(member, scene))
+            continue;
+        memberClientIds[count++] = member->clientId;
+    }
+    return count;
+}
+
+static bool vm_mock_service_team_battle_contains_client(const vm_mock_service_team *team,
+                                                        u32 clientId)
+{
+    if (team == NULL || !team->battleActive || clientId == 0)
+        return false;
+    for (u8 i = 0; i < team->battleMemberCount; ++i)
+    {
+        if (team->battleMemberClientIds[i] == clientId)
+            return true;
+    }
+    return false;
+}
+
+static int vm_mock_service_team_battle_member_index(const vm_mock_service_team *team,
+                                                    u32 clientId)
+{
+    if (team == NULL || !team->battleActive || clientId == 0)
+        return -1;
+    for (u8 i = 0; i < team->battleMemberCount; ++i)
+    {
+        if (team->battleMemberClientIds[i] == clientId)
+            return i;
+    }
+    return -1;
+}
+
+/* Freeze the same-scene party at the instant the leader's 4/1 request is
+ * accepted.  Each passive client later receives its own observer-specific
+ * 1/4/5 packet from the ordinary scene poll path. */
+static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
+                                            vm_mock_service_client_session *leader,
+                                            const char *scene,
+                                            u32 enemyId,
+                                            u32 sceneMonsterIndex,
+                                            u32 sceneMonsterX,
+                                            u32 sceneMonsterY,
+                                            u8 monsterCount,
+                                            u8 side,
+                                            u8 *queuedOut)
+{
+    u32 participantIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX] = {0};
+    u8 participantCount = 0;
+    u8 queued = 0;
+
+    if (queuedOut)
+        *queuedOut = 0;
+    if (team == NULL || leader == NULL ||
+        !vm_mock_service_team_is_leader(team, leader->clientId))
+    {
+        return 0;
+    }
+    participantCount = vm_mock_service_team_collect_battle_members(team, scene, participantIds);
+    if (participantCount < 2 || participantIds[0] != leader->clientId)
+        return participantCount;
+
+    for (u8 i = 0; i < team->memberCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+        if (member != NULL)
+            member->pendingTeamBattleSerial = 0;
+    }
+    ++team->battleSerial;
+    if (team->battleSerial == 0)
+        team->battleSerial = 1;
+    team->battleActive = true;
+    team->battleLeaderClientId = leader->clientId;
+    team->battleEnemyId = enemyId;
+    team->battleSceneMonsterIndex = sceneMonsterIndex;
+    team->battleSceneMonsterX = sceneMonsterX;
+    team->battleSceneMonsterY = sceneMonsterY;
+    team->battleMonsterCount = monsterCount;
+    team->battleSide = side;
+    team->battleMemberCount = participantCount;
+    memcpy(team->battleMemberClientIds, participantIds,
+           sizeof(team->battleMemberClientIds));
+    snprintf(team->battleScene, sizeof(team->battleScene), "%s", scene);
+    team->battleFinished = false;
+    team->battleTurnCounter = 0;
+    memcpy(team->battleEnemyHpSlots, g_mockBattleEnemyHpSlots,
+           sizeof(team->battleEnemyHpSlots));
+    memcpy(team->battleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots,
+           sizeof(team->battleEnemyHpMaxSlots));
+    team->battleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
+    team->battleEnemyHpMax = g_mockBattleEnemyHpMax;
+    team->battleRoundActedMask = 0;
+    team->battleRoundSerial = 1;
+    team->battleRoundTerminalPending = false;
+    team->battleRoundActionSerial = 0;
+    memset(team->battleRoundActions, 0, sizeof(team->battleRoundActions));
+    team->battleActionSerial = 0;
+    memset(team->battleEvents, 0, sizeof(team->battleEvents));
+    memset(team->battleMemberHp, 0, sizeof(team->battleMemberHp));
+    memset(team->battleMemberHpMax, 0, sizeof(team->battleMemberHpMax));
+    memset(team->battleMemberMp, 0, sizeof(team->battleMemberMp));
+    memset(team->battleMemberMpMax, 0, sizeof(team->battleMemberMpMax));
+    for (u8 i = 0; i < participantCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(participantIds[i]);
+        if (member == NULL)
+            continue;
+        team->battleMemberHpMax[i] = member->onlineHpMax ? member->onlineHpMax : 1;
+        team->battleMemberHp[i] = vm_net_mock_min_u32(member->onlineHp,
+                                                      team->battleMemberHpMax[i]);
+        team->battleMemberMpMax[i] = member->onlineMpMax;
+        team->battleMemberMp[i] = vm_net_mock_min_u32(member->onlineMp,
+                                                      team->battleMemberMpMax[i]);
+    }
+
+    for (u8 i = 0; i < participantCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(participantIds[i]);
+        if (member != NULL && member->clientId != leader->clientId)
+        {
+            member->pendingTeamBattleSerial = team->battleSerial;
+            ++queued;
+        }
+    }
+    if (queuedOut)
+        *queuedOut = queued;
+    printf("[info][mock-service] team_battle_queue serial=%u leader=%08x enemy=%u "
+           "scene=%s members=%u queued=%u index=%u pos=(%u,%u)\n",
+           team->battleSerial,
+           leader->clientId,
+           enemyId,
+           team->battleScene,
+           participantCount,
+           queued,
+           sceneMonsterIndex,
+           sceneMonsterX,
+           sceneMonsterY);
+    return participantCount;
 }
 
 static vm_mock_service_account_state *vm_mock_service_open_account_role_db_for_console(const char *accountId,
@@ -18583,6 +18889,13 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
 
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
+static bool vm_net_mock_append_battle_drop_refresh7_if_needed(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    u8 *objectCount,
+    const char *phase,
+    bool allowActiveSession);
 
 static bool vm_net_mock_is_actor_other_only10_request(const u8 *request, u32 requestLen)
 {
@@ -19815,6 +20128,15 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     return 1;
 }
 
+static u32 vm_net_mock_build_pending_team_battle_start_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer);
+static u32 vm_net_mock_build_pending_team_battle_action_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer);
+
 static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *observer = vm_mock_service_get_active_client_session();
@@ -19828,6 +20150,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     u32 maxMovementAgeTicks = 0;
     bool needsBaseline = false;
     int socialAppend = 0;
+    u32 teamBattleResponseLen = 0;
 
     if (out == NULL || outCap < pos || observer == NULL ||
         !observer->sceneVisibleReady || observer->sceneVisiblePending ||
@@ -19836,6 +20159,14 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return 0;
     }
     scene = observer->sceneVisibleScene;
+    teamBattleResponseLen = vm_net_mock_build_pending_team_battle_start_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_pending_team_battle_action_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     roleCount = vm_net_mock_build_scene_role_seeds(scene,
                                                    seeds,
                                                    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
@@ -20489,6 +20820,216 @@ static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
         return 0;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, roleMaxMp))
         return 0;
+    return pos;
+}
+
+static u32 vm_net_mock_build_team_battle_scene_start_info_blob(
+    u8 *out,
+    u32 outCap,
+    u32 sceneMonsterIndex,
+    u32 sceneMonsterX,
+    u32 sceneMonsterY,
+    u8 monsterCount,
+    vm_mock_service_team *team,
+    vm_mock_service_client_session *observer,
+    const char *scene,
+    u8 *partyCountOut)
+{
+    u32 memberClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX] = {0};
+    u32 pos = 0;
+    u8 partyCount = 0;
+
+    if (partyCountOut)
+        *partyCountOut = 0;
+    if (team == NULL || observer == NULL ||
+        !vm_mock_service_team_contains_client(team, observer->clientId))
+    {
+        return vm_net_mock_build_battle_scene_start_info_blob(
+            out, outCap, sceneMonsterIndex, sceneMonsterX, sceneMonsterY,
+            monsterCount, observer ? observer->onlineRoleId : 0);
+    }
+
+    if (observer->pendingTeamBattleSerial != 0 &&
+        team->battleActive &&
+        observer->pendingTeamBattleSerial == team->battleSerial)
+    {
+        partyCount = team->battleMemberCount;
+        memcpy(memberClientIds, team->battleMemberClientIds, sizeof(memberClientIds));
+    }
+    else
+    {
+        partyCount = vm_mock_service_team_collect_battle_members(
+            team, scene, memberClientIds);
+    }
+    if (partyCount < 2)
+    {
+        return vm_net_mock_build_battle_scene_start_info_blob(
+            out, outCap, sceneMonsterIndex, sceneMonsterX, sceneMonsterY,
+            monsterCount, observer->onlineRoleId);
+    }
+    if (partyCount > VM_MOCK_SERVICE_TEAM_MEMBER_MAX)
+        partyCount = VM_MOCK_SERVICE_TEAM_MEMBER_MAX;
+    if (monsterCount < 1)
+        monsterCount = 1;
+    if (monsterCount > 3)
+        monsterCount = 3;
+
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, monsterCount) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterIndex) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterX) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, sceneMonsterY) ||
+        !vm_net_mock_seq_put_u8(out, outCap, &pos, partyCount))
+    {
+        return 0;
+    }
+
+    for (u8 i = 0; i < partyCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(memberClientIds[i]);
+        u32 wireId = vm_mock_service_team_member_wire_id(observer, member);
+        u32 hpMax = member && member->onlineHpMax ? member->onlineHpMax : 1;
+        u32 hp = member ? member->onlineHp : 0;
+        u32 mpMax = member ? member->onlineMpMax : 0;
+        u32 mp = member ? member->onlineMp : 0;
+
+        if (member == NULL || wireId == 0)
+            return 0;
+        if (hp > hpMax)
+            hp = hpMax;
+        if (mp > mpMax)
+            mp = mpMax;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, wireId) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, hp) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, hpMax) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, mp) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, mpMax))
+        {
+            return 0;
+        }
+        printf("[info][network] mock_team_battle_member_row observer=%08x "
+               "member=%08x/%u wire=%u hp=%u/%u mp=%u/%u\n",
+               observer->clientId,
+               member->clientId,
+               member->onlineRoleId,
+               wireId,
+               hp, hpMax, mp, mpMax);
+    }
+    if (partyCountOut)
+        *partyCountOut = partyCount;
+    return pos;
+}
+
+static u32 vm_net_mock_build_pending_team_battle_start_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer)
+{
+    vm_mock_service_team *team = NULL;
+    u8 battleInfo[192];
+    u32 battleInfoLen = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u32 pendingSerial = 0;
+    u32 hp = 0;
+    u32 hpMax = 1;
+    u32 mp = 0;
+    u32 mpMax = 0;
+    u8 partyCount = 0;
+
+    if (out == NULL || outCap < pos || observer == NULL ||
+        observer->pendingTeamBattleSerial == 0)
+    {
+        return 0;
+    }
+    pendingSerial = observer->pendingTeamBattleSerial;
+    team = vm_mock_service_team_find_for_client(observer->clientId);
+    if (team == NULL || !team->battleActive ||
+        team->battleSerial != pendingSerial ||
+        !vm_mock_service_team_battle_contains_client(team, observer->clientId) ||
+        !vm_mock_service_session_scene_is_visible(observer, team->battleScene))
+    {
+        printf("[warn][mock-service] team_battle_drop observer=%08x serial=%u "
+               "reason=stale-or-scene-changed\n",
+               observer->clientId, pendingSerial);
+        observer->pendingTeamBattleSerial = 0;
+        return 0;
+    }
+
+    memset(battleInfo, 0, sizeof(battleInfo));
+    battleInfoLen = vm_net_mock_build_team_battle_scene_start_info_blob(
+        battleInfo, sizeof(battleInfo),
+        team->battleSceneMonsterIndex,
+        team->battleSceneMonsterX,
+        team->battleSceneMonsterY,
+        team->battleMonsterCount,
+        team,
+        observer,
+        team->battleScene,
+        &partyCount);
+    if (battleInfoLen == 0 || battleInfoLen > 0xffff)
+        return 0;
+    if (!vm_net_mock_append_scene_monster_moveinfo2_object(
+            out, outCap, &pos,
+            team->battleEnemyId,
+            team->battleSceneMonsterX,
+            team->battleSceneMonsterY))
+    {
+        return 0;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 5, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "side", team->battleSide) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo",
+                                    battleInfo, (u16)battleInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+
+    hpMax = observer->onlineHpMax ? observer->onlineHpMax : 1;
+    hp = observer->onlineHp;
+    mpMax = observer->onlineMpMax;
+    mp = observer->onlineMp;
+    if (hp > hpMax)
+        hp = hpMax;
+    if (mp > mpMax)
+        mp = mpMax;
+    g_mockBattleOperateSessionArmed = 1;
+    g_mockBattleOperateSessionFinished = 0;
+    g_mockBattlePendingEnemyTurn = 0;
+    g_mockBattleAwaitingSettlement = 0;
+    g_mockBattleSceneMonsterStartActive = 1;
+    g_mockBattleEnemyCountCurrent = team->battleMonsterCount;
+    g_mockBattleOperateTurnCounter = 0;
+    ++g_mockBattleOperateSessionSerial;
+    g_vm_net_mock_battle_rewarded_exp = 0;
+    g_vm_net_mock_battle_rewarded_drop_item = 0;
+    g_vm_net_mock_battle_rewarded_drop_seq = 0;
+    g_vm_net_mock_battle_rewarded_drop_count = 0;
+    g_vm_net_mock_battle_settlement_sent_serial = 0;
+    g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
+    g_vm_net_mock_battle_recovered_serial = 0;
+    g_vm_net_mock_battle_role_id_current = observer->onlineRoleId;
+    g_vm_net_mock_battle_enemy_id_current = team->battleEnemyId;
+    g_mockBattleRoleHpCurrent = hp;
+    g_mockBattleRoleHpMax = hpMax;
+    g_mockBattleRoleMpCurrent = mp;
+    g_mockBattleRoleMpMax = mpMax;
+    vm_net_mock_battle_reset_enemy_hp_from_stats(team->battleEnemyId);
+
+    observer->pendingTeamBattleSerial = 0;
+    printf("[info][mock-service] team_battle_deliver serial=%u observer=%08x "
+           "leader=%08x enemy=%u scene=%s party=%u subtype=5 side=%u "
+           "objects=2 resp=%u evidence=mmBattle:0x7BD0->0x66CC\n",
+           pendingSerial,
+           observer->clientId,
+           team->battleLeaderClientId,
+           team->battleEnemyId,
+           team->battleScene,
+           partyCount,
+           team->battleSide,
+           pos);
     return pos;
 }
 
@@ -21202,7 +21743,9 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     playerSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_PLAYER_WIRE_SLOT", defaultPlayerSlot);
     enemySlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_ENEMY_WIRE_SLOT", defaultEnemySlot);
     bundleWholeRound = g_mockBattleOperateSessionArmed != 0 &&
-                       vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0;
+                       (g_vm_net_mock_team_battle_party_count_current >= 2
+                            ? g_vm_net_mock_team_battle_resolve_monsters_current != 0
+                            : vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0);
 
     if (g_mockBattleAwaitingSettlement != 0)
         return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
@@ -21312,7 +21855,8 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                                  : role->roleId;
         }
 
-        includeCounterattack = vm_net_mock_env_u32("CBE_BATTLE_ITEM_USE_COUNTER", 1) != 0 &&
+        includeCounterattack = bundleWholeRound &&
+                               vm_net_mock_env_u32("CBE_BATTLE_ITEM_USE_COUNTER", 1) != 0 &&
                                g_mockBattleEnemyHpCurrent > 0 &&
                                g_mockBattleRoleHpCurrent > 0;
         if (includeCounterattack)
@@ -21646,8 +22190,10 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         g_mockBattleOperateSessionFinished = 0;
     terminalFollowup = false;
     bundleWholeRound = g_mockBattleOperateSessionArmed != 0 &&
-                       operateIsOffensive &&
-                       vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0;
+                       (g_vm_net_mock_team_battle_party_count_current >= 2
+                            ? g_vm_net_mock_team_battle_resolve_monsters_current != 0
+                            : (operateIsOffensive &&
+                               vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0));
     firstRecordActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_PLAYER_ACTOR_WIRE_SLOT",
                                                        playerSlot);
     firstRecordChildFlag = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_CHILD_FLAG", 0);
@@ -22213,8 +22759,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         g_mockBattleOperateSessionFinished = 0;
     terminalFollowup = false;
     bundleWholeRound = g_mockBattleOperateSessionArmed != 0 &&
-                       operateIsOffensive &&
-                       vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0;
+                       (g_vm_net_mock_team_battle_party_count_current >= 2
+                            ? g_vm_net_mock_team_battle_resolve_monsters_current != 0
+                            : (operateIsOffensive &&
+                               vm_net_mock_env_u32("CBE_BATTLE_BUNDLE_ROUND", 1) != 0));
     firstRecordActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_PLAYER_ACTOR_WIRE_SLOT",
                                                        playerSlot);
     firstRecordChildFlag = (u8)vm_net_mock_env_u32("CBE_BATTLE_FIRST_CHILD_FLAG", 0);
@@ -22622,6 +23170,930 @@ static u32 vm_net_mock_build_battle_operate_response_raw82(const u8 *request, u3
     return 0;
 }
 
+typedef struct
+{
+    bool active;
+    bool duplicateAction;
+    bool resolvesRound;
+    vm_mock_service_team *team;
+    vm_mock_service_client_session *session;
+    u8 memberIndex;
+    u8 memberBit;
+    u8 aliveMask;
+} vm_mock_service_team_battle_operation_context;
+
+enum
+{
+    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE = 1,
+    VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK = 2,
+    VM_MOCK_TEAM_BATTLE_BUILD_ITEM = 3
+};
+
+static u16 vm_net_mock_copy_response_object(const u8 *packet,
+                                            u32 packetLen,
+                                            u8 kind,
+                                            u8 subtype,
+                                            u8 *objectOut,
+                                            u32 objectCap)
+{
+    u32 pos = 5;
+
+    if (packet == NULL || packetLen < 11 || packet[0] != 'W' || packet[1] != 'T')
+        return 0;
+    while (pos + 6 <= packetLen)
+    {
+        u16 objectLen = (u16)(((u16)packet[pos + 4] << 8) | packet[pos + 5]);
+        if (objectLen < 6 || pos + objectLen > packetLen)
+            return 0;
+        if (packet[pos] == 1 && packet[pos + 1] == kind && packet[pos + 2] == subtype)
+        {
+            if (objectOut == NULL || objectLen > objectCap)
+                return 0;
+            memcpy(objectOut, packet + pos, objectLen);
+            return objectLen;
+        }
+        pos += objectLen;
+    }
+    return 0;
+}
+
+/* Response objects built by vm_net_mock_begin_wt_object have a six-byte
+ * header, followed by object-entry fields encoded as:
+ *
+ *   name_len:u8, name, value_len:be16, value[value_len]
+ *
+ * This is deliberately separate from vm_net_mock_get_object_blob_field().
+ * The latter decodes vm_net_mock_put_object_blob()'s nested length wrapper,
+ * while battle actioninfo is written with vm_net_mock_put_object_raw() and
+ * therefore has only the entry's single value_len. */
+static bool vm_net_mock_get_response_object_entry_field(
+    const u8 *packet,
+    u32 packetLen,
+    u8 kind,
+    u8 subtype,
+    const char *field,
+    const u8 **valueOut,
+    u16 *valueLenOut)
+{
+    u32 objectPos = 5;
+    u32 fieldNameLen = field ? (u32)strlen(field) : 0;
+
+    if (valueOut)
+        *valueOut = NULL;
+    if (valueLenOut)
+        *valueLenOut = 0;
+    if (packet == NULL || packetLen < 11 ||
+        packet[0] != 'W' || packet[1] != 'T' ||
+        fieldNameLen == 0 || fieldNameLen > 0xff)
+    {
+        return false;
+    }
+
+    while (objectPos + 6 <= packetLen)
+    {
+        u16 objectLen = (u16)(((u16)packet[objectPos + 4] << 8) |
+                              packet[objectPos + 5]);
+        u32 entryPos = objectPos + 6;
+        u32 objectEnd = objectPos + objectLen;
+
+        if (objectLen < 6 || objectEnd > packetLen)
+            return false;
+        if (packet[objectPos] != 1 || packet[objectPos + 1] != kind ||
+            packet[objectPos + 2] != subtype)
+        {
+            objectPos = objectEnd;
+            continue;
+        }
+
+        while (entryPos < objectEnd)
+        {
+            u8 nameLen = packet[entryPos++];
+            u16 valueLen = 0;
+            const u8 *name = NULL;
+            const u8 *value = NULL;
+
+            if (nameLen == 0 || entryPos + nameLen + 2 > objectEnd)
+                return false;
+            name = packet + entryPos;
+            entryPos += nameLen;
+            valueLen = (u16)(((u16)packet[entryPos] << 8) |
+                             packet[entryPos + 1]);
+            entryPos += 2;
+            if (entryPos + valueLen > objectEnd)
+                return false;
+            value = packet + entryPos;
+            if (nameLen == fieldNameLen &&
+                memcmp(name, field, fieldNameLen) == 0)
+            {
+                if (valueOut)
+                    *valueOut = value;
+                if (valueLenOut)
+                    *valueLenOut = valueLen;
+                return true;
+            }
+            entryPos += valueLen;
+        }
+        return false;
+    }
+    return false;
+}
+
+static u8 vm_mock_service_team_battle_alive_mask(const vm_mock_service_team *team)
+{
+    u8 mask = 0;
+
+    if (team == NULL)
+        return 0;
+    for (u8 i = 0; i < team->battleMemberCount && i < 8; ++i)
+    {
+        if (team->battleMemberHp[i] != 0)
+            mask = (u8)(mask | (u8)(1u << i));
+    }
+    return mask;
+}
+
+static u32 vm_net_mock_build_team_battle_round_wait_response(
+    u8 *out,
+    u32 outCap,
+    const vm_mock_service_team_battle_operation_context *context,
+    const char *reason)
+{
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || context == NULL || context->team == NULL)
+        return 0;
+    /* A duplicate/dead-member acknowledgement must not be a zero-action 4/6.
+     * HandleBattleActionMsg still treats subtype 6 as an action-list boundary;
+     * a valid zero-object WT packet completes the request without advancing the
+     * battle module's local action phase. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][mock-service] team_battle_round_wait battle=%u round=%u "
+           "source=%08x actor=%u acted=%02x alive=%02x reason=%s resp=%u\n",
+           context->team->battleSerial,
+           context->team->battleRoundSerial,
+           context->session ? context->session->clientId : 0,
+           context->memberIndex,
+           context->team->battleRoundActedMask,
+           context->aliveMask,
+           reason ? reason : "wait",
+           pos);
+    return pos;
+}
+
+static bool vm_net_mock_copy_non_battle_action_objects(
+    const u8 *packet,
+    u32 packetLen,
+    u8 *objectsOut,
+    u32 objectsCap,
+    u32 *objectsLenOut,
+    u8 *objectCountOut)
+{
+    u32 readPos = 5;
+    u32 writePos = 0;
+    u8 objectCount = 0;
+
+    if (objectsLenOut)
+        *objectsLenOut = 0;
+    if (objectCountOut)
+        *objectCountOut = 0;
+    if (packet == NULL || packetLen < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return false;
+    while (readPos + 6 <= packetLen)
+    {
+        u16 objectLen = (u16)(((u16)packet[readPos + 4] << 8) |
+                              packet[readPos + 5]);
+
+        if (objectLen < 6 || readPos + objectLen > packetLen)
+            return false;
+        /* No battle-module command may escape before the round barrier.  In
+         * particular, a non-final killing blow produces both 4/6 and 4/7;
+         * forwarding that settlement object would end the requester's battle
+         * while the other living members are still choosing actions.  Item and
+         * inventory companion objects from other kinds remain safe to return. */
+        if (!(packet[readPos] == 1 && packet[readPos + 1] == 4))
+        {
+            if (objectsOut == NULL || writePos + objectLen > objectsCap ||
+                objectCount == 0xff)
+            {
+                return false;
+            }
+            memcpy(objectsOut + writePos, packet + readPos, objectLen);
+            writePos += objectLen;
+            ++objectCount;
+        }
+        readPos += objectLen;
+    }
+    if (readPos != packetLen)
+        return false;
+    if (objectsLenOut)
+        *objectsLenOut = writePos;
+    if (objectCountOut)
+        *objectCountOut = objectCount;
+    return true;
+}
+
+static bool vm_mock_service_team_battle_capture_round_action(
+    const vm_mock_service_team_battle_operation_context *context,
+    const u8 *response,
+    u32 responseLen)
+{
+    vm_mock_service_team *team = context ? context->team : NULL;
+    vm_mock_service_team_battle_round_action *pending = NULL;
+    const u8 *actionInfo = NULL;
+    u16 actionInfoLen = 0;
+    u8 actionCount = 0;
+
+    if (context == NULL || !context->active || team == NULL ||
+        context->memberIndex >= VM_MOCK_SERVICE_TEAM_MEMBER_MAX ||
+        !vm_net_mock_get_object_u8_field(response, responseLen,
+                                         "actionnum", &actionCount) ||
+        actionCount == 0 ||
+        !vm_net_mock_get_response_object_entry_field(
+            response, responseLen, 4, 6,
+            "actioninfo", &actionInfo, &actionInfoLen) ||
+        actionInfo == NULL || actionInfoLen == 0 ||
+        actionInfoLen > VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX)
+    {
+        return false;
+    }
+
+    pending = &team->battleRoundActions[context->memberIndex];
+    ++team->battleRoundActionSerial;
+    if (team->battleRoundActionSerial == 0)
+        team->battleRoundActionSerial = 1;
+    memset(pending, 0, sizeof(*pending));
+    pending->valid = true;
+    pending->serial = team->battleRoundActionSerial;
+    pending->sourceClientId = context->session ? context->session->clientId : 0;
+    pending->memberIndex = context->memberIndex;
+    pending->actionCount = actionCount;
+    pending->actionInfoLen = actionInfoLen;
+    memcpy(pending->actionInfo, actionInfo, actionInfoLen);
+    printf("[info][mock-service] team_battle_round_capture battle=%u round=%u "
+           "source=%08x actor=%u order=%u actions=%u info=%u acted=%02x alive=%02x\n",
+           team->battleSerial,
+           team->battleRoundSerial,
+           pending->sourceClientId,
+           pending->memberIndex,
+           pending->serial,
+           pending->actionCount,
+           pending->actionInfoLen,
+           team->battleRoundActedMask,
+           context->aliveMask);
+    return true;
+}
+
+static void vm_mock_service_team_battle_clear_round_actions(
+    vm_mock_service_team *team)
+{
+    if (team == NULL)
+        return;
+    memset(team->battleRoundActions, 0, sizeof(team->battleRoundActions));
+    team->battleRoundTerminalPending = false;
+}
+
+static u32 vm_net_mock_build_team_battle_deferred_ack(
+    u8 *out,
+    u32 outCap,
+    const u8 *response,
+    u32 responseLen,
+    const vm_mock_service_team_battle_operation_context *context)
+{
+    u8 extraObjects[VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX * 2];
+    u32 extraObjectsLen = 0;
+    u8 extraObjectCount = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_copy_non_battle_action_objects(
+            response, responseLen,
+            extraObjects, sizeof(extraObjects),
+            &extraObjectsLen, &extraObjectCount) ||
+        pos + extraObjectsLen > outCap)
+    {
+        return 0;
+    }
+    if (extraObjectsLen != 0)
+    {
+        memcpy(out + pos, extraObjects, extraObjectsLen);
+        pos += extraObjectsLen;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, extraObjectCount);
+    printf("[info][mock-service] team_battle_round_defer battle=%u round=%u "
+           "source=%08x actor=%u acted=%02x alive=%02x ack_objects=%u resp=%u\n",
+           context && context->team ? context->team->battleSerial : 0,
+           context && context->team ? context->team->battleRoundSerial : 0,
+           context && context->session ? context->session->clientId : 0,
+           context ? context->memberIndex : 0,
+           context && context->team ? context->team->battleRoundActedMask : 0,
+           context ? context->aliveMask : 0,
+           extraObjectCount,
+           pos);
+    return pos;
+}
+
+static u32 vm_net_mock_merge_team_battle_round_response(
+    u8 *out,
+    u32 outCap,
+    const u8 *currentResponse,
+    u32 currentResponseLen,
+    const vm_mock_service_team_battle_operation_context *context)
+{
+    vm_mock_service_team *team = context ? context->team : NULL;
+    u8 combinedActionInfo[
+        VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX *
+        VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u8 extraObjects[VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX * 2];
+    const u8 *currentActionInfo = NULL;
+    u16 currentActionInfoLen = 0;
+    u8 currentActionCount = 0;
+    u32 combinedActionInfoLen = 0;
+    u32 totalActionCount = 0;
+    u32 extraObjectsLen = 0;
+    u8 extraObjectCount = 0;
+    u8 pendingCount = 0;
+    u32 lastSerial = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || team == NULL ||
+        !vm_net_mock_get_object_u8_field(currentResponse, currentResponseLen,
+                                         "actionnum", &currentActionCount) ||
+        currentActionCount == 0 ||
+        !vm_net_mock_get_response_object_entry_field(
+            currentResponse, currentResponseLen, 4, 6,
+            "actioninfo", &currentActionInfo, &currentActionInfoLen) ||
+        currentActionInfo == NULL || currentActionInfoLen == 0 ||
+        !vm_net_mock_copy_non_battle_action_objects(
+            currentResponse, currentResponseLen,
+            extraObjects, sizeof(extraObjects),
+            &extraObjectsLen, &extraObjectCount))
+    {
+        return 0;
+    }
+
+    for (;;)
+    {
+        vm_mock_service_team_battle_round_action *next = NULL;
+
+        for (u8 i = 0; i < team->battleMemberCount; ++i)
+        {
+            vm_mock_service_team_battle_round_action *candidate =
+                &team->battleRoundActions[i];
+
+            if (!candidate->valid || candidate->serial <= lastSerial)
+                continue;
+            if (next == NULL || candidate->serial < next->serial)
+                next = candidate;
+        }
+        if (next == NULL)
+            break;
+        if (combinedActionInfoLen + next->actionInfoLen >
+                sizeof(combinedActionInfo) ||
+            totalActionCount + next->actionCount > 0xff)
+        {
+            return 0;
+        }
+        memcpy(combinedActionInfo + combinedActionInfoLen,
+               next->actionInfo, next->actionInfoLen);
+        combinedActionInfoLen += next->actionInfoLen;
+        totalActionCount += next->actionCount;
+        lastSerial = next->serial;
+        ++pendingCount;
+    }
+    if (combinedActionInfoLen + currentActionInfoLen > sizeof(combinedActionInfo) ||
+        totalActionCount + currentActionCount > 0xff)
+    {
+        return 0;
+    }
+    memcpy(combinedActionInfo + combinedActionInfoLen,
+           currentActionInfo, currentActionInfoLen);
+    combinedActionInfoLen += currentActionInfoLen;
+    totalActionCount += currentActionCount;
+
+    if (!vm_net_mock_append_battle_action6_object(
+            out, outCap, &pos,
+            combinedActionInfo, combinedActionInfoLen,
+            (u8)totalActionCount) ||
+        pos + extraObjectsLen > outCap)
+    {
+        return 0;
+    }
+    if (extraObjectsLen != 0)
+    {
+        memcpy(out + pos, extraObjects, extraObjectsLen);
+        pos += extraObjectsLen;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, (u8)(1 + extraObjectCount));
+    printf("[info][mock-service] team_battle_round_release battle=%u round=%u "
+           "source=%08x actor=%u pending=%u actions=%u info=%u extras=%u resp=%u\n",
+           team->battleSerial,
+           team->battleRoundSerial,
+           context && context->session ? context->session->clientId : 0,
+           context ? context->memberIndex : 0,
+           pendingCount,
+           (u8)totalActionCount,
+           combinedActionInfoLen,
+           extraObjectCount,
+           pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_team_battle_terminal_release_response(
+    u8 *out,
+    u32 outCap,
+    const vm_mock_service_team_battle_operation_context *context)
+{
+    vm_mock_service_team *team = context ? context->team : NULL;
+    u8 combinedActionInfo[
+        VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX *
+        VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u32 combinedActionInfoLen = 0;
+    u32 totalActionCount = 0;
+    u32 lastSerial = 0;
+    u8 pendingCount = 0;
+    u8 objectCount = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || team == NULL ||
+        !team->battleRoundTerminalPending || team->battleEnemyHpCurrent != 0)
+    {
+        return 0;
+    }
+
+    for (;;)
+    {
+        vm_mock_service_team_battle_round_action *next = NULL;
+
+        for (u8 i = 0; i < team->battleMemberCount; ++i)
+        {
+            vm_mock_service_team_battle_round_action *candidate =
+                &team->battleRoundActions[i];
+
+            if (!candidate->valid || candidate->serial <= lastSerial)
+                continue;
+            if (next == NULL || candidate->serial < next->serial)
+                next = candidate;
+        }
+        if (next == NULL)
+            break;
+        if (combinedActionInfoLen + next->actionInfoLen >
+                sizeof(combinedActionInfo) ||
+            totalActionCount + next->actionCount > 0xff)
+        {
+            return 0;
+        }
+        memcpy(combinedActionInfo + combinedActionInfoLen,
+               next->actionInfo, next->actionInfoLen);
+        combinedActionInfoLen += next->actionInfoLen;
+        totalActionCount += next->actionCount;
+        lastSerial = next->serial;
+        ++pendingCount;
+    }
+    if (pendingCount == 0 || totalActionCount == 0 ||
+        !vm_net_mock_append_battle_action6_object(
+            out, outCap, &pos,
+            combinedActionInfo, combinedActionInfoLen,
+            (u8)totalActionCount))
+    {
+        return 0;
+    }
+    ++objectCount;
+    if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    g_vm_net_mock_battle_settlement_sent_serial =
+        g_mockBattleOperateSessionSerial;
+    if (!vm_net_mock_append_battle_drop_refresh7_if_needed(
+            out, outCap, &pos, &objectCount,
+            "team-battle-terminal-release", true))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    g_mockBattleOperateSessionArmed = 0;
+    g_mockBattleOperateSessionFinished = 0;
+    g_mockBattlePendingEnemyTurn = 0;
+    g_mockBattleAwaitingSettlement = 1;
+    vm_net_mock_battle_save_terminal_role_state("team-battle-terminal-release");
+    printf("[info][mock-service] team_battle_round_terminal_release "
+           "battle=%u round=%u source=%08x actor=%u pending=%u "
+           "actions=%u info=%u objects=%u resp=%u\n",
+           team->battleSerial,
+           team->battleRoundSerial,
+           context && context->session ? context->session->clientId : 0,
+           context ? context->memberIndex : 0,
+           pendingCount,
+           (u8)totalActionCount,
+           combinedActionInfoLen,
+           objectCount,
+           pos);
+    return pos;
+}
+
+static vm_mock_service_team_battle_operation_context
+vm_mock_service_team_battle_prepare_operation(void)
+{
+    vm_mock_service_team_battle_operation_context context;
+    vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = session ?
+        vm_mock_service_team_find_for_client(session->clientId) : NULL;
+    int memberIndex = vm_mock_service_team_battle_member_index(
+        team, session ? session->clientId : 0);
+
+    memset(&context, 0, sizeof(context));
+    if (session == NULL || team == NULL || !team->battleActive ||
+        memberIndex < 0 || memberIndex >= team->battleMemberCount)
+    {
+        return context;
+    }
+
+    context.active = true;
+    context.team = team;
+    context.session = session;
+    context.memberIndex = (u8)memberIndex;
+    context.memberBit = (u8)(1u << memberIndex);
+    context.aliveMask = vm_mock_service_team_battle_alive_mask(team);
+    context.duplicateAction = (team->battleRoundActedMask & context.memberBit) != 0;
+    context.resolvesRound = !context.duplicateAction &&
+                            (context.aliveMask & context.memberBit) != 0 &&
+                            (u8)(team->battleRoundActedMask | context.memberBit) == context.aliveMask;
+    g_vm_net_mock_team_battle_party_count_current = team->battleMemberCount;
+    g_vm_net_mock_team_battle_actor_slot_current = (u8)memberIndex;
+    g_vm_net_mock_team_battle_resolve_monsters_current = context.resolvesRound ? 1 : 0;
+    g_mockBattleSceneMonsterStartActive = 1;
+    g_mockBattleEnemyCountCurrent = team->battleMonsterCount;
+    g_mockBattleOperateTurnCounter = team->battleTurnCounter;
+    g_vm_net_mock_battle_enemy_id_current = team->battleEnemyId;
+    memcpy(g_mockBattleEnemyHpSlots, team->battleEnemyHpSlots,
+           sizeof(g_mockBattleEnemyHpSlots));
+    memcpy(g_mockBattleEnemyHpMaxSlots, team->battleEnemyHpMaxSlots,
+           sizeof(g_mockBattleEnemyHpMaxSlots));
+    g_mockBattleEnemyHpCurrent = team->battleEnemyHpCurrent;
+    g_mockBattleEnemyHpMax = team->battleEnemyHpMax;
+    g_mockBattleRoleHpCurrent = team->battleMemberHp[memberIndex];
+    g_mockBattleRoleHpMax = team->battleMemberHpMax[memberIndex];
+    g_mockBattleRoleMpCurrent = team->battleMemberMp[memberIndex];
+    g_mockBattleRoleMpMax = team->battleMemberMpMax[memberIndex];
+    /* A non-final team action must never arm the solo builder's deferred
+     * enemy-turn fallback in this account's restored battle state. */
+    g_mockBattlePendingEnemyTurn = 0;
+    printf("[info][mock-service] team_battle_round_prepare battle=%u round=%u "
+           "source=%08x actor=%u acted=%02x alive=%02x duplicate=%u resolve=%u\n",
+           team->battleSerial,
+           team->battleRoundSerial,
+           session->clientId,
+           context.memberIndex,
+           team->battleRoundActedMask,
+           context.aliveMask,
+           context.duplicateAction ? 1 : 0,
+           context.resolvesRound ? 1 : 0);
+    return context;
+}
+
+static void vm_mock_service_team_battle_clear_operation_context(void)
+{
+    g_vm_net_mock_team_battle_party_count_current = 0;
+    g_vm_net_mock_team_battle_actor_slot_current = 0;
+    g_vm_net_mock_team_battle_resolve_monsters_current = 0;
+}
+
+static void vm_mock_service_team_battle_queue_action(
+    vm_mock_service_team_battle_operation_context *context,
+    const u8 *response,
+    u32 responseLen)
+{
+    vm_mock_service_team *team = context ? context->team : NULL;
+    vm_mock_service_team_battle_event *event = NULL;
+    u16 actionObjectLen = 0;
+    u32 nextSerial = 0;
+    u32 slot = 0;
+    u8 fullMask = 0;
+    u8 actionObject[VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX];
+
+    if (context == NULL || !context->active || team == NULL ||
+        response == NULL || responseLen == 0)
+    {
+        return;
+    }
+    actionObjectLen = vm_net_mock_copy_response_object(
+        response, responseLen, 4, 6,
+        actionObject, sizeof(actionObject));
+    if (actionObjectLen == 0)
+        return;
+    ++team->battleActionSerial;
+    if (team->battleActionSerial == 0)
+        team->battleActionSerial = 1;
+    nextSerial = team->battleActionSerial;
+    slot = (nextSerial - 1) % VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX;
+    event = &team->battleEvents[slot];
+    fullMask = (u8)((1u << team->battleMemberCount) - 1u);
+    if (event->valid && event->deliveredMask != fullMask)
+    {
+        printf("[warn][mock-service] team_battle_action_overwrite old=%u "
+               "delivered=%02x expected=%02x\n",
+               event->serial, event->deliveredMask, fullMask);
+    }
+    memset(event, 0, sizeof(*event));
+    memcpy(event->objectData, actionObject, actionObjectLen);
+    event->valid = true;
+    event->terminalVictory = team->battleEnemyHpCurrent == 0;
+    event->serial = nextSerial;
+    event->sourceClientId = context->session->clientId;
+    event->deliveredMask = (u8)(1u << context->memberIndex);
+    event->objectLen = actionObjectLen;
+    printf("[info][mock-service] team_battle_action_queue battle=%u action=%u "
+           "source=%08x actor=%u enemyhp=%u/%u terminal=%u object=%u "
+           "delivered=%02x\n",
+           team->battleSerial,
+           event->serial,
+           event->sourceClientId,
+           context->memberIndex,
+           team->battleEnemyHpCurrent,
+           team->battleEnemyHpMax,
+           event->terminalVictory ? 1 : 0,
+           event->objectLen,
+           event->deliveredMask);
+}
+
+static void vm_mock_service_team_battle_finish_operation(
+    vm_mock_service_team_battle_operation_context *context,
+    const u8 *response,
+    u32 responseLen,
+    bool publishAction)
+{
+    vm_mock_service_team *team = context ? context->team : NULL;
+    vm_mock_service_client_session *session = context ? context->session : NULL;
+    u8 actionCount = 0;
+    bool actionAccepted = false;
+    bool vitalsChanged = false;
+
+    if (context == NULL || !context->active || team == NULL)
+    {
+        vm_mock_service_team_battle_clear_operation_context();
+        return;
+    }
+    actionAccepted = response != NULL && responseLen != 0 &&
+                     vm_net_mock_get_object_u8_field(response, responseLen,
+                                                     "actionnum", &actionCount) &&
+                     actionCount != 0;
+    memcpy(team->battleEnemyHpSlots, g_mockBattleEnemyHpSlots,
+           sizeof(team->battleEnemyHpSlots));
+    memcpy(team->battleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots,
+           sizeof(team->battleEnemyHpMaxSlots));
+    team->battleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
+    team->battleEnemyHpMax = g_mockBattleEnemyHpMax;
+    team->battleTurnCounter = g_mockBattleOperateTurnCounter;
+    team->battleMemberHp[context->memberIndex] = g_mockBattleRoleHpCurrent;
+    team->battleMemberHpMax[context->memberIndex] = g_mockBattleRoleHpMax;
+    team->battleMemberMp[context->memberIndex] = g_mockBattleRoleMpCurrent;
+    team->battleMemberMpMax[context->memberIndex] = g_mockBattleRoleMpMax;
+    g_mockBattlePendingEnemyTurn = 0;
+    if (actionAccepted)
+    {
+        team->battleRoundActedMask = (u8)(team->battleRoundActedMask | context->memberBit);
+        if (publishAction)
+        {
+            team->battleRoundActedMask = 0;
+            ++team->battleRoundSerial;
+            if (team->battleRoundSerial == 0)
+                team->battleRoundSerial = 1;
+        }
+    }
+    if (publishAction && team->battleEnemyHpCurrent == 0)
+        team->battleFinished = true;
+    if (actionAccepted && publishAction)
+        vm_mock_service_team_battle_queue_action(context, response, responseLen);
+    if (publishAction)
+        vm_mock_service_team_battle_clear_round_actions(team);
+
+    /* Publish the shared battle snapshot straight into the service presence
+     * before the next poll.  In particular HP=0 is a real value here, not an
+     * absent/default value; the resulting subtype 5/11 update keeps every
+     * party HUD in lockstep with the death action in 4/6. */
+    if (session != NULL)
+    {
+        vitalsChanged = session->onlineHp != team->battleMemberHp[context->memberIndex] ||
+                        session->onlineHpMax != team->battleMemberHpMax[context->memberIndex] ||
+                        session->onlineMp != team->battleMemberMp[context->memberIndex] ||
+                        session->onlineMpMax != team->battleMemberMpMax[context->memberIndex];
+        session->onlineHp = team->battleMemberHp[context->memberIndex];
+        session->onlineHpMax = team->battleMemberHpMax[context->memberIndex];
+        session->onlineMp = team->battleMemberMp[context->memberIndex];
+        session->onlineMpMax = team->battleMemberMpMax[context->memberIndex];
+        if (vitalsChanged && session->roleOnline)
+            vm_mock_service_team_enqueue_hsp_for_members(session);
+    }
+    printf("[info][mock-service] team_battle_state battle=%u source=%08x "
+           "actor=%u turn=%u enemyhp=%u/%u slots=%u/%u/%u "
+           "rolehp=%u/%u rolemp=%u/%u round=%u acted=%02x alive=%02x "
+           "resolve=%u accepted=%u release=%u hsp=%u finished=%u\n",
+           team->battleSerial,
+           context->session->clientId,
+           context->memberIndex,
+           team->battleTurnCounter,
+           team->battleEnemyHpCurrent,
+           team->battleEnemyHpMax,
+           team->battleEnemyHpSlots[0],
+           team->battleEnemyHpSlots[1],
+           team->battleEnemyHpSlots[2],
+           team->battleMemberHp[context->memberIndex],
+           team->battleMemberHpMax[context->memberIndex],
+           team->battleMemberMp[context->memberIndex],
+           team->battleMemberMpMax[context->memberIndex],
+           team->battleRoundSerial,
+           team->battleRoundActedMask,
+           vm_mock_service_team_battle_alive_mask(team),
+           context->resolvesRound ? 1 : 0,
+           actionAccepted ? 1 : 0,
+           publishAction ? 1 : 0,
+           vitalsChanged ? 1 : 0,
+           team->battleFinished ? 1 : 0);
+    vm_mock_service_team_battle_clear_operation_context();
+}
+
+static u32 vm_net_mock_build_synchronized_team_battle_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap,
+    u8 buildType)
+{
+    vm_mock_service_team_battle_operation_context context;
+    u32 responseLen = 0;
+    u32 mergedResponseLen = 0;
+    u32 deferredAckLen = 0;
+    u8 actionCount = 0;
+    bool actionAccepted = false;
+    bool releaseRound = false;
+
+    memset(&context, 0, sizeof(context));
+    if (buildType == VM_MOCK_TEAM_BATTLE_BUILD_ITEM)
+    {
+        if (!vm_net_mock_parse_battle_item_use_request(request, requestLen, NULL))
+            return 0;
+    }
+    else if (buildType == VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK)
+    {
+        if (!vm_net_mock_is_battle_operate_request_relaxed(request, requestLen))
+            return 0;
+    }
+    else if (!vm_net_mock_is_battle_operate_request(request, requestLen))
+    {
+        return 0;
+    }
+    context = vm_mock_service_team_battle_prepare_operation();
+    if (context.active && context.team->battleFinished)
+    {
+        responseLen = vm_net_mock_build_pending_team_battle_action_response(
+            out, outCap, context.session);
+        vm_mock_service_team_battle_clear_operation_context();
+        if (responseLen != 0)
+            return responseLen;
+        return vm_net_mock_build_battle_case11_auto_off_response(out, outCap);
+    }
+    if (context.active &&
+        (context.duplicateAction || (context.aliveMask & context.memberBit) == 0))
+    {
+        responseLen = vm_net_mock_build_team_battle_round_wait_response(
+            out, outCap, &context,
+            context.duplicateAction ? "already-acted" : "member-dead");
+        vm_mock_service_team_battle_clear_operation_context();
+        return responseLen;
+    }
+    if (context.active && context.team->battleRoundTerminalPending)
+    {
+        if (context.resolvesRound)
+        {
+            responseLen = vm_net_mock_build_team_battle_terminal_release_response(
+                out, outCap, &context);
+            if (responseLen == 0)
+            {
+                printf("[error][mock-service] team_battle_round_terminal_release_failed "
+                       "battle=%u round=%u source=%08x actor=%u acted=%02x alive=%02x\n",
+                       context.team->battleSerial,
+                       context.team->battleRoundSerial,
+                       context.session ? context.session->clientId : 0,
+                       context.memberIndex,
+                       context.team->battleRoundActedMask,
+                       context.aliveMask);
+                vm_mock_service_team_battle_clear_operation_context();
+                return 0;
+            }
+            vm_mock_service_team_battle_finish_operation(
+                &context, out, responseLen, true);
+            return responseLen;
+        }
+
+        /* The monsters are already dead in the shared snapshot, but the
+         * killing action has not been exposed to any client yet.  Count this
+         * living member's submitted choice toward the frozen round without
+         * manufacturing an attack against a dead target. */
+        context.team->battleRoundActedMask = (u8)(
+            context.team->battleRoundActedMask | context.memberBit);
+        printf("[info][mock-service] team_battle_round_terminal_wait "
+               "battle=%u round=%u source=%08x actor=%u acted=%02x alive=%02x\n",
+               context.team->battleSerial,
+               context.team->battleRoundSerial,
+               context.session ? context.session->clientId : 0,
+               context.memberIndex,
+               context.team->battleRoundActedMask,
+               context.aliveMask);
+        responseLen = vm_net_mock_build_team_battle_round_wait_response(
+            out, outCap, &context, "terminal-pending");
+        vm_mock_service_team_battle_clear_operation_context();
+        return responseLen;
+    }
+    if (buildType == VM_MOCK_TEAM_BATTLE_BUILD_ITEM)
+        responseLen = vm_net_mock_build_battle_item_use_response(request, requestLen, out, outCap);
+    else if (buildType == VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK)
+        responseLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen,
+                                                                         out, outCap);
+    else
+        responseLen = vm_net_mock_build_battle_operate_response(request, requestLen, out, outCap);
+
+    if (context.active)
+    {
+        if (responseLen != 0)
+        {
+            actionAccepted = vm_net_mock_get_object_u8_field(
+                                 out, responseLen, "actionnum", &actionCount) &&
+                             actionCount != 0;
+            releaseRound = actionAccepted && context.resolvesRound;
+            if (actionAccepted && !releaseRound &&
+                g_mockBattleEnemyHpCurrent == 0)
+            {
+                context.team->battleRoundTerminalPending = true;
+                printf("[info][mock-service] team_battle_round_terminal_capture "
+                       "battle=%u round=%u source=%08x actor=%u acted=%02x alive=%02x\n",
+                       context.team->battleSerial,
+                       context.team->battleRoundSerial,
+                       context.session ? context.session->clientId : 0,
+                       context.memberIndex,
+                       context.team->battleRoundActedMask,
+                       context.aliveMask);
+            }
+            if (actionAccepted && !releaseRound &&
+                !vm_mock_service_team_battle_capture_round_action(
+                    &context, out, responseLen))
+            {
+                /* Never strand a live battle behind a server-side capture
+                 * failure.  Publishing the one action is less faithful, but
+                 * preserves a recoverable client state and leaves a loud log. */
+                printf("[error][mock-service] team_battle_round_capture_failed "
+                       "battle=%u round=%u source=%08x actor=%u actionnum=%u\n",
+                       context.team->battleSerial,
+                       context.team->battleRoundSerial,
+                       context.session ? context.session->clientId : 0,
+                       context.memberIndex,
+                       actionCount);
+                releaseRound = true;
+            }
+            if (releaseRound)
+            {
+                mergedResponseLen = vm_net_mock_merge_team_battle_round_response(
+                    out, outCap, out, responseLen, &context);
+                if (mergedResponseLen == 0)
+                {
+                    printf("[error][mock-service] team_battle_round_merge_failed "
+                           "battle=%u round=%u source=%08x actor=%u resp=%u\n",
+                           context.team->battleSerial,
+                           context.team->battleRoundSerial,
+                           context.session ? context.session->clientId : 0,
+                           context.memberIndex,
+                           responseLen);
+                    mergedResponseLen = responseLen;
+                }
+                responseLen = mergedResponseLen;
+                vm_mock_service_team_battle_finish_operation(
+                    &context, out, responseLen, true);
+            }
+            else if (actionAccepted)
+            {
+                /* Commit the server-side player action now, but do not expose
+                 * its 4/6 object.  HandleBattleActionMsg consumes each 4/6 as
+                 * one local action list, so exposing it early makes that client
+                 * enter the enemy phase before its peers have submitted. */
+                vm_mock_service_team_battle_finish_operation(
+                    &context, out, responseLen, false);
+                deferredAckLen = vm_net_mock_build_team_battle_deferred_ack(
+                    out, outCap, out, responseLen, &context);
+                if (deferredAckLen == 0)
+                    deferredAckLen = responseLen;
+                responseLen = deferredAckLen;
+            }
+            else
+            {
+                vm_mock_service_team_battle_finish_operation(
+                    &context, out, responseLen, false);
+            }
+        }
+        else
+            vm_mock_service_team_battle_clear_operation_context();
+    }
+    return responseLen;
+}
+
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
@@ -22935,6 +24407,139 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     vm_autotest_note("mock_battle_pending_settlement serial=%u objects=%u response=4/7+optional-7/7+4/11+4/9 evidence=mmBattle:0x7BD0/0x743C mmGame:0x0D04\n",
                      g_mockBattleOperateSessionSerial,
                      objectCount);
+    return pos;
+}
+
+static void vm_net_mock_rewrite_battle_teaminfo_role_id(u8 *packet,
+                                                        u32 packetLen,
+                                                        u32 roleId)
+{
+    const u8 *teamInfo = NULL;
+    u16 teamInfoLen = 0;
+    u8 *mutableInfo = NULL;
+
+    if (packet == NULL || roleId == 0 ||
+        !vm_net_mock_get_object_blob_field(packet, packetLen,
+                                           "teaminfo", &teamInfo, &teamInfoLen) ||
+        teamInfo == NULL || teamInfoLen < 6 ||
+        teamInfo[0] != 0 || teamInfo[1] != 4)
+    {
+        return;
+    }
+    mutableInfo = (u8 *)teamInfo;
+    mutableInfo[2] = (u8)(roleId >> 24);
+    mutableInfo[3] = (u8)(roleId >> 16);
+    mutableInfo[4] = (u8)(roleId >> 8);
+    mutableInfo[5] = (u8)roleId;
+}
+
+static u32 vm_net_mock_build_pending_team_battle_action_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer)
+{
+    vm_mock_service_team *team = observer ?
+        vm_mock_service_team_find_for_client(observer->clientId) : NULL;
+    vm_mock_service_team_battle_event *event = NULL;
+    vm_mock_service_client_session *source = NULL;
+    int memberIndex = vm_mock_service_team_battle_member_index(
+        team, observer ? observer->clientId : 0);
+    u32 oldestSerial = 0xffffffffu;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u8 memberBit = 0;
+    u8 fullMask = 0;
+    u32 sourceWireId = 0;
+
+    if (out == NULL || outCap < pos || observer == NULL || team == NULL ||
+        !team->battleActive || memberIndex < 0 ||
+        memberIndex >= team->battleMemberCount)
+    {
+        return 0;
+    }
+    memberBit = (u8)(1u << memberIndex);
+    fullMask = (u8)((1u << team->battleMemberCount) - 1u);
+    for (u8 i = 0; i < VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX; ++i)
+    {
+        vm_mock_service_team_battle_event *candidate = &team->battleEvents[i];
+        if (!candidate->valid || (candidate->deliveredMask & memberBit) != 0)
+            continue;
+        if (candidate->serial < oldestSerial)
+        {
+            oldestSerial = candidate->serial;
+            event = candidate;
+        }
+    }
+    if (event == NULL || event->objectLen < 6 ||
+        event->objectLen > sizeof(event->objectData) ||
+        pos + event->objectLen > outCap)
+    {
+        return 0;
+    }
+
+    g_mockBattleSceneMonsterStartActive = 1;
+    g_mockBattleEnemyCountCurrent = team->battleMonsterCount;
+    g_mockBattleOperateTurnCounter = team->battleTurnCounter;
+    g_vm_net_mock_battle_enemy_id_current = team->battleEnemyId;
+    memcpy(g_mockBattleEnemyHpSlots, team->battleEnemyHpSlots,
+           sizeof(g_mockBattleEnemyHpSlots));
+    memcpy(g_mockBattleEnemyHpMaxSlots, team->battleEnemyHpMaxSlots,
+           sizeof(g_mockBattleEnemyHpMaxSlots));
+    g_mockBattleEnemyHpCurrent = team->battleEnemyHpCurrent;
+    g_mockBattleEnemyHpMax = team->battleEnemyHpMax;
+    g_mockBattleRoleHpCurrent = team->battleMemberHp[memberIndex];
+    g_mockBattleRoleHpMax = team->battleMemberHpMax[memberIndex];
+    g_mockBattleRoleMpCurrent = team->battleMemberMp[memberIndex];
+    g_mockBattleRoleMpMax = team->battleMemberMpMax[memberIndex];
+    g_vm_net_mock_battle_role_id_current = observer->onlineRoleId;
+
+    memcpy(out + pos, event->objectData, event->objectLen);
+    pos += event->objectLen;
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    source = vm_mock_service_find_client_session(event->sourceClientId);
+    sourceWireId = vm_mock_service_team_member_wire_id(observer, source);
+    vm_net_mock_rewrite_battle_teaminfo_role_id(out, pos, sourceWireId);
+
+    if (event->terminalVictory)
+    {
+        if (!vm_net_mock_append_battle_status7_object(out, outCap, &pos))
+            return 0;
+        ++objectCount;
+        g_vm_net_mock_battle_settlement_sent_serial = g_mockBattleOperateSessionSerial;
+        if (!vm_net_mock_append_battle_drop_refresh7_if_needed(
+                out, outCap, &pos, &objectCount,
+                "team-battle-peer-inline", true))
+        {
+            return 0;
+        }
+        g_mockBattleOperateSessionArmed = 0;
+        g_mockBattleOperateSessionFinished = 0;
+        g_mockBattlePendingEnemyTurn = 0;
+        g_mockBattleAwaitingSettlement = 1;
+        vm_net_mock_battle_save_terminal_role_state("team-battle-peer");
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    event->deliveredMask = (u8)(event->deliveredMask | memberBit);
+    printf("[info][mock-service] team_battle_action_deliver battle=%u action=%u "
+           "observer=%08x source=%08x source_wire=%u actor=%u "
+           "enemyhp=%u/%u terminal=%u objects=%u resp=%u delivered=%02x/%02x "
+           "evidence=mmBattle:0x6CE8/0x6EB0\n",
+           team->battleSerial,
+           event->serial,
+           observer->clientId,
+           event->sourceClientId,
+           sourceWireId,
+           memberIndex,
+           team->battleEnemyHpCurrent,
+           team->battleEnemyHpMax,
+           event->terminalVictory ? 1 : 0,
+           objectCount,
+           pos,
+           event->deliveredMask,
+           fullMask);
+    if (event->deliveredMask == fullMask)
+        event->valid = false;
     return pos;
 }
 
@@ -23454,6 +25059,12 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     u32 roleMaxHp = 0;
     u32 roleMp = 0;
     u32 roleMaxMp = 0;
+    vm_mock_service_client_session *activeSession =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_team *activeTeam = NULL;
+    const char *teamBattleScene = NULL;
+    u8 teamBattlePartyCount = 0;
+    u8 teamBattleQueuedCount = 0;
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
@@ -23548,12 +25159,38 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                             roleId != 0;
     if (useSceneMonsterStart)
     {
-        battleInfoLen = vm_net_mock_build_battle_scene_start_info_blob(battleInfo, sizeof(battleInfo),
-                                                                       sceneMonsterIndex,
-                                                                       sceneMonsterPosX,
-                                                                       sceneMonsterPosY,
-                                                                       battleEnemyCount,
-                                                                       roleId);
+        if (activeSession != NULL &&
+            activeSession->sceneVisibleReady &&
+            !activeSession->sceneVisiblePending &&
+            vm_net_mock_scene_name_is_safe(activeSession->sceneVisibleScene))
+        {
+            activeTeam = vm_mock_service_team_find_for_client(activeSession->clientId);
+            if (vm_mock_service_team_is_leader(activeTeam, activeSession->clientId))
+                teamBattleScene = activeSession->sceneVisibleScene;
+        }
+        if (activeTeam != NULL && teamBattleScene != NULL)
+        {
+            battleInfoLen = vm_net_mock_build_team_battle_scene_start_info_blob(
+                battleInfo, sizeof(battleInfo),
+                sceneMonsterIndex,
+                sceneMonsterPosX,
+                sceneMonsterPosY,
+                battleEnemyCount,
+                activeTeam,
+                activeSession,
+                teamBattleScene,
+                &teamBattlePartyCount);
+        }
+        else
+        {
+            battleInfoLen = vm_net_mock_build_battle_scene_start_info_blob(
+                battleInfo, sizeof(battleInfo),
+                sceneMonsterIndex,
+                sceneMonsterPosX,
+                sceneMonsterPosY,
+                battleEnemyCount,
+                roleId);
+        }
     }
     else
     {
@@ -23689,8 +25326,29 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                          sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
                          index, posx, posy,
                          battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
-                         enemyTable, enemyTableIds[0], enemyTableIds[1],
-                         enemyTableIds[2], enemyTableIds[3]);
+                          enemyTable, enemyTableIds[0], enemyTableIds[1],
+                          enemyTableIds[2], enemyTableIds[3]);
+    }
+    if (useSceneMonsterStart && activeTeam != NULL && activeSession != NULL &&
+        teamBattleScene != NULL && teamBattlePartyCount >= 2)
+    {
+        (void)vm_mock_service_team_begin_battle(
+            activeTeam,
+            activeSession,
+            teamBattleScene,
+            requestedEnemyId,
+            sceneMonsterIndex,
+            sceneMonsterPosX,
+            sceneMonsterPosY,
+            battleEnemyCount,
+            battleSide,
+            &teamBattleQueuedCount);
+        printf("[info][network] mock_team_battle_start leader=%08x party=%u "
+               "queued=%u response=%u source=leader-4/1\n",
+               activeSession->clientId,
+               teamBattlePartyCount,
+               teamBattleQueuedCount,
+               pos);
     }
     return pos;
 }
@@ -27131,7 +28789,8 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    hookedLen = vm_net_mock_build_battle_item_use_response(request, requestLen, out, outCap);
+    hookedLen = vm_net_mock_build_synchronized_team_battle_response(
+        request, requestLen, out, outCap, VM_MOCK_TEAM_BATTLE_BUILD_ITEM);
     if (hookedLen)
     {
         vm_net_mock_battle_publish_role_vitals();
@@ -27147,14 +28806,16 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    hookedLen = vm_net_mock_build_battle_operate_response(request, requestLen, out, outCap);
+    hookedLen = vm_net_mock_build_synchronized_team_battle_response(
+        request, requestLen, out, outCap, VM_MOCK_TEAM_BATTLE_BUILD_OPERATE);
     if (hookedLen)
     {
         vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-operate", request, requestLen, hookedLen);
         return hookedLen;
     }
-    hookedLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen, out, outCap);
+    hookedLen = vm_net_mock_build_synchronized_team_battle_response(
+        request, requestLen, out, outCap, VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK);
     if (hookedLen)
     {
         vm_net_mock_battle_publish_role_vitals();
