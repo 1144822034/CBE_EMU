@@ -6705,6 +6705,10 @@ static bool vm_net_mock_scene_is_taohuadao01(const char *scene)
 }
 
 static bool vm_net_mock_adjust_safe_player_pos_from_sce(const char *scene, u16 *x, u16 *y);
+static bool vm_net_mock_get_scene_reasonable_spawn_from_sce(const char *scene,
+                                                            u16 *xOut,
+                                                            u16 *yOut,
+                                                            u16 *entryIdOut);
 
 static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 *x, u16 *y)
 {
@@ -8403,6 +8407,10 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+                                                          &role->x,
+                                                          &role->y,
+                                                          NULL);
     role->designationId = 0;
     vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
@@ -8595,6 +8603,10 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     {
         role->x = VM_NET_MOCK_ROLE_INITIAL_X;
         role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+                                                              &role->x,
+                                                              &role->y,
+                                                              NULL);
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
     vm_net_mock_role_normalize_backpack(role);
@@ -10708,6 +10720,10 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
 
     if (!vm_net_mock_scene_name_is_safe(respawnScene))
         respawnScene = vm_net_mock_default_scene_name();
+    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(respawnScene,
+                                                          &respawnX,
+                                                          &respawnY,
+                                                          NULL);
     vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
     snprintf(role->scene, sizeof(role->scene), "%s", respawnScene);
     role->x = respawnX;
@@ -10805,10 +10821,10 @@ static u16 vm_net_mock_scene_spawn_y(void)
 static const char *vm_net_mock_default_scene_name(void)
 {
     /*
-     * Fresh roles start on the Penglai TongQueTai island. The old 223,382
-     * position is this scene's edge-portal spawn near 00Penglai_02; keep first
-     * login near the central platform instead so it does not immediately hug a
-     * transfer trigger.
+     * Fresh roles start on the Penglai TongQueTai island. The actual landing
+     * point is resolved from this scene's SCE edge-portal spawn and then moved
+     * away from the trigger rectangle; VM_NET_MOCK_ROLE_INITIAL_X/Y are only a
+     * last-resort fallback when the SCE cannot be read.
      */
     return "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65"; /* GBK: c00PenglaiXiandao_01.sce */
 }
@@ -13514,8 +13530,8 @@ static void vm_net_mock_defer_scene_enter_completion(const vm_net_mock_scene_cha
             g_vm_net_mock_last_scene_change_target.y == 0)
         {
             u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_center_spawn_from_sce(
-                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy))
+            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(
+                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy, NULL))
             {
                 g_vm_net_mock_last_scene_change_target.x = cx;
                 g_vm_net_mock_last_scene_change_target.y = cy;
@@ -13737,6 +13753,60 @@ static bool vm_net_mock_get_scene_nearest_entry_spawn_from_sce(const char *scene
         *yOut = bestY;
     if (entryIdOut)
         *entryIdOut = bestEntryId;
+    return true;
+}
+
+static bool vm_net_mock_get_scene_reasonable_spawn_from_sce(const char *scene,
+                                                            u16 *xOut,
+                                                            u16 *yOut,
+                                                            u16 *entryIdOut)
+{
+    u16 width = 0;
+    u16 height = 0;
+    u16 x = 0;
+    u16 y = 0;
+    u16 entryId = 0xffff;
+    const char *source = "sce-center";
+
+    if (xOut)
+        *xOut = 0;
+    if (yOut)
+        *yOut = 0;
+    if (entryIdOut)
+        *entryIdOut = 0xffff;
+    if (scene == NULL || scene[0] == 0)
+        return false;
+
+    /*
+     * SCE edge-portal spawn points are scene-space actor coordinates.  Prefer
+     * the one nearest the map centre for a generic teleport that has no source
+     * entry id, then reuse the existing trigger-rectangle safety adjustment.
+     * By contrast, sMap.dsh positionX/positionY place the scene node on the
+     * world-map UI and must never be emitted as the actor's scene position.
+     */
+    if (vm_net_mock_get_scene_dimensions_from_sce(scene, &width, &height) &&
+        vm_net_mock_get_scene_nearest_entry_spawn_from_sce(scene,
+                                                           (u16)(width / 2),
+                                                           (u16)(height / 2),
+                                                           &x,
+                                                           &y,
+                                                           &entryId))
+    {
+        source = "sce-nearest-entry";
+    }
+    else if (!vm_net_mock_get_scene_center_spawn_from_sce(scene, &x, &y))
+    {
+        return false;
+    }
+
+    if (xOut)
+        *xOut = x;
+    if (yOut)
+        *yOut = y;
+    if (entryIdOut)
+        *entryIdOut = entryId;
+    vm_autotest_note("mock_scene_reasonable_spawn scene=%s pos=(%u,%u) source=%s entry=%u\n",
+                     scene, x, y, source, entryId);
     return true;
 }
 
@@ -14219,8 +14289,8 @@ static void vm_net_mock_remember_scene_change_target(const vm_net_mock_scene_cha
             g_vm_net_mock_last_scene_change_target.y == 0)
         {
             u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_center_spawn_from_sce(
-                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy))
+            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(
+                    g_vm_net_mock_last_scene_change_target.scene, &cx, &cy, NULL))
             {
                 g_vm_net_mock_last_scene_change_target.x = cx;
                 g_vm_net_mock_last_scene_change_target.y = cy;
@@ -14650,16 +14720,19 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
          * target pending; the subsequent 25/5 follow-up then re-sends 30/2 +
          * 30/1 and the client re-enters the same screen in a loop.
          *
-         * Use the SCE centre spawn when available so the client lands at a
-         * valid position instead of (0,0).
+         * Use a real SCE entry spawn when available so the client lands inside
+         * the playable scene instead of inventing (0,0) or a map centre.
          */
-        if (vm_net_mock_get_scene_center_spawn_from_sce(mapId, &centerX, &centerY))
+        if (vm_net_mock_get_scene_reasonable_spawn_from_sce(mapId,
+                                                            &centerX,
+                                                            &centerY,
+                                                            NULL))
         {
             target->x = centerX;
             target->y = centerY;
             target->hasSceEntry = true;
         }
-        printf("[info][network] mock_scene_entry_local_fallback scene=%s exit=%u pos=(%u,%u) action=use-center-spawn\n",
+        printf("[info][network] mock_scene_entry_local_fallback scene=%s exit=%u pos=(%u,%u) action=use-sce-safe-spawn\n",
                mapId, exitId, target->x, target->y);
         return;
     }
@@ -14809,8 +14882,16 @@ static void vm_net_mock_get_teleport_stone_target(const u8 *request, u32 request
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitid", &exitId);
 
     snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_normalize_scene_name_for_enter(targetScene));
-    target->x = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_X", 223);
-    target->y = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_Y", 382);
+    target->x = VM_NET_MOCK_ROLE_INITIAL_X;
+    target->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(target->scene,
+                                                          &target->x,
+                                                          &target->y,
+                                                          NULL);
+    if (getenv("CBE_TELEPORT_STONE_X") != NULL)
+        target->x = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_X", target->x);
+    if (getenv("CBE_TELEPORT_STONE_Y") != NULL)
+        target->y = (u16)vm_net_mock_env_u32("CBE_TELEPORT_STONE_Y", target->y);
     target->exitId = exitId;
     target->mapType = 2;
     vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
@@ -15114,6 +15195,7 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
     const char *posSource = "-";
     u16 dshX = 0;
     u16 dshY = 0;
+    u16 sceEntryId = 0xffff;
     u32 dshTargetRowId = 0;
     u32 dshBaseRowId = 0;
     u32 dshSceneCount = 0;
@@ -15181,19 +15263,38 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
         snprintf(target->scene, sizeof(target->scene), "%s", targetScene);
         target->needsSceneDownload = true;
     }
-    if (dshX != 0 || dshY != 0)
+    if (targetResourceExists &&
+        vm_net_mock_get_scene_reasonable_spawn_from_sce(target->scene,
+                                                        &target->x,
+                                                        &target->y,
+                                                        &sceEntryId))
     {
+        posSource = sceEntryId == 0xffff ? "sce-center-fallback" : "sce-nearest-entry";
+        target->hasSceEntry = true;
+        printf("[info][network] mock_scene_landing_resolve scene=%s smap_marker=(%u,%u) landing=(%u,%u) source=%s entry=%u\n",
+               target->scene, dshX, dshY, target->x, target->y,
+               posSource, sceEntryId);
+        vm_autotest_note("mock_scene_landing_resolve scene=%s smap_marker=(%u,%u) landing=(%u,%u) source=%s entry=%u evidence=SCE2-edge-portal\n",
+                         target->scene, dshX, dshY, target->x, target->y,
+                         posSource, sceEntryId);
+    }
+    else if (!targetResourceExists && (dshX != 0 || dshY != 0))
+    {
+        /*
+         * The local SCE is unavailable, so the real scene-space entry cannot be
+         * resolved yet. Keep the old marker only as a download-path fallback;
+         * installed scenes must never use sMap.dsh UI coordinates as actor data.
+         */
         target->x = dshX;
         target->y = dshY;
-        posSource = "smap-dsh-pos";
-        target->hasSceEntry = targetResourceExists;
+        posSource = "smap-ui-marker-fallback-missing-sce";
     }
     else
     {
         if (sourceOut)
             *sourceOut = source;
         if (posSourceOut)
-            *posSourceOut = "missing-smap-pos";
+            *posSourceOut = targetResourceExists ? "missing-sce-landing" : "missing-smap-marker";
         if (smapRowOut)
             *smapRowOut = dshTargetRowId;
         if (sceneCountOut)
@@ -15204,7 +15305,8 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
     }
     target->exitId = 1;
     target->mapType = 2;
-    vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    if (!targetResourceExists)
+        vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
     if (target->needsSceneDownload)
     {
         vm_autotest_note("mock_teleport_stone_map_missing_sce curid=%u objid=%u scene=%s smap_row=%u base=%u count=%u pos=(%u,%u)\n",
@@ -19758,7 +19860,10 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
         if (target.x == 0 && target.y == 0)
         {
             u16 cx = 0, cy = 0;
-            if (vm_net_mock_get_scene_center_spawn_from_sce(target.scene, &cx, &cy))
+            if (vm_net_mock_get_scene_reasonable_spawn_from_sce(target.scene,
+                                                                &cx,
+                                                                &cy,
+                                                                NULL))
             {
                 target.x = cx;
                 target.y = cy;
@@ -19772,6 +19877,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     g_vm_net_mock_last_scene_change_target = target;
     currentScene = vm_net_mock_current_scene_name();
     if (resourcesReady &&
+        !g_vm_net_mock_teleport_stone_map_enter_pending &&
         currentScene != NULL &&
         vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
         vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
@@ -19797,6 +19903,32 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                          target.y,
                          g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
         return ackLen;
+    }
+
+    if (resourcesReady &&
+        g_vm_net_mock_teleport_stone_map_enter_pending &&
+        currentScene != NULL &&
+        vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+        vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
+    {
+        /*
+         * A fresh 16/4 map-stone request can legitimately start another load
+         * cycle for the same scene and landing point before the completed-scene
+         * reuse window expires.  That is different from the post-download 2/3
+         * repeat which has no map-enter pending provenance.  Ack-only here
+         * leaves the newly opened loading screen without its resource-complete
+         * family, so let this request continue through the normal resource +
+         * 30/2(no-posinfo) completion below.
+         */
+        printf("[info][network] mock_mmgame_scene_transfer_fresh_same_target scene=%s pos=(%u,%u) age=%u action=deliver-resource-completion\n",
+               target.scene,
+               target.x,
+               target.y,
+               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+        vm_autotest_note("mock_mmgame_scene_transfer_fresh_same_target scene=%s pos=(%u,%u) action=deliver-resource-completion evidence=16/4-map-enter-pending\n",
+                         target.scene,
+                         target.x,
+                         target.y);
     }
 
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,

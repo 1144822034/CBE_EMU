@@ -315,11 +315,12 @@ Response strategy:
   contract consumed by `mmGame:0x11CE` / `mmBattle:0x1868`;
 - do not use a fixed `(120,120)` landing point. The request carries only
   `curid/objid`, so the server maps those ids through the real local DSH tables:
-  `wMap.dsh` chooses the sub-map row range, and `sMap.dsh` supplies the target
-  scene file name.
-- when `sMap.dsh` supplies position fields, keep those coordinates as the map
-  stone landing point. If the row has no usable position, do not invent one;
-  log `mock_teleport_stone_map_unresolved` and return no synthetic response.
+  `wMap.dsh` chooses the sub-map row range and `sMap.dsh` supplies the target
+  scene file name. The `sMap` position columns are world-map UI node positions,
+  not actor coordinates (corrected by the 2026-07-16 evidence below).
+- when the target SCE exists, choose an actual `edge_portal.spawn_point` and
+  move it outside the trigger rectangle by the normal landing safety gap. If no
+  edge portal exists, use the SCE dimensions only as a last-resort centre.
 - when the target SCE is missing, keep the `sMap.dsh` scene file name in the
   response instead of falling back to the default scene, and preserve the
   `sMap.dsh` position fields while the client downloads the matching resources.
@@ -333,8 +334,8 @@ visible 16/4 fields do not carry selected child sMap row
 wMap.lower_map -> default sMap row
 if wMap.scene_count > 1, mark row_source=wmap-base-ambiguous in trace
 old fixed-coordinate behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
-current visible-packet behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh position when available
-current visible-packet behavior: curid=1 objid=4 -> c04LinAnFu_01.sce @ sMap.dsh position, row_source=wmap-base-ambiguous
+old DSH-marker behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh UI position
+current behavior: DSH resolves the scene; SCE edge_portal supplies the safe actor landing
 current missing-resource behavior: DSH-derived scene name is preserved with scene download enabled
 unresolved behavior: no row/scene/position fallback; log action=no-fallback and continue investigation
 ```
@@ -755,3 +756,68 @@ Fix:
 - if the client lacks a GIF/MAP/SCE locally, it still drives the normal `18/7`
   download flow. That download should not cause `16/4` targets to be marked as
   unresolved on the server side.
+
+### 2026-07-16 Fresh Same-Target Map Transfer
+
+Repeated map-stone operation reproduced a permanent loading progress bar:
+
+```text
+mock_teleport_stone_map_transfer curid=5 objid=1 ... scene=c00蓬莱仙岛_01
+mock_scene_change_completed_repeat_ack scene=c00蓬莱仙岛_01 ... age=82
+net_send ... wt=2/3 ... resp=96
+mock_mmgame_scene_transfer_repeat_ack scene=c00蓬莱仙岛_01 ... age=87
+net_send ... wt=25/5 ... resp=23
+```
+
+The completed-scene reuse test confused two different cycles:
+
+- a post-download/repeated `2/3` confirmation has no new `16/4` provenance and
+  must remain ack-only so it does not restart the scene;
+- a new user-issued `16/4`, even when it resolves to the same scene and landing
+  point inside the reuse window, has already opened a new loading cycle and
+  still needs the normal resource-completion family.
+
+`vm_net_mock_build_mmgame_scene_transfer_followup_response()` now applies the
+ack-only repeat shortcut only when `map_enter_pending` is false. A fresh
+same-target `16/4` continues through the existing resource objects plus
+`30/2 result=2` without `posinfo`; it closes the loading cycle without issuing a
+second coordinate-bearing scene entry.
+
+### 2026-07-16 SCE-Space Safe Landing
+
+The previous map-transfer path treated `sMap.dsh` columns `位置X/位置Y` as the
+player's scene-space position. Cross-scene validation disproved that model:
+many official rows point at isolated/blocked MAP cells, while the same SCE files
+contain explicit edge-portal spawn points in scene coordinates. The DSH rows
+also contain `位置X小/位置Y小` and directional neighbour IDs, confirming that
+these coordinates describe the regional-map node layout.
+
+Client movement evidence from `江湖OL.CBE`:
+
+- `CheckMoveCollision(0x01045258)` probes the actor footprint and calls the two
+  MAP collision helpers;
+- `CheckMapMoveCollision(0x010451C2)` checks left/right boundary bits from the
+  high nibble of adjacent MAP cells;
+- `CheckMapMoveCollisionY2(0x0104512E)` checks top/bottom boundary bits.
+
+Server landing rule:
+
+1. `wMap.dsh` and `sMap.dsh` still resolve the requested scene key.
+2. For an installed SCE, select the edge-portal spawn nearest the scene centre.
+3. Apply `VM_NET_MOCK_SCENE_LANDING_SAFE_GAP` so the actor does not immediately
+   retrigger that portal.
+4. Use the SCE centre only when the scene has no edge portal. The DSH UI marker
+   is retained solely for a missing-SCE download fallback.
+
+Runtime replay of real `1/16/4` packets:
+
+```text
+Penglai TongQueTai: smap_marker=(96,112)  -> SCE entry 1 -> landing=(223,370)
+TaohuaDao _03:      smap_marker=(128,152) -> SCE entry 0 -> landing=(66,313)
+YeLianPo _01:       smap_marker=(96,120)  -> SCE entry 0 -> landing=(170,64)
+HuoYanShan _01:     smap_marker=(80,152)  -> SCE entry 1 -> landing=(193,48)
+```
+
+The TongQueTai response `posinfo` bytes decode to `x=0x00DF (223)` and
+`y=0x0172 (370)`, matching the service trace and replacing the old world-map UI
+marker `(96,112)`.
