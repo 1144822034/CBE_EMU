@@ -63,10 +63,10 @@ unknowns:
 4. `displayName:string`
 5. `actorResource:string`
 6. `scriptName:string`
-7. `dynamicDisplayName:string`
+7. `actorResourceKey:string`
 8. `finalActorId:u32`
 
-解析器调用 `scene_node_find_or_create(0x0100EFC4)` 创建节点，随后写入 NPC 节点类型 21、名称和最终 actor id。第四个字符串通过 `RegisterDisplayName(0x0100EEE0)` 注册头顶动态名称。
+解析器调用 `scene_node_find_or_create(0x0100EFC4)` 创建节点，随后写入 NPC 节点类型 21、名称和最终 actor id。第四个字符串通过 `RegisterDisplayName(0x0100EEE0)` 注册到节点形象槽；运行时已确认这里必须传 `.actor` 资源键，重复传显示名会让客户端请求名为 NPC 中文名的更新文件。
 
 服务端让 `rowId == finalActorId`，ID 由场景名、脚本名、显示名和坐标稳定散列到 `20000..59999`。这不会猜测客户端资源索引；实际形象仍由同一 SCE 行中的 `.actor` 名称决定。
 

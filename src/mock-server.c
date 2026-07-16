@@ -16887,15 +16887,18 @@ static bool vm_net_mock_build_scene_npcinfo_blob(const char *scene,
 
         /* scene_parse_npcinfo_and_spawn_npcs(0x01037998):
          * row id, x, y, visible name, actor resource, script metadata,
-         * dynamic label, final actor id. Both ids stay equal so clicks and
-         * later NPC operations refer to the same stable scene actor. */
+         * dynamic actor-resource key, final actor id. The fourth string is
+         * registered into the scene node's visual slot; repeating displayName
+         * there makes the client request an update file named after the NPC.
+         * Both ids stay equal so clicks and later NPC operations refer to the
+         * same stable scene actor. */
         if (!vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->actorId) ||
             !vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->x) ||
             !vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->y) ||
             !vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->displayName) ||
             !vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->actorResource) ||
             !vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->scriptName) ||
-            !vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->displayName) ||
+            !vm_net_mock_seq_put_string(npcInfo, npcInfoCap, &npcInfoLen, seed->actorResource) ||
             !vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->actorId))
         {
             return false;
@@ -18884,8 +18887,10 @@ static u32 vm_net_mock_build_penglai02_repeat_scene_change_response(const u8 *re
 
     /*
      * Runtime evidence:
-     * - the first _01 -> _02 portal request is WT 2/3 len=74 and needs the
-     *   full 30/2(posinfo)+30/1 bootstrap so EnterSceneByMapName() can render;
+     * - the first _01 -> _02 portal request is WT 2/3 len=74; the local portal
+     *   has created the destination shell, but this direction still needs one
+     *   30/2 position-bearing completion to leave loading; the redundant 30/1
+     *   scene-enter object is omitted;
      * - after visible render, the client re-emits a narrower WT 2/3 contract
      *   for the same _02 exit=0 target together with 27/11, 27/4, and 7/42.
      *
@@ -19068,12 +19073,12 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
     {
         /*
-         * Some live portal transitions already entered the client's pending
-         * scene-switch path before this request. The 30/2 scene-position
-         * result calls EnterSceneByMapName(), which asks the platform to
-         * re-enter the destination scene screen; keep the 30/1 scene-enter
-         * object in the same dispatch window so the follow-up fresh init has
-         * scene data to consume.
+         * The local edge-portal path has already created and initialized the
+         * destination scene screen before this WT 2/3 response is dispatched.
+         * A position-bearing 30/2 is the required completion for this request
+         * family. Appending 30/1 immediately after it calls the same scene-enter
+         * vtable a second time and visibly restarts loading. Send exactly one
+         * resolved scene-position completion.
          */
         if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                                true, true, true, true, false, false, false))
@@ -19082,28 +19087,11 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
                                                                   target.scene, target.x, target.y))
             return 0;
         objectCount += 1;
-        /*
-         * Runtime `_02 -> _03` already re-enters through the scene-pos result
-         * path. Appending an immediate second 30/1 scene-enter object produces
-         * one extra same-class screen init and shows the repeated loading bar
-         * the user still observes on first arrival.
-         */
-        if (!(currentScene != NULL &&
-              vm_net_mock_scene_is_penglai02(currentScene) &&
-              vm_net_mock_scene_is_penglai03(target.scene)))
-        {
-            if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
-                                                                target.scene, target.x, target.y))
-                return 0;
-            objectCount += 1;
-        }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         /*
-         * The full-bootstrap path already includes the 30/2 scene+posinfo
-         * object. IDA scene_handle_enter_with_scene_pos(0x010396D6) feeds that
-         * object into EnterSceneByMapName(0x01018150), so leaving the same target
-         * pending makes the next 25/5 subset repeat the scene enter and shows an
-         * extra loading cycle.
+         * The full response already includes the single required 30/2 position
+         * completion. Leaving the same target pending makes the next 25/5 subset
+         * replay it.
          */
         if (!resourcesReady)
         {
@@ -19561,8 +19549,8 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
      *   Penglai _02 emits `25/5 + 2/3 + 27/11 + 7/42` instead of stalling;
      * - IDA/runtime from earlier scene probes: 27/11 is consumed by
      *   scene_parse_npcinfo_and_spawn_npcs(), and deferred scene completion
-     *   already wants 27/12 + 27/11 + 27/4 together with the final 30/2
-     *   scene-pos result.
+     *   already wants 27/12 + 27/11 + 27/4. A later 30/2 scene-pos result
+     *   repeats the mode-7 scene-enter lifecycle after the local portal shell.
      *
      * Populate 27/11 from the current SCE only after the scene shell exists;
      * the one-shot guard prevents a later follow-up from recreating the nodes.
@@ -19585,10 +19573,6 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         return 0;
     objectCount += 1;
     if (!vm_net_mock_append_books42_object(out, outCap, &pos))
-        return 0;
-    objectCount += 1;
-    if (!vm_net_mock_append_scene_pos_result_object_for_scene(out, outCap, &pos,
-                                                              target.scene, target.x, target.y))
         return 0;
     objectCount += 1;
     vm_net_mock_mark_completed_scene_change_target(&target);
@@ -19732,6 +19716,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                                                                      u8 *out, u32 outCap)
 {
     u32 pos = 5;
+    u32 objectStart = 0;
     u8 objectCount = 0;
     vm_net_mock_scene_change_target target;
     const char *currentScene = NULL;
@@ -19818,9 +19803,11 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                                                            true, true, true, true,
                                                            false, false, false))
         return 0;
-    if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
-                                                         target.scene, target.x, target.y))
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
         return 0;
+    if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
     objectCount += 1;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
@@ -19842,7 +19829,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     printf("[info][network] mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u resp=%u\n",
            target.scene, target.x, target.y, objectCount, pos);
-    vm_autotest_note("mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u response=resources+30/1 evidence=JianghuOL:0x10396D6 runtime=post-mmGame-16/3\n",
+    vm_autotest_note("mock_mmgame_scene_transfer_followup scene=%s pos=(%u,%u) objects=%u response=resources+30/2-ack-no-posinfo evidence=JianghuOL:0x1039770(result=2) runtime=post-local-portal-shell\n",
                      target.scene, target.x, target.y, objectCount);
     return pos;
 }
@@ -27845,7 +27832,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     if (completeDeferredScene)
     {
         const vm_net_mock_scene_change_target *target = &g_vm_net_mock_last_scene_change_target;
-        u32 objectStart = 0;
         if (!vm_net_mock_append_fb_target_result12_for_scene(out, outCap, &pos, target->scene, target->x, target->y))
             return 0;
         objectCount += 1;
@@ -27858,13 +27844,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                         g_vm_net_mock_last_scene_change_fb4_type,
                                                         vm_net_mock_fb_target_info_text()))
             return 0;
-        objectCount += 1;
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, true, true, 2,
-                                               target->scene, target->x, target->y))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount += 1;
         vm_net_mock_mark_completed_scene_change_target(target);
         g_vm_net_mock_last_scene_change_target_valid = false;
