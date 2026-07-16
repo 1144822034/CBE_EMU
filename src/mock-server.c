@@ -10916,6 +10916,13 @@ static u8 g_vm_net_mock_last_scene_change_fb4_type = 1;
 static vm_net_mock_scene_change_target g_vm_net_mock_last_completed_scene_change_target;
 static bool g_vm_net_mock_last_completed_scene_change_target_valid = false;
 static u32 g_vm_net_mock_last_completed_scene_change_tick = 0;
+/*
+ * A title role-select starts the first scene screen from the subtype-6
+ * actorinfo object.  The later WT 12/1 is emitted near the end of that same
+ * scene initialization and is only a resource/business follow-up; it must not
+ * carry another scene+posinfo enter object.
+ */
+static bool g_vm_net_mock_title_role_scene_followup_pending = false;
 static char g_vm_net_mock_last_current_scene_reload_scene[64];
 static bool g_vm_net_mock_last_current_scene_reload_valid = false;
 static u32 g_vm_net_mock_last_current_scene_reload_tick = 0;
@@ -11006,6 +11013,7 @@ typedef struct vm_mock_service_account_state
     vm_net_mock_scene_change_target lastCompletedSceneChangeTarget;
     bool lastCompletedSceneChangeTargetValid;
     u32 lastCompletedSceneChangeTick;
+    bool titleRoleSceneFollowupPending;
 
     char lastCurrentSceneReloadScene[64];
     bool lastCurrentSceneReloadValid;
@@ -11343,6 +11351,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->lastCompletedSceneChangeTarget = g_vm_net_mock_last_completed_scene_change_target;
     state->lastCompletedSceneChangeTargetValid = g_vm_net_mock_last_completed_scene_change_target_valid;
     state->lastCompletedSceneChangeTick = g_vm_net_mock_last_completed_scene_change_tick;
+    state->titleRoleSceneFollowupPending = g_vm_net_mock_title_role_scene_followup_pending;
     memcpy(state->lastCurrentSceneReloadScene, g_vm_net_mock_last_current_scene_reload_scene,
            sizeof(state->lastCurrentSceneReloadScene));
     state->lastCurrentSceneReloadValid = g_vm_net_mock_last_current_scene_reload_valid;
@@ -11444,6 +11453,7 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_last_completed_scene_change_target = state->lastCompletedSceneChangeTarget;
     g_vm_net_mock_last_completed_scene_change_target_valid = state->lastCompletedSceneChangeTargetValid;
     g_vm_net_mock_last_completed_scene_change_tick = state->lastCompletedSceneChangeTick;
+    g_vm_net_mock_title_role_scene_followup_pending = state->titleRoleSceneFollowupPending;
     memcpy(g_vm_net_mock_last_current_scene_reload_scene, state->lastCurrentSceneReloadScene,
            sizeof(g_vm_net_mock_last_current_scene_reload_scene));
     g_vm_net_mock_last_current_scene_reload_valid = state->lastCurrentSceneReloadValid;
@@ -14359,6 +14369,41 @@ static void vm_net_mock_mark_direct_scene_enter_completed(const vm_net_mock_scen
            target->y,
            target->exitId,
            reason ? reason : "direct-enter");
+}
+
+static void vm_net_mock_complete_startup_scene_followup(const char *currentScene,
+                                                        const char *source,
+                                                        u8 objectCount,
+                                                        u32 responseLen)
+{
+    vm_net_mock_scene_change_target target;
+    u16 targetX = vm_net_mock_scene_spawn_x();
+    u16 targetY = vm_net_mock_scene_spawn_y();
+
+    if (currentScene == NULL || currentScene[0] == 0)
+    {
+        g_vm_net_mock_title_role_scene_followup_pending = false;
+        return;
+    }
+
+    memset(&target, 0, sizeof(target));
+    snprintf(target.scene, sizeof(target.scene), "%s", currentScene);
+    if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY, NULL, NULL))
+        vm_net_mock_adjust_safe_player_pos_for_scene(currentScene, &targetX, &targetY);
+    target.x = targetX;
+    target.y = targetY;
+    target.mapType = 2;
+    target.exitId = 0;
+    target.hasSceEntry = true;
+    target.needsSceneDownload = false;
+    vm_net_mock_mark_direct_scene_enter_completed(&target, "scene-startup-followup-complete");
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                      "scene-startup-followup-complete");
+    g_vm_net_mock_title_role_scene_followup_pending = false;
+    printf("[info][network] mock_scene_startup_followup_complete scene=%s pos=(%u,%u) source=%s objects=%u resp=%u action=no-second-scene-enter\n",
+           target.scene, target.x, target.y, source ? source : "-", objectCount, responseLen);
+    vm_autotest_note("mock_scene_startup_followup_complete scene=%s pos=(%u,%u) source=%s objects=%u response=no-scene-pos-reenter evidence=JianghuOL.CBE:0x010137CA+0x010396D6\n",
+                     target.scene, target.x, target.y, source ? source : "-", objectCount);
 }
 
 static bool vm_net_mock_is_recent_completed_scene_change_target(const vm_net_mock_scene_change_target *target)
@@ -27468,7 +27513,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 sceneNpcActorInfoLen = 0;
     u32 sceneNpcActorId = 0;
     const char *currentScene = NULL;
-    bool startupDirectSceneEnter = false;
+    bool startupSceneAlreadyEntered = false;
     vm_net_mock_scene_change_target downloadedTarget;
     bool useDownloadedTarget = false;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
@@ -27541,8 +27586,9 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                          downloadedTarget.scene, downloadedTarget.x, downloadedTarget.y);
         return pos;
     }
-    startupDirectSceneEnter = !g_vm_net_mock_last_scene_change_target_valid &&
-                              !g_vm_net_mock_last_completed_scene_change_target_valid;
+    startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
+                                 (!g_vm_net_mock_last_scene_change_target_valid &&
+                                  !g_vm_net_mock_last_completed_scene_change_target_valid);
     sceneSupportsActorOtherNpcSeed = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene);
     /*
      * Runtime evidence from the latest manual runs:
@@ -27603,14 +27649,17 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     appendSceneRoomNpcAfterEnter = !keepBusinessGate &&
                                    vm_net_mock_scene_room_npc_seed_count(currentScene) > 0 &&
                                    vm_net_mock_env_u8("CBE_SCENE_FOLLOWUP_ROOM_NPC", 0) != 0;
-    if (keepBusinessGate)
+    if (keepBusinessGate || startupSceneAlreadyEntered)
     {
         u32 objectStart = 0;
         /*
-         * Probe the first-scene contract without forcing client globals:
-         * 27/12 and full 30/1 both close sceneObj+0x164 before later local
-         * HUD responses. A 30/2 result/scene ack without posinfo exercises the
-         * scene completion follow-up path but avoids that close branch.
+         * scene_runtime_init_and_sync(0x01012FB4) constructs WT 12/1 only at
+         * 0x010137CA, after the first scene screen has already loaded its map,
+         * actor and HUD state from the role-select subtype-6 actorinfo.  A
+         * trailing 30/1 with posinfo is consumed by
+         * scene_handle_enter_with_scene_pos(0x010396D6) and starts the same
+         * scene lifecycle again. Keep a 30/2 completion ack without posinfo so
+         * the request closes without calling the scene-enter path.
          */
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
             return 0;
@@ -27664,29 +27713,11 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    if (startupDirectSceneEnter &&
-        !keepBusinessGate &&
-        currentScene != NULL &&
-        currentScene[0] != 0)
-    {
-        vm_net_mock_scene_change_target target;
-        u16 targetX = vm_net_mock_scene_spawn_x();
-        u16 targetY = vm_net_mock_scene_spawn_y();
-
-        memset(&target, 0, sizeof(target));
-        snprintf(target.scene, sizeof(target.scene), "%s", currentScene);
-        if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY, NULL, NULL))
-            vm_net_mock_adjust_safe_player_pos_for_scene(currentScene, &targetX, &targetY);
-        target.x = targetX;
-        target.y = targetY;
-        target.mapType = 2;
-        target.exitId = 0;
-        target.hasSceEntry = true;
-        target.needsSceneDownload = false;
-        vm_net_mock_mark_direct_scene_enter_completed(&target, "scene-resource-followup-startup");
-        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
-                                          "scene-resource-followup-startup");
-    }
+    if (startupSceneAlreadyEntered)
+        vm_net_mock_complete_startup_scene_followup(currentScene,
+                                                    "scene-resource-followup",
+                                                    objectCount,
+                                                    pos);
     if (actorOtherNpcSeedInFollowup)
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
@@ -27739,6 +27770,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     u32 pos = 5;
     u8 objectCount = 0;
     bool completeDeferredScene = g_vm_net_mock_last_scene_change_target_valid;
+    bool startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending;
     const char *currentScene = NULL;
     const char *nearbyScene = NULL;
     bool seedSubsetNpcOther = false;
@@ -27895,6 +27927,11 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (startupSceneAlreadyEntered && !completeDeferredScene)
+        vm_net_mock_complete_startup_scene_followup(currentScene,
+                                                    "scene-task-subset-followup",
+                                                    objectCount,
+                                                    pos);
     if (seedSubsetNpcOther)
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
@@ -29476,6 +29513,25 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
     selected = vm_net_mock_select_active_role(actorId);
     role = vm_net_mock_active_role();
     activeActorId = role ? role->roleId : 0;
+
+    if (selected && role != NULL)
+    {
+        /*
+         * Role select creates a new first-scene lifecycle on the client. Do
+         * not inherit the previous connection's completed/pending scene
+         * target: doing so makes the post-init WT 2/3 look like a fresh map
+         * transition on relogin and can produce a second full bootstrap.
+         */
+        g_vm_net_mock_title_role_scene_followup_pending = true;
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_completed_scene_change_target_valid = false;
+        g_vm_net_mock_last_current_scene_reload_valid = false;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        g_vm_net_mock_teleport_stone_map_enter_pending = false;
+        g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    }
 
     /* A minimal {result, actorID} subtype-6 ack is accepted by
      * role_manage_screen_handle_network(case 6), but as soon as subtype-15
