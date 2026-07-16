@@ -1,6 +1,6 @@
 CC := gcc
 
-OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/resource.o obj/main.o
+OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/mysql-client.o obj/resource.o obj/main.o
 
 UNICORN = Lib/unicorn-2.1.4/unicorn-import.lib
 
@@ -26,7 +26,9 @@ obj/fileIoEngine.o: src/fileIoEngine.c
 	$(CC) -g  -w -c src/fileIoEngine.c -o obj/fileIoEngine.o
 obj/lcd.o: src/lcd.c
 	$(CC) -g  -w -c src/lcd.c -o obj/lcd.o
-obj/main.o: src/main.c src/mock-server.c src/vmFunc.c src/hookRam.c src/vmEvent.c
+obj/mysql-client.o: src/mysql-client.c src/mysql-client.h
+	$(CC) -g -w -c src/mysql-client.c -o obj/mysql-client.o
+obj/main.o: src/main.c src/mock-server.c src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c
 	$(CC) -g -w -c src/main.c -o obj/main.o
 obj/gifDecode.o: src/gifDecode.c
 	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o
