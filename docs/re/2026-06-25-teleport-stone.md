@@ -821,3 +821,55 @@ HuoYanShan _01:     smap_marker=(80,152)  -> SCE entry 1 -> landing=(193,48)
 The TongQueTai response `posinfo` bytes decode to `x=0x00DF (223)` and
 `y=0x0172 (370)`, matching the service trace and replacing the old world-map UI
 marker `(96,112)`.
+
+### 2026-07-16 mmGame Direct-Entry Coordinate Unit Correction
+
+An intermediate hypothesis encoded the direct-entry `16/2` coordinates as
+`SCE pixel * 6`. Runtime retest still placed the actor in the blocked top-left
+decoration, and the full client call chain disproved that conversion:
+
+- `mmGameMstarWqvga.cbm:sub_BCC(0x0BCC)` reads both tagged signed-i16 values
+  from `posinfo` and passes them unchanged to API-table offset `0x74`;
+- `JianghuOL.CBE:stream_read_i16_be_tagged(0x01033A3A)` only decodes the
+  tagged big-endian i16 and performs no coordinate scaling;
+- `EnterSceneByMapName(0x0101809C)` stores the values unchanged at
+  `R9+0x5C8E/+0x5C90`;
+- `scene_runtime_init_and_sync(0x01012FB4)` copies those saved values unchanged
+  into the active scene node at `+24/+26`;
+- `scene_camera_follow_actor(0x01014C92)` consumes the node values directly
+  against the SCE map dimensions.
+
+For TongQueTai the map is `432x432`; the scaled `(1338,2220)` wire position is
+therefore necessarily outside the map. The server now keeps and encodes the
+authoritative safe SCE-pixel landing unchanged: `scene_pos=(223,370)`,
+`wire_pos=(223,370)`, `coord_scale=1`. The SCE landing resolver and portal
+safety gap remain in place; only the unsupported wire scaling was removed.
+
+### 2026-07-17 Same-Scene Map Transfer Position Commit
+
+The coordinate-unit correction was necessary but not sufficient. A full
+automated `curid=1 objid=1` replay proved the old `16/2` response followed this
+client state sequence:
+
+```text
+wire posinfo                       = (223,370)
+EnterSceneByMapName arguments      = (223,370)
+R9+0x5C8E/+0x5C90 saved position  = (223,370)
+scene node +24/+26 after init      = (50,50)
+```
+
+`JianghuOL.CBE:scene_runtime_init_and_sync(0x01012FB4)` dispatches on
+`sceneObj+0x1B4`. The mmGame `16/2 -> sub_BCC` path leaves this parser state at
+zero. Case 0 rebuilds the active actor with the default `(50,50)` and does not
+copy the saved target position.
+
+The main-business scene entry parser
+`JianghuOL.CBE:parse_scene_response_entry(0x010396D6)` supplies the missing
+contract. Before calling `EnterSceneByMapName`, it writes parser state `7`.
+`scene_runtime_init_and_sync` case 7 then copies `R9+0x5C8E/+0x5C90` to the
+active node at `+24/+26`.
+
+Consequently the map-UI `16/4` request now receives a `30/1 {scene,posinfo}`
+response rather than the old `16/2 {result,scene,posinfo,exitid}` response.
+The SCE landing resolver and unscaled tagged-i16 position are unchanged; the
+fix is the client parser path that commits those coordinates to the actor node.

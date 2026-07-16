@@ -14,6 +14,17 @@
 FILE *openFileList[16];
 static char openFileNames[16][256];
 
+static bool vm_uses_be_fixed_df_layout(void)
+{
+    return g_cbeInfo.isBiggianProgram && g_cbeInfo.headerInt1 != 0 &&
+           g_cbeInfo.headerInt2 > g_cbeInfo.codeLen;
+}
+
+static u32 vm_df_package_struct_size(void)
+{
+    return vm_uses_be_fixed_df_layout() ? 80u : 108u;
+}
+
 static void vm_read_string_by_ptr_limited(u32 ptr, char *dst, size_t dstSize);
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize);
 
@@ -1289,11 +1300,11 @@ LABEL_8:
     v1 = (v1 + 1);
     if (!v5)
         return 0;
-    uc_mem_read(MTK, a1 + 10, &len, 2);
+    len = vm_get_var_short(a1 + 10);
     for (i = 0; len > i; i++)
     {
-        uc_mem_read(MTK, a1 + 28, &tmp, 4);
-        uc_mem_read(MTK, tmp + 4 * i, &v3, 4);
+        tmp = (int)vm_get_var(a1 + 28);
+        v3 = (int)vm_get_var(tmp + 4 * i);
         if (v3)
         {
             u8 pkgIndex = 0;
@@ -1340,6 +1351,8 @@ int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
         vm_DF_Free(child + 12);
         vm_DF_Free(child + 16);
         vm_DF_Free(child + 20);
+        if (vm_uses_be_fixed_df_layout())
+            vm_DF_Free(child + 24);
         vm_DF_Free(slotAddr);
         vm_set_var(slotAddr, 0);
     }
@@ -1356,16 +1369,23 @@ int vm_DF_DataPackage_ReleasePackage(int a1, int namePtr)
         vm_DF_Free(a1 + 20);
         vm_DF_Free(a1 + 28);
 
-        int fileHandle = (int)vm_get_var(a1 + 92);
-        if (fileHandle >= 0)
+        if (!vm_uses_be_fixed_df_layout())
         {
-            vm_cbfs_vm_file_close(fileHandle);
-            vm_set_var(a1 + 92, (u32)-1);
+            int fileHandle = (int)vm_get_var(a1 + 92);
+            if (fileHandle >= 0)
+            {
+                vm_cbfs_vm_file_close(fileHandle);
+                vm_set_var(a1 + 92, (u32)-1);
+            }
+            if (vm_get_var(a1 + 100))
+                vm_DF_Free(a1 + 100);
         }
-        if (vm_get_var(a1 + 100))
-            vm_DF_Free(a1 + 100);
+        else
+        {
+            vm_DF_Free(a1 + 24);
+        }
 
-        uc_mem_write(MTK, a1, emptyBuff, 108);
+        uc_mem_write(MTK, a1, emptyBuff, vm_df_package_struct_size());
         return vm_set_call_result(0);
     }
 
@@ -1398,8 +1418,8 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
 
         if (slot_ptr == 0)
         {
-            /* allocate slot struct (108 bytes) and write pointer into table_base+4*idx */
-            vm_DF_Malloc_IN(slot_addr_vm, 108);  /* DF_Malloc_IN((DWORD*)(table_base+4*idx), 108) */
+            /* Firmware generations use either an 80-byte or 108-byte package. */
+            vm_DF_Malloc_IN(slot_addr_vm, vm_df_package_struct_size());
             slot_ptr = vm_get_var(slot_addr_vm); /* newly allocated slot pointer */
 
             /* length of src string in VM */
@@ -1425,7 +1445,7 @@ int vm_DF_DataPackage_LoadPackage(int a1, int srcPtr)
     /* no free slot: append at end (index = slot_count) */
     {
         int new_slot_addr_vm = table_base + 4 * slot_count;
-        vm_DF_Malloc_IN(new_slot_addr_vm, 108);
+        vm_DF_Malloc_IN(new_slot_addr_vm, vm_df_package_struct_size());
         int slot_ptr = vm_get_var(new_slot_addr_vm);
 
         int n = vm_strlen(srcPtr);
@@ -1709,17 +1729,17 @@ int vm_DF_DataPackage_GetPackageID(int a1, int a2)
     if (!a2)
         return 0;
 
-    uc_mem_read(MTK, a1 + 10, &count, 2);
-    uc_mem_read(MTK, a1 + 28, &base, 4);
+    count = (int16_t)vm_get_var_short(a1 + 10);
+    base = (int)vm_get_var(a1 + 28);
 
     for (i = 0; i < count; i++)
     {
-        uc_mem_read(MTK, base + 4 * i, &entry, 4);
+        entry = (int)vm_get_var(base + 4 * i);
 
         if (!entry)
             continue;
 
-        uc_mem_read(MTK, entry + 4, &str_ptr, 4);
+            str_ptr = (int)vm_get_var(entry + 4);
 
         if (vm_DF_String_Equal(str_ptr, a2))
         {
@@ -1732,14 +1752,13 @@ int vm_DF_DataPackage_GetPackageID(int a1, int a2)
 int vm_DF_Free(int p)
 {
     u32 target = 0;
-    u32 zero = 0;
 
     if (p)
     {
-        uc_mem_read(MTK, p, &target, 4);
+        target = vm_get_var(p);
         if (target)
             vm_free(target);
-        uc_mem_write(MTK, p, &zero, 4);
+        vm_set_var(p, 0);
     }
     return vm_set_call_result(p);
 }
@@ -1917,6 +1936,7 @@ int vm_DF_DataPackage_LoadFromTResource(int a1, int a2)
 int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
 {
     int fileHandle;
+    bool compactLayout = vm_uses_be_fixed_df_layout();
 
     int v34 = 0;
 
@@ -1924,7 +1944,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
     int count, i = 0;
     int pkg_id = 0;
 
-    fileHandle = vm_get_var(a1 + 92);
+    fileHandle = compactLayout ? -1 : (int)vm_get_var(a1 + 92);
 
     if (fileHandle == -1)
     {
@@ -1938,7 +1958,8 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
             return fileHandle;
     }
 
-    vm_set_var(a1 + 92, fileHandle);
+    if (!compactLayout)
+        vm_set_var(a1 + 92, fileHandle);
     vm_cbfs_vm_file_seek(fileHandle, fileSeekPos, 0);
 
     int size = vm_DF_File_ReadInt(fileHandle);
@@ -1948,7 +1969,7 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
     if (1)
     {
         u32 ptr = vm_malloc_var();
-        vm_set_var(bufferPtr, 0);
+        vm_set_var(ptr, 0);
         vm_DF_Malloc_IN(ptr, size); //&bufferPtr
         bufferPtr = vm_get_var(ptr);
         vm_free(ptr);
@@ -1966,7 +1987,8 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         offset = vm_get_var(ptr);
         vm_free_var(ptr);
     }
-    vm_set_var(a1 + 104, minus1);
+    if (!compactLayout)
+        vm_set_var(a1 + 104, minus1);
 
     if (1)
     {
@@ -2012,8 +2034,8 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
             if (1)
             {
                 u32 pfBuffer = 0;
-                // entry->fileHandle = handle
-                vm_set_var(entry + 92, fileHandle);
+                if (!compactLayout)
+                    vm_set_var(entry + 92, fileHandle);
 
                 int idx = ((u32)vm_get_var_byte(entry + 1)) << 8;
 
@@ -2044,6 +2066,11 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
                     blockOffset = vm_get_var(ptr);
                     vm_free_var(ptr);
                 }
+
+                if (g_cbeInfo.isBiggianProgram)
+                    printf("[info][cbe] df_tcard_block entry=%08x name=%s block=%08x data=%08x count=%d\n",
+                           entry, entryName[0] ? entryName : "<root>", block_size,
+                           data_size, arr_cnt);
 
                 vm_set_var_short(entry + 8, arr_cnt);
                 int res_idxPtr = 0, res_stringPtr = 0, res_intPtr = 0;
@@ -2118,23 +2145,37 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
 
                 if (data_size)
                 {
-                    int tell = vm_cbfs_vm_file_tell(fileHandle);
-
-                    if (pkg_id)
+                    if (compactLayout)
                     {
-                        int base = vm_get_var(a1 + 28);
-                        int item = vm_get_var(base + (pkg_id - 1) * 4);
-                        vm_set_var_byte(item + 84, 1);
-                        vm_set_var(item + 88, tell);
-                        vm_set_var(item + 92, fileHandle);
-                        vm_set_var(item + 96, data_size);
+                        int dataEntry = entry;
+                        vm_DF_Malloc_IN(dataEntry + 24, data_size);
+                        int dataPtr = vm_get_var(dataEntry + 24);
+                        if (dataPtr)
+                            vm_DF_File_ReadToBuffer(fileHandle, dataPtr, data_size);
+                        if (g_cbeInfo.isBiggianProgram)
+                            printf("[info][cbe] df_tcard_data entry=%08x package=%08x pkg=%d data=%08x size=%08x\n",
+                                   entry, a1, pkg_id, dataPtr, data_size);
                     }
                     else
                     {
-                        vm_set_var_byte(a1 + 84, 1);
-                        vm_set_var(a1 + 88, tell);
-                        vm_set_var(a1 + 92, fileHandle);
-                        vm_set_var(a1 + 96, data_size);
+                        int tell = vm_cbfs_vm_file_tell(fileHandle);
+
+                        if (pkg_id)
+                        {
+                            int base = vm_get_var(a1 + 28);
+                            int item = vm_get_var(base + (pkg_id - 1) * 4);
+                            vm_set_var_byte(item + 84, 1);
+                            vm_set_var(item + 88, tell);
+                            vm_set_var(item + 92, fileHandle);
+                            vm_set_var(item + 96, data_size);
+                        }
+                        else
+                        {
+                            vm_set_var_byte(a1 + 84, 1);
+                            vm_set_var(a1 + 88, tell);
+                            vm_set_var(a1 + 92, fileHandle);
+                            vm_set_var(a1 + 96, data_size);
+                        }
                     }
                 }
 
@@ -2162,8 +2203,13 @@ int vm_DF_DataPackage_LoadFormTCardEx(int a1, int pathPtr, int fileSeekPos)
         vm_free_var(ptr);
     }
 
-    int txt_id;
-    uc_mem_read(MTK, a1 + 104, &txt_id, 4);
+    if (compactLayout)
+    {
+        vm_cbfs_vm_file_close(fileHandle);
+        return 0;
+    }
+
+    int txt_id = (int)vm_get_var(a1 + 104);
     // vm_free(offsetPtr);
 
     if (txt_id != -1)
@@ -2191,8 +2237,7 @@ int vm_DF_File_ReadToBuffer(int fileHandle, int bufferPtr, int size)
 
 int vm_DF_DataPackage_LoadFormTCard(int a1)
 {
-    int offset;
-    uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &offset, 4);
+    int offset = (int)vm_get_var(VM_DF_DataPackage_In_File_Offset_ADDRESS);
     return vm_DF_DataPackage_LoadFormTCardEx(a1, VM_DF_DataPackage_FilePath_ADDRESS, offset);
 }
 
@@ -2204,7 +2249,7 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     if (a3)
     {
         uc_mem_read(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &n2, 1);
-        uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &inFileOffset, 4);
+        inFileOffset = vm_get_var(VM_DF_DataPackage_In_File_Offset_ADDRESS);
 
         if (n2 == 1)
         {
@@ -2214,7 +2259,7 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
 
         if (n2 == 2)
         {
-            uc_mem_read(MTK, VM_DF_DataPackage_In_File_Offset_ADDRESS, &a2, 4);
+            a2 = vm_get_var(VM_DF_DataPackage_In_File_Offset_ADDRESS);
         }
     }
 
@@ -2226,13 +2271,13 @@ void vm_initDFDataPackage(u32 a1, u32 a2)
 {
     u32 tmp2, tmp3, tmp4;
     tmp2 = 0;
-    uc_mem_write(MTK, a1 + 4, &tmp2, 4);
-    uc_mem_write(MTK, a1 + 8, &tmp2, 2);
-    uc_mem_write(MTK, a1 + 10, &tmp2, 2);
-    uc_mem_write(MTK, a1 + 12, &tmp2, 4);
-    uc_mem_write(MTK, a1 + 16, &tmp2, 4);
-    uc_mem_write(MTK, a1 + 24, &tmp2, 4);
-    uc_mem_write(MTK, a1 + 28, &tmp2, 4);
+    vm_set_var(a1 + 4, tmp2);
+    vm_set_var_short(a1 + 8, (u16)tmp2);
+    vm_set_var_short(a1 + 10, (u16)tmp2);
+    vm_set_var(a1 + 12, tmp2);
+    vm_set_var(a1 + 16, tmp2);
+    vm_set_var(a1 + 24, tmp2);
+    vm_set_var(a1 + 28, tmp2);
     // printf("vm_initDFDataPackage(%x,%x)\n", a1, a2); // debug
     //*a1 = 1
     tmp2 = 1;
@@ -2240,37 +2285,43 @@ void vm_initDFDataPackage(u32 a1, u32 a2)
     // DF_Malloc_IN((_DWORD *)(a1 + 28), 4 * a2);
     tmp4 = vm_malloc(a2 * 4);
     uc_mem_write(MTK, tmp4, emptyBuff, SDL_min(a2 * 4, 1024)); // memclr_w()
-    uc_mem_write(MTK, a1 + 28, &tmp4, 4);
-    tmp2 = (u32)-1;
-    uc_mem_write(MTK, a1 + 92, &tmp2, 4);
-    tmp2 = 0;
-    uc_mem_write(MTK, a1 + 100, &tmp2, 4);
+    vm_set_var(a1 + 28, tmp4);
+    if (!vm_uses_be_fixed_df_layout())
+    {
+        tmp2 = (u32)-1;
+        vm_set_var(a1 + 92, tmp2);
+        tmp2 = 0;
+        vm_set_var(a1 + 100, tmp2);
+    }
     tmp3 = VM_DF_DATAPACKAGE_FUNC_LIST_ADDRESS; // DF_DataPackage_LoadPackage
-    uc_mem_write(MTK, a1 + 32, &tmp3, 4);
+    vm_set_var(a1 + 32, tmp3);
     tmp3 += 4; // DF_DataPackage_ReleasePackage
-    uc_mem_write(MTK, a1 + 36, &tmp3, 4);
+    vm_set_var(a1 + 36, tmp3);
     tmp3 += 4; // DF_DataPackage_LoadFromTResource
-    uc_mem_write(MTK, a1 + 40, &tmp3, 4);
+    vm_set_var(a1 + 40, tmp3);
     tmp3 += 4; // DF_DataPackage_LoadFormTCard
-    uc_mem_write(MTK, a1 + 44, &tmp3, 4);
+    vm_set_var(a1 + 44, tmp3);
     tmp3 += 4; // DF_DataPackage_DoLoading
-    uc_mem_write(MTK, a1 + 48, &tmp3, 4);
+    vm_set_var(a1 + 48, tmp3);
     tmp3 += 4; // DF_DataPackage_LocateDataPackage
-    uc_mem_write(MTK, a1 + 52, &tmp3, 4);
+    vm_set_var(a1 + 52, tmp3);
     tmp3 += 4; // DF_DataPackage_GetFile
-    uc_mem_write(MTK, a1 + 56, &tmp3, 4);
+    vm_set_var(a1 + 56, tmp3);
     tmp3 += 4; // DF_DataPackage_GetFileByID
-    uc_mem_write(MTK, a1 + 60, &tmp3, 4);
+    vm_set_var(a1 + 60, tmp3);
     tmp3 += 4; // DF_DataPackage_GetFileNameByID
-    uc_mem_write(MTK, a1 + 64, &tmp3, 4);
+    vm_set_var(a1 + 64, tmp3);
     tmp3 += 4; // DF_DataPackage_GetFileID
-    uc_mem_write(MTK, a1 + 68, &tmp3, 4);
+    vm_set_var(a1 + 68, tmp3);
     tmp3 += 4; // DF_DataPackage_ShowFileList
     // return DF_DataPackage_ShowFileList
     u32 r = tmp3;
-    uc_mem_write(MTK, a1 + 72, &tmp3, 4);
-    tmp3 += 4; // DF_DataPackage_InitTxt
-    uc_mem_write(MTK, a1 + 80, &tmp3, 4);
+    vm_set_var(a1 + 72, tmp3);
+    tmp3 += 4;
+    if (vm_uses_be_fixed_df_layout())
+        vm_set_var(a1 + 76, tmp3); // DF_DataPackage_LoadFormTCardEx
+    else
+        vm_set_var(a1 + 80, tmp3); // DF_DataPackage_InitTxt
     return vm_set_call_result(r);
 }
 
@@ -2645,24 +2696,23 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
     int result = -1;
     uc_engine *uc = MTK;
     // count1 = *(int16 *)(a1 + 8)
-    uc_mem_read(uc, a1 + 8, &count1, 2); // 应该是0x112
+    count1 = (int16_t)vm_get_var_short(a1 + 8);
 
     // base_ptr = *(uint32 *)(a1 + 12)
-    uc_mem_read(uc, a1 + 12, &base_ptr, 4);
+    base_ptr = vm_get_var(a1 + 12);
 
     // id_base = *(uint32 *)(a1 + 20)
-    uc_mem_read(uc, a1 + 20, &id_base, 4);
+    id_base = vm_get_var(a1 + 20);
 
     for (i = 0; i < count1; i++)
     {
         // str_ptr = *(uint32 *)(base_ptr + 4 * i)
-        uc_mem_read(uc, base_ptr + 4 * i, &str_ptr, 4);
+        str_ptr = vm_get_var(base_ptr + 4 * i);
         // uc_mem_read(MTK,str_ptr,globalSprintfBuff,128);
 
         if (vm_DF_String_Equal(str_ptr, namePtr))
         {
-            u32 file_id = 0; // 第一次应该返回0x1c
-            uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
+            u32 file_id = vm_get_var_short(id_base + 2 * i);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
         }
@@ -2670,26 +2720,25 @@ u32 vm_DF_DataPackage_GetFileID(u32 a1, u32 namePtr)
 
     for (i = 0; i < count1; i++)
     {
-        uc_mem_read(uc, base_ptr + 4 * i, &str_ptr, 4);
+        str_ptr = vm_get_var(base_ptr + 4 * i);
         if (vm_DF_String_Dsh_Basename_Equal(str_ptr, namePtr))
         {
-            u32 file_id = 0;
-            uc_mem_read(uc, id_base + 2 * i, &file_id, 2);
+            u32 file_id = vm_get_var_short(id_base + 2 * i);
             uc_reg_write(uc, UC_ARM_REG_R0, &file_id);
             return file_id;
         }
     }
 
     // count2 = *(int16 *)(a1 + 10)
-    uc_mem_read(uc, a1 + 10, &count2, 2);
+    count2 = (int16_t)vm_get_var_short(a1 + 10);
 
     // child_base = *(uint32 *)(a1 + 28)
-    uc_mem_read(uc, a1 + 28, &child_base, 4);
+    child_base = vm_get_var(a1 + 28);
 
     for (j = 0; j < count2; j++)
     {
         // v7 = *(uint32 *)(child_base + 4 * j)
-        uc_mem_read(uc, child_base + 4 * j, &v7, 4);
+        v7 = vm_get_var(child_base + 4 * j);
 
         if (v7)
         {
@@ -2718,41 +2767,31 @@ int vm_DF_DataPackage_DoReadData(int32_t a1, int32_t a2)
     int32_t v6 = 0;
     int len = 0;
     u32 buffer = 0;
-    uc_engine *uc = MTK;
-    // count = *(int16 *)(a1 + 8)
-    // uc_mem_read(uc, a1, cbeTextString, 64);
-    // printf("vm_DF_DataPackage_DoReadData(%x,%x)\n", a1, a2);
-    uc_mem_read(uc, a1 + 8, &count, 2);
+    // Guest manager structures use the CBE's byte order. Resource package
+    // payload integers remain little-endian and are decoded separately by
+    // vm_DF_File_ReadInt/vm_DF_ReadInt.
+    count = (int16_t)vm_get_var_short(a1 + 8);
     if (count <= a2)
     {
         printf("codeLib\\DF_DataPackage.c");
         assert(0);
     }
 
-    // file_handle = *(uint32 *)(a1 + 92)
-    uc_mem_read(uc, a1 + 92, &file_handle, 4);
-
-    // data_base = *(uint32 *)(a1 + 16)
-    uc_mem_read(uc, a1 + 16, &data_base, 4);
-
-    // base_offset = *(uint32 *)(a1 + 88)
-    uc_mem_read(uc, a1 + 88, &base_offset, 4);
-
-    // v5 = *(uint32 *)(data_base + 4 * a2)
-    uc_mem_read(uc, data_base + 4 * a2, &v5, 4);
+    file_handle = (int32_t)vm_get_var(a1 + 92);
+    data_base = (int32_t)vm_get_var(a1 + 16);
+    base_offset = (int32_t)vm_get_var(a1 + 88);
+    v5 = (int32_t)vm_get_var(data_base + 4 * a2);
 
     // seek
     vm_cbfs_vm_file_seek(file_handle, v5 + base_offset, 0);
 
     if ((count - 1) > (int16_t)a2)
     {
-        // v6 = *(uint32 *)(data_base + 4 * a2 + 4)
-        uc_mem_read(uc, data_base + 4 * a2 + 4, &v6, 4);
+        v6 = (int32_t)vm_get_var(data_base + 4 * a2 + 4);
     }
     else
     {
-        // v6 = *(uint32 *)(a1 + 96)
-        uc_mem_read(uc, a1 + 96, &v6, 4);
+        v6 = (int32_t)vm_get_var(a1 + 96);
     }
 
     len = v6 - v5;
@@ -2786,19 +2825,20 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
     uc_engine *uc = MTK;
     if (fileId == (u32)-1)
         return vm_set_call_result(0);
-    uc_mem_read(uc, a1 + 8, &count1, 2);
-    uc_mem_read(uc, a1 + 20, &id_base, 4);
-    uc_mem_read(uc, a1 + 16, &data_base, 4);
-    uc_mem_read(uc, a1 + 24, &offset_base, 4);
+    count1 = (int16_t)vm_get_var_short(a1 + 8);
+    id_base = vm_get_var(a1 + 20);
+    data_base = vm_get_var(a1 + 16);
+    offset_base = vm_get_var(a1 + 24);
     // printf("DF_DataPackage_GetFileByID:%d\n", fileId);
 
     for (i = 0; i < count1; i++)
     {
-        uc_mem_read(uc, id_base + i * 2, &file_id, 2);
+        file_id = (int16_t)vm_get_var_short(id_base + i * 2);
 
         if (file_id == (int16_t)fileId)
         {
-            uc_mem_read(uc, a1 + 84, &flag, 1);
+            if (!vm_uses_be_fixed_df_layout())
+                uc_mem_read(uc, a1 + 84, &flag, 1);
 
             if (flag)
             {
@@ -2807,7 +2847,7 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
             }
             else
             {
-                uc_mem_read(uc, data_base + i * 4, &data_ptr, 4);
+                data_ptr = vm_get_var(data_base + i * 4);
                 offset = offset_base;
                 offset = data_ptr + offset;
                 return vm_set_call_result(offset);
@@ -2815,12 +2855,12 @@ int vm_DF_DataPackage_GetFileByID(u32 a1, u32 fileId)
         }
     }
 
-    uc_mem_read(uc, a1 + 10, &count2, 2);
-    uc_mem_read(uc, a1 + 28, &child_base, 4);
+    count2 = (int16_t)vm_get_var_short(a1 + 10);
+    child_base = vm_get_var(a1 + 28);
 
     for (j = 0; j < count2; j++)
     {
-        uc_mem_read(uc, child_base + j * 4, &v7, 4);
+        v7 = vm_get_var(child_base + j * 4);
 
         if (v7)
         {
@@ -3349,6 +3389,97 @@ int vm_gifDecode(int gifBufferPtr, int resultPtr)
     return vm_set_call_result(resultPtr);
 }
 
+static u32 vm_png_crc32(const u8 *data, u32 len)
+{
+    u32 crc = 0xffffffffu;
+    for (u32 i = 0; i < len; ++i)
+    {
+        crc ^= data[i];
+        for (u32 bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static u32 vm_png_read_be32(const u8 *p)
+{
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+static void vm_png_write_be32(u8 *p, u32 value)
+{
+    p[0] = (u8)(value >> 24);
+    p[1] = (u8)(value >> 16);
+    p[2] = (u8)(value >> 8);
+    p[3] = (u8)value;
+}
+
+/* Mobile Rainbow PNGGAME keeps normal PNG chunks except PLTE: the chunk's
+ * declared length remains RGB888-sized while its payload contains one
+ * big-endian RGB565 word per palette entry. */
+static u8 *vm_png_normalize_firmware_palette(const u8 *src, u32 srcSize, u32 *outSize)
+{
+    static const u8 firmwareSignature[8] = {0x89, 'P', 'N', 'G', 'G', 'A', 'M', 'E'};
+    static const u8 pngSignature[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    if (srcSize < 8 || memcmp(src, firmwareSignature, 8) != 0)
+        return NULL;
+
+    u32 capacity = srcSize + 1024;
+    u8 *dst = (u8 *)SDL_malloc(capacity);
+    if (!dst)
+        return NULL;
+    memcpy(dst, pngSignature, 8);
+
+    u32 srcPos = 8;
+    u32 dstPos = 8;
+    while (srcPos + 8 <= srcSize)
+    {
+        u32 declaredLen = vm_png_read_be32(src + srcPos);
+        const u8 *type = src + srcPos + 4;
+        bool isPalette = memcmp(type, "PLTE", 4) == 0;
+        u32 sourcePayloadLen = isPalette ? (declaredLen / 3) * 2 : declaredLen;
+        if (srcPos + 8 + sourcePayloadLen + 4 > srcSize ||
+            dstPos + 12 + declaredLen > capacity)
+        {
+            SDL_free(dst);
+            return NULL;
+        }
+
+        vm_png_write_be32(dst + dstPos, declaredLen);
+        memcpy(dst + dstPos + 4, type, 4);
+        if (isPalette)
+        {
+            u32 colors = declaredLen / 3;
+            const u8 *encoded = src + srcPos + 8;
+            u8 *expanded = dst + dstPos + 8;
+            for (u32 i = 0; i < colors; ++i)
+            {
+                u16 rgb565 = ((u16)encoded[i * 2] << 8) | encoded[i * 2 + 1];
+                u8 r5 = (u8)((rgb565 >> 11) & 0x1f);
+                u8 g6 = (u8)((rgb565 >> 5) & 0x3f);
+                u8 b5 = (u8)(rgb565 & 0x1f);
+                expanded[i * 3] = (u8)((r5 << 3) | (r5 >> 2));
+                expanded[i * 3 + 1] = (u8)((g6 << 2) | (g6 >> 4));
+                expanded[i * 3 + 2] = (u8)((b5 << 3) | (b5 >> 2));
+            }
+            u32 crc = vm_png_crc32(dst + dstPos + 4, 4 + declaredLen);
+            vm_png_write_be32(dst + dstPos + 8 + declaredLen, crc);
+        }
+        else
+        {
+            memcpy(dst + dstPos + 8, src + srcPos + 8, declaredLen + 4);
+        }
+
+        srcPos += 8 + sourcePayloadLen + 4;
+        dstPos += 12 + declaredLen;
+        if (memcmp(type, "IEND", 4) == 0)
+            break;
+    }
+
+    *outSize = dstPos;
+    return dst;
+}
+
 int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
 {
     u8 hdr[8];
@@ -3371,8 +3502,16 @@ int vm_pngDecodeStart(int pngBufferPtr, int resultPtr)
     }
     uc_mem_read(MTK, pngBufferPtr + 8, pngData, pngSize);
 
+    u32 decodeSize = pngSize;
+    u8 *normalized = vm_png_normalize_firmware_palette(pngData, pngSize, &decodeSize);
+    if (normalized)
+    {
+        SDL_free(pngData);
+        pngData = normalized;
+    }
+
     int w = 0, h = 0, comp = 0;
-    u8 *rgba = stbi_load_from_memory(pngData, (int)pngSize, &w, &h, &comp, 4);
+    u8 *rgba = stbi_load_from_memory(pngData, (int)decodeSize, &w, &h, &comp, 4);
     SDL_free(pngData);
     if (!rgba)
     {
@@ -3517,9 +3656,10 @@ static u32 vm_IMG_ensureDataPackage(u32 *slot)
 {
     if (*slot == 0)
     {
-        *slot = vm_malloc(108);
+        u32 packageSize = vm_df_package_struct_size();
+        *slot = vm_malloc(packageSize);
         if (*slot)
-            uc_mem_write(MTK, *slot, emptyBuff, 108);
+            uc_mem_write(MTK, *slot, emptyBuff, packageSize);
     }
     return *slot;
 }
@@ -3609,7 +3749,8 @@ u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage)
 
     u8 loadedFromFile = 0;
     u32 data = 0;
-    uc_mem_read(MTK, dataPackage + 84, &loadedFromFile, 1);
+    if (!vm_uses_be_fixed_df_layout())
+        uc_mem_read(MTK, dataPackage + 84, &loadedFromFile, 1);
     if (loadedFromFile)
     {
         data = vm_DF_DataPackage_DoReadData(dataPackage, imageId);
@@ -3653,12 +3794,13 @@ u32 vm_IMG_CreateImageFormResForVm(u32 imageId, u32 outImage)
 void vm_IMG_CreateImageFormRes(u32 a1)
 {
     u32 tmp1 = 0;
-    u32 tmp2;
+    u32 tmp2 = 0;
     u32 DataPackage = vm_DF_GetDataPackage();
     u32 Data;
     if (DataPackage)
     {
-        uc_mem_read(MTK, DataPackage + 84, &tmp2, 1);
+        if (!vm_uses_be_fixed_df_layout())
+            uc_mem_read(MTK, DataPackage + 84, &tmp2, 1);
         if (tmp2)
         {
             Data = vm_DF_DataPackage_DoReadData(DataPackage, a1);

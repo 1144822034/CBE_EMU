@@ -415,6 +415,15 @@ static bool vm_address_in_range(u32 address, u32 begin, u32 size)
 
 static bool vm_is_manager_func_stub_address(u32 address)
 {
+    if (vm_address_in_range(address, VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS,
+                            VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT * 4))
+        return true;
+    if (vm_address_in_range(address, VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS,
+                            VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT * 4))
+        return true;
+    if (vm_address_in_range(address, VM_FIXED_BASE_MANAGER_INIT_ADDRESS,
+                            VM_FIXED_BASE_MANAGER_INIT_COUNT * 4))
+        return true;
     if (vm_address_in_range(address, VM_MANAGER_FUNC_LIST_ADDRESS, VM_VIDEO_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_MANAGER_FUNC_LIST_ADDRESS))
         return true;
     if (vm_address_in_range(address, VM_DL_PAY_FUNC_LIST_ADDRESS, VM_DL_IMAGE_FUNC_LIST_ADDRESS + VM_MANAGER_FUNC_LIST_SIZE - VM_DL_PAY_FUNC_LIST_ADDRESS))
@@ -1267,6 +1276,7 @@ static u32 g_nativeAppInitEntry = 0;
 static u32 g_nativeAppParserEntry = 0;
 static u32 g_nativeSystemInfoPtr = 0;
 static u32 g_nativePropertyInfoPtr = 0;
+static u32 g_nativeDispatchTraceCount = 0;
 
 static void normalize_program_exit_pc(u32 fallbackPc)
 {
@@ -5110,8 +5120,8 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
             u32 battleHp = 0;
             u32 battleHpMax = 0;
             uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId));
-            uc_mem_read(MTK, node + 0x00, &x, sizeof(x));
-            uc_mem_read(MTK, node + 0x02, &y, sizeof(y));
+            uc_mem_read(MTK, node + 0x18, &x, sizeof(x));
+            uc_mem_read(MTK, node + 0x1A, &y, sizeof(y));
             uc_mem_read(MTK, node + 0x44, &labelPtr, sizeof(labelPtr));
             uc_mem_read(MTK, node + 0x13B, &nodeKind, sizeof(nodeKind));
             uc_mem_read(MTK, node + 0x13C, &promptKind, sizeof(promptKind));
@@ -5625,6 +5635,78 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
+static char g_cbeLoadPathUtf8[260] = LOAD_CBE_PATH;
+
+static void vm_cbe_init_config(int argc, char *args[])
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(args[i], "--cbe=", 6) == 0 && args[i][6] != 0)
+        {
+            snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", args[i] + 6);
+        }
+    }
+    printf("[info][cbe] selected=%s\n", g_cbeLoadPathUtf8);
+}
+
+static bool vm_cbe_uses_fixed_base_manager_abi(void)
+{
+    /* Older fixed-base images reserve manager-copy space after the actual
+     * code.  Newer images map code exactly and call a single native dispatcher. */
+    return g_cbeInfo.isBiggianProgram && g_cbeInfo.headerInt1 != 0 &&
+           g_cbeInfo.headerInt2 > g_cbeInfo.codeLen;
+}
+
+typedef struct
+{
+    u32 directoryOffset;
+    u32 funcBase;
+    u32 funcCount;
+    const char *name;
+} vm_fixed_base_manager_spec;
+
+/* Mobile Rainbow firmware exposes manager initializers in a sparse directory.
+ * A fixed-base CBE calls the initializer, passing its own destination table in
+ * R0.  The table lengths below come from the copy sizes in the CBE loader. */
+static const vm_fixed_base_manager_spec g_fixedBaseManagerSpecs[] = {
+    {0x00, VM_MANAGER_FILEIO_FUNC_LIST_ADDRESS, 0x60 / 4, "fileio"},
+    {0x08, VM_MANAGER_LCD_FUNC_LIST_ADDRESS, 0xfc / 4, "lcd"},
+    {0x10, VM_MANAGER_TIMER_FUNC_LIST_ADDRESS, 0x18 / 4, "timer"},
+    {0x18, VM_MANAGER_CTRL_FUNC_LIST_ADDRESS, 0x3c / 4, "ctrl"},
+    {0x20, VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS, 0x48 / 4, "memory"},
+    {0x28, VM_MANAGER_BILLING_FUNC_LIST_ADDRESS, 0x40 / 4, "billing"},
+    {0x30, VM_MANAGER_SCREEN_FUNC_LIST_ADDRESS, 0x2c / 4, "screen"},
+    {0x38, VM_MANAGER_NETWORK_FUNC_LIST_ADDRESS, 0x1c / 4, "network"},
+    {0x40, VM_MANAGER_UCS2_FUNC_LIST_ADDRESS, 0x30 / 4, "ucs2"},
+    {0x48, VM_SYS_MANAGER_FUNC_LIST_ADDRESS, 0x6c / 4, "sys"},
+    {0x50, VM_MANAGER_DF_SCRIPT_FUNC_LIST_ADDRESS, 0x58 / 4, "df-script"},
+    {0x58, VM_MANAGER_GAME_LCD_FUNC_LIST_ADDRESS, 0xa0 / 4, "game-lcd"},
+    {0x60, VM_MANAGER_GAME_UTIL_FUNC_LIST_ADDRESS, 0xa0 / 4, "gameutil"},
+    {0x68, VM_MANAGER_DF_ENGINE_FUNC_LIST_ADDRESS, 0x3c / 4, "df-engine"},
+    {0x70, VM_MANAGER_NETAPP_FUNC_LIST_ADDRESS, 0xf0 / 4, "netapp"},
+    {0x78, VM_MANAGER_AUDIO_FUNC_LIST_ADDRESS, 0x24 / 4, "audio"},
+    {0x80, VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS, 0x27c / 4, "gameold"},
+    {0x8c, VM_MANAGER_SENSOR_FUNC_LIST_ADDRESS, 0x1c / 4, "sensor"},
+};
+
+static void vm_init_fixed_base_manager_directory(void)
+{
+    if (!vm_cbe_uses_fixed_base_manager_abi())
+        return;
+
+    uc_mem_write(MTK, VM_NATIVE_MANAGER_DIRECTORY_ADDRESS, emptyBuff, 0x100);
+    for (u32 i = 0; i < sizeof(g_fixedBaseManagerSpecs) / sizeof(g_fixedBaseManagerSpecs[0]); ++i)
+        vm_set_var(VM_NATIVE_MANAGER_DIRECTORY_ADDRESS + g_fixedBaseManagerSpecs[i].directoryOffset,
+                   VM_FIXED_BASE_MANAGER_INIT_ADDRESS + i * 4);
+
+    vm_set_var(VM_Manager_Table_ADDRESS + 8, VM_NATIVE_MANAGER_DIRECTORY_ADDRESS);
+    vm_set_var(VM_Manager_Table_ADDRESS + 12, VM_LOG_NOOP_ADDRESS);
+    vm_set_var(VM_Manager_Table_ADDRESS + 16, VM_CURR_APP_INFO_ADDRESS);
+    printf("[info][cbe] manager_abi=fixed-base-big registry=%08x directory=%08x\n",
+           VM_Manager_Table_ADDRESS,
+           VM_NATIVE_MANAGER_DIRECTORY_ADDRESS);
+}
+
 
 static int vm_ascii_stricmp(const char *a, const char *b)
 {
@@ -5767,6 +5849,7 @@ static void vm_reset_runtime_state_for_restart(void)
     g_nativeAppParserEntry = 0;
     g_nativeSystemInfoPtr = 0;
     g_nativePropertyInfoPtr = 0;
+    g_nativeDispatchTraceCount = 0;
     g_vm_img_app_data_package = 0;
     g_vm_img_inner_data_package = 0;
     g_vm_img_current_data_package = 0;
@@ -5778,6 +5861,7 @@ static void vm_reset_runtime_state_for_restart(void)
     changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
     vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3);
     vm_initManagerTable();
+    vm_init_fixed_base_manager_directory();
 
     Global_R9 = Program_Data_Address;
     uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9);
@@ -6486,8 +6570,7 @@ void RunArmProgram(void *param)
     vm_lcd_init_screen_image_struct();
     // DF_DataPackage_SetFullPaths()
     // 当前运行的文件名
-    char nameBuff[64] = LOAD_CBE_PATH;
-    utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
+    utf8_to_gbk(g_cbeLoadPathUtf8, cbeTextString, mySizeOf(cbeTextString));
     uc_mem_write(MTK, VM_DF_DataPackage_FilePath_ADDRESS, cbeTextString, 64);
     // DF_DataPackage_SetFileLens();
     vm_set_var(VM_DF_DataPackage_In_File_Length_ADDRESS, g_cbeInfo.DF_DataPacakge_Size);
@@ -6496,14 +6579,16 @@ void RunArmProgram(void *param)
     changeTmp1 = 1;
     uc_mem_write(MTK, VM_DF_DataPackage_LoadType_ADDRESS, &changeTmp1, 1);
     // 第一次入口初始化
-    changeTmp1 = g_cbeInfo.headerInt1 ? (VM_NATIVE_DISPATCH_ADDRESS | 1) : VM_Manager_Table_ADDRESS;
+    changeTmp1 = (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+                     ? (VM_NATIVE_DISPATCH_ADDRESS | 1)
+                     : VM_Manager_Table_ADDRESS;
     uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1); // 传入Manager函数表指针地址
 
     u32 exitAddr = PROGRAM_EXIT_ADDR;
     u32 thumbExitAddr = PROGRAM_EXIT_ADDR | 1;
     uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
     p = vm_emu_start(startAddr + 1, exitAddr);        // thumb模式
-    if (p == UC_ERR_OK && !g_cbeInfo.headerInt1)
+    if (p == UC_ERR_OK && (!g_cbeInfo.headerInt1 || vm_cbe_uses_fixed_base_manager_abi()))
     {
         g_appMainEntry = vm_get_var(VM_Manager_Table_ADDRESS);
         g_appExitEntry = vm_get_var(VM_Manager_Table_ADDRESS + 4);
@@ -6511,14 +6596,22 @@ void RunArmProgram(void *param)
         vm_autotest_note("app_entries main=%08x exit=%08x\n", g_appMainEntry, g_appExitEntry);
     }
 
-    if (p == UC_ERR_OK && g_cbeInfo.headerInt1)
+    if (p == UC_ERR_OK && g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
     {
+        /* The native logic callback performs a one-shot interface bootstrap on
+         * its first invocation and deliberately returns before game logic. */
+        if (g_nativeAppParserEntry)
+        {
+            uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
+            p = vm_emu_start(g_nativeAppParserEntry, exitAddr);
+        }
         if (g_nativeAppInitEntry)
         {
             changeTmp1 = 0;
             uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1);
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-            p = vm_emu_start(g_nativeAppInitEntry, exitAddr);
+            if (p == UC_ERR_OK)
+                p = vm_emu_start(g_nativeAppInitEntry, exitAddr);
         }
         while (p == UC_ERR_OK)
         {
@@ -7060,6 +7153,7 @@ int main(int argc, char *args[])
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    vm_cbe_init_config(argc, args);
     vm_autotest_init(argc, args);
     vm_mock_service_init_config(argc, args);
     if (!g_mockServiceOnly)
@@ -7098,8 +7192,7 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
-    char nameBuff[64] = LOAD_CBE_PATH;
-    utf8_to_gbk(nameBuff, cbeTextString, mySizeOf(cbeTextString));
+    utf8_to_gbk(g_cbeLoadPathUtf8, cbeTextString, mySizeOf(cbeTextString));
     if (!vm_host_file_exists((char *)cbeTextString))
     {
         char altPath[128];
@@ -7196,6 +7289,7 @@ int main(int argc, char *args[])
         vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3); // vcurAppFileName全局变量地址
 
         vm_initManagerTable();
+        vm_init_fixed_base_manager_directory();
 
         Global_R9 = Program_Data_Address;
         uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9); // r9写入数据段地址
@@ -7206,7 +7300,7 @@ int main(int argc, char *args[])
         if (g_mockServiceOnly)
         {
             printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u\n",
-                   LOAD_CBE_PATH, Program_ROM_Address, Program_Data_Address, g_mockServicePort);
+                    g_cbeLoadPathUtf8, Program_ROM_Address, Program_Data_Address, g_mockServicePort);
             vm_net_mock_service_run_forever(g_mockServiceBindHost, g_mockServicePort);
             return 0;
         }
@@ -7609,6 +7703,16 @@ static bool hook_vm_native_dispatch_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R1, &arg);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
 
+    if (g_nativeDispatchTraceCount < 96)
+    {
+        u32 r2 = 0;
+        u32 r3 = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        printf("[trace][native-dispatch] n=%u id=%x arg=%x r2=%x r3=%x lr=%x\n",
+               g_nativeDispatchTraceCount++, id, arg, r2, r3, lr);
+    }
+
     if ((id >= Program_ROM_Address && id < Program_ROM_Address + Program_ROM_Mapped_Size) ||
         (id >= Program_Data_Address && id < Program_Data_Address + g_cbeInfo.headerInt4) ||
         (id >= VM_Memory_Pool_ADDRESS && id < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE))
@@ -7619,8 +7723,10 @@ static bool hook_vm_native_dispatch_func(u32 address)
     {
         if (arg)
         {
-            g_nativeAppInitEntry = vm_get_var(arg);
-            g_nativeAppParserEntry = vm_get_var(arg + 4);
+            /* Native ABI registers {logic, init, dispatcher}.  The second
+             * callback runs once; the first callback is consumed per tick. */
+            g_nativeAppParserEntry = vm_get_var(arg);
+            g_nativeAppInitEntry = vm_get_var(arg + 4);
             vm_set_var(arg + 8, VM_NATIVE_DISPATCH_ADDRESS | 1);
         }
         vm_set_call_result(VM_NATIVE_DISPATCH_ADDRESS | 1);
@@ -7664,6 +7770,14 @@ static bool hook_vm_native_dispatch_func(u32 address)
         }
         vm_set_call_result(0);
     }
+    else if (id == 0x41a)
+    {
+        printf("[trace][native-dispatch] service=41a a0=%x a1=%x a2=%x\n",
+               arg ? vm_get_var(arg) : 0,
+               arg ? vm_get_var(arg + 4) : 0,
+               arg ? vm_get_var(arg + 8) : 0);
+        vm_set_call_result(id);
+    }
     else if (id == 0x7d1)
     {
         if (arg)
@@ -7683,6 +7797,43 @@ static bool hook_vm_native_dispatch_func(u32 address)
                         g_nativeSystemInfoPtr = vm_malloc(0x400);
                         for (u32 off = 0; off < 0x400; off += sizeof(emptyBuff))
                             uc_mem_write(MTK, g_nativeSystemInfoPtr + off, emptyBuff, sizeof(emptyBuff));
+                        /* Native SystemInfo embeds service tables.  The linked
+                         * compatibility layer uses these three slots during its
+                         * first real logic tick. */
+                        vm_set_var(g_nativeSystemInfoPtr + 0x9c,
+                                   VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 13 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xa0,
+                                   VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 14 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x24,
+                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 9 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x58,
+                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 19 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x70,
+                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x74,
+                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x78,
+                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 6 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x20c,
+                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x210,
+                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 1 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x214,
+                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 2 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0x22c,
+                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 8 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xa4,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 2 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xa8,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 1 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xac,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xb0,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 3 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xb4,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 4 * 4);
+                        vm_set_var(g_nativeSystemInfoPtr + 0xb8,
+                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 5 * 4);
                         vm_set_var(g_nativeSystemInfoPtr + 0xf0, VM_NATIVE_DISPATCH_ADDRESS | 1);
                     }
                     vm_set_var(outPtr, g_nativeSystemInfoPtr);
@@ -7697,6 +7848,13 @@ static bool hook_vm_native_dispatch_func(u32 address)
                     }
                     vm_set_var(outPtr, g_nativePropertyInfoPtr);
                 }
+                else if (handle == 0x41a && size >= 4)
+                {
+                    /* Native file-open result.  The sample asks for the
+                     * optional external update file upinfo3.dat; absent files
+                     * are reported with a negative handle. */
+                    vm_set_var(outPtr, 0xffffffffu);
+                }
             }
         }
         vm_set_call_result(0);
@@ -7709,6 +7867,182 @@ static bool hook_vm_native_dispatch_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
         printf("[impl]native dispatcher id:%x arg:%x r2:%x r3:%x lr:%x\n", id, arg, r2, r3, lr);
         assert(0);
+    }
+
+    vm_bx(lr);
+    return true;
+}
+
+static bool hook_vm_fixed_base_manager_init_func(u32 address)
+{
+    u32 end = VM_FIXED_BASE_MANAGER_INIT_ADDRESS + VM_FIXED_BASE_MANAGER_INIT_COUNT * 4;
+    if (address < VM_FIXED_BASE_MANAGER_INIT_ADDRESS || address >= end)
+        return false;
+
+    u32 idx = (address - VM_FIXED_BASE_MANAGER_INIT_ADDRESS) / 4;
+    if (idx >= sizeof(g_fixedBaseManagerSpecs) / sizeof(g_fixedBaseManagerSpecs[0]))
+        return false;
+
+    u32 table = 0;
+    u32 lr = 0;
+    const vm_fixed_base_manager_spec *spec = &g_fixedBaseManagerSpecs[idx];
+    uc_reg_read(MTK, UC_ARM_REG_R0, &table);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    vm_configManagerTableCount(table, spec->funcBase, spec->funcCount);
+    printf("[info][cbe] manager_init name=%s table=%08x funcs=%u\n",
+           spec->name, table, spec->funcCount);
+    vm_set_call_result(table);
+    vm_bx(lr);
+    return true;
+}
+
+static bool hook_vm_native_system_time_func(u32 address)
+{
+    u32 end = VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + VM_NATIVE_SYSTEM_TIME_FUNC_COUNT * 4;
+    if (address < VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS || address >= end)
+        return false;
+
+    u32 idx = (address - VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS) / 4;
+    time_t now = time(NULL);
+    struct tm localTime;
+#ifdef _WIN32
+    localtime_s(&localTime, &now);
+#else
+    localtime_r(&now, &localTime);
+#endif
+    u32 value = 0;
+    if (idx == 0)
+        value = (u32)localTime.tm_year + 1900;
+    else if (idx == 1)
+        value = (u32)localTime.tm_mon + 1;
+    else if (idx == 2)
+        value = (u32)localTime.tm_mday;
+    else if (idx == 3)
+        value = (u32)localTime.tm_hour;
+    else if (idx == 4)
+        value = (u32)localTime.tm_min;
+    else if (idx == 5)
+        value = (u32)localTime.tm_sec;
+    vm_set_call_result(value);
+
+    u32 lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    vm_bx(lr);
+    return true;
+}
+
+/* Mobile Rainbow firmware 0x001F4552 creates a small picture-library object.
+ * The fixed-base CBE currently uses its +0x28 method as a six-argument
+ * rectangle fill primitive.  Keep the remaining method entries callable so
+ * later fixed-base games fail softly while their exact contracts are added. */
+static bool hook_vm_fixed_base_gameold_object_func(u32 address)
+{
+    u32 end = VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS +
+              VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT * 4;
+    if (address < VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS || address >= end)
+        return false;
+
+    u32 idx = (address - VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS) / 4;
+    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, sp = 0, lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+
+    if (idx == 4)
+    {
+        int x = (int)(int16_t)(r1 & 0xffff);
+        int y = (int)(int16_t)(r2 & 0xffff);
+        int width = (int)(int16_t)(r3 & 0xffff);
+        int height = (int)(int16_t)(vm_get_var(sp) & 0xffff);
+        u16 color = (u16)(vm_get_var(sp + 4) & 0xffff);
+        if (width > 0 && height > 0)
+        {
+            vm_lcd_fill_rect_local(x, y, width, height, color);
+            vm_lcd_sync_cache_rect_to_vm(x, y, width, height);
+        }
+        vm_set_call_result(0);
+    }
+    else
+    {
+        printf("[warn][cbe] fixed_gameold_picture_method idx=%u "
+               "r0=%08x r1=%08x r2=%08x r3=%08x\n",
+               idx, r0, r1, r2, r3);
+        vm_set_call_result(0);
+    }
+
+    vm_bx(lr);
+    return true;
+}
+
+/* Region-set methods installed by Mobile Rainbow sub_1F688A. Rendering in the
+ * emulator is immediate, but maintaining the guest-visible list/count keeps
+ * the CBE's update and traversal decisions consistent with the firmware. */
+static bool hook_vm_fixed_base_gameold_region_func(u32 address)
+{
+    u32 end = VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS +
+              VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT * 4;
+    if (address < VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS || address >= end)
+        return false;
+
+    u32 idx = (address - VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS) / 4;
+    u32 r0 = 0, r1 = 0, r2 = 0, lr = 0;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+
+    if (idx == 0)
+    {
+        /* sub_1F6866: attach one of the two linked region sets. */
+        if (r2 == 0)
+            vm_set_var(r0 + 0x20, r1);
+        else if (r2 == 1)
+            vm_set_var(r0 + 0x24, r1);
+        vm_set_call_result(r0);
+    }
+    else if (idx == 4)
+    {
+        /* sub_1F67FE flushes accumulated rectangles. Host drawing is already
+         * immediate, so only reset the guest-visible used count. */
+        vm_set_var(r0 + 0x04, 0);
+        vm_set_call_result(0);
+    }
+    else if (idx == 5)
+    {
+        /* sub_1F6690 mode 2/4 appends a clipped x/y/w/h rectangle. */
+        u32 used = vm_get_var(r0 + 0x04);
+        u32 capacity = vm_get_var(r0 + 0x08);
+        u32 entries = vm_get_var(r0 + 0x0c);
+        if (r2 && entries && used < capacity)
+        {
+            int x = (int)(int16_t)vm_get_var_short(r2 + 0);
+            int y = (int)(int16_t)vm_get_var_short(r2 + 2);
+            int w = (int)(int16_t)vm_get_var_short(r2 + 4);
+            int h = (int)(int16_t)vm_get_var_short(r2 + 6);
+            if (x < 0) { w += x; x = 0; }
+            if (y < 0) { h += y; y = 0; }
+            if (x + w > LCD_WIDTH) w = LCD_WIDTH - x;
+            if (y + h > LCD_HEIGHT) h = LCD_HEIGHT - y;
+            if (w < 0) w = 0;
+            if (h < 0) h = 0;
+            u32 dst = vm_get_var(entries + used * 4);
+            if (dst)
+            {
+                vm_set_var_short(dst + 0, (u16)x);
+                vm_set_var_short(dst + 2, (u16)y);
+                vm_set_var_short(dst + 4, (u16)w);
+                vm_set_var_short(dst + 6, (u16)h);
+                vm_set_var(r0 + 0x04, used + 1);
+            }
+        }
+        vm_set_call_result(vm_get_var(r0 + 0x04));
+    }
+    else
+    {
+        vm_set_call_result(0);
     }
 
     vm_bx(lr);
@@ -9677,12 +10011,22 @@ static bool hook_vm_manager_fileio_func(u32 address)
     }
     else if (idx == 14)
     {
-        printf("[call]cbfs_vm_find_first\n");
+        u32 lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        printf("[call]cbfs_vm_find_first r0=%08x r1=%08x r2=%08x lr=%08x\n", tmp1, tmp2, tmp3, lr);
         assert(0);
     }
     else if (idx == 15)
     {
-        printf("[call]cbfs_vm_find_next\n");
+        u32 lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        printf("[call]cbfs_vm_find_next r0=%08x r1=%08x r2=%08x lr=%08x\n", tmp1, tmp2, tmp3, lr);
         assert(0);
     }
     else if (idx == 16)
@@ -11543,7 +11887,14 @@ static bool hook_vm_manager_netapp_func(u32 address)
     }
     else
     {
-        printf("[impl]vmNetAppManager调用位置:%d\n", idx);
+        u32 lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        printf("[impl]vmNetAppManager idx=%u r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
+               idx, tmp1, tmp2, tmp3, tmp4, lr);
         assert(0);
     }
     // bx lr实现
@@ -11822,6 +12173,26 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         vm_IMG_CreateImageFormRes(tmp1);
     }
+    else if ((idx == 2 || idx == 3) && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_424D8/sub_425C4: draw an image region to the
+         * implicit screen buffer. Slot 2 uses the transparent-pixel path. */
+        u32 sp = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); /* image */
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); /* source x */
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); /* source y */
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4); /* width */
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        int height = (int)(int16_t)(vm_get_var(sp) & 0xffff);
+        int dstX = (int)(int16_t)(vm_get_var(sp + 4) & 0xffff);
+        int dstY = (int)(int16_t)(vm_get_var(sp + 8) & 0xffff);
+        vm_lcd_call_draw_image_clip_ex(tmp1,
+                                       (int)(int16_t)(tmp2 & 0xffff),
+                                       (int)(int16_t)(tmp3 & 0xffff),
+                                       (int)(int16_t)(tmp4 & 0xffff),
+                                       height, dstX, dstY, idx == 3);
+        vm_set_call_result(0);
+    }
     else if (idx == 11)
     {
         printf("[call]IMG_Destory\n");
@@ -11842,6 +12213,41 @@ static bool hook_vm_manager_gameold_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         tmp2 = (g_curKeyState & tmp1) != 0;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
+    }
+    else if (idx == 15 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_422EE stores x/y and x+w/y+h as the active
+         * drawing clip. Host rendering already clips against the LCD bounds. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        printf("[info][cbe] gameold_clip_rect x=%d y=%d w=%d h=%d\n",
+               (int)tmp1, (int)tmp2, (int)tmp3, (int)tmp4);
+        vm_set_call_result(tmp2 + tmp4);
+    }
+    else if (idx == 16 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_4213C: image height. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_set_call_result(tmp1 ? vm_get_var_short(tmp1 + 6) : 0);
+    }
+    else if (idx == 17 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_42148: image width. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_set_call_result(tmp1 ? vm_get_var_short(tmp1 + 4) : 0);
+    }
+    else if (idx == 18 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_4216A is RGB888 -> RGB565 conversion only. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        u16 color = (u16)(((tmp1 & 0xf8) << 8) |
+                          ((tmp2 & 0xfc) << 3) |
+                          ((tmp3 & 0xf8) >> 3));
+        vm_set_call_result(color);
     }
     else if (idx == 24)
     {
@@ -11966,6 +12372,82 @@ static bool hook_vm_manager_gameold_func(u32 address)
     else if (idx == 69)
     {
         vm_set_call_result(g_curKeyDownState);
+    }
+    else if (idx == 76 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_1F4552: initialize the picture-library object.
+         * It allocates a 240-pixel scanline, a resource-id array, and a
+         * picture-pointer array, then installs methods at +0x18..+0x50. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        u32 count = tmp2 & 0xffff;
+        u32 scanline = vm_malloc(240 * 2);
+        u32 resourceIds = vm_malloc(count * 2);
+        u32 pictures = vm_malloc(count * 4);
+        if (scanline)
+            vm_try_write_zero(scanline, 240 * 2);
+        if (resourceIds)
+            vm_try_write_zero(resourceIds, count * 2);
+        if (pictures)
+            vm_try_write_zero(pictures, count * 4);
+        vm_set_var(tmp1 + 0x00, scanline);
+        vm_set_var_short(tmp1 + 0x08, (u16)count);
+        vm_set_var(tmp1 + 0x0c, resourceIds);
+        vm_set_var(tmp1 + 0x10, pictures);
+        vm_set_var_short(tmp1 + 0x14, 0);
+        for (u32 method = 0; method < VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT; ++method)
+            vm_set_var(tmp1 + 0x18 + method * 4,
+                       VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS + method * 4);
+        printf("[info][cbe] gameold_picture_init context=%08x capacity=%u "
+               "scanline=%08x ids=%08x pictures=%08x\n",
+               tmp1, count, scanline, resourceIds, pictures);
+        vm_set_call_result(scanline && resourceIds && pictures ? 1 : 0);
+    }
+
+    else if (idx == 80 && vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Mobile Rainbow sub_1F688A: initialize a clipped region set. */
+        u32 sp = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); /* object */
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); /* packed x/y */
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); /* packed w/h */
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4); /* owner A */
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        u32 ownerB = vm_get_var(sp);
+        u32 capacity = vm_get_var(sp + 4);
+        u32 entries = capacity ? vm_malloc(capacity * 4) : 0;
+        if (entries)
+            vm_try_write_zero(entries, capacity * 4);
+        for (u32 i = 0; i < capacity && entries; ++i)
+        {
+            u32 rect = vm_malloc(8);
+            if (rect)
+                vm_try_write_zero(rect, 8);
+            vm_set_var(entries + i * 4, rect);
+        }
+        vm_set_var(tmp1 + 0x04, 0);
+        vm_set_var(tmp1 + 0x08, capacity);
+        vm_set_var(tmp1 + 0x0c, entries);
+        vm_set_var(tmp1 + 0x10, tmp4);
+        vm_set_var(tmp1 + 0x14, ownerB);
+        vm_set_var(tmp1 + 0x18, tmp2);
+        vm_set_var(tmp1 + 0x1c, tmp3);
+        vm_set_var(tmp1 + 0x20, 0);
+        vm_set_var(tmp1 + 0x24, 0);
+        for (u32 method = 0; method < VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT; ++method)
+            vm_set_var(tmp1 + 0x28 + method * 4,
+                       VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS + method * 4);
+        if (entries && capacity)
+        {
+            u32 first = vm_get_var(entries);
+            vm_set_var(first + 0, tmp2);
+            vm_set_var(first + 4, tmp3);
+            vm_set_var(tmp1 + 0x04, 1);
+        }
+        printf("[info][cbe] gameold_region_init context=%08x capacity=%u "
+               "bounds=%08x/%08x entries=%08x\n",
+               tmp1, capacity, tmp2, tmp3, entries);
+        vm_set_call_result(entries ? 1 : 0);
     }
 
     else if (idx == 81)
@@ -12348,7 +12830,14 @@ static bool hook_vm_manager_gameold_func(u32 address)
     }
     else
     {
-        printf("[impl]vmGameOldManager调用位置:%d\n", idx);
+        u32 lr = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        printf("[impl]vmGameOldManager idx=%u r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n",
+               idx, tmp1, tmp2, tmp3, tmp4, lr);
         assert(0);
     }
     // bx lr实现
@@ -12382,19 +12871,24 @@ static bool hook_vm_df_datapackage_func(u32 address)
     }
     else if (idx == 3)
     {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        vm_DF_DataPackage_LoadFromTResource(tmp1, tmp2);
         printf("[call]DF_DataPackage_LoadFromTResource\n");
-        assert(0);
     }
     else if (idx == 4)
     {
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        vm_DF_DataPackage_LoadFormTCard(tmp1);
         printf("[call]DF_DataPackage_LoadFormTCard\n");
-        assert(0);
     }
     else if (idx == 5)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        printf("[info][cbe] df_do_loading package=%08x source=%08x mode=%u\n",
+               tmp1, tmp2, tmp3);
         VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
         printf("[call]DF_DataPackage_DoLoading\n");
     }
@@ -12442,8 +12936,17 @@ static bool hook_vm_df_datapackage_func(u32 address)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
-        vm_DF_DataPackage_InitTxt(tmp1, tmp2);
-        printf("[call]DF_DataPackage_InitTxt\n");
+        if (vm_cbe_uses_fixed_base_manager_abi())
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+            vm_DF_DataPackage_LoadFormTCardEx(tmp1, tmp2, tmp3);
+            printf("[call]DF_DataPackage_LoadFormTCardEx\n");
+        }
+        else
+        {
+            vm_DF_DataPackage_InitTxt(tmp1, tmp2);
+            printf("[call]DF_DataPackage_InitTxt\n");
+        }
     }
 
     else
@@ -13130,6 +13633,30 @@ static void hook_vm_native_dispatch_code_callback(uc_engine *uc, uint64_t addres
     lastAddress = (u32)address;
 }
 
+static void hook_vm_native_system_time_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_native_system_time_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_fixed_base_manager_init_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_fixed_base_manager_init_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_fixed_base_gameold_object_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_fixed_base_gameold_object_func((u32)address);
+    lastAddress = (u32)address;
+}
+
+static void hook_vm_fixed_base_gameold_region_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
+{
+    hook_vm_fixed_base_gameold_region_func((u32)address);
+    lastAddress = (u32)address;
+}
+
 static void hook_vm_sys_manager_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     hook_vm_sys_manager_func((u32)address);
@@ -13316,7 +13843,21 @@ static uc_err add_manager_code_hooks(uc_engine *uc)
 #define ADD_MANAGER_CODE_HOOK(begin, cb) ADD_MANAGER_CODE_HOOK_RANGE(begin, begin + VM_MANAGER_FUNC_LIST_SIZE - 1, cb)
 
     ADD_MANAGER_CODE_HOOK(VM_MANAGER_FUNC_LIST_ADDRESS, hook_vm_manager_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS,
+                                VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS +
+                                    VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT * 4 - 1,
+                                hook_vm_fixed_base_gameold_region_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS,
+                                VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS +
+                                    VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT * 4 - 1,
+                                hook_vm_fixed_base_gameold_object_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_FIXED_BASE_MANAGER_INIT_ADDRESS,
+                                VM_FIXED_BASE_MANAGER_INIT_ADDRESS + VM_FIXED_BASE_MANAGER_INIT_COUNT * 4 - 1,
+                                hook_vm_fixed_base_manager_init_code_callback);
     ADD_MANAGER_CODE_HOOK_RANGE(VM_NATIVE_DISPATCH_ADDRESS, VM_NATIVE_DISPATCH_ADDRESS + 3, hook_vm_native_dispatch_code_callback);
+    ADD_MANAGER_CODE_HOOK_RANGE(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS,
+                                VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + VM_NATIVE_SYSTEM_TIME_FUNC_COUNT * 4 - 1,
+                                hook_vm_native_system_time_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_SYS_MANAGER_FUNC_LIST_ADDRESS, hook_vm_sys_manager_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS, hook_vm_memory_manager_code_callback);
     ADD_MANAGER_CODE_HOOK(VM_MANAGER_LCD_FUNC_LIST_ADDRESS, hook_vm_manager_lcd_code_callback);

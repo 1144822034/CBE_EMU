@@ -15388,14 +15388,20 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
 }
 
 static bool vm_net_mock_put_teleport_stone_scene_fields_with_result(u8 *out, u32 outCap, u32 *pos,
-                                                                    u8 resultValue,
-                                                                    const vm_net_mock_scene_change_target *target)
+                                                                     u8 resultValue,
+                                                                     const vm_net_mock_scene_change_target *target)
 {
     u8 posInfo[8];
     u32 posInfoLen = 0;
 
     if (target == NULL)
         return false;
+    /*
+     * mmGame sub_BCC reads two tagged signed i16 values unchanged and passes
+     * them to the main-business API +0x74 callback. EnterSceneByMapName and
+     * scene_runtime_init_and_sync then store/copy the same values unchanged,
+     * so this path uses the normal SCE pixel coordinate unit.
+     */
     posInfoLen = vm_net_mock_build_pos_info(posInfo, sizeof(posInfo), target->x, target->y);
     if (posInfoLen == 0)
         return false;
@@ -15798,7 +15804,6 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
                                                                   u8 *out, u32 outCap)
 {
     u32 pos = 5;
-    u32 objectStart = 0;
     u32 curId = 0;
     u32 objId = 0;
     u32 smapRow = 0;
@@ -15827,28 +15832,36 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
                          posSource ? posSource : "-");
         return 0;
     }
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 2, &objectStart))
+    /*
+     * A 16/2 fall-through calls mmGame:sub_BCC directly.  On a same-scene
+     * map transfer that leaves sceneObj+0x1B4 (parserState) at 0, so
+     * scene_runtime_init_and_sync takes case 0 and keeps the rebuilt actor at
+     * its default (50,50), even though EnterSceneByMapName saved the supplied
+     * position correctly.  The main-business 30/1 parser is the real direct
+     * scene-entry contract: JianghuOL:0x010396D6 sets parserState=7 before it
+     * calls EnterSceneByMapName, and case 7 then copies saved x/y to node+24/26.
+     */
+    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+    if (pos == 0)
         return 0;
-    if (!vm_net_mock_put_teleport_stone_scene_fields(out, outCap, &pos, 2, &target))
-        return 0;
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
 
     vm_net_mock_remember_scene_change_target(&target);
     g_vm_net_mock_teleport_stone_map_enter_pending = true;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "teleport-stone-map-target");
-    printf("[info][network] mock_teleport_stone_map_transfer curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s pos=(%u,%u) scene_source=%s pos_source=%s download=%u resp=%u\n",
+    printf("[info][network] mock_teleport_stone_map_transfer curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) wire_pos=(%u,%u) coord_scale=1 response=30/1 scene_source=%s pos_source=%s download=%u resp=%u\n",
            curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
            target.scene, target.x, target.y,
+           target.x, target.y,
            source ? source : "-", posSource ? posSource : "-",
            target.needsSceneDownload ? 1u : 0u, pos);
-    vm_autotest_note("mock_teleport_stone_map_transfer curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s pos=(%u,%u) scene_source=%s pos_source=%s download=%u evidence=xxjh:0x103573A response=16/2\n",
-                     curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
-                     target.scene, target.x, target.y,
-                     source ? source : "-", posSource ? posSource : "-",
-                     target.needsSceneDownload ? 1u : 0u);
+    vm_autotest_note("mock_teleport_stone_map_transfer curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) wire_pos=(%u,%u) coord_scale=1 response=30/1 scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010396D6(parserState=7)+0x01012FB4(case7-node+24/+26) negative=16/2-parserState0-default50\n",
+                      curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
+                      target.scene, target.x, target.y,
+                      target.x, target.y,
+                      source ? source : "-", posSource ? posSource : "-",
+                      target.needsSceneDownload ? 1u : 0u);
     return pos;
 }
 
