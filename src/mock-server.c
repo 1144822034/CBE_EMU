@@ -17385,6 +17385,7 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
     const char *sourceAccountId = g_vm_mock_service_active_account_id;
     const char *scene = vm_net_mock_current_scene_name();
+    const char *targetScope = "nearby";
     const char *reason = "invalid";
     u32 actorId = 0;
     u32 pos = 5;
@@ -17393,18 +17394,20 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
     memset(&targetSeed, 0, sizeof(targetSeed));
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_nearby_team_invite_request(request, requestLen, &actorId) ||
-        !vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+        (!vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+         (targetScope = "friend",
+          !vm_net_mock_find_friend_role_seed_by_role_id(actorId, &targetSeed))))
     {
         return 0;
     }
     if (sourceSession != NULL && sourceRole != NULL && targetSeed.session != NULL &&
         sourceSession->clientId != targetSeed.session->clientId)
     {
-        /* `actorId` is the visible scene-node id.  When two accounts use the
-         * same persistent role id, nearby seeding deliberately substitutes a
-         * client-scoped 0x6Axxxxxx id; do not compare that transport id with
-         * session->onlineRoleId after the seed resolver already proved the
-         * target is visible in this scene. */
+        /* A nearby row supplies its observer-scoped scene actor id; a friend
+         * row supplies the persistent role id and may point to another scene.
+         * Both narrow resolvers already bind the request id to an authorized
+         * online session, so do not compare the transport id with the target's
+         * persistent id again. */
         sourceTeam = vm_mock_service_team_find_for_client(sourceSession->clientId);
         if (sourceTeam != NULL && !vm_mock_service_team_is_leader(sourceTeam, sourceSession->clientId))
         {
@@ -17436,8 +17439,9 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
      * initiator.  5/1 only needs a transport ack; the real incoming 5/2 is
      * delivered to the target through its normal scene-sync poll. */
     vm_net_mock_finish_wt_packet(out, pos, 0);
-    printf("[info][network] mock_team_invite actor=%u source=%08x/%u target=%08x/%u queued=%u reason=%s resp=%u evidence=JianghuOL.CBE:0x0101BEF4+0x01011F3A(subtype2)\n",
+    printf("[info][network] mock_team_invite actor=%u scope=%s source=%08x/%u target=%08x/%u queued=%u reason=%s resp=%u evidence=JianghuOL.CBE:0x0101BEF4+0x01011F3A(subtype2)\n",
            actorId,
+           targetScope,
            sourceSession ? sourceSession->clientId : 0,
            sourceRole ? sourceRole->roleId : 0,
            targetSeed.session ? targetSeed.session->clientId : 0,
@@ -21111,14 +21115,18 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     {
         vm_mock_service_client_session *source =
             vm_mock_service_find_client_session(notice->sourceClientId);
+        vm_mock_service_team *team =
+            vm_mock_service_team_find_for_client(observer->clientId);
         u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
                                   : notice->sourceRoleId;
         int appendedObjects = notice->result == 1 ? 2 : 1;
 
-        /* Subtype 4 reports the target's answer.  On success the native
-         * incremental follow-up is subtype 5 for the newly joined member;
-         * subtype 10 is a full query/refresh and must not replace this join
-         * notification. */
+        /* Subtype 4 only reports the target's answer; it never inserts roster
+         * rows.  Friend-list invites start from an empty local roster, so a
+         * lone subtype 5 would add only the remote member and leave the local
+         * count at one.  The team UI requires a count greater than one.  Send
+         * the authoritative subtype-10 roster to the inviter, while existing
+         * third-party members continue to receive the subtype-5 delta. */
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4, &objectStart) ||
             sourceWireId == 0 ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
@@ -21131,15 +21139,17 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         if (notice->result == 1)
         {
             if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
-                !vm_net_mock_append_team_member_join_object(out, outCap, pos,
-                                                            observer, source))
+                team == NULL ||
+                !vm_net_mock_append_team_group_info_object(out, outCap, pos,
+                                                           team, observer, 10))
             {
                 return -1;
             }
         }
-        printf("[info][mock-service] team_result_deliver observer=%08x result=%u member_update=%s\n",
+        printf("[info][mock-service] team_result_deliver observer=%08x result=%u roster_update=%s members=%u\n",
                observer->clientId, notice->result,
-               notice->result == 1 ? "5/5" : "none");
+               notice->result == 1 ? "5/10-full" : "none",
+               team ? team->memberCount : 0);
         memset(notice, 0, sizeof(*notice));
         if (noticeTypeOut)
             *noticeTypeOut = noticeType;

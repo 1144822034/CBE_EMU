@@ -95,7 +95,9 @@ ida_evidence:
 
 2026-07-15 静态证据修正：成功的 `5/3` 不能只有 `result`。`net_handle_group_info(0x01011F3A)` 的 subtype 3 和 subtype 10 共用 `0x0101216A` 的全量成员解析器；subtype 3 在 `result == 1` 时从 `0x0101217E` 继续读取 `num`、`groupinfo`，循环至 `0x01012224 AddRoleToList`，并把首行 id 写成队长 id。仅返回 `5/3 { result:1 }` 属于截断的成功包，客户端不会建立完整队伍模型，表现为加入成功但没有队伍 UI。成员容器也不是由该结果包临时创建：`scene_system_bootstrap(0x01003856)` 已在 `0x01003904-0x0100390C` 调用 `AllocBufIfNull(Global_R9+0x5CF4, 0x130)`，因此正常进入场景后容器应先于邀请存在。
 
-加入时采用客户端原生的全量/增量分工：接受方的请求直回为单个完整 `5/3 { result=1, num, groupinfo }`；邀请方的下一次场景轮询依次收到 `5/4 { id, result=1, name }` 与 `5/5 { groupinfo:新成员单行 }`；已有的其他队员只收到 `5/5` 新成员行。`5/10` 仍只响应客户端主动的 `WT 5/10` 全量查询。在 `5/4` 后主动拼入完整 `5/10` 会把全量重建用于本应增量加入的时刻，因此不再使用该时序。早先把 `resp=148` 的 `0x01011E3A` 崩溃归因于全量通知时序并不准确；2026-07-15 后续 reader 数据流证明它来自 `groupinfo` 中多插入的伪 reserved 字节。
+加入时采用客户端原生的全量/增量分工：接受方的请求直回为单个完整 `5/3 { result=1, num, groupinfo }`；已有的其他队员只收到 `5/5` 新成员行。2026-07-16 的好友列表邀请复测进一步证明，邀请方不能只收到 `5/4 + 5/5`：`net_handle_group_info` subtype 4 只显示同意提示，subtype 5 只追加远端一行，而好友列表发起方此前没有本机 roster 行，最终成员计数只有 1。聊天/队伍入口 `HandleSceneMenuNavigation(0x0101AED2)` 在 `0x0101B182` 明确要求 `Global_R9+23668 > 1`，所以服务端队伍虽然已有两人，队长端仍不会出现 UI。现在邀请方在 `5/4` 后收到完整 `5/10 { result=1, num, groupinfo, leadid }`，一次建立队长和新成员两行并设置队长 id；已有第三方队员仍使用 `5/5` 增量。早先 `resp=148` 的 `0x01011E3A` 崩溃并不是全量通知时序本身导致，而是当时 `groupinfo` 中多插入的伪 reserved/tagged-id 字节；当前全量 builder 已采用验证后的 raw-first-id 布局。
+
+好友列表的 `5/1.id` 是持久角色 id，目标不一定与邀请方处于同一场景。组队邀请目标解析现在先匹配同场景观察端 actor id，再用已确认好友关系的持久 role id 解析在线 session；第二条路径复用装备查看已验证的 friend-scope resolver，不把任意 role id 扩大成可邀请目标。关键日志新增 `mock_team_invite ... scope=nearby|friend`，队长成功刷新为 `team_result_deliver ... roster_update=5/10-full members=2`。
 
 2026-07-11 runtime negative evidence: 两个游客账户均为持久 roleId `10001` 时，周围玩家节点使用客户端作用域的 `0x6Axxxxxx` actor id 避免冲突。`5/1.id` 因而是该节点 id，而不是目标 `onlineRoleId`。邀请处理器先以这个 actor id 精确解析 nearby seed；之后不得再次比较 `onlineRoleId == actorId`，否则会把可见目标错误记录为 `target-offline` 并丢弃邀请。队伍管理器同样以成员行的 role id 去重；故 `5/3`、`5/10`、`5/11` 及发给同队他人的 `5/7` 均必须按观察端编码：本机仍为真实 `10001`，冲突的远端成员为该观察端已使用的同一个 `0x6Axxxxxx`。不能把两行都编码为 `10001`，否则客户端只保留一个成员。
 
