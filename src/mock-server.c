@@ -11021,11 +11021,32 @@ enum
 {
     VM_MOCK_SERVICE_PEER_SYNC_MAX = 16,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4,
+    VM_MOCK_SERVICE_CHAT_NOTICE_MAX = 16,
+    VM_MOCK_SERVICE_CHAT_POLL_MAX = 4,
     VM_MOCK_SERVICE_TEAM_MAX = 16,
     VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3,
     VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX = 8,
     VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX = 2048,
     VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX = 512
+};
+
+enum
+{
+    VM_MOCK_CHAT_TYPE_TEAM = 2,
+    VM_MOCK_CHAT_TYPE_GUILD = 3,
+    VM_MOCK_CHAT_TYPE_LOCAL = 4,
+    VM_MOCK_CHAT_TYPE_SYSTEM = 5,
+    VM_MOCK_CHAT_TYPE_WORLD = 6,
+    VM_MOCK_CHAT_TYPE_PRIVATE = 7,
+    VM_MOCK_CHAT_TYPE_TEAM_NOTICE = 8
+};
+
+enum
+{
+    VM_MOCK_CHAT_REQUEST_WORLD = 0,
+    VM_MOCK_CHAT_REQUEST_TEAM = 2,
+    VM_MOCK_CHAT_REQUEST_GUILD = 3,
+    VM_MOCK_CHAT_REQUEST_LOCAL = 4
 };
 
 typedef struct
@@ -11063,6 +11084,17 @@ typedef struct
     char sourceName[32];
     u32 queuedTick;
 } vm_mock_service_social_notice;
+
+typedef struct
+{
+    bool valid;
+    u8 type;
+    u32 sourceClientId;
+    u32 sourceRoleId;
+    char sourceName[16];
+    char message[82];
+    u32 queuedTick;
+} vm_mock_service_chat_notice;
 
 typedef struct
 {
@@ -11129,6 +11161,10 @@ typedef struct vm_mock_service_client_session
     u32 pendingDirQueueTick;
     u32 pendingDirQueueSerial;
     vm_mock_service_social_notice socialNotices[VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX];
+    vm_mock_service_chat_notice chatNotices[VM_MOCK_SERVICE_CHAT_NOTICE_MAX];
+    u8 chatNoticeHead;
+    u8 chatNoticeCount;
+    bool systemWelcomeQueued;
     bool friendInviteReplyActive;
     u32 friendInviteSourceClientId;
     u32 friendInviteSourceRoleId;
@@ -11588,6 +11624,84 @@ static bool vm_mock_service_session_enqueue_social_notice(
     return true;
 }
 
+static const char *vm_mock_service_chat_type_name(u8 type)
+{
+    switch (type)
+    {
+    case VM_MOCK_CHAT_TYPE_WORLD:
+        return "world";
+    case VM_MOCK_CHAT_TYPE_GUILD:
+        return "guild";
+    case VM_MOCK_CHAT_TYPE_SYSTEM:
+        return "system";
+    case VM_MOCK_CHAT_TYPE_LOCAL:
+        return "local";
+    case VM_MOCK_CHAT_TYPE_TEAM:
+        return "team";
+    case VM_MOCK_CHAT_TYPE_PRIVATE:
+        return "private";
+    case VM_MOCK_CHAT_TYPE_TEAM_NOTICE:
+        return "team-notice";
+    default:
+        return "unknown";
+    }
+}
+
+static bool vm_mock_service_session_enqueue_chat_notice(
+    vm_mock_service_client_session *target,
+    u8 type,
+    const vm_mock_service_client_session *source,
+    const char *sourceName,
+    const char *message)
+{
+    vm_mock_service_chat_notice *slot = NULL;
+    u8 slotIndex = 0;
+
+    if (target == NULL || message == NULL || message[0] == 0 ||
+        (type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE))
+    {
+        return false;
+    }
+    if (target->chatNoticeCount >= VM_MOCK_SERVICE_CHAT_NOTICE_MAX)
+    {
+        printf("[warn][mock-service] chat_notice_drop target=%08x type=%s reason=queue-full\n",
+               target->clientId, vm_mock_service_chat_type_name(type));
+        return false;
+    }
+
+    slotIndex = (u8)((target->chatNoticeHead + target->chatNoticeCount) %
+                     VM_MOCK_SERVICE_CHAT_NOTICE_MAX);
+    slot = &target->chatNotices[slotIndex];
+    memset(slot, 0, sizeof(*slot));
+    slot->valid = true;
+    slot->type = type;
+    slot->sourceClientId = source ? source->clientId : 0;
+    slot->sourceRoleId = source ? source->onlineRoleId : 0;
+    snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
+             sourceName && sourceName[0] ? sourceName :
+             (source && source->onlineRoleName[0] ? source->onlineRoleName : "System"));
+    snprintf(slot->message, sizeof(slot->message), "%s", message);
+    slot->queuedTick = g_schedulerTick;
+    ++target->chatNoticeCount;
+    printf("[info][mock-service] chat_notice_queue target=%08x type=%s source=%08x/%u bytes=%u depth=%u\n",
+           target->clientId,
+           vm_mock_service_chat_type_name(type),
+           slot->sourceClientId,
+           slot->sourceRoleId,
+           (u32)strlen(slot->message),
+           target->chatNoticeCount);
+    return true;
+}
+
+static bool vm_mock_service_session_enqueue_system_message(
+    vm_mock_service_client_session *target,
+    const char *message)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    return vm_mock_service_session_enqueue_chat_notice(
+        target, VM_MOCK_CHAT_TYPE_SYSTEM, NULL, systemNameGbk, message);
+}
+
 static vm_mock_service_team *vm_mock_service_team_find_for_client(u32 clientId)
 {
     if (clientId == 0)
@@ -11994,6 +12108,8 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     session->roleOnline = true;
     if (becameOnline)
     {
+        static const char welcomeMessageGbk[] =
+            "\xBB\xB6\xD3\xAD\xBD\xF8\xC8\xEB\xBD\xAD\xBA\xFE\xCA\xC0\xBD\xE7";
         printf("[info][mock-service] session_online client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",
                session->clientId,
                session->accountId[0] ? session->accountId : "-",
@@ -12003,6 +12119,11 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
                session->sceneVisibleX,
                session->sceneVisibleY,
                reason ? reason : "-");
+        if (!session->systemWelcomeQueued &&
+            vm_mock_service_session_enqueue_system_message(session, welcomeMessageGbk))
+        {
+            session->systemWelcomeQueued = true;
+        }
     }
     if (changed)
     {
@@ -12065,6 +12186,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sceneVisiblePending = false;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    memset(session->chatNotices, 0, sizeof(session->chatNotices));
+    session->chatNoticeHead = 0;
+    session->chatNoticeCount = 0;
+    session->systemWelcomeQueued = false;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
@@ -20761,6 +20886,108 @@ static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_
     return false;
 }
 
+/* net_handle_type_payload_detail(0x010126C6) reads 1/3/3 as:
+ *   type:u8, chatinfo:blob
+ * chatinfo is count:u8 followed by repeated
+ *   senderName:len16-string, senderRoleId:tagged-u32, message:len16-string.
+ * The blob field's own len16 prefix supplies the first tagged reader header,
+ * so the count itself is deliberately written as one raw byte. */
+static bool vm_net_mock_append_chat_message_object(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    u8 type,
+    u32 sourceRoleId,
+    const char *sourceName,
+    const char *message)
+{
+    u8 chatInfo[160];
+    u32 chatInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || sourceName == NULL || message == NULL ||
+        type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE ||
+        strlen(sourceName) > 15 || strlen(message) > 81)
+    {
+        return false;
+    }
+    if (!vm_net_mock_put_u8(chatInfo, sizeof(chatInfo), &chatInfoLen, 1) ||
+        !vm_net_mock_seq_put_string(chatInfo, sizeof(chatInfo), &chatInfoLen, sourceName) ||
+        !vm_net_mock_seq_put_u32(chatInfo, sizeof(chatInfo), &chatInfoLen, sourceRoleId) ||
+        !vm_net_mock_seq_put_string(chatInfo, sizeof(chatInfo), &chatInfoLen, message) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 3, 3, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", type) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "chatinfo", chatInfo,
+                                     (u16)chatInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static int vm_net_mock_append_scene_sync_chat_objects(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    vm_mock_service_client_session *observer)
+{
+    int appended = 0;
+
+    if (out == NULL || pos == NULL || observer == NULL)
+        return -1;
+    while (observer->chatNoticeCount > 0 && appended < VM_MOCK_SERVICE_CHAT_POLL_MAX)
+    {
+        vm_mock_service_chat_notice *notice =
+            &observer->chatNotices[observer->chatNoticeHead];
+        vm_mock_service_client_session *source = NULL;
+        u32 sourceWireId = notice->sourceRoleId;
+        u32 ageTicks = 0;
+
+        if (!notice->valid)
+        {
+            memset(notice, 0, sizeof(*notice));
+            observer->chatNoticeHead =
+                (u8)((observer->chatNoticeHead + 1) % VM_MOCK_SERVICE_CHAT_NOTICE_MAX);
+            --observer->chatNoticeCount;
+            continue;
+        }
+        if (notice->sourceClientId != 0)
+        {
+            source = vm_mock_service_find_client_session(notice->sourceClientId);
+            if (source != NULL && source->onlineRoleId == notice->sourceRoleId)
+            {
+                u32 resolvedWireId = vm_mock_service_team_member_wire_id(observer, source);
+                if (resolvedWireId != 0)
+                    sourceWireId = resolvedWireId;
+            }
+        }
+        if (!vm_net_mock_append_chat_message_object(out, outCap, pos,
+                                                    notice->type,
+                                                    sourceWireId,
+                                                    notice->sourceName,
+                                                    notice->message))
+        {
+            return -1;
+        }
+        if (g_schedulerTick >= notice->queuedTick)
+            ageTicks = g_schedulerTick - notice->queuedTick;
+        printf("[info][mock-service] chat_notice_deliver observer=%08x type=%s source=%08x/%u bytes=%u age_ticks=%u\n",
+               observer->clientId,
+               vm_mock_service_chat_type_name(notice->type),
+               notice->sourceClientId,
+               sourceWireId,
+               (u32)strlen(notice->message),
+               ageTicks);
+        memset(notice, 0, sizeof(*notice));
+        observer->chatNoticeHead =
+            (u8)((observer->chatNoticeHead + 1) % VM_MOCK_SERVICE_CHAT_NOTICE_MAX);
+        --observer->chatNoticeCount;
+        ++appended;
+    }
+    return appended;
+}
+
 /*
  * The remote mock service is request/response TCP, but every live emulator
  * issues a scene-sync poll on the normal event-7 path.  Use that existing
@@ -21018,6 +21245,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     u32 pos = 5;
     u32 maxMovementAgeTicks = 0;
     bool needsBaseline = false;
+    int chatAppend = 0;
     int socialAppend = 0;
     u32 teamBattleResponseLen = 0;
 
@@ -21073,6 +21301,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
                                                                    &nearbyMoveinfoCount);
         if (objectCount == 0)
             return 0;
+        chatAppend = vm_net_mock_append_scene_sync_chat_objects(
+            out, outCap, &pos, observer);
+        if (chatAppend < 0)
+            return 0;
+        if (chatAppend > 0)
+            objectCount = (u8)(objectCount + chatAppend);
         socialAppend = vm_net_mock_append_scene_sync_social_notice_object(
             out, outCap, &pos, observer, &socialNoticeType);
         if (socialAppend < 0)
@@ -21080,11 +21314,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         if (socialAppend > 0)
             objectCount = (u8)(objectCount + socialAppend);
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u social=%s resp=%u evidence=IDA:0x01012958/0x01012A76\n",
+        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u chat=%d social=%s resp=%u evidence=IDA:0x01012958/0x01012A76/0x010126C6\n",
                observer->clientId,
                scene,
                nearbyRoleCount,
                nearbyMoveinfoCount,
+               chatAppend,
                vm_mock_service_social_notice_name(socialNoticeType),
                pos);
         return pos;
@@ -21139,6 +21374,13 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         peerSync->visible = false;
     }
 
+    chatAppend = vm_net_mock_append_scene_sync_chat_objects(
+        out, outCap, &pos, observer);
+    if (chatAppend < 0)
+        return 0;
+    if (chatAppend > 0)
+        objectCount = (u8)(objectCount + chatAppend);
+
     socialAppend = vm_net_mock_append_scene_sync_social_notice_object(
         out, outCap, &pos, observer, &socialNoticeType);
     if (socialAppend < 0)
@@ -21149,14 +21391,267 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (objectCount == 0)
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u social=%s queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01012A76\n",
+    printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u chat=%d social=%s queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01012A76/0x010126C6\n",
            observer->clientId,
            scene,
            objectCount,
            movementObjectCount,
+           chatAppend,
            vm_mock_service_social_notice_name(socialNoticeType),
            maxMovementAgeTicks,
            maxMovementAgeTicks * VM_SCHED_FRAME_MS,
+           pos);
+    return pos;
+}
+
+typedef struct
+{
+    u8 requestSubtype;
+    u8 requestType;
+    u32 sendTo;
+    char message[82];
+} vm_net_mock_chat_request;
+
+static bool vm_net_mock_request_contains_chat_object(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 3 &&
+            (object.subtype == 1 || object.subtype == 2))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool vm_net_mock_parse_chat_request(const u8 *request,
+                                           u32 requestLen,
+                                           vm_net_mock_chat_request *parsed)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (parsed)
+        memset(parsed, 0, sizeof(*parsed));
+    if (request == NULL || requestLen < 9 || parsed == NULL ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 3 ||
+        (object.subtype != 1 && object.subtype != 2) ||
+        !vm_net_mock_get_object_string_field(object.payload, object.payloadLen,
+                                             "data", parsed->message,
+                                             sizeof(parsed->message)) ||
+        parsed->message[0] == 0)
+    {
+        return false;
+    }
+
+    parsed->requestSubtype = object.subtype;
+    if (object.subtype == 1)
+    {
+        if (!vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                            "type", &parsed->requestType) ||
+            (parsed->requestType != VM_MOCK_CHAT_REQUEST_WORLD &&
+             parsed->requestType != VM_MOCK_CHAT_REQUEST_TEAM &&
+             parsed->requestType != VM_MOCK_CHAT_REQUEST_GUILD &&
+             parsed->requestType != VM_MOCK_CHAT_REQUEST_LOCAL))
+        {
+            return false;
+        }
+    }
+    else if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                               "sendTo", &parsed->sendTo) ||
+             parsed->sendTo == 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+static vm_mock_service_client_session *vm_mock_service_find_chat_target(
+    vm_mock_service_client_session *source,
+    u32 sendTo)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    vm_net_mock_scene_role_seed nearbySeed;
+
+    if (source == NULL || sendTo == 0)
+        return NULL;
+    while (session != NULL)
+    {
+        if (session != source && session->roleOnline && session->onlinePresenceValid &&
+            vm_mock_service_session_presence_is_recent(session) &&
+            (session->onlineRoleId == sendTo ||
+             vm_mock_service_team_member_wire_id(source, session) == sendTo))
+        {
+            return session;
+        }
+        session = session->next;
+    }
+    memset(&nearbySeed, 0, sizeof(nearbySeed));
+    if (source->sceneVisibleReady &&
+        vm_net_mock_find_nearby_role_seed_by_actor_id(source->sceneVisibleScene,
+                                                      sendTo, &nearbySeed) &&
+        nearbySeed.session != NULL && nearbySeed.session != source)
+    {
+        return nearbySeed.session;
+    }
+    return NULL;
+}
+
+static u8 vm_net_mock_chat_response_type(u8 requestType)
+{
+    switch (requestType)
+    {
+    case VM_MOCK_CHAT_REQUEST_WORLD:
+        return VM_MOCK_CHAT_TYPE_WORLD;
+    case VM_MOCK_CHAT_REQUEST_TEAM:
+        return VM_MOCK_CHAT_TYPE_TEAM;
+    case VM_MOCK_CHAT_REQUEST_GUILD:
+        return VM_MOCK_CHAT_TYPE_GUILD;
+    case VM_MOCK_CHAT_REQUEST_LOCAL:
+        return VM_MOCK_CHAT_TYPE_LOCAL;
+    default:
+        return 0;
+    }
+}
+
+static u32 vm_net_mock_build_chat_response(const u8 *request,
+                                           u32 requestLen,
+                                           u8 *out,
+                                           u32 outCap)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    static const char teamRequiredGbk[] =
+        "\xB5\xB1\xC7\xB0\xCE\xB4\xBC\xD3\xC8\xEB\xB6\xD3\xCE\xE9";
+    static const char targetOfflineGbk[] =
+        "\xB6\xD4\xB7\xBD\xB2\xBB\xD4\xDA\xCF\xDF";
+    static const char guildUnavailableGbk[] =
+        "\xB0\xEF\xC5\xC9\xCF\xFB\xCF\xA2\xD4\xDD\xCE\xB4\xBF\xAA\xB7\xC5";
+    vm_net_mock_chat_request chat;
+    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *privateTarget = NULL;
+    vm_mock_service_team *team = NULL;
+    const char *systemMessage = NULL;
+    u8 deliveryType = 0;
+    char sourceName[16];
+    u32 pos = 5;
+    u32 recipientCount = 0;
+
+    if (out == NULL || outCap < pos || source == NULL || source->onlineRoleId == 0 ||
+        !vm_net_mock_parse_chat_request(request, requestLen, &chat))
+    {
+        return 0;
+    }
+    memset(sourceName, 0, sizeof(sourceName));
+    snprintf(sourceName, sizeof(sourceName), "%s",
+             source->onlineRoleName[0] ? source->onlineRoleName : "Player");
+
+    if (chat.requestSubtype == 2)
+    {
+        deliveryType = VM_MOCK_CHAT_TYPE_PRIVATE;
+        privateTarget = vm_mock_service_find_chat_target(source, chat.sendTo);
+        if (privateTarget == NULL)
+            systemMessage = targetOfflineGbk;
+    }
+    else
+    {
+        deliveryType = vm_net_mock_chat_response_type(chat.requestType);
+        if (deliveryType == VM_MOCK_CHAT_TYPE_TEAM)
+        {
+            team = vm_mock_service_team_find_for_client(source->clientId);
+            if (team == NULL)
+                systemMessage = teamRequiredGbk;
+        }
+        else if (deliveryType == VM_MOCK_CHAT_TYPE_GUILD)
+            systemMessage = guildUnavailableGbk;
+    }
+
+    if (deliveryType == 0)
+    {
+        return 0;
+    }
+    if (systemMessage != NULL)
+    {
+        if (!vm_net_mock_append_chat_message_object(out, outCap, &pos,
+                                                    VM_MOCK_CHAT_TYPE_SYSTEM, 0,
+                                                    systemNameGbk, systemMessage))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+    }
+    else
+    {
+        /* DispatchSceneTransition(0x01015FAC) inserts the sender's successful
+         * message into the local UI before the request is sent.  A second
+         * 1/3/3 echo duplicates the row and can place it in a different
+         * channel.  The server only acknowledges success and delivers the
+         * message to the other recipients. */
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+    }
+
+    if (systemMessage == NULL &&
+        (deliveryType == VM_MOCK_CHAT_TYPE_WORLD ||
+         deliveryType == VM_MOCK_CHAT_TYPE_LOCAL ||
+         deliveryType == VM_MOCK_CHAT_TYPE_TEAM))
+    {
+        vm_mock_service_client_session *target = g_vm_mock_service_client_sessions;
+        while (target != NULL)
+        {
+            bool selected = false;
+            if (target != source && target->roleOnline && target->onlinePresenceValid &&
+                vm_mock_service_session_presence_is_recent(target))
+            {
+                if (deliveryType == VM_MOCK_CHAT_TYPE_WORLD)
+                {
+                    selected = true;
+                }
+                else if (deliveryType == VM_MOCK_CHAT_TYPE_LOCAL &&
+                         source->sceneVisibleReady &&
+                         vm_mock_service_session_scene_is_visible(
+                             target, source->sceneVisibleScene))
+                {
+                    selected = true;
+                }
+                else if (deliveryType == VM_MOCK_CHAT_TYPE_TEAM && team != NULL &&
+                         vm_mock_service_team_contains_client(team, target->clientId))
+                {
+                    selected = true;
+                }
+            }
+            if (selected && vm_mock_service_session_enqueue_chat_notice(
+                                target, deliveryType, source, sourceName, chat.message))
+            {
+                ++recipientCount;
+            }
+            target = target->next;
+        }
+    }
+    else if (systemMessage == NULL && deliveryType == VM_MOCK_CHAT_TYPE_PRIVATE &&
+             privateTarget != NULL &&
+             vm_mock_service_session_enqueue_chat_notice(
+                 privateTarget, deliveryType, source, sourceName, chat.message))
+    {
+        recipientCount = 1;
+    }
+
+    printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s send_to=%u recipients=%u bytes=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",
+           source->clientId,
+           source->onlineRoleId,
+           chat.requestSubtype,
+           chat.requestType,
+           vm_mock_service_chat_type_name(deliveryType),
+           systemMessage != NULL ? "system-error" : "empty",
+           chat.sendTo,
+           recipientCount,
+           (u32)strlen(chat.message),
            pos);
     return pos;
 }
@@ -29017,6 +29512,8 @@ static bool vm_net_mock_object_is_split_safe(const vm_net_mock_request_object *o
 
     if (object->kind == 2 && (object->subtype == 1 || object->subtype == 10))
         return true;
+    if (object->kind == 3 && (object->subtype == 1 || object->subtype == 2))
+        return true;
     if (object->kind == 4 && object->subtype == 1)
         return true;
     if (object->kind == 7 && (object->subtype == 7 || object->subtype == 18))
@@ -29153,6 +29650,30 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         {
             vm_net_log_handled_packet("builtin-actor-moveinfo-ack", request, requestLen, hookedLen);
             return hookedLen;
+        }
+    }
+
+    /* Chat is commonly flushed together with the scene's 2/10 refresh object.
+     * Handle it before the generic `type` detector, whose unrelated type=2
+     * branch would otherwise consume a world/team chat request. */
+    if (vm_net_mock_request_contains_chat_object(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_chat_response(request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-chat-message", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+        if (!g_netMockSplitProbe)
+        {
+            hookedLen = vm_net_mock_build_split_safe_combo_response(request, requestLen,
+                                                                    out, outCap);
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-chat-message-combo", request,
+                                          requestLen, hookedLen);
+                return hookedLen;
+            }
         }
     }
 

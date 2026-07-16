@@ -41,8 +41,8 @@ inline int getFontHeight()
 inline int getFontCellWidth()
 {
     /*
-     * ASCII glyphs in font_gb.uc3 live in full bitmaps, while the CBE UI
-     * positions them as half-width cells.
+     * The UC3 header describes the full-width glyph cell.  ASCII glyphs use
+     * the left half of that bitmap and advance by one half-width cell.
      */
     return fontWidth / 2;
 }
@@ -107,6 +107,14 @@ void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
     if (drawWidth <= 0)
         return;
 
+    /*
+     * Glyphs are generated at their final pixel width.  In particular, an
+     * ASCII glyph already occupies the left half of a 16x16 UC3 bitmap, so a
+     * half-width draw must copy columns 0..7 directly instead of resampling
+     * all 16 columns into eight pixels.
+     */
+    int bitmapDrawWidth = drawWidth < fontWidth ? drawWidth : fontWidth;
+
     char *bitMapData = SDL_malloc(bitmapDataSize);
     if (bitMapData == NULL)
         return;
@@ -117,31 +125,15 @@ void drawFontCharWithWidth(u16 gbCode, int x, int y, u16 color, int drawWidth)
             int py = y + j;
             if (py < 0 || py >= LCD_HEIGHT)
                 continue;
-            for (int i = 0; i < drawWidth; i++)
+            for (int i = 0; i < bitmapDrawWidth; i++)
             {
                 int px = x + i;
                 if (px < 0 || px >= LCD_WIDTH)
                     continue;
 
-                int srcStart = (i * fontWidth) / drawWidth;
-                int srcEnd = ((i + 1) * fontWidth + drawWidth - 1) / drawWidth;
-                if (srcEnd <= srcStart)
-                    srcEnd = srcStart + 1;
-                if (srcEnd > fontWidth)
-                    srcEnd = fontWidth;
-
-                int hasPixel = 0;
-                for (int srcX = srcStart; srcX < srcEnd; srcX++)
-                {
-                    int byteIndex = j * linePitch + srcX / 8;
-                    int bitIndex = 7 - (srcX % 8);
-                    if ((bitMapData[byteIndex] >> bitIndex) & 1)
-                    {
-                        hasPixel = 1;
-                        break;
-                    }
-                }
-                if (hasPixel)
+                int byteIndex = j * linePitch + i / 8;
+                int bitIndex = 7 - (i % 8);
+                if ((bitMapData[byteIndex] >> bitIndex) & 1)
                 {
                     int offset = py * LCD_WIDTH + px;
                     ((u16 *)Lcd_Cache_Buffer)[offset] = color;
