@@ -3231,6 +3231,9 @@ static uc_err scheduler_tick(void)
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
+    /* Host TCP completes on its worker thread.  Only the emulator thread may
+     * allocate/write VM buffers and invoke the CBE network callback. */
+    vm_net_mock_async_drain_completions();
     vm_net_mock_poll_push_if_due();
     err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
@@ -5656,6 +5659,7 @@ static void vm_close_open_files_for_restart(void)
 
 static void vm_reset_runtime_state_for_restart(void)
 {
+    vm_net_mock_async_reset();
     if (ROM_MEMPOOL)
         memset(ROM_MEMPOOL, 0, Program_ROM_Mapped_Size);
     if (STACK_MEMPOOL)
@@ -7217,6 +7221,7 @@ int main(int argc, char *args[])
         printf("Unicorn Engine Initialized\n");
 
         loop();
+        vm_net_mock_async_shutdown();
         vm_net_mock_service_notify_disconnect("host-loop-exit");
     }
     return 0;
