@@ -2,74 +2,99 @@
 
 ## 目标与样例
 
-本轮以 `bin/CBE_BE/武林外传(新品).CBE` 为样例，目标是让大端序 CBE 继续沿用模拟器已有的小端序管理器和文件接口，而不是为同一套宿主能力维护第二份实现。
+本轮以 `bin/CBE_BE/武林外传(新品).CBE` 为样例，目标是把 native 大端 ABI 适配在调用边界，文件、内存、图片解码、LCD 绘制、屏幕调度继续复用已有小端实现。
 
 样例头部解析结果：
 
 - 代码：文件偏移 `0x9b`，长度 `0x154fc`，装载基址 `0x043e3000`。
 - BSS：文件偏移 `0x1559f`，长度 `0x1150`。
 - RW 数据：文件偏移 `0x166f7`，长度 `0x2280`，运行时数据基址 `0x043f84fc`。
-- 数据包：文件偏移 `0x1898b`，长度 `0x3dc7b`。
+- 内嵌 DataPackage：文件偏移 `0x1898b`，长度 `0x3dc7b`，共 153 个资源。
 
-## 固件与客户端证据
+## IDA 证据与错误根因
 
-参考 binary 为 IDA 中的 `6彩移动乐园600H_TOSHIBA TV00560002EDGB.bin`（ARMB-32）：
+参考固件为 IDA 中的移动乐园 600H 固件，客户端为当前打开的 `武林外传(新品).CBE`。
 
-- `sub_F9594` 检查连续 8 个 `0xfe` 字节，用它识别大端序 CBE 标记。
-- `sub_F873E` 逐项读取 12 字节头部字段，并以大端序组合长度/偏移。
-- `sub_F94DA` 与 `sub_F9462` 负责 CBE 校验、装载和后续合法性检查。
-- 固件中的源文件字符串指向 `vmInit.c`，与客户端初始化兼容层的行为一致。
+### 生命周期不是逐帧 logic
 
-客户端侧验证结果：
+- 客户端 `sub_0` 通过 service `0x79e` 注册 `{main, exit, dispatcher}`，运行时分别是 `0x043e56f3`、`0x043e5679`。
+- 固件 `vmEnterWin` 在进入窗口时同步调用 main，窗口销毁时才调用 exit。main 是两阶段初始化入口，不是逐帧 logic。
+- 模拟器现在连续执行两次 main 完成 manager bootstrap 和真正的游戏入口，然后落回已有小端屏幕调度器；不再把 main 每帧重复调用，也不在启动时误调 exit。
 
-- `0x043e56f3` 是注册给宿主的 logic 回调，`0x043e5679` 是一次性 init 回调；注册顺序为 `{logic, init, dispatcher}`。
-- `0x043e803e` 从 SystemInfo 取得 `+0xf0` 函数，并用 `0x043f855c` 的 52 项表调用它；附近字符串为 `vmInitManagers:%x`。
-- 该 52 项表前 7 项已经是客户端 ROM 内适配函数，其余项目是管理器编号。因此初始化时必须保留 ROM 覆盖项，只把编号转换为模拟器现有管理器入口。
-- `SystemInfo + 0x20c` 是连续 22 项的 stdio 表。只提供少数槽位会在客户端读取缺失入口后跳到空地址。
-- native service `0x52` 的参数不是 SystemInfo，而是客户端自有的 `0x27c` 字节 GameManagerOld 平表。样例把该对象地址保存在 `0x043f964c` 指向的位置，随后只覆盖少数适配槽。
-- 客户端包装器 `0x043e41f2` 读取 GameManagerOld `+0x1b0`（槽 108），以 `(object, capacity=5)` 调用；启动尾部的另一包装器以槽 73 和容量 20 初始化相同字段布局。
-- 600H 固件 `sub_1F4552` 是对应的图片库初始化器：为 `object+0x00` 分配 480 字节扫描线，为 `+0x0c` 分配 `capacity*2` 的资源 ID 数组，为 `+0x10` 分配 `capacity*4` 的图片指针数组，并在 `+0x18..+0x50` 安装 15 个方法。客户端在初始化后调用的 `+0x20`、`+0x30` 以及自行覆盖的 `+0x34..+0x40` 都与这一对象布局吻合。
+### “系统更新”不是 IMEI 返回值造成的
+
+- `CBE_BE/imeiInfo.dat` 能被正常读取，末尾状态字节为 `0x03`，客户端实际进入了游戏主初始化 `sub_1D38`。
+- `upinfo3.dat` 是运行时可写状态，不是只读分发资源。`CBE_BE/upinfo.dat` 的末字节为 `0x01`，客户端完成一次检查后写回的 `CoolBar_H_QVGA/upinfo3.dat` 末字节为 `0x00`。把缺失的运行时文件回退到分发 `upinfo.dat`，会在每次干净启动时重新导入更新标志；这才是“系统更新”首屏的直接分支条件，并非 IMEI 或 service `0x406` 的返回值。
+- 真正的问题是固件同步调用 main，而模拟器延后到模块入口返回后才调用。旧兼容代码把 GameManagerOld 表地址写入了客户端的 SystemInfo 全局，随后客户端在 SystemInfo `+4/+8` 安装绘图适配器时覆盖了 GameManagerOld 的图片槽，初始化分支和调用链随之失真。
+- service `0x52` 现在先创建独立 SystemInfo 对象并写入客户端全局；service `0x7d1` 再补齐方法。SystemInfo `+0x28` 经客户端首屏 destroy（IDA `0xAED8`）确认是图片释放入口，复用小端 `IMG_Destory`。
+
+### manager 表的真实长度
+
+- 客户端传给 SystemInfo `+0xf0` 的 `0x043f855c` 只包含 7 个生命周期回调，后面紧接资源 ID 全局，并不是 52 项 manager 表。
+- 旧实现展开 52 项会把资源 ID `0x54`、`0x55` 等覆盖为宿主函数桩，导致后续图片资源号变成 `0x0c0000xx`。
+- native 路径现在只验证并保留前 7 个客户端回调；传统小端路径仍按原逻辑填充 52 项。
+
+### Thumb 与回调栈
+
+- 600H 的 GameOld 表把所有函数指针写成 `function + 1`。native manager、SystemInfo 和对象方法因此统一保留 Thumb 低位。
+- Unicorn 在 SVC 模式改写 CPSR 时可能恢复旧的 banked R13。`vm_bx` 和模拟入口在切换 Thumb 状态后恢复当前 SP；屏幕、定时器和网络等宿主发起的顶层回调使用新的任务栈顶。
 
 ## 已实现的宿主契约
 
-1. 大端序 native app 先运行一次 logic 完成管理器 bootstrap，再运行一次 init，之后由宿主逐帧调用 logic。
-2. `SystemInfo + 0xf0` 指向已有小端序管理器总表的第 34 项；该入口合并 52 项表并保留客户端 ROM 适配函数。
-3. `SystemInfo + 0x20c` 通过 `vm_configManagerTableCount` 填满现有 stdio 管理器的 22 个入口。
-4. native service `0x41a`、`0x41b`、`0x427`、`0x41c` 分别复用 `vm_cbfs_vm_file_open`、`vm_cbfs_vm_file_write`、`vm_cbfs_vm_file_read`、`vm_cbfs_vm_file_close`；单参数 service `0x42a` 复用 `vm_cbfs_vm_file_getfilesize`。结果仍通过 `0x7d1` 两阶段接口回传。
-5. 文件路径读取同时识别 UCS-2LE 和 UCS-2BE。UCS-2BE 先规范化为 UCS-2LE，再走原有 GBK/宿主路径转换逻辑。
-6. 大端序 CBE 的只读配套资源从当前所选 CBE 的同级目录解析。客户端请求 `CoolBar_H_QVGA/downinfo3.dat` 时，会依次尝试原相对路径、同级同名文件，以及去掉文件名末尾数字后的同级 `downinfo.dat`；写入路径不重定向到分发资源，避免改写原文件。
-   所选目录保存在独立宿主状态中，不能复用会被绘制、格式化等接口覆盖的 `cbeTextString` 临时缓冲。
-7. guest 栈地址允许作为 native 日志/调试参数，避免合法的栈内字符串被误判。
-8. 宿主请求退出时调用 `uc_emu_stop` 唤醒仍在 native callback 中运行的 Unicorn，再执行已有清理流程。
-9. native service `0xb9` 的参数是 `{pointer-output, size, success-byte}`。客户端先用它申请 12 字节指针表，再为三个 9 字节字符串申请内存；实现复用 `vm_malloc`，等价于小端序内存管理器的 `DF_Malloc_IN`。
-10. service `0x52` 先用已有小端 GameManagerOld 函数列表填充 159 项，再仅对大端原生 ABI 覆盖槽 73、108，使其复用同一个图片库初始化入口。槽 79 保存当前图片库对象；小端表的原始索引和行为不变。
-11. 图片库重复初始化时先释放旧扫描线、资源 ID 数组和图片指针数组，再重新分配。这与固件 `DF_Malloc_IN(pointer-output, size)` 的替换语义一致，避免更新轮询期间耗尽模拟器内存池。
-12. service `0x3d` 接收 `{name, context, stack_size, priority:u8, auto_start:u8}`；样例名称为 `coolbarFighter`。宿主返回稳定非零句柄，最终成功字节仍由已有 `0x7d1` 两阶段回传路径写回。
+### `CBE_BE` 配套文件
 
-service `0x406` 目前只确认了两阶段返回约定，尚未锁定它注册的回调语义；现阶段按成功且返回 0 处理，没有伪造客户端状态。
+- 所选 CBE 的同级目录作为大端资源根目录，独立保存在宿主状态中。
+- `CoolBar_H_QVGA/downinfo3.dat`、`helpinfo3.dat`、`imeiInfo3.dat` 等读取请求会在 `CBE_BE` 中尝试同名文件，再去掉文件名末尾数字，解析到 `downinfo.dat`、`helpinfo.dat`、`imeiInfo.dat`。
+- `upinfoN.dat` 明确排除在同级只读回退之外：缺失时由客户端根据 `downinfo.dat` 重建，后续读写都落到运行时 `CoolBar_H_QVGA`。这样既不会覆盖 `CBE_BE` 中的分发种子，也不会反复导入旧更新标志。路径输入同时支持 UCS-2LE/UCS-2BE，底层仍复用小端 CBFS 接口。
+
+### native 服务与内存
+
+- service `0xb7`/`0xb8`/`0xb9`/`0xbe` 分别复用已有 DreamFactory MemoryBlock 初始化、重置、分配和释放语义。样例先申请 5120 字节，随后重建为 `0x57800` 字节。
+- service `0x41a`、`0x41b`、`0x427`、`0x41c`、`0x42a` 继续复用小端文件打开、写入、读取、关闭和取长度实现，结果通过现有 `0x7d1` 两阶段接口回传。
+- 内嵌 DataPackage 沿用现有解析器，识别 153 个条目；GameOld native 槽 79 触发同一数据页初始化。
+
+### GameManagerOld 与对象布局
+
+- service `0x52` 用已有 GameManagerOld 列表初始化 159 项，再为 native ABI 加 Thumb 位，并只覆盖经 IDA/运行确认的槽位。
+- 图片创建、透明/非透明裁剪绘制、图片宽高、RGB565、LCD flush、屏幕切换都转到已有小端实现。
+- native 槽 76 复用图片库初始化。Wulin 的槽 108/容量 5 是紧凑对象，方法只到 `+0x30`，其后立刻是首屏回调表；槽 73/容量 20 是派生图片库，方法延伸到 `+0x50`。按容量区分可避免覆盖首屏 `init/destroy`，同时保留退出时需要的释放方法。
+- native 槽 78 初始化紧凑场景对象，并复用 600H `sub_1F688A` 的 region/capacity 布局。Wulin 客户端事件方法位于 `+0x30`，SDK 方法从 `+0x34` 开始。
+- Wulin 使用的文字对象构造槽在所检查的 600H SDK 版本中为空。模拟器按客户端包装器 `sub_3AC` 的 ABI 初始化基础文字对象，客户端仍负责安装自己的 `+0x24` 方法。
+
+### native 图片 ABI
+
+Wulin 把图片头读取为：
+
+```text
++0x00  pixels : u32
++0x04  width  : u32
++0x08  height : u32
+```
+
+小端图片解码器使用 `{pixels, u16 width, u16 height, ownership}`。直接返回紧凑头会让 Wulin 把高度当成宽度、把 ownership 后的 0 当成高度，首屏裁剪高度因此为 0，只剩黑屏。
+
+native 返回边界现在重排为 3 个 32 位成员，把 ownership 暂存在 height 的高 16 位；调用小端裁剪绘制前，在 guest 栈上构造临时紧凑头。这样 GIF/PNG/原始 RGB565 解码和 LCD 栅格化无需维护第二份实现，图片释放时也能恢复 ownership。
 
 ## 运行验证
 
 大端序样例：
 
 ```powershell
-$env:SDL_VIDEODRIVER='dummy'
-.\main.exe '--cbe=CBE_BE/武林外传(新品).CBE' --autotest --shot-ms=1000 --max-ms=6000
+.\main.exe '--cbe=CBE_BE/武林外传(新品).CBE' --autotest --shot-ms=1000 --max-ms=8000
 ```
 
-结果：退出码 0；完成 CBE 装载、native 回调注册、52 项管理器合并、159 项 GameManagerOld 初始化、UCS-2BE 路径解析以及文件打开/读取/关闭。图片库对象分别以容量 5 和 20 初始化，界面自然推进到可见的“系统更新中…”画面，没有空地址取指、assert、内存池耗尽或无法退出的问题。验证截图为 `bin/autotest/screens/000006_00006038.bmp`。
+结果：在删除运行时 `CoolBar_H_QVGA/upinfo3.dat` 的冷启动条件下退出码仍为 0。`downinfo.dat`、`helpinfo.dat`、`imeiInfo.dat` 均从 `CBE_BE` 成功解析，`upinfo3.dat` 由客户端重建；DataPackage、两套图片库、场景和文字对象完成初始化；首屏显示游戏自己的“请稍候...”启动画面，不再进入“系统更新”画面；8 秒运行及 native exit 清理无空地址取指、assert 或内存池耗尽。
 
 小端序回归：
 
 ```powershell
-$env:SDL_VIDEODRIVER='dummy'
-.\main.exe '--cbe=CBE/江湖OL.cbe' --autotest --shot-ms=1000 --max-ms=4000
+.\main.exe '--cbe=CBE/江湖OL.CBE' --autotest --shot-ms=1000 --max-ms=4000
 ```
 
-结果：退出码 0；正常装载、建立首屏并完成宿主退出清理。
+结果：退出码 0，首屏、后续屏幕和宿主退出清理均正常。
 
 ## 当前边界
 
-`武林外传(新品).CBE` 会依次访问 `CoolBar_H_QVGA\\upinfo3.dat`、`downinfo3.dat`、`imeiInfo3.dat`，并尝试可选的 `helpinfo3.dat`。前三个分发文件位于 `CBE_BE/upinfo.dat`、`downinfo.dat`、`imeiInfo.dat`，由大端序同级资源解析规则提供给客户端；写回的 `upinfo3.dat` 仍位于运行时存储目录，不会覆盖分发种子。
-
-当前仍停留在系统更新轮询：`helpinfo3.dat` 缺失会按文件不存在返回，service `0x406` 也仍只实现已确认的成功/零结果两阶段契约。图片库方法 `+0x20` 与 `+0x30` 目前保持可调用的软返回，尚未复原 600H 中 `sub_1F43AE`、`sub_1F4282` 的完整资源装载语义；这是继续推进更新流程时应优先验证的边界。
+- 600H 与 Wulin 来自不同 SDK 小版本，少数高位 GameOld 槽位只能结合客户端包装器确认；新增映射必须保持小端索引不变。
+- 紧凑场景和图片库中尚未逆出的非关键方法当前为可调用软返回。已确认的矩形填充、图片绘制和释放路径正常；场景提交等未知方法只做一次告警，避免逐帧刷屏。
+- service `0x406` 目前只确认两阶段返回约定，仍按成功且返回 0 处理，没有伪造客户端状态。

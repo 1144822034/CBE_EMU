@@ -599,6 +599,12 @@ static int vm_lcd_image_pitch_bytes(int width)
     return (((4 - width) & 3) + width) * PIXEL_PER_BYTE;
 }
 
+static bool vm_cbe_uses_native_be_image_layout(void)
+{
+    return g_cbeInfo.isBiggianProgram && g_cbeInfo.headerInt1 != 0 &&
+           g_cbeInfo.headerInt2 <= g_cbeInfo.codeLen;
+}
+
 static bool vm_lcd_read_image_info(u32 imageInfo, u32 *pixels, int *width, int *height)
 {
     u8 header[8];
@@ -608,8 +614,16 @@ static bool vm_lcd_read_image_info(u32 imageInfo, u32 *pixels, int *width, int *
         return false;
 
     *pixels = vm_get_var(imageInfo);
-    *width = (int)vm_get_var_short(imageInfo + 4);
-    *height = (int)vm_get_var_short(imageInfo + 6);
+    if (vm_cbe_uses_native_be_image_layout())
+    {
+        *width = (int)(vm_get_var(imageInfo + 4) & 0xffff);
+        *height = (int)(vm_get_var(imageInfo + 8) & 0xffff);
+    }
+    else
+    {
+        *width = (int)vm_get_var_short(imageInfo + 4);
+        *height = (int)vm_get_var_short(imageInfo + 6);
+    }
     return *pixels != 0 && *width > 0 && *height > 0;
 }
 
@@ -627,6 +641,21 @@ static void vm_lcd_call_draw_image_clip_ex(u32 imageInfo, int srcX, int srcY, in
 
     uc_reg_read(MTK, UC_ARM_REG_SP, &savedSp);
     tempSp = savedSp - 16;
+    if (vm_cbe_uses_native_be_image_layout())
+    {
+        /* The reusable LE rasterizer consumes {pixels,u16 width,u16 height,
+         * flags}. Native BE clients expose {pixels,u32 width,u32 height}.
+         * Build a temporary LE view below the draw-argument frame. */
+        u32 legacyImageInfo = savedSp - 28;
+        u32 nativeMeta = vm_get_var(imageInfo + 8);
+        vm_try_write_zero(legacyImageInfo, 12);
+        vm_set_var(legacyImageInfo, vm_get_var(imageInfo));
+        vm_set_var_short(legacyImageInfo + 4,
+                         (u16)(vm_get_var(imageInfo + 4) & 0xffff));
+        vm_set_var_short(legacyImageInfo + 6, (u16)(nativeMeta & 0xffff));
+        vm_set_var_byte(legacyImageInfo + 8, (u8)(nativeMeta >> 16));
+        r1 = legacyImageInfo;
+    }
     vm_set_var(tempSp, (u32)w);
     vm_set_var(tempSp + 4, (u32)h);
     vm_set_var(tempSp + 8, (u32)dstX);
@@ -829,6 +858,7 @@ static void scheduler_normalize_startup_screen_state(void)
 
 
 static uc_err vm_emu_start(u32 begin, u32 until);
+static bool vm_cbe_uses_fixed_base_manager_abi(void);
 static bool vm_is_pool_entry(u32 entry);
 static void vm_restore_r9_for_entry(u32 entry);
 static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
@@ -1265,27 +1295,43 @@ void dumpVirtMemory(u32 addr, u32 len)
 void vm_bx(u32 addr)
 {
     u32 cpsr;
+    u32 sp;
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (addr & 1)
         cpsr |= 0x20;
     else
         cpsr &= ~0x20u;
+    /* BX changes only instruction-set state here; it must not switch the
+     * active stack.  Unicorn can reload a stale banked R13 when CPSR is
+     * rewritten in SVC mode, so explicitly retain the logical current SP. */
     uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_write(MTK, UC_ARM_REG_SP, &sp);
     uc_reg_write(MTK, UC_ARM_REG_PC, &addr);
 }
 
 static u32 g_currentEmuEntry = 0;
-static u32 g_nativeAppInitEntry = 0;
-static u32 g_nativeAppLogicEntry = 0;
+static u32 g_nativeAppMainEntry = 0;
+static u32 g_nativeAppExitEntry = 0;
 static u32 g_nativeSystemInfoPtr = 0;
+static bool g_nativeSystemInfoConfigured = false;
 static u32 g_nativePropertyInfoPtr = 0;
-static u32 g_nativePictureLibraryPtr = 0;
 static u32 g_nativeDispatchTraceCount = 0;
 static int g_nativeFileOpenResult = -1;
 static int g_nativeFileReadResult = -1;
 static int g_nativeFileWriteResult = -1;
 static int g_nativeFileSizeResult = -1;
 static int g_nativeService406Result = 0;
+
+static u32 vm_native_manager_stub(u32 address)
+{
+    /* The 600H firmware installs every GameOld callback as function+1.  Its
+     * clients use BX veneers, so native Thumb CBE tables must preserve that
+     * low-bit contract even though host hook ranges use aligned addresses. */
+    if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+        return address | 1u;
+    return address;
+}
 
 static void normalize_program_exit_pc(u32 fallbackPc)
 {
@@ -1303,15 +1349,18 @@ static void normalize_program_exit_pc(u32 fallbackPc)
 static uc_err vm_emu_start(u32 begin, u32 until)
 {
     u32 cpsr = 0;
+    u32 sp = 0;
     g_currentEmuEntry = begin;
     if (Global_R9)
         vm_restore_r9_for_entry(begin);
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (begin & 1)
         cpsr |= 0x20;
     else
         cpsr &= ~0x20u;
     uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_write(MTK, UC_ARM_REG_SP, &sp);
     uc_err err = uc_emu_start(MTK, begin, until, 0, 0);
     normalize_program_exit_pc(begin);
     return err;
@@ -1320,15 +1369,18 @@ static uc_err vm_emu_start(u32 begin, u32 until)
 static uc_err vm_emu_start_count(u32 begin, u32 until, uint64_t count)
 {
     u32 cpsr = 0;
+    u32 sp = 0;
     g_currentEmuEntry = begin;
     if (Global_R9)
         vm_restore_r9_for_entry(begin);
     uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (begin & 1)
         cpsr |= 0x20;
     else
         cpsr &= ~0x20u;
     uc_reg_write(MTK, UC_ARM_REG_CPSR, &cpsr);
+    uc_reg_write(MTK, UC_ARM_REG_SP, &sp);
     uc_err err = uc_emu_start(MTK, begin, until, 0, count);
     normalize_program_exit_pc(begin);
     return err;
@@ -1736,6 +1788,16 @@ static uc_err vm_call4_preserve_regs(u32 entry, u32 r0, u32 r1, u32 r2, u32 r3)
     for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
         uc_reg_read(MTK, preserveRegs[i], &saved[i]);
 
+    if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Timer/network callbacks are dispatched by a firmware task just like
+         * screen callbacks.  Startup leaves the emulated supervisor stack at
+         * its lower guard, so host-originated native callbacks need a fresh
+         * task stack before the guest prologue starts pushing registers. */
+        u32 stackTop = STACK_ADDRESS + size_1mb;
+        uc_reg_write(MTK, UC_ARM_REG_SP, &stackTop);
+    }
+
     uc_err err = vm_call4(entry, r0, r1, r2, r3);
 
     for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
@@ -1768,7 +1830,10 @@ static uc_err vm_call4_preserve_regs_clear_stack_args(u32 entry, u32 r0, u32 r1,
     for (u32 i = 0; i < mySizeOf(preserveRegs); ++i)
         uc_reg_read(MTK, preserveRegs[i], &saved[i]);
 
-    u32 sp = saved[13] - 32;
+    u32 callbackSp = saved[13];
+    if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+        callbackSp = STACK_ADDRESS + size_1mb;
+    u32 sp = callbackSp - 32;
     u8 zeroStackArgs[32] = {0};
     uc_mem_write(MTK, sp, zeroStackArgs, sizeof(zeroStackArgs));
     uc_reg_write(MTK, UC_ARM_REG_SP, &sp);
@@ -1993,6 +2058,17 @@ static uc_err vm_run_host_quit_cleanup(u32 exitAddr, u32 thumbExitAddr)
 
 static void scheduler_prepare_screen_call(u32 screenThisPtr)
 {
+    if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Firmware invokes native screen callbacks on a task-owned stack.
+         * Unicorn only has the process stack configured, and the SDK leaves
+         * its supervisor-bank SP near the mapped lower guard after returning
+         * from startup.  Screen callbacks are top-level C calls, so give each
+         * one a fresh aligned stack exactly as the firmware task dispatcher
+         * does. */
+        u32 stackTop = STACK_ADDRESS + size_1mb;
+        uc_reg_write(MTK, UC_ARM_REG_SP, &stackTop);
+    }
     u32 screenFuncPtr = screenThisPtr ? screenThisPtr + 0x18 : 0;
     if (screenThisPtr != g_currentScreenThis)
     {
@@ -5859,11 +5935,11 @@ static void vm_reset_runtime_state_for_restart(void)
     g_lastStartupProgress = 0xff;
     g_lastStartupUpdateState = 0xff;
     g_currentFontType = 0;
-    g_nativeAppInitEntry = 0;
-    g_nativeAppLogicEntry = 0;
+    g_nativeAppMainEntry = 0;
+    g_nativeAppExitEntry = 0;
     g_nativeSystemInfoPtr = 0;
+    g_nativeSystemInfoConfigured = false;
     g_nativePropertyInfoPtr = 0;
-    g_nativePictureLibraryPtr = 0;
     g_nativeDispatchTraceCount = 0;
     g_nativeFileOpenResult = -1;
     g_nativeFileReadResult = -1;
@@ -6625,50 +6701,39 @@ void RunArmProgram(void *param)
 
     if (p == UC_ERR_OK && g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
     {
-        /* Native fixed-base CBE images register {logic, init, dispatcher} via
-         * service 0x79e.  Logic performs its manager bootstrap on the first
-         * call, then init runs once before the host starts ticking logic. */
-        if (g_nativeAppLogicEntry)
+        /* Firmware vmEnterWin stores service 0x79e as {main, exit, dispatcher}.
+         * It invokes main when entering the application and reserves exit for
+         * window teardown; neither callback is a per-frame logic function. */
+        g_appMainEntry = g_nativeAppMainEntry;
+        g_appExitEntry = g_nativeAppExitEntry;
+        printf("[info][app] native main=%08x exit=%08x\n",
+               g_appMainEntry, g_appExitEntry);
+        if (g_appMainEntry)
         {
-            uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-            p = vm_emu_start(g_nativeAppLogicEntry, exitAddr);
-        }
-        if (g_nativeAppInitEntry)
-        {
-            changeTmp1 = 0;
-            uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1);
-            uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-            if (p == UC_ERR_OK)
-                p = vm_emu_start(g_nativeAppInitEntry, exitAddr);
-        }
-        while (p == UC_ERR_OK)
-        {
-            p = scheduler_tick();
-            if (p != UC_ERR_OK)
-                break;
-            if (g_hostQuitRequested)
+            /* The native SDK main is two-phase.  Its first invocation only
+             * initializes the manager block (vmInitManagers returns 1); the
+             * following entry invocation performs vmEnterCheck and transfers
+             * control to the actual game.  This mirrors the firmware entry
+             * path without turning main into a frame callback. */
+            for (u32 pass = 0; pass < 2 && p == UC_ERR_OK; ++pass)
             {
-                p = vm_run_host_quit_cleanup(exitAddr, thumbExitAddr);
-                break;
-            }
-            if (g_nativeAppLogicEntry)
-            {
+                changeTmp1 = g_appMainEntry;
+                uc_reg_write(MTK, UC_ARM_REG_R0, &changeTmp1);
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                p = vm_emu_start(g_nativeAppLogicEntry, exitAddr);
-                if (p != UC_ERR_OK)
-                    break;
+                p = vm_emu_start(g_appMainEntry, exitAddr);
             }
-            vm_lcd_update_with_input_overlay();
-            vm_frame_delay(50);
         }
-        if (p != UC_ERR_OK)
-            printf("native app loop异常:%s\n", uc_strerror(p));
-        g_vmThreadFinished = 1;
-        return;
+        /* The game switches screens through the same legacy GameManagerOld
+         * SCREEN_ChangeScreen slot as little-endian CBE images.  Fall through
+         * to the shared screen scheduler so init/logic/render/resource-load
+         * callbacks run with the existing implementation. */
     }
 
-    // 第二次初始化
-    if (p == UC_ERR_OK)
+    // Legacy images expose a separate second-stage main entry.  Native
+    // dispatcher images already completed both SDK phases above; invoking
+    // their registered main again tears down/recreates the manager runtime.
+    if (p == UC_ERR_OK &&
+        !(g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi()))
     {
         startAddr = g_appMainEntry ? g_appMainEntry : vm_get_var(VM_Manager_Table_ADDRESS);
         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
@@ -7620,30 +7685,33 @@ static bool hook_vm_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if (tmp1)
         {
-            tmp5 = 0;
-            for (tmp2 = 0; tmp2 < 52; tmp2++)
+            if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
             {
-                /* Native big-endian compatibility tables may override leading
-                 * manager slots with guest-side adapters.  Keep those adapters
-                 * and resolve only numeric service IDs through the legacy table. */
-                if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+                /* Wulin passes a seven-callback application lifecycle table,
+                 * followed immediately by unrelated resource-id globals.  The
+                 * 600H SystemInfo method registers this table; it does not
+                 * expand it into the 52-entry legacy manager directory. */
+                tmp5 = 0;
+                for (tmp2 = 0; tmp2 < 7; ++tmp2)
                 {
                     tmp4 = vm_get_var(tmp1 + tmp2 * 4);
                     if (vm_address_in_range(tmp4 & ~1u,
                                             Program_ROM_Address,
                                             Program_ROM_Mapped_Size))
-                    {
                         tmp5++;
-                        continue;
-                    }
                 }
-                tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
-                vm_set_var(tmp1 + tmp2 * 4, tmp3);
+                printf("[info][native-app] lifecycle_table=%08x callbacks=%u "
+                       "first_resource=%08x\n",
+                       tmp1, tmp5, vm_get_var(tmp1 + 7 * 4));
             }
-            if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi() &&
-                g_nativeDispatchTraceCount < 96)
-                printf("[info][native-app] managers=%08x guest_overrides=%u slot44=%08x\n",
-                       tmp1, tmp5, vm_get_var(tmp1 + 44 * 4));
+            else
+            {
+                for (tmp2 = 0; tmp2 < 52; tmp2++)
+                {
+                    tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
+                    vm_set_var(tmp1 + tmp2 * 4, tmp3);
+                }
+            }
         }
         vm_set_call_result(0);
     }
@@ -7776,12 +7844,14 @@ static bool hook_vm_native_dispatch_func(u32 address)
     {
         if (arg)
         {
-            /* Firmware ABI registers {logic, init, dispatcher}. */
-            g_nativeAppLogicEntry = vm_get_var(arg);
-            g_nativeAppInitEntry = vm_get_var(arg + 4);
+            /* Firmware ABI registers {application main, application exit,
+             * dispatcher}.  vmEnterWin calls main on entry and exit only when
+             * the containing window is torn down. */
+            g_nativeAppMainEntry = vm_get_var(arg);
+            g_nativeAppExitEntry = vm_get_var(arg + 4);
             vm_set_var(arg + 8, VM_NATIVE_DISPATCH_ADDRESS | 1);
-            printf("[info][native-app] init=%08x logic=%08x\n",
-                   g_nativeAppInitEntry, g_nativeAppLogicEntry);
+            printf("[info][native-app] main=%08x exit=%08x\n",
+                    g_nativeAppMainEntry, g_nativeAppExitEntry);
         }
         vm_set_call_result(VM_NATIVE_DISPATCH_ADDRESS | 1);
     }
@@ -7795,19 +7865,36 @@ static bool hook_vm_native_dispatch_func(u32 address)
             vm_configManagerTableCount(arg,
                                        VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS,
                                        0x27c / 4);
+            for (u32 slot = 0; slot < 0x27c / 4; ++slot)
+                vm_set_var(arg + slot * 4,
+                           vm_native_manager_stub(vm_get_var(arg + slot * 4)));
             /* 600H coolbar_GAME_if uses flat slots 73 and 108 for compatible
              * DF_PictureLibrary_Init(object, capacity) layouts.  The legacy
              * emulator exposes the same firmware routine as GameManagerOld
              * slot 75 (hook index 76), so keep the shared implementation and
              * overlay only the native big-endian table entries. */
             vm_set_var(arg + 73 * 4,
-                       VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4);
+                       vm_native_manager_stub(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4));
             vm_set_var(arg + 108 * 4,
-                       VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4);
-            vm_set_var(Program_Data_Address + 0x1724, arg);
+                       vm_native_manager_stub(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4));
+            /* vmEnterWin invokes the registered main synchronously before the
+             * module entry continues into service 0x52.  That main obtains
+             * SystemInfo and stores it at Wulin's global +0x1724.  The host
+             * drives main after module entry, so pre-create the same object
+             * here to preserve the firmware-visible ordering.  Pointing this
+             * global at the GameOld table makes Wulin's SystemInfo adapters at
+             * +4/+8 overwrite GameOld draw slots and recurse indefinitely. */
+            if (!g_nativeSystemInfoPtr)
+            {
+                g_nativeSystemInfoPtr = vm_malloc(0x400);
+                for (u32 off = 0; off < 0x400; off += sizeof(emptyBuff))
+                    uc_mem_write(MTK, g_nativeSystemInfoPtr + off,
+                                 emptyBuff, sizeof(emptyBuff));
+            }
+            vm_set_var(Program_Data_Address + 0x1724, g_nativeSystemInfoPtr);
             printf("[info][native-app] gameold=%08x funcs=%u "
-                   "picture_init_slots=73,108\n",
-                   arg, 0x27c / 4);
+                   "system_info=%08x picture_init_slots=73,108\n",
+                   arg, 0x27c / 4, g_nativeSystemInfoPtr);
         }
         vm_set_call_result(0);
     }
@@ -7835,8 +7922,26 @@ static bool hook_vm_native_dispatch_func(u32 address)
     {
         vm_set_call_result(id);
     }
-    else if (id == 0xb7 || id == 0xb8)
+    else if (id == 0xb7)
     {
+        /* Native MemoryBlock_Init packs the requested arena size in the first
+         * frame word.  Wulin requests 0x57800 before initializing its embedded
+         * data page.  Reuse the global little-endian DreamFactory arena. */
+        u32 requested = arg ? vm_get_var(arg) : 0;
+        if (requested && requested <= VM_MemoryBlock_SIZE)
+        {
+            vm_initMemoryBlock(VM_MemoryBlock_PTR_ADDRESS, requested);
+            vm_set_var(VM_DreamFactory_MemoryBlock_ADDRESS,
+                       VM_MemoryBlock_PTR_ADDRESS);
+            printf("[info][cbe] native_memory_block size=%u descriptor=%08x\n",
+                   requested, VM_MemoryBlock_PTR_ADDRESS);
+        }
+        vm_set_call_result(0);
+    }
+    else if (id == 0xb8)
+    {
+        if (vm_get_var(VM_MemoryBlock_PTR_ADDRESS + 8))
+            vm_MF_MemoryBlock_Reset(VM_MemoryBlock_PTR_ADDRESS);
         vm_set_call_result(0);
     }
     else if (id == 0xb9)
@@ -7851,6 +7956,20 @@ static bool hook_vm_native_dispatch_func(u32 address)
         if (arg)
             vm_set_var_byte(arg + 8, allocated ? 1 : 0);
         vm_set_call_result(allocated ? 1 : 0);
+    }
+    else if (id == 0xbe)
+    {
+        /* Native DF_Free_IN is the counterpart to service 0xb9.  The caller
+         * passes the address of its owned pointer; firmware frees the pointed
+         * block and clears the owner slot. */
+        u32 outPtr = arg ? vm_get_var(arg) : 0;
+        u32 allocated = outPtr ? vm_get_var(outPtr) : 0;
+        if (vm_address_in_range(allocated, VM_Memory_Pool_ADDRESS,
+                                VM_MEMPOOL_TOTAL_SIZE))
+            vm_free(allocated);
+        if (outPtr)
+            vm_set_var(outPtr, 0);
+        vm_set_call_result(0);
     }
     else if (id == 0x4)
     {
@@ -7957,46 +8076,74 @@ static bool hook_vm_native_dispatch_func(u32 address)
                     if (!g_nativeSystemInfoPtr)
                     {
                         g_nativeSystemInfoPtr = vm_malloc(0x400);
+                        printf("[info][native-app] system_info=%08x request_frame=%08x out=%08x\n",
+                               g_nativeSystemInfoPtr, arg, outPtr);
                         for (u32 off = 0; off < 0x400; off += sizeof(emptyBuff))
                             uc_mem_write(MTK, g_nativeSystemInfoPtr + off, emptyBuff, sizeof(emptyBuff));
+                    }
+                    if (!g_nativeSystemInfoConfigured)
+                    {
                         /* Native SystemInfo embeds service tables.  Keep the
                          * table entries backed by the same manager hooks used
                          * by legacy little-endian CBE images. */
+                        /* SystemInfo slot 0 is IMG_CreateImageFormRes.  The
+                         * native client passes its resource token and then
+                         * consumes the returned 12-byte image object through
+                         * the same GameManagerOld image helpers. */
+                        vm_set_var(g_nativeSystemInfoPtr,
+                                   vm_native_manager_stub(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS));
+                        /* SystemInfo slot 14 sets the active (x,y,w,h) clip.
+                         * Reuse the legacy GameManagerOld clip implementation;
+                         * host drawing already enforces the LCD bounds. */
+                        vm_set_var(g_nativeSystemInfoPtr + 0x38,
+                                   vm_native_manager_stub(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 14 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x9c,
-                                   VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 13 * 4);
+                                   vm_native_manager_stub(VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 13 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0xa0,
-                                   VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 14 * 4);
+                                   vm_native_manager_stub(VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 14 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x24,
-                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 9 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 9 * 4));
+                        /* Wulin's first screen destroy callback invokes
+                         * SystemInfo+0x28 with the image returned by slot 0.
+                         * This is the native image-release entry and shares
+                         * the legacy GameManagerOld IMG_Destory contract. */
+                        vm_set_var(g_nativeSystemInfoPtr + 0x28,
+                                   vm_native_manager_stub(VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 10 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x58,
-                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 19 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 19 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x70,
-                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x74,
-                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0x78,
-                                   VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 6 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 6 * 4));
                         vm_configManagerTableCount(g_nativeSystemInfoPtr + 0x20c,
                                                    VM_MANAGER_STDIO_FUNC_LIST_ADDRESS,
                                                    22);
+                        for (u32 slot = 0; slot < 22; ++slot)
+                            vm_set_var(g_nativeSystemInfoPtr + 0x20c + slot * 4,
+                                       vm_native_manager_stub(vm_get_var(g_nativeSystemInfoPtr + 0x20c + slot * 4)));
                         vm_set_var(g_nativeSystemInfoPtr + 0xa4,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 2 * 4);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 2 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0xa8,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 1 * 4);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 1 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0xac,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS));
                         vm_set_var(g_nativeSystemInfoPtr + 0xb0,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 3 * 4);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 3 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0xb4,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 4 * 4);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 4 * 4));
                         vm_set_var(g_nativeSystemInfoPtr + 0xb8,
-                                   VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 5 * 4);
+                                   vm_native_manager_stub(VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 5 * 4));
                         /* SystemInfo::initManagers is the same whole-manager
                          * table initializer exposed as legacy manager slot 34.
                          * The native compatibility layer passes its 52-entry
                          * manager table here during vmInitManagers(). */
                         vm_set_var(g_nativeSystemInfoPtr + 0xf0,
-                                   VM_MANAGER_FUNC_LIST_ADDRESS + 34 * 4);
+                                   vm_native_manager_stub(VM_MANAGER_FUNC_LIST_ADDRESS + 34 * 4));
+                        g_nativeSystemInfoConfigured = true;
+                        printf("[info][native-app] system_info_configured=%08x request_frame=%08x out=%08x\n",
+                               g_nativeSystemInfoPtr, arg, outPtr);
                     }
                     vm_set_var(outPtr, g_nativeSystemInfoPtr);
                 }
@@ -8006,6 +8153,11 @@ static bool hook_vm_native_dispatch_func(u32 address)
                     {
                         g_nativePropertyInfoPtr = vm_malloc(0x100);
                         uc_mem_write(MTK, g_nativePropertyInfoPtr, emptyBuff, 0x100);
+                        /* The firmware exposes paired runtime init/release
+                         * methods here.  The shared emulator memory runtime is
+                         * already live, so both calls use the native neutral
+                         * dispatcher path. */
+                        vm_set_var(g_nativePropertyInfoPtr + 0x10, VM_NATIVE_DISPATCH_ADDRESS | 1);
                         vm_set_var(g_nativePropertyInfoPtr + 0x14, VM_NATIVE_DISPATCH_ADDRESS | 1);
                     }
                     vm_set_var(outPtr, g_nativePropertyInfoPtr);
@@ -8125,7 +8277,6 @@ static bool hook_vm_fixed_base_gameold_object_func(u32 address)
     uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
     uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-
     if (idx == 4)
     {
         int x = (int)(int16_t)(r1 & 0xffff);
@@ -8142,9 +8293,14 @@ static bool hook_vm_fixed_base_gameold_object_func(u32 address)
     }
     else
     {
-        printf("[warn][cbe] fixed_gameold_picture_method idx=%u "
-               "r0=%08x r1=%08x r2=%08x r3=%08x\n",
-               idx, r0, r1, r2, r3);
+        static bool warned[VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT] = {false};
+        if (idx < VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT && !warned[idx])
+        {
+            printf("[warn][cbe] fixed_gameold_picture_method idx=%u "
+                   "r0=%08x r1=%08x r2=%08x r3=%08x\n",
+                   idx, r0, r1, r2, r3);
+            warned[idx] = true;
+        }
         vm_set_call_result(0);
     }
 
@@ -8222,6 +8378,61 @@ static bool hook_vm_fixed_base_gameold_region_func(u32 address)
 
     vm_bx(lr);
     return true;
+}
+
+/* 600H sub_1F688A is shared by both the standalone region constructor and
+ * the larger scene/window object constructor.  Keep one guest-visible layout
+ * so native big-endian clients and fixed-base clients use the same region
+ * callbacks and rectangle storage. */
+static u32 vm_gameold_init_region_object(u32 object, u32 packedPosition,
+                                         u32 packedSize, u32 ownerA,
+                                         u32 ownerB, u32 capacity)
+{
+    /* Real SDK callers use small fixed lists (Wulin uses 10).  A larger value
+     * indicates that this SDK revision assigned a different contract to the
+     * same high table slot; do not turn stale stack data into a huge guest
+     * allocation. */
+    if (capacity > 0x1000)
+    {
+        printf("[warn][cbe] gameold_region_invalid_capacity context=%08x "
+               "capacity=%u\n", object, capacity);
+        return 0;
+    }
+    u32 entries = capacity ? vm_malloc(capacity * 4) : 0;
+    if (entries)
+        vm_try_write_zero(entries, capacity * 4);
+    for (u32 i = 0; i < capacity && entries; ++i)
+    {
+        u32 rect = vm_malloc(8);
+        if (rect)
+            vm_try_write_zero(rect, 8);
+        vm_set_var(entries + i * 4, rect);
+    }
+
+    vm_set_var(object + 0x04, 0);
+    vm_set_var(object + 0x08, capacity);
+    vm_set_var(object + 0x0c, entries);
+    vm_set_var(object + 0x10, ownerA);
+    vm_set_var(object + 0x14, ownerB);
+    vm_set_var(object + 0x18, packedPosition);
+    vm_set_var(object + 0x1c, packedSize);
+    vm_set_var(object + 0x20, 0);
+    vm_set_var(object + 0x24, 0);
+    for (u32 method = 0; method < VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT; ++method)
+        vm_set_var(object + 0x28 + method * 4,
+                   vm_native_manager_stub(VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS + method * 4));
+
+    if (entries && capacity)
+    {
+        u32 first = vm_get_var(entries);
+        if (first)
+        {
+            vm_set_var(first + 0, packedPosition);
+            vm_set_var(first + 4, packedSize);
+            vm_set_var(object + 0x04, 1);
+        }
+    }
+    return entries;
 }
 
 static bool hook_vm_sys_manager_func(u32 address)
@@ -12347,11 +12558,30 @@ static bool hook_vm_manager_gameold_func(u32 address)
         printf("[call]IMG_CreateImageFormRes\n");
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         vm_IMG_CreateImageFormRes(tmp1);
+        if (g_cbeInfo.isBiggianProgram)
+        {
+            uc_reg_read(MTK, UC_ARM_REG_R0, &tmp2);
+            if (vm_cbe_uses_native_be_image_layout() && tmp2)
+            {
+                /* Wulin reads width and height as separate 32-bit members.
+                 * Repack the reusable LE decoder's compact header and keep
+                 * its ownership flag in the otherwise-unused upper half of
+                 * the native height word. */
+                u32 pixels = vm_get_var(tmp2);
+                u32 width = vm_get_var_short(tmp2 + 4);
+                u32 height = vm_get_var_short(tmp2 + 6);
+                u32 ownership = vm_get_var_byte(tmp2 + 8);
+                vm_set_var(tmp2, pixels);
+                vm_set_var(tmp2 + 4, width);
+                vm_set_var(tmp2 + 8, (ownership << 16) | height);
+            }
+        }
     }
-    else if ((idx == 2 || idx == 3) && vm_cbe_uses_fixed_base_manager_abi())
+    else if ((idx == 2 || idx == 3) && g_cbeInfo.isBiggianProgram)
     {
-        /* Mobile Rainbow sub_424D8/sub_425C4: draw an image region to the
-         * implicit screen buffer. Slot 2 uses the transparent-pixel path. */
+        /* Mobile Rainbow sub_424D8/sub_425C4 and Wulin sub_458/sub_3FE share
+         * the same seven-argument clipped-image ABI.  Slot 2 uses the
+         * transparent-pixel path. */
         u32 sp = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); /* image */
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); /* source x */
@@ -12372,7 +12602,19 @@ static bool hook_vm_manager_gameold_func(u32 address)
     {
         printf("[call]IMG_Destory\n");
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_IMG_Destory(tmp1);
+        if (vm_cbe_uses_native_be_image_layout() && tmp1)
+        {
+            u32 pixels = vm_get_var(tmp1);
+            u32 ownership = vm_get_var(tmp1 + 8) >> 16;
+            if ((ownership == 1 || ownership == 3 || ownership == 4) && pixels)
+                vm_free(pixels);
+            vm_try_write_zero(tmp1, 12);
+            vm_set_call_result(0);
+        }
+        else
+        {
+            vm_IMG_Destory(tmp1);
+        }
     }
     else if (idx == 12)
     {
@@ -12389,7 +12631,7 @@ static bool hook_vm_manager_gameold_func(u32 address)
         tmp2 = (g_curKeyState & tmp1) != 0;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
     }
-    else if (idx == 15 && vm_cbe_uses_fixed_base_manager_abi())
+    else if (idx == 15 && g_cbeInfo.isBiggianProgram)
     {
         /* Mobile Rainbow sub_422EE stores x/y and x+w/y+h as the active
          * drawing clip. Host rendering already clips against the LCD bounds. */
@@ -12401,21 +12643,27 @@ static bool hook_vm_manager_gameold_func(u32 address)
                (int)tmp1, (int)tmp2, (int)tmp3, (int)tmp4);
         vm_set_call_result(tmp2 + tmp4);
     }
-    else if (idx == 16 && vm_cbe_uses_fixed_base_manager_abi())
+    else if (idx == 16 && g_cbeInfo.isBiggianProgram)
     {
-        /* Mobile Rainbow sub_4213C: image height. */
+        /* Native big-endian wrappers use slot 15 as image height. */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_set_call_result(tmp1 ? vm_get_var_short(tmp1 + 6) : 0);
+        vm_set_call_result(tmp1 ?
+                           (vm_cbe_uses_native_be_image_layout() ?
+                                (vm_get_var(tmp1 + 8) & 0xffff) :
+                                vm_get_var_short(tmp1 + 6)) : 0);
     }
-    else if (idx == 17 && vm_cbe_uses_fixed_base_manager_abi())
+    else if (idx == 17 && g_cbeInfo.isBiggianProgram)
     {
-        /* Mobile Rainbow sub_42148: image width. */
+        /* Native big-endian wrappers use slot 16 as image width. */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        vm_set_call_result(tmp1 ? vm_get_var_short(tmp1 + 4) : 0);
+        vm_set_call_result(tmp1 ?
+                           (vm_cbe_uses_native_be_image_layout() ?
+                                (vm_get_var(tmp1 + 4) & 0xffff) :
+                                vm_get_var_short(tmp1 + 4)) : 0);
     }
-    else if (idx == 18 && vm_cbe_uses_fixed_base_manager_abi())
+    else if (idx == 18 && g_cbeInfo.isBiggianProgram)
     {
-        /* Mobile Rainbow sub_4216A is RGB888 -> RGB565 conversion only. */
+        /* Native big-endian slot 17 is RGB888 -> RGB565 conversion. */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
@@ -12434,6 +12682,14 @@ static bool hook_vm_manager_gameold_func(u32 address)
         vm_GetStreamDataFormRes(tmp1, tmp2, tmp3, tmp4);
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp5);
         vm_note_stream_data_result("game_old", lastAddress, tmp1, tmp2, tmp3, tmp4, tmp5);
+    }
+    else if (idx == 31 && g_cbeInfo.isBiggianProgram)
+    {
+        /* Wulin calls flat slot 30 through a zero-argument veneer after a
+         * batch of draw operations.  600H sub_42B60 forwards this to the LCD
+         * update routine; the host presents its cached framebuffer in the
+         * scheduler, so no additional guest-side work is required. */
+        vm_set_call_result(0);
     }
     else if (idx == 51)
     {
@@ -12548,14 +12804,46 @@ static bool hook_vm_manager_gameold_func(u32 address)
     {
         vm_set_call_result(g_curKeyDownState);
     }
+    else if (idx == 70 && g_cbeInfo.isBiggianProgram &&
+             !vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* Wulin wraps flat slot 69 with sub_3AC to add its text-layout method
+         * at object+0x24.  This SDK slot constructs the underlying scrolling
+         * text object; it is absent from the inspected 600H table revision.
+         * Preserve the observed six-argument layout and provide callable base
+         * methods so the client-owned layout/render wrapper can run. */
+        u32 sp = 0;
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); /* object */
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); /* color/style */
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); /* font */
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4); /* line height */
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        u32 width = vm_get_var(sp);
+        u32 height = vm_get_var(sp + 4);
+        vm_try_write_zero(tmp1, 0x38);
+        vm_set_var_short(tmp1 + 0x04, (u16)tmp3);
+        vm_set_var_short(tmp1 + 0x06, (u16)tmp4);
+        vm_set_var(tmp1 + 0x14, tmp2);
+        vm_set_var_short(tmp1 + 0x18, (u16)width);
+        vm_set_var_short(tmp1 + 0x1a, (u16)height);
+        for (u32 method = 0; method < 4; ++method)
+            vm_set_var(tmp1 + 0x28 + method * 4,
+                       vm_native_manager_stub(VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS + method * 4));
+        printf("[info][cbe] gameold_text_init context=%08x style=%08x "
+               "font=%u line=%u bounds=%u/%u\n",
+               tmp1, tmp2, tmp3, tmp4, width, height);
+        vm_set_call_result(tmp1);
+    }
     else if (idx == 79)
     {
-        /* Native SystemInfo flat slot 78 is called once after the client's
-         * DreamFactory allocation setup.  The legacy manager tables and
-         * screen runtime are already initialized by vm_initManagerTable(), so
-         * the shared little-endian entry only has to acknowledge that phase. */
-        DEBUG_PRINT("[call]GAME_InitRuntime\n");
-        vm_set_call_result(0);
+        /* Wulin's SDK calls flat slot 78 through a zero-argument BX veneer,
+         * unlike the two-argument sub_4A973A present in the inspected 600H
+         * firmware revision.  In this SDK it is the one-time image/data-page
+         * runtime initialization performed just before screens are created.
+         * Reuse the little-endian embedded-CBE data-package loader. */
+        u32 count = vm_IMG_InitDataPage(0, 1);
+        printf("[info][cbe] gameold_runtime_init resources=%u package=%08x\n",
+               count, vm_get_var(VM_DreamFactory_DataPackage_ADDRESS));
     }
     else if (idx == 76 && g_cbeInfo.isBiggianProgram)
     {
@@ -12594,72 +12882,101 @@ static bool hook_vm_manager_gameold_func(u32 address)
         vm_set_var(tmp1 + 0x0c, resourceIds);
         vm_set_var(tmp1 + 0x10, pictures);
         vm_set_var_short(tmp1 + 0x14, 0);
-        for (u32 method = 0; method < VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT; ++method)
+        /* This native SDK's picture-library base ends at +0x30.  Wulin
+         * derives its own object at +0x34 (sub_F56 installs four callbacks
+         * there), so writing the newer firmware's 15-entry layout would
+         * overwrite the following screen callback table. */
+        /* Wulin uses slot 108 for its compact five-entry loading object and
+         * slot 73 for the 20-entry derived picture library.  The latter owns
+         * the space through +0x50 and its exit path calls that final method. */
+        const u32 nativePictureMethodCount = count <= 5 ? 7 :
+                                                     VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_COUNT;
+        for (u32 method = 0; method < nativePictureMethodCount; ++method)
             vm_set_var(tmp1 + 0x18 + method * 4,
-                       VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS + method * 4);
+                       vm_native_manager_stub(VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS + method * 4));
         printf("[info][cbe] gameold_picture_init context=%08x capacity=%u "
                "scanline=%08x ids=%08x pictures=%08x\n",
                tmp1, count, scanline, resourceIds, pictures);
         vm_set_call_result(scanline && resourceIds && pictures ? 1 : 0);
     }
 
-    else if (idx == 80 && g_cbeInfo.isBiggianProgram &&
+    else if (idx == 78 && g_cbeInfo.isBiggianProgram &&
              !vm_cbe_uses_fixed_base_manager_abi())
     {
-        /* 600H native GameManagerOld slot 79 registers the picture-library
-         * object created through slot 108.  The emulator's shared DF/image
-         * paths receive that object directly, so retaining it is sufficient
-         * until a getter needs to expose the firmware global. */
+        /* Wulin flat slot 77 constructs a large scene/window object with the
+         * sub_1F688A region object embedded at +0x628.  Its six-argument SDK
+         * ABI omits the resource-parser arguments used by the inspected 600H
+         * sub_1F527C, so initialize the common layout without consuming
+         * nonexistent stack arguments. */
+        u32 sp = 0;
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
-        g_nativePictureLibraryPtr = tmp1;
-        printf("[info][cbe] gameold_picture_library=%08x\n", tmp1);
-        vm_set_call_result(0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        u32 ownerB = vm_get_var(sp);
+        u32 capacity = vm_get_var(sp + 4);
+        printf("[trace][cbe] gameold_scene_args context=%08x position=%08x "
+               "size=%08x owner=%08x/%08x capacity=%u sp=%08x\n",
+               tmp1, tmp2, tmp3, tmp4, ownerB, capacity, sp);
+        u32 region = tmp1 + 0x628;
+        u32 entries = vm_gameold_init_region_object(region, tmp2, tmp3,
+                                                     tmp1, tmp1, capacity);
+        /* Wulin uses the compact scene-object ABI: its client-owned event
+         * callback is at +0x30 and the SDK methods start at +0x34.  The 600H
+         * revision places equivalent methods near +0x670.  Install callable
+         * compatibility methods without touching the client callback. */
+        for (u32 method = 0; method < 8; ++method)
+            vm_set_var(tmp1 + 0x34 + method * 4,
+                       vm_native_manager_stub(VM_FIXED_BASE_GAMEOLD_OBJECT_FUNC_ADDRESS + method * 4));
+        vm_set_var(tmp1 + 0x624, tmp4);
+        vm_set_var_short(tmp1 + 0x0c, 0);
+        vm_set_var(tmp1 + 0x610, 0);
+        vm_set_var_short(tmp1 + 0x0e, 0);
+        vm_set_var_short(tmp1 + 0x00, 0);
+        vm_set_var_short(tmp1 + 0x02, 0);
+        const u32 methodOffsets[] = {
+            0x654, 0x658, 0x668, 0x670, 0x674, 0x678,
+            0x67c, 0x680, 0x684, 0x688, 0x68c, 0x690,
+        };
+        for (u32 i = 0; i < sizeof(methodOffsets) / sizeof(methodOffsets[0]); ++i)
+            vm_set_var(tmp1 + methodOffsets[i], VM_NATIVE_DISPATCH_ADDRESS | 1);
+        printf("[info][cbe] gameold_scene_init context=%08x capacity=%u "
+               "bounds=%08x/%08x entries=%08x\n",
+               tmp1, capacity, tmp2, tmp3, entries);
+        vm_set_call_result(entries ? 1 : 0);
     }
 
     else if (idx == 80 && vm_cbe_uses_fixed_base_manager_abi())
     {
-        /* Mobile Rainbow sub_1F688A: initialize a clipped region set. */
+        /* 600H sub_1F688A: standalone clipped-region object constructor. */
         u32 sp = 0;
-        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1); /* object */
-        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2); /* packed x/y */
-        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3); /* packed w/h */
-        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4); /* owner A */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
         uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
         u32 ownerB = vm_get_var(sp);
         u32 capacity = vm_get_var(sp + 4);
-        u32 entries = capacity ? vm_malloc(capacity * 4) : 0;
-        if (entries)
-            vm_try_write_zero(entries, capacity * 4);
-        for (u32 i = 0; i < capacity && entries; ++i)
-        {
-            u32 rect = vm_malloc(8);
-            if (rect)
-                vm_try_write_zero(rect, 8);
-            vm_set_var(entries + i * 4, rect);
-        }
-        vm_set_var(tmp1 + 0x04, 0);
-        vm_set_var(tmp1 + 0x08, capacity);
-        vm_set_var(tmp1 + 0x0c, entries);
-        vm_set_var(tmp1 + 0x10, tmp4);
-        vm_set_var(tmp1 + 0x14, ownerB);
-        vm_set_var(tmp1 + 0x18, tmp2);
-        vm_set_var(tmp1 + 0x1c, tmp3);
-        vm_set_var(tmp1 + 0x20, 0);
-        vm_set_var(tmp1 + 0x24, 0);
-        for (u32 method = 0; method < VM_FIXED_BASE_GAMEOLD_REGION_FUNC_COUNT; ++method)
-            vm_set_var(tmp1 + 0x28 + method * 4,
-                       VM_FIXED_BASE_GAMEOLD_REGION_FUNC_ADDRESS + method * 4);
-        if (entries && capacity)
-        {
-            u32 first = vm_get_var(entries);
-            vm_set_var(first + 0, tmp2);
-            vm_set_var(first + 4, tmp3);
-            vm_set_var(tmp1 + 0x04, 1);
-        }
+        printf("[trace][cbe] gameold_region_args context=%08x position=%08x "
+               "size=%08x owner=%08x/%08x capacity=%u sp=%08x\n",
+               tmp1, tmp2, tmp3, tmp4, ownerB, capacity, sp);
+        u32 entries = vm_gameold_init_region_object(tmp1, tmp2, tmp3,
+                                                     tmp4, ownerB, capacity);
         printf("[info][cbe] gameold_region_init context=%08x capacity=%u "
                "bounds=%08x/%08x entries=%08x\n",
                tmp1, capacity, tmp2, tmp3, entries);
         vm_set_call_result(entries ? 1 : 0);
+    }
+
+    else if (idx == 80 && g_cbeInfo.isBiggianProgram)
+    {
+        /* Wulin assigns this slot to a picture-library operation rather than
+         * the standalone region constructor used by the fixed-base SDK. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        DEBUG_PRINT("[call]GAME_PictureLibraryOp(%08x,%08x)\n", tmp1, tmp2);
+        vm_set_call_result(0);
     }
 
     else if (idx == 81)

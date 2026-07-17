@@ -585,6 +585,18 @@ static int vm_file_try_existing_path(const char *path, char *resolvedName, size_
     return 1;
 }
 
+static int vm_file_is_mutable_upinfo_state(const char *path)
+{
+    const char *name = vm_path_basename(path);
+    const char *p;
+    if (name == NULL || _strnicmp(name, "upinfo", 6) != 0)
+        return 0;
+    p = name + 6;
+    while (*p >= '0' && *p <= '9')
+        ++p;
+    return _stricmp(p, ".dat") == 0;
+}
+
 static int vm_file_try_resolve_selected_cbe_asset_path(const char *normalizedName,
                                                         const char *mode,
                                                         char *resolvedName,
@@ -601,6 +613,13 @@ static int vm_file_try_resolve_selected_cbe_asset_path(const char *normalizedNam
         resolvedName == NULL || resolvedSize == 0 || !vm_file_is_read_only_mode(mode))
         return 0;
     if (!vm_file_get_selected_cbe_directory(directory, sizeof(directory)))
+        return 0;
+
+    /* upinfoN.dat is mutable per-profile state, not a distribution asset.
+     * If it is absent from app storage, Wulin must rebuild it from downinfo;
+     * substituting the bundle's upinfo.dat imports a stale update flag and
+     * selects the system-update branch on every clean launch. */
+    if (vm_file_is_mutable_upinfo_state(normalizedName))
         return 0;
 
     /* Big-endian CBE bundles keep their companion files beside the selected
