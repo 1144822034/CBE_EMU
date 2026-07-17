@@ -3003,6 +3003,7 @@ enum
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
     VM_NET_MOCK_SKILL_NAME_BYTES = 24,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
+    VM_NET_MOCK_TELEPORT_STONE_COST = 1,
     VM_NET_MOCK_SCENE_LANDING_SAFE_GAP = 32,
     VM_NET_MOCK_ROLE_DB_MAX_ROLES = 5,
     VM_NET_MOCK_ROLE_DB_LEGACY_VERSION = 1,
@@ -15850,6 +15851,186 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
     return pos;
 }
 
+static bool vm_net_mock_parse_teleport_stone_confirmed_exit_combo(
+    const u8 *request, u32 requestLen,
+    u32 *itemObjectStartOut, u32 *itemObjectLenOut,
+    u32 *objectCountOut, u32 *exitIdOut, u8 *typeOut)
+{
+    u32 offset = 4;
+    u32 objectCount = 0;
+    u32 exitId2 = 0;
+    u32 exitId3 = 0;
+    u32 type2 = 0;
+    u32 type3 = 0;
+    u32 itemObjectStart = 0;
+    u32 itemObjectLen = 0;
+    bool haveSubtype2 = false;
+    bool haveSubtype3 = false;
+    bool haveItemUse = false;
+    vm_net_mock_request_object object;
+
+    if (itemObjectStartOut)
+        *itemObjectStartOut = 0;
+    if (itemObjectLenOut)
+        *itemObjectLenOut = 0;
+    if (objectCountOut)
+        *objectCountOut = 0;
+    if (exitIdOut)
+        *exitIdOut = 0;
+    if (typeOut)
+        *typeOut = 0;
+    if (!g_vm_net_mock_teleport_stone_confirm_target_valid ||
+        request == NULL || requestLen < 14 ||
+        request[0] != 'W' || request[1] != 'T')
+    {
+        return false;
+    }
+
+    while (offset < requestLen)
+    {
+        u32 objectStart = offset;
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+            return false;
+        ++objectCount;
+
+        if (object.major == 1 && object.kind == 0x10 && object.subtype == 2)
+        {
+            if (objectCount != 1 || haveSubtype2 ||
+                !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                     "exitID", &exitId2) ||
+                !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                     "type", &type2))
+            {
+                return false;
+            }
+            haveSubtype2 = true;
+            continue;
+        }
+        if (object.major == 1 && object.kind == 0x10 && object.subtype == 3)
+        {
+            if (!haveSubtype2 || haveSubtype3 ||
+                !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                     "exitID", &exitId3) ||
+                !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                     "type", &type3))
+            {
+                return false;
+            }
+            haveSubtype3 = true;
+            continue;
+        }
+        if (object.major == 1 && object.kind == 7 && object.subtype == 1)
+        {
+            if (!haveSubtype2 || !haveSubtype3 || haveItemUse || object.payloadLen == 0)
+                return false;
+            haveItemUse = true;
+            itemObjectStart = objectStart;
+            itemObjectLen = offset - objectStart;
+            continue;
+        }
+        return false;
+    }
+
+    if (offset != requestLen || !haveSubtype2 || !haveSubtype3 ||
+        exitId2 != exitId3 || type2 == 0 || type2 != type3 || type2 > 0xffu)
+    {
+        return false;
+    }
+    if (itemObjectStartOut)
+        *itemObjectStartOut = itemObjectStart;
+    if (itemObjectLenOut)
+        *itemObjectLenOut = itemObjectLen;
+    if (objectCountOut)
+        *objectCountOut = objectCount;
+    if (exitIdOut)
+        *exitIdOut = exitId2;
+    if (typeOut)
+        *typeOut = (u8)type2;
+    return true;
+}
+
+static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u8 itemRequest[512]; /* Matches the host's bounded async WT request size. */
+    u8 itemResponse[1024];
+    u8 sceneResponse[1024];
+    u32 itemObjectStart = 0;
+    u32 itemObjectLen = 0;
+    u32 objectCount = 0;
+    u32 exitId = 0;
+    u8 type = 0;
+    u32 itemRequestLen = 0;
+    u32 itemResponseLen = 0;
+    u32 sceneResponseLen = 0;
+    u32 pos = 5;
+    u32 mergedObjectCount = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_teleport_stone_confirmed_exit_combo(
+            request, requestLen,
+            &itemObjectStart, &itemObjectLen,
+            &objectCount, &exitId, &type))
+    {
+        return 0;
+    }
+
+    if (itemObjectLen != 0)
+    {
+        itemRequestLen = 4 + itemObjectLen;
+        if (itemRequestLen > sizeof(itemRequest) ||
+            itemObjectStart + itemObjectLen > requestLen)
+        {
+            return 0;
+        }
+        itemRequest[0] = 'W';
+        itemRequest[1] = 'T';
+        itemRequest[2] = (u8)((itemRequestLen >> 8) & 0xff);
+        itemRequest[3] = (u8)(itemRequestLen & 0xff);
+        memcpy(itemRequest + 4, request + itemObjectStart, itemObjectLen);
+        itemResponseLen = vm_net_mock_build_item_use_response(itemRequest, itemRequestLen,
+                                                              itemResponse, sizeof(itemResponse));
+        if (itemResponseLen < 5 || itemResponse[0] != 'W' || itemResponse[1] != 'T')
+            return 0;
+    }
+
+    /*
+     * The runtime request is one WT packet containing 16/2 + 16/3 (+ 7/1
+     * when a stone is consumed). Treating only its first object as a standalone
+     * 16/2 loses the already-present 16/3 and leaves the client waiting. Reuse
+     * the verified subtype-3 path so the saved 16/4 target becomes 30/1.
+     */
+    sceneResponseLen = vm_net_mock_build_teleport_stone_transfer_response(
+        request, requestLen, 3, sceneResponse, sizeof(sceneResponse));
+    if (sceneResponseLen < 5 || sceneResponse[0] != 'W' || sceneResponse[1] != 'T')
+        return 0;
+
+    if (itemResponseLen > 5)
+    {
+        if (pos + itemResponseLen - 5 > outCap)
+            return 0;
+        memcpy(out + pos, itemResponse + 5, itemResponseLen - 5);
+        pos += itemResponseLen - 5;
+        mergedObjectCount += itemResponse[4];
+    }
+    if (pos + sceneResponseLen - 5 > outCap)
+        return 0;
+    memcpy(out + pos, sceneResponse + 5, sceneResponseLen - 5);
+    pos += sceneResponseLen - 5;
+    mergedObjectCount += sceneResponse[4];
+    if (mergedObjectCount > 0xffu)
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, (u8)mergedObjectCount);
+
+    printf("[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item_request=%u item_response=%u scene_response=%u response_objects=%u resp=%u\n",
+           objectCount, exitId, type, itemRequestLen, itemResponseLen,
+           sceneResponseLen, mergedObjectCount, pos);
+    vm_autotest_note("mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item=%u response_objects=%u response=item-ack+30/1 evidence=runtime:wt16/2-len130 JianghuOL:0x01018F66/0x01018ED6\n",
+                     objectCount, exitId, type, itemObjectLen ? 1u : 0u,
+                     mergedObjectCount);
+    return pos;
+}
+
 static bool vm_net_mock_append_teleport_stone_map_confirm_object(u8 *out, u32 outCap,
                                                                   u32 *pos)
 {
@@ -15859,13 +16040,15 @@ static bool vm_net_mock_append_teleport_stone_map_confirm_object(u8 *out, u32 ou
         return false;
     /*
      * JianghuOL:0x010357E0 dispatches 16/4 to HandleItemUseConfirm
-     * (0x010190A8). result=0 opens the normal confirmation dialog; value=0
-     * keeps the mock transfer free while the confirmation callback still
-     * executes ConsumeInventoryItem(0, ...), which emits 16/2 then 16/3 and
-     * performs the map controller's normal teardown.
+     * (0x010190A8). result=0 opens the normal confirmation dialog, and `value`
+     * is both the displayed teleport-stone cost and the count later passed to
+     * ConsumeInventoryItem(0x01018F66). A single map transfer costs one item
+     * 800. If the client has no stone, ConsumeInventoryItem follows its normal
+     * "not enough, purchase?" branch before emitting 16/2 and 16/3.
      */
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 0) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "value", 0))
+        !vm_net_mock_put_object_u32(out, outCap, pos, "value",
+                                    VM_NET_MOCK_TELEPORT_STONE_COST))
     {
         return false;
     }
@@ -15924,14 +16107,16 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
-    printf("[info][network] mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=0 scene_source=%s pos_source=%s download=%u resp=%u\n",
+    printf("[info][network] mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u resp=%u\n",
            curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
            target.scene, target.x, target.y,
+           (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
            source ? source : "-", posSource ? posSource : "-",
            target.needsSceneDownload ? 1u : 0u, pos);
-    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=0 scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66 negative=direct-30/1-stale-map-controller\n",
+    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66 negative=value0-wrong-cost+direct-30/1-stale-map-controller\n",
                       curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
                       target.scene, target.x, target.y,
+                      (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
                       source ? source : "-", posSource ? posSource : "-",
                       target.needsSceneDownload ? 1u : 0u);
     return pos;
@@ -30791,6 +30976,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-settings-unstuck-16-2", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-teleport-stone-confirmed-exit-combo",
+                                  request, requestLen, hookedLen);
         return hookedLen;
     }
 

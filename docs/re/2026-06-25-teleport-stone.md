@@ -5,10 +5,9 @@
 Implemented server-side handling for the teleport-stone request family:
 
 - `1/16/1`: list teleport destinations.
-- `1/16/2`: acknowledge the first confirmed map-exit request while preserving
-  the selected destination server-side.
-- `1/16/3`: consume the confirmation request and return the main-business
-  scene-enter family (`resources + 30/1`) for the saved destination.
+- `1/16/2 + 1/16/3 [+ 1/7/1]`: consume the client's combined confirmed-exit
+  request and return inventory acknowledgements plus main-business `30/1` for
+  the saved destination.
 - `1/16/4`: map-UI transfer preparation request; the response opens the
   client's normal confirmation path before `16/2` and `16/3` perform entry.
 
@@ -128,12 +127,12 @@ shape during the same network callback. The server therefore returns
 saving the target in the separate confirmation slot and not arming the actual
 scene-change target until the follow-up `16/3` request.
 
-For the current map-UI confirmation flow, `16/4 result=0` has already installed
-the client's confirmation callback. Its first follow-up `16/2` therefore gets
-a zero-object WT acknowledgement instead. Full `mmGame:sub_11CE(0x11CE)`
-evidence shows `16/2 result=2` is the recharge-prompt branch, not an entry
-acknowledgement. The resolved target remains saved for the immediately following
-`16/3`, which is the authoritative scene-exit request.
+An intermediate isolated-packet replay treated the follow-up `16/2` as a
+standalone request and returned a zero-object WT acknowledgement. Full
+`mmGame:sub_11CE(0x11CE)` evidence still proves `16/2 result=2` is the
+recharge-prompt branch, but runtime later showed the real client batches
+`16/2`, `16/3`, and optional item use into one WT packet. The combined handler
+documented below supersedes the standalone interpretation for map confirmation.
 
 ### `1/16/3`
 
@@ -319,7 +318,7 @@ IDA evidence:
 
 Response strategy:
 
-- return a same-subtype `1/16/4 {result:u8=0,value:u32=0}` object so the client
+- return a same-subtype `1/16/4 {result:u8=0,value:u32=1}` object so the client
   enters its normal item-use confirmation callback;
 - retain the resolved scene/position server-side across the callback's compact
   `16/2` and `16/3` requests;
@@ -618,7 +617,7 @@ mock_teleport_stone_list entries=1 exitinfo_len=...
 mock_teleport_stone_transfer subtype=2 ... response=empty-wt-await-16/3 pending=0 confirm=1
 mock_teleport_stone_transfer subtype=3 ... response=scene-channel-enter-confirm-target pending=0 confirm=1
 mock_teleport_stone_direct_enter_followup scene=... pos=(...) objects=... response=scene-task-subset
-mock_teleport_stone_map_confirm curid=... objid=... scene=... pos=(...) response=16/4-confirm value=0 scene_source=... pos_source=... download=...
+mock_teleport_stone_map_confirm curid=... objid=... scene=... pos=(...) response=16/4-confirm value=1 scene_source=... pos_source=... download=...
 mock_teleport_stone_post_enter scene=... pos=(...) objects=4
 ```
 
@@ -911,21 +910,67 @@ that leaves stale map state:
 - that teardown clears the cached map-sheet state, so the next world-map open
   reloads its current world/child indices from the newly selected `sMap` row.
 
-The mock now returns `16/4 {result:u8=0,value:u32=0}` and stores the resolved
-scene target server-side. The compact `16/2` gets a zero-object WT transport
-acknowledgement (avoiding `mmGame:0x11CE`'s `result=2` recharge prompt), while
-`16/3` reuses the saved target and returns the existing `30/1` scene-enter
-response. This preserves both required contracts: normal world-map state refresh
+The mock now returns `16/4 {result:u8=0,value:u32=1}` and stores the resolved
+scene target server-side. After acceptance, the combined `16/2 + 16/3` request
+reuses that target and returns the existing `30/1` scene-enter response; when a
+stone is consumed, the same response places the existing item acknowledgements
+before `30/1`. This preserves normal world-map refresh, inventory consumption,
 and parser-state-7 position commit. No client memory or world-map globals are
 written by the host.
 
-Service replay of the real Lin'an request shape after the fix:
+Early isolated service replay validated the response fields and target mapping,
+but did not reproduce the client's later multi-object batching:
 
 ```text
 request  16/4 curid=1 objid=4
 resolve  c04临安府_01 pos=(201,140) smap_row=47
-response 16/4 result=0 value=0, 37 bytes
-request  16/2 exitID=47 type=3
-response zero-object WT acknowledgement, 5 bytes
-next     16/3 consumes the saved target through the existing 30/1 builder
+response 16/4 result=0 value=1, 37 bytes
+isolated request  16/2 exitID=47 type=3
+isolated response zero-object WT acknowledgement, 5 bytes
+real client       16/2 + 16/3 [+ 7/1] in one request; see the combo evidence below
 ```
+
+### 2026-07-17 Teleport-Stone Cost
+
+Runtime UI showed `您需要0个传送石` because the first map-confirm implementation
+encoded `16/4.value=0` to make transfers free. Client evidence proves this field
+is not reserved:
+
+- `HandleItemUseConfirm(0x010190A8)` reads `value` into the saved one-byte item
+  count and formats `您需要花费%d个传送石瞬移到%s` with it;
+- accepting the dialog reaches `HandleItemUseDialogCb(0x01019068)`, which passes
+  the same count to `ConsumeInventoryItem(0x01018F66)`;
+- `ConsumeInventoryItem` operates on item ID `800`; when the client has no stone,
+  its existing guard displays `传送石不够，是否购买？` before sending the scene
+  exit requests.
+
+The server now returns `value=1`, matching one teleport stone per map transfer.
+
+### 2026-07-17 Confirmed Exit Is a Multi-Object Request
+
+After changing the real cost from zero to one, runtime reached the confirmation
+dialog but stalled after acceptance. The service trace ended at:
+
+```text
+mock_teleport_stone_transfer subtype=2 ... response=empty-wt-await-16/3
+net_send ... wt=16/2 len=130 ... resp=5
+```
+
+No later request arrived. The `130`-byte boundary is the key negative evidence:
+this is not a standalone short `16/2`. `ConsumeInventoryItem(0x01018F66)` calls
+`SendSceneExitEvent(0x01018ED6)` twice and then removes item `800`; the outgoing
+event layer batches those operations into one WT packet:
+
+```text
+1/16/2 {exitID,type}
+1/16/3 {exitID,type}
+1/7/1  {teleport-stone use fields}  # present when value/count is nonzero
+```
+
+The old first-object detector returned an empty response for `16/2`, thereby
+discarding the already-present `16/3`. The new narrow combo handler requires the
+saved `16/4` confirmation target, matching `16/2` and `16/3` exit/type fields,
+and permits only the associated `7/1` item-use object. It extracts `7/1` through
+the existing item-use builder, places its inventory acknowledgements first, and
+appends the verified `30/1` scene-enter object last. Runtime source:
+`builtin-teleport-stone-confirmed-exit-combo`.
