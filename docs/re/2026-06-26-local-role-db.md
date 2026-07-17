@@ -49,7 +49,7 @@ active local role:
 
 ```text
 roleId, job/visual, sex/visual, name,
-playerId, account/display,
+guildId, guildName/display,
 level/status word,
 hp, hpMax, mp, mpMax,
 derived charm/stat words,
@@ -65,6 +65,9 @@ motion/grid words
 
 Relevant parser write evidence:
 
+- `0x0100FAC4` 把首个 `u32` 写入 actor `+100`，它是角色 ID；
+  `0x0100FB22` 把角色名后的第二个 `u32` 写入 actor `+104`，它是帮派 ID，
+  不能再次发送角色 ID。帮派菜单直接以该值是否为零区分未入帮/已入帮；
 - `0x0100FBA8..0x0100FBE4` reads six tagged integer fields and stores them into
   the actor property word table around actor offsets `+288..+306`; the mock now
   fills these with derived strength/agility/wisdom/endurance/charm/reserve
@@ -185,12 +188,17 @@ Login and scene enter:
   `N + 1` is `N * 100`.
 - scene/login actorinfo uses the active role name for its role name, display
   name so map-side role information matches title selection.
+- scene/login actorinfo 的首个 ID 是 `roleId`，第二个 ID 是真实 `guildId`；未入帮
+  发送 `guildId=0`，已入帮发送 `guild_members.guild_id`。客户端
+  `HandleSceneMenuNavigation(0x0101AED2)` 与
+  `HandleGuildMenuAction(0x0103D15A)` 都直接检查 actor `+104`，因此不能用角色 ID
+  或“无帮派”文字代替该状态值。
 - scene/login actorinfo now derives display-only RPG properties from the active
   role instead of writing zeros:
   - title is wealth based through the designation catalog documented in
     `2026-07-02-role-designation-page.md`; only titles whose money requirement
     is met are returned by the `23/1` title page list;
-  - display/sect defaults to `散人`;
+  - display/sect 查询 `guild_members -> guilds` 并显示真实帮派名；未入帮时显示 `无帮派`，不再把 `散人` 当作帮派名；
   - spouse defaults to `无` through the group/type-1 `name` field instead of the
     old hard-coded `Codex`;
   - level words default to the normalized role level, so a fresh role displays
@@ -235,6 +243,11 @@ Title role list:
   fallback names such as `Role10002`.
 - title role delete handles request `1/1/8`, removes the matching persisted
   role by `actorID`, and returns `result=0` only on success.
+- relational role saves preserve existing `account_roles` rows and update them
+  in place. Only role IDs that actually disappeared are deleted. This is
+  required because guild membership uses `ON DELETE CASCADE`; the former
+  delete-and-reinsert save path dissolved a guild during ordinary role-select,
+  position, or battle-state persistence.
 
 Money sync:
 
