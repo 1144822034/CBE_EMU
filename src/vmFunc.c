@@ -334,7 +334,8 @@ static int vm_path_looks_like_ascii_c_string(const u8 *raw, size_t rawSize)
     return len >= 2 && len < rawSize;
 }
 
-static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2LenOut)
+static int vm_path_looks_like_ucs2(const u8 *raw, size_t rawSize,
+                                   int bigEndian, u32 *ucs2LenOut)
 {
     if (ucs2LenOut)
         *ucs2LenOut = 0;
@@ -348,7 +349,9 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
     int sawWideChar = 0;
     while (pos + 1 < rawSize)
     {
-        u16 ch = (u16)(raw[pos] | (raw[pos + 1] << 8));
+        u16 ch = bigEndian
+                     ? (u16)((raw[pos] << 8) | raw[pos + 1])
+                     : (u16)(raw[pos] | (raw[pos + 1] << 8));
         if (ch == 0)
         {
             if (units == 0)
@@ -392,9 +395,21 @@ static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
         return;
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     u32 ucs2Len = 0;
-    if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
+    if (vm_path_looks_like_ucs2(rawName, sizeof(rawName), 0, &ucs2Len))
     {
         ucs2_to_gbk(rawName, ucs2Len, out, outSize);
+    }
+    else if (vm_path_looks_like_ucs2(rawName, sizeof(rawName), 1, &ucs2Len))
+    {
+        /* The shared host file layer consumes UCS-2LE.  Normalize paths from
+         * big-endian CBE images before reusing the existing conversion path. */
+        u8 ucs2Le[256];
+        for (u32 pos = 0; pos + 1 < ucs2Len; pos += 2)
+        {
+            ucs2Le[pos] = rawName[pos + 1];
+            ucs2Le[pos + 1] = rawName[pos];
+        }
+        ucs2_to_gbk(ucs2Le, ucs2Len, out, outSize);
     }
     else
     {
@@ -520,6 +535,107 @@ static int vm_file_is_bare_cbe_module(const char *path)
         return 0;
     ext = strrchr(path, '.');
     return ext != NULL && (_stricmp(ext, ".cbm") == 0 || _stricmp(ext, ".cbe") == 0);
+}
+
+static void vm_file_set_selected_cbe_path(const char *selected)
+{
+    const char *slash;
+    const char *backslash;
+    size_t len;
+
+    if (selected == NULL || selected[0] == 0)
+        return;
+
+    slash = strrchr(selected, '/');
+    backslash = strrchr(selected, '\\');
+    if (backslash != NULL && (slash == NULL || backslash > slash))
+        slash = backslash;
+    if (slash == NULL)
+    {
+        snprintf(g_selectedCbeDirectoryHost, sizeof(g_selectedCbeDirectoryHost), ".");
+        return;
+    }
+
+    len = (size_t)(slash - selected);
+    if (len == 0 || len >= sizeof(g_selectedCbeDirectoryHost))
+        return;
+    memcpy(g_selectedCbeDirectoryHost, selected, len);
+    g_selectedCbeDirectoryHost[len] = 0;
+    printf("[info][cbe] asset_root=%s\n", g_selectedCbeDirectoryHost);
+}
+
+static int vm_file_get_selected_cbe_directory(char *directory, size_t directorySize)
+{
+    if (directory == NULL || directorySize == 0 || g_selectedCbeDirectoryHost[0] == 0)
+        return 0;
+    snprintf(directory, directorySize, "%s", g_selectedCbeDirectoryHost);
+    return 1;
+}
+
+static int vm_file_try_existing_path(const char *path, char *resolvedName, size_t resolvedSize)
+{
+    FILE *fp;
+    if (path == NULL || path[0] == 0 || resolvedName == NULL || resolvedSize == 0)
+        return 0;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    fclose(fp);
+    snprintf(resolvedName, resolvedSize, "%s", path);
+    return 1;
+}
+
+static int vm_file_try_resolve_selected_cbe_asset_path(const char *normalizedName,
+                                                        const char *mode,
+                                                        char *resolvedName,
+                                                        size_t resolvedSize)
+{
+    char directory[256];
+    char candidate[512];
+    char unversionedName[256];
+    const char *baseName;
+    const char *extension;
+    const char *stemEnd;
+
+    if (!g_cbeInfo.isBiggianProgram || normalizedName == NULL || normalizedName[0] == 0 ||
+        resolvedName == NULL || resolvedSize == 0 || !vm_file_is_read_only_mode(mode))
+        return 0;
+    if (!vm_file_get_selected_cbe_directory(directory, sizeof(directory)))
+        return 0;
+
+    /* Big-endian CBE bundles keep their companion files beside the selected
+     * image.  Prefer the original relative layout, then accept a flat bundle. */
+    if (snprintf(candidate, sizeof(candidate), "%s/%s", directory, normalizedName) < (int)sizeof(candidate) &&
+        vm_file_try_existing_path(candidate, resolvedName, resolvedSize))
+        goto resolved;
+
+    baseName = vm_path_basename(normalizedName);
+    if (snprintf(candidate, sizeof(candidate), "%s/%s", directory, baseName) < (int)sizeof(candidate) &&
+        vm_file_try_existing_path(candidate, resolvedName, resolvedSize))
+        goto resolved;
+
+    /* Mobile Rainbow app storage appends a numeric profile suffix to files
+     * such as downinfo3.dat.  Distribution bundles commonly store the same
+     * seed file as downinfo.dat, so strip only trailing stem digits. */
+    extension = strrchr(baseName, '.');
+    stemEnd = extension;
+    if (extension != NULL)
+    {
+        while (stemEnd > baseName && stemEnd[-1] >= '0' && stemEnd[-1] <= '9')
+            --stemEnd;
+        if (stemEnd < extension &&
+            snprintf(unversionedName, sizeof(unversionedName), "%.*s%s",
+                     (int)(stemEnd - baseName), baseName, extension) < (int)sizeof(unversionedName) &&
+            snprintf(candidate, sizeof(candidate), "%s/%s", directory, unversionedName) < (int)sizeof(candidate) &&
+            vm_file_try_existing_path(candidate, resolvedName, resolvedSize))
+            goto resolved;
+    }
+    return 0;
+
+resolved:
+    printf("[info][file] big_endian_asset requested='%s' resolved='%s'\n",
+           normalizedName, resolvedName);
+    return 1;
 }
 
 #define VM_RELEASED_RESOURCE_MAX 1024
@@ -852,10 +968,21 @@ static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, con
 static int vm_file_try_resolve_cbe_module_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
 {
     FILE *fp;
+    char directory[256];
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
     if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_cbe_module(normalizedName))
         return 0;
+    if (vm_file_get_selected_cbe_directory(directory, sizeof(directory)) &&
+        snprintf(resolvedName, resolvedSize, "%s/%s", directory, normalizedName) < (int)resolvedSize)
+    {
+        fp = fopen(resolvedName, "rb");
+        if (fp != NULL)
+        {
+            fclose(fp);
+            return 1;
+        }
+    }
     if (snprintf(resolvedName, resolvedSize, "CBE/%s", normalizedName) >= (int)resolvedSize)
         return 0;
     fp = fopen(resolvedName, "rb");
@@ -991,6 +1118,12 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 return i;
             }
             FILE *f = fopen(normalizedName, openMode);
+            if (f == NULL && vm_file_try_resolve_selected_cbe_asset_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
+            {
+                f = fopen(resolvedName, openMode);
+                if (f != NULL)
+                    snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
+            }
             if (f == NULL && vm_file_try_resolve_cbe_module_path(normalizedName, openMode, resolvedName, sizeof(resolvedName)))
             {
                 f = fopen(resolvedName, openMode);
@@ -1175,7 +1308,8 @@ int vm_cbfs_vm_file_exists(int disk, int namePtr)
     if (f == NULL)
     {
         char resolvedName[256];
-        if (vm_file_try_resolve_cbe_module_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)) ||
+        if (vm_file_try_resolve_selected_cbe_asset_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)) ||
+            vm_file_try_resolve_cbe_module_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)) ||
             vm_file_try_resolve_jhonline_dsh_path(normalizedName, "rb", resolvedName, sizeof(resolvedName)))
             f = fopen(resolvedName, "rb");
     }

@@ -17,6 +17,9 @@
 
 #include "main.h"
 #include "lcd.h"
+/* Unlike cbeTextString, this path state is never reused as a guest/string
+ * scratch buffer after startup. */
+static char g_selectedCbeDirectoryHost[260] = "CBE";
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
@@ -1273,10 +1276,16 @@ void vm_bx(u32 addr)
 
 static u32 g_currentEmuEntry = 0;
 static u32 g_nativeAppInitEntry = 0;
-static u32 g_nativeAppParserEntry = 0;
+static u32 g_nativeAppLogicEntry = 0;
 static u32 g_nativeSystemInfoPtr = 0;
 static u32 g_nativePropertyInfoPtr = 0;
+static u32 g_nativePictureLibraryPtr = 0;
 static u32 g_nativeDispatchTraceCount = 0;
+static int g_nativeFileOpenResult = -1;
+static int g_nativeFileReadResult = -1;
+static int g_nativeFileWriteResult = -1;
+static int g_nativeFileSizeResult = -1;
+static int g_nativeService406Result = 0;
 
 static void normalize_program_exit_pc(u32 fallbackPc)
 {
@@ -1779,6 +1788,12 @@ static void vm_request_host_quit(const char *reason)
     g_hostQuitRequested = 1;
     printf("[info][host] quit requested: %s\n", reason ? reason : "unknown");
     vm_autotest_note("host_quit_request reason=%s\n", reason ? reason : "unknown");
+
+    /* A native big-endian callback may stay inside one uc_emu_start call while
+     * it waits for application state.  Wake the emulation thread so it can
+     * observe the quit flag and run the normal cleanup path. */
+    if (MTK && !g_vmThreadFinished)
+        uc_emu_stop(MTK);
 }
 
 static void scheduler_clear_pending_async_tasks(void)
@@ -5628,8 +5643,8 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
 #define LOAD_CBE_PATH "CBE/血剑Online.CBE"
 #define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
-#define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
-#define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
+#define LOAD_CBE_PATH "CBE_BE/歪歪猫发条城历险记V100.CBE"
+#define LOAD_CBE_PATH "CBE_BE/武林外传(新品).CBE"
 #define LOAD_CBE_PATH "CBE/众神之战.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
@@ -5706,7 +5721,6 @@ static void vm_init_fixed_base_manager_directory(void)
            VM_Manager_Table_ADDRESS,
            VM_NATIVE_MANAGER_DIRECTORY_ADDRESS);
 }
-
 
 static int vm_ascii_stricmp(const char *a, const char *b)
 {
@@ -5846,10 +5860,16 @@ static void vm_reset_runtime_state_for_restart(void)
     g_lastStartupUpdateState = 0xff;
     g_currentFontType = 0;
     g_nativeAppInitEntry = 0;
-    g_nativeAppParserEntry = 0;
+    g_nativeAppLogicEntry = 0;
     g_nativeSystemInfoPtr = 0;
     g_nativePropertyInfoPtr = 0;
+    g_nativePictureLibraryPtr = 0;
     g_nativeDispatchTraceCount = 0;
+    g_nativeFileOpenResult = -1;
+    g_nativeFileReadResult = -1;
+    g_nativeFileWriteResult = -1;
+    g_nativeFileSizeResult = -1;
+    g_nativeService406Result = 0;
     g_vm_img_app_data_package = 0;
     g_vm_img_inner_data_package = 0;
     g_vm_img_current_data_package = 0;
@@ -6356,10 +6376,17 @@ static void vm_note_stream_data_result(const char *manager, u32 caller, u32 resP
 static bool vm_host_cbe_sibling_file_exists(const char *name)
 {
     char path[256];
+    char directory[256];
     if (vm_host_file_exists(name))
         return true;
     if (name == NULL || name[0] == 0 || strchr(name, '/') != NULL || strchr(name, '\\') != NULL)
         return false;
+    if (vm_file_get_selected_cbe_directory(directory, sizeof(directory)))
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, name);
+        if (vm_host_file_exists(path))
+            return true;
+    }
     snprintf(path, sizeof(path), "CBE/%s", name);
     return vm_host_file_exists(path);
 }
@@ -6598,12 +6625,13 @@ void RunArmProgram(void *param)
 
     if (p == UC_ERR_OK && g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
     {
-        /* The native logic callback performs a one-shot interface bootstrap on
-         * its first invocation and deliberately returns before game logic. */
-        if (g_nativeAppParserEntry)
+        /* Native fixed-base CBE images register {logic, init, dispatcher} via
+         * service 0x79e.  Logic performs its manager bootstrap on the first
+         * call, then init runs once before the host starts ticking logic. */
+        if (g_nativeAppLogicEntry)
         {
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-            p = vm_emu_start(g_nativeAppParserEntry, exitAddr);
+            p = vm_emu_start(g_nativeAppLogicEntry, exitAddr);
         }
         if (g_nativeAppInitEntry)
         {
@@ -6623,10 +6651,10 @@ void RunArmProgram(void *param)
                 p = vm_run_host_quit_cleanup(exitAddr, thumbExitAddr);
                 break;
             }
-            if (g_nativeAppParserEntry)
+            if (g_nativeAppLogicEntry)
             {
                 uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
-                p = vm_emu_start(g_nativeAppParserEntry, exitAddr);
+                p = vm_emu_start(g_nativeAppLogicEntry, exitAddr);
                 if (p != UC_ERR_OK)
                     break;
             }
@@ -7203,6 +7231,7 @@ int main(int argc, char *args[])
             printf("[info][host] runtime cwd adjusted to ./bin\n");
         }
     }
+    vm_file_set_selected_cbe_path((char *)cbeTextString);
     char *fileBuffer = readFile(cbeTextString, &changeTmp1);
     g_cbeFileBuffer = (u8 *)fileBuffer;
     g_cbeFileSize = changeTmp1;
@@ -7591,11 +7620,30 @@ static bool hook_vm_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         if (tmp1)
         {
+            tmp5 = 0;
             for (tmp2 = 0; tmp2 < 52; tmp2++)
             {
+                /* Native big-endian compatibility tables may override leading
+                 * manager slots with guest-side adapters.  Keep those adapters
+                 * and resolve only numeric service IDs through the legacy table. */
+                if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi())
+                {
+                    tmp4 = vm_get_var(tmp1 + tmp2 * 4);
+                    if (vm_address_in_range(tmp4 & ~1u,
+                                            Program_ROM_Address,
+                                            Program_ROM_Mapped_Size))
+                    {
+                        tmp5++;
+                        continue;
+                    }
+                }
                 tmp3 = VM_MANAGER_FUNC_LIST_ADDRESS + tmp2 * 4;
                 vm_set_var(tmp1 + tmp2 * 4, tmp3);
             }
+            if (g_cbeInfo.headerInt1 && !vm_cbe_uses_fixed_base_manager_abi() &&
+                g_nativeDispatchTraceCount < 96)
+                printf("[info][native-app] managers=%08x guest_overrides=%u slot44=%08x\n",
+                       tmp1, tmp5, vm_get_var(tmp1 + 44 * 4));
         }
         vm_set_call_result(0);
     }
@@ -7713,9 +7761,14 @@ static bool hook_vm_native_dispatch_func(u32 address)
                g_nativeDispatchTraceCount++, id, arg, r2, r3, lr);
     }
 
-    if ((id >= Program_ROM_Address && id < Program_ROM_Address + Program_ROM_Mapped_Size) ||
-        (id >= Program_Data_Address && id < Program_Data_Address + g_cbeInfo.headerInt4) ||
-        (id >= VM_Memory_Pool_ADDRESS && id < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE))
+    if ((id & ~1u) >= Program_ROM_Address &&
+        (id & ~1u) < Program_ROM_Address + Program_ROM_Mapped_Size)
+    {
+        vm_set_call_result(0);
+    }
+    else if ((id >= Program_Data_Address && id < Program_Data_Address + g_cbeInfo.headerInt4) ||
+        (id >= VM_Memory_Pool_ADDRESS && id < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE) ||
+        (id >= STACK_ADDRESS && id < STACK_ADDRESS + size_1mb))
     {
         vm_set_call_result(0);
     }
@@ -7723,11 +7776,12 @@ static bool hook_vm_native_dispatch_func(u32 address)
     {
         if (arg)
         {
-            /* Native ABI registers {logic, init, dispatcher}.  The second
-             * callback runs once; the first callback is consumed per tick. */
-            g_nativeAppParserEntry = vm_get_var(arg);
+            /* Firmware ABI registers {logic, init, dispatcher}. */
+            g_nativeAppLogicEntry = vm_get_var(arg);
             g_nativeAppInitEntry = vm_get_var(arg + 4);
             vm_set_var(arg + 8, VM_NATIVE_DISPATCH_ADDRESS | 1);
+            printf("[info][native-app] init=%08x logic=%08x\n",
+                   g_nativeAppInitEntry, g_nativeAppLogicEntry);
         }
         vm_set_call_result(VM_NATIVE_DISPATCH_ADDRESS | 1);
     }
@@ -7735,11 +7789,47 @@ static bool hook_vm_native_dispatch_func(u32 address)
     {
         if (arg && g_cbeInfo.headerInt1)
         {
-            /* Native app-object registration; this CBE reads the slot immediately
-             * after the call to patch its init/parse callbacks. */
+            /* Firmware service 0x52 initializes the client-owned legacy flat
+             * GameManager object (0x27c bytes), then the CBE replaces a few
+             * slots with its own adapters immediately after the call. */
+            vm_configManagerTableCount(arg,
+                                       VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS,
+                                       0x27c / 4);
+            /* 600H coolbar_GAME_if uses flat slots 73 and 108 for compatible
+             * DF_PictureLibrary_Init(object, capacity) layouts.  The legacy
+             * emulator exposes the same firmware routine as GameManagerOld
+             * slot 75 (hook index 76), so keep the shared implementation and
+             * overlay only the native big-endian table entries. */
+            vm_set_var(arg + 73 * 4,
+                       VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4);
+            vm_set_var(arg + 108 * 4,
+                       VM_MANAGER_GAMEOLD_FUNC_LIST_ADDRESS + 75 * 4);
             vm_set_var(Program_Data_Address + 0x1724, arg);
+            printf("[info][native-app] gameold=%08x funcs=%u "
+                   "picture_init_slots=73,108\n",
+                   arg, 0x27c / 4);
         }
         vm_set_call_result(0);
+    }
+    else if (id == 0x3d)
+    {
+        /* Native task-create frame:
+         * {name, context, stack_size, priority:u8, auto_start:u8}.  The
+         * cooperative emulator already drives the registered application
+         * logic, so use the frame address as a stable non-zero task handle;
+         * the wrapper reports completion through its existing callback path. */
+        u32 namePtr = arg ? vm_get_var(arg) : 0;
+        u32 context = arg ? vm_get_var(arg + 4) : 0;
+        u32 stackSize = arg ? vm_get_var(arg + 8) : 0;
+        u32 priority = arg ? vm_get_var_byte(arg + 12) : 0;
+        u32 autoStart = arg ? vm_get_var_byte(arg + 13) : 0;
+        char taskName[64] = {0};
+        if (namePtr)
+            vm_read_path_string(namePtr, taskName, sizeof(taskName));
+        printf("[info][native-task] create name='%s' context=%08x "
+               "stack=%u priority=%u auto_start=%u\n",
+               taskName, context, stackSize, priority, autoStart);
+        vm_set_call_result(arg ? arg : 1);
     }
     else if (id == 0x8f || id == 0x8e || id == 0x97 || id == 0xac || id == 0x421)
     {
@@ -7747,6 +7837,25 @@ static bool hook_vm_native_dispatch_func(u32 address)
     }
     else if (id == 0xb7 || id == 0xb8)
     {
+        vm_set_call_result(0);
+    }
+    else if (id == 0xb9)
+    {
+        u32 outPtr = arg ? vm_get_var(arg) : 0;
+        u32 size = arg ? vm_get_var(arg + 4) : 0;
+        u32 allocated = (outPtr && size) ? vm_malloc(size) : 0;
+        /* Native DF allocation uses {pointer-output, size, success-byte}.
+         * This is the big-endian wrapper for legacy memory manager DF_Malloc_IN. */
+        if (outPtr)
+            vm_set_var(outPtr, allocated);
+        if (arg)
+            vm_set_var_byte(arg + 8, allocated ? 1 : 0);
+        vm_set_call_result(allocated ? 1 : 0);
+    }
+    else if (id == 0x4)
+    {
+        /* Native cooperative-yield service; the host loop already schedules
+         * callbacks between guest invocations. */
         vm_set_call_result(0);
     }
     else if (id == 0x67 || id == 0x6b || id == 0x6e)
@@ -7772,10 +7881,63 @@ static bool hook_vm_native_dispatch_func(u32 address)
     }
     else if (id == 0x41a)
     {
-        printf("[trace][native-dispatch] service=41a a0=%x a1=%x a2=%x\n",
-               arg ? vm_get_var(arg) : 0,
-               arg ? vm_get_var(arg + 4) : 0,
-               arg ? vm_get_var(arg + 8) : 0);
+        int openMode = arg ? (int)vm_get_var(arg) : 0;
+        u32 namePtr = arg ? vm_get_var(arg + 4) : 0;
+        u32 rwPtr = arg ? vm_get_var(arg + 8) : 0;
+        char nativePath[256] = {0};
+        char nativeMode[16] = {0};
+        vm_read_path_string(namePtr, nativePath, sizeof(nativePath));
+        vm_read_path_string(rwPtr, nativeMode, sizeof(nativeMode));
+        /* Native service 0x41a is the fixed-base wrapper for the same file-open
+         * implementation used by the little-endian file manager. */
+        g_nativeFileOpenResult = vm_cbfs_vm_file_open(openMode, namePtr, rwPtr);
+        if (g_nativeDispatchTraceCount < 96)
+            printf("[trace][native-dispatch] file_open mode=%x path='%s' rw='%s' result=%d\n",
+                   openMode, nativePath, nativeMode, g_nativeFileOpenResult);
+        vm_set_call_result(id);
+    }
+    else if (id == 0x427)
+    {
+        u32 bufferPtr = arg ? vm_get_var(arg) : 0;
+        int size = arg ? (int)vm_get_var(arg + 4) : 0;
+        int handle = arg ? (int)vm_get_var(arg + 8) : -1;
+        /* Native service 0x427 shares the little-endian file-read contract. */
+        g_nativeFileReadResult = vm_cbfs_vm_file_read(bufferPtr, size, handle);
+        vm_set_call_result(id);
+    }
+    else if (id == 0x41b)
+    {
+        u32 bufferPtr = arg ? vm_get_var(arg) : 0;
+        int size = arg ? (int)vm_get_var(arg + 4) : 0;
+        int handle = arg ? (int)vm_get_var(arg + 8) : -1;
+        /* Native file write shares the legacy fileio buffer/size/handle ABI. */
+        g_nativeFileWriteResult = vm_cbfs_vm_file_write(bufferPtr, size, handle);
+        vm_set_call_result(id);
+    }
+    else if (id == 0x41c)
+    {
+        int handle = arg ? (int)vm_get_var(arg) : -1;
+        vm_cbfs_vm_file_close(handle);
+        vm_set_call_result(0);
+    }
+    else if (id == 0x42a)
+    {
+        int handle = arg ? (int)vm_get_var(arg) : -1;
+        /* The native file object calls this one-argument slot immediately
+         * after open and before allocating its read buffer.  It is the same
+         * get-file-size contract as little-endian fileio manager slot 9. */
+        g_nativeFileSizeResult = vm_cbfs_vm_file_getfilesize(handle);
+        vm_set_call_result(id);
+    }
+    else if (id == 0x406)
+    {
+        u32 a0 = arg ? vm_get_var(arg) : 0;
+        u32 a1 = arg ? vm_get_var_byte(arg + 4) : 0;
+        u32 a2 = arg ? vm_get_var(arg + 8) : 0;
+        if (g_nativeDispatchTraceCount < 96)
+            printf("[trace][native-dispatch] service=406 a0=%x a1=%x a2=%x\n",
+                   a0, a1, a2);
+        g_nativeService406Result = 0;
         vm_set_call_result(id);
     }
     else if (id == 0x7d1)
@@ -7797,9 +7959,9 @@ static bool hook_vm_native_dispatch_func(u32 address)
                         g_nativeSystemInfoPtr = vm_malloc(0x400);
                         for (u32 off = 0; off < 0x400; off += sizeof(emptyBuff))
                             uc_mem_write(MTK, g_nativeSystemInfoPtr + off, emptyBuff, sizeof(emptyBuff));
-                        /* Native SystemInfo embeds service tables.  The linked
-                         * compatibility layer uses these three slots during its
-                         * first real logic tick. */
+                        /* Native SystemInfo embeds service tables.  Keep the
+                         * table entries backed by the same manager hooks used
+                         * by legacy little-endian CBE images. */
                         vm_set_var(g_nativeSystemInfoPtr + 0x9c,
                                    VM_MEMORY_MANAGER_FUNC_LIST_ADDRESS + 13 * 4);
                         vm_set_var(g_nativeSystemInfoPtr + 0xa0,
@@ -7814,14 +7976,9 @@ static bool hook_vm_native_dispatch_func(u32 address)
                                    VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 5 * 4);
                         vm_set_var(g_nativeSystemInfoPtr + 0x78,
                                    VM_MANAGER_LCD_FUNC_LIST_ADDRESS + 6 * 4);
-                        vm_set_var(g_nativeSystemInfoPtr + 0x20c,
-                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS);
-                        vm_set_var(g_nativeSystemInfoPtr + 0x210,
-                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 1 * 4);
-                        vm_set_var(g_nativeSystemInfoPtr + 0x214,
-                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 2 * 4);
-                        vm_set_var(g_nativeSystemInfoPtr + 0x22c,
-                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS + 8 * 4);
+                        vm_configManagerTableCount(g_nativeSystemInfoPtr + 0x20c,
+                                                   VM_MANAGER_STDIO_FUNC_LIST_ADDRESS,
+                                                   22);
                         vm_set_var(g_nativeSystemInfoPtr + 0xa4,
                                    VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 2 * 4);
                         vm_set_var(g_nativeSystemInfoPtr + 0xa8,
@@ -7834,7 +7991,12 @@ static bool hook_vm_native_dispatch_func(u32 address)
                                    VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 4 * 4);
                         vm_set_var(g_nativeSystemInfoPtr + 0xb8,
                                    VM_NATIVE_SYSTEM_TIME_FUNC_ADDRESS + 5 * 4);
-                        vm_set_var(g_nativeSystemInfoPtr + 0xf0, VM_NATIVE_DISPATCH_ADDRESS | 1);
+                        /* SystemInfo::initManagers is the same whole-manager
+                         * table initializer exposed as legacy manager slot 34.
+                         * The native compatibility layer passes its 52-entry
+                         * manager table here during vmInitManagers(). */
+                        vm_set_var(g_nativeSystemInfoPtr + 0xf0,
+                                   VM_MANAGER_FUNC_LIST_ADDRESS + 34 * 4);
                     }
                     vm_set_var(outPtr, g_nativeSystemInfoPtr);
                 }
@@ -7850,10 +8012,23 @@ static bool hook_vm_native_dispatch_func(u32 address)
                 }
                 else if (handle == 0x41a && size >= 4)
                 {
-                    /* Native file-open result.  The sample asks for the
-                     * optional external update file upinfo3.dat; absent files
-                     * are reported with a negative handle. */
-                    vm_set_var(outPtr, 0xffffffffu);
+                    vm_set_var(outPtr, (u32)g_nativeFileOpenResult);
+                }
+                else if (handle == 0x427 && size >= 4)
+                {
+                    vm_set_var(outPtr, (u32)g_nativeFileReadResult);
+                }
+                else if (handle == 0x41b && size >= 4)
+                {
+                    vm_set_var(outPtr, (u32)g_nativeFileWriteResult);
+                }
+                else if (handle == 0x42a && size >= 4)
+                {
+                    vm_set_var(outPtr, (u32)g_nativeFileSizeResult);
+                }
+                else if (handle == 0x406 && size >= 4)
+                {
+                    vm_set_var(outPtr, (u32)g_nativeService406Result);
                 }
             }
         }
@@ -12373,14 +12548,38 @@ static bool hook_vm_manager_gameold_func(u32 address)
     {
         vm_set_call_result(g_curKeyDownState);
     }
-    else if (idx == 76 && vm_cbe_uses_fixed_base_manager_abi())
+    else if (idx == 79)
     {
-        /* Mobile Rainbow sub_1F4552: initialize the picture-library object.
+        /* Native SystemInfo flat slot 78 is called once after the client's
+         * DreamFactory allocation setup.  The legacy manager tables and
+         * screen runtime are already initialized by vm_initManagerTable(), so
+         * the shared little-endian entry only has to acknowledge that phase. */
+        DEBUG_PRINT("[call]GAME_InitRuntime\n");
+        vm_set_call_result(0);
+    }
+    else if (idx == 76 && g_cbeInfo.isBiggianProgram)
+    {
+        /* 600H/Mobile Rainbow sub_1F4552: initialize the picture-library object.
          * It allocates a 240-pixel scanline, a resource-id array, and a
          * picture-pointer array, then installs methods at +0x18..+0x50. */
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         u32 count = tmp2 & 0xffff;
+        /* Firmware DF_Malloc_IN releases the previous pointer stored in each
+         * output field before reallocating. Mirror that behavior so repeated
+         * native screen initialization does not leak the shared VM pool. */
+        u32 oldScanline = vm_get_var(tmp1 + 0x00);
+        u32 oldResourceIds = vm_get_var(tmp1 + 0x0c);
+        u32 oldPictures = vm_get_var(tmp1 + 0x10);
+        if (vm_address_in_range(oldScanline, VM_Memory_Pool_ADDRESS,
+                                VM_MEMPOOL_TOTAL_SIZE))
+            vm_free(oldScanline);
+        if (vm_address_in_range(oldResourceIds, VM_Memory_Pool_ADDRESS,
+                                VM_MEMPOOL_TOTAL_SIZE))
+            vm_free(oldResourceIds);
+        if (vm_address_in_range(oldPictures, VM_Memory_Pool_ADDRESS,
+                                VM_MEMPOOL_TOTAL_SIZE))
+            vm_free(oldPictures);
         u32 scanline = vm_malloc(240 * 2);
         u32 resourceIds = vm_malloc(count * 2);
         u32 pictures = vm_malloc(count * 4);
@@ -12402,6 +12601,19 @@ static bool hook_vm_manager_gameold_func(u32 address)
                "scanline=%08x ids=%08x pictures=%08x\n",
                tmp1, count, scanline, resourceIds, pictures);
         vm_set_call_result(scanline && resourceIds && pictures ? 1 : 0);
+    }
+
+    else if (idx == 80 && g_cbeInfo.isBiggianProgram &&
+             !vm_cbe_uses_fixed_base_manager_abi())
+    {
+        /* 600H native GameManagerOld slot 79 registers the picture-library
+         * object created through slot 108.  The emulator's shared DF/image
+         * paths receive that object directly, so retaining it is sufficient
+         * until a getter needs to expose the firmware global. */
+        uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
+        g_nativePictureLibraryPtr = tmp1;
+        printf("[info][cbe] gameold_picture_library=%08x\n", tmp1);
+        vm_set_call_result(0);
     }
 
     else if (idx == 80 && vm_cbe_uses_fixed_base_manager_abi())
