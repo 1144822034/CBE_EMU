@@ -48,3 +48,16 @@ net_queue_data ... async_queue_ms=N network_ms=N deliver_ms=N
 ## 后续
 
 异步化消除了服务端等待对客户端帧循环的直接阻塞，但没有缩短服务端本身的处理时间。当前服务端 stdout 为无缓冲模式，高频移动日志仍可能让 `network_ms` 达到数百毫秒并造成 FIFO 累积。下一步应对 moveinfo 日志限频或改为缓冲/异步日志；稳定后再评估持久 TCP 连接。
+
+## 2026-07-17 场景切换接收超时
+
+临安场景出口切换复现了：服务端已生成 `2/3` 响应，但客户端后台请求报告
+`pending=game-timeout`，服务端紧接着记录 `dropped malformed request`。同一日志中
+普通 `2/1 moveinfo` 已出现 `process_ms=1026`，而远程 socket 的收发超时固定为
+`1500 ms`。场景切换还需要捕获会话和 MySQL 状态，超过该窗口后客户端先关闭
+socket，服务端发送响应头/正文时失败，因此没有形成正常的完成队列项。
+
+`VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS` 现设为 `5000 ms`。这只扩大后台工作线程的
+远程请求等待窗口，不会重新阻塞 CBE/模拟器帧循环；连接拒绝仍会立即失败。服务端
+同时记录 `response_send_failed stage=header|body ... process_ms=...`，客户端失败日志
+带 `timeout_ms=5000`，便于区分服务不可用与服务端处理超过等待窗口。

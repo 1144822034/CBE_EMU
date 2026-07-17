@@ -5,16 +5,18 @@
 Implemented server-side handling for the teleport-stone request family:
 
 - `1/16/1`: list teleport destinations.
-- `1/16/2`: confirm prompt only; save the selected destination server-side.
+- `1/16/2`: acknowledge the first confirmed map-exit request while preserving
+  the selected destination server-side.
 - `1/16/3`: consume the confirmation request and return the main-business
   scene-enter family (`resources + 30/1`) for the saved destination.
-- `1/16/4`: map-UI instant transfer request from the teleport-stone world map.
+- `1/16/4`: map-UI transfer preparation request; the response opens the
+  client's normal confirmation path before `16/2` and `16/3` perform entry.
 
 Runtime validation has covered the crash point and the first transfer request:
 
 - `16/1` is now handled by `builtin-teleport-stone-list`.
 - `16/2` is now handled by `builtin-teleport-stone-transfer`.
-- `16/4` is now handled by `builtin-teleport-stone-map-transfer`.
+- `16/4` is now handled by `builtin-teleport-stone-map-confirm`.
 - the first post-enter combo after `16/2` was observed as
   `27/11 + 12/1 + 7/42`; a narrow completion handler was added for it.
 
@@ -84,8 +86,8 @@ Parser evidence:
 - `result == 4` shows a hint.
 - Any other result falls through to `sub_BCC()` and performs scene entry.
 
-Current implementation follows the confirmation branch for `16/2`, but still
-includes the selected target fields:
+The older non-map implementation follows the confirmation branch for `16/2`,
+and includes the selected target fields:
 
 ```text
 result = 2 as typed-u8: 00 01 02
@@ -125,6 +127,13 @@ shape during the same network callback. The server therefore returns
 `16/2-confirm-target`: `result=2` plus the full target fields, while still
 saving the target in the separate confirmation slot and not arming the actual
 scene-change target until the follow-up `16/3` request.
+
+For the current map-UI confirmation flow, `16/4 result=0` has already installed
+the client's confirmation callback. Its first follow-up `16/2` therefore gets
+a zero-object WT acknowledgement instead. Full `mmGame:sub_11CE(0x11CE)`
+evidence shows `16/2 result=2` is the recharge-prompt branch, not an entry
+acknowledgement. The resolved target remains saved for the immediately following
+`16/3`, which is the authoritative scene-exit request.
 
 ### `1/16/3`
 
@@ -310,9 +319,12 @@ IDA evidence:
 
 Response strategy:
 
-- return a `1/16/2` object instead of a same-subtype `16/4` object;
-- reuse the already validated `result + scene + posinfo + exitid` scene-enter
-  contract consumed by `mmGame:0x11CE` / `mmBattle:0x1868`;
+- return a same-subtype `1/16/4 {result:u8=0,value:u32=0}` object so the client
+  enters its normal item-use confirmation callback;
+- retain the resolved scene/position server-side across the callback's compact
+  `16/2` and `16/3` requests;
+- acknowledge the confirmed `16/2` with an empty WT packet, then return the
+  validated `30/1 {scene,posinfo}` entry contract from `16/3`;
 - do not use a fixed `(120,120)` landing point. The request carries only
   `curid/objid`, so the server maps those ids through the real local DSH tables:
   `wMap.dsh` chooses the sub-map row range and `sMap.dsh` supplies the target
@@ -595,7 +607,7 @@ Handled sources:
 ```text
 builtin-teleport-stone-list
 builtin-teleport-stone-transfer
-builtin-teleport-stone-map-transfer
+builtin-teleport-stone-map-confirm
 builtin-teleport-stone-post-enter
 ```
 
@@ -603,10 +615,10 @@ Autotest notes:
 
 ```text
 mock_teleport_stone_list entries=1 exitinfo_len=...
-mock_teleport_stone_transfer subtype=2 ... response=16/2-confirm-target pending=0 confirm=1
+mock_teleport_stone_transfer subtype=2 ... response=empty-wt-await-16/3 pending=0 confirm=1
 mock_teleport_stone_transfer subtype=3 ... response=scene-channel-enter-confirm-target pending=0 confirm=1
 mock_teleport_stone_direct_enter_followup scene=... pos=(...) objects=... response=scene-task-subset
-mock_teleport_stone_map_transfer curid=... objid=... scene=... pos=(...) scene_source=... pos_source=... download=...
+mock_teleport_stone_map_confirm curid=... objid=... scene=... pos=(...) response=16/4-confirm value=0 scene_source=... pos_source=... download=...
 mock_teleport_stone_post_enter scene=... pos=(...) objects=4
 ```
 
@@ -869,7 +881,51 @@ contract. Before calling `EnterSceneByMapName`, it writes parser state `7`.
 `scene_runtime_init_and_sync` case 7 then copies `R9+0x5C8E/+0x5C90` to the
 active node at `+24/+26`.
 
-Consequently the map-UI `16/4` request now receives a `30/1 {scene,posinfo}`
-response rather than the old `16/2 {result,scene,posinfo,exitid}` response.
-The SCE landing resolver and unscaled tagged-i16 position are unchanged; the
-fix is the client parser path that commits those coordinates to the actor node.
+Consequently the final scene-enter stage must use a `30/1 {scene,posinfo}`
+response rather than relying on the old `16/2 {result,scene,posinfo,exitid}`
+direct-entry parser. The SCE landing resolver and unscaled tagged-i16 position
+are unchanged; the fix is the client parser path that commits those coordinates
+to the actor node. As documented below, this `30/1` now belongs to the confirmed
+`16/3` stage rather than being returned prematurely to the initial `16/4`.
+
+### 2026-07-17 World-Map Current-Node Refresh
+
+Runtime after transferring from Penglai to `临安-南宣门` showed the scene and
+actor position were correct, but reopening the world map still highlighted the
+previous location. The request trace contained only:
+
+```text
+16/4 -> builtin-teleport-stone-map-transfer -> 30/1
+```
+
+There was no subsequent `16/2` or `16/3` request. Client evidence explains why
+that leaves stale map state:
+
+- `JianghuOL.CBE:0x0103573A` sends `16/4 {curid,objid}` and records the selected
+  absolute `sMap` row;
+- `0x010357E0` only dispatches the reply to `HandleItemUseConfirm(0x010190A8)`
+  when the reply is still subtype `16/4`;
+- `result=0` installs the normal confirmation callback;
+- accepting it calls `ConsumeInventoryItem(0x01018F66)`, which sends `16/2`
+  followed by `16/3` and performs the map controller's normal teardown;
+- that teardown clears the cached map-sheet state, so the next world-map open
+  reloads its current world/child indices from the newly selected `sMap` row.
+
+The mock now returns `16/4 {result:u8=0,value:u32=0}` and stores the resolved
+scene target server-side. The compact `16/2` gets a zero-object WT transport
+acknowledgement (avoiding `mmGame:0x11CE`'s `result=2` recharge prompt), while
+`16/3` reuses the saved target and returns the existing `30/1` scene-enter
+response. This preserves both required contracts: normal world-map state refresh
+and parser-state-7 position commit. No client memory or world-map globals are
+written by the host.
+
+Service replay of the real Lin'an request shape after the fix:
+
+```text
+request  16/4 curid=1 objid=4
+resolve  c04临安府_01 pos=(201,140) smap_row=47
+response 16/4 result=0 value=0, 37 bytes
+request  16/2 exitID=47 type=3
+response zero-object WT acknowledgement, 5 bytes
+next     16/3 consumes the saved target through the existing 30/1 builder
+```

@@ -64,7 +64,7 @@ The two portal directions use different completion shapes:
 The `27/11 npcinfo` builder wrote `displayName` into both the visible-name field
 and the fourth string. For the monkey row this made the scene node resolve
 `小猴子` as its visual resource key. The fourth string now carries
-`e_monkey.actor` (and the smith row carries `n_swordmaster.actor`).
+`e_monkey.actor` (and the smith row carries `n_blacksmith.actor`).
 
 ## Validation
 
@@ -81,8 +81,8 @@ WT 2/3 len=74 -> builtin-scene-change resp=392
 caller=01018150 count=1
 target init count=2 (local shell + one required completion)
 ready=1 assets=1 parserState=7 pos=(128,57)
-npc 20020 pos=(70,38)
-npc 20021 pos=(108,38)
+npc 20020 pos=(338,125)
+npc 20021 pos=(376,125)
 ```
 
 Reverse portal (`00蓬莱仙岛_02 -> c00蓬莱仙岛_01`):

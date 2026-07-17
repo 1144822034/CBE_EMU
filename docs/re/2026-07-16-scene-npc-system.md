@@ -36,9 +36,9 @@ ida_evidence:
 
 runtime_evidence:
   trace_lines: mock_scene_npc_catalog, mock_scene_npc_seed
-  handled_source: builtin-type27-followup / 场景完成响应
+  handled_source: 首登 scene-sync-poll / builtin-type27-followup / 场景完成响应
   queued_event: event 7
-  client_effect: 铸剑谷待客户端重新进入后确认两项实体显示
+  client_effect: 角色直接登录铸剑谷后创建 20020/20021 两个类型 21 场景节点
 
 negative_evidence:
   missing_or_bad_field: 旧实现混有猜测场景目录；另有 2/10、2/5 的 NPC 试验对象
@@ -91,15 +91,18 @@ unknowns:
 
 `00蓬莱仙岛_02.sce`（蓬莱-铸剑谷）的真实 SCE 只有场景道具和传送口，不含 `.actor/.xse` NPC 行，因此不能靠 SCE 扫描恢复该场景角色。历史 `27/11` 协议目录与当前场景校正共同确认了两项服务端动态角色：
 
-- `20020`：欧冶子（铁匠），`n_swordmaster.actor`，坐标 `(70,38)`；
-- `20021`：小猴子，`e_monkey.actor`，坐标 `(108,38)`。
+- `20020`：欧冶子（铁匠），`n_blacksmith.actor`，坐标 `(338,125)`；
+- `20021`：小猴子，`e_monkey.actor`，坐标 `(376,125)`。
 
-这两项在构建 `27/11 npcinfo` 时先于 SCE 行合并，仍受四个动态名称槽的总上限约束。日志以 `source=confirmed-dynamic` 区分，避免把它们误记成 SCE 扫描结果。`bin/JHOnlineData/npcs.json` 中带 `.scex` 键的实验数据不是运行时目录，服务端不读取它。
+客户端 `0x01037998 -> 0x0100EFC4` 将这两个值原样写入节点场景像素坐标；解码后的 `00蓬莱仙岛_02.map` 为 512×512，`y=125` 是铸剑屋门外的可行走带，两个 NPC 以 38 像素间隔排在门右侧。这两项在构建 `27/11 npcinfo` 时先于 SCE 行合并，仍受四个动态名称槽的总上限约束。日志以 `source=confirmed-dynamic` 区分，避免把它们误记成 SCE 扫描结果。`bin/JHOnlineData/npcs.json` 中带 `.scex` 键的实验数据不是运行时目录，服务端不读取它。
+
+欧冶子的模型字段必须使用客户端资源包中的 `n_blacksmith.actor`。本地角色资源预览显示该资源为持锤铁匠，而此前误用的 `n_swordmaster.actor` 是红衣剑师；原始 SCE 导出中的铁匠行也统一使用 `n_blacksmith.actor`。`27/11` 的第四个字符串会直接进入客户端资源解析链，因此这里不能用职业近似模型代替。
 
 ## 生命周期与防重复
 
 - 初始场景切换 `2/3` 仍返回空 `27/11`；此时客户端场景节点表可能尚未创建。
-- 真实 `30/1` 场景进入对象会重新标记当前场景 NPC 待刷新。
+- 真实 `30/1` 场景进入对象会重新标记当前场景 NPC 待刷新；角色选择的 subtype-6 首登路径也会显式重新标记，因为它不会经过 `30/1` builder。
+- 首登的 `12/1` 任务组合响应在本机可能超过客户端 1.5 秒传输等待，因此不再把 NPC 实体埋在该大响应中；场景标记为 ready 后的第一次 scene-sync poll 单独下发一次 `27/11`。
 - 当前场景完成、重复完成、传送石完成、post-enter 完成、task-subset 延迟完成，以及客户端明确的 `27/11` 跟进请求，都会调用同一个场景目录 builder。
 - 同一 session、同一场景只下发一次实体列表；后续重复请求返回空 `27/11`，避免重复创建节点或重复注册动态名称。
 - 切换/重新进入场景后由 `30/1` 重新武装，允许再次建立该场景的 NPC 节点。
@@ -107,5 +110,5 @@ unknowns:
 ## 验证
 
 - `make -j2`：铸剑谷动态目录改动已通过构建。
-- 正式 mock 服务已按原参数重启并由 PID `23568` 监听 `127.0.0.1:19090`；启动日志为 `tmp/mock-service-19090.20260716-133343.stdout.log`。
-- 客户端重新登录并进入铸剑谷后，应输出 `mock_scene_npc_catalog ... source=confirmed-dynamic actors=2 rows=2` 与 `mock_scene_npc_seed ... npcnum=2`；正向显示仍需当前客户端重新建立场景后确认。
+- 正式 mock 服务已按原参数重启并由 PID `31732` 监听 `127.0.0.1:19090`；启动日志为 `tmp/mock-service-19090.20260717-123625.stdout.log`。
+- 直接登录铸剑谷的自动化实测输出 `mock_scene_npc_seed phase=startup-scene-sync-poll ... npcnum=2`，poll 响应 `resp=245` 在 `network_ms=1168` 内到达客户端；场景节点表随后出现 `20020 pos=(338,125)`、`20021 pos=(376,125)`，两者均为 `prompt=21 active=1`，无地址异常或断言。
