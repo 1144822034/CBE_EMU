@@ -6306,13 +6306,15 @@ static bool vm_net_mock_read_current_player_grid(u32 *nodeOut, u32 *actorIdOut,
                                                  u16 *gridXOut, u16 *gridYOut,
                                                  u16 *targetXOut, u16 *targetYOut);
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason);
+static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b);
 
 static void vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(const char *scene)
 {
     if (g_vm_net_mock_scene_moveinfo_npc_seeded &&
         (scene == NULL ||
          g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] == 0 ||
-         strcmp(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, scene) != 0))
+         !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+                                              scene)))
     {
         g_vm_net_mock_scene_moveinfo_npc_seeded = false;
         g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] = 0;
@@ -6320,7 +6322,8 @@ static void vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(const char *scen
     if (g_vm_net_mock_scene_moveinfo_npc_pending &&
         (scene == NULL ||
          g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] == 0 ||
-         strcmp(g_vm_net_mock_scene_moveinfo_npc_pending_scene, scene) != 0))
+         !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+                                              scene)))
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
@@ -6347,7 +6350,8 @@ static bool vm_net_mock_is_scene_moveinfo_npc_seed_request(const char *scene,
         return false;
     if (scene == NULL || scene[0] == 0 ||
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] == 0 ||
-        strcmp(g_vm_net_mock_scene_moveinfo_npc_pending_scene, scene) != 0)
+        !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+                                             scene))
     {
         return false;
     }
@@ -13371,7 +13375,15 @@ static u32 vm_net_mock_scene_npcinfo_hash(const char *scene,
     return hash;
 }
 
-static u32 vm_net_mock_append_confirmed_dynamic_scene_npcinfo_seeds(
+static bool vm_net_mock_scene_is_linan_north_gate(const char *scene)
+{
+    return scene != NULL &&
+           vm_net_mock_scene_names_equal_loose(
+               scene,
+               "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x39"); /* c04临安府_09 */
+}
+
+static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
     const char *scene,
     vm_net_mock_scene_npcinfo_seed *seeds,
     u32 seedCap)
@@ -13379,30 +13391,81 @@ static u32 vm_net_mock_append_confirmed_dynamic_scene_npcinfo_seeds(
     vm_net_mock_scene_npcinfo_seed seed;
     u32 count = 0;
 
-    if (!vm_net_mock_scene_is_penglai02(scene) || seeds == NULL || seedCap == 0)
+    if (seeds == NULL || seedCap == 0)
         return 0;
 
-    /* 00蓬莱仙岛_02.sce (蓬莱-铸剑谷) contains no actor/xse records.
-     * These two actors are supplied by the original service-side scene catalog.
-     * The client consumes x/y as scene pixels (0x01037998 -> 0x0100EFC4), and
-     * the decoded 512x512 map places the walkable strip immediately to the
-     * right of the forge doorway at y=125. Keep the two actors 38 px apart. */
+    if (vm_net_mock_scene_is_penglai02(scene))
+    {
+        /* 00蓬莱仙岛_02.sce (蓬莱-铸剑谷) contains no actor/xse records.
+         * These two actors are supplied by the original service-side scene catalog.
+         * The client consumes x/y as scene pixels (0x01037998 -> 0x0100EFC4), and
+         * the decoded 512x512 map places the walkable strip immediately to the
+         * right of the forge doorway at y=125. Keep the two actors 38 px apart. */
+        memset(&seed, 0, sizeof(seed));
+        seed.actorId = 20020;
+        seed.x = 338;
+        seed.y = 125;
+        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_blacksmith.actor");
+        snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xc5\xb7\xd2\xb1\xd7\xd3"); /* 欧冶子 */
+        seeds[count++] = seed;
+
+        if (count < seedCap)
+        {
+            memset(&seed, 0, sizeof(seed));
+            seed.actorId = 20021;
+            seed.x = 376;
+            seed.y = 125;
+            snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "e_monkey.actor");
+            snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xd0\xa1\xba\xef\xd7\xd3"); /* 小猴子 */
+            seeds[count++] = seed;
+        }
+        return count;
+    }
+
+    if (!vm_net_mock_scene_is_linan_north_gate(scene))
+        return 0;
+
+    /* sMap.dsh row 55 maps 临安-北宣门 to c04临安府_09.sce. The current
+     * SCE has portals and map data but no interactive actor/xse records, so
+     * these service-side NPC rows are required. Historical client scene data
+     * confirms the two guard actor/script pairs and all three script names. Use
+     * the generic young-man actor for Hu Fei rather than the stale blacksmith
+     * binding found in c04临安府_10. The guard coordinates flank the north portal
+     * to 06野猪林_04; Hu Fei stands by the lower-right shop frontage. All three
+     * points are on zero-flag walkable cells of the current 400x400 map. */
     memset(&seed, 0, sizeof(seed));
-    seed.actorId = 20020;
-    seed.x = 338;
-    seed.y = 125;
-    snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_blacksmith.actor");
-    snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xc5\xb7\xd2\xb1\xd7\xd3"); /* 欧冶子 */
+    seed.actorId = 20090;
+    seed.x = 172;
+    seed.y = 132;
+    snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_solider2.actor");
+    snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xcd\xf5\xb3\xaf"); /* 王朝 */
+    snprintf(seed.scriptName, sizeof(seed.scriptName), "%s",
+             "\x30\x34\xc1\xd9\xb0\xb2\xcd\xf5\xb3\xaf\x2e\x78\x73\x65"); /* 04临安王朝.xse */
     seeds[count++] = seed;
 
     if (count < seedCap)
     {
         memset(&seed, 0, sizeof(seed));
-        seed.actorId = 20021;
-        seed.x = 376;
-        seed.y = 125;
-        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "e_monkey.actor");
-        snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xd0\xa1\xba\xef\xd7\xd3"); /* 小猴子 */
+        seed.actorId = 20091;
+        seed.x = 228;
+        seed.y = 132;
+        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_solider1.actor");
+        snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xc2\xed\xba\xba"); /* 马汉 */
+        snprintf(seed.scriptName, sizeof(seed.scriptName), "%s",
+                 "\x30\x34\xc1\xd9\xb0\xb2\xc2\xed\xba\xba\x2e\x78\x73\x65"); /* 04临安马汉.xse */
+        seeds[count++] = seed;
+    }
+
+    if (count < seedCap)
+    {
+        memset(&seed, 0, sizeof(seed));
+        seed.actorId = 20092;
+        seed.x = 304;
+        seed.y = 304;
+        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_man1.actor");
+        snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xba\xfa\xec\xb3"); /* 胡斐 */
+        snprintf(seed.scriptName, sizeof(seed.scriptName), "%s",
+                 "\x30\x34\xc1\xd9\xb0\xb2\xba\xfa\xec\xb3\x2e\x78\x73\x65"); /* 04临安胡斐.xse */
         seeds[count++] = seed;
     }
 
@@ -13430,7 +13493,7 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
         return 0;
     }
     memset(seeds, 0, sizeof(*seeds) * seedCap);
-    count = vm_net_mock_append_confirmed_dynamic_scene_npcinfo_seeds(scene, seeds, seedCap);
+    count = vm_net_mock_append_service_scene_npcinfo_seeds(scene, seeds, seedCap);
     total = count;
     if (dynamicOut)
         *dynamicOut = count;
@@ -17294,7 +17357,7 @@ static bool vm_net_mock_build_scene_npcinfo_blob(const char *scene,
     if (npcInfoLenOut)
         *npcInfoLenOut = npcInfoLen;
     if (dynamicCount != 0)
-        catalogSource = totalCount > dynamicCount ? "sce+confirmed-dynamic" : "confirmed-dynamic";
+        catalogSource = totalCount > dynamicCount ? "sce+service-dynamic" : "service-dynamic";
     printf("[info][network] mock_scene_npc_catalog scene=%s source=%s actors=%u rows=%u dynamic=%u truncated=%u npcinfo_len=%u evidence=JianghuOL.CBE:0x01037998\n",
            scene ? scene : "-",
            catalogSource,
@@ -19089,7 +19152,9 @@ static bool vm_net_mock_append_scene_npcs11_once_or_empty(u8 *out, u32 outCap, u
     vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(scene);
     if (g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] != 0 &&
-        scene != NULL && strcmp(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, scene) == 0)
+        scene != NULL &&
+        vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+                                            scene))
     {
         return vm_net_mock_append_fb_target_empty11_object(out, outCap, pos);
     }
