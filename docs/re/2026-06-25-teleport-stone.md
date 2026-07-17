@@ -974,3 +974,29 @@ and permits only the associated `7/1` item-use object. It extracts `7/1` through
 the existing item-use builder, places its inventory acknowledgements first, and
 appends the verified `30/1` scene-enter object last. Runtime source:
 `builtin-teleport-stone-confirmed-exit-combo`.
+
+### 2026-07-17 Exact sMap Scene Key for World-Map Highlight
+
+After the confirmed-exit flow and actor landing were fixed, transferring from
+Penglai to Yanmen Pass still left the world-map highlight on Penglai. Runtime
+proved the active scene itself was already `c08雁门关_01`, while the authoritative
+`sMap.dsh` row 70 stores `c08雁门关_01.sce`.
+
+The remaining mismatch is client-local but packet-driven:
+
+- `LoadSceneRes(0x0103130A)` passes `sceneObj+0x475`, the scene string received
+  through the scene-enter packet, to `LoadItemDataSheets(0x01035C48)`;
+- when the child map sheets are reloaded, it calls
+  `LoadMapDataSheet(0x0103581E, mode=4, currentScene)`;
+- mode 4 performs an exact `sMap.dsh` map-name lookup and only on success writes
+  controller `+16` (current world), `+18` (current child ID), and `+40`
+  (selected world);
+- the generic c-prefixed enter normalization had changed the DSH target from
+  `c08雁门关_01.sce` to `c08雁门关_01`, so mode 4 missed and retained the previous
+  Penglai indices.
+
+Map-stone targets resolved from `wMap.dsh`/`sMap.dsh` now preserve the exact DSH
+scene key, including `.sce`, through the final `30/1` entry. This exception is
+limited to the map-stone path. Login and portal transitions keep their existing
+normalization, and server resource lookup plus loose scene matching continue to
+accept both forms. The trace marks the contract as `scene_key=smap-exact`.

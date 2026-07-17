@@ -15269,8 +15269,21 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
     targetResourceExists = vm_net_mock_scene_resource_exists(targetScene);
     if (targetResourceExists)
     {
-        snprintf(target->scene, sizeof(target->scene), "%s",
-                 vm_net_mock_normalize_scene_name_for_enter(targetScene));
+        /*
+         * Keep the authoritative sMap.dsh key byte-for-byte for map-stone
+         * entry.  JianghuOL:LoadSceneRes(0x0103130A) later passes the current
+         * scene string to LoadMapDataSheet(0x0103581E, mode 4), which performs
+         * an exact lookup against sMap.dsh's map-name column before updating
+         * the world-map current-world/current-child indices.  Stripping the
+         * `.sce` suffix from c-prefixed targets makes that lookup miss and
+         * leaves the previous (commonly Penglai) node highlighted.
+         *
+         * This exception is deliberately limited to DSH-resolved map-stone
+         * targets.  Normal login/portal entry keeps the established
+         * extensionless normalization, while loose scene comparisons and the
+         * resource loader already accept both key forms.
+         */
+        snprintf(target->scene, sizeof(target->scene), "%s", targetScene);
     }
     else if (vm_net_mock_scene_name_is_download_key(targetScene))
     {
@@ -16107,13 +16120,13 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
-    printf("[info][network] mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u resp=%u\n",
+    printf("[info][network] mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_key=smap-exact scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u resp=%u\n",
            curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
            target.scene, target.x, target.y,
            (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
            source ? source : "-", posSource ? posSource : "-",
            target.needsSceneDownload ? 1u : 0u, pos);
-    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66 negative=value0-wrong-cost+direct-30/1-stale-map-controller\n",
+    vm_autotest_note("mock_teleport_stone_map_confirm curid=%u objid=%u smap_row=%u scene_count=%u row_source=%s scene=%s scene_key=smap-exact scene_pos=(%u,%u) response=16/4-confirm value=%u scene_source=%s pos_source=%s download=%u evidence=JianghuOL:0x010357E0/0x010190A8/0x01018F66/0x0103130A/0x0103581E negative=value0-wrong-cost+direct-30/1-stale-map-controller+extensionless-smap-miss\n",
                       curId, objId, smapRow, sceneCount, rowSource ? rowSource : "-",
                       target.scene, target.x, target.y,
                       (u32)VM_NET_MOCK_TELEPORT_STONE_COST,
