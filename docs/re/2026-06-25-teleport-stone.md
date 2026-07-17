@@ -6,8 +6,8 @@ Implemented server-side handling for the teleport-stone request family:
 
 - `1/16/1`: list teleport destinations.
 - `1/16/2 + 1/16/3 [+ 1/7/1]`: consume the client's combined confirmed-exit
-  request and return inventory acknowledgements plus main-business `30/1` for
-  the saved destination.
+  request and return only the inventory acknowledgement in that callback. A
+  later scene-sync poll emits the saved destination as a one-shot `30/1`.
 - `1/16/4`: map-UI transfer preparation request; the response opens the
   client's normal confirmation path before `16/2` and `16/3` perform entry.
 
@@ -912,11 +912,12 @@ that leaves stale map state:
 
 The mock now returns `16/4 {result:u8=0,value:u32=1}` and stores the resolved
 scene target server-side. After acceptance, the combined `16/2 + 16/3` request
-reuses that target and returns the existing `30/1` scene-enter response; when a
-stone is consumed, the same response places the existing item acknowledgements
-before `30/1`. This preserves normal world-map refresh, inventory consumption,
-and parser-state-7 position commit. No client memory or world-map globals are
-written by the host.
+reuses that target, consumes the stone, and returns the item acknowledgement.
+The target remains account-local until a later scene-sync poll emits the
+existing `30/1` scene-enter response as a separate network event. This
+preserves normal world-map refresh, inventory consumption, and parser-state-7
+position commit without entering a scene while the confirmation callback is
+still unwinding. No client memory or world-map globals are written by the host.
 
 Early isolated service replay validated the response fields and target mapping,
 but did not reproduce the client's later multi-object batching:
@@ -968,12 +969,14 @@ event layer batches those operations into one WT packet:
 ```
 
 The old first-object detector returned an empty response for `16/2`, thereby
-discarding the already-present `16/3`. The new narrow combo handler requires the
+discarding the already-present `16/3`. The narrow combo handler requires the
 saved `16/4` confirmation target, matching `16/2` and `16/3` exit/type fields,
 and permits only the associated `7/1` item-use object. It extracts `7/1` through
-the existing item-use builder, places its inventory acknowledgements first, and
-appends the verified `30/1` scene-enter object last. Runtime source:
-`builtin-teleport-stone-confirmed-exit-combo`.
+the existing item-use builder and returns those inventory acknowledgements from
+`builtin-teleport-stone-confirmed-exit-combo`. It does not append `30/1`: the
+target is delivered once by `mock_teleport_stone_deferred_enter` from a later
+scene-sync poll. The callback-lifetime evidence for this split is recorded in
+`2026-07-17-teleport-confirm-callback-crash.md`.
 
 ### 2026-07-17 Exact sMap Scene Key for World-Map Highlight
 

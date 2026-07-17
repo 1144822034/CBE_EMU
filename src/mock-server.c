@@ -5025,7 +5025,7 @@ static bool vm_net_mock_append_shop_open_status14_object(u8 *out, u32 outCap, u3
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_string(out, outCap, pos, "shopinfo", "Codex Shop"))
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "shopinfo", "Shop"))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
@@ -10933,6 +10933,17 @@ static bool g_vm_net_mock_teleport_stone_map_enter_pending = false;
 static u32 g_vm_net_mock_last_teleport_stone_list_tick = 0;
 static vm_net_mock_scene_change_target g_vm_net_mock_teleport_stone_confirm_target;
 static bool g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+/*
+ * A confirmed map-stone request batches 16/2 + 16/3 + optional 7/1 in one WT
+ * packet.  The inventory acknowledgement must finish its callback before the
+ * main-business 30/1 scene entry is delivered: entering the scene in that same
+ * callback exposes the still-live CBM confirmation screen underneath the scene
+ * screen and its loading widget keeps a destroyed image owner.  Arm the target
+ * here and let the next service poll deliver 30/1 as a separate network event.
+ */
+static vm_net_mock_scene_change_target g_vm_net_mock_teleport_stone_deferred_enter_target;
+static bool g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+static u32 g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
 static bool g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
 static u8 g_vm_net_mock_last_scene_change_fb4_type = 1;
 static vm_net_mock_scene_change_target g_vm_net_mock_last_completed_scene_change_target;
@@ -11029,6 +11040,9 @@ typedef struct vm_mock_service_account_state
     u32 lastTeleportStoneListTick;
     vm_net_mock_scene_change_target teleportStoneConfirmTarget;
     bool teleportStoneConfirmTargetValid;
+    vm_net_mock_scene_change_target teleportStoneDeferredEnterTarget;
+    bool teleportStoneDeferredEnterValid;
+    u32 teleportStoneDeferredEnterTick;
     bool lastSceneChangeFromActorOtherPortal;
     u8 lastSceneChangeFb4Type;
 
@@ -11367,6 +11381,9 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->lastTeleportStoneListTick = g_vm_net_mock_last_teleport_stone_list_tick;
     state->teleportStoneConfirmTarget = g_vm_net_mock_teleport_stone_confirm_target;
     state->teleportStoneConfirmTargetValid = g_vm_net_mock_teleport_stone_confirm_target_valid;
+    state->teleportStoneDeferredEnterTarget = g_vm_net_mock_teleport_stone_deferred_enter_target;
+    state->teleportStoneDeferredEnterValid = g_vm_net_mock_teleport_stone_deferred_enter_valid;
+    state->teleportStoneDeferredEnterTick = g_vm_net_mock_teleport_stone_deferred_enter_tick;
     state->lastSceneChangeFromActorOtherPortal = g_vm_net_mock_last_scene_change_from_actor_other_portal;
     state->lastSceneChangeFb4Type = g_vm_net_mock_last_scene_change_fb4_type;
 
@@ -11469,6 +11486,9 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_last_teleport_stone_list_tick = state->lastTeleportStoneListTick;
     g_vm_net_mock_teleport_stone_confirm_target = state->teleportStoneConfirmTarget;
     g_vm_net_mock_teleport_stone_confirm_target_valid = state->teleportStoneConfirmTargetValid;
+    g_vm_net_mock_teleport_stone_deferred_enter_target = state->teleportStoneDeferredEnterTarget;
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = state->teleportStoneDeferredEnterValid;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = state->teleportStoneDeferredEnterTick;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = state->lastSceneChangeFromActorOtherPortal;
     g_vm_net_mock_last_scene_change_fb4_type = state->lastSceneChangeFb4Type;
 
@@ -13375,12 +13395,12 @@ static u32 vm_net_mock_scene_npcinfo_hash(const char *scene,
     return hash;
 }
 
-static bool vm_net_mock_scene_is_linan_north_gate(const char *scene)
+static bool vm_net_mock_scene_is_linan_south_gate(const char *scene)
 {
     return scene != NULL &&
            vm_net_mock_scene_names_equal_loose(
                scene,
-               "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x39"); /* c04临安府_09 */
+               "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31"); /* c04临安府_01 */
 }
 
 static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
@@ -13422,17 +13442,16 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
         return count;
     }
 
-    if (!vm_net_mock_scene_is_linan_north_gate(scene))
+    if (!vm_net_mock_scene_is_linan_south_gate(scene))
         return 0;
 
-    /* sMap.dsh row 55 maps 临安-北宣门 to c04临安府_09.sce. The current
-     * SCE has portals and map data but no interactive actor/xse records, so
-     * these service-side NPC rows are required. Historical client scene data
-     * confirms the two guard actor/script pairs and all three script names. Use
-     * the generic young-man actor for Hu Fei rather than the stale blacksmith
-     * binding found in c04临安府_10. The guard coordinates flank the north portal
-     * to 06野猪林_04; Hu Fei stands by the lower-right shop frontage. All three
-     * points are on zero-flag walkable cells of the current 400x400 map. */
+    /* sMap.dsh row 47 maps 临安-南宣门 to c04临安府_01.sce. Wang Chao,
+     * Ma Han and Hu Fei belong to this scene, not c04临安府_09 (北宣门).
+     * Keep the two guard rows on the upper plaza. The south-gate map is
+     * 304x416, so Hu Fei's former north-gate x=304 boundary coordinate is
+     * moved inside the lower-right frontage. The client has four display-name
+     * registry slots (RegisterDisplayName, 0x0100EEE0); service rows are kept
+     * first so these three corrected actors cannot be truncated by SCE rows. */
     memset(&seed, 0, sizeof(seed));
     seed.actorId = 20090;
     seed.x = 172;
@@ -13460,7 +13479,7 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
     {
         memset(&seed, 0, sizeof(seed));
         seed.actorId = 20092;
-        seed.x = 304;
+        seed.x = 264;
         seed.y = 304;
         snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_man1.actor");
         snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xba\xfa\xec\xb3"); /* 胡斐 */
@@ -13501,6 +13520,16 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
      * Avoid decoding and rescanning it on the latency-sensitive first-login
      * request once the confirmed service-side rows have been supplied. */
     if (vm_net_mock_scene_is_penglai02(scene))
+    {
+        if (totalOut)
+            *totalOut = total;
+        return count;
+    }
+    /* c04临安府_01.sce is the old South Gate resource. Its embedded 宋兵乙 /
+     * 守门卫兵甲 / 王大胆 / 守门卫兵 rows are a stale scene catalog and must
+     * not consume the four client display-name slots alongside the current
+     * service-side 王朝 / 马汉 / 胡斐 catalog. */
+    if (vm_net_mock_scene_is_linan_south_gate(scene))
     {
         if (totalOut)
             *totalOut = total;
@@ -16030,7 +16059,6 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
 {
     u8 itemRequest[512]; /* Matches the host's bounded async WT request size. */
     u8 itemResponse[1024];
-    u8 sceneResponse[1024];
     u32 itemObjectStart = 0;
     u32 itemObjectLen = 0;
     u32 objectCount = 0;
@@ -16038,11 +16066,9 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
     u8 type = 0;
     u32 itemRequestLen = 0;
     u32 itemResponseLen = 0;
-    u32 sceneResponseLen = 0;
-    u32 pos = 5;
-    u32 mergedObjectCount = 0;
+    vm_net_mock_scene_change_target target;
 
-    if (out == NULL || outCap < pos ||
+    if (out == NULL || outCap < 5 ||
         !vm_net_mock_parse_teleport_stone_confirmed_exit_combo(
             request, requestLen,
             &itemObjectStart, &itemObjectLen,
@@ -16072,38 +16098,83 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
 
     /*
      * The runtime request is one WT packet containing 16/2 + 16/3 (+ 7/1
-     * when a stone is consumed). Treating only its first object as a standalone
-     * 16/2 loses the already-present 16/3 and leaves the client waiting. Reuse
-     * the verified subtype-3 path so the saved 16/4 target becomes 30/1.
+     * when a stone is consumed), so the saved target must still be consumed
+     * here.  Do not append 30/1 to the item response, though.  Runtime crash
+     * evidence at JianghuOL.CBE:0x01018136 -> 0x01046189 -> 0x01005AF4
+     * shows that same-callback scene entry removes the current scene while the
+     * CBM confirmation window is still underneath it.  Its loading widget then
+     * draws through a resource owner whose pixel buffer has already been
+     * cleared.  Return only the inventory acknowledgement now and let a later
+     * service-poll event deliver the one-shot 30/1 after the confirmation
+     * callback has unwound.
      */
-    sceneResponseLen = vm_net_mock_build_teleport_stone_transfer_response(
-        request, requestLen, 3, sceneResponse, sizeof(sceneResponse));
-    if (sceneResponseLen < 5 || sceneResponse[0] != 'W' || sceneResponse[1] != 'T')
+    if (itemResponseLen > outCap)
         return 0;
 
-    if (itemResponseLen > 5)
-    {
-        if (pos + itemResponseLen - 5 > outCap)
-            return 0;
-        memcpy(out + pos, itemResponse + 5, itemResponseLen - 5);
-        pos += itemResponseLen - 5;
-        mergedObjectCount += itemResponse[4];
-    }
-    if (pos + sceneResponseLen - 5 > outCap)
-        return 0;
-    memcpy(out + pos, sceneResponse + 5, sceneResponseLen - 5);
-    pos += sceneResponseLen - 5;
-    mergedObjectCount += sceneResponse[4];
-    if (mergedObjectCount > 0xffu)
-        return 0;
-    vm_net_mock_finish_wt_packet(out, pos, (u8)mergedObjectCount);
+    target = g_vm_net_mock_teleport_stone_confirm_target;
+    g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+    g_vm_net_mock_teleport_stone_deferred_enter_target = target;
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = true;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = g_schedulerTick;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
 
-    printf("[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item_request=%u item_response=%u scene_response=%u response_objects=%u resp=%u\n",
+    if (itemResponseLen >= 5)
+        memcpy(out, itemResponse, itemResponseLen);
+    else
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+
+    printf("[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item_request=%u item_response=%u response_objects=%u deferred_scene=1 scene=%s pos=(%u,%u) armed_tick=%u resp=%u\n",
            objectCount, exitId, type, itemRequestLen, itemResponseLen,
-           sceneResponseLen, mergedObjectCount, pos);
-    vm_autotest_note("mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item=%u response_objects=%u response=item-ack+30/1 evidence=runtime:wt16/2-len130 JianghuOL:0x01018F66/0x01018ED6\n",
+           itemResponseLen >= 5 ? itemResponse[4] : 0,
+           target.scene, target.x, target.y,
+           g_vm_net_mock_teleport_stone_deferred_enter_tick,
+           itemResponseLen >= 5 ? itemResponseLen : 5);
+    vm_autotest_note("mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item=%u response_objects=%u response=item-ack-only deferred_scene=1 evidence=runtime:wt16/2-len130+crash:0x01018136/0x01046189/0x01005AF4\n",
                      objectCount, exitId, type, itemObjectLen ? 1u : 0u,
-                     mergedObjectCount);
+                     itemResponseLen >= 5 ? itemResponse[4] : 0);
+    return itemResponseLen >= 5 ? itemResponseLen : 5;
+}
+
+static u32 vm_net_mock_build_teleport_stone_deferred_enter_response(u8 *out,
+                                                                    u32 outCap)
+{
+    vm_net_mock_scene_change_target target;
+    u32 pos = 0;
+    u32 armedTick = g_vm_net_mock_teleport_stone_deferred_enter_tick;
+
+    if (!g_vm_net_mock_teleport_stone_deferred_enter_valid ||
+        out == NULL || outCap < 5)
+    {
+        return 0;
+    }
+    /* A poll queued in the request's own scheduler tick is not a safe phase
+     * boundary.  Wait for at least the next 100 ms client frame so the item/CBM
+     * callback and its screen removal have completed. */
+    if (g_schedulerTick == armedTick)
+        return 0;
+
+    target = g_vm_net_mock_teleport_stone_deferred_enter_target;
+    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(&target, out, outCap);
+    if (pos == 0)
+        return 0;
+
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                      "teleport-stone-deferred-target");
+
+    printf("[info][network] mock_teleport_stone_deferred_enter scene=%s pos=(%u,%u) armed_tick=%u deliver_tick=%u response=scene-channel-enter-confirm-target resp=%u evidence=separate-network-event\n",
+           target.scene, target.x, target.y, armedTick, g_schedulerTick, pos);
+    vm_autotest_note("mock_teleport_stone_deferred_enter scene=%s pos=(%u,%u) armed_tick=%u deliver_tick=%u response=30/1 evidence=JianghuOL:0x01012E4D/0x01039B8A/0x010396D6 crash-boundary:0x01018136/0x01046189/0x01005AF4\n",
+                     target.scene, target.x, target.y, armedTick, g_schedulerTick);
     return pos;
 }
 
@@ -16178,6 +16249,8 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
 
     g_vm_net_mock_teleport_stone_confirm_target = target;
     g_vm_net_mock_teleport_stone_confirm_target_valid = true;
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
     g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
     g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -17367,6 +17440,156 @@ static bool vm_net_mock_build_scene_npcinfo_blob(const char *scene,
            totalCount > seedCount ? totalCount - seedCount : 0,
            npcInfoLen);
     return true;
+}
+
+static bool vm_net_mock_is_npc_dialog_request(const u8 *request, u32 requestLen,
+                                              u32 *actorIdOut, u32 *indexOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u8 requestType = 0;
+    u32 actorId = 0;
+    u32 index = 0;
+    u32 posX = 0;
+    u32 posY = 0;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (indexOut)
+        *indexOut = 0;
+    if (request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' || request[4] != 1)
+    {
+        return false;
+    }
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        object.major != 1 || object.kind != 26 || object.subtype != 1)
+    {
+        return false;
+    }
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen)
+    {
+        return false;
+    }
+
+    if (!vm_net_mock_get_object_u8_field(request + 9, requestLen - 9,
+                                         "type", &requestType) ||
+        requestType != 1 ||
+        !vm_net_mock_get_object_number_field(request + 9, requestLen - 9,
+                                             "id", &actorId) ||
+        actorId == 0)
+    {
+        return false;
+    }
+    /* SendNPCInteractReq writes index/posx/posy too, but the WT writer omits
+     * zero-valued fields. The observed index-0 request therefore contains only
+     * type and id. Keep those two as the required discriminator and parse the
+     * optional values only when the writer kept them. */
+    (void)vm_net_mock_get_object_number_field(request + 9, requestLen - 9,
+                                              "index", &index);
+    (void)vm_net_mock_get_object_number_field(request + 9, requestLen - 9,
+                                              "posx", &posX);
+    (void)vm_net_mock_get_object_number_field(request + 9, requestLen - 9,
+                                              "posy", &posY);
+    if (actorIdOut)
+        *actorIdOut = actorId;
+    if (indexOut)
+        *indexOut = index;
+    return true;
+}
+
+static const char *vm_net_mock_npc_dialog_text(u32 actorId)
+{
+    switch (actorId)
+    {
+    case 20020: /* 欧冶子 */
+        return "\xd6\xfd\xbd\xa3\xbd\xb2\xbe\xbf\xbb\xf0\xba\xf2\xba\xcd\xb2\xc4\xc1\xcf\xa3\xac\xc9\xd9\xcf\xc0\xc8\xf4\xd3\xd0\xb1\xf8\xc6\xf7\xc9\xcf\xb5\xc4\xca\xc2\xa3\xac\xbf\xc9\xd2\xd4\xc0\xb4\xd5\xd2\xce\xd2\xa1\xa3";
+    case 20021: /* 小猴子 */
+        return "\xd6\xa8\xd6\xa8\xa3\xa1\xd0\xa1\xba\xef\xd7\xd3\xb3\xe5\xc4\xe3\xd5\xa3\xc1\xcb\xd5\xa3\xd1\xdb\xa1\xa3";
+    case 20090: /* 王朝：04临安王朝.xse 的常态对白 */
+        return "\xbf\xbf\xa3\xac\xc0\xcf\xb4\xf3\xb0\xae\xcc\xfd\xb0\xfc\xb9\xab\xb4\xab\xa3\xac\xbe\xcd\xd3\xb2\xb1\xc6\xce\xd2\xc3\xc7\xb8\xc4\xc1\xcb\xc3\xfb\xd7\xd6\xc8\xc3\xcb\xfb\xd2\xb2\xb9\xfd\xb9\xfd\xb0\xfc\xb9\xab\xf1\xab\xa1\xa3";
+    case 20091: /* 马汉：04临安马汉.xse 的常态对白 */
+        return "\xc7\xb0\xc3\xe6\xca\xc7\xbb\xca\xb9\xac\xd6\xd8\xb5\xd8\xa3\xa1";
+    case 20092: /* 胡斐：04临安胡斐.xse 的常态对白 */
+        return "\xc8\xcb\xd4\xda\xbd\xad\xba\xfe\xc6\xae\xa3\xac\xc4\xc4\xc4\xdc\xb2\xbb\xb0\xa4\xb5\xb6\xa3\xbf\xb0\xa4\xb5\xb6\xb2\xbb\xd3\xc3\xc5\xc2\xa3\xac\xbc\xd7\xba\xf1\xc8\xcb\xb2\xbb\xb9\xd2\xa3\xa1";
+    default:
+        return "\xc9\xd9\xcf\xc0\xa3\xac\xd3\xd0\xca\xb2\xc3\xb4\xca\xc2\xc2\xf0\xa3\xbf"; /* 少侠，有什么事吗？ */
+    }
+}
+
+static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestLen,
+                                                 u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_npcinfo_seed seeds[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    const vm_net_mock_scene_npcinfo_seed *matchedSeed = NULL;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *dialogText = NULL;
+    u32 actorId = 0;
+    u32 index = 0;
+    u32 totalCount = 0;
+    u32 dynamicCount = 0;
+    u32 seedCount = 0;
+    u8 dialog[512];
+    u32 dialogLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_is_npc_dialog_request(request, requestLen, &actorId, &index) ||
+        out == NULL || outCap < pos)
+    {
+        return 0;
+    }
+
+    memset(seeds, 0, sizeof(seeds));
+    seedCount = vm_net_mock_collect_scene_npcinfo_seeds(scene, seeds,
+                                                       VM_NET_MOCK_SCENE_NPCINFO_MAX,
+                                                       &totalCount, &dynamicCount);
+    for (u32 i = 0; i < seedCount; ++i)
+    {
+        if (seeds[i].actorId == actorId)
+        {
+            matchedSeed = &seeds[i];
+            break;
+        }
+    }
+    dialogText = vm_net_mock_npc_dialog_text(actorId);
+
+    /* ParseNPCDialogData(0x010380E8) consumes the raw sequence as:
+     * dialog-kind:u8, main-text:string, option-count:u8, button-count:u8.
+     * Start with a text-only page. The client supplies its ordinary Back button,
+     * so zero server options/buttons closes locally and does not invent a second
+     * request contract before task-choice packets have been recovered. */
+    memset(dialog, 0, sizeof(dialog));
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen, dialogText) ||
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0))
+    {
+        return 0;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "hidebtn", 0) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "dialog", dialog, (u16)dialogLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u dialog_len=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8\n",
+           actorId,
+           index,
+           matchedSeed && matchedSeed->displayName[0] ? matchedSeed->displayName : "-",
+           matchedSeed && matchedSeed->scriptName[0] ? matchedSeed->scriptName : "-",
+           scene ? scene : "-",
+           matchedSeed ? 1u : 0u,
+           dialogLen,
+           pos);
+    vm_autotest_note("mock_npc_dialog actor=%u index=%u catalog_match=%u dialog_len=%u response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8\n",
+                     actorId, index, matchedSeed ? 1u : 0u, dialogLen);
+    return pos;
 }
 
 static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *pos)
@@ -22177,8 +22400,14 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     u32 teamBattleResponseLen = 0;
     bool npcCatalogAppended = false;
 
-    if (out == NULL || outCap < pos || observer == NULL ||
-        !observer->sceneVisibleReady || observer->sceneVisiblePending ||
+    if (out == NULL || outCap < pos || observer == NULL)
+        return 0;
+    /* This one-shot is deliberately checked before sceneVisiblePending.  The
+     * target is only marked pending while this builder emits 30/1, so the old
+     * scene remains pollable during the item/confirmation phase. */
+    if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
+        return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
+    if (!observer->sceneVisibleReady || observer->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(observer->sceneVisibleScene))
     {
         return 0;
@@ -30011,6 +30240,8 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
         g_vm_net_mock_teleport_stone_direct_enter_pending = false;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
         g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
         /*
          * The subtype-6 role-select payload has already created the first
@@ -30646,6 +30877,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
         vm_net_log_handled_packet("builtin-update-chunk-missing", request, requestLen, 0);
         return 0;
+    }
+
+    hookedLen = vm_net_mock_build_npc_dialog_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-npc-dialog", request, requestLen, hookedLen);
+        return hookedLen;
     }
 
     hookedLen = vm_net_mock_build_scene_interaction_followup_response(request, requestLen, out, outCap);
