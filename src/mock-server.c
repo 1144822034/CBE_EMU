@@ -3374,6 +3374,11 @@ static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static void vm_net_mock_role_db_save(const char *reason);
+static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
+                                                        u32 itemId,
+                                                        u32 count,
+                                                        u16 *seqOut,
+                                                        const char *reason);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
                                                                             u32 itemId,
@@ -10611,9 +10616,12 @@ static void vm_net_mock_role_set_timeline_position(const char *scene,
     (void)reason;
 }
 
-static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut)
+static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
+                                                        u32 itemId,
+                                                        u32 count,
+                                                        u16 *seqOut,
+                                                        const char *reason)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
     u8 itemCount = 0;
 
     if (seqOut)
@@ -10635,7 +10643,7 @@ static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOu
             if (seqOut)
                 *seqOut = item->seq;
             vm_net_mock_role_normalize_backpack(role);
-            vm_net_mock_role_db_save("backpack-add-stack");
+            vm_net_mock_role_db_save(reason ? reason : "backpack-add-stack");
             return true;
         }
     }
@@ -10657,8 +10665,14 @@ static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOu
     if (seqOut)
         *seqOut = item->seq;
     vm_net_mock_role_normalize_backpack(role);
-    vm_net_mock_role_db_save("backpack-add-item");
+    vm_net_mock_role_db_save(reason ? reason : "backpack-add-item");
     return true;
+}
+
+static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut)
+{
+    return vm_net_mock_role_add_backpack_item_to_role(
+        vm_net_mock_active_role(), itemId, count, seqOut, NULL);
 }
 
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
@@ -13925,6 +13939,80 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
     return true;
 }
 
+static bool vm_mock_service_account_grant_role_item(const char *accountId,
+                                                     const char *roleSelector,
+                                                     u32 itemId,
+                                                     u32 count,
+                                                     u16 *seqOut,
+                                                     const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *existing = NULL;
+    const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+    u32 before = 0;
+    u32 after = 0;
+    u16 seq = 0;
+
+    if (seqOut)
+        *seqOut = 0;
+    if (messageOut)
+        *messageOut = "物品给予失败";
+    if (itemId == 0 || count == 0 || count > 255)
+    {
+        if (messageOut)
+            *messageOut = "物品或数量无效";
+        return false;
+    }
+    catalogItem = vm_net_mock_find_shop_catalog_item(itemId);
+    if (catalogItem == NULL)
+    {
+        if (messageOut)
+            *messageOut = "物品目录中不存在该物品";
+        return false;
+    }
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                 messageOut);
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    existing = vm_net_mock_role_find_backpack_item(role, itemId, 0);
+    before = existing ? existing->count : 0;
+    if (!vm_net_mock_role_add_backpack_item_to_role(role, itemId, count, &seq,
+                                                     "admin-item-grant"))
+    {
+        if (messageOut)
+            *messageOut = "角色背包已满，无法加入新物品";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    existing = vm_net_mock_role_find_backpack_item(role, itemId, seq);
+    after = existing ? existing->count : count;
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-service] account_item_grant user=%s role=%s id=%u item=%u count=%u seq=%u stack=%u/%u\n",
+           accountId,
+           role->name[0] ? role->name : "-",
+           role->roleId,
+           itemId,
+           count,
+           seq,
+           before,
+           after);
+    if (seqOut)
+        *seqOut = seq;
+    if (messageOut)
+        *messageOut = "物品给予成功";
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
 
 enum
 {
@@ -14464,7 +14552,314 @@ static bool vm_net_mock_scene_is_linan_south_gate(const char *scene)
                "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31"); /* c04临安府_01 */
 }
 
-static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
+enum
+{
+    VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX = 256
+};
+
+typedef struct
+{
+    bool enabled;
+    char scene[64];
+    vm_net_mock_scene_npcinfo_seed seed;
+} vm_net_mock_dynamic_npc_override;
+
+typedef struct
+{
+    vm_net_mock_scene_npcinfo_seed seed;
+    bool enabled;
+    bool builtin;
+    bool overridden;
+} vm_net_mock_dynamic_npc_admin_row;
+
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+} vm_net_mock_dynamic_npc_load_context;
+
+static vm_net_mock_dynamic_npc_override
+    g_vm_net_mock_dynamic_npc_overrides[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+static u32 g_vm_net_mock_dynamic_npc_override_count = 0;
+static bool g_vm_net_mock_dynamic_npc_db_loaded = false;
+static bool g_vm_net_mock_dynamic_npc_db_valid = false;
+
+static bool vm_net_mock_dynamic_npc_decode_hex(const char *value, size_t valueLen,
+                                               char *out, size_t outCap)
+{
+    size_t decodedLen = 0;
+
+    if (value == NULL || out == NULL || outCap < 2 ||
+        !vm_mysql_hex_decode(value, valueLen, out, outCap - 1, &decodedLen) ||
+        decodedLen >= outCap)
+    {
+        return false;
+    }
+    out[decodedLen] = 0;
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_row(void *contextValue,
+                                       unsigned int columnCount,
+                                       const char *const *values,
+                                       const size_t *lengths)
+{
+    vm_net_mock_dynamic_npc_load_context *context =
+        (vm_net_mock_dynamic_npc_load_context *)contextValue;
+    vm_net_mock_dynamic_npc_override row;
+    u32 number[7];
+
+    memset(&row, 0, sizeof(row));
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 10 ||
+        g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
+                                            row.scene, sizeof(row.scene)) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[0]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &number[1]) || number[1] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &number[2]) || number[2] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &number[3]) || number[3] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &number[4]) || number[4] > 0xffffu ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[6], lengths[6],
+                                            row.seed.actorResource, sizeof(row.seed.actorResource)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[7], lengths[7],
+                                            row.seed.displayName, sizeof(row.seed.displayName)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[8], lengths[8],
+                                            row.seed.scriptName, sizeof(row.seed.scriptName)) ||
+        !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u)
+    {
+        if (context != NULL)
+            ++context->skipped;
+        return true;
+    }
+
+    row.seed.actorId = number[0];
+    row.seed.x = (u16)number[1];
+    row.seed.y = (u16)number[2];
+    row.seed.kind = (u16)number[3];
+    row.seed.orientation = (u16)number[4];
+    row.enabled = number[5] != 0;
+    if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
+        !vm_net_mock_scene_name_is_safe(row.scene) ||
+        row.seed.displayName[0] == 0 ||
+        strlen(row.seed.displayName) >= 30 ||
+        strlen(row.seed.actorResource) >= 30 ||
+        strlen(row.seed.scriptName) >= 32 ||
+        !vm_net_mock_str_ends_with(row.seed.actorResource, ".actor") ||
+        (row.seed.scriptName[0] != 0 &&
+         !vm_net_mock_str_ends_with(row.seed.scriptName, ".xse")) ||
+        !vm_net_mock_client_data_resource_exists(row.seed.actorResource, ".actor") ||
+        (row.seed.scriptName[0] != 0 &&
+         !vm_net_mock_client_data_resource_exists(row.seed.scriptName, ".xse")))
+    {
+        ++context->skipped;
+        return true;
+    }
+
+    snprintf(g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].scene,
+             sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene), "%s", row.scene);
+    g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].seed = row.seed;
+    g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].enabled = row.enabled;
+    ++g_vm_net_mock_dynamic_npc_override_count;
+    ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_db_load(void)
+{
+    vm_net_mock_dynamic_npc_load_context context;
+
+    if (g_vm_net_mock_dynamic_npc_db_loaded)
+        return g_vm_net_mock_dynamic_npc_db_valid;
+    g_vm_net_mock_dynamic_npc_db_loaded = true;
+    g_vm_net_mock_dynamic_npc_db_valid = false;
+    g_vm_net_mock_dynamic_npc_override_count = 0;
+    memset(g_vm_net_mock_dynamic_npc_overrides, 0,
+           sizeof(g_vm_net_mock_dynamic_npc_overrides));
+    memset(&context, 0, sizeof(context));
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_dynamic_npcs ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
+            "npc_kind SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "orientation SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "actor_resource VARBINARY(64) NOT NULL,display_name VARBINARY(32) NOT NULL,"
+            "script_name VARBINARY(64) NOT NULL DEFAULT '',enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
+            "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled "
+            "FROM server_dynamic_npcs ORDER BY scene,actor_id",
+            vm_net_mock_dynamic_npc_row, &context))
+    {
+        printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_dynamic_npc_db_valid = true;
+    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u\n",
+           context.loaded, context.skipped);
+    return true;
+}
+
+static int vm_net_mock_dynamic_npc_find_override(const char *scene, u32 actorId)
+{
+    if (!vm_net_mock_dynamic_npc_db_load() || scene == NULL || actorId == 0)
+        return -1;
+    for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
+    {
+        if (g_vm_net_mock_dynamic_npc_overrides[i].seed.actorId == actorId &&
+            vm_net_mock_scene_names_equal_loose(
+                g_vm_net_mock_dynamic_npc_overrides[i].scene, scene))
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static bool vm_net_mock_dynamic_npc_admin_save(
+    const char *scene,
+    const vm_net_mock_scene_npcinfo_seed *seed,
+    bool enabled,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
+    char actorHex[sizeof(seed->actorResource) * 2 + 1];
+    char nameHex[sizeof(seed->displayName) * 2 + 1];
+    char scriptHex[sizeof(seed->scriptName) * 2 + 1];
+    char query[2048];
+    int existing = -1;
+    vm_net_mock_dynamic_npc_override row;
+
+    if (errorOut)
+        *errorOut = "invalid dynamic npc";
+    if (!vm_net_mock_dynamic_npc_db_load())
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene) || seed == NULL ||
+        seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
+        seed->displayName[0] == 0 || strlen(seed->displayName) >= 30 ||
+        seed->actorResource[0] == 0 || strlen(seed->actorResource) >= 30 ||
+        strlen(seed->scriptName) >= 32 ||
+        !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
+        (seed->scriptName[0] != 0 &&
+         !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
+        !vm_net_mock_client_data_resource_exists(seed->actorResource, ".actor") ||
+        (seed->scriptName[0] != 0 &&
+         !vm_net_mock_client_data_resource_exists(seed->scriptName, ".xse")))
+    {
+        if (errorOut)
+            *errorOut = "NPC fields or resources are invalid";
+        return false;
+    }
+    existing = vm_net_mock_dynamic_npc_find_override(scene, seed->actorId);
+    if (existing < 0 &&
+        g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX)
+    {
+        if (errorOut)
+            *errorOut = "dynamic npc catalog is full";
+        return false;
+    }
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0 ||
+        vm_mysql_hex_encode(seed->actorResource, strlen(seed->actorResource),
+                            actorHex, sizeof(actorHex)) == 0 ||
+        vm_mysql_hex_encode(seed->displayName, strlen(seed->displayName),
+                            nameHex, sizeof(nameHex)) == 0 ||
+        (seed->scriptName[0] != 0 &&
+         vm_mysql_hex_encode(seed->scriptName, strlen(seed->scriptName),
+                             scriptHex, sizeof(scriptHex)) == 0))
+    {
+        if (errorOut)
+            *errorOut = "NPC text encoding failed";
+        return false;
+    }
+    if (seed->scriptName[0] == 0)
+        scriptHex[0] = 0;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
+             "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',%u) "
+             "ON DUPLICATE KEY UPDATE pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
+             "npc_kind=VALUES(npc_kind),orientation=VALUES(orientation),"
+             "actor_resource=VALUES(actor_resource),display_name=VALUES(display_name),"
+             "script_name=VALUES(script_name),enabled=VALUES(enabled)",
+             sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
+             seed->orientation, actorHex, nameHex, scriptHex, enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&row, 0, sizeof(row));
+    snprintf(row.scene, sizeof(row.scene), "%s", scene);
+    row.seed = *seed;
+    row.enabled = enabled;
+    if (existing >= 0)
+        g_vm_net_mock_dynamic_npc_overrides[existing] = row;
+    else
+        g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u pos=(%u,%u) actor_res=%s script=%s\n",
+           scene, seed->actorId, enabled ? 1u : 0u, seed->x, seed->y,
+           seed->actorResource, seed->scriptName[0] ? seed->scriptName : "-");
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_admin_delete_override(
+    const char *scene, u32 actorId, const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
+    char query[512];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "dynamic npc override not found";
+    if (!vm_net_mock_dynamic_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0)
+    {
+        return false;
+    }
+    existing = vm_net_mock_dynamic_npc_find_override(scene, actorId);
+    if (existing < 0 ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if ((u32)existing + 1 < g_vm_net_mock_dynamic_npc_override_count)
+    {
+        memmove(&g_vm_net_mock_dynamic_npc_overrides[existing],
+                &g_vm_net_mock_dynamic_npc_overrides[existing + 1],
+                (g_vm_net_mock_dynamic_npc_override_count - (u32)existing - 1) *
+                    sizeof(g_vm_net_mock_dynamic_npc_overrides[0]));
+    }
+    --g_vm_net_mock_dynamic_npc_override_count;
+    memset(&g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count],
+           0, sizeof(g_vm_net_mock_dynamic_npc_overrides[0]));
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] dynamic_npc_override_delete scene=%s actor=%u\n",
+           scene, actorId);
+    return true;
+}
+
+static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(
     const char *scene,
     vm_net_mock_scene_npcinfo_seed *seeds,
     u32 seedCap)
@@ -14549,6 +14944,126 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
         seeds[count++] = seed;
     }
 
+    return count;
+}
+
+static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
+    const char *scene,
+    vm_net_mock_scene_npcinfo_seed *seeds,
+    u32 seedCap)
+{
+    vm_net_mock_scene_npcinfo_seed builtins[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    u32 builtinCount = 0;
+    u32 count = 0;
+
+    if (scene == NULL || seeds == NULL || seedCap == 0)
+        return 0;
+    memset(builtins, 0, sizeof(builtins));
+    builtinCount = vm_net_mock_append_builtin_scene_npcinfo_seeds(
+        scene, builtins, VM_NET_MOCK_SCENE_NPCINFO_MAX);
+    (void)vm_net_mock_dynamic_npc_db_load();
+
+    for (u32 i = 0; i < builtinCount && count < seedCap; ++i)
+    {
+        int overrideIndex = vm_net_mock_dynamic_npc_find_override(
+            scene, builtins[i].actorId);
+        if (overrideIndex < 0)
+        {
+            seeds[count++] = builtins[i];
+        }
+        else if (g_vm_net_mock_dynamic_npc_overrides[overrideIndex].enabled)
+        {
+            seeds[count++] = g_vm_net_mock_dynamic_npc_overrides[overrideIndex].seed;
+        }
+    }
+    for (u32 i = 0;
+         i < g_vm_net_mock_dynamic_npc_override_count && count < seedCap;
+         ++i)
+    {
+        bool replacesBuiltin = false;
+        const vm_net_mock_dynamic_npc_override *row =
+            &g_vm_net_mock_dynamic_npc_overrides[i];
+
+        if (!row->enabled ||
+            !vm_net_mock_scene_names_equal_loose(row->scene, scene))
+        {
+            continue;
+        }
+        for (u32 builtinIndex = 0; builtinIndex < builtinCount; ++builtinIndex)
+        {
+            if (builtins[builtinIndex].actorId == row->seed.actorId)
+            {
+                replacesBuiltin = true;
+                break;
+            }
+        }
+        if (!replacesBuiltin)
+            seeds[count++] = row->seed;
+    }
+    return count;
+}
+
+static u32 vm_net_mock_dynamic_npc_admin_list(
+    const char *scene,
+    vm_net_mock_dynamic_npc_admin_row *rows,
+    u32 rowCap)
+{
+    vm_net_mock_scene_npcinfo_seed builtins[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    u32 builtinCount = 0;
+    u32 count = 0;
+
+    if (scene == NULL || rows == NULL || rowCap == 0)
+        return 0;
+    memset(rows, 0, sizeof(*rows) * rowCap);
+    memset(builtins, 0, sizeof(builtins));
+    builtinCount = vm_net_mock_append_builtin_scene_npcinfo_seeds(
+        scene, builtins, VM_NET_MOCK_SCENE_NPCINFO_MAX);
+    (void)vm_net_mock_dynamic_npc_db_load();
+    for (u32 i = 0; i < builtinCount && count < rowCap; ++i)
+    {
+        int overrideIndex = vm_net_mock_dynamic_npc_find_override(
+            scene, builtins[i].actorId);
+        rows[count].builtin = true;
+        if (overrideIndex >= 0)
+        {
+            rows[count].seed =
+                g_vm_net_mock_dynamic_npc_overrides[overrideIndex].seed;
+            rows[count].enabled =
+                g_vm_net_mock_dynamic_npc_overrides[overrideIndex].enabled;
+            rows[count].overridden = true;
+        }
+        else
+        {
+            rows[count].seed = builtins[i];
+            rows[count].enabled = true;
+        }
+        ++count;
+    }
+    for (u32 i = 0;
+         i < g_vm_net_mock_dynamic_npc_override_count && count < rowCap;
+         ++i)
+    {
+        bool replacesBuiltin = false;
+        const vm_net_mock_dynamic_npc_override *row =
+            &g_vm_net_mock_dynamic_npc_overrides[i];
+
+        if (!vm_net_mock_scene_names_equal_loose(row->scene, scene))
+            continue;
+        for (u32 builtinIndex = 0; builtinIndex < builtinCount; ++builtinIndex)
+        {
+            if (builtins[builtinIndex].actorId == row->seed.actorId)
+            {
+                replacesBuiltin = true;
+                break;
+            }
+        }
+        if (replacesBuiltin)
+            continue;
+        rows[count].seed = row->seed;
+        rows[count].enabled = row->enabled;
+        rows[count].overridden = true;
+        ++count;
+    }
     return count;
 }
 

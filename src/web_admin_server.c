@@ -7,11 +7,15 @@
  */
 
 #include <ctype.h>
+#ifndef _WIN32
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
 
 enum
 {
     VM_MOCK_ADMIN_REQUEST_MAX = 8192,
-    VM_MOCK_ADMIN_RESPONSE_MAX = 131072,
+    VM_MOCK_ADMIN_RESPONSE_MAX = 524288,
     VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 100
 };
 
@@ -332,7 +336,7 @@ static int vm_mock_admin_send_response(vm_mock_service_socket client,
         "Connection: close\r\n"
         "Cache-Control: no-store\r\n"
         "X-Content-Type-Options: nosniff\r\n"
-        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
         "%s\r\n",
         status ? status : "200 OK",
         contentType ? contentType : "text/plain; charset=utf-8",
@@ -344,6 +348,2196 @@ static int vm_mock_admin_send_response(vm_mock_service_socket client,
     if (!vm_mock_service_send_all(client, (const u8 *)header, (u32)headerLen))
         return 0;
     return bodyLen == 0 || vm_mock_service_send_all(client, (const u8 *)body, (u32)bodyLen);
+}
+
+static int vm_mock_admin_send_binary_response(vm_mock_service_socket client,
+                                              const char *status,
+                                              const char *contentType,
+                                              const u8 *body,
+                                              u32 bodyLen)
+{
+    char header[1024];
+    int headerLen = snprintf(
+        header, sizeof(header),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
+        "\r\n",
+        status ? status : "200 OK",
+        contentType ? contentType : "application/octet-stream",
+        bodyLen);
+
+    if (headerLen <= 0 || (size_t)headerLen >= sizeof(header))
+        return 0;
+    if (!vm_mock_service_send_all(client, (const u8 *)header, (u32)headerLen))
+        return 0;
+    return bodyLen == 0 ||
+           (body != NULL && vm_mock_service_send_all(client, body, bodyLen));
+}
+
+enum
+{
+    VM_MOCK_ADMIN_SCENE_FILE_MAX = 512,
+    VM_MOCK_ADMIN_ACTOR_FILE_MAX = 1024,
+    VM_MOCK_ADMIN_XSE_FILE_MAX = 512
+};
+
+typedef struct
+{
+    char name[64];
+    uint64_t size;
+} vm_mock_admin_scene_file;
+
+static char g_vm_mock_admin_session_token[40];
+
+static const char g_vm_mock_admin_script[] =
+    "(()=>{"
+    "const keep=(selector,key)=>{"
+    "const box=document.querySelector(selector);if(!box)return;"
+    "const restore=()=>{const value=sessionStorage.getItem(key);"
+    "if(value!==null){const top=parseInt(value,10);if(Number.isFinite(top))box.scrollTop=top;}};"
+    "const save=()=>sessionStorage.setItem(key,String(box.scrollTop));"
+    "restore();box.addEventListener('scroll',save,{passive:true});"
+    "box.addEventListener('click',save);window.addEventListener('load',restore,{once:true});};"
+    "const setupItemFilter=()=>{"
+    "const category=document.querySelector('#item-category');"
+    "const item=document.querySelector('#item-select');if(!category||!item)return;"
+    "const apply=(reset)=>{const wanted=category.value;"
+    "for(const option of item.options){if(!option.value)continue;"
+    "const show=wanted==='all'||option.dataset.category===wanted;"
+    "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}"
+    "if(reset)item.value='';};"
+    "category.addEventListener('change',()=>apply(true));apply(false);};"
+    "document.addEventListener('DOMContentLoaded',()=>{"
+    "keep('.accounts','cbe-admin-accounts-scroll');"
+    "keep('.scene-list','cbe-admin-scenes-scroll');setupItemFilter();});"
+    "})();";
+
+static void vm_mock_admin_ensure_session_token(void)
+{
+    u32 value = 0;
+    u32 words[4];
+
+    if (g_vm_mock_admin_session_token[0] != 0)
+        return;
+    value = (u32)time(NULL) ^ (u32)getpid() ^
+            (u32)(uintptr_t)&g_vm_mock_admin_session_token ^ scheduler_get_tick_ms();
+    if (value == 0)
+        value = 0x6a09e667u;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        value += 0x9e3779b9u + i * 0x85ebca6bu;
+        words[i] = value;
+    }
+    snprintf(g_vm_mock_admin_session_token,
+             sizeof(g_vm_mock_admin_session_token),
+             "%08x%08x%08x%08x",
+             words[0], words[1], words[2], words[3]);
+}
+
+static bool vm_mock_admin_request_is_authenticated(const char *request,
+                                                    size_t headerLen)
+{
+    char cookie[1024];
+    const char key[] = "cbe_admin=";
+    const char *cursor = NULL;
+
+    vm_mock_admin_ensure_session_token();
+    if (!vm_mock_admin_header_value(request, headerLen, "Cookie",
+                                    cookie, sizeof(cookie)))
+    {
+        return false;
+    }
+    cursor = cookie;
+    while ((cursor = strstr(cursor, key)) != NULL)
+    {
+        const char *value = cursor + sizeof(key) - 1;
+        size_t valueLen = strcspn(value, "; ");
+        if (valueLen == strlen(g_vm_mock_admin_session_token) &&
+            memcmp(value, g_vm_mock_admin_session_token, valueLen) == 0)
+        {
+            return true;
+        }
+        cursor = value + valueLen;
+    }
+    return false;
+}
+
+static void vm_mock_admin_send_location(vm_mock_service_socket client,
+                                        const char *location,
+                                        const char *cookieHeader)
+{
+    char extraHeaders[1024];
+
+    snprintf(extraHeaders, sizeof(extraHeaders), "%sLocation: %s\r\n",
+             cookieHeader ? cookieHeader : "",
+             location && location[0] ? location : "/");
+    (void)vm_mock_admin_send_response(client, "303 See Other",
+                                      "text/plain; charset=utf-8",
+                                      extraHeaders,
+                                      "正在跳转。\n");
+}
+
+static void vm_mock_admin_render_login(char *response, size_t responseCap,
+                                       const char *error)
+{
+    vm_mock_admin_text page;
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 后台登录</title><style>"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".card{width:min(380px,calc(100vw - 32px));background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:26px;box-shadow:0 8px 30px #10182814}"
+        "h1{font-size:22px;margin:0 0 6px}.sub{color:#667085;margin:0 0 20px}.error{padding:9px 11px;margin-bottom:12px;border-radius:6px;background:#fef3f2;color:#b42318}"
+        "form{display:grid;gap:11px}input{width:100%;border:1px solid #d0d5dd;border-radius:7px;padding:10px 11px;font-size:15px}button{border:0;border-radius:7px;padding:10px 12px;background:#175cd3;color:#fff;cursor:pointer}"
+        "</style></head><body><main class=\"card\"><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">请输入管理密码后继续</p>");
+    if (error != NULL && error[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"error\">");
+        vm_mock_admin_text_append_html(&page, error);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<form method=\"post\" action=\"/login\">"
+        "<input type=\"password\" name=\"password\" autocomplete=\"current-password\" placeholder=\"管理密码\" autofocus required>"
+        "<button type=\"submit\">登录</button></form></main></body></html>");
+}
+
+static int vm_mock_admin_scene_file_compare(const void *leftValue,
+                                            const void *rightValue)
+{
+    const vm_mock_admin_scene_file *left =
+        (const vm_mock_admin_scene_file *)leftValue;
+    const vm_mock_admin_scene_file *right =
+        (const vm_mock_admin_scene_file *)rightValue;
+    return strcmp(left->name, right->name);
+}
+
+static u32 vm_mock_admin_collect_scene_files(vm_mock_admin_scene_file *files,
+                                             u32 fileCap)
+{
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+#ifdef _WIN32
+    {
+        static const char *patterns[] = {
+            "../web/fs/JHOnlineData/*.sce",
+            "web/fs/JHOnlineData/*.sce"
+        };
+        WIN32_FIND_DATAA found;
+        HANDLE search = INVALID_HANDLE_VALUE;
+
+        for (u32 patternIndex = 0;
+             patternIndex < sizeof(patterns) / sizeof(patterns[0]);
+             ++patternIndex)
+        {
+            search = FindFirstFileA(patterns[patternIndex], &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                size_t nameLen = strlen(found.cFileName);
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(found.cFileName, ".sce"))
+                {
+                    continue;
+                }
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         found.cFileName);
+                files[count].size =
+                    ((uint64_t)found.nFileSizeHigh << 32) | found.nFileSizeLow;
+                ++count;
+            } while (count < fileCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
+    }
+#else
+    {
+        static const char *directories[] = {
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = opendir(directories[directoryIndex]);
+            struct dirent *entry = NULL;
+            if (directory == NULL)
+                continue;
+            while (count < fileCap && (entry = readdir(directory)) != NULL)
+            {
+                char path[384];
+                struct stat info;
+                size_t nameLen = strlen(entry->d_name);
+                if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(entry->d_name, ".sce"))
+                    continue;
+                snprintf(path, sizeof(path), "%s/%s", directories[directoryIndex],
+                         entry->d_name);
+                if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+                    continue;
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         entry->d_name);
+                files[count].size = (uint64_t)info.st_size;
+                ++count;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (count > 1)
+        qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
+    return count;
+}
+
+static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
+                                             u32 fileCap)
+{
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+#ifdef _WIN32
+    {
+        static const char *patterns[] = {
+            "../web/fs/JHOnlineData/*.actor",
+            "web/fs/JHOnlineData/*.actor"
+        };
+        WIN32_FIND_DATAA found;
+        HANDLE search = INVALID_HANDLE_VALUE;
+
+        for (u32 patternIndex = 0;
+             patternIndex < sizeof(patterns) / sizeof(patterns[0]);
+             ++patternIndex)
+        {
+            search = FindFirstFileA(patterns[patternIndex], &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                size_t nameLen = strlen(found.cFileName);
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(found.cFileName, ".actor"))
+                {
+                    continue;
+                }
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         found.cFileName);
+                files[count].size =
+                    ((uint64_t)found.nFileSizeHigh << 32) | found.nFileSizeLow;
+                ++count;
+            } while (count < fileCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
+    }
+#else
+    {
+        static const char *directories[] = {
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = opendir(directories[directoryIndex]);
+            struct dirent *entry = NULL;
+            if (directory == NULL)
+                continue;
+            while (count < fileCap && (entry = readdir(directory)) != NULL)
+            {
+                char path[384];
+                struct stat info;
+                size_t nameLen = strlen(entry->d_name);
+                if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(entry->d_name, ".actor"))
+                {
+                    continue;
+                }
+                snprintf(path, sizeof(path), "%s/%s",
+                         directories[directoryIndex], entry->d_name);
+                if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+                    continue;
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         entry->d_name);
+                files[count].size = (uint64_t)info.st_size;
+                ++count;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (count > 1)
+        qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
+    return count;
+}
+
+static u32 vm_mock_admin_collect_xse_files(vm_mock_admin_scene_file *files,
+                                           u32 fileCap)
+{
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+#ifdef _WIN32
+    {
+        static const char *patterns[] = {
+            "../web/fs/JHOnlineData/*.xse",
+            "web/fs/JHOnlineData/*.xse"
+        };
+        WIN32_FIND_DATAA found;
+        HANDLE search = INVALID_HANDLE_VALUE;
+
+        for (u32 patternIndex = 0;
+             patternIndex < sizeof(patterns) / sizeof(patterns[0]);
+             ++patternIndex)
+        {
+            search = FindFirstFileA(patterns[patternIndex], &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                size_t nameLen = strlen(found.cFileName);
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(found.cFileName, ".xse"))
+                {
+                    continue;
+                }
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         found.cFileName);
+                files[count].size =
+                    ((uint64_t)found.nFileSizeHigh << 32) | found.nFileSizeLow;
+                ++count;
+            } while (count < fileCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
+    }
+#else
+    {
+        static const char *directories[] = {
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = opendir(directories[directoryIndex]);
+            struct dirent *entry = NULL;
+            if (directory == NULL)
+                continue;
+            while (count < fileCap && (entry = readdir(directory)) != NULL)
+            {
+                char path[384];
+                struct stat info;
+                size_t nameLen = strlen(entry->d_name);
+                if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(entry->d_name, ".xse"))
+                {
+                    continue;
+                }
+                snprintf(path, sizeof(path), "%s/%s",
+                         directories[directoryIndex], entry->d_name);
+                if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+                    continue;
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         entry->d_name);
+                files[count].size = (uint64_t)info.st_size;
+                ++count;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (count > 1)
+        qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
+    return count;
+}
+
+static void vm_mock_admin_render_actor_select(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *actorFiles,
+    u32 actorCount, const char *currentActor)
+{
+    bool currentFound = false;
+
+    if (page == NULL)
+        return;
+    for (u32 i = 0; i < actorCount; ++i)
+    {
+        if (currentActor != NULL && strcmp(actorFiles[i].name, currentActor) == 0)
+        {
+            currentFound = true;
+            break;
+        }
+    }
+    vm_mock_admin_text_appendf(
+        page, "<select name=\"actor_resource\" required>");
+    if (currentActor != NULL && currentActor[0] != 0 && !currentFound)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>");
+        vm_mock_admin_text_append_html(page, currentActor);
+        vm_mock_admin_text_appendf(page, "（资源不存在，请重新选择）</option>");
+    }
+    if ((currentActor == NULL || currentActor[0] == 0) && actorCount != 0)
+        vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>请选择 Actor 资源</option>");
+    for (u32 i = 0; i < actorCount; ++i)
+    {
+        bool selected = currentFound &&
+                        strcmp(actorFiles[i].name, currentActor) == 0;
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, actorFiles[i].name);
+        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
+        vm_mock_admin_text_append_html(page, actorFiles[i].name);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    if (actorCount == 0)
+        vm_mock_admin_text_appendf(page, "<option value=\"\" disabled>未找到 Actor 资源</option>");
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_xse_select(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *xseFiles,
+    u32 xseCount, const char *currentScript)
+{
+    bool currentFound = false;
+    bool hasCurrent = currentScript != NULL && currentScript[0] != 0;
+
+    if (page == NULL)
+        return;
+    for (u32 i = 0; i < xseCount; ++i)
+    {
+        if (hasCurrent && strcmp(xseFiles[i].name, currentScript) == 0)
+        {
+            currentFound = true;
+            break;
+        }
+    }
+    vm_mock_admin_text_appendf(page, "<select name=\"script_name\">");
+    if (hasCurrent && !currentFound)
+    {
+        char currentUtf8[192];
+        vm_net_mock_gbk_label_to_utf8(currentScript, currentUtf8,
+                                      sizeof(currentUtf8));
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"\" selected disabled>");
+        vm_mock_admin_text_append_html(page, currentUtf8);
+        vm_mock_admin_text_appendf(
+            page, "（资源不存在，请重新选择）</option>");
+    }
+    vm_mock_admin_text_appendf(
+        page, "<option value=\"\"%s>无脚本</option>",
+        hasCurrent ? "" : " selected");
+    for (u32 i = 0; i < xseCount; ++i)
+    {
+        char nameUtf8[192];
+        bool selected = currentFound &&
+                        strcmp(xseFiles[i].name, currentScript) == 0;
+
+        vm_net_mock_gbk_label_to_utf8(xseFiles[i].name, nameUtf8,
+                                      sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, nameUtf8);
+        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
+        vm_mock_admin_text_append_html(page, nameUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    if (xseCount == 0)
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"\" disabled>未找到 XSE 脚本资源</option>");
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static bool vm_mock_admin_utf8_to_gbk_text(const char *utf8,
+                                           char *gbk, size_t gbkCap,
+                                           bool allowEmpty)
+{
+    if (gbk == NULL || gbkCap == 0)
+        return false;
+    gbk[0] = 0;
+    if (utf8 == NULL || utf8[0] == 0)
+        return allowEmpty;
+    utf8_to_gbk((u8 *)utf8, (u8 *)gbk, gbkCap);
+    return gbk[0] != 0;
+}
+
+static bool vm_mock_admin_scene_file_to_runtime_key(const char *sceneFile,
+                                                    char *runtimeScene,
+                                                    size_t runtimeSceneCap)
+{
+    char stem[64];
+    char canonical[64];
+    size_t len = 0;
+
+    if (runtimeScene == NULL || runtimeSceneCap == 0)
+        return false;
+    runtimeScene[0] = 0;
+    if (sceneFile == NULL || !vm_net_mock_scene_name_is_safe(sceneFile))
+        return false;
+    snprintf(stem, sizeof(stem), "%s", sceneFile);
+    len = strlen(stem);
+    if (len > 4 && strcmp(stem + len - 4, ".sce") == 0)
+    {
+        stem[len - 4] = 0;
+        len -= 4;
+    }
+    memset(canonical, 0, sizeof(canonical));
+    if (stem[0] == 'c')
+    {
+        if (len < 4 || !isdigit((unsigned char)stem[1]) ||
+            !isdigit((unsigned char)stem[2]))
+        {
+            return false;
+        }
+        snprintf(canonical, sizeof(canonical), "%s", stem);
+    }
+    else if (len < 3 || !isdigit((unsigned char)stem[0]) ||
+             !isdigit((unsigned char)stem[1]))
+    {
+        /* Battle/test SCE files use keys such as b_20黑龙潭 and 测试地图.
+         * They have already been selected from the server-owned SCE directory,
+         * so the extensionless resource key is both safe and authoritative. */
+        snprintf(canonical, sizeof(canonical), "%s", stem);
+    }
+    else if (stem[2] == '_' && len > 5 &&
+        isdigit((unsigned char)stem[len - 2]) &&
+        isdigit((unsigned char)stem[len - 1]))
+    {
+        size_t middleLen = len - 5;
+        if (1 + 2 + middleLen + 1 + 2 + 1 > sizeof(canonical))
+            return false;
+        canonical[0] = 'c';
+        canonical[1] = stem[0];
+        canonical[2] = stem[1];
+        memcpy(canonical + 3, stem + 3, middleLen);
+        canonical[3 + middleLen] = '_';
+        canonical[4 + middleLen] = stem[len - 2];
+        canonical[5 + middleLen] = stem[len - 1];
+        canonical[6 + middleLen] = 0;
+    }
+    else
+    {
+        if (len + 2 > sizeof(canonical))
+            return false;
+        canonical[0] = 'c';
+        memcpy(canonical + 1, stem, len + 1);
+    }
+
+    /* Legacy files resolve through a c-prefixed runtime alias, while newer
+     * catalogs such as 00蓬莱仙岛_02.sce are authoritative without that prefix.
+     * Keep whichever key the server resource resolver can actually open. */
+    if (vm_net_mock_scene_name_is_safe(canonical))
+        snprintf(runtimeScene, runtimeSceneCap, "%s", canonical);
+    else if (vm_net_mock_scene_name_is_safe(stem))
+        snprintf(runtimeScene, runtimeSceneCap, "%s", stem);
+    else
+        return false;
+    return true;
+}
+
+enum
+{
+    VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX = 16,
+    VM_MOCK_ADMIN_PREVIEW_PIXEL_MAX = 1024 * 1024,
+    VM_MOCK_ADMIN_PREVIEW_RESOURCE_MAX = 16 * 1024 * 1024,
+    VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX = 64,
+    VM_MOCK_ADMIN_ACTOR_RECT_MAX = 1024,
+    VM_MOCK_ADMIN_ACTOR_FRAME_MAX = 256,
+    VM_MOCK_ADMIN_ACTOR_SVG_MAX = 2 * 1024 * 1024
+};
+
+typedef enum
+{
+    VM_MOCK_ADMIN_PORTAL_EDGE = 1,
+    VM_MOCK_ADMIN_PORTAL_META = 2,
+    VM_MOCK_ADMIN_PORTAL_NAMED = 3
+} vm_mock_admin_portal_kind;
+
+typedef struct
+{
+    vm_mock_admin_portal_kind kind;
+    char targetScene[64];
+    char displayName[64];
+    u16 entryId;
+    u16 targetEntryId;
+    u32 left;
+    u32 top;
+    u32 right;
+    u32 bottom;
+} vm_mock_admin_scene_portal;
+
+typedef struct
+{
+    int32_t left;
+    int32_t top;
+    int32_t right;
+    int32_t bottom;
+    int32_t imageIndex;
+} vm_mock_admin_actor_rect;
+
+typedef struct
+{
+    int32_t rectIndex;
+    int32_t offsetX;
+    int32_t offsetY;
+} vm_mock_admin_actor_frame;
+
+typedef struct
+{
+    char mapName[64];
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
+    u32 imageCount;
+    u32 width;
+    u32 height;
+    u32 tileWidth;
+    u32 tileHeight;
+    u32 cols;
+    u32 rows;
+    const u8 *cells;
+    u32 cellCount;
+} vm_mock_admin_scene_preview;
+
+static char g_vm_mock_admin_preview_cache_scene[64];
+static u8 *g_vm_mock_admin_preview_cache_bmp = NULL;
+static u32 g_vm_mock_admin_preview_cache_bmp_len = 0;
+
+static void vm_mock_admin_preview_write_le16(u8 *out, u32 off, u16 value)
+{
+    out[off] = (u8)(value & 0xffu);
+    out[off + 1] = (u8)((value >> 8) & 0xffu);
+}
+
+static void vm_mock_admin_preview_write_le32(u8 *out, u32 off, u32 value)
+{
+    out[off] = (u8)(value & 0xffu);
+    out[off + 1] = (u8)((value >> 8) & 0xffu);
+    out[off + 2] = (u8)((value >> 16) & 0xffu);
+    out[off + 3] = (u8)((value >> 24) & 0xffu);
+}
+
+static bool vm_mock_admin_load_data_payload(const char *name,
+                                            const char *requiredSuffix,
+                                            u8 **payloadOut,
+                                            u32 *payloadLenOut,
+                                            u8 *typeOut)
+{
+    FILE *fp = NULL;
+    u8 *raw = NULL;
+    u8 *payload = NULL;
+    long rawSizeLong = 0;
+    u32 rawSize = 0;
+    u32 declaredLen = 0;
+    u32 decodedLen = 0;
+    u8 type = 0;
+    bool ok = false;
+
+    if (payloadOut)
+        *payloadOut = NULL;
+    if (payloadLenOut)
+        *payloadLenOut = 0;
+    if (typeOut)
+        *typeOut = 0;
+    if (name == NULL || payloadOut == NULL || payloadLenOut == NULL ||
+        !vm_net_mock_open_server_data_resource(name, requiredSuffix,
+                                               &fp, NULL, 0))
+    {
+        return false;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0 ||
+        (rawSizeLong = ftell(fp)) < 5 ||
+        rawSizeLong > VM_MOCK_ADMIN_PREVIEW_RESOURCE_MAX ||
+        fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        return false;
+    }
+    rawSize = (u32)rawSizeLong;
+    raw = (u8 *)malloc(rawSize);
+    if (raw == NULL || fread(raw, 1, rawSize, fp) != rawSize)
+        goto done;
+    declaredLen = (u32)raw[0] | ((u32)raw[1] << 8) |
+                  ((u32)raw[2] << 16) | ((u32)raw[3] << 24);
+    if (declaredLen != rawSize - 4 || declaredLen < 1)
+        goto done;
+    type = raw[4];
+    if (type == 1)
+    {
+        decodedLen = declaredLen - 1;
+        if (decodedLen == 0)
+            goto done;
+        payload = (u8 *)malloc(decodedLen);
+        if (payload == NULL)
+            goto done;
+        memcpy(payload, raw + 5, decodedLen);
+    }
+    else if (type == 2)
+    {
+        if (declaredLen < 9)
+            goto done;
+        decodedLen = vm_net_mock_read_be32_at(raw + 4, 5) & 0x7fffffffu;
+        if (decodedLen == 0 || decodedLen > VM_MOCK_ADMIN_PREVIEW_RESOURCE_MAX)
+            goto done;
+        payload = (u8 *)malloc(decodedLen);
+        if (payload == NULL ||
+            vm_net_mock_decode_lzss_resource_stream(raw + 4, declaredLen,
+                                                    payload, decodedLen) != decodedLen)
+        {
+            goto done;
+        }
+    }
+    else
+    {
+        goto done;
+    }
+    *payloadOut = payload;
+    *payloadLenOut = decodedLen;
+    if (typeOut)
+        *typeOut = type;
+    payload = NULL;
+    ok = true;
+
+done:
+    if (fp)
+        fclose(fp);
+    free(raw);
+    free(payload);
+    return ok;
+}
+
+static bool vm_mock_admin_scene_sibling_map_name(const char *scene,
+                                                 char *mapName,
+                                                 size_t mapNameCap)
+{
+    char stem[64];
+    size_t len = 0;
+
+    if (scene == NULL || scene[0] == 0 || mapName == NULL || mapNameCap == 0 ||
+        vm_net_mock_scene_name_has_path_separator(scene))
+    {
+        return false;
+    }
+    snprintf(stem, sizeof(stem), "%s", scene);
+    len = strlen(stem);
+    if (len > 4 && strcmp(stem + len - 4, ".sce") == 0)
+        stem[len - 4] = 0;
+    if (snprintf(mapName, mapNameCap, "%s.map", stem) >= (int)mapNameCap ||
+        !vm_net_mock_open_server_data_resource(mapName, ".map", NULL, NULL, 0))
+    {
+        mapName[0] = 0;
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_scene_map_name(const char *scene,
+                                         char *mapName,
+                                         size_t mapNameCap)
+{
+    u8 data[8192];
+    u32 len = 0;
+    u32 base = 0;
+    u32 nameLen = 0;
+
+    if (mapName == NULL || mapNameCap == 0)
+        return false;
+    mapName[0] = 0;
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    if (len < 15)
+        return vm_mock_admin_scene_sibling_map_name(scene, mapName, mapNameCap);
+    for (base = 0; base + 15 <= len && base < 32; ++base)
+    {
+        if (memcmp(data + base, "SCE2", 4) == 0)
+            break;
+    }
+    if (base + 15 > len || base >= 32)
+        return vm_mock_admin_scene_sibling_map_name(scene, mapName, mapNameCap);
+    nameLen = data[base + 10];
+    if (nameLen == 0 || nameLen >= mapNameCap || base + 11 + nameLen > len)
+        return vm_mock_admin_scene_sibling_map_name(scene, mapName, mapNameCap);
+    memcpy(mapName, data + base + 11, nameLen);
+    mapName[nameLen] = 0;
+    if (vm_net_mock_str_ends_with(mapName, ".map") &&
+        !vm_net_mock_scene_name_has_path_separator(mapName))
+    {
+        return true;
+    }
+    return vm_mock_admin_scene_sibling_map_name(scene, mapName, mapNameCap);
+}
+
+static bool vm_mock_admin_parse_map_preview(const u8 *data, u32 len,
+                                            const char *mapName,
+                                            vm_mock_admin_scene_preview *preview)
+{
+    u32 pos = 0;
+    u32 expectedCells = 0;
+
+    if (data == NULL || preview == NULL || len < 24)
+        return false;
+    memset(preview, 0, sizeof(*preview));
+    if (mapName)
+        snprintf(preview->mapName, sizeof(preview->mapName), "%s", mapName);
+    preview->imageCount = vm_mock_service_read_le32(data + pos);
+    pos += 4;
+    if (preview->imageCount == 0 ||
+        preview->imageCount > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < preview->imageCount; ++i)
+    {
+        u32 nameLen = 0;
+        if (pos >= len)
+            return false;
+        nameLen = data[pos++];
+        if (nameLen == 0 || nameLen >= sizeof(preview->imageNames[i]) ||
+            pos + nameLen > len)
+        {
+            return false;
+        }
+        memcpy(preview->imageNames[i], data + pos, nameLen);
+        preview->imageNames[i][nameLen] = 0;
+        pos += nameLen;
+    }
+    if (pos + 16 > len)
+        return false;
+    preview->width = vm_mock_service_read_le32(data + pos);
+    preview->height = vm_mock_service_read_le32(data + pos + 4);
+    preview->tileWidth = vm_mock_service_read_le32(data + pos + 8);
+    preview->tileHeight = vm_mock_service_read_le32(data + pos + 12);
+    pos += 16;
+    if (preview->width == 0 || preview->height == 0 ||
+        preview->tileWidth == 0 || preview->tileHeight == 0 ||
+        preview->width > 4096 || preview->height > 4096 ||
+        preview->width > VM_MOCK_ADMIN_PREVIEW_PIXEL_MAX / preview->height ||
+        ((len - pos) & 3u) != 0)
+    {
+        return false;
+    }
+    preview->cols = (preview->width + preview->tileWidth - 1) /
+                    preview->tileWidth;
+    preview->rows = (preview->height + preview->tileHeight - 1) /
+                    preview->tileHeight;
+    if (preview->cols == 0 || preview->rows == 0 ||
+        preview->cols > 4096 / preview->rows)
+    {
+        return false;
+    }
+    expectedCells = preview->cols * preview->rows;
+    preview->cellCount = (len - pos) / 4;
+    if (preview->cellCount != expectedCells)
+        return false;
+    preview->cells = data + pos;
+    return true;
+}
+
+static bool vm_mock_admin_scene_preview_info(const char *scene,
+                                             vm_mock_admin_scene_preview *preview)
+{
+    char mapName[64];
+    u8 *mapPayload = NULL;
+    u32 mapPayloadLen = 0;
+    bool ok = false;
+
+    memset(mapName, 0, sizeof(mapName));
+    if (!vm_mock_admin_scene_map_name(scene, mapName, sizeof(mapName)) ||
+        !vm_mock_admin_load_data_payload(mapName, ".map", &mapPayload,
+                                         &mapPayloadLen, NULL))
+    {
+        return false;
+    }
+    ok = vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen,
+                                         mapName, preview);
+    free(mapPayload);
+    if (ok)
+        preview->cells = NULL;
+    return ok;
+}
+
+static bool vm_mock_admin_read_sce_string_field(const u8 *data, u32 len,
+                                                u32 *pos, u16 expectedField,
+                                                char *out, size_t outCap)
+{
+    if (data == NULL || pos == NULL || out == NULL || outCap == 0 ||
+        *pos + 5 > len || vm_net_mock_read_le16_at(data, *pos) != 3 ||
+        vm_net_mock_read_le16_at(data, *pos + 2) != expectedField)
+    {
+        return false;
+    }
+    *pos += 4;
+    return vm_net_mock_read_sce_len_string(data, len, pos, out, outCap);
+}
+
+static bool vm_mock_admin_parse_sce_meta_portal_at(
+    const u8 *data, u32 len, u32 off, vm_mock_admin_scene_portal *portal,
+    u32 *endOut)
+{
+    u32 pos = off;
+    u16 kind = 0;
+
+    if (data == NULL || portal == NULL || off + 12 > len)
+        return false;
+    memset(portal, 0, sizeof(*portal));
+    portal->kind = VM_MOCK_ADMIN_PORTAL_META;
+    portal->entryId = 0xffff;
+    portal->targetEntryId = 0xffff;
+    kind = vm_net_mock_read_le16_at(data, pos);
+    pos += 2;
+    if (kind == 8)
+    {
+        if (pos + 6 > len)
+            return false;
+        pos += 6;
+    }
+    else
+    {
+        if (pos + 8 > len || vm_net_mock_read_le16_at(data, pos) != 8)
+            return false;
+        pos += 8;
+    }
+    if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 6,
+                                             portal->targetScene,
+                                             sizeof(portal->targetScene)) ||
+        !vm_net_mock_str_ends_with(portal->targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(portal->targetScene) ||
+        !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x07,
+                                           &portal->entryId))
+    {
+        return false;
+    }
+    {
+        u16 left = 0;
+        u16 top = 0;
+        u16 right = 0;
+        u16 bottom = 0;
+        if (!vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0a, &left) ||
+            !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0b, &top) ||
+            !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0c, &right) ||
+            !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x0d, &bottom) ||
+            !vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x13,
+                                               &portal->targetEntryId) ||
+            right < left || bottom < top)
+        {
+            return false;
+        }
+        portal->left = left;
+        portal->top = top;
+        portal->right = right;
+        portal->bottom = bottom;
+    }
+    if (endOut)
+        *endOut = pos;
+    return true;
+}
+
+static bool vm_mock_admin_parse_sce_named_portal_at(
+    const u8 *data, u32 len, u32 off, vm_mock_admin_scene_portal *portal,
+    u32 *endOut)
+{
+    u32 pos = off;
+    u16 kind = 0;
+    u16 tileX = 0;
+    u16 tileY = 0;
+    u16 tileWidth = 0;
+    u16 tileHeight = 0;
+
+    if (data == NULL || portal == NULL || off + 12 > len)
+        return false;
+    memset(portal, 0, sizeof(*portal));
+    portal->kind = VM_MOCK_ADMIN_PORTAL_NAMED;
+    portal->entryId = 0xffff;
+    portal->targetEntryId = 0xffff;
+    kind = vm_net_mock_read_le16_at(data, pos);
+    pos += 2;
+    if (kind == 4)
+    {
+        if (pos + 8 > len)
+            return false;
+        tileX = vm_net_mock_read_le16_at(data, pos);
+        tileY = vm_net_mock_read_le16_at(data, pos + 2);
+        tileWidth = vm_net_mock_read_le16_at(data, pos + 4);
+        tileHeight = vm_net_mock_read_le16_at(data, pos + 6);
+        pos += 8;
+    }
+    else
+    {
+        if (pos + 10 > len || vm_net_mock_read_le16_at(data, pos) != 4)
+            return false;
+        tileX = vm_net_mock_read_le16_at(data, pos + 2);
+        tileY = vm_net_mock_read_le16_at(data, pos + 4);
+        tileWidth = vm_net_mock_read_le16_at(data, pos + 6);
+        tileHeight = vm_net_mock_read_le16_at(data, pos + 8);
+        pos += 10;
+    }
+    if (tileWidth == 0 || tileHeight == 0)
+        return false;
+
+    /* Named portals optionally carry a field-0x12 interaction prompt. */
+    if (kind == 4 && pos + 3 <= len &&
+        vm_net_mock_read_le16_at(data, pos) == 0x12)
+    {
+        char ignoredPrompt[128];
+        pos += 2;
+        if (!vm_net_mock_read_sce_len_string(data, len, &pos,
+                                             ignoredPrompt,
+                                             sizeof(ignoredPrompt)))
+        {
+            return false;
+        }
+    }
+    else if (pos + 5 <= len && vm_net_mock_read_le16_at(data, pos) == 3 &&
+             vm_net_mock_read_le16_at(data, pos + 2) == 0x12)
+    {
+        char ignoredPrompt[128];
+        if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
+                                                 ignoredPrompt,
+                                                 sizeof(ignoredPrompt)))
+        {
+            return false;
+        }
+    }
+    if (!vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x15,
+                                           &portal->targetEntryId) ||
+        !vm_mock_admin_read_sce_string_field(data, len, &pos, 0x16,
+                                             portal->displayName,
+                                             sizeof(portal->displayName)) ||
+        !vm_mock_admin_read_sce_string_field(data, len, &pos, 0x17,
+                                             portal->targetScene,
+                                             sizeof(portal->targetScene)) ||
+        !vm_net_mock_str_ends_with(portal->targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(portal->targetScene))
+    {
+        return false;
+    }
+    portal->left = (u32)tileX * 16u;
+    portal->top = (u32)tileY * 16u;
+    portal->right = portal->left + (u32)tileWidth * 16u;
+    portal->bottom = portal->top + (u32)tileHeight * 16u;
+    if (endOut)
+        *endOut = pos;
+    return true;
+}
+
+static bool vm_mock_admin_portal_equals(const vm_mock_admin_scene_portal *a,
+                                        const vm_mock_admin_scene_portal *b)
+{
+    return a != NULL && b != NULL && a->kind == b->kind &&
+           a->entryId == b->entryId &&
+           a->targetEntryId == b->targetEntryId &&
+           a->left == b->left && a->top == b->top &&
+           a->right == b->right && a->bottom == b->bottom &&
+           strcmp(a->targetScene, b->targetScene) == 0;
+}
+
+static u32 vm_mock_admin_collect_scene_portals(
+    const char *scene, vm_mock_admin_scene_portal *portals, u32 portalCap,
+    u32 *totalOut)
+{
+    u8 data[8192];
+    u32 len = 0;
+    u32 start = 0;
+    u32 count = 0;
+    u32 total = 0;
+
+    if (totalOut)
+        *totalOut = 0;
+    if (scene == NULL || scene[0] == 0 || portals == NULL || portalCap == 0)
+        return 0;
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len == 0 || start == 0)
+        return 0;
+
+    for (u32 off = start; off + 12 <= len; ++off)
+    {
+        vm_mock_admin_scene_portal portal;
+        vm_net_mock_sce_edge_portal edge;
+        u32 end = 0;
+        bool parsed = false;
+
+        memset(&portal, 0, sizeof(portal));
+        memset(&edge, 0, sizeof(edge));
+        if (vm_net_mock_parse_sce_edge_portal_at(data, len, off, &edge, &end))
+        {
+            portal.kind = VM_MOCK_ADMIN_PORTAL_EDGE;
+            portal.entryId = edge.entryId;
+            portal.targetEntryId = edge.targetEntryId;
+            portal.left = edge.left;
+            portal.top = edge.top;
+            portal.right = edge.right;
+            portal.bottom = edge.bottom;
+            snprintf(portal.targetScene, sizeof(portal.targetScene), "%s",
+                     edge.targetScene);
+            parsed = true;
+        }
+        else if (vm_mock_admin_parse_sce_meta_portal_at(data, len, off,
+                                                        &portal, &end) ||
+                 vm_mock_admin_parse_sce_named_portal_at(data, len, off,
+                                                         &portal, &end))
+        {
+            parsed = true;
+        }
+        if (parsed)
+        {
+            bool duplicate = false;
+            for (u32 i = 0; i < count; ++i)
+            {
+                if (vm_mock_admin_portal_equals(&portals[i], &portal))
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate)
+            {
+                ++total;
+                if (count < portalCap)
+                    portals[count++] = portal;
+            }
+            if (end > off + 1)
+                off = end - 1;
+        }
+    }
+    if (totalOut)
+        *totalOut = total;
+    return count;
+}
+
+static bool vm_mock_admin_actor_read_s32(const u8 *data, u32 len, u32 *pos,
+                                         int32_t *valueOut)
+{
+    if (data == NULL || pos == NULL || valueOut == NULL || *pos + 4 > len)
+        return false;
+    *valueOut = (int32_t)vm_mock_service_read_le32(data + *pos);
+    *pos += 4;
+    return true;
+}
+
+static bool vm_mock_admin_actor_read_string(const u8 *data, u32 len, u32 *pos,
+                                            char *out, size_t outCap)
+{
+    u32 stringLen = 0;
+    if (data == NULL || pos == NULL || out == NULL || outCap == 0 || *pos >= len)
+        return false;
+    stringLen = data[(*pos)++];
+    if (stringLen == 0 || stringLen >= outCap || *pos + stringLen > len)
+        return false;
+    memcpy(out, data + *pos, stringLen);
+    out[stringLen] = 0;
+    *pos += stringLen;
+    return true;
+}
+
+static bool vm_mock_admin_build_actor_preview_svg(const char *actorResource,
+                                                  u8 **svgOut,
+                                                  u32 *svgLenOut)
+{
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
+    vm_mock_admin_actor_rect *rects = NULL;
+    vm_mock_admin_actor_frame frames[VM_MOCK_ADMIN_ACTOR_FRAME_MAX];
+    GifOutput images[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX];
+    bool imageValid[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX];
+    u8 *actorPayload = NULL;
+    u32 actorPayloadLen = 0;
+    u8 actorType = 0;
+    u32 pos = 0;
+    int32_t imageCountSigned = 0;
+    int32_t rectCountSigned = 0;
+    int32_t animationCount = 0;
+    int32_t partCount = 0;
+    u32 imageCount = 0;
+    u32 rectCount = 0;
+    u32 frameCount = 0;
+    int32_t minX = 0;
+    int32_t minY = 0;
+    int32_t maxX = 0;
+    int32_t maxY = 0;
+    u32 width = 0;
+    u32 height = 0;
+    u16 *canvas = NULL;
+    char *svg = NULL;
+    vm_mock_admin_text text;
+    bool boundsReady = false;
+    bool ok = false;
+
+    if (svgOut)
+        *svgOut = NULL;
+    if (svgLenOut)
+        *svgLenOut = 0;
+    memset(imageNames, 0, sizeof(imageNames));
+    memset(frames, 0, sizeof(frames));
+    memset(images, 0, sizeof(images));
+    memset(imageValid, 0, sizeof(imageValid));
+    if (actorResource == NULL || svgOut == NULL || svgLenOut == NULL ||
+        vm_net_mock_scene_name_has_path_separator(actorResource) ||
+        !vm_net_mock_str_ends_with(actorResource, ".actor") ||
+        !vm_mock_admin_load_data_payload(actorResource, ".actor",
+                                         &actorPayload, &actorPayloadLen,
+                                         &actorType) || actorType != 2)
+    {
+        goto done;
+    }
+    if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &imageCountSigned) ||
+        imageCountSigned <= 0 ||
+        imageCountSigned > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        goto done;
+    }
+    imageCount = (u32)imageCountSigned;
+    for (u32 i = 0; i < imageCount; ++i)
+    {
+        if (!vm_mock_admin_actor_read_string(actorPayload, actorPayloadLen,
+                                             &pos, imageNames[i],
+                                             sizeof(imageNames[i])) ||
+            !vm_net_mock_str_ends_with(imageNames[i], ".gif") ||
+            vm_net_mock_scene_name_has_path_separator(imageNames[i]))
+        {
+            goto done;
+        }
+    }
+    if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &rectCountSigned) ||
+        rectCountSigned <= 0 || rectCountSigned > VM_MOCK_ADMIN_ACTOR_RECT_MAX)
+    {
+        goto done;
+    }
+    rectCount = (u32)rectCountSigned;
+    rects = (vm_mock_admin_actor_rect *)calloc(rectCount, sizeof(*rects));
+    if (rects == NULL)
+        goto done;
+    for (u32 i = 0; i < rectCount; ++i)
+    {
+        if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &rects[i].left) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &rects[i].top) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &rects[i].right) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &rects[i].bottom) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &rects[i].imageIndex) ||
+            rects[i].imageIndex < 0 ||
+            (u32)rects[i].imageIndex >= imageCount)
+        {
+            goto done;
+        }
+    }
+    if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &animationCount) ||
+        animationCount <= 0 ||
+        !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &partCount) ||
+        partCount <= 0 || partCount > 4096)
+    {
+        goto done;
+    }
+    for (int32_t partIndex = 0; partIndex < partCount; ++partIndex)
+    {
+        int32_t partId = 0;
+        int32_t candidateFrameCount = 0;
+        if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &partId) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &candidateFrameCount) ||
+            candidateFrameCount < 0 || candidateFrameCount > 65535 ||
+            (u32)candidateFrameCount > (actorPayloadLen - pos) / 20u)
+        {
+            goto done;
+        }
+        (void)partId;
+        if (frameCount == 0 && candidateFrameCount > 0 &&
+            candidateFrameCount <= VM_MOCK_ADMIN_ACTOR_FRAME_MAX)
+        {
+            frameCount = (u32)candidateFrameCount;
+            for (u32 i = 0; i < frameCount; ++i)
+            {
+                int32_t ignored = 0;
+                if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                                  &pos, &frames[i].rectIndex) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                                  &pos, &frames[i].offsetX) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                                  &pos, &frames[i].offsetY) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                                  &pos, &ignored) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                                  &pos, &ignored))
+                {
+                    goto done;
+                }
+            }
+        }
+        else
+        {
+            pos += (u32)candidateFrameCount * 20u;
+        }
+    }
+    if (frameCount == 0)
+        goto done;
+
+    for (u32 i = 0; i < frameCount; ++i)
+    {
+        vm_mock_admin_actor_rect *rect = NULL;
+        int32_t right = 0;
+        int32_t bottom = 0;
+        if (frames[i].rectIndex < 0 || (u32)frames[i].rectIndex >= rectCount)
+            goto done;
+        rect = &rects[frames[i].rectIndex];
+        if (rect->right <= rect->left || rect->bottom <= rect->top)
+            goto done;
+        right = frames[i].offsetX + (rect->right - rect->left);
+        bottom = frames[i].offsetY + (rect->bottom - rect->top);
+        if (!boundsReady)
+        {
+            minX = frames[i].offsetX;
+            minY = frames[i].offsetY;
+            maxX = right;
+            maxY = bottom;
+            boundsReady = true;
+        }
+        else
+        {
+            if (frames[i].offsetX < minX)
+                minX = frames[i].offsetX;
+            if (frames[i].offsetY < minY)
+                minY = frames[i].offsetY;
+            if (right > maxX)
+                maxX = right;
+            if (bottom > maxY)
+                maxY = bottom;
+        }
+    }
+    if (!boundsReady || maxX <= minX || maxY <= minY ||
+        maxX - minX > 512 || maxY - minY > 512)
+    {
+        goto done;
+    }
+    width = (u32)(maxX - minX);
+    height = (u32)(maxY - minY);
+    canvas = (u16 *)calloc((size_t)width * height, sizeof(u16));
+    if (canvas == NULL)
+        goto done;
+
+    for (u32 i = 0; i < imageCount; ++i)
+    {
+        u8 *imagePayload = NULL;
+        u32 imagePayloadLen = 0;
+        u8 imageType = 0;
+        int mallocSize = 0;
+        if (!vm_mock_admin_load_data_payload(imageNames[i], ".gif",
+                                             &imagePayload, &imagePayloadLen,
+                                             &imageType) || imageType != 1)
+        {
+            free(imagePayload);
+            continue;
+        }
+        imageValid[i] = gifDecodeExt(imagePayload, &images[i], 1,
+                                     &mallocSize) != 0 &&
+                        images[i].pixels != NULL && images[i].width != 0 &&
+                        images[i].height != 0;
+        free(imagePayload);
+    }
+
+    for (u32 i = 0; i < frameCount; ++i)
+    {
+        const vm_mock_admin_actor_rect *rect = &rects[frames[i].rectIndex];
+        GifOutput *image = &images[rect->imageIndex];
+        u32 rectWidth = (u32)(rect->right - rect->left);
+        u32 rectHeight = (u32)(rect->bottom - rect->top);
+        u32 sourcePitch = 0;
+        int32_t destX = frames[i].offsetX - minX;
+        int32_t destY = frames[i].offsetY - minY;
+        if (!imageValid[rect->imageIndex] || rect->left < 0 || rect->top < 0 ||
+            (u32)rect->right > image->width ||
+            (u32)rect->bottom > image->height)
+        {
+            continue;
+        }
+        sourcePitch = image->width + ((4u - (image->width & 3u)) & 3u);
+        for (u32 y = 0; y < rectHeight; ++y)
+        {
+            for (u32 x = 0; x < rectWidth; ++x)
+            {
+                u16 pixel = image->pixels[((u32)rect->top + y) * sourcePitch +
+                                          (u32)rect->left + x];
+                if (pixel != 0 && destX + (int32_t)x >= 0 &&
+                    destY + (int32_t)y >= 0 &&
+                    (u32)(destX + (int32_t)x) < width &&
+                    (u32)(destY + (int32_t)y) < height)
+                {
+                    canvas[(u32)(destY + (int32_t)y) * width +
+                           (u32)(destX + (int32_t)x)] = pixel;
+                }
+            }
+        }
+    }
+
+    svg = (char *)malloc(VM_MOCK_ADMIN_ACTOR_SVG_MAX);
+    if (svg == NULL)
+        goto done;
+    vm_mock_admin_text_init(&text, svg, VM_MOCK_ADMIN_ACTOR_SVG_MAX);
+    vm_mock_admin_text_appendf(
+        &text,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%u\" height=\"%u\" viewBox=\"0 0 %u %u\" shape-rendering=\"crispEdges\">",
+        width, height, width, height);
+    for (u32 y = 0; y < height && !text.truncated; ++y)
+    {
+        for (u32 x = 0; x < width;)
+        {
+            u16 pixel = canvas[y * width + x];
+            u32 run = 1;
+            while (x + run < width && canvas[y * width + x + run] == pixel)
+                ++run;
+            if (pixel != 0)
+            {
+                u32 red = ((pixel >> 11) & 0x1fu) * 255u / 31u;
+                u32 green = ((pixel >> 5) & 0x3fu) * 255u / 63u;
+                u32 blue = (pixel & 0x1fu) * 255u / 31u;
+                vm_mock_admin_text_appendf(
+                    &text,
+                    "<rect x=\"%u\" y=\"%u\" width=\"%u\" height=\"1\" fill=\"#%02x%02x%02x\"/>",
+                    x, y, run, red, green, blue);
+            }
+            x += run;
+        }
+    }
+    vm_mock_admin_text_appendf(&text, "</svg>");
+    if (text.truncated || text.length == 0)
+        goto done;
+    *svgOut = (u8 *)svg;
+    *svgLenOut = (u32)text.length;
+    svg = NULL;
+    ok = true;
+
+done:
+    for (u32 i = 0; i < VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX; ++i)
+    {
+        if (images[i].owned && images[i].pixels)
+            free_mem(images[i].pixels);
+    }
+    free(actorPayload);
+    free(rects);
+    free(canvas);
+    free(svg);
+    return ok;
+}
+
+static const char *vm_mock_admin_orientation_arrow(u16 orientation)
+{
+    switch (orientation)
+    {
+    case 1:
+        return "↑";
+    case 2:
+        return "→";
+    case 3:
+        return "↓";
+    case 4:
+        return "←";
+    default:
+        return "•";
+    }
+}
+
+static const char *vm_mock_admin_orientation_name(u16 orientation)
+{
+    switch (orientation)
+    {
+    case 0:
+        return "默认";
+    case 1:
+        return "上";
+    case 2:
+        return "右";
+    case 3:
+        return "下";
+    case 4:
+        return "左";
+    default:
+        return "扩展";
+    }
+}
+
+static void vm_mock_admin_preview_fill_placeholder(u16 *canvas,
+                                                   u32 canvasWidth,
+                                                   u32 canvasHeight,
+                                                   u32 x0, u32 y0,
+                                                   u32 width, u32 height)
+{
+    for (u32 y = 0; y < height && y0 + y < canvasHeight; ++y)
+    {
+        for (u32 x = 0; x < width && x0 + x < canvasWidth; ++x)
+        {
+            canvas[(y0 + y) * canvasWidth + x0 + x] =
+                ((((x / 4) ^ (y / 4)) & 1u) == 0) ? 0xf81fu : 0x0000u;
+        }
+    }
+}
+
+static bool vm_mock_admin_build_scene_preview_bmp(const char *scene,
+                                                  const u8 **bmpOut,
+                                                  u32 *bmpLenOut,
+                                                  u32 *widthOut,
+                                                  u32 *heightOut)
+{
+    char mapName[64];
+    u8 *mapPayload = NULL;
+    u32 mapPayloadLen = 0;
+    vm_mock_admin_scene_preview preview;
+    GifOutput images[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX];
+    bool imageValid[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX];
+    u16 *canvas = NULL;
+    u8 *bmp = NULL;
+    u32 rowBytes = 0;
+    u32 imageBytes = 0;
+    u32 bmpLen = 0;
+    bool ok = false;
+
+    if (bmpOut)
+        *bmpOut = NULL;
+    if (bmpLenOut)
+        *bmpLenOut = 0;
+    if (widthOut)
+        *widthOut = 0;
+    if (heightOut)
+        *heightOut = 0;
+    if (scene == NULL || bmpOut == NULL || bmpLenOut == NULL)
+        return false;
+    if (g_vm_mock_admin_preview_cache_bmp != NULL &&
+        strcmp(g_vm_mock_admin_preview_cache_scene, scene) == 0)
+    {
+        *bmpOut = g_vm_mock_admin_preview_cache_bmp;
+        *bmpLenOut = g_vm_mock_admin_preview_cache_bmp_len;
+        if (widthOut)
+            *widthOut = vm_mock_service_read_le32(g_vm_mock_admin_preview_cache_bmp + 18);
+        if (heightOut)
+            *heightOut = vm_mock_service_read_le32(g_vm_mock_admin_preview_cache_bmp + 22);
+        return true;
+    }
+
+    memset(mapName, 0, sizeof(mapName));
+    memset(&preview, 0, sizeof(preview));
+    memset(images, 0, sizeof(images));
+    memset(imageValid, 0, sizeof(imageValid));
+    if (!vm_mock_admin_scene_map_name(scene, mapName, sizeof(mapName)) ||
+        !vm_mock_admin_load_data_payload(mapName, ".map", &mapPayload,
+                                         &mapPayloadLen, NULL) ||
+        !vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen,
+                                         mapName, &preview))
+    {
+        goto done;
+    }
+    canvas = (u16 *)calloc((size_t)preview.width * preview.height, sizeof(u16));
+    if (canvas == NULL)
+        goto done;
+
+    for (u32 i = 0; i < preview.imageCount; ++i)
+    {
+        u8 *imagePayload = NULL;
+        u32 imagePayloadLen = 0;
+        u8 imageType = 0;
+        int mallocSize = 0;
+
+        if (!vm_mock_admin_load_data_payload(preview.imageNames[i], ".gif",
+                                             &imagePayload, &imagePayloadLen,
+                                             &imageType) || imageType != 1)
+        {
+            free(imagePayload);
+            continue;
+        }
+        imageValid[i] = gifDecodeExt(imagePayload, &images[i], 1,
+                                     &mallocSize) != 0 &&
+                        images[i].pixels != NULL &&
+                        images[i].width != 0 && images[i].height != 0;
+        free(imagePayload);
+    }
+
+    for (u32 index = 0; index < preview.cellCount; ++index)
+    {
+        u32 packed = vm_mock_service_read_le32(preview.cells + index * 4);
+        u32 imageIndex = (packed >> 24) & 0x0fu;
+        u32 tileIndex = packed & 0x00ffffffu;
+        u32 gridX = index / preview.rows;
+        u32 gridY = index % preview.rows;
+        u32 dstX = gridX * preview.tileWidth;
+        u32 dstY = gridY * preview.tileHeight;
+        u32 copyWidth = preview.tileWidth;
+        u32 copyHeight = preview.tileHeight;
+        bool copied = false;
+
+        if (dstX + copyWidth > preview.width)
+            copyWidth = preview.width - dstX;
+        if (dstY + copyHeight > preview.height)
+            copyHeight = preview.height - dstY;
+        if (imageIndex < preview.imageCount && imageValid[imageIndex])
+        {
+            GifOutput *image = &images[imageIndex];
+            u32 sourcePitch = image->width + ((4u - (image->width & 3u)) & 3u);
+            u32 tilesPerRow = image->width / preview.tileWidth;
+            u32 tilesPerCol = image->height / preview.tileHeight;
+            u32 tileCount = tilesPerRow * tilesPerCol;
+            if (tilesPerRow != 0 && tilesPerCol != 0 && tileIndex < tileCount)
+            {
+                u32 sourceX = (tileIndex % tilesPerRow) * preview.tileWidth;
+                u32 sourceY = (tileIndex / tilesPerRow) * preview.tileHeight;
+                for (u32 y = 0; y < copyHeight; ++y)
+                {
+                    memcpy(canvas + (dstY + y) * preview.width + dstX,
+                           image->pixels + (sourceY + y) * sourcePitch + sourceX,
+                           copyWidth * sizeof(u16));
+                }
+                copied = true;
+            }
+        }
+        if (!copied)
+        {
+            vm_mock_admin_preview_fill_placeholder(canvas, preview.width,
+                                                   preview.height, dstX, dstY,
+                                                   copyWidth, copyHeight);
+        }
+    }
+
+    rowBytes = (preview.width * 3u + 3u) & ~3u;
+    if (preview.height > (0xffffffffu - 54u) / rowBytes)
+        goto done;
+    imageBytes = rowBytes * preview.height;
+    bmpLen = 54u + imageBytes;
+    bmp = (u8 *)malloc(bmpLen);
+    if (bmp == NULL)
+        goto done;
+    memset(bmp, 0, bmpLen);
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    vm_mock_admin_preview_write_le32(bmp, 2, bmpLen);
+    vm_mock_admin_preview_write_le32(bmp, 10, 54);
+    vm_mock_admin_preview_write_le32(bmp, 14, 40);
+    vm_mock_admin_preview_write_le32(bmp, 18, preview.width);
+    vm_mock_admin_preview_write_le32(bmp, 22, preview.height);
+    vm_mock_admin_preview_write_le16(bmp, 26, 1);
+    vm_mock_admin_preview_write_le16(bmp, 28, 24);
+    vm_mock_admin_preview_write_le32(bmp, 34, imageBytes);
+    vm_mock_admin_preview_write_le32(bmp, 38, 2835);
+    vm_mock_admin_preview_write_le32(bmp, 42, 2835);
+    for (u32 y = 0; y < preview.height; ++y)
+    {
+        u8 *dst = bmp + 54u + (preview.height - 1u - y) * rowBytes;
+        for (u32 x = 0; x < preview.width; ++x)
+        {
+            u16 pixel = canvas[y * preview.width + x];
+            dst[x * 3] = (u8)((pixel & 0x1fu) * 255u / 31u);
+            dst[x * 3 + 1] = (u8)(((pixel >> 5) & 0x3fu) * 255u / 63u);
+            dst[x * 3 + 2] = (u8)(((pixel >> 11) & 0x1fu) * 255u / 31u);
+        }
+    }
+
+    free(g_vm_mock_admin_preview_cache_bmp);
+    g_vm_mock_admin_preview_cache_bmp = bmp;
+    g_vm_mock_admin_preview_cache_bmp_len = bmpLen;
+    snprintf(g_vm_mock_admin_preview_cache_scene,
+             sizeof(g_vm_mock_admin_preview_cache_scene), "%s", scene);
+    bmp = NULL;
+    *bmpOut = g_vm_mock_admin_preview_cache_bmp;
+    *bmpLenOut = g_vm_mock_admin_preview_cache_bmp_len;
+    if (widthOut)
+        *widthOut = preview.width;
+    if (heightOut)
+        *heightOut = preview.height;
+    ok = true;
+
+done:
+    for (u32 i = 0; i < VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX; ++i)
+    {
+        if (images[i].owned && images[i].pixels)
+            free_mem(images[i].pixels);
+    }
+    free(canvas);
+    free(mapPayload);
+    free(bmp);
+    return ok;
+}
+
+static void vm_mock_admin_render_content_page(char *response,
+                                              size_t responseCap,
+                                              const char *query)
+{
+    vm_mock_admin_scene_file sceneFiles[VM_MOCK_ADMIN_SCENE_FILE_MAX];
+    vm_mock_admin_scene_file actorFiles[VM_MOCK_ADMIN_ACTOR_FILE_MAX];
+    vm_mock_admin_scene_file xseFiles[VM_MOCK_ADMIN_XSE_FILE_MAX];
+    vm_net_mock_dynamic_npc_admin_row npcRows[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+    vm_net_mock_scene_npcinfo_seed previewNpcRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+    vm_mock_admin_scene_portal previewPortalRows[VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX];
+    vm_mock_admin_scene_preview preview;
+    vm_mock_admin_text page;
+    char selectedSceneUtf8[192];
+    char selectedSceneFile[64];
+    char runtimeScene[64];
+    char status[16];
+    char message[256];
+    u32 sceneCount = 0;
+    u32 actorCount = 0;
+    u32 xseCount = 0;
+    u32 npcCount = 0;
+    u32 previewNpcCount = 0;
+    u32 previewNpcTotal = 0;
+    u32 previewDynamicCount = 0;
+    u32 previewPortalCount = 0;
+    u32 previewPortalTotal = 0;
+    bool previewReady = false;
+
+    memset(sceneFiles, 0, sizeof(sceneFiles));
+    memset(actorFiles, 0, sizeof(actorFiles));
+    memset(xseFiles, 0, sizeof(xseFiles));
+    memset(npcRows, 0, sizeof(npcRows));
+    memset(previewNpcRows, 0, sizeof(previewNpcRows));
+    memset(previewPortalRows, 0, sizeof(previewPortalRows));
+    memset(&preview, 0, sizeof(preview));
+    memset(selectedSceneUtf8, 0, sizeof(selectedSceneUtf8));
+    memset(selectedSceneFile, 0, sizeof(selectedSceneFile));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    vm_mock_admin_text_init(&page, response, responseCap);
+    sceneCount = vm_mock_admin_collect_scene_files(
+        sceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
+    actorCount = vm_mock_admin_collect_actor_files(
+        actorFiles, VM_MOCK_ADMIN_ACTOR_FILE_MAX);
+    xseCount = vm_mock_admin_collect_xse_files(
+        xseFiles, VM_MOCK_ADMIN_XSE_FILE_MAX);
+    (void)vm_mock_admin_form_value(query, "scene", selectedSceneUtf8,
+                                   sizeof(selectedSceneUtf8));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    if (selectedSceneUtf8[0] != 0)
+    {
+        (void)vm_mock_admin_utf8_to_gbk_text(selectedSceneUtf8,
+                                             selectedSceneFile,
+                                             sizeof(selectedSceneFile), false);
+    }
+    {
+        bool found = false;
+        for (u32 i = 0; i < sceneCount; ++i)
+        {
+            if (strcmp(sceneFiles[i].name, selectedSceneFile) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found && sceneCount > 0)
+            snprintf(selectedSceneFile, sizeof(selectedSceneFile), "%s",
+                     sceneFiles[0].name);
+    }
+    vm_net_mock_gbk_label_to_utf8(selectedSceneFile,
+                                  selectedSceneUtf8,
+                                  sizeof(selectedSceneUtf8));
+    if (selectedSceneFile[0] != 0 &&
+        vm_mock_admin_scene_file_to_runtime_key(selectedSceneFile,
+                                                runtimeScene,
+                                                sizeof(runtimeScene)))
+    {
+        npcCount = vm_net_mock_dynamic_npc_admin_list(
+            runtimeScene, npcRows, VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX);
+        previewReady = vm_mock_admin_scene_preview_info(runtimeScene, &preview);
+        previewNpcCount = vm_net_mock_collect_scene_npcinfo_seeds(
+            runtimeScene, previewNpcRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX,
+            &previewNpcTotal, &previewDynamicCount);
+        previewPortalCount = vm_mock_admin_collect_scene_portals(
+            runtimeScene, previewPortalRows, VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX,
+            &previewPortalTotal);
+    }
+
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 游戏内容管理</title><style>"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub{color:#667085;margin:4px 0 16px}"
+        ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
+        ".logout{background:none;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
+        ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
+        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
+        ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}"
+        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
+        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields{grid-template-columns:1fr 1fr}}"
+        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
+        "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
+        "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a></nav>"
+        "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
+        sceneCount);
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char sceneUtf8[192];
+        char encoded[512];
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name,
+                                      sceneUtf8, sizeof(sceneUtf8));
+        vm_mock_admin_url_encode(sceneUtf8, encoded, sizeof(encoded));
+        if (strcmp(sceneFiles[i].name, selectedSceneFile) == 0)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<a id=\"selected-scene\" class=\"scene on\" aria-current=\"page\" href=\"/?tab=content&amp;scene=%s#selected-scene\"><span>",
+                encoded);
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<a class=\"scene\" href=\"/?tab=content&amp;scene=%s#selected-scene\"><span>",
+                encoded);
+        }
+        vm_mock_admin_text_append_html(&page, sceneUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "</span><span class=\"size\">%llu B</span></a>",
+            (unsigned long long)sceneFiles[i].size);
+    }
+    if (sceneCount == 0)
+        vm_mock_admin_text_appendf(&page, "<span class=\"size\">未找到 SCE 文件</span>");
+    vm_mock_admin_text_appendf(&page,
+        "</div></aside><section><div class=\"card\"><h2>动态 NPC：");
+    vm_mock_admin_text_append_html(&page,
+                                   selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择场景");
+    vm_mock_admin_text_appendf(&page, "</h2>");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (previewReady)
+    {
+        char encodedScene[512];
+        char mapNameUtf8[192];
+
+        vm_mock_admin_url_encode(selectedSceneUtf8, encodedScene,
+                                 sizeof(encodedScene));
+        vm_net_mock_gbk_label_to_utf8(preview.mapName, mapNameUtf8,
+                                      sizeof(mapNameUtf8));
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"preview\"><div class=\"preview-head\"><strong>场景预览</strong><span class=\"size\">");
+        vm_mock_admin_text_append_html(&page, mapNameUtf8);
+        vm_mock_admin_text_appendf(&page,
+            " · %u×%u · NPC %u%s · 传送点 %u%s</span></div>"
+            "<div class=\"map-scroll\"><div class=\"map-stage\" style=\"width:%upx;height:%upx\">"
+            "<img src=\"/scene-preview.bmp?scene=%s\" width=\"%u\" height=\"%u\" alt=\"场景完整地图\">",
+            preview.width, preview.height, previewNpcCount,
+            previewNpcTotal > previewNpcCount ? "+" : "",
+            previewPortalCount,
+            previewPortalTotal > previewPortalCount ? "+" : "",
+            preview.width, preview.height, encodedScene,
+            preview.width, preview.height);
+        for (u32 i = 0; i < previewPortalCount; ++i)
+        {
+            const vm_mock_admin_scene_portal *portal = &previewPortalRows[i];
+            char targetSceneUtf8[192];
+            char displayNameUtf8[192];
+            u32 markerLeft = portal->left < preview.width ? portal->left : preview.width - 1;
+            u32 markerTop = portal->top < preview.height ? portal->top : preview.height - 1;
+            u32 markerRight = portal->right < preview.width ? portal->right : preview.width;
+            u32 markerBottom = portal->bottom < preview.height ? portal->bottom : preview.height;
+            u32 markerWidth = markerRight > markerLeft ? markerRight - markerLeft : 1;
+            u32 markerHeight = markerBottom > markerTop ? markerBottom - markerTop : 1;
+            bool named = portal->kind == VM_MOCK_ADMIN_PORTAL_NAMED;
+
+            vm_net_mock_gbk_label_to_utf8(portal->targetScene,
+                                          targetSceneUtf8,
+                                          sizeof(targetSceneUtf8));
+            vm_net_mock_gbk_label_to_utf8(portal->displayName,
+                                          displayNameUtf8,
+                                          sizeof(displayNameUtf8));
+            vm_mock_admin_text_appendf(
+                &page,
+                "<div class=\"portal-box%s\" data-target-scene=\"",
+                named ? " named" : "");
+            vm_mock_admin_text_append_html(&page, targetSceneUtf8);
+            vm_mock_admin_text_appendf(
+                &page,
+                "\" style=\"left:%upx;top:%upx;width:%upx;height:%upx\" title=\"",
+                markerLeft, markerTop, markerWidth, markerHeight);
+            if (displayNameUtf8[0] != 0)
+            {
+                vm_mock_admin_text_append_html(&page, displayNameUtf8);
+                vm_mock_admin_text_appendf(&page, " · ");
+            }
+            vm_mock_admin_text_appendf(&page, "目标场景：");
+            vm_mock_admin_text_append_html(&page, targetSceneUtf8);
+            if (portal->entryId == 0xffff)
+            {
+                vm_mock_admin_text_appendf(
+                    &page,
+                    " · 入口 -- → %u · 区域 (%u,%u)-(%u,%u)\"><span class=\"portal-label\">",
+                    portal->targetEntryId, portal->left, portal->top,
+                    portal->right, portal->bottom);
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(
+                    &page,
+                    " · 入口 %u → %u · 区域 (%u,%u)-(%u,%u)\"><span class=\"portal-label\">",
+                    portal->entryId, portal->targetEntryId,
+                    portal->left, portal->top, portal->right, portal->bottom);
+            }
+            if (displayNameUtf8[0] != 0)
+            {
+                vm_mock_admin_text_append_html(&page, displayNameUtf8);
+                vm_mock_admin_text_appendf(&page, " → ");
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(&page, "→ ");
+            }
+            vm_mock_admin_text_append_html(&page, targetSceneUtf8);
+            vm_mock_admin_text_appendf(&page, "</span></div>");
+        }
+        for (u32 i = 0; i < previewNpcCount; ++i)
+        {
+            const vm_net_mock_scene_npcinfo_seed *seed = &previewNpcRows[i];
+            char npcNameUtf8[128];
+            char actorEncoded[256];
+            u32 markerX = seed->x < preview.width ? seed->x : preview.width - 1;
+            u32 markerY = seed->y < preview.height ? seed->y : preview.height - 1;
+            bool serviceNpc = i < previewDynamicCount;
+            bool outside = seed->x >= preview.width || seed->y >= preview.height;
+
+            vm_mock_admin_url_encode(seed->actorResource, actorEncoded,
+                                     sizeof(actorEncoded));
+            vm_net_mock_gbk_label_to_utf8(
+                seed->displayName[0] ? seed->displayName : "NPC",
+                npcNameUtf8, sizeof(npcNameUtf8));
+            vm_mock_admin_text_appendf(&page,
+                "<div class=\"npc-pin%s\" style=\"left:%upx;top:%upx\" title=\"",
+                serviceNpc ? " service" : "", markerX, markerY);
+            vm_mock_admin_text_append_html(&page, npcNameUtf8);
+            vm_mock_admin_text_appendf(&page,
+                " · (%u,%u) · 朝向 %u %s · ",
+                seed->x, seed->y,
+                seed->orientation,
+                vm_mock_admin_orientation_name(seed->orientation));
+            vm_mock_admin_text_append_html(&page, seed->actorResource);
+            vm_mock_admin_text_appendf(&page,
+                " · %s%s\"><span class=\"pin-name\">",
+                serviceNpc ? "服务端动态" : "SCE 内置",
+                outside ? " · 坐标越界" : "");
+            vm_mock_admin_text_append_html(&page, npcNameUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "</span><span class=\"sprite-wrap\"><img class=\"actor-sprite\" src=\"/actor-preview.svg?actor=%s\" alt=\"",
+                actorEncoded);
+            vm_mock_admin_text_append_html(&page, npcNameUtf8);
+            vm_mock_admin_text_appendf(
+                &page,
+                " NPC 模型\"><span class=\"facing-badge\" title=\"朝向 %u %s\">%s%u</span></span></div>",
+                seed->orientation,
+                vm_mock_admin_orientation_name(seed->orientation),
+                vm_mock_admin_orientation_arrow(seed->orientation),
+                seed->orientation);
+        }
+        vm_mock_admin_text_appendf(&page,
+            "</div></div><div class=\"preview-legend\"><span class=\"legend-icon service\">人</span><span class=\"size\">服务端动态 NPC</span>"
+            "<span class=\"legend-icon\">人</span><span class=\"size\">SCE 内置 NPC</span>"
+            "<span class=\"legend-portal\"></span><span class=\"size\">边界/元数据传送点</span>"
+            "<span class=\"legend-portal named\"></span><span class=\"size\">具名传送点</span></div>");
+        if (previewNpcCount != 0)
+            vm_mock_admin_text_appendf(&page, "<div class=\"preview-npcs\">");
+        for (u32 i = 0; i < previewNpcCount; ++i)
+        {
+            const vm_net_mock_scene_npcinfo_seed *seed = &previewNpcRows[i];
+            char npcNameUtf8[128];
+            bool serviceNpc = i < previewDynamicCount;
+
+            vm_net_mock_gbk_label_to_utf8(
+                seed->displayName[0] ? seed->displayName : "NPC",
+                npcNameUtf8, sizeof(npcNameUtf8));
+            vm_mock_admin_text_appendf(&page,
+                "<span class=\"npc-chip%s\">",
+                serviceNpc ? " service" : "");
+            vm_mock_admin_text_append_html(&page, npcNameUtf8);
+            vm_mock_admin_text_appendf(
+                &page, " (%u,%u) · 朝向 %u %s · %s</span>",
+                seed->x, seed->y, seed->orientation,
+                vm_mock_admin_orientation_name(seed->orientation),
+                seed->actorResource);
+        }
+        if (previewNpcCount != 0)
+            vm_mock_admin_text_appendf(&page, "</div>");
+        if (previewPortalCount != 0)
+            vm_mock_admin_text_appendf(&page, "<div class=\"preview-portals\">");
+        for (u32 i = 0; i < previewPortalCount; ++i)
+        {
+            const vm_mock_admin_scene_portal *portal = &previewPortalRows[i];
+            char targetSceneUtf8[192];
+            char displayNameUtf8[192];
+            bool named = portal->kind == VM_MOCK_ADMIN_PORTAL_NAMED;
+
+            vm_net_mock_gbk_label_to_utf8(portal->targetScene,
+                                          targetSceneUtf8,
+                                          sizeof(targetSceneUtf8));
+            vm_net_mock_gbk_label_to_utf8(portal->displayName,
+                                          displayNameUtf8,
+                                          sizeof(displayNameUtf8));
+            vm_mock_admin_text_appendf(&page,
+                "<span class=\"portal-chip%s\">",
+                named ? " named" : "");
+            if (displayNameUtf8[0] != 0)
+            {
+                vm_mock_admin_text_append_html(&page, displayNameUtf8);
+                vm_mock_admin_text_appendf(&page, " → ");
+            }
+            vm_mock_admin_text_append_html(&page, targetSceneUtf8);
+            if (portal->entryId == 0xffff)
+            {
+                vm_mock_admin_text_appendf(
+                    &page, " · 入口 --→%u · (%u,%u)-(%u,%u)</span>",
+                    portal->targetEntryId, portal->left, portal->top,
+                    portal->right, portal->bottom);
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(
+                    &page, " · 入口 %u→%u · (%u,%u)-(%u,%u)</span>",
+                    portal->entryId, portal->targetEntryId,
+                    portal->left, portal->top, portal->right, portal->bottom);
+            }
+        }
+        if (previewPortalCount != 0)
+            vm_mock_admin_text_appendf(&page, "</div>");
+        if (previewNpcTotal > previewNpcCount)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<p class=\"foot\">NPC 目录共 %u 项，当前预览显示前 %u 项。</p>",
+                previewNpcTotal, previewNpcCount);
+        }
+        if (previewPortalTotal > previewPortalCount)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<p class=\"foot\">传送点共 %u 项，当前预览显示前 %u 项。</p>",
+                previewPortalTotal, previewPortalCount);
+        }
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"preview-error\">该 SCE 引用的地图资源无法解析，暂时不能生成预览。</div>");
+    }
+    vm_mock_admin_text_appendf(&page, "<div class=\"npc-list\">");
+    for (u32 i = 0; i < npcCount; ++i)
+    {
+        const vm_net_mock_dynamic_npc_admin_row *row = &npcRows[i];
+        char displayUtf8[128];
+        vm_net_mock_gbk_label_to_utf8(row->seed.displayName,
+                                      displayUtf8, sizeof(displayUtf8));
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"npc%s\"><div class=\"npc-head\"><strong>Actor %u</strong><span>",
+            row->enabled ? "" : " off", row->seed.actorId);
+        if (row->builtin)
+            vm_mock_admin_text_appendf(&page, "<span class=\"badge\">内置%s</span> ",
+                                       row->overridden ? "·已覆盖" : "");
+        vm_mock_admin_text_appendf(&page, "<span class=\"badge\">%s</span></span></div>",
+                                   row->enabled ? "已启用" : "已停用");
+        vm_mock_admin_text_appendf(&page,
+            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-npc\">"
+            "<input type=\"hidden\" name=\"scene\" value=\"");
+        vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\"><div class=\"fields\"><label class=\"field\"><span>Actor ID</span><input name=\"actor_id\" value=\"%u\" readonly></label>"
+            "<label class=\"field\"><span>显示名称</span><input name=\"display_name\" value=\"",
+            row->seed.actorId);
+        vm_mock_admin_text_append_html(&page, displayUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\" maxlength=\"29\" required></label><label class=\"field\"><span>Actor 资源</span>");
+        vm_mock_admin_render_actor_select(&page, actorFiles, actorCount,
+                                          row->seed.actorResource);
+        vm_mock_admin_text_appendf(&page,
+            "</label>"
+            "<label class=\"field\"><span>X</span><input type=\"number\" name=\"x\" min=\"1\" max=\"65535\" value=\"%u\" required></label>"
+            "<label class=\"field\"><span>Y</span><input type=\"number\" name=\"y\" min=\"1\" max=\"65535\" value=\"%u\" required></label>"
+            "<label class=\"field\"><span>类型</span><input type=\"number\" name=\"kind\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
+            "<label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"%u\"></label></div>"
+            "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>",
+            row->seed.x, row->seed.y, row->seed.kind, row->seed.orientation);
+        vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
+                                        row->seed.scriptName);
+        vm_mock_admin_text_appendf(&page,
+            "</label><div class=\"actions\"><button type=\"submit\">保存修改</button></div></form>"
+            "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"toggle-npc\">"
+            "<input type=\"hidden\" name=\"scene\" value=\"");
+        vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"enabled\" value=\"%u\">"
+            "<button class=\"%s\" type=\"submit\">%s</button></form>",
+            row->seed.actorId, row->enabled ? 0u : 1u,
+            row->enabled ? "danger" : "enable",
+            row->enabled ? "停用 NPC" : "恢复 NPC");
+        if (row->overridden)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-npc-override\">"
+                "<input type=\"hidden\" name=\"scene\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\">"
+                "<button class=\"danger\" type=\"submit\">%s</button></form>",
+                row->seed.actorId,
+                row->builtin ? "恢复内置默认" : "删除自定义 NPC");
+        }
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (npcCount == 0)
+        vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有服务端动态 NPC。</p>");
+    vm_mock_admin_text_appendf(&page,
+        "</div><div class=\"npc new\"><div class=\"npc-head\"><strong>增加动态 NPC</strong><span class=\"badge\">下次进入场景生效</span></div>"
+        "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-npc\">"
+        "<input type=\"hidden\" name=\"scene\" value=\"");
+    vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+    vm_mock_admin_text_appendf(&page,
+        "\"><div class=\"fields\"><label class=\"field\"><span>Actor ID</span><input type=\"number\" name=\"actor_id\" min=\"1\" max=\"4294967295\" value=\"30000\" required></label>"
+        "<label class=\"field\"><span>显示名称</span><input name=\"display_name\" maxlength=\"29\" required></label>"
+        "<label class=\"field\"><span>Actor 资源</span>");
+    vm_mock_admin_render_actor_select(&page, actorFiles, actorCount,
+                                      "n_man1.actor");
+    vm_mock_admin_text_appendf(&page,
+        "</label>"
+        "<label class=\"field\"><span>X</span><input type=\"number\" name=\"x\" min=\"1\" max=\"65535\" required></label>"
+        "<label class=\"field\"><span>Y</span><input type=\"number\" name=\"y\" min=\"1\" max=\"65535\" required></label>"
+        "<label class=\"field\"><span>类型</span><input type=\"number\" name=\"kind\" min=\"0\" max=\"65535\" value=\"0\"></label>"
+        "<label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
+        "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
+    vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
+    vm_mock_admin_text_appendf(&page,
+        "</label><div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
+        "<p class=\"foot\">只显示和编辑服务端动态目录；SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "</div></section></div></main></body></html>");
+
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><title>响应过大</title><p>游戏内容页面超过大小限制。</p>");
+    }
 }
 
 static bool vm_mock_admin_account_is_online(const char *accountId)
@@ -360,20 +2554,160 @@ static bool vm_mock_admin_account_is_online(const char *accountId)
     return false;
 }
 
+static const char *vm_mock_admin_item_category_name(bool equipment, u8 category)
+{
+    if (equipment)
+    {
+        switch (category)
+        {
+        case 0: return "头盔";
+        case 1: return "衣甲";
+        case 2: return "披风";
+        case 3: return "腰带";
+        case 4: return "护腿";
+        case 5: return "鞋靴";
+        case 6: return "戒指";
+        case 7: return "剑";
+        case 8: return "匕首";
+        case 9: return "法杖";
+        default: return "其他装备";
+        }
+    }
+    switch (category)
+    {
+    case 10: return "药品与消耗品";
+    case 11: return "任务物品";
+    case 12: return "采集材料";
+    case 13: return "普通材料";
+    case 14: return "商城道具";
+    case 20: return "礼包";
+    case 21: return "活动道具";
+    case 22: return "徽章";
+    case 23: return "玄晶";
+    case 24: return "鲜花";
+    case 25: return "社交道具";
+    case 26: return "婚姻道具";
+    case 27: return "帮派资源";
+    default: return "其他物品";
+    }
+}
+
+static void vm_mock_admin_render_item_grant_form(
+    vm_mock_admin_text *page, const char *account,
+    const u32 *roleIds, char roleNames[][128], u32 roleCount)
+{
+    bool equipmentCategories[256];
+    bool itemCategories[256];
+    u32 itemCount = vm_net_mock_load_shop_catalog();
+
+    if (page == NULL || account == NULL || account[0] == 0 ||
+        roleIds == NULL || roleNames == NULL || roleCount == 0)
+    {
+        return;
+    }
+    memset(equipmentCategories, 0, sizeof(equipmentCategories));
+    memset(itemCategories, 0, sizeof(itemCategories));
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
+        if (item->isEquip)
+            equipmentCategories[item->category] = true;
+        else
+            itemCategories[item->category] = true;
+    }
+
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-grant\"><h2>给予物品</h2>"
+        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"grant-item\">"
+        "<input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><label><span>角色</span><select name=\"role\" required>");
+    for (u32 i = 0; i < roleCount; ++i)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", roleIds[i]);
+        vm_mock_admin_text_append_html(page, roleNames[i]);
+        vm_mock_admin_text_appendf(page, "（ID %u）</option>", roleIds[i]);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label><label><span>物品分类</span>"
+        "<select id=\"item-category\"><option value=\"all\">全部分类</option>");
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!equipmentCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(page, "<option value=\"e%u\">装备 · ", category);
+        vm_mock_admin_text_append_html(
+            page, vm_mock_admin_item_category_name(true, (u8)category));
+        vm_mock_admin_text_appendf(page, "（%u）</option>", category);
+    }
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!itemCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(page, "<option value=\"i%u\">物品 · ", category);
+        vm_mock_admin_text_append_html(
+            page, vm_mock_admin_item_category_name(false, (u8)category));
+        vm_mock_admin_text_appendf(page, "（%u）</option>", category);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label><label class=\"item-field\"><span>物品</span>"
+        "<select id=\"item-select\" name=\"item\" required>"
+        "<option value=\"\" selected disabled>请选择物品</option>");
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
+        char itemNameUtf8[128];
+
+        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                      sizeof(itemNameUtf8));
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" data-category=\"%c%u\">[%u] ",
+            item->itemId, item->isEquip ? 'e' : 'i', item->category,
+            item->itemId);
+        vm_mock_admin_text_append_html(page, itemNameUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label><label><span>数量</span>"
+        "<input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required>"
+        "</label><button type=\"submit\">给予物品</button></form>"
+        "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
+}
+
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
 {
     vm_mock_admin_text page;
+    char tab[16];
     char selectedAccount[64];
     char status[16];
     char message[256];
     const char *roleError = NULL;
     vm_mock_service_account_state *accountState = NULL;
+    u32 managedRoleIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+    char managedRoleNames[VM_NET_MOCK_ROLE_DB_MAX_ROLES][128];
+    u32 managedRoleCount = 0;
 
     vm_mock_admin_text_init(&page, response, responseCap);
+    memset(tab, 0, sizeof(tab));
     memset(selectedAccount, 0, sizeof(selectedAccount));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    memset(managedRoleIds, 0, sizeof(managedRoleIds));
+    memset(managedRoleNames, 0, sizeof(managedRoleNames));
+    (void)vm_mock_admin_form_value(query, "tab", tab, sizeof(tab));
+    if (strcmp(tab, "content") == 0)
+    {
+        vm_mock_admin_render_content_page(response, responseCap, query);
+        return;
+    }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
@@ -390,17 +2724,21 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 后台管理</title><style>"
-        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
-        ".wrap{max-width:1120px;margin:28px auto;padding:0 18px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}"
-        ".sub{color:#667085;margin:4px 0 20px}.grid{display:grid;grid-template-columns:240px 1fr;gap:16px}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:18px;box-shadow:0 1px 2px #1018280d}"
-        ".accounts{display:flex;flex-direction:column;gap:6px}.account{display:flex;justify-content:space-between;padding:9px 10px;border-radius:7px;color:#344054;text-decoration:none}.account:hover,.account.on{background:#eef4ff;color:#175cd3}"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{max-width:1120px;height:100vh;margin:0 auto;padding:28px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}"
+        ".sub{color:#667085;margin:4px 0 20px}.grid{display:grid;grid-template-columns:240px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:18px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
+        ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
+        ".accounts{display:flex;flex:1;min-height:0;flex-direction:column;gap:6px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.account{display:flex;justify-content:space-between;padding:9px 10px;border-radius:7px;color:#344054;text-decoration:none;scroll-margin-block:12px}.account:hover,.account.on{background:#eef4ff;color:#175cd3}"
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
-        "table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
-        "input{width:100%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.foot{margin-top:16px;color:#667085;font-size:12px}"
-        "@media(max-width:780px){.grid,.forms{grid-template-columns:1fr}.accounts{max-height:220px;overflow:auto}.table-wrap{overflow:auto}}"
-        "</style></head><body><main class=\"wrap\"><h1>江湖OL 后台管理</h1>"
-        "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p><div class=\"grid\">"
+        "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
+        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(150px,1fr) minmax(260px,1.8fr) 90px auto;gap:9px;align-items:end}.grant-form label{display:grid;gap:4px}.grant-form label>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}.foot{margin-top:16px;color:#667085;font-size:12px}"
+        "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form button{justify-self:start}}"
+        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
+        "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
+        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
         g_vm_mock_service_account_db.accountCount);
 
@@ -410,8 +2748,18 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         char encoded[192];
         bool online = vm_mock_admin_account_is_online(accountId);
         vm_mock_admin_url_encode(accountId, encoded, sizeof(encoded));
-        vm_mock_admin_text_appendf(&page, "<a class=\"account%s\" href=\"/?account=%s\"><span>",
-                                   strcmp(accountId, selectedAccount) == 0 ? " on" : "", encoded);
+        if (strcmp(accountId, selectedAccount) == 0)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<a id=\"selected-account\" class=\"account on\" aria-current=\"page\" href=\"/?tab=accounts&amp;account=%s#selected-account\"><span>",
+                encoded);
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<a class=\"account\" href=\"/?tab=accounts&amp;account=%s#selected-account\"><span>",
+                encoded);
+        }
         vm_mock_admin_text_append_html(&page, accountId);
         vm_mock_admin_text_appendf(&page, "</span><span class=\"%s\">%s</span></a>",
                                    online ? "dot" : "muted", online ? "在线" : "离线");
@@ -449,6 +2797,14 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
 
             vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
                                           roleNameUtf8, sizeof(roleNameUtf8));
+            if (managedRoleCount < VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                managedRoleIds[managedRoleCount] = role->roleId;
+                snprintf(managedRoleNames[managedRoleCount],
+                         sizeof(managedRoleNames[managedRoleCount]), "%s",
+                         roleNameUtf8);
+                ++managedRoleCount;
+            }
             vm_mock_admin_text_appendf(&page, "<tr><td><strong>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);
             vm_mock_admin_text_appendf(&page, "</strong><br><span class=\"muted\">ID %u</span></td>", role->roleId);
@@ -487,7 +2843,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                        (roleError ? roleError : "角色数据不可用") : "请选择账号");
         vm_mock_admin_text_appendf(&page, "</td></tr>");
     }
-    vm_mock_admin_text_appendf(&page, "</tbody></table></div></div><div class=\"forms\">"
+    vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
+    vm_mock_admin_render_item_grant_form(
+        &page, selectedAccount, managedRoleIds, managedRoleNames,
+        managedRoleCount);
+    vm_mock_admin_text_appendf(&page, "</div><div class=\"forms\">"
                                "<div class=\"card\"><h2>创建账号</h2><form class=\"stack\" method=\"post\" action=\"/action\">"
                                "<input type=\"hidden\" name=\"action\" value=\"create-account\">"
                                "<input name=\"account\" maxlength=\"63\" placeholder=\"账号名\" required>"
@@ -530,26 +2890,276 @@ static void vm_mock_admin_redirect(vm_mock_service_socket client,
                                       extraHeaders, "正在返回后台页面。\n");
 }
 
+static void vm_mock_admin_redirect_content(vm_mock_service_socket client,
+                                           const char *sceneUtf8,
+                                           const char *status,
+                                           const char *message)
+{
+    char sceneEncoded[512];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1600];
+
+    vm_mock_admin_url_encode(sceneUtf8 ? sceneUtf8 : "",
+                             sceneEncoded, sizeof(sceneEncoded));
+    vm_mock_admin_url_encode(status ? status : "error",
+                             statusEncoded, sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败",
+                             messageEncoded, sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             "/?tab=content&scene=%s&status=%s&message=%s",
+             sceneEncoded, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static bool vm_mock_admin_form_u32(const char *body, const char *field,
+                                   u32 maximum, u32 *valueOut)
+{
+    char textValue[32];
+    u32 parsed = 0;
+
+    memset(textValue, 0, sizeof(textValue));
+    if (!vm_mock_admin_form_value(body, field, textValue, sizeof(textValue)) ||
+        !vm_net_mock_parse_u32_strict(textValue, &parsed) || parsed > maximum)
+    {
+        return false;
+    }
+    if (valueOut)
+        *valueOut = parsed;
+    return true;
+}
+
+static bool vm_mock_admin_scene_from_form(const char *body,
+                                          char *sceneUtf8,
+                                          size_t sceneUtf8Cap,
+                                          char *runtimeScene,
+                                          size_t runtimeSceneCap)
+{
+    vm_mock_admin_scene_file files[VM_MOCK_ADMIN_SCENE_FILE_MAX];
+    char sceneFile[64];
+    u32 fileCount = 0;
+    bool exists = false;
+
+    if (sceneUtf8 == NULL || sceneUtf8Cap == 0 ||
+        runtimeScene == NULL || runtimeSceneCap == 0)
+    {
+        return false;
+    }
+    sceneUtf8[0] = 0;
+    runtimeScene[0] = 0;
+    memset(sceneFile, 0, sizeof(sceneFile));
+    if (!vm_mock_admin_form_value(body, "scene", sceneUtf8, sceneUtf8Cap) ||
+        !vm_mock_admin_utf8_to_gbk_text(sceneUtf8, sceneFile,
+                                        sizeof(sceneFile), false))
+    {
+        return false;
+    }
+    fileCount = vm_mock_admin_collect_scene_files(
+        files, VM_MOCK_ADMIN_SCENE_FILE_MAX);
+    for (u32 i = 0; i < fileCount; ++i)
+    {
+        if (strcmp(files[i].name, sceneFile) == 0)
+        {
+            exists = true;
+            break;
+        }
+    }
+    return exists && vm_mock_admin_scene_file_to_runtime_key(
+                         sceneFile, runtimeScene, runtimeSceneCap);
+}
+
+static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
+                                            const char *action,
+                                            const char *body)
+{
+    char sceneUtf8[192];
+    char runtimeScene[64];
+    char displayUtf8[128];
+    char scriptUtf8[192];
+    char actorResource[64];
+    char enabledText[8];
+    vm_net_mock_scene_npcinfo_seed seed;
+    const char *error = NULL;
+    u32 actorId = 0;
+    u32 x = 0;
+    u32 y = 0;
+    u32 kind = 0;
+    u32 orientation = 0;
+
+    memset(sceneUtf8, 0, sizeof(sceneUtf8));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(displayUtf8, 0, sizeof(displayUtf8));
+    memset(scriptUtf8, 0, sizeof(scriptUtf8));
+    memset(actorResource, 0, sizeof(actorResource));
+    memset(enabledText, 0, sizeof(enabledText));
+    memset(&seed, 0, sizeof(seed));
+    if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
+                                       runtimeScene, sizeof(runtimeScene)) ||
+        !vm_mock_admin_form_u32(body, "actor_id", 0xffffffffu, &actorId) ||
+        actorId == 0)
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "场景或 Actor ID 无效");
+        return;
+    }
+
+    if (strcmp(action, "delete-npc-override") == 0)
+    {
+        if (!vm_net_mock_dynamic_npc_admin_delete_override(
+                runtimeScene, actorId, &error))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                error ? error : "NPC 覆盖项删除失败");
+            return;
+        }
+        vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                       "NPC 覆盖项已删除");
+        return;
+    }
+
+    if (strcmp(action, "toggle-npc") == 0)
+    {
+        vm_net_mock_dynamic_npc_admin_row rows[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+        u32 rowCount = vm_net_mock_dynamic_npc_admin_list(
+            runtimeScene, rows, VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX);
+        bool found = false;
+        bool enabled = false;
+
+        if (!vm_mock_admin_form_value(body, "enabled", enabledText,
+                                      sizeof(enabledText)) ||
+            (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "NPC 启用状态无效");
+            return;
+        }
+        enabled = strcmp(enabledText, "1") == 0;
+        for (u32 i = 0; i < rowCount; ++i)
+        {
+            if (rows[i].seed.actorId == actorId)
+            {
+                seed = rows[i].seed;
+                found = true;
+                break;
+            }
+        }
+        if (!found || !vm_net_mock_dynamic_npc_admin_save(
+                          runtimeScene, &seed, enabled, &error))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                error ? error : "NPC 不存在或状态保存失败");
+            return;
+        }
+        vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                       enabled ? "NPC 已恢复" : "NPC 已停用");
+        return;
+    }
+
+    if (strcmp(action, "save-npc") != 0 ||
+        !vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
+        !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
+        !vm_mock_admin_form_u32(body, "kind", 0xffffu, &kind) ||
+        !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
+        !vm_mock_admin_form_value(body, "display_name", displayUtf8,
+                                  sizeof(displayUtf8)) ||
+        !vm_mock_admin_form_value(body, "actor_resource", actorResource,
+                                  sizeof(actorResource)) ||
+        !vm_mock_admin_form_value(body, "script_name", scriptUtf8,
+                                  sizeof(scriptUtf8)))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "NPC 表单字段不完整或数值越界");
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)actorResource; *p; ++p)
+    {
+        if (*p >= 0x80)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "Actor 资源名必须使用 ASCII");
+            return;
+        }
+    }
+    if (vm_net_mock_scene_name_has_path_separator(actorResource) ||
+        !vm_net_mock_str_ends_with(actorResource, ".actor") ||
+        !vm_net_mock_open_server_data_resource(actorResource, ".actor",
+                                               NULL, NULL, 0))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "所选 Actor 资源不存在");
+        return;
+    }
+    if (!vm_mock_admin_utf8_to_gbk_text(displayUtf8, seed.displayName,
+                                        sizeof(seed.displayName), false) ||
+        !vm_mock_admin_utf8_to_gbk_text(scriptUtf8, seed.scriptName,
+                                        sizeof(seed.scriptName), true))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "NPC 名称或脚本名编码失败");
+        return;
+    }
+    if (seed.scriptName[0] != 0 &&
+        (vm_net_mock_scene_name_has_path_separator(seed.scriptName) ||
+         !vm_net_mock_str_ends_with(seed.scriptName, ".xse") ||
+         !vm_net_mock_open_server_data_resource(seed.scriptName, ".xse",
+                                                NULL, NULL, 0)))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "所选 XSE 脚本资源不存在");
+        return;
+    }
+    seed.actorId = actorId;
+    seed.x = (u16)x;
+    seed.y = (u16)y;
+    seed.kind = (u16)kind;
+    seed.orientation = (u16)orientation;
+    snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);
+    if (!vm_net_mock_dynamic_npc_admin_save(runtimeScene, &seed, true, &error))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       error ? error : "NPC 保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_content(client, sceneUtf8, "ok", "NPC 保存成功");
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
     char account[64];
     char password[64];
     char role[64];
+    char itemText[32];
     char amountText[32];
     const char *error = NULL;
+    u32 itemId = 0;
     u32 amount = 0;
+    u16 itemSeq = 0;
     bool ok = false;
 
     memset(action, 0, sizeof(action));
     memset(account, 0, sizeof(account));
     memset(password, 0, sizeof(password));
     memset(role, 0, sizeof(role));
+    memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
-    if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)) ||
-        !vm_mock_admin_form_value(body, "account", account, sizeof(account)))
+    if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
+        return;
+    }
+    if (strcmp(action, "save-npc") == 0 ||
+        strcmp(action, "toggle-npc") == 0 ||
+        strcmp(action, "delete-npc-override") == 0)
+    {
+        vm_mock_admin_handle_npc_action(client, action, body);
+        return;
+    }
+    if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))
+    {
+        vm_mock_admin_redirect(client, "", "error", "账号参数不完整");
         return;
     }
 
@@ -589,6 +3199,28 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (strcmp(action, "add-money") == 0 ? "普通钱币增加成功" : "W 币增加成功")
                                   : (error ? error : "余额修改失败"));
+        return;
+    }
+    if (strcmp(action, "grant-item") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "item", itemText,
+                                      sizeof(itemText)) ||
+            !vm_mock_admin_form_value(body, "amount", amountText,
+                                      sizeof(amountText)) ||
+            !vm_net_mock_parse_u32_strict(itemText, &itemId) || itemId == 0 ||
+            !vm_net_mock_parse_u32_strict(amountText, &amount) || amount == 0 ||
+            amount > 255)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "物品和数量参数无效");
+            return;
+        }
+        ok = vm_mock_service_account_grant_role_item(
+            account, role, itemId, amount, &itemSeq, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "物品给予成功" :
+                                    (error ? error : "物品给予失败"));
         return;
     }
 
@@ -667,6 +3299,129 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
     else
         query = "";
 
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/healthz") == 0)
+    {
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/json; charset=utf-8", NULL,
+                                    "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
+        return 1;
+    }
+    if (strcmp(target, "/login") == 0)
+    {
+        char password[64];
+
+        memset(password, 0, sizeof(password));
+        if (strcmp(method, "POST") == 0 &&
+            vm_mock_admin_form_value(body, "password", password,
+                                     sizeof(password)) &&
+            strcmp(password, "123456") == 0)
+        {
+            char cookieHeader[256];
+            vm_mock_admin_ensure_session_token();
+            snprintf(cookieHeader, sizeof(cookieHeader),
+                     "Set-Cookie: cbe_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
+                     g_vm_mock_admin_session_token);
+            vm_mock_admin_send_location(client, "/", cookieHeader);
+            return 1;
+        }
+        if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: GET, POST\r\n",
+                                        "登录只允许 GET 或 POST。\n");
+            return 0;
+        }
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        vm_mock_admin_render_login(
+            response, VM_MOCK_ADMIN_RESPONSE_MAX,
+            strcmp(method, "POST") == 0 ? "管理密码错误" : NULL);
+        vm_mock_admin_send_response(
+            client,
+            strcmp(method, "POST") == 0 ? "401 Unauthorized" : "200 OK",
+            "text/html; charset=utf-8", NULL, response);
+        free(response);
+        return 1;
+    }
+    if (strcmp(target, "/logout") == 0)
+    {
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n", "退出只允许 POST。\n");
+            return 0;
+        }
+        vm_mock_admin_send_location(
+            client, "/login",
+            "Set-Cookie: cbe_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+        return 1;
+    }
+    if (!vm_mock_admin_request_is_authenticated(request, headerLen))
+    {
+        vm_mock_admin_send_location(client, "/login", NULL);
+        return 0;
+    }
+
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/admin.js") == 0)
+    {
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/javascript; charset=utf-8",
+                                    NULL, g_vm_mock_admin_script);
+        return 1;
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/actor-preview.svg") == 0)
+    {
+        char actorResource[128];
+        u8 *svg = NULL;
+        u32 svgLen = 0;
+
+        memset(actorResource, 0, sizeof(actorResource));
+        if (!vm_mock_admin_form_value(query, "actor", actorResource,
+                                      sizeof(actorResource)) ||
+            !vm_mock_admin_build_actor_preview_svg(actorResource, &svg,
+                                                   &svgLen))
+        {
+            vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                        NULL, NULL,
+                                        "NPC 模型资源无法生成预览。\n");
+            free(svg);
+            return 0;
+        }
+        vm_mock_admin_send_binary_response(client, "200 OK", "image/svg+xml",
+                                           svg, svgLen);
+        free(svg);
+        return 1;
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(target, "/scene-preview.bmp") == 0)
+    {
+        char sceneUtf8[192];
+        char runtimeScene[64];
+        const u8 *bmp = NULL;
+        u32 bmpLen = 0;
+
+        memset(sceneUtf8, 0, sizeof(sceneUtf8));
+        memset(runtimeScene, 0, sizeof(runtimeScene));
+        if (!vm_mock_admin_scene_from_form(query, sceneUtf8,
+                                           sizeof(sceneUtf8), runtimeScene,
+                                           sizeof(runtimeScene)) ||
+            !vm_mock_admin_build_scene_preview_bmp(runtimeScene, &bmp,
+                                                   &bmpLen, NULL, NULL))
+        {
+            vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                        NULL, NULL,
+                                        "场景地图资源无法生成预览。\n");
+            return 0;
+        }
+        vm_mock_admin_send_binary_response(client, "200 OK", "image/bmp",
+                                           bmp, bmpLen);
+        return 1;
+    }
+
     if (strcmp(method, "GET") == 0 && strcmp(target, "/") == 0)
     {
         response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
@@ -678,12 +3433,6 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         vm_mock_admin_render_page(response, VM_MOCK_ADMIN_RESPONSE_MAX, query);
         vm_mock_admin_send_response(client, "200 OK", "text/html; charset=utf-8", NULL, response);
         free(response);
-        return 1;
-    }
-    if (strcmp(method, "GET") == 0 && strcmp(target, "/healthz") == 0)
-    {
-        vm_mock_admin_send_response(client, "200 OK", "application/json; charset=utf-8", NULL,
-                                    "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
     if (strcmp(target, "/action") == 0)
