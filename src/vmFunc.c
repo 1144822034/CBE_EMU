@@ -1086,39 +1086,43 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
 // ok
 int vm_cbfs_vm_file_read(int bufferPtr, int size, int handle)
 {
-    u32 pc = 0;
-    u32 lr = 0;
-    u32 r0 = 0;
-    u32 r1 = 0;
-    u32 r2 = 0;
-    u32 r3 = 0;
+    /* MMORPG_DataSheet reads each row as a 4-byte length followed by at most
+     * 0x200 bytes of row data.  World-map setup walks hundreds of rows across
+     * wMap/sMap and used to pay four unused Unicorn register reads plus one
+     * SDL_malloc/SDL_free pair for every tiny file read.  Keep the large-read
+     * behavior unchanged, but serve the common data-sheet reads from a bounded
+     * host stack buffer. */
+    u8 smallBuffer[0x200];
+    u8 *tmp = NULL;
+    int heapAllocated = 0;
+    size_t readed = 0;
+
     if (size <= 0)
         return vm_set_call_result(0);
     if (handle < 0 || handle >= 16 || openFileList[handle] == NULL)
         return vm_set_call_result(-1);
     if (openFileList[handle] == VM_PSEUDO_DIR_HANDLE)
         return vm_set_call_result(0);
-    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
-    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
-    char *tmp = SDL_malloc(size);
-    int readed = fread(tmp, 1, size, openFileList[handle]);
 
-    if (readed > 0)
+    if ((u32)size <= sizeof(smallBuffer))
     {
-        uc_mem_write(MTK, bufferPtr, tmp, readed);
-        if (strstr(openFileNames[handle], ".cbm") != NULL || strstr(openFileNames[handle], ".CBM") != NULL)
-        {
-        }
+        tmp = smallBuffer;
     }
     else
     {
+        tmp = SDL_malloc((size_t)size);
+        heapAllocated = 1;
+        if (tmp == NULL)
+            return vm_set_call_result(-1);
     }
-    SDL_free(tmp);
-    return vm_set_call_result(readed);
+
+    readed = fread(tmp, 1, (size_t)size, openFileList[handle]);
+
+    if (readed > 0)
+        uc_mem_write(MTK, bufferPtr, tmp, readed);
+    if (heapAllocated)
+        SDL_free(tmp);
+    return vm_set_call_result((int)readed);
 }
 // ok
 int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle)

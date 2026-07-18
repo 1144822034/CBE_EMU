@@ -367,6 +367,7 @@ static char g_mockServiceHost[64] = "127.0.0.1";
 static char g_mockServiceBindHost[64] = "127.0.0.1";
 static u32 g_mockServiceClientId = 0;
 static u16 g_mockServicePort = 19090;
+static u16 g_mockAdminPort = 19091;
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
 static u32 g_battleSubtype8InfoDstWatchLen = 0;
 static u32 g_battleSubtype8InfoDstWatchTick = 0;
@@ -3593,6 +3594,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
     const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
     const char *envLegacyPort = getenv("CBE_MOCK_SERVICE_PORT");
     const char *envLegacyRemote = getenv("CBE_MOCK_SERVICE_REMOTE");
+    const char *envAdminPort = getenv("CBE_MOCK_ADMIN_PORT");
     char parsedHost[64];
     u16 parsedPort = 0;
 
@@ -3652,6 +3654,15 @@ static void vm_mock_service_init_config(int argc, char *args[])
         }
     }
 
+    if (envAdminPort)
+    {
+        u32 portValue = 0;
+        if (vm_autotest_parse_u32(envAdminPort, &portValue) && portValue > 0 && portValue <= 65535u)
+            g_mockAdminPort = (u16)portValue;
+        else
+            printf("[warn][mock-service] invalid CBE_MOCK_ADMIN_PORT=%s\n", envAdminPort);
+    }
+
     for (int i = 1; i < argc; ++i)
     {
         if (strcmp(args[i], "--mock-service-only") == 0)
@@ -3665,6 +3676,14 @@ static void vm_mock_service_init_config(int argc, char *args[])
                 g_mockServicePort = (u16)portValue;
             else
                 printf("[warn][mock-service] invalid mock-service-port=%s\n", args[i] + 20);
+        }
+        else if (strncmp(args[i], "--mock-admin-port=", 18) == 0)
+        {
+            u32 portValue = 0;
+            if (vm_autotest_parse_u32(args[i] + 18, &portValue) && portValue > 0 && portValue <= 65535u)
+                g_mockAdminPort = (u16)portValue;
+            else
+                printf("[warn][mock-service] invalid mock-admin-port=%s\n", args[i] + 18);
         }
         else if (strncmp(args[i], "--mock-service=", 15) == 0)
         {
@@ -3701,9 +3720,10 @@ static void vm_mock_service_init_config(int argc, char *args[])
 
     if (g_mockServiceOnly)
     {
-        printf("[info][mock-service] mode=server-only bind=%s:%u client-default=%s:%u\n",
+        printf("[info][mock-service] mode=server-only bind=%s:%u admin=127.0.0.1:%u client-default=%s:%u\n",
                g_mockServiceBindHost,
                g_mockServicePort,
+               g_mockAdminPort,
                g_mockServiceHost,
                g_mockServicePort);
     }
@@ -7299,8 +7319,9 @@ int main(int argc, char *args[])
 
         if (g_mockServiceOnly)
         {
-            printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u\n",
-                    g_cbeLoadPathUtf8, Program_ROM_Address, Program_Data_Address, g_mockServicePort);
+            printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u admin_port=%u\n",
+                    g_cbeLoadPathUtf8, Program_ROM_Address, Program_Data_Address,
+                    g_mockServicePort, g_mockAdminPort);
             vm_net_mock_service_run_forever(g_mockServiceBindHost, g_mockServicePort);
             return 0;
         }
