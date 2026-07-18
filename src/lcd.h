@@ -1,10 +1,17 @@
 #pragma once
-#include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 #include "config.h"
+#ifdef CBE_PLATFORM_ANDROID
+#include "android_compat.h"
+#else
+#include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
+#endif
 
 
 extern SDL_Window *window;
 extern u8* Lcd_Cache_Buffer;
+#ifdef CBE_PLATFORM_ANDROID
+extern int finalLayerBuffer[LCD_WIDTH * LCD_HEIGHT];
+#endif
 
 typedef enum
 {

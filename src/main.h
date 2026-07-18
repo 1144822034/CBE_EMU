@@ -5,15 +5,17 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
-#ifdef __ANDROID__
-#include <SDL2/SDL.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include "config.h"
+#ifdef CBE_PLATFORM_ANDROID
+#include "android_compat.h"
 #include <unicorn/unicorn.h>
 #else
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 #include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"
 #endif
 #include <pthread.h>
-#include "config.h"
 #include "fileIoEngine.h"
 #include "vmMalloc.h"
 #include "fontEngine.h"
@@ -41,6 +43,22 @@ void handleEvent_EMU(uc_engine *uc, uint64_t address, uint32_t size, void *user_
 bool isIRQ_Disable(u32 cpsr);
 bool isIrqMode(u32 cpsr);
 void dumpCpuInfo();
+void dumpVirtMemory(u32 addr, u32 len);
+#ifdef CBE_PLATFORM_ANDROID
+int cbeInit(const char *rootPath);
+int cbeRun(void);
+void cbeTaskListRun(void);
+void cbeShutdown(void);
+const char *cbeGetCpuInfoText(void);
+int cbeAndroidInputIsOpen(void);
+int cbeAndroidInputIsPassword(void);
+int cbeAndroidInputGetSerial(void);
+int cbeAndroidInputGetMaxLen(void);
+int cbeAndroidInputGetInputType(void);
+const char *cbeAndroidInputGetTextUtf8(void);
+const char *cbeAndroidInputGetPromptUtf8(void);
+void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled);
+#endif
 
 u32 last_gpt1_interrupt_time;
 u32 IRQ_MASK_SET_L_Data;

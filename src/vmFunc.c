@@ -88,9 +88,9 @@ int vm_DF_DataPackage_InitTxt(int a1, int a2);
 int vm_DF_DataPackage_ReleasePackage(int a1, int a2);
 
 u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr);
-void vm_DF_WriteShort(bufPtr, offsetPtr, value);
+u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value);
 int vm_DF_ReadInt(int a1, int a2);
-void vm_DF_WriteInt(bufPtr, offsetPtr, value);
+u32 vm_DF_WriteInt(u32 bufPtr, u32 offsetPtr, u32 value);
 
 int vm_DF_Malloc_IN(int a1, int a2);
 int vm_DF_ReadString2(u32 bufferPtr, u32 offsetPtr);
@@ -112,7 +112,7 @@ int vm_cbfs_vm_file_write(int bufferPtr, int size, int fileHandle);
 int vm_cbfs_vm_file_tell(int fileHandle);
 int vm_cbfs_vm_file_close(int fileHandle);
 int vm_cbfs_vm_file_rename(int disk, int oldNamePtr, int newNamePtr);
-void vm_initDFDataPackage(u32 a1, u32 a2);
+u32 vm_initDFDataPackage(u32 a1, u32 a2);
 u32 vm_IMG_InitDataPage(u32 a1, u32 a2);
 u32 vm_IMG_InitInnerDataPageEx(u32 a1, u32 a2);
 u32 vm_IMG_InitDataPageEx(u32 a1, u32 a2, u32 dataPackage);
@@ -120,14 +120,16 @@ u32 vm_IMG_ReleaseDataPage(void);
 u32 vm_IMG_InitDataPageTxt(u32 textId);
 u32 vm_IMG_CreateImageFormIdEx(u32 imageId, u32 dataPackage, u32 outImage);
 u32 vm_IMG_CreateImageFormResForVm(u32 imageId, u32 outImage);
+u32 vm_IMG_CreateImageFormRes(u32 imageId);
 void vm_sprintf();
 void vm_DF_GetFormatString();
-void vm_DF_GetMemoryBlock();
+u32 vm_DF_GetMemoryBlock(void);
 u32 vm_set_call_result(u32 r);
 void vm_initManagerTable();
 void vm_configManagerTable(u32 a, u32 b);
 void vm_configManagerTableCount(u32 tableAddr, u32 funcAddr, u32 count);
 void vm_InitDlWPayManager(u32 tmp1);
+void vm_InitDlLoadManager(u32 tmp1);
 void vm_InitDlRsManager(u32 tmp1);
 void vm_InitDlImageManager(u32 tmp1);
 // 真机
@@ -387,19 +389,36 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
+#ifdef CBE_PLATFORM_ANDROID
+    char gbkPath[256];
+#endif
     memset(out, 0, outSize);
+#ifdef CBE_PLATFORM_ANDROID
+    memset(gbkPath, 0, sizeof(gbkPath));
+#endif
     if (outSize == 0)
         return;
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     u32 ucs2Len = 0;
     if (vm_path_looks_like_ucs2_le(rawName, sizeof(rawName), &ucs2Len))
     {
+#ifdef CBE_PLATFORM_ANDROID
+        ucs2_to_gbk(rawName, ucs2Len, (u8 *)gbkPath, sizeof(gbkPath));
+#else
         ucs2_to_gbk(rawName, ucs2Len, out, outSize);
+#endif
     }
     else
     {
+#ifdef CBE_PLATFORM_ANDROID
+        vm_read_string_by_ptr_limited(namePtr, gbkPath, sizeof(gbkPath));
+#else
         vm_read_string_by_ptr_limited(namePtr, out, outSize);
+#endif
     }
+#ifdef CBE_PLATFORM_ANDROID
+    gbk_to_utf8((u8 *)gbkPath, (u8 *)out, outSize);
+#endif
     out[outSize - 1] = 0;
 }
 
@@ -1546,7 +1565,7 @@ u16 vm_DF_ReadShort(u32 bufPtr, u32 offsetPtr)
     return vm_set_call_result(ret);
 }
 
-void vm_DF_WriteShort(bufPtr, offsetPtr, value)
+u32 vm_DF_WriteShort(u32 bufPtr, u32 offsetPtr, u32 value)
 {
     u32 offset, ret;
     uc_mem_read(MTK, offsetPtr, &offset, 4);
@@ -1574,7 +1593,7 @@ int vm_DF_ReadInt(int a1, int a2)
     vm_set_var(a2, offset);
     return vm_set_call_result(result);
 }
-void vm_DF_WriteInt(a1, a2, value)
+u32 vm_DF_WriteInt(u32 a1, u32 a2, u32 value)
 {
     u32 offset, ret;
     u8 arr[4];
@@ -2279,7 +2298,7 @@ int VM_DF_DataPackage_DoLoading(int a1, int a2, int a3)
     return vm_DF_DataPackage_LoadFromTResource(a1, a2);
 }
 
-void vm_initDFDataPackage(u32 a1, u32 a2)
+u32 vm_initDFDataPackage(u32 a1, u32 a2)
 {
     u32 tmp2, tmp3, tmp4;
     tmp2 = 0;
@@ -2627,7 +2646,7 @@ void vm_DF_GetFormatString()
 }
 
 // ok
-void vm_DF_GetMemoryBlock()
+u32 vm_DF_GetMemoryBlock(void)
 {
     u32 tmp1;
     tmp1 = vm_get_var(VM_DreamFactory_MemoryBlock_ADDRESS);
@@ -2677,13 +2696,13 @@ u32 vm_MF_MemoryBlock_Malloc(int a1, int a2)
     // printf("[call]MF_MemoryBlock_Malloc(%x,%x)(%x)\n", baseAddr, a2, oldOffset);
 }
 
-void vm_MF_MemoryBlock_Reset(int a1)
+u32 vm_MF_MemoryBlock_Reset(int a1)
 {
     u32 v = 0;
     vm_set_var(a1 + 4, v); // offset重置为0
     return vm_set_call_result(v);
 }
-void vm_MF_MemoryBlock_Release(int a1)
+u32 vm_MF_MemoryBlock_Release(int a1)
 {
     u32 base = vm_get_var(a1);
     u32 size = vm_get_var(a1 + 8);
@@ -3803,7 +3822,7 @@ u32 vm_IMG_CreateImageFormResForVm(u32 imageId, u32 outImage)
     return vm_set_call_result(outImage);
 }
 
-void vm_IMG_CreateImageFormRes(u32 a1)
+u32 vm_IMG_CreateImageFormRes(u32 a1)
 {
     u32 tmp1 = 0;
     u32 tmp2 = 0;

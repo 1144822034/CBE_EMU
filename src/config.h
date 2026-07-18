@@ -124,6 +124,14 @@
 #define PROGRAM_EXIT_ADDR 0x0f000000
 #pragma once
 
+/* Android NDK defines __ANDROID__.  The legacy Android Studio project also
+ * passes ANDROID_CBE_PORT explicitly; accept either spelling so the emulator
+ * sources can be copied into that project without source edits. */
+#if defined(__ANDROID__) || defined(ANDROID_CBE_PORT)
+#define CBE_PLATFORM_ANDROID 1
+#define CBE_CLIENT_ONLY 1
+#endif
+
 #define u8 unsigned char
 #define u16 unsigned short
 #define u32 unsigned int

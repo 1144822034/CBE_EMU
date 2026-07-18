@@ -6,10 +6,6 @@
 #ifdef _WIN32
 #include <direct.h>
 #endif
-#ifdef __ANDROID__
-#include <unistd.h>
-#include "android_compat.c"
-#endif
 #include <stdarg.h>
 #include <math.h>
 #include <stdint.h>
@@ -21,7 +17,7 @@
 #include "hookRam.c"
 #include "vmEvent.c"
 
-#if defined(GDB_SERVER_SUPPORT) && !defined(__ANDROID__)
+#if defined(GDB_SERVER_SUPPORT) && !defined(CBE_PLATFORM_ANDROID)
 #include "gdb_client.c"
 pthread_t gdb_server_mutex;
 
@@ -193,11 +189,13 @@ static int g_autotestKeyReleaseSym = 0;
 static FILE *g_autotestStateFile = NULL;
 static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
+static u32 g_vmInputSerial = 0;
 static u32 g_vmInputCallback = 0;
 static u32 g_vmInputBuffer = 0;
 static u32 g_vmInputTargetBuffer = 0;
 static u32 g_vmInputMaxLen = 0;
 static u32 g_vmInputInputType = 0;
+static u32 g_vmInputPrompt = 0;
 static u32 g_vmInputScratchBuffer = 0;
 static u32 g_vmInputScratchBytes = 0;
 static int g_vmInputOverlayX = 12;
@@ -2442,9 +2440,13 @@ static uc_err scheduler_dispatch_net_tasks(void)
     return UC_ERR_OK;
 }
 
-/* Mock server implementation lives in a separate file but remains in this
- * translation unit while it still depends on emulator-local static helpers. */
+/* Android ships only the remote game client transport.  The desktop build
+ * keeps the embedded service, persistence and web-admin implementation. */
+#ifdef CBE_CLIENT_ONLY
+#include "network-client.c"
+#else
 #include "mock-server.c"
+#endif
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
 
 static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 context)
@@ -2915,7 +2917,9 @@ static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
 static void vm_lcd_update_with_input_overlay(void)
 {
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+#ifndef CBE_PLATFORM_ANDROID
     vm_input_draw_overlay();
+#endif
     UpdateLcd();
 }
 
@@ -3158,6 +3162,7 @@ static uc_err vm_input_finish(u32 result)
     g_vmInputTargetBuffer = 0;
     g_vmInputMaxLen = 0;
     g_vmInputInputType = 0;
+    g_vmInputPrompt = 0;
     g_vmInputPassword = 0;
     vm_debug_log_login_input_state(result ? "finish-cancel-after" : "finish-ok-after", callback, buffer);
     return err;
@@ -3208,6 +3213,9 @@ static void vm_input_open(u32 callback, u32 param, int password)
 
     g_vmInputOpen = 1;
     g_vmInputPassword = password ? 1 : 0;
+    ++g_vmInputSerial;
+    if (g_vmInputSerial == 0)
+        g_vmInputSerial = 1;
     g_vmInputCallback = callback;
     g_vmInputMaxLen = maxLen & 0xffff;
     if (g_vmInputMaxLen == 0)
@@ -3225,6 +3233,7 @@ static void vm_input_open(u32 callback, u32 param, int password)
     g_vmInputTargetBuffer = buffer;
     g_vmInputBuffer = g_vmInputScratchBuffer;
     g_vmInputInputType = inputType & 0xff;
+    g_vmInputPrompt = prompt;
     g_vmInputOverlayX = 12;
     g_vmInputOverlayY = password ? 372 : 344;
     g_vmInputOverlayW = 216;
@@ -3234,6 +3243,96 @@ static void vm_input_open(u32 callback, u32 param, int password)
     vm_input_request_sdl_text_input(1);
     vm_set_call_result(1);
 }
+
+#ifdef CBE_PLATFORM_ANDROID
+int cbeAndroidInputIsOpen(void)
+{
+    return g_vmInputOpen ? 1 : 0;
+}
+
+int cbeAndroidInputIsPassword(void)
+{
+    return g_vmInputPassword ? 1 : 0;
+}
+
+int cbeAndroidInputGetSerial(void)
+{
+    return (int)g_vmInputSerial;
+}
+
+int cbeAndroidInputGetMaxLen(void)
+{
+    return (int)g_vmInputMaxLen;
+}
+
+int cbeAndroidInputGetInputType(void)
+{
+    return (int)g_vmInputInputType;
+}
+
+const char *cbeAndroidInputGetTextUtf8(void)
+{
+    static char utf8[1024];
+    u8 ucs2[512];
+    u8 gbk[512];
+    u32 maxChars;
+    u32 len;
+    u32 bytes;
+
+    memset(utf8, 0, sizeof(utf8));
+    memset(ucs2, 0, sizeof(ucs2));
+    memset(gbk, 0, sizeof(gbk));
+    if (!g_vmInputOpen || !g_vmInputBuffer || !MTK)
+        return utf8;
+    maxChars = g_vmInputMaxLen ? g_vmInputMaxLen : 255;
+    if (maxChars > 255)
+        maxChars = 255;
+    len = vm_input_wcslen_limit(g_vmInputBuffer, maxChars);
+    bytes = (len + 1) * 2;
+    if (bytes > sizeof(ucs2))
+        bytes = sizeof(ucs2);
+    uc_mem_read(MTK, g_vmInputBuffer, ucs2, bytes);
+    ucs2[sizeof(ucs2) - 2] = 0;
+    ucs2[sizeof(ucs2) - 1] = 0;
+    ucs2_to_gbk(ucs2, bytes, gbk, sizeof(gbk));
+    gbk_to_utf8(gbk, (u8 *)utf8, sizeof(utf8));
+    return utf8;
+}
+
+const char *cbeAndroidInputGetPromptUtf8(void)
+{
+    static char utf8[256];
+    char gbk[128];
+    memset(utf8, 0, sizeof(utf8));
+    memset(gbk, 0, sizeof(gbk));
+    if (g_vmInputPrompt && MTK)
+        vm_debug_read_guest_ucs2_as_gbk(g_vmInputPrompt, gbk, sizeof(gbk), 63);
+    if (gbk[0] != 0)
+        gbk_to_utf8((u8 *)gbk, (u8 *)utf8, sizeof(utf8));
+    if (utf8[0] == 0)
+        snprintf(utf8, sizeof(utf8), "%s", g_vmInputPassword ? "请输入密码" : "请输入文本");
+    return utf8;
+}
+
+void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled)
+{
+    u32 copyLen;
+    u32 maxChars;
+    if (!g_vmInputOpen)
+        return;
+    if (!cancelled && g_vmInputBuffer && g_vmInputMaxLen > 0)
+    {
+        maxChars = g_vmInputMaxLen - 1;
+        copyLen = len > 0 ? (u32)len : 0;
+        if (copyLen > maxChars)
+            copyLen = maxChars;
+        for (u32 i = 0; i < copyLen; ++i)
+            vm_input_write_u16(g_vmInputBuffer + i * 2, text ? text[i] : 0);
+        vm_input_write_u16(g_vmInputBuffer + copyLen * 2, 0);
+    }
+    EnqueueVMEvent(VM_EVENT_INPUT_DONE, cancelled ? 1 : 0, 0);
+}
+#endif
 
 static uc_err scheduler_tick(void)
 {
@@ -3589,6 +3688,38 @@ static void vm_autotest_note(const char *fmt, ...)
 
 static void vm_mock_service_init_config(int argc, char *args[])
 {
+#ifdef CBE_CLIENT_ONLY
+    const char *envEndpoint = getenv("CBE_SERVER_ENDPOINT");
+    char parsedHost[64];
+    u16 parsedPort = 0;
+    (void)argc;
+    (void)args;
+
+    if (g_mockServiceClientId == 0)
+    {
+        g_mockServiceClientId = (u32)time(NULL) ^
+                                (u32)(uintptr_t)&g_mockServiceClientId ^
+                                ((u32)getpid() * 0x9e3779b9u);
+        if (g_mockServiceClientId == 0)
+            g_mockServiceClientId = 1;
+    }
+    if (envEndpoint != NULL && envEndpoint[0] != 0)
+    {
+        if (vm_mock_service_parse_host_port(envEndpoint, parsedHost,
+                                            sizeof(parsedHost), &parsedPort))
+        {
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            g_mockServicePort = parsedPort;
+        }
+        else
+        {
+            printf("[warn][network] invalid CBE_SERVER_ENDPOINT=%s\n", envEndpoint);
+        }
+    }
+    g_mockServiceOnly = 0;
+    printf("[info][network] mode=android-client server=%s:%u\n",
+           g_mockServiceHost, g_mockServicePort);
+#else
     const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
     const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
     const char *envBind = getenv("CBE_MOCK_SERVICE_BIND");
@@ -3732,6 +3863,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
         printf("[info][mock-service] mode=emulator client=%s:%u auth=packet-driven required=service\n",
                g_mockServiceHost, g_mockServicePort);
     }
+#endif
 }
 
 static void vm_autotest_format_mem_hex(u32 addr, u32 len, char *out, size_t outCap)
@@ -5568,7 +5700,11 @@ void loop()
     }
     g_vmInputSdlTextInputWanted = 0;
     vm_input_sync_sdl_text_input();
+#ifndef CBE_PLATFORM_ANDROID
     pthread_join(&EmuThread, &thread_ret);
+#else
+    (void)thread_ret;
+#endif
     if (SD_File_Handle != NULL)
         fclose(SD_File_Handle);
     if (g_autotestStateFile != NULL)
@@ -5655,7 +5791,11 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
 #define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
 #define LOAD_CBE_PATH "CBE/江湖OL.CBE"
 
+#ifdef CBE_PLATFORM_ANDROID
+static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.cbe";
+#else
 static char g_cbeLoadPathUtf8[260] = LOAD_CBE_PATH;
+#endif
 
 static void vm_cbe_init_config(int argc, char *args[])
 {
@@ -5854,6 +5994,7 @@ static void vm_reset_runtime_state_for_restart(void)
     g_vmInputTargetBuffer = 0;
     g_vmInputMaxLen = 0;
     g_vmInputInputType = 0;
+    g_vmInputPrompt = 0;
     g_vmInputScratchBuffer = 0;
     g_vmInputScratchBytes = 0;
     g_vmInputComposition[0] = 0;
@@ -7157,19 +7298,27 @@ void RunArmProgram(void *param)
 #endif
 }
 
-#ifdef __ANDROID__
-int SDL_main(int argc, char *args[])
+#ifdef CBE_PLATFORM_ANDROID
+static int g_cbeInitialized = 0;
+static volatile int g_cbeRunning = 0;
+
+int cbeInit(const char *rootPath)
 #else
 int main(int argc, char *args[])
 #endif
 {
-
     uc_err err;
     uc_hook hookHandle;
-#ifdef __ANDROID__
-    android_extract_assets();
-    if (android_get_data_dir()[0])
-        chdir(android_get_data_dir());
+#ifdef CBE_PLATFORM_ANDROID
+    int argc = 0;
+    char **args = NULL;
+    if (g_cbeInitialized)
+        return 0;
+    if (rootPath != NULL && rootPath[0] != 0 && chdir(rootPath) != 0)
+    {
+        printf("[error][android] failed to chdir root=%s\n", rootPath);
+        return -1;
+    }
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -7179,9 +7328,12 @@ int main(int argc, char *args[])
     if (!g_mockServiceOnly)
         vm_lcd_init_rotation_config(argc, args);
 
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+#endif
     // while(1);
 
+#ifndef CBE_PLATFORM_ANDROID
     if (SDL_Init((g_mockServiceOnly ? SDL_INIT_TIMER : (SDL_INIT_VIDEO | SDL_INIT_TIMER))) < 0)
     {
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
@@ -7209,10 +7361,16 @@ int main(int argc, char *args[])
             SDL_UpdateWindowSurface(window);
         }
     }
+#endif
 
     InitVmEvent();
 
+#ifdef CBE_PLATFORM_ANDROID
+    snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", g_cbeLoadPathUtf8);
+#else
     utf8_to_gbk(g_cbeLoadPathUtf8, cbeTextString, mySizeOf(cbeTextString));
+#endif
+#ifndef CBE_PLATFORM_ANDROID
     if (!vm_host_file_exists((char *)cbeTextString))
     {
         char altPath[128];
@@ -7223,7 +7381,13 @@ int main(int argc, char *args[])
             printf("[info][host] runtime cwd adjusted to ./bin\n");
         }
     }
+#endif
     char *fileBuffer = readFile(cbeTextString, &changeTmp1);
+    if (fileBuffer == NULL || changeTmp1 == 0)
+    {
+        printf("[error][cbe] failed to load %s\n", cbeTextString);
+        return -1;
+    }
     g_cbeFileBuffer = (u8 *)fileBuffer;
     g_cbeFileSize = changeTmp1;
     // 分析前150字节
@@ -7317,6 +7481,7 @@ int main(int argc, char *args[])
         changeTmp2 = STACK_ADDRESS + size_1mb; // 映射栈内存
         uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
 
+#ifndef CBE_CLIENT_ONLY
         if (g_mockServiceOnly)
         {
             printf("[info][mock-service] loaded cbe=%s entry=%08x data=%08x port=%u admin_port=%u\n",
@@ -7325,10 +7490,15 @@ int main(int argc, char *args[])
             vm_net_mock_service_run_forever(g_mockServiceBindHost, g_mockServicePort);
             return 0;
         }
+#endif
 
-        // 启动emu线程
         changeTmp1 = Program_ROM_Address;
 
+#ifdef CBE_PLATFORM_ANDROID
+        g_cbeInitialized = 1;
+        printf("Unicorn Engine Initialized\n");
+#else
+        // 启动emu线程
         pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
 #ifdef GDB_SERVER_SUPPORT
         pthread_create(&gdb_server_mutex, NULL, gdb_server_main, NULL);
@@ -7338,9 +7508,76 @@ int main(int argc, char *args[])
         loop();
         vm_net_mock_async_shutdown();
         vm_net_mock_service_notify_disconnect("host-loop-exit");
+#endif
     }
     return 0;
 }
+
+#ifdef CBE_PLATFORM_ANDROID
+int cbeRun(void)
+{
+    if (!g_cbeInitialized || g_cbeRunning)
+        return -1;
+    g_cbeRunning = 1;
+    RunArmProgram((void *)(uintptr_t)Program_ROM_Address);
+    g_cbeRunning = 0;
+    return 0;
+}
+
+void cbeTaskListRun(void)
+{
+    if (!g_cbeInitialized)
+        return;
+    loop();
+    vm_net_mock_async_shutdown();
+    vm_net_mock_service_notify_disconnect("android-loop-exit");
+}
+
+void cbeShutdown(void)
+{
+    if (!g_cbeInitialized)
+        return;
+    vm_request_host_quit("android-destroy");
+    EnqueueVMEvent(VM_EVENT_EXIT, 0, 0);
+    g_vmInputSdlTextInputWanted = 0;
+}
+
+const char *cbeGetCpuInfoText(void)
+{
+    static char info[512];
+    u32 r[10] = {0};
+    u32 sp = 0;
+    u32 pc = 0;
+    u32 lr = 0;
+    u32 cpsr = 0;
+    if (MTK == NULL)
+    {
+        snprintf(info, sizeof(info), "CBE emulator is not initialized");
+        return info;
+    }
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r[0]);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &r[1]);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r[2]);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r[3]);
+    uc_reg_read(MTK, UC_ARM_REG_R4, &r[4]);
+    uc_reg_read(MTK, UC_ARM_REG_R5, &r[5]);
+    uc_reg_read(MTK, UC_ARM_REG_R6, &r[6]);
+    uc_reg_read(MTK, UC_ARM_REG_R7, &r[7]);
+    uc_reg_read(MTK, UC_ARM_REG_R8, &r[8]);
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r[9]);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_CPSR, &cpsr);
+    snprintf(info, sizeof(info),
+             "r0:%x r1:%x r2:%x r3:%x r4:%x r5:%x r6:%x r7:%x r8:%x r9:%x\n"
+             "sp:%x cpsr:%x thumb:%x mode:%x lr:%x pc:%x lastPc:%x irq:%x",
+             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+             sp, cpsr, (cpsr & 0x20) != 0, cpsr & 0x1f, lr, pc,
+             lastAddress, irq_nested_count);
+    return info;
+}
+#endif
 
 // 是否禁用IRQ中断
 bool isIRQ_Disable(u32 cpsr)
@@ -8396,6 +8633,7 @@ return 4;
         g_vmInputTargetBuffer = 0;
         g_vmInputMaxLen = 0;
         g_vmInputInputType = 0;
+        g_vmInputPrompt = 0;
         g_vmInputPassword = 0;
         g_vmInputComposition[0] = 0;
         vm_set_call_result(0);
@@ -10776,7 +11014,7 @@ static bool hook_vm_manager_network_func(u32 address)
                 tmp2 = 0;
                 uc_reg_write(MTK, UC_ARM_REG_R0, &tmp2);
                 vm_bx(tmp1);
-                return;
+                return true;
             }
             vm_set_call_result(0);
         }

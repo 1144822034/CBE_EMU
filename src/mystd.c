@@ -24,6 +24,191 @@ u8 my_mem_compare(u8 *src, u8 *dest, u32 len)
     return 0;
 }
 
+#ifdef CBE_PLATFORM_ANDROID
+#include "android_gbk_table.inc"
+
+static int lookup_gbk_by_unicode(u16 unicode, u16 *gbk)
+{
+    int lo = 0;
+    int hi = (int)(sizeof(kUnicodeToGbk) / sizeof(kUnicodeToGbk[0])) - 1;
+    while (lo <= hi)
+    {
+        int mid = lo + (hi - lo) / 2;
+        if (kUnicodeToGbk[mid].unicode == unicode)
+        {
+            *gbk = kUnicodeToGbk[mid].gbk;
+            return 1;
+        }
+        if (kUnicodeToGbk[mid].unicode < unicode)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return 0;
+}
+
+static int lookup_unicode_by_gbk(u16 gbk, u16 *unicode)
+{
+    int lo = 0;
+    int hi = (int)(sizeof(kGbkToUnicode) / sizeof(kGbkToUnicode[0])) - 1;
+    while (lo <= hi)
+    {
+        int mid = lo + (hi - lo) / 2;
+        if (kGbkToUnicode[mid].gbk == gbk)
+        {
+            *unicode = kGbkToUnicode[mid].unicode;
+            return 1;
+        }
+        if (kGbkToUnicode[mid].gbk < gbk)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return 0;
+}
+
+static u32 utf8_next_codepoint(const u8 **cursor)
+{
+    const u8 *s = *cursor;
+    u32 ch;
+    if (s[0] < 0x80)
+    {
+        *cursor = s + 1;
+        return s[0];
+    }
+    if ((s[0] & 0xe0) == 0xc0 && (s[1] & 0xc0) == 0x80)
+    {
+        ch = ((u32)(s[0] & 0x1f) << 6) | (u32)(s[1] & 0x3f);
+        *cursor = s + 2;
+        return ch;
+    }
+    if ((s[0] & 0xf0) == 0xe0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80)
+    {
+        ch = ((u32)(s[0] & 0x0f) << 12) | ((u32)(s[1] & 0x3f) << 6) | (u32)(s[2] & 0x3f);
+        *cursor = s + 3;
+        return ch;
+    }
+    *cursor = s + 1;
+    return '?';
+}
+
+static int utf8_write_codepoint(u8 **out, size_t *left, u16 ch)
+{
+    if (ch < 0x80)
+    {
+        if (*left < 1)
+            return 0;
+        *(*out)++ = (u8)ch;
+        *left -= 1;
+    }
+    else if (ch < 0x800)
+    {
+        if (*left < 2)
+            return 0;
+        *(*out)++ = (u8)(0xc0 | (ch >> 6));
+        *(*out)++ = (u8)(0x80 | (ch & 0x3f));
+        *left -= 2;
+    }
+    else
+    {
+        if (*left < 3)
+            return 0;
+        *(*out)++ = (u8)(0xe0 | (ch >> 12));
+        *(*out)++ = (u8)(0x80 | ((ch >> 6) & 0x3f));
+        *(*out)++ = (u8)(0x80 | (ch & 0x3f));
+        *left -= 3;
+    }
+    return 1;
+}
+
+void gbk_to_utf8(u8 *gbk, u8 *utf8, size_t outlen)
+{
+    u8 *out = utf8;
+    size_t left;
+    if (!gbk || !utf8 || outlen == 0)
+        return;
+    left = outlen - 1;
+    memset(utf8, 0, outlen);
+    for (u32 i = 0; gbk[i] != 0 && left > 0;)
+    {
+        u16 unicode = '?';
+        if (gbk[i] < 0x80)
+            unicode = gbk[i++];
+        else if (gbk[i + 1] != 0)
+        {
+            u16 code = ((u16)gbk[i] << 8) | gbk[i + 1];
+            lookup_unicode_by_gbk(code, &unicode);
+            i += 2;
+        }
+        else
+            ++i;
+        if (!utf8_write_codepoint(&out, &left, unicode))
+            break;
+    }
+    *out = 0;
+}
+
+void utf8_to_gbk(u8 *utf, u8 *gbk, size_t outlen)
+{
+    u8 *out = gbk;
+    size_t left;
+    const u8 *cursor;
+    if (!utf || !gbk || outlen == 0)
+        return;
+    left = outlen - 1;
+    cursor = utf;
+    memset(gbk, 0, outlen);
+    while (*cursor && left > 0)
+    {
+        u32 ch = utf8_next_codepoint(&cursor);
+        if (ch < 0x80)
+        {
+            *out++ = (u8)ch;
+            --left;
+        }
+        else
+        {
+            u16 code;
+            if (ch <= 0xffff && lookup_gbk_by_unicode((u16)ch, &code) && left >= 2)
+            {
+                *out++ = (u8)(code >> 8);
+                *out++ = (u8)(code & 0xff);
+                left -= 2;
+            }
+            else
+            {
+                *out++ = '?';
+                --left;
+            }
+        }
+    }
+    *out = 0;
+}
+
+void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
+{
+    size_t pos = 0;
+    if (!gbk || !unicode || outlen < 2)
+        return;
+    memset(unicode, 0, outlen);
+    for (u32 i = 0; gbk[i] != 0 && pos + 2 <= outlen;)
+    {
+        u16 ch = '?';
+        if (gbk[i] < 0x80)
+            ch = gbk[i++];
+        else if (gbk[i + 1] != 0)
+        {
+            u16 code = ((u16)gbk[i] << 8) | gbk[i + 1];
+            lookup_unicode_by_gbk(code, &ch);
+            i += 2;
+        }
+        else
+            ++i;
+        unicode[pos++] = (u8)(ch & 0xff);
+        unicode[pos++] = (u8)(ch >> 8);
+    }
+}
+#else
 void gbk_to_utf8(u8 *gbk, u8 *utf8, size_t outlen)
 {
     iconv_t cd = iconv_open("UTF-8", "GBK");
@@ -71,6 +256,7 @@ void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
     iconv(cd, &pin, &inlen, &pout, &outlen);
     iconv_close(cd);
 }
+#endif
 
 int strlen_utf16(u16 *utf16)
 {
@@ -174,6 +360,34 @@ int ucs2_to_utf8(u8 *in, int ilen, u8 *out, int olen)
 }
 int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len)
 {
+#ifdef CBE_PLATFORM_ANDROID
+    u32 out = 0;
+    if (!ucs2 || !gbk || gbk_len == 0)
+        return -1;
+    memset(gbk, 0, gbk_len);
+    for (u32 i = 0; i + 1 < ucs2_len && out + 1 < gbk_len; i += 2)
+    {
+        u16 ch = (u16)ucs2[i] | ((u16)ucs2[i + 1] << 8);
+        if (ch == 0)
+            break;
+        if (ch < 0x80)
+            gbk[out++] = (u8)ch;
+        else
+        {
+            u16 code;
+            if (!lookup_gbk_by_unicode(ch, &code) || out + 2 >= gbk_len)
+                gbk[out++] = '?';
+            else
+            {
+                gbk[out++] = (u8)(code >> 8);
+                gbk[out++] = (u8)(code & 0xff);
+            }
+        }
+    }
+    if (out < gbk_len)
+        gbk[out] = 0;
+    return 0;
+#else
     iconv_t cd;
     char *inbuf = (char *)ucs2;
     char *outbuf = gbk;
@@ -195,4 +409,5 @@ int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len)
 
     iconv_close(cd);
     return 0;
+#endif
 }

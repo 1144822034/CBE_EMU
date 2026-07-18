@@ -1,5 +1,9 @@
 #include "config.h"
+#ifdef CBE_PLATFORM_ANDROID
+#include <stddef.h>
+#else
 #include <iconv.h>
+#endif
 
 void my_memcpy(void *dest, void *src, int len);
 void my_memset(void *dest, u8 value, int len);

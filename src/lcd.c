@@ -10,6 +10,9 @@
 #define PIXEL888B(v) (v & 0xff)                // 5位蓝色
 
 u8 *Lcd_Cache_Buffer;
+#ifdef CBE_PLATFORM_ANDROID
+int finalLayerBuffer[LCD_WIDTH * LCD_HEIGHT];
+#endif
 static vm_lcd_rotation g_lcdRotation = VM_LCD_ROTATE_0;
 
 #define LCD_TOOLBAR_HEIGHT 32
@@ -83,7 +86,11 @@ int LcdGetWindowHeight(void)
 
 int LcdGetToolbarHeight(void)
 {
+#ifdef CBE_PLATFORM_ANDROID
+    return 0;
+#else
     return LCD_TOOLBAR_HEIGHT;
+#endif
 }
 
 void LcdApplyWindowSize(void)
@@ -207,8 +214,12 @@ void InitLcd()
 {
     Lcd_Cache_Buffer = SDL_malloc(LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
     memset(Lcd_Cache_Buffer, 0, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
+#ifdef CBE_PLATFORM_ANDROID
+    memset(finalLayerBuffer, 0, sizeof(finalLayerBuffer));
+#endif
 }
 
+#ifndef CBE_PLATFORM_ANDROID
 static void LcdSurfacePutPixel(SDL_Surface *sfc, int x, int y, u32 color)
 {
     if (!sfc || x < 0 || y < 0 || x >= sfc->w || y >= sfc->h)
@@ -324,9 +335,26 @@ static void LcdDrawToolbar(SDL_Surface *sfc)
     LcdSurfaceDrawRect(sfc, indicatorX - 2, indicatorY - 2,
                        indicatorW, indicatorH + 4, 0x4b515c);
 }
+#endif
 
 void UpdateLcd()
 {
+#ifdef CBE_PLATFORM_ANDROID
+    if (Lcd_Cache_Buffer == NULL)
+        return;
+    for (int i = 0; i < LCD_HEIGHT; ++i)
+    {
+        for (int j = 0; j < LCD_WIDTH; ++j)
+        {
+            u32 offset = (u32)j + (u32)i * LCD_WIDTH;
+            u16 color = ((u16 *)Lcd_Cache_Buffer)[offset];
+            finalLayerBuffer[offset] = (int)(0xff000000u |
+                                             ((u32)PIXEL565R(color) << 16) |
+                                             ((u32)PIXEL565G(color) << 8) |
+                                             (u32)PIXEL565B(color));
+        }
+    }
+#else
     LcdApplyWindowSize();
 
     SDL_Surface *sfc = SDL_GetWindowSurface(window);
@@ -389,4 +417,5 @@ void UpdateLcd()
     if (SDL_MUSTLOCK(sfc))
         SDL_UnlockSurface(sfc);
     SDL_UpdateWindowSurface(window);
+#endif
 }
