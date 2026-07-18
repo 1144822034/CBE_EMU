@@ -589,6 +589,55 @@ repeat num:
 其他帮派。批准在同一 MySQL 事务中插入 `guild_members(member_rank=3)` 并把申请状态
 改为 `1`；拒绝只把状态改为 `2`。过期申请不会误操作其他角色。
 
+### 在线申请人的结果通知 `10/36`
+
+批准申请最初只修改了 MySQL。在线申请人的角色节点仍保留登录时解析出的
+`actor+104=0`，所以服务端成员查询已经认为角色入帮，但客户端主菜单仍按旧值进入
+“未入帮”分支；重新登录重新解析 `actorinfo` 后才恢复。客户端本身提供了无需重登的
+状态更新协议：
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  dispatch: `HandleGuildBusinessDispatch(0x0103C50E)`, subtype `36`
+  parser: `scene_update_status_summary_from_packet(0x0103BCBA)`
+  reset_parser: `scene_reset_status_snapshot_nodes(0x0103BC3C)`
+  copy_helper: `scene_copy_status_summary_fields(0x01044FAC)`
+
+批准通知为：
+
+```text
+1/10/36 {
+  type:u8 = 1
+  info:string                 // 服务端中文成功提示
+  id:u32 = guildId
+  name:string = guildName
+  status:u32 = 3              // 普通帮众
+}
+```
+
+解析器先显示 `info`，再把 `id/name/status` 分别写入当前角色节点的
+`+104/+108/+312`，并通过 `scene_copy_status_summary_fields` 同步状态快照和状态显示
+节点。因此后续菜单和人物信息立即使用新的帮派 ID，不再依赖重新登录。拒绝通知为：
+
+```text
+1/10/36 {
+  type:u8 = 2
+  info:string                 // 申请被拒绝提示
+}
+```
+
+`type=2` 只报告申请结果，不携带 `id/name/status`，不会覆盖角色可能已经从其他途径获得的
+帮派身份。远程 mock 服务没有服务端主动连接客户端的通道，因此审批事务提交后把通知写入
+目标在线会话队列，由目标已有的 event-7 场景同步轮询下发；目标离线时不保留易过期的内存
+通知，数据库仍是权威状态，下次登录由 `actorinfo` 恢复。
+
+服务级在线回归使用三个独立会话：`guest00022/10022` 审批，
+`guest00021/10021` 接收批准，`guest00020/10020` 接收拒绝。批准目标从自己的轮询响应中
+得到 `10/36 type=1,id=<临时帮派>,name=codexNtf18,status=3`；拒绝目标得到
+`10/36 type=2` 且没有帮派字段。队列和投递目标日志分别为
+`guild_application_notice_queue`、`guild_application_notice_deliver`，完整记录位于
+`tmp/mock-service-19090.20260718-130656.stdout.log`。测试夹具已级联清理。
+
 服务级回归使用 `guest00022/10022` 作为临时帮主、`guest00020/10020` 和
 `guest00021/10021` 作为两个真实申请人：`10/32` 返回角色 ID
 `[10020,10021]`，且不含操作人 `10022`；批准 `10021` 后成员位阶为 3、申请状态为

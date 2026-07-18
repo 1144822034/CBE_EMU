@@ -11810,7 +11810,9 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT = 6,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN = 7,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE = 8,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP = 9
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP = 9,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED = 10,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED = 11
 };
 
 typedef struct
@@ -11824,6 +11826,9 @@ typedef struct
     u8 sourceSex;
     char sourceAccountId[64];
     char sourceName[32];
+    u32 guildId;
+    u16 guildStatus;
+    char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
     u32 queuedTick;
 } vm_mock_service_social_notice;
 
@@ -12286,6 +12291,10 @@ static const char *vm_mock_service_social_notice_name(u8 type)
         return "team-leave";
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP:
         return "team-hsp";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED:
+        return "guild-application-approved";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED:
+        return "guild-application-rejected";
     default:
         return "unknown";
     }
@@ -20435,6 +20444,97 @@ static u8 vm_net_mock_guild_member_online(const vm_net_mock_guild_member_record 
     return 0;
 }
 
+/* Guild application approval is persisted immediately, but an already-online
+ * applicant still has the old actor+104 guild id in the CBE until it receives
+ * the native 10/36 status update.  Queue that packet for the applicant's next
+ * ordinary scene-sync poll; offline roles will obtain the same state from the
+ * persisted actorinfo during their next login. */
+static bool vm_mock_service_enqueue_guild_application_notice(
+    const vm_net_mock_guild_application_record *application,
+    const vm_net_mock_guild_record *guild,
+    u8 actionType,
+    const vm_net_mock_role_state *requester)
+{
+    vm_mock_service_client_session *target = g_vm_mock_service_client_sessions;
+    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
+    vm_mock_service_social_notice *slot = NULL;
+    u8 noticeType = actionType == 1
+                        ? VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED
+                        : VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED;
+
+    if (application == NULL || guild == NULL || guild->guildId == 0 ||
+        application->roleId == 0 || application->accountId[0] == 0 ||
+        (actionType != 1 && actionType != 2))
+    {
+        return false;
+    }
+    while (target != NULL)
+    {
+        if (target->roleOnline && target->onlinePresenceValid &&
+            vm_mock_service_session_presence_is_recent(target) &&
+            target->onlineRoleId == application->roleId &&
+            strcmp(target->accountId, application->accountId) == 0)
+        {
+            break;
+        }
+        target = target->next;
+    }
+    if (target == NULL)
+    {
+        printf("[info][mock-service] guild_application_notice_queue "
+               "target=%s/%u action=%s guild=%u queued=0 reason=target-offline\n",
+               application->accountId, application->roleId,
+               vm_mock_service_social_notice_name(noticeType), guild->guildId);
+        return false;
+    }
+
+    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+    {
+        vm_mock_service_social_notice *entry = &target->socialNotices[i];
+        if ((entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED ||
+             entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED) &&
+            entry->guildId == guild->guildId)
+        {
+            slot = entry;
+            break;
+        }
+        if (slot == NULL && entry->type == VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE)
+            slot = entry;
+    }
+    if (slot == NULL)
+    {
+        printf("[warn][mock-service] guild_application_notice_queue "
+               "target=%08x/%u action=%s guild=%u queued=0 reason=queue-full\n",
+               target->clientId, application->roleId,
+               vm_mock_service_social_notice_name(noticeType), guild->guildId);
+        return false;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->type = noticeType;
+    slot->result = actionType;
+    slot->sourceClientId = source ? source->clientId : 0;
+    slot->sourceRoleId = requester ? requester->roleId : 0;
+    slot->sourceLevel = (u16)(requester && requester->level ? requester->level : 1);
+    slot->sourceJob = requester && requester->job ? requester->job : 1;
+    slot->sourceSex = requester && requester->sex <= 1 ? requester->sex : 0;
+    snprintf(slot->sourceAccountId, sizeof(slot->sourceAccountId), "%s",
+             g_vm_mock_service_active_account_id ?
+                 g_vm_mock_service_active_account_id : "");
+    snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
+             requester && requester->name[0] ? requester->name : "Guild");
+    slot->guildId = guild->guildId;
+    slot->guildStatus = actionType == 1 ? 3 : 0;
+    snprintf(slot->guildName, sizeof(slot->guildName), "%s", guild->guildName);
+    slot->queuedTick = g_schedulerTick;
+    printf("[info][mock-service] guild_application_notice_queue "
+           "target=%08x/%u action=%s guild=%u name=%s status=%u queued=1\n",
+           target->clientId, application->roleId,
+           vm_mock_service_social_notice_name(noticeType), guild->guildId,
+           guild->guildName, slot->guildStatus);
+    return true;
+}
+
 static u32 vm_net_mock_build_guild_member_page_response(const u8 *request, u32 requestLen,
                                                           u8 *out, u32 outCap)
 {
@@ -21569,6 +21669,8 @@ static u8 vm_net_mock_apply_guild_application_action(
         {
             goto failed;
         }
+        (void)vm_mock_service_enqueue_guild_application_notice(
+            &application, &guild, action->type, requester);
         return 1;
     }
 
@@ -21617,6 +21719,8 @@ static u8 vm_net_mock_apply_guild_application_action(
     {
         goto failed;
     }
+    (void)vm_mock_service_enqueue_guild_application_notice(
+        &application, &guild, action->type, requester);
     return 1;
 
 failed:
@@ -25495,6 +25599,50 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         if (noticeTypeOut)
             *noticeTypeOut = noticeType;
         return 1;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED:
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED:
+    {
+        static const char approvedFormat[] =
+            "\xc8\xeb\xb0\xef\xc9\xea\xc7\xeb\xd2\xd1\xc5\xfa\xd7\xbc\xa3\xac"
+            "\xd2\xd1\xbc\xd3\xc8\xeb\xa1\xbe%s\xa1\xbf";
+        static const char rejectedFormat[] =
+            "\xc4\xe3\xbc\xd3\xc8\xeb\xa1\xbe%s\xa1\xbf\xb5\xc4\xc9\xea\xc7\xeb"
+            "\xd2\xd1\xb1\xbb\xbe\xdc\xbe\xf8";
+        char info[80];
+        u8 statusType = noticeType ==
+                            VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED
+                            ? 1 : 2;
+
+        memset(info, 0, sizeof(info));
+        snprintf(info, sizeof(info),
+                 statusType == 1 ? approvedFormat : rejectedFormat,
+                 notice->guildName);
+        /* HandleGuildBusinessDispatch(0x0103C50E) routes 10/36 to
+         * scene_update_status_summary_from_packet(0x0103BCBA).  Type 1 shows
+         * info and updates actor+104/+108/+312; type 2 reports a rejected
+         * application without changing an existing guild identity. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 10, 36,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "type", statusType) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "info", info) ||
+            (statusType == 1 &&
+             (!vm_net_mock_put_object_u32(out, outCap, pos, "id", notice->guildId) ||
+              !vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                             notice->guildName) ||
+              !vm_net_mock_put_object_u32(out, outCap, pos, "status",
+                                          notice->guildStatus))))
+        {
+            return -1;
+        }
+        printf("[info][mock-service] guild_application_notice_deliver "
+               "observer=%08x action=%s guild=%u name=%s status=%u response=10/36 "
+               "evidence=JianghuOL.CBE:0x0103C50E+0x0103BCBA\n",
+               observer->clientId,
+               vm_mock_service_social_notice_name(noticeType),
+               notice->guildId, notice->guildName, notice->guildStatus);
+        break;
     }
 
     default:
