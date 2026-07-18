@@ -1,7 +1,7 @@
 # 帮派列表、详情、申请与人物属性（2026-07-17）
 
-phase: guild-list-detail-application-create
-status: implemented
+phase: guild-list-detail-application-create-leave-recruitment-approval
+status: implemented-and-validated
 
 ## 问题边界
 
@@ -33,13 +33,15 @@ ida_evidence:
 | --- | --- | --- |
 | `1/10/20` | `index:u32`, `pagesize:u8` | 帮派列表翻页请求；按一基首行索引读取，首页为 `index=1` |
 | `1/10/21` | `index:u32`, `pagesize:u8` | 从帮派菜单首次进入“其他帮派”时的列表请求；返回同一个 `10/21` 列表响应 |
-| `1/10/22` | `id:u32` | 读取选中帮派详情 |
+| `1/10/22` | `id:u32` | 重载：`id=帮派 ID` 时读取选中帮派详情；`id=当前角色 ID` 时脱离帮派 |
 | `1/10/23` | `id:u32` | 已入帮管理页按当前 `actor+104`（帮派 ID）读取本帮情报 |
 | `1/10/20` 或 `1/10/37` | `index:u32`, `pagesize:u8` | 按一基首行索引读取本帮成员；成员首页使用 `10/20`，成员管理分页还会使用 `10/37`；首页为 `index=1` |
 | `1/10/30` | 无 | 未入帮角色开始创建帮派；已入帮角色还会复用该 subtype 进入帮派场景路径 |
 | `1/10/28` | `name:string` | 校验准备创建的帮派名并进入确认阶段 |
 | `1/10/11` | `name:string` | 确认创建并提交最终落库 |
 | `1/10/31` | `id:u32` | 向指定帮派提交入帮申请 |
+| `1/10/32` | `id:u32=0`, `index:u32`, `pagesize:u8` | 分页读取本帮待审批的入帮申请；首页为 `index=1` |
+| `1/10/33` | `type:u8`, `roleid:u32` | 审批申请；`type=1` 批准，`type=2` 拒绝 |
 
 ## 列表响应 `10/21`
 
@@ -189,6 +191,54 @@ ida_evidence:
 不能通过把显示字符串改成空串来修复菜单；状态必须来自第二个 ID。
 主场景菜单 `0x0101B15E` 的零值分支使用 `0x0101B530` 的 GBK 文本
 “你未加入任何帮派!”，非零分支才调用 `StartSceneTransition(3,1,1,0)` 打开已入帮管理页。
+
+## 脱离帮派 `10/22`
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  confirmation_ui: `DrawGuildInfoPanel(0x0103D2FE)`
+  request_sender: `HandleSceneChatInput(0x0103D5F2) -> SendRoleActionEvent(0x0103C830)`
+  response_parser: `HandleBattleResultEvent(0x0103DABC)`（旧符号名与实际语义不符）
+
+确认界面显示“是否确定脱离……帮派？”。玩家确认后，客户端发送：
+
+```text
+1/10/22 {
+  id:u32 = 当前角色 actor+100
+}
+```
+
+服务端必须同 subtype 返回，且不能返回帮派详情对象：
+
+```text
+1/10/22 {
+  result:u8                 // 1=成功，0=失败
+}
+```
+
+`HandleBattleResultEvent` 收到该对象后会清除网络等待状态；成功时显示“成功脱离帮派”并
+重置角色状态快照，失败时显示“脱离帮派失败”。旧实现把 `10/22.id=当前角色 ID` 错误地
+解析成详情查询并返回 `10/23 {result,faction}`，响应 subtype 与回调契约均不匹配，因而
+不能完成脱离流程。
+
+当前服务端在详情处理器之前按当前活动角色 ID 分流，并在 MySQL 事务中执行以下规则：
+
+- 普通成员删除自己的 `guild_members` 关系，并清除自己的待处理入帮申请；
+- 帮主且帮派仍有其他成员时返回失败，必须先转让帮主，避免产生无帮主帮派；
+- 帮派仅剩帮主本人时允许退出，同时删除帮派，成员和申请由外键级联清理；
+- 请求 ID 不是当前活动角色、角色未入帮或数据库事务失败时均返回失败。
+
+service_evidence:
+  event: `7`
+  handled_source: `builtin-guild-leave`
+  response: `10/22 {result}`
+  runtime_log: `tmp/mock-service-19090.20260718-115449.stdout.log`
+  operational_service: PID `8200`, `127.0.0.1:19090`
+  operational_log: `tmp/mock-service-19090.20260718-120118.stdout.log`
+
+真实服务回归用临时两人帮派验证了三条状态转换：有成员时帮主退出得到 `result=0`；
+普通成员退出得到 `result=1` 且帮派保留；成员退出后唯一帮主再次退出得到 `result=1`，
+帮派与关联成员一并删除。回归夹具已清理，原有帮派、成员和申请数据未改动。
 
 ## 申请响应 `10/31`
 
@@ -434,7 +484,9 @@ ida_evidence:
 - 解码角色选择响应的 `actorinfo` 后，未入帮角色得到
   `roleId=10024, guildId=0, guildName=无帮派`；临时加入测试帮派后得到
   `roleId=10024, guildId=<真实主键>, guildName=测试帮`；
-- 已入帮管理页形态的 `10/22 { id=10024 }` 成功解析到真实帮派并返回 `10/23`；
+- 早期把已入帮管理页的 `10/22 {id=当前角色 ID}` 解析为本帮详情并返回 `10/23`
+  是错误路径；IDA 发送点和结果回调共同确认该形态实际是脱离帮派请求，现已在详情处理器
+  之前分流并返回同 subtype 的 `10/22 {result}`；
 - 测试帮派、成员与申请均在验证结束后清理。
 
 成员页兼容响应的服务验证日志为
@@ -471,14 +523,85 @@ ida_evidence:
 为 `mock_player_info actor=10023 scope=active-role ... source=builtin-nearby-player-info`，未再
 出现该请求被 `builtin-game-type` 接管。验证产生的临时账号状态已经删除。
 
+## 招收帮众申请列表与审批 `10/32 + 10/33`
+
+phase: guild-recruitment-application-review
+status: implemented-and-service-validated
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  page_sender: `SendRankingPageReq(0x01040276) -> SendRoleActionEvent(0x0103C830)`
+  action_sender: `SendRoleBattleAction(0x010402BC) -> SendRoleActionEvent(0x0103C830)`
+  page_parser: `HandleRoleListResponse(0x0103FF2C)`
+  action_parser: `HandleRankingResponse(0x0104094A)`
+  dispatcher: `HandleRankingEvents(0x01040AA8)`
+  menu_input: `HandleBagMenuInput(0x01040318)`
+
+客户端进入“招收帮众”时发送固定 48 字节请求：
+
+```text
+1/10/32 {
+  id:u32 = 0
+  index:u32        // 一基首行索引
+  pagesize:u8
+}
+```
+
+`HandleRoleListResponse(0x0103FF2C)` 在 `result=1` 时依次读取：
+
+```text
+roles:u32          // 本帮当前人数
+maxroles:u32       // 本帮人数上限
+allpgs:u32
+num:u32
+roleinfo:blob
+repeat num:
+  roleId:u32
+  roleName:string
+  level:u32
+```
+
+`result=3` 表示权限不足，`result=4` 表示当前没有申请人。旧服务端把所有
+`10/32` 错误分流到登录角色列表 builder，后者从当前账号的活动角色构造
+`roleinfo`；因此帮主使用另一个账号申请后，列表仍稳定显示帮主本人。数据库中的原始
+申请并没有串号：运行取证记录为
+`guild_id=4, applicant_account_id=guest00024, applicant_role_id=10024`，申请人名称也
+与 `account_roles` 一致。修复后的列表只读取当前帮派
+`guild_applications.status=0`，角色 ID、名称和等级全部来自申请快照，不再读取操作人的
+活动角色。
+
+选择“批准”或“拒绝”时，客户端发送固定 34 字节请求：
+
+```text
+1/10/33 {
+  type:u8          // 1=批准，2=拒绝
+  roleid:u32       // 申请人角色 ID
+}
+```
+
+响应保持相同 subtype：`1/10/33 {result:u8,type:u8}`。`HandleRankingResponse`
+对 `result=1` 刷新当前申请页；批准时还增加客户端当前人数。其他结果的客户端语义为：
+`2=权限不足`、`3=人数已满`、`4=玩家已有帮派`、`5=申请已被处理`。旧通用
+`type` fallback 会把批准和拒绝响应分别改写成其他 subtype，页面既收不到正确回调，
+服务端也完全没有修改成员关系。
+
+审批现在先复核操作人仍是本帮帮主/管理、申请仍待处理、人数上限以及申请人是否已加入
+其他帮派。批准在同一 MySQL 事务中插入 `guild_members(member_rank=3)` 并把申请状态
+改为 `1`；拒绝只把状态改为 `2`。过期申请不会误操作其他角色。
+
+服务级回归使用 `guest00022/10022` 作为临时帮主、`guest00020/10020` 和
+`guest00021/10021` 作为两个真实申请人：`10/32` 返回角色 ID
+`[10020,10021]`，且不含操作人 `10022`；批准 `10021` 后成员位阶为 3、申请状态为
+1；拒绝 `10020` 后没有成员行、申请状态为 2；再次分页返回 `result=4`。测试完成后
+临时帮派、成员及申请已级联删除，既有
+`guest00024/10024 -> guild_id=4, status=0` 记录保持不变。对应服务日志为
+`tmp/mock-service-19090.20260718-122632.stdout.log`。
+
 本次创建修复额外完成了静态协议复核和 `make -j2` 构建验证。完整交互需要在客户端
 依次输入名称并确认两次；服务日志应依次出现 `mock_guild_create_start`、
 `mock_guild_create_name`、`mock_guild_create_commit`。
 
 unknowns:
-  - name: 入帮申请审批界面
-    current_value: 未实现
-    why_kept: 创建流程已经实现；申请审批的成员管理包仍需要按运行时请求确定。
   - name: 入帮邀请目标端确认
     current_value: 未实现
     why_kept: `10/13` 发送端已确认，但目标端 `10/14` 及确认后的成员变更尚未完成跨客户端运行验证。

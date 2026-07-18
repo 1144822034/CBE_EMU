@@ -3289,6 +3289,16 @@ typedef struct
     char memberTitle[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
 } vm_net_mock_guild_member_record;
 
+typedef struct
+{
+    u32 roleId;
+    u32 level;
+    u8 job;
+    u8 sex;
+    char accountId[64];
+    char roleName[VM_NET_MOCK_GUILD_ROLE_NAME_SIZE];
+} vm_net_mock_guild_application_record;
+
 static bool vm_net_mock_guild_find_role_membership(u32 roleId,
                                                     vm_net_mock_guild_record *guildOut,
                                                     u8 *rankOut);
@@ -8755,6 +8765,14 @@ typedef struct
     bool invalid;
 } vm_mock_mysql_guild_member_rows_context;
 
+typedef struct
+{
+    vm_net_mock_guild_application_record *rows;
+    u32 rowCapacity;
+    u32 rowCount;
+    bool invalid;
+} vm_mock_mysql_guild_application_rows_context;
+
 static bool vm_net_mock_guild_mysql_query(const char *sql,
                                            vm_mysql_row_callback callback,
                                            void *context)
@@ -8963,6 +8981,49 @@ static bool vm_mock_mysql_guild_member_record_row(void *contextValue,
     return true;
 }
 
+static bool vm_mock_mysql_guild_application_record_row(void *contextValue,
+                                                        unsigned int columnCount,
+                                                        const char *const *values,
+                                                        const size_t *lengths)
+{
+    vm_mock_mysql_guild_application_rows_context *context =
+        (vm_mock_mysql_guild_application_rows_context *)contextValue;
+    vm_net_mock_guild_application_record *application = NULL;
+    u32 job = 0;
+    u32 sex = 0;
+
+    if (context == NULL || context->rows == NULL ||
+        context->rowCount >= context->rowCapacity || columnCount != 6)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    application = &context->rows[context->rowCount];
+    memset(application, 0, sizeof(*application));
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &application->roleId) ||
+        !vm_net_mock_guild_decode_hex_text(values[1], lengths[1],
+                                            application->roleName,
+                                            sizeof(application->roleName)) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &application->level) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &job) || job > 255 ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &sex) || sex > 255 ||
+        !vm_mock_mysql_copy_text(application->accountId, sizeof(application->accountId),
+                                 values[5], lengths[5]) ||
+        application->roleId == 0 || application->accountId[0] == 0)
+    {
+        context->invalid = true;
+        memset(application, 0, sizeof(*application));
+        return true;
+    }
+    application->job = (u8)job;
+    application->sex = (u8)sex;
+    /* HandleRoleListResponse copies the name into the 16-byte slot at row+4. */
+    vm_net_mock_guild_limit_gbk_text(application->roleName, 15);
+    ++context->rowCount;
+    return true;
+}
+
 static bool vm_net_mock_guild_query_records(const char *whereClause,
                                             const char *tailClause,
                                             vm_net_mock_guild_record *rows,
@@ -9063,6 +9124,74 @@ static bool vm_net_mock_guild_find_member(u32 guildId, u32 roleId,
     }
     if (memberOut)
         *memberOut = member;
+    return true;
+}
+
+static bool vm_net_mock_guild_query_applications(
+    u32 guildId, u32 offset, u32 pageSize,
+    vm_net_mock_guild_application_record *rows, u32 rowCapacity,
+    u32 *rowCountOut)
+{
+    char query[1536];
+    vm_mock_mysql_guild_application_rows_context context;
+
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (guildId == 0 || rows == NULL || rowCapacity == 0 || pageSize == 0)
+        return false;
+    if (pageSize > rowCapacity)
+        pageSize = rowCapacity;
+    memset(&context, 0, sizeof(context));
+    context.rows = rows;
+    context.rowCapacity = rowCapacity;
+    snprintf(query, sizeof(query),
+             "SELECT applicant_role_id,HEX(applicant_role_name),applicant_level,"
+             "applicant_job,applicant_sex,applicant_account_id "
+             "FROM guild_applications WHERE guild_id=%u AND status=0 "
+             "ORDER BY created_at,applicant_role_id LIMIT %u OFFSET %u",
+             guildId, pageSize, offset);
+    if (!vm_net_mock_guild_mysql_query(query,
+                                        vm_mock_mysql_guild_application_record_row,
+                                        &context) || context.invalid)
+    {
+        printf("[error][network] mock_guild_application_query_failed guild=%u error=%s\n",
+               guildId, vm_mysql_last_error());
+        return false;
+    }
+    if (rowCountOut)
+        *rowCountOut = context.rowCount;
+    return true;
+}
+
+static bool vm_net_mock_guild_find_pending_application(
+    u32 guildId, u32 roleId, vm_net_mock_guild_application_record *applicationOut)
+{
+    char query[1536];
+    vm_mock_mysql_guild_application_rows_context context;
+    vm_net_mock_guild_application_record application;
+
+    if (applicationOut)
+        memset(applicationOut, 0, sizeof(*applicationOut));
+    if (guildId == 0 || roleId == 0)
+        return false;
+    memset(&context, 0, sizeof(context));
+    memset(&application, 0, sizeof(application));
+    context.rows = &application;
+    context.rowCapacity = 1;
+    snprintf(query, sizeof(query),
+             "SELECT applicant_role_id,HEX(applicant_role_name),applicant_level,"
+             "applicant_job,applicant_sex,applicant_account_id "
+             "FROM guild_applications WHERE guild_id=%u AND applicant_role_id=%u "
+             "AND status=0 LIMIT 1",
+             guildId, roleId);
+    if (!vm_net_mock_guild_mysql_query(query,
+                                        vm_mock_mysql_guild_application_record_row,
+                                        &context) || context.invalid || context.rowCount != 1)
+    {
+        return false;
+    }
+    if (applicationOut)
+        *applicationOut = application;
     return true;
 }
 
@@ -19773,6 +19902,34 @@ static bool vm_net_mock_is_guild_detail_request(const u8 *request, u32 requestLe
     return true;
 }
 
+/* The guild-member screen reuses 10/22 for two different operations.  A
+ * selected guild row sends id=guildId and expects the 10/23 detail object;
+ * confirming "leave guild" sends id=actor+100 (the current role id) and
+ * HandleBattleResultEvent consumes a same-subtype 10/22 {result}. */
+static bool vm_net_mock_parse_guild_leave_request(const u8 *request, u32 requestLen,
+                                                   u32 *roleIdOut)
+{
+    u32 offset = 4;
+    u32 roleId = 0;
+    vm_net_mock_request_object object;
+
+    if (roleIdOut)
+        *roleIdOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10 ||
+        object.subtype != 22 ||
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "id", &roleId) ||
+        roleId == 0)
+    {
+        return false;
+    }
+    if (roleIdOut)
+        *roleIdOut = roleId;
+    return true;
+}
+
 static bool vm_net_mock_is_guild_create_start_request(const u8 *request, u32 requestLen)
 {
     u32 offset = 4;
@@ -19820,7 +19977,7 @@ static bool vm_net_mock_parse_guild_name_request(const u8 *request, u32 requestL
 }
 
 static bool vm_net_mock_is_guild_apply_request(const u8 *request, u32 requestLen,
-                                                 u32 *guildIdOut)
+                                                  u32 *guildIdOut)
 {
     u32 offset = 4;
     u32 guildId = 0;
@@ -19838,6 +19995,85 @@ static bool vm_net_mock_is_guild_apply_request(const u8 *request, u32 requestLen
     }
     if (guildIdOut)
         *guildIdOut = guildId;
+    return true;
+}
+
+typedef struct
+{
+    bool valid;
+    u32 requestId;
+    u32 index;
+    u32 pageSize;
+} vm_net_mock_guild_application_page_request;
+
+typedef struct
+{
+    bool valid;
+    u8 type;
+    u32 roleId;
+} vm_net_mock_guild_application_action;
+
+/* The recruitment screen is not the title role selector.  SendRankingPageReq
+ * emits 10/32 {id=0,index=one-based first row,pagesize}; HandleRoleListResponse
+ * consumes the pending applicants from roleinfo.  Keep malformed 10/32 packets
+ * in this handler so the screen receives an error result and clears +145. */
+static bool vm_net_mock_parse_guild_application_page_request(
+    const u8 *request, u32 requestLen,
+    vm_net_mock_guild_application_page_request *pageOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_guild_application_page_request page;
+
+    memset(&page, 0, sizeof(page));
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10 ||
+        object.subtype != 32)
+    {
+        return false;
+    }
+    page.valid =
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "id", &page.requestId) &&
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "index", &page.index) &&
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "pagesize", &page.pageSize) &&
+        page.index > 0 && page.pageSize > 0;
+    if (page.pageSize > VM_NET_MOCK_GUILD_PAGE_MAX)
+        page.pageSize = VM_NET_MOCK_GUILD_PAGE_MAX;
+    if (pageOut)
+        *pageOut = page;
+    return true;
+}
+
+/* The applicant row action uses type=1 for approval and type=2 for rejection.
+ * HandleRankingResponse expects the reply on the same 10/33 subtype. */
+static bool vm_net_mock_parse_guild_application_action(
+    const u8 *request, u32 requestLen,
+    vm_net_mock_guild_application_action *actionOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_guild_application_action action;
+
+    memset(&action, 0, sizeof(action));
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10 ||
+        object.subtype != 33)
+    {
+        return false;
+    }
+    action.valid =
+        vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                        "type", &action.type) &&
+        vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "roleid", &action.roleId) &&
+        (action.type == 1 || action.type == 2) && action.roleId != 0;
+    if (actionOut)
+        *actionOut = action;
     return true;
 }
 
@@ -20496,12 +20732,153 @@ static u32 vm_net_mock_build_guild_page_compat_response(const u8 *request, u32 r
     return pos;
 }
 
+static u8 vm_net_mock_apply_guild_leave(u32 requestedRoleId,
+                                         vm_net_mock_role_state *role,
+                                         u32 *guildIdOut,
+                                         u8 *memberRankOut,
+                                         bool *disbandedOut)
+{
+    vm_net_mock_guild_record guild;
+    char accountHex[129];
+    char query[1024];
+    char tableAndWhere[512];
+    u32 remainingRows = 0;
+    u32 memberCount = 0;
+    u8 memberRank = 0;
+    bool transactionStarted = false;
+    bool disbanded = false;
+
+    if (guildIdOut)
+        *guildIdOut = 0;
+    if (memberRankOut)
+        *memberRankOut = 0;
+    if (disbandedOut)
+        *disbandedOut = false;
+    memset(&guild, 0, sizeof(guild));
+    memset(accountHex, 0, sizeof(accountHex));
+    memset(query, 0, sizeof(query));
+    memset(tableAndWhere, 0, sizeof(tableAndWhere));
+
+    if (role == NULL || requestedRoleId == 0 || requestedRoleId != role->roleId ||
+        !vm_net_mock_guild_find_role_membership(role->roleId, &guild, &memberRank) ||
+        guild.guildId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
+    {
+        return 0;
+    }
+    if (guildIdOut)
+        *guildIdOut = guild.guildId;
+    if (memberRankOut)
+        *memberRankOut = memberRank;
+
+    snprintf(tableAndWhere, sizeof(tableAndWhere),
+             "guild_members WHERE guild_id=%u", guild.guildId);
+    if (!vm_net_mock_guild_count(tableAndWhere, &memberCount) || memberCount == 0)
+        return 0;
+
+    /* No separate dissolve-guild action exists in this client.  Let the sole
+     * leader leave by deleting the guild (FK cascades members/applications),
+     * but reject leaving a populated guild until leadership is handed over. */
+    if (memberRank == 1 && memberCount != 1)
+        return 0;
+
+    if (!vm_mysql_exec("START TRANSACTION"))
+        return 0;
+    transactionStarted = true;
+
+    snprintf(query, sizeof(query),
+             "DELETE FROM guild_applications "
+             "WHERE applicant_account_id=CAST(X'%s' AS CHAR) AND applicant_role_id=%u",
+             accountHex, role->roleId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+
+    if (memberRank == 1)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM guilds WHERE guild_id=%u "
+                 "AND leader_account_id=CAST(X'%s' AS CHAR) AND leader_role_id=%u",
+                 guild.guildId, accountHex, role->roleId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(tableAndWhere, sizeof(tableAndWhere),
+                 "guilds WHERE guild_id=%u", guild.guildId);
+        if (!vm_net_mock_guild_count(tableAndWhere, &remainingRows) || remainingRows != 0)
+            goto failed;
+        disbanded = true;
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM guild_members WHERE guild_id=%u "
+                 "AND account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND member_rank=%u",
+                 guild.guildId, accountHex, role->roleId, memberRank);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(tableAndWhere, sizeof(tableAndWhere),
+                 "guild_members WHERE guild_id=%u "
+                 "AND account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                 guild.guildId, accountHex, role->roleId);
+        if (!vm_net_mock_guild_count(tableAndWhere, &remainingRows) || remainingRows != 0)
+            goto failed;
+    }
+
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    if (g_vm_mock_service_active_account != NULL)
+        g_vm_mock_service_active_account->selectedGuildId = 0;
+    if (disbandedOut)
+        *disbandedOut = disbanded;
+    return 1;
+
+failed:
+    printf("[error][network] mock_guild_leave_db_failed guild=%u role=%u rank=%u "
+           "members=%u error=%s\n",
+           guild.guildId, role ? role->roleId : 0, memberRank,
+           memberCount, vm_mysql_last_error());
+    if (transactionStarted)
+        vm_mysql_exec("ROLLBACK");
+    return 0;
+}
+
+static u32 vm_net_mock_build_guild_leave_response(const u8 *request, u32 requestLen,
+                                                   u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 requestedRoleId = 0;
+    u32 guildId = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 memberRank = 0;
+    u8 result = 0;
+    bool disbanded = false;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_guild_leave_request(request, requestLen, &requestedRoleId) ||
+        role == NULL || requestedRoleId != role->roleId)
+    {
+        return 0;
+    }
+    result = vm_net_mock_apply_guild_leave(requestedRoleId, role, &guildId,
+                                            &memberRank, &disbanded);
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 22, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_guild_leave role=%u requested=%u guild=%u rank=%u "
+           "result=%u disbanded=%u response=10/22 resp=%u "
+           "evidence=JianghuOL.CBE:0x0103D2FE+0x0103D5F2+0x0103DABC\n",
+           role ? role->roleId : 0, requestedRoleId, guildId, memberRank,
+           result, disbanded ? 1u : 0u, pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_guild_detail_response(const u8 *request, u32 requestLen,
                                                     u8 *out, u32 outCap)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_guild_record guild;
-    vm_net_mock_guild_record membership;
     u8 faction[1024];
     char memberCount[32];
     u32 guildId = 0;
@@ -20512,7 +20889,6 @@ static u32 vm_net_mock_build_guild_detail_response(const u8 *request, u32 reques
     u8 result = 1;
 
     memset(&guild, 0, sizeof(guild));
-    memset(&membership, 0, sizeof(membership));
     memset(faction, 0, sizeof(faction));
     memset(memberCount, 0, sizeof(memberCount));
     if (out == NULL || outCap < pos ||
@@ -20523,20 +20899,7 @@ static u32 vm_net_mock_build_guild_detail_response(const u8 *request, u32 reques
     resolvedGuildId = guildId;
     if (!vm_net_mock_guild_find_by_id(resolvedGuildId, &guild))
     {
-        /* The list screen sends the selected guild id.  The joined-role
-         * management screen instead sends actor+100 (the current role id) at
-         * 0x0103D6BE after checking actor+104. */
-        if (role != NULL && guildId == role->roleId &&
-            vm_net_mock_guild_find_role_membership(role->roleId, &membership, NULL) &&
-            membership.guildId != 0 &&
-            vm_net_mock_guild_find_by_id(membership.guildId, &guild))
-        {
-            resolvedGuildId = membership.guildId;
-        }
-        else
-        {
-            result = 2;
-        }
+        result = 2;
     }
     if (result == 1)
     {
@@ -20999,6 +21362,306 @@ static u32 vm_net_mock_build_guild_apply_response(const u8 *request, u32 request
     printf("[info][network] mock_guild_apply guild=%u role=%u result=%u name=%s resp=%u evidence=JianghuOL.CBE:0x0103F99E\n",
            guildId, role ? role->roleId : 0, result,
            guild.guildName[0] ? guild.guildName : "-", pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_guild_application_page_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_guild_application_page_request page;
+    vm_net_mock_guild_application_record rows[VM_NET_MOCK_GUILD_PAGE_MAX];
+    vm_net_mock_guild_record guild;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 roleInfo[4096];
+    char tableAndWhere[256];
+    u32 roleInfoLen = 0;
+    u32 rowCount = 0;
+    u32 totalApplications = 0;
+    u32 totalPages = 1;
+    u32 offset = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 memberRank = 0;
+    u8 result = 2;
+
+    memset(&page, 0, sizeof(page));
+    memset(rows, 0, sizeof(rows));
+    memset(&guild, 0, sizeof(guild));
+    memset(roleInfo, 0, sizeof(roleInfo));
+    memset(tableAndWhere, 0, sizeof(tableAndWhere));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_guild_application_page_request(request, requestLen, &page))
+    {
+        return 0;
+    }
+
+    if (page.valid && role != NULL &&
+        vm_net_mock_guild_find_role_membership(role->roleId, &guild, &memberRank) &&
+        guild.guildId != 0 && memberRank > 0 && memberRank <= 2 &&
+        vm_net_mock_guild_find_by_id(guild.guildId, &guild))
+    {
+        snprintf(tableAndWhere, sizeof(tableAndWhere),
+                 "guild_applications WHERE guild_id=%u AND status=0", guild.guildId);
+        if (vm_net_mock_guild_count(tableAndWhere, &totalApplications))
+        {
+            if (totalApplications == 0)
+            {
+                result = 4; /* HandleRoleListResponse: no current applicants. */
+            }
+            else
+            {
+                offset = page.index - 1;
+                totalPages = (totalApplications + page.pageSize - 1) / page.pageSize;
+                if (totalPages == 0)
+                    totalPages = 1;
+                if (vm_net_mock_guild_query_applications(
+                        guild.guildId, offset, page.pageSize,
+                        rows, VM_NET_MOCK_GUILD_PAGE_MAX, &rowCount))
+                {
+                    result = 1;
+                    for (u32 i = 0; i < rowCount; ++i)
+                    {
+                        if (!vm_net_mock_seq_put_u32(roleInfo, sizeof(roleInfo),
+                                                     &roleInfoLen, rows[i].roleId) ||
+                            !vm_net_mock_seq_put_string(roleInfo, sizeof(roleInfo),
+                                                        &roleInfoLen, rows[i].roleName) ||
+                            !vm_net_mock_seq_put_u32(roleInfo, sizeof(roleInfo),
+                                                     &roleInfoLen, rows[i].level))
+                        {
+                            result = 2;
+                            roleInfoLen = 0;
+                            rowCount = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (page.valid)
+    {
+        result = 3; /* permission denied / requester is no longer management */
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 32, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        (result == 1 &&
+         (!vm_net_mock_put_object_u32(out, outCap, &pos, "roles", guild.memberCount) ||
+          !vm_net_mock_put_object_u32(out, outCap, &pos, "maxroles", guild.memberLimit) ||
+          !vm_net_mock_put_object_u32(out, outCap, &pos, "allpgs", totalPages) ||
+          !vm_net_mock_put_object_u32(out, outCap, &pos, "num", rowCount) ||
+          !vm_net_mock_put_object_entry(out, outCap, &pos, "roleinfo",
+                                         roleInfo, (u16)roleInfoLen))))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_guild_application_page requester=%u guild=%u rank=%u "
+           "index=%u page_size=%u members=%u/%u pending=%u rows=%u "
+           "first_applicant=%u result=%u response=10/32 resp=%u "
+           "evidence=JianghuOL.CBE:0x01040276+0x0103FF2C+0x01040AA8\n",
+           role ? role->roleId : 0, guild.guildId, memberRank,
+           page.index, page.pageSize, guild.memberCount, guild.memberLimit,
+           totalApplications, rowCount, rowCount ? rows[0].roleId : 0,
+           result, pos);
+    return pos;
+}
+
+static u8 vm_net_mock_apply_guild_application_action(
+    const vm_net_mock_guild_application_action *action,
+    vm_net_mock_role_state *requester,
+    u32 *guildIdOut, u8 *requesterRankOut)
+{
+    vm_net_mock_guild_application_record application;
+    vm_net_mock_guild_member_record acceptedMember;
+    vm_net_mock_guild_record guild;
+    vm_net_mock_guild_record existingMembership;
+    char accountHex[129];
+    char query[1536];
+    char tableAndWhere[512];
+    u32 matchingRows = 0;
+    u32 memberCount = 0;
+    u8 requesterRank = 0;
+    bool transactionStarted = false;
+
+    if (guildIdOut)
+        *guildIdOut = 0;
+    if (requesterRankOut)
+        *requesterRankOut = 0;
+    memset(&application, 0, sizeof(application));
+    memset(&acceptedMember, 0, sizeof(acceptedMember));
+    memset(&guild, 0, sizeof(guild));
+    memset(&existingMembership, 0, sizeof(existingMembership));
+    memset(accountHex, 0, sizeof(accountHex));
+    memset(query, 0, sizeof(query));
+    memset(tableAndWhere, 0, sizeof(tableAndWhere));
+
+    if (requester == NULL ||
+        !vm_net_mock_guild_find_role_membership(requester->roleId,
+                                                 &guild, &requesterRank) ||
+        guild.guildId == 0)
+    {
+        return 2;
+    }
+    if (guildIdOut)
+        *guildIdOut = guild.guildId;
+    if (requesterRankOut)
+        *requesterRankOut = requesterRank;
+    if (requesterRank == 0 || requesterRank > 2)
+        return 2;
+    if (action == NULL || !action->valid)
+        return 0;
+    if (!vm_net_mock_guild_find_by_id(guild.guildId, &guild))
+        return 0;
+    if (!vm_net_mock_guild_find_pending_application(guild.guildId, action->roleId,
+                                                     &application))
+    {
+        return 5;
+    }
+    if (action->type == 1)
+    {
+        if (vm_net_mock_guild_find_membership_for_account(application.accountId,
+                                                           application.roleId,
+                                                           &existingMembership, NULL))
+        {
+            return 4;
+        }
+        if (guild.memberCount >= guild.memberLimit)
+            return 3;
+    }
+    if (vm_mysql_hex_encode(application.accountId,
+                            vm_mock_mysql_bounded_strlen(application.accountId,
+                                                         sizeof(application.accountId)),
+                            accountHex, sizeof(accountHex)) == 0)
+    {
+        return 0;
+    }
+
+    if (!vm_mysql_exec("START TRANSACTION"))
+        return 0;
+    transactionStarted = true;
+
+    /* Re-read the pending row after opening the transaction.  A second manager
+     * may already have handled the same application between list and action. */
+    if (!vm_net_mock_guild_find_pending_application(guild.guildId, action->roleId,
+                                                     &application))
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 5;
+    }
+    if (action->type == 2)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE guild_applications SET status=2 "
+                 "WHERE guild_id=%u AND applicant_account_id=CAST(X'%s' AS CHAR) "
+                 "AND applicant_role_id=%u AND status=0",
+                 guild.guildId, accountHex, application.roleId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(tableAndWhere, sizeof(tableAndWhere),
+                 "guild_applications WHERE guild_id=%u "
+                 "AND applicant_account_id=CAST(X'%s' AS CHAR) "
+                 "AND applicant_role_id=%u AND status=2",
+                 guild.guildId, accountHex, application.roleId);
+        if (!vm_net_mock_guild_count(tableAndWhere, &matchingRows) || matchingRows != 1 ||
+            !vm_mysql_exec("COMMIT"))
+        {
+            goto failed;
+        }
+        return 1;
+    }
+
+    memset(&existingMembership, 0, sizeof(existingMembership));
+    if (vm_net_mock_guild_find_membership_for_account(application.accountId,
+                                                       application.roleId,
+                                                       &existingMembership, NULL))
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 4;
+    }
+    snprintf(tableAndWhere, sizeof(tableAndWhere),
+             "guild_members WHERE guild_id=%u", guild.guildId);
+    if (!vm_net_mock_guild_count(tableAndWhere, &memberCount))
+        goto failed;
+    if (memberCount >= guild.memberLimit)
+    {
+        vm_mysql_exec("ROLLBACK");
+        return 3;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO guild_members(guild_id,account_id,role_id,role_name,member_rank,member_title) "
+             "SELECT guild_id,applicant_account_id,applicant_role_id,applicant_role_name,3,'' "
+             "FROM guild_applications WHERE guild_id=%u "
+             "AND applicant_account_id=CAST(X'%s' AS CHAR) "
+             "AND applicant_role_id=%u AND status=0",
+             guild.guildId, accountHex, application.roleId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "UPDATE guild_applications SET status=1 "
+             "WHERE guild_id=%u AND applicant_account_id=CAST(X'%s' AS CHAR) "
+             "AND applicant_role_id=%u AND status=0",
+             guild.guildId, accountHex, application.roleId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(tableAndWhere, sizeof(tableAndWhere),
+             "guild_applications WHERE guild_id=%u "
+             "AND applicant_account_id=CAST(X'%s' AS CHAR) "
+             "AND applicant_role_id=%u AND status=1",
+             guild.guildId, accountHex, application.roleId);
+    if (!vm_net_mock_guild_count(tableAndWhere, &matchingRows) || matchingRows != 1 ||
+        !vm_net_mock_guild_find_member(guild.guildId, application.roleId, &acceptedMember) ||
+        strcmp(acceptedMember.accountId, application.accountId) != 0 ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    return 1;
+
+failed:
+    printf("[error][network] mock_guild_application_action_db_failed guild=%u "
+           "requester=%u target=%u type=%u error=%s\n",
+           guild.guildId, requester ? requester->roleId : 0,
+           action ? action->roleId : 0, action ? action->type : 0,
+           vm_mysql_last_error());
+    if (transactionStarted)
+        vm_mysql_exec("ROLLBACK");
+    return 0;
+}
+
+static u32 vm_net_mock_build_guild_application_action_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_guild_application_action action;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 guildId = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 requesterRank = 0;
+    u8 result = 0;
+
+    memset(&action, 0, sizeof(action));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_guild_application_action(request, requestLen, &action))
+    {
+        return 0;
+    }
+    result = vm_net_mock_apply_guild_application_action(&action, role,
+                                                         &guildId, &requesterRank);
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 33, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", action.type))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_guild_application_action requester=%u guild=%u rank=%u "
+           "target=%u type=%u valid=%u result=%u response=10/33 resp=%u "
+           "evidence=JianghuOL.CBE:0x010402BC+0x01040318+0x0104094A+0x01040AA8\n",
+           role ? role->roleId : 0, guildId, requesterRank,
+           action.roleId, action.type, action.valid ? 1u : 0u, result, pos);
     return pos;
 }
 
@@ -33506,6 +34169,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    /* Leave-guild reuses 10/22 {id=roleId}, so split it before the ordinary
+     * 10/22 {id=guildId} detail request. */
+    hookedLen = vm_net_mock_build_guild_leave_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-guild-leave", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     /* Joined guild information uses 10/23 {id=guildId}.  Keep this parser-backed
      * handler before the legacy broad role_action23 fallback, which only returns
      * result+id and leaves HandleFactionInfoResponse without its faction blob. */
@@ -33583,6 +34255,28 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-guild-apply", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    /* 10/32 is the in-scene guild recruitment list, not the title role list.
+     * Handle it here before the legacy kind/subtype fallback near login. */
+    hookedLen = vm_net_mock_build_guild_application_page_response(request, requestLen,
+                                                                   out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-guild-application-page",
+                                  request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    /* The generic type fallback rewrites type=1/2 replies to subtype 26/20.
+     * Applicant approval/rejection must remain 10/33 for HandleRankingResponse. */
+    hookedLen = vm_net_mock_build_guild_application_action_response(request, requestLen,
+                                                                     out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-guild-application-action",
+                                  request, requestLen, hookedLen);
         return hookedLen;
     }
 
