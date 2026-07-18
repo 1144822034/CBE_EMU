@@ -3255,7 +3255,8 @@ enum
     VM_NET_MOCK_GUILD_PAGE_MAX = 32,
     VM_NET_MOCK_GUILD_NAME_SIZE = 32,
     VM_NET_MOCK_GUILD_ROLE_NAME_SIZE = 32,
-    VM_NET_MOCK_GUILD_TEXT_SIZE = 128
+    VM_NET_MOCK_GUILD_TEXT_SIZE = 128,
+    VM_NET_MOCK_GUILD_NOTICE_MAX_BYTES = 60
 };
 
 typedef struct
@@ -18604,6 +18605,113 @@ static bool vm_net_mock_find_friend_role_seed_by_role_id(
     return false;
 }
 
+/* Recruitment and friend-list actions use a persistent role id, not
+ * necessarily an actor id from the observer's current scene.  In particular,
+ * the guild recruitment page may show the current role or an online role from
+ * another scene.  Keep this resolver separate from the nearby resolver so a
+ * scene-node id is never silently treated as a global role id. */
+static bool vm_net_mock_find_online_role_seed_by_role_id(
+    u32 roleId, vm_net_mock_scene_role_seed *seedOut)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+
+    if (seedOut)
+        memset(seedOut, 0, sizeof(*seedOut));
+    if (roleId == 0)
+        return false;
+
+    while (session != NULL)
+    {
+        if (session->roleOnline && session->onlinePresenceValid &&
+            vm_mock_service_session_presence_is_recent(session) &&
+            session->onlineRoleId == roleId)
+        {
+            if (seedOut)
+            {
+                seedOut->actorId = roleId;
+                seedOut->x = session->onlineX;
+                seedOut->y = session->onlineY;
+                seedOut->job = session->onlineJob ? session->onlineJob : 1;
+                seedOut->sex = session->onlineSex <= 1 ? session->onlineSex : 0;
+                seedOut->level = session->onlineLevel ? session->onlineLevel : 1;
+                seedOut->hp = session->onlineHp;
+                seedOut->hpMax = session->onlineHpMax;
+                seedOut->mp = session->onlineMp;
+                seedOut->mpMax = session->onlineMpMax;
+                seedOut->roleName = session->onlineRoleName[0] ?
+                                    session->onlineRoleName : "Player";
+                seedOut->titleText = session->onlineRoleTitle[0] ?
+                                     session->onlineRoleTitle : "";
+                seedOut->titleBadge = session->onlineRoleTitleBadge[0] ?
+                                      session->onlineRoleTitleBadge : "";
+                seedOut->stateText = "Online";
+                seedOut->session = session;
+            }
+            return true;
+        }
+        session = session->next;
+    }
+    return false;
+}
+
+static bool vm_net_mock_find_player_info_seed_by_actor_id(
+    const char *scene, u32 actorId, vm_net_mock_scene_role_seed *seedOut,
+    const char **scopeOut)
+{
+    vm_net_mock_role_state *activeRole = NULL;
+    vm_mock_service_client_session *activeSession = NULL;
+
+    if (scopeOut)
+        *scopeOut = "unresolved";
+    if (vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, seedOut))
+    {
+        if (scopeOut)
+            *scopeOut = "nearby";
+        return true;
+    }
+    if (vm_net_mock_find_friend_role_seed_by_role_id(actorId, seedOut))
+    {
+        if (scopeOut)
+            *scopeOut = "friend";
+        return true;
+    }
+    if (vm_net_mock_find_online_role_seed_by_role_id(actorId, seedOut))
+    {
+        if (scopeOut)
+            *scopeOut = "online-role";
+        return true;
+    }
+
+    /* The service can receive a recruitment-profile request before presence
+     * has been refreshed.  Resolve the active persisted role as the final
+     * narrow scope; this is also the row emitted by the legacy 10/32 role-list
+     * response. */
+    activeRole = vm_net_mock_active_role();
+    if (activeRole == NULL || activeRole->roleId != actorId)
+        return false;
+    activeSession = vm_mock_service_get_active_client_session();
+    if (seedOut)
+    {
+        memset(seedOut, 0, sizeof(*seedOut));
+        seedOut->actorId = activeRole->roleId;
+        seedOut->x = activeRole->x;
+        seedOut->y = activeRole->y;
+        seedOut->job = activeRole->job ? activeRole->job : 1;
+        seedOut->sex = activeRole->sex <= 1 ? activeRole->sex : 0;
+        seedOut->level = activeRole->level ? (u16)activeRole->level : 1;
+        seedOut->hp = activeRole->hp;
+        seedOut->hpMax = activeRole->hpMax;
+        seedOut->mp = activeRole->mp;
+        seedOut->mpMax = activeRole->mpMax;
+        seedOut->roleName = activeRole->name[0] ? activeRole->name : "Player";
+        seedOut->stateText = "Online";
+        seedOut->session = activeSession;
+    }
+    if (scopeOut)
+        *scopeOut = "active-role";
+    return true;
+}
+
 /*
  * The surrounding-player action menu is a set of independent client requests,
  * not variants of 2/7.  The sender functions are:
@@ -18722,6 +18830,7 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     const char *jobName = NULL;
     const char *sexName = NULL;
     const char *guildName = "\xce\xde\xb0\xef\xc5\xc9"; /* GBK: 无帮派 */
+    const char *targetScope = "unresolved";
     vm_net_mock_guild_record guild;
 
     memset(&targetSeed, 0, sizeof(targetSeed));
@@ -18731,10 +18840,30 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     memset(factionSexLine, 0, sizeof(factionSexLine));
     memset(&guild, 0, sizeof(guild));
     if (out == NULL || outCap < pos ||
-        !vm_net_mock_is_nearby_player_info_request(request, requestLen, &actorId) ||
-        !vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed))
+        !vm_net_mock_is_nearby_player_info_request(request, requestLen, &actorId))
     {
         return 0;
+    }
+
+    /* Send a parser-matching failure object even if the selected role has gone
+     * offline.  HandleFactionDegreeResponse(10/2) clears the action dialog's
+     * pending flag before it examines result; falling through to the generic
+     * type=2 handler changes the response to 10/20 and leaves the progress bar
+     * running forever. */
+    if (!vm_net_mock_find_player_info_seed_by_actor_id(scene, actorId, &targetSeed,
+                                                       &targetScope))
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 2, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        printf("[warn][network] mock_player_info actor=%u scope=unresolved "
+               "response=10/2 result=0 resp=%u evidence=JianghuOL.CBE:0x010211A8\n",
+               actorId, pos);
+        return pos;
     }
 
     /* The CBE renders the strings as GBK.  Keep fixed labels as explicit GBK
@@ -18793,15 +18922,16 @@ static u32 vm_net_mock_build_nearby_player_info_response(const u8 *request, u32 
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[info][network] mock_nearby_player_info actor=%u name=%s level=%u scene=%s playerinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
+    printf("[info][network] mock_player_info actor=%u scope=%s name=%s level=%u scene=%s playerinfo_len=%u resp=%u evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
            actorId,
+           targetScope,
            targetSeed.roleName ? targetSeed.roleName : "Player",
            targetSeed.level,
            scene ? scene : "-",
            playerInfoLen,
            pos);
-    vm_autotest_note("mock_nearby_player_info actor=%u level=%u response=10/2 evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
-                     actorId, targetSeed.level);
+    vm_autotest_note("mock_player_info actor=%u scope=%s level=%u response=10/2 evidence=JianghuOL.CBE:0x0101A5AA+0x010211A8\n",
+                     actorId, targetScope, targetSeed.level);
     return pos;
 }
 
@@ -19553,7 +19683,8 @@ static bool vm_net_mock_is_guild_page_request(const u8 *request, u32 requestLen,
 }
 
 static bool vm_net_mock_is_guild_member_page_request(const u8 *request, u32 requestLen,
-                                                       u32 *indexOut, u32 *pageSizeOut)
+                                                       u32 *indexOut, u32 *pageSizeOut,
+                                                       u8 *requestSubtypeOut)
 {
     u32 offset = 4;
     u32 index = 0;
@@ -19564,9 +19695,12 @@ static bool vm_net_mock_is_guild_member_page_request(const u8 *request, u32 requ
         *indexOut = 0;
     if (pageSizeOut)
         *pageSizeOut = 0;
+    if (requestSubtypeOut)
+        *requestSubtypeOut = 0;
     if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        offset != requestLen || object.major != 1 || object.kind != 10 || object.subtype != 37 ||
+        offset != requestLen || object.major != 1 || object.kind != 10 ||
+        (object.subtype != 20 && object.subtype != 37) ||
         !vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "index", &index) ||
         !vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "pagesize", &pageSize) ||
         pageSize == 0)
@@ -19579,6 +19713,8 @@ static bool vm_net_mock_is_guild_member_page_request(const u8 *request, u32 requ
         *indexOut = index;
     if (pageSizeOut)
         *pageSizeOut = pageSize;
+    if (requestSubtypeOut)
+        *requestSubtypeOut = object.subtype;
     return true;
 }
 
@@ -19637,7 +19773,7 @@ static bool vm_net_mock_parse_guild_name_request(const u8 *request, u32 requestL
 }
 
 static bool vm_net_mock_is_guild_apply_request(const u8 *request, u32 requestLen,
-                                                u32 *guildIdOut)
+                                                 u32 *guildIdOut)
 {
     u32 offset = 4;
     u32 guildId = 0;
@@ -19655,6 +19791,82 @@ static bool vm_net_mock_is_guild_apply_request(const u8 *request, u32 requestLen
     }
     if (guildIdOut)
         *guildIdOut = guildId;
+    return true;
+}
+
+/* The guild menu uses a two-stage slogan flow.  Selecting "publish notice"
+ * sends an empty 10/35 to load the current text; confirming the editor sends
+ * 10/34 {slogan}.  Both are completed by HandleGuildSloganResult through a
+ * 10/35 response, so keep them in one parser-backed handler. */
+static bool vm_net_mock_parse_guild_slogan_request(const u8 *request, u32 requestLen,
+                                                    bool *publishOut,
+                                                    bool *sloganParsedOut,
+                                                    char *sloganOut, u32 sloganOutSize)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (publishOut)
+        *publishOut = false;
+    if (sloganParsedOut)
+        *sloganParsedOut = false;
+    if (sloganOut != NULL && sloganOutSize > 0)
+        sloganOut[0] = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 10)
+    {
+        return false;
+    }
+    if (object.subtype == 35 && object.payloadLen == 0)
+        return true;
+    if (object.subtype != 34)
+        return false;
+    if (publishOut)
+        *publishOut = true;
+    if (sloganOut != NULL && sloganOutSize > 0 &&
+        vm_net_mock_get_object_string_field(object.payload, object.payloadLen,
+                                            "slogan", sloganOut, sloganOutSize))
+    {
+        if (sloganParsedOut)
+            *sloganParsedOut = true;
+    }
+    /* A malformed publish still belongs to this flow.  Returning a 10/35
+     * failure is required to clear screen+145 instead of falling through to
+     * the service's unhandled-packet assertion. */
+    return true;
+}
+
+static bool vm_net_mock_guild_slogan_is_valid(const char *slogan)
+{
+    size_t length = 0;
+    size_t offset = 0;
+
+    if (slogan == NULL)
+        return false;
+    length = vm_mock_mysql_bounded_strlen(slogan, VM_NET_MOCK_GUILD_TEXT_SIZE);
+    if (length >= VM_NET_MOCK_GUILD_TEXT_SIZE ||
+        length > VM_NET_MOCK_GUILD_NOTICE_MAX_BYTES)
+    {
+        return false;
+    }
+    while (offset < length)
+    {
+        const unsigned char lead = (unsigned char)slogan[offset];
+        if (lead < 0x20u || lead == 0x7fu)
+            return false;
+        if (lead < 0x80u)
+        {
+            ++offset;
+            continue;
+        }
+        if (offset + 1 >= length)
+            return false;
+        const unsigned char trail = (unsigned char)slogan[offset + 1];
+        if (trail < 0x40u || trail == 0x7fu)
+            return false;
+        offset += 2;
+    }
     return true;
 }
 
@@ -19797,6 +20009,7 @@ static u32 vm_net_mock_build_guild_member_page_response(const u8 *request, u32 r
     u32 playerInfoLen = 0;
     u32 objectStart = 0;
     u32 pos = 5;
+    u8 requestSubtype = 0;
     u8 result = 2;
 
     memset(&guild, 0, sizeof(guild));
@@ -19804,7 +20017,8 @@ static u32 vm_net_mock_build_guild_member_page_response(const u8 *request, u32 r
     memset(rows, 0, sizeof(rows));
     memset(playerInfo, 0, sizeof(playerInfo));
     if (out == NULL || outCap < pos ||
-        !vm_net_mock_is_guild_member_page_request(request, requestLen, &index, &pageSize))
+        !vm_net_mock_is_guild_member_page_request(request, requestLen, &index, &pageSize,
+                                                   &requestSubtype))
     {
         return 0;
     }
@@ -19870,15 +20084,63 @@ static u32 vm_net_mock_build_guild_member_page_response(const u8 *request, u32 r
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[info][network] mock_guild_member_page role=%u guild=%u index=%u page_size=%u "
+    printf("[info][network] mock_guild_member_page request=10/%u role=%u guild=%u index=%u page_size=%u "
            "members=%u/%u rows=%u allpgs=%u playerinfo_len=%u result=%u resp=%u "
-           "evidence=JianghuOL.CBE:0x0104214E+0x01041D66+0x01042CB2\n",
-           role ? role->roleId : 0, guild.guildId, index, pageSize,
+           "evidence=JianghuOL.CBE:0x01041502+0x0104214E+0x01041D66\n",
+           requestSubtype, role ? role->roleId : 0, guild.guildId, index, pageSize,
            guild.memberCount, guild.memberLimit, rowCount, totalPages,
            playerInfoLen, result, pos);
     vm_autotest_note("mock_guild_member_page role=%u guild=%u rows=%u response=10/20 "
                      "evidence=JianghuOL.CBE:0x0104214E+0x01041D66\n",
                      role ? role->roleId : 0, guild.guildId, rowCount);
+    return pos;
+}
+
+/* Both the joined-guild member page and the other-guild list use request
+ * 10/20 {index,pagesize}.  Their active screen callbacks deliberately consume
+ * different response subtypes: the member page handles 10/20 while the guild
+ * list handles 10/21.  A packet containing both objects is therefore the only
+ * stateless way to preserve both client flows, including page-one navigation,
+ * without guessing the current UI from server-side timing. */
+static u32 vm_net_mock_build_guild_page_compat_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap)
+{
+    u8 memberPacket[16384];
+    u8 guildPacket[16384];
+    u32 index = 0;
+    u32 pageSize = 0;
+    u32 memberLen = 0;
+    u32 guildLen = 0;
+    u32 pos = 5;
+    u8 requestSubtype = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_guild_page_request(request, requestLen, &index, &pageSize,
+                                           &requestSubtype) ||
+        requestSubtype != 20)
+    {
+        return 0;
+    }
+    memset(memberPacket, 0, sizeof(memberPacket));
+    memset(guildPacket, 0, sizeof(guildPacket));
+    memberLen = vm_net_mock_build_guild_member_page_response(
+        request, requestLen, memberPacket, sizeof(memberPacket));
+    guildLen = vm_net_mock_build_guild_page_response(
+        request, requestLen, guildPacket, sizeof(guildPacket));
+    if (memberLen <= 5 || guildLen <= 5 ||
+        pos + (memberLen - 5) + (guildLen - 5) > outCap)
+    {
+        return 0;
+    }
+    memcpy(out + pos, memberPacket + 5, memberLen - 5);
+    pos += memberLen - 5;
+    memcpy(out + pos, guildPacket + 5, guildLen - 5);
+    pos += guildLen - 5;
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    printf("[info][network] mock_guild_page_compat request=10/20 index=%u page_size=%u "
+           "objects=2 member=10/20 guild=10/21 resp=%u "
+           "evidence=JianghuOL.CBE:0x01041502+0x0103FC00+0x010420B8\n",
+           index, pageSize, pos);
     return pos;
 }
 
@@ -20388,8 +20650,104 @@ static u32 vm_net_mock_build_guild_apply_response(const u8 *request, u32 request
     return pos;
 }
 
+static u32 vm_net_mock_build_guild_slogan_response(const u8 *request, u32 requestLen,
+                                                     u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_guild_record guild;
+    char slogan[VM_NET_MOCK_GUILD_TEXT_SIZE];
+    char sloganHex[VM_NET_MOCK_GUILD_NOTICE_MAX_BYTES * 2 + 1];
+    char query[512];
+    size_t sloganLen = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 rank = 0;
+    u8 result = 0;
+    bool publish = false;
+    bool sloganParsed = false;
+
+    memset(&guild, 0, sizeof(guild));
+    memset(slogan, 0, sizeof(slogan));
+    memset(sloganHex, 0, sizeof(sloganHex));
+    memset(query, 0, sizeof(query));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_guild_slogan_request(request, requestLen,
+                                                &publish, &sloganParsed,
+                                                slogan, sizeof(slogan)))
+    {
+        return 0;
+    }
+
+    if (role != NULL &&
+        vm_net_mock_guild_find_role_membership(role->roleId, &guild, &rank) &&
+        guild.guildId != 0 && vm_net_mock_guild_find_by_id(guild.guildId, &guild))
+    {
+        /* member_rank 1 is the guild leader and 2 is management.  The client
+         * normally exposes this action only to those ranks, but enforce the
+         * same boundary server-side for forged 10/34 requests. */
+        if (rank > 0 && rank <= 2)
+        {
+            result = 1;
+            if (publish)
+            {
+                sloganLen = vm_mock_mysql_bounded_strlen(slogan, sizeof(slogan));
+                if (!sloganParsed || !vm_net_mock_guild_slogan_is_valid(slogan) ||
+                    (sloganLen != 0 &&
+                     vm_mysql_hex_encode(slogan, sloganLen,
+                                         sloganHex, sizeof(sloganHex)) == 0))
+                {
+                    result = 0;
+                }
+                else
+                {
+                    snprintf(query, sizeof(query),
+                             "UPDATE guilds SET notice=X'%s' WHERE guild_id=%u",
+                             sloganHex, guild.guildId);
+                    if (!vm_mysql_exec(query))
+                    {
+                        printf("[error][network] mock_guild_slogan_db_failed guild=%u role=%u error=%s\n",
+                               guild.guildId, role->roleId, vm_mysql_last_error());
+                        result = 0;
+                    }
+                    else
+                    {
+                        memcpy(guild.notice, slogan, sloganLen + 1);
+                    }
+                }
+            }
+        }
+        else
+        {
+            result = 2;
+        }
+    }
+    else
+    {
+        /* Result 2 has a dedicated permission/not-in-guild message in
+         * HandleGuildSloganResult; all result paths clear the wait flag. */
+        result = 2;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 10, 35, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        (result == 1 &&
+         !vm_net_mock_put_object_string(out, outCap, &pos, "slogan", guild.notice)))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_guild_slogan action=%s role=%u guild=%u rank=%u "
+           "result=%u bytes=%u response=10/35 resp=%u "
+           "evidence=JianghuOL.CBE:0x0103C830+0x01040FCE+0x0104149E\n",
+           publish ? "publish" : "load",
+           role ? role->roleId : 0, guild.guildId, rank, result,
+           result == 1 ? (u32)strlen(guild.notice) : 0, pos);
+    return pos;
+}
+
 static bool vm_net_mock_is_friend_page_request(const u8 *request, u32 requestLen,
-                                                u32 *indexOut, u8 *pageSizeOut)
+                                                 u32 *indexOut, u8 *pageSizeOut)
 {
     u32 offset = 4;
     u32 index = 0;
@@ -32457,6 +32815,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_guild_page_compat_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-guild-page-compat", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_guild_page_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -32496,6 +32861,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-guild-apply", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_guild_slogan_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-guild-slogan", request, requestLen, hookedLen);
         return hookedLen;
     }
 
