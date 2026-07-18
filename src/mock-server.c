@@ -3024,7 +3024,7 @@ enum
     VM_NET_MOCK_ROLE_DEFAULT_ID = 10001,
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
-    VM_NET_MOCK_ROLE_DEFAULT_MONEY = 1000,
+    VM_NET_MOCK_ROLE_DEFAULT_MONEY = 0,
     VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT = 10,
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 5,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
@@ -14040,7 +14040,9 @@ static u32 vm_net_mock_scene_payload_start(const u8 *data, u32 len)
 enum
 {
     /* RegisterDisplayName(0x0100EEE0) owns four 36-byte dynamic label slots. */
-    VM_NET_MOCK_SCENE_NPCINFO_MAX = 4
+    VM_NET_MOCK_SCENE_NPCINFO_MAX = 4,
+    VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID = 20022,
+    VM_NET_MOCK_TEST_TASK_ID = 900001
 };
 
 typedef struct
@@ -14471,6 +14473,20 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
             seed.y = 125;
             snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "e_monkey.actor");
             snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xd0\xa1\xba\xef\xd7\xd3"); /* 小猴子 */
+            seeds[count++] = seed;
+        }
+        if (count < seedCap)
+        {
+            /* Service-side task test actor.  Keep it on the same audited
+             * walkable strip as 欧冶子 / 小猴子 so first-login and teleport
+             * scene catalogs expose one identical interaction target. */
+            memset(&seed, 0, sizeof(seed));
+            seed.actorId = VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID;
+            seed.x = 300;
+            seed.y = 125;
+            snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_man1.actor");
+            snprintf(seed.displayName, sizeof(seed.displayName), "%s",
+                     "\xc8\xce\xce\xf1\xca\xb9\xd5\xdf"); /* 任务使者 */
             seeds[count++] = seed;
         }
         return count;
@@ -18533,6 +18549,210 @@ static bool vm_net_mock_is_npc_dialog_request(const u8 *request, u32 requestLen,
     return true;
 }
 
+typedef struct
+{
+    u8 state;
+    u8 progress1;
+    u8 progress2;
+    bool found;
+    bool invalid;
+} vm_net_mock_task_state_row;
+
+static bool vm_net_mock_task_state_mysql_row(void *contextValue,
+                                             unsigned int columnCount,
+                                             const char *const *values,
+                                             const size_t *lengths)
+{
+    vm_net_mock_task_state_row *row = (vm_net_mock_task_state_row *)contextValue;
+    u32 state = 0;
+    u32 progress1 = 0;
+    u32 progress2 = 0;
+
+    if (row == NULL || row->found || columnCount != 3 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &state) || state > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &progress1) || progress1 > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &progress2) || progress2 > 0xffu)
+    {
+        if (row)
+            row->invalid = true;
+        return true;
+    }
+    row->state = (u8)state;
+    row->progress1 = (u8)progress1;
+    row->progress2 = (u8)progress2;
+    row->found = true;
+    return true;
+}
+
+static bool vm_net_mock_task_state_load(u32 roleId, u32 taskId,
+                                        vm_net_mock_task_state_row *rowOut)
+{
+    char accountHex[129];
+    char query[512];
+    vm_net_mock_task_state_row row;
+    bool queryOk = false;
+
+    if (rowOut)
+        memset(rowOut, 0, sizeof(*rowOut));
+    if (roleId == 0 || taskId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
+        return false;
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT task_state,progress1,progress2 FROM account_role_tasks "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
+             accountHex, roleId, taskId);
+    queryOk = vm_mysql_query(query, vm_net_mock_task_state_mysql_row, &row);
+    if (!queryOk &&
+        strcmp(vm_mysql_last_error(), "MySQL socket send failed") == 0)
+    {
+        /* A stale persistent socket is common after an idle map session.  A
+         * SELECT is safe to replay because this failure happens before any row
+         * callback.  Without the retry, login can briefly report tasknum=0 and
+         * offer an already accepted task again. */
+        printf("[warn][network] mock_task_mysql_reconnect role=%u task=%u reason=socket-send-failed\n",
+               roleId, taskId);
+        memset(&row, 0, sizeof(row));
+        queryOk = vm_mysql_query(query, vm_net_mock_task_state_mysql_row, &row);
+    }
+    if (!queryOk || row.invalid)
+    {
+        printf("[error][network] mock_task_mysql_load_failed role=%u task=%u error=%s invalid=%u\n",
+               roleId, taskId, vm_mysql_last_error(), row.invalid ? 1u : 0u);
+        return false;
+    }
+    if (rowOut)
+        *rowOut = row;
+    return true;
+}
+
+static bool vm_net_mock_task_accept(u32 roleId, u32 taskId)
+{
+    char accountHex[129];
+    char query[768];
+
+    if (roleId == 0 || taskId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_tasks"
+             "(account_id,role_id,task_id,task_state,progress1,progress2) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u,1,0,0) "
+             "ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP",
+             accountHex, roleId, taskId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_task_state_store(u32 roleId, u32 taskId, u8 state)
+{
+    char accountHex[129];
+    char query[640];
+
+    if (roleId == 0 || taskId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
+        return false;
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_tasks SET task_state=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
+             state, accountHex, roleId, taskId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_task_delete(u32 roleId, u32 taskId)
+{
+    char accountHex[129];
+    char query[640];
+
+    if (roleId == 0 || taskId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_tasks "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u "
+             "AND task_state IN (1,2)",
+             accountHex, roleId, taskId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_append_test_task_record(u8 *out, u32 outCap, u32 *pos,
+                                                u8 state, u8 progress1, u8 progress2)
+{
+    /* ParseItemDataFields(0x01046D24) consumes this exact tagged sequence.
+     * Type 1 + id 65535 deliberately keeps the test task active without
+     * accidentally matching ordinary inventory changes. */
+    return vm_net_mock_seq_put_u32(out, outCap, pos, VM_NET_MOCK_TEST_TASK_ID) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xb2\xe2\xca\xd4\xc8\xce\xce\xf1") && /* 测试任务 */
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xc8\xce\xce\xf1\xca\xb9\xd5\xdf") && /* 任务使者 */
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xc8\xce\xce\xf1\xca\xb9\xd5\xdf") &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 1) &&
+           vm_net_mock_seq_put_u32(out, outCap, pos, 65535) &&
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xb2\xe2\xca\xd4\xc6\xbe\xd6\xa4") && /* 测试凭证 */
+           vm_net_mock_seq_put_u8(out, outCap, pos, progress1) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 1) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_u32(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_string(out, outCap, pos, "") &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, progress2) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, state);
+}
+
+static bool vm_net_mock_append_test_task_candidate_record(u8 *out, u32 outCap,
+                                                          u32 *pos)
+{
+    /* DeserializeRoleInfo(0x01046E00) expands this stream into one 76-byte
+     * available-task row.  scene_refresh_interact_prompt_types(0x01017C6C)
+     * compares the second string (row+37) with scene-node+68 and assigns
+     * prompt type 2, the client's normal exclamation mark. */
+    return vm_net_mock_seq_put_u32(out, outCap, pos, VM_NET_MOCK_TEST_TASK_ID) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0) &&
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xb2\xe2\xca\xd4\xc8\xce\xce\xf1") && /* 测试任务 */
+           vm_net_mock_seq_put_string(out, outCap, pos,
+                                      "\xc8\xce\xce\xf1\xca\xb9\xd5\xdf") && /* 任务使者 */
+           vm_net_mock_seq_put_u8(out, outCap, pos, 1);
+}
+
+static bool vm_net_mock_append_task_state_object(u8 *out, u32 outCap, u32 *pos,
+                                                 u32 taskId, u8 state)
+{
+    u8 taskState[16];
+    u32 taskStateLen = 0;
+    u32 objectStart = 0;
+
+    memset(taskState, 0, sizeof(taskState));
+    if (!vm_net_mock_seq_put_u32(taskState, sizeof(taskState), &taskStateLen, taskId) ||
+        !vm_net_mock_seq_put_u8(taskState, sizeof(taskState), &taskStateLen, state) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 6, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "tasknum", 1) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "taskstate",
+                                    taskState, (u16)taskStateLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static bool vm_net_mock_task_read_tagged_u32(const u8 *data, u32 dataLen, u32 *valueOut)
+{
+    if (valueOut)
+        *valueOut = 0;
+    if (data == NULL || dataLen != 6 || data[0] != 0 || data[1] != 4)
+        return false;
+    if (valueOut)
+    {
+        *valueOut = ((u32)data[2] << 24) | ((u32)data[3] << 16) |
+                    ((u32)data[4] << 8) | (u32)data[5];
+    }
+    return true;
+}
+
 static const char *vm_net_mock_npc_dialog_text(u32 actorId)
 {
     switch (actorId)
@@ -18541,6 +18761,8 @@ static const char *vm_net_mock_npc_dialog_text(u32 actorId)
         return "\xd6\xfd\xbd\xa3\xbd\xb2\xbe\xbf\xbb\xf0\xba\xf2\xba\xcd\xb2\xc4\xc1\xcf\xa3\xac\xc9\xd9\xcf\xc0\xc8\xf4\xd3\xd0\xb1\xf8\xc6\xf7\xc9\xcf\xb5\xc4\xca\xc2\xa3\xac\xbf\xc9\xd2\xd4\xc0\xb4\xd5\xd2\xce\xd2\xa1\xa3";
     case 20021: /* 小猴子 */
         return "\xd6\xa8\xd6\xa8\xa3\xa1\xd0\xa1\xba\xef\xd7\xd3\xb3\xe5\xc4\xe3\xd5\xa3\xc1\xcb\xd5\xa3\xd1\xdb\xa1\xa3";
+    case VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID: /* 任务使者 */
+        return "\xc9\xd9\xcf\xc0\xa3\xac\xce\xd2\xd5\xe2\xc0\xef\xd3\xd0\xd2\xbb\xcf\xee\xc8\xce\xce\xf1\xbf\xc9\xd2\xd4\xb9\xa9\xc4\xe3\xb2\xe2\xca\xd4\xa1\xa3";
     case 20090: /* 王朝：04临安王朝.xse 的常态对白 */
         return "\xbf\xbf\xa3\xac\xc0\xcf\xb4\xf3\xb0\xae\xcc\xfd\xb0\xfc\xb9\xab\xb4\xab\xa3\xac\xbe\xcd\xd3\xb2\xb1\xc6\xce\xd2\xc3\xc7\xb8\xc4\xc1\xcb\xc3\xfb\xd7\xd6\xc8\xc3\xcb\xfb\xd2\xb2\xb9\xfd\xb9\xfd\xb0\xfc\xb9\xab\xf1\xab\xa1\xa3";
     case 20091: /* 马汉：04临安马汉.xse 的常态对白 */
@@ -18564,6 +18786,11 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     u32 totalCount = 0;
     u32 dynamicCount = 0;
     u32 seedCount = 0;
+    vm_net_mock_role_state *activeRole = NULL;
+    vm_net_mock_task_state_row taskState;
+    bool taskAlreadyAccepted = false;
+    bool taskCompletedNow = false;
+    bool showTaskOption = false;
     u8 dialog[512];
     u32 dialogLen = 0;
     u32 pos = 5;
@@ -18588,20 +18815,81 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
     dialogText = vm_net_mock_npc_dialog_text(actorId);
+    memset(&taskState, 0, sizeof(taskState));
+    if (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID)
+    {
+        activeRole = vm_net_mock_active_role();
+        if (activeRole != NULL &&
+            vm_net_mock_task_state_load(activeRole->roleId,
+                                        VM_NET_MOCK_TEST_TASK_ID,
+                                        &taskState) &&
+            taskState.found)
+        {
+            taskAlreadyAccepted = true;
+            if (taskState.state == 1 &&
+                vm_net_mock_task_state_store(activeRole->roleId,
+                                             VM_NET_MOCK_TEST_TASK_ID, 2))
+            {
+                taskState.state = 2;
+                taskCompletedNow = true;
+                dialogText =
+                    "\xb2\xe2\xca\xd4\xc4\xbf\xb1\xea\xd2\xd1\xcd\xea\xb3\xc9\xa3\xac\xc7\xeb\xd4\xd9\xb4\xce"
+                    "\xd3\xeb\xce\xd2\xbd\xbb\xcc\xb8\xcc\xe1\xbd\xbb\xc8\xce\xce\xf1\xa1\xa3"; /* 测试目标已完成，请再次与我交谈提交任务。 */
+            }
+            else if (taskState.state == 2)
+            {
+                showTaskOption = true;
+                dialogText =
+                    "\xd5\xe2\xcf\xee\xb2\xe2\xca\xd4\xc8\xce\xce\xf1\xd2\xd1\xcd\xea\xb3\xc9\xa3\xac\xbf\xc9\xd2\xd4"
+                    "\xcc\xe1\xbd\xbb\xc1\xcb\xa1\xa3"; /* 这项测试任务已完成，可以提交了。 */
+            }
+            else
+            {
+                dialogText =
+                    "\xd5\xe2\xcf\xee\xb2\xe2\xca\xd4\xc8\xce\xce\xf1\xd2\xd1\xbe\xad\xbd\xe1\xca\xf8\xa1\xa3"; /* 这项测试任务已经结束。 */
+            }
+        }
+        else
+        {
+            showTaskOption = true;
+        }
+    }
 
     /* ParseNPCDialogData(0x010380E8) consumes the raw sequence as:
-     * dialog-kind:u8, main-text:string, option-count:u8, button-count:u8.
-     * Start with a text-only page. The client supplies its ordinary Back button,
-     * so zero server options/buttons closes locally and does not invent a second
-     * request contract before task-choice packets have been recovered. */
+     * dialog-kind:u8, main-text:string, option-count:u8, then each option as
+     * display-type:u8/name:string/action:u8/value:u32/description:string,
+     * followed by button-count:u8.  The parser stores action at option+44;
+     * task_hall_activate_selected_entry(0x010492B0) switches that byte and only
+     * action 4 enters the 6/10 task-detail path.  A completed task exposes the
+     * same action again; the client derives request state 3 from its active row
+     * and subsequently sends 6/4 to commit it. */
     memset(dialog, 0, sizeof(dialog));
     if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
         !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen, dialogText) ||
-        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
-        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0))
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen,
+                                actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID &&
+                                showTaskOption ? 1 : 0))
     {
         return 0;
     }
+    if (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption)
+    {
+        if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
+            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                        taskAlreadyAccepted
+                                            ? "\xcc\xe1\xbd\xbb\xb2\xe2\xca\xd4\xc8\xce\xce\xf1" /* 提交测试任务 */
+                                            : "\xbd\xd3\xca\xdc\xb2\xe2\xca\xd4\xc8\xce\xce\xf1") || /* 接受测试任务 */
+            !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
+            !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
+                                     VM_NET_MOCK_TEST_TASK_ID) ||
+            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                        "\xb2\xe9\xbf\xb4\xc8\xce\xce\xf1\xcf\xea\xc7\xe9")) /* 查看任务详情 */
+        {
+            return 0;
+        }
+    }
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0))
+        return 0;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 1, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "hidebtn", 0) ||
@@ -18610,19 +18898,366 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    if (taskCompletedNow &&
+        !vm_net_mock_append_task_state_object(out, outCap, &pos,
+                                              VM_NET_MOCK_TEST_TASK_ID, 2))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, taskCompletedNow ? 2 : 1);
 
-    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u dialog_len=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8\n",
+    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action4)+0x0104726C(case6)\n",
            actorId,
            index,
            matchedSeed && matchedSeed->displayName[0] ? matchedSeed->displayName : "-",
            matchedSeed && matchedSeed->scriptName[0] ? matchedSeed->scriptName : "-",
            scene ? scene : "-",
            matchedSeed ? 1u : 0u,
+           actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u,
+           taskAlreadyAccepted ? 1u : 0u,
+           taskState.state,
+           taskCompletedNow ? 1u : 0u,
+           actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 4u : 0u,
            dialogLen,
+           taskCompletedNow ? 2u : 1u,
            pos);
     vm_autotest_note("mock_npc_dialog actor=%u index=%u catalog_match=%u dialog_len=%u response=26/1 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8\n",
                      actorId, index, matchedSeed ? 1u : 0u, dialogLen);
+    return pos;
+}
+
+static bool vm_net_mock_append_info_banner_result5_object(u8 *out, u32 outCap,
+                                                          u32 *pos);
+
+static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
+                                           u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    vm_net_mock_request_object trailingObject;
+    vm_net_mock_role_state *activeRole = NULL;
+    vm_net_mock_task_state_row taskState;
+    const u8 *taskBlob = NULL;
+    u16 taskBlobLen = 0;
+    u32 taskId = 0;
+    u8 requestState = 0;
+    u8 taskInfo[512];
+    u32 taskInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 result = 1;
+    u8 responseSubtype = 0;
+    u8 responseObjectCount = 1;
+    bool hasInfoBannerPrefix = false;
+    bool hasInfoBannerTail = false;
+    const char *action = NULL;
+    const char *evidence = "JianghuOL.CBE:0x0104726C";
+
+    if (request == NULL || requestLen < 9 || out == NULL || outCap < pos ||
+        request[0] != 'W' || request[1] != 'T' || request[4] != 1 ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        return 0;
+    }
+    /* The real completion path flushes its progress-banner request before the
+     * task request: `25/5(empty) + 6/4{taskid}`.  Keep this exception narrow;
+     * other task operations either contain one object or, for 6/11 accept,
+     * carry the empty 25/5 object after the task object. */
+    if (object.major == 1 && object.kind == 0x19 &&
+        object.subtype == 5 && object.payloadLen == 0)
+    {
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &object) ||
+            object.major != 1 || object.kind != 6 || object.subtype != 4 ||
+            offset != requestLen)
+        {
+            return 0;
+        }
+        hasInfoBannerPrefix = true;
+    }
+    if (object.major != 1 || object.kind != 6 ||
+        (object.subtype != 4 && object.subtype != 6 && object.subtype != 7 &&
+         object.subtype != 10 && object.subtype != 11 &&
+         object.subtype != 12))
+    {
+        return 0;
+    }
+    if (offset != requestLen)
+    {
+        if (object.subtype != 11 ||
+            !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &trailingObject) ||
+            trailingObject.major != 1 || trailingObject.kind != 0x19 ||
+            trailingObject.subtype != 5 || trailingObject.payloadLen != 0 ||
+            offset != requestLen)
+        {
+            return 0;
+        }
+        hasInfoBannerTail = true;
+    }
+
+    memset(&taskState, 0, sizeof(taskState));
+    memset(taskInfo, 0, sizeof(taskInfo));
+
+    /* Preserve the request ordering.  result=4 is the normal 25/5 completion
+     * consumed by net_handle_info_banner_state; the following 6/16 then removes
+     * the completed task through HandleTaskCompleteResult(0x01038E6E). */
+    if (hasInfoBannerPrefix)
+    {
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        responseObjectCount += 1;
+    }
+
+    if (object.subtype == 4)
+    {
+        if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                 "taskid", &taskId) ||
+            taskId != VM_NET_MOCK_TEST_TASK_ID)
+        {
+            return 0;
+        }
+        activeRole = vm_net_mock_active_role();
+        if (activeRole == NULL)
+            return 0;
+        if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
+            taskState.found && taskState.state == 2 &&
+            vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))
+        {
+            result = 0;
+        }
+        responseSubtype = 16;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
+                                         responseSubtype,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        {
+            return 0;
+        }
+        if (result == 0)
+        {
+            u32 totalExp = activeRole->exp;
+            if (!vm_net_mock_put_object_u32(out, outCap, &pos, "taskid", taskId) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp",
+                                            vm_net_mock_role_last_level_exp(totalExp)) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "curexp",
+                                            vm_net_mock_role_next_level_start_exp(totalExp)) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "persentexp",
+                                            vm_net_mock_role_exp_percent(totalExp)) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", 100) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", 100))
+            {
+                return 0;
+            }
+        }
+        else if (!vm_net_mock_put_object_string(
+                     out, outCap, &pos, "text",
+                     "\xc8\xce\xce\xf1\xc9\xd0\xce\xb4\xcd\xea\xb3\xc9\xa1\xa3")) /* 任务尚未完成。 */
+        {
+            return 0;
+        }
+        action = "commit";
+        evidence = "JianghuOL.CBE:0x01047CFC+0x01038E6E+0x010479D2";
+    }
+    else if (object.subtype == 7)
+    {
+        if (!vm_net_mock_get_object_number_field(object.payload,
+                                                 object.payloadLen,
+                                                 "taskid", &taskId) ||
+            taskId != VM_NET_MOCK_TEST_TASK_ID)
+        {
+            return 0;
+        }
+        activeRole = vm_net_mock_active_role();
+        if (activeRole == NULL)
+            return 0;
+        if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
+            taskState.found &&
+            (taskState.state == 1 || taskState.state == 2) &&
+            vm_net_mock_task_delete(activeRole->roleId, taskId))
+        {
+            result = 0;
+        }
+        responseSubtype = 7;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
+                                         responseSubtype, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        {
+            return 0;
+        }
+        action = "abandon";
+        evidence = "JianghuOL.CBE:0x01047DAC+0x0104778C+0x0104726C(case7)";
+    }
+    else if (object.subtype == 10)
+    {
+        const char *detailText =
+            "\xd5\xe2\xca\xc7\xd2\xbb\xcf\xee\xc8\xce\xce\xf1\xcf\xb5\xcd\xb3\xb2\xe2\xca\xd4"
+            "\xc8\xce\xce\xf1\xa1\xa3\xc8\xb7\xc8\xcf\xba\xf3\xbd\xab\xbc\xd3\xc8\xeb\xc8\xce"
+            "\xce\xf1\xc1\xd0\xb1\xed\xa1\xa3"; /* 这是一项任务系统测试任务。确认后将加入任务列表。 */
+        if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                 "taskid", &taskId) ||
+            taskId != VM_NET_MOCK_TEST_TASK_ID)
+        {
+            return 0;
+        }
+        (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                              "state", &requestState);
+        taskInfoLen = (u32)strlen(detailText);
+        responseSubtype = 10;
+        /* ReqTaskInfo(0x01038D2C) forwards the field to SendTaskHallReq
+         * (0x01038CB2), which uses the response object's string accessor at
+         * +0x40 and copies the returned text directly.  This is not a tagged
+         * stream like 6/1 taskinfo or 26/1 dialog. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
+                                         responseSubtype, &objectStart) ||
+            !vm_net_mock_put_object_string(out, outCap, &pos, "info", detailText))
+        {
+            return 0;
+        }
+        result = 0;
+        action = "detail";
+        evidence = "JianghuOL.CBE:0x010491FA+0x01038CB2+0x0104726C(case10)";
+    }
+    else if (object.subtype == 12)
+    {
+        static const char destinationText[] =
+            "\xc8\xce\xce\xf1\xc4\xbf\xb1\xea\xa3\xba\xd3\xeb\xc5\xee\xc0\xb3\xa1\xaa\xd6\xfd\xbd\xa3\xb9\xc8\xb5\xc4"
+            "\xc8\xce\xce\xf1\xca\xb9\xd5\xdf\xbd\xbb\xcc\xb8\xa1\xa3"; /* 任务目标：与蓬莱-铸剑谷的任务使者交谈。 */
+        if (!vm_net_mock_get_object_number_field(object.payload,
+                                                 object.payloadLen,
+                                                 "id", &taskId) ||
+            taskId != VM_NET_MOCK_TEST_TASK_ID)
+        {
+            return 0;
+        }
+        activeRole = vm_net_mock_active_role();
+        if (activeRole == NULL ||
+            !vm_net_mock_task_state_load(activeRole->roleId, taskId,
+                                         &taskState) ||
+            !taskState.found ||
+            (taskState.state != 1 && taskState.state != 2))
+        {
+            return 0;
+        }
+        taskInfoLen = (u32)strlen(destinationText);
+        responseSubtype = 12;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
+                                         responseSubtype, &objectStart) ||
+            !vm_net_mock_put_object_string(out, outCap, &pos, "text",
+                                           destinationText))
+        {
+            return 0;
+        }
+        result = 0;
+        action = "destination";
+        evidence = "JianghuOL.CBE:0x01047E0C+0x01047F0A+0x0104726C(case12)";
+    }
+    else
+    {
+        const char *fieldName = object.subtype == 11 ? "taskinfo" : "taskid";
+        bool taskIdParsed =
+            vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                             fieldName, &taskId);
+        if (!taskIdParsed &&
+            vm_net_mock_get_object_blob_field(object.payload, object.payloadLen,
+                                              fieldName, &taskBlob, &taskBlobLen))
+        {
+            taskIdParsed = vm_net_mock_task_read_tagged_u32(taskBlob,
+                                                            taskBlobLen,
+                                                            &taskId);
+        }
+        if (!taskIdParsed || taskId != VM_NET_MOCK_TEST_TASK_ID)
+        {
+            return 0;
+        }
+        activeRole = vm_net_mock_active_role();
+        if (activeRole == NULL)
+            return 0;
+
+        if (object.subtype == 11)
+        {
+            responseSubtype = 11;
+            result = vm_net_mock_task_accept(activeRole->roleId, taskId) ? 0 : 1;
+            if (result == 0 &&
+                (!vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) ||
+                 !taskState.found))
+            {
+                result = 1;
+            }
+            if (result == 0 &&
+                !vm_net_mock_append_test_task_record(taskInfo, sizeof(taskInfo),
+                                                     &taskInfoLen,
+                                                     taskState.state,
+                                                     taskState.progress1,
+                                                     taskState.progress2))
+            {
+                return 0;
+            }
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6, 11,
+                                             &objectStart) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+                (result == 0 &&
+                 !vm_net_mock_put_object_raw(out, outCap, &pos, "taskinfo",
+                                             taskInfo, (u16)taskInfoLen)))
+            {
+                return 0;
+            }
+            action = "accept";
+            evidence = "JianghuOL.CBE:0x01047A7C+0x0104726C(case11)";
+        }
+        else
+        {
+            responseSubtype = 6;
+            /* SendTaskStateUpdate(0x01046E64) uses 6/6 as the completed-state
+             * notification.  Echo the persisted state in the parser-backed
+             * taskstate stream so the active task entry updates in place. */
+            result = vm_net_mock_task_state_store(activeRole->roleId, taskId, 2) ? 0 : 1;
+            if (!vm_net_mock_seq_put_u32(taskInfo, sizeof(taskInfo), &taskInfoLen, taskId) ||
+                !vm_net_mock_seq_put_u8(taskInfo, sizeof(taskInfo), &taskInfoLen,
+                                        result == 0 ? 2 : 1) ||
+                !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6, 6,
+                                             &objectStart) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "tasknum", 1) ||
+                !vm_net_mock_put_object_raw(out, outCap, &pos, "taskstate",
+                                            taskInfo, (u16)taskInfoLen))
+            {
+                return 0;
+            }
+            action = "state";
+            evidence = "JianghuOL.CBE:0x01046E64+0x0104726C(case6)";
+        }
+    }
+
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    if (hasInfoBannerTail)
+    {
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        responseObjectCount += 1;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
+    printf("[info][network] mock_task action=%s task=%u role=%u request_subtype=%u response_subtype=%u request_state=%u result=%u request_info_prefix=%u request_info_tail=%u response_objects=%u taskinfo_len=%u resp=%u evidence=%s\n",
+           action ? action : "-",
+           taskId,
+           activeRole ? activeRole->roleId : 0,
+           object.subtype,
+           responseSubtype,
+           requestState,
+           result,
+           hasInfoBannerPrefix ? 1u : 0u,
+           hasInfoBannerTail ? 1u : 0u,
+           responseObjectCount,
+           taskInfoLen,
+           pos,
+           evidence);
+    vm_autotest_note("mock_task action=%s task=%u role=%u result=%u info_prefix=%u info_tail=%u response_objects=%u taskinfo_len=%u request=6/%u response=6/%u evidence=%s\n",
+                     action ? action : "-", taskId,
+                     activeRole ? activeRole->roleId : 0,
+                     result, hasInfoBannerPrefix ? 1u : 0u,
+                     hasInfoBannerTail ? 1u : 0u,
+                     responseObjectCount, taskInfoLen,
+                     object.subtype, responseSubtype,
+                     evidence);
     return pos;
 }
 
@@ -24761,12 +25396,41 @@ static bool vm_net_mock_is_scene_task_subset_followup_request(const u8 *request,
 
 static bool vm_net_mock_append_taskinfo_empty1_object(u8 *out, u32 outCap, u32 *pos)
 {
+    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
+    vm_net_mock_task_state_row taskState;
+    u8 taskInfo[256];
+    u32 taskInfoLen = 0;
+    u8 taskNum = 0;
     u32 objectStart = 0;
+
+    memset(&taskState, 0, sizeof(taskState));
+    memset(taskInfo, 0, sizeof(taskInfo));
+    if (activeRole != NULL &&
+        vm_net_mock_task_state_load(activeRole->roleId,
+                                    VM_NET_MOCK_TEST_TASK_ID,
+                                    &taskState) &&
+        taskState.found &&
+        (taskState.state == 1 || taskState.state == 2))
+    {
+        if (!vm_net_mock_append_test_task_record(taskInfo, sizeof(taskInfo),
+                                                 &taskInfoLen,
+                                                 taskState.state,
+                                                 taskState.progress1,
+                                                 taskState.progress2))
+        {
+            return false;
+        }
+        taskNum = 1;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 1, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "taskinfo", NULL, 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "tasknum", taskNum) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "taskinfo",
+                                    taskInfo, (u16)taskInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_task_list role=%u tasknum=%u taskinfo_len=%u evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24\n",
+           activeRole ? activeRole->roleId : 0, taskNum, taskInfoLen);
     return true;
 }
 
@@ -24793,18 +25457,47 @@ static bool vm_net_mock_append_tasktypes_empty13_object(u8 *out, u32 outCap, u32
     return true;
 }
 
-static bool vm_net_mock_append_taskaction_empty14_object(u8 *out, u32 outCap, u32 *pos)
+static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos)
 {
+    vm_net_mock_role_state *activeRole = vm_net_mock_active_role();
+    vm_net_mock_task_state_row taskState;
+    const char *scene = vm_net_mock_current_scene_name();
+    u8 taskInfo[128];
+    u32 taskInfoLen = 0;
+    u8 taskNum = 0;
     u32 objectStart = 0;
+
+    memset(&taskState, 0, sizeof(taskState));
+    memset(taskInfo, 0, sizeof(taskInfo));
+    if (activeRole != NULL && vm_net_mock_scene_is_penglai02(scene) &&
+        vm_net_mock_task_state_load(activeRole->roleId,
+                                    VM_NET_MOCK_TEST_TASK_ID,
+                                    &taskState) &&
+        !taskState.found)
+    {
+        if (!vm_net_mock_append_test_task_candidate_record(taskInfo, sizeof(taskInfo),
+                                                           &taskInfoLen))
+        {
+            return false;
+        }
+        taskNum = 1;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 6, 14, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "action", 0))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "tasknum", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "tasknum", taskNum))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "taskinfo", NULL, 0))
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "taskinfo",
+                                    taskInfo, (u16)taskInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_task_candidates role=%u scene=%s tasknum=%u taskinfo_len=%u accepted=%u evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)\n",
+           activeRole ? activeRole->roleId : 0,
+           scene ? scene : "-",
+           taskNum,
+           taskInfoLen,
+           taskState.found ? 1u : 0u);
     return true;
 }
 
@@ -32334,26 +33027,12 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
         *objectCount = (u8)(*objectCount + added);
     }
 
-    if (!vm_net_mock_append_taskinfo_empty1_object(out, outCap, pos))
-        return false;
-    *objectCount += 1;
-
     /*
-     * Case 13 loops over six tasktype slots. Each slot is a tagged i8 type id
-     * followed by a len16 C string; use raw field payload so the stream cursor
-     * starts directly at the first record.
+     * Create/refresh scene nodes before dispatching task rows.  The client only
+     * recomputes node+326 from task response cases (6/1, 6/6 and 6/14); sending
+     * those rows before 2/10 leaves a newly created NPC without its prompt icon
+     * until a later task refresh.
      */
-    if (includeTaskLists)
-    {
-        if (!vm_net_mock_append_tasktypes_empty13_object(out, outCap, pos))
-            return false;
-        *objectCount += 1;
-
-        if (!vm_net_mock_append_taskaction_empty14_object(out, outCap, pos))
-            return false;
-        *objectCount += 1;
-    }
-
     if (includeActorOther)
     {
         if (preferSceneNpcOther || vm_net_mock_env_u32("CBE_SCENE_NPC_OTHERINFO", 0) != 0)
@@ -32371,6 +33050,26 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
         {
             return false;
         }
+        *objectCount += 1;
+    }
+
+    if (!vm_net_mock_append_taskinfo_empty1_object(out, outCap, pos))
+        return false;
+    *objectCount += 1;
+
+    /*
+     * Case 13 loops over six tasktype slots. Each slot is a tagged i8 type id
+     * followed by a len16 C string; use raw field payload so the stream cursor
+     * starts directly at the first record.
+     */
+    if (includeTaskLists)
+    {
+        if (!vm_net_mock_append_tasktypes_empty13_object(out, outCap, pos))
+            return false;
+        *objectCount += 1;
+
+        if (!vm_net_mock_append_taskaction14_object(out, outCap, pos))
+            return false;
         *objectCount += 1;
     }
 
@@ -35108,6 +35807,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-npc-dialog", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_task_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-task", request, requestLen, hookedLen);
         return hookedLen;
     }
 

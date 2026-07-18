@@ -46,9 +46,9 @@ dialog-kind:u8
 main-text:string
 option-count:u8
 repeat option-count:
-  option-type:u8
+  display-type:u8
   name:string
-  flag:u8
+  action:u8
   value:u32
   description:string
 button-count:u8

@@ -1589,7 +1589,15 @@ void vm_DF_WriteInt(a1, a2, value)
 // buffPtr,size
 int vm_DF_Malloc_IN(int a1, int a2)
 {
-    int ptr = vm_malloc(a2);
+    /*
+     * DreamFactory's slot allocator is also used for zero-length arrays.  The
+     * CBE text layout code immediately stores the first line offset after
+     * DF_Malloc_IN(slot, 0), so the target ABI must leave a writable sentinel
+     * in the slot instead of NULL.  Keep direct vm_malloc(0) semantics intact
+     * and normalize only this slot-based allocator contract.  The sentinel is
+     * a 16-bit line offset, so reserve at least two logical bytes.
+     */
+    int ptr = vm_malloc(a2 > 0 ? (u32)a2 : 2u);
     vm_set_var(a1, ptr);
     return vm_set_call_result(1);
 }

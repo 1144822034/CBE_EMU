@@ -29,6 +29,14 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_guild
 
 脚本只新增帮派、成员和申请表，不会修改已有账号、角色或好友数据。
 
+已有数据库升级到任务功能时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_tasks.sql
+```
+
+脚本只新增按账号、角色保存的任务状态表，不会修改已有角色数据。
+
 密码由命令行交互输入。服务运行时的默认密码与本机开发环境一致，也可以通过以下环境变量覆盖，避免修改源代码：
 
 - `CBE_MYSQL_HOST`
@@ -45,6 +53,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_guild
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
 - `account_role_equipment`：按角色和装备槽保存的装备。
 - `account_role_backpack`：按角色和背包槽保存的物品。
+- `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。

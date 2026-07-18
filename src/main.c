@@ -8797,7 +8797,10 @@ static bool hook_vm_memory_manager_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         DEBUG_PRINT("[call]DF_Malloc_IN(%x,%x)\n", tmp1, tmp2);
-        tmp3 = vm_malloc(tmp2);
+        /* Match vm_DF_Malloc_IN: zero-length DreamFactory arrays still own a
+         * writable sentinel.  JianghuOL's LayoutTextWithWordWrap relies on
+         * this when clearing a task-detail text control with an empty string. */
+        tmp3 = vm_malloc(tmp2 != 0 ? tmp2 : 2u);
         vm_set_var(tmp1, tmp3);
         tmp1 = 1;
         uc_reg_write(MTK, UC_ARM_REG_R0, &tmp1);
