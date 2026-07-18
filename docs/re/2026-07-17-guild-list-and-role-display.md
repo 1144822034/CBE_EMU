@@ -268,24 +268,152 @@ ida_evidence:
 
 ```text
 1/10/35 {}                  -> 1/10/35 { result:u8, slogan:string }
-1/10/34 { slogan:string }   -> 1/10/35 { result:u8, slogan:string }
+1/10/34 { slogan:string }   -> 1/10/34 { result:u8 }
 ```
 
-菜单确认第 4 项后，`DispatchRoleAction` 先发送空 `10/35` 读取当前公告。成功响应会清
-`screen+145` 等待标记、打开公告编辑界面并把 `slogan` 复制到编辑缓冲区。编辑确认时，
-`SendRoleActionEvent` 的 subtype 34 分支发送 `slogan`；客户端仍只通过 subtype 35 的
-`HandleGuildSloganResult` 接收结果。因此把空 `10/35` 当通用 ACK，或者对 `10/34`
-原样回 subtype 34，都会留下等待或绕过公告页面状态机。
+菜单确认第 4 项后，`DispatchRoleAction` 先发送空 `10/35` 读取当前公告。成功响应由
+`HandleGuildSloganResult(0x01040FCE)` 清 `screen+145` 等待标记、打开公告编辑界面并把
+`slogan` 复制到编辑缓冲区。编辑确认时，`HandleChatSceneInput(0x0103FC7E)` 调用
+`SendRoleActionEvent` 的 subtype 34 分支发送 `slogan`；其结果由独立的
+`HandleChatChannelResult(0x0103FE7E)` 处理。该处理器只接受 subtype 34，只读取
+`result`，先清全局等待状态和 `screen+145`，再显示结果并返回帮派管理界面。把发布结果
+改写成 `10/35` 会绕过该处理器，造成公告已经写入数据库但进度条无法消失。
 
 服务端只允许 `member_rank=1/2`（帮主/管理）读取和修改公告；提交内容按 GBK 字符边界
-验证且最多 60 字节，与 MySQL `guilds.notice VARBINARY(60)` 一致。成功后写入数据库并在
-响应中回显最终文本；无权限使用 `result=2`，畸形内容或存储失败使用失败结果。所有已识别
-路径都返回 `10/35`，保证客户端清除等待标记。
+验证且最多 60 字节，与 MySQL `guilds.notice VARBINARY(60)` 一致。读取成功在 `10/35`
+响应中回显最终文本，读取无权限使用 `result=2`；发布成功只回 `10/34 {result=1}`，发布
+无权限使用 `result=3`，畸形内容或存储失败使用失败结果。这样每条路径都进入对应客户端
+处理器并清除等待标记。
 
-协议级回归使用帮主账号验证了空公告读取、17 字节临时公告发布、MySQL 持久化和原公告
-恢复；响应分别为 34/51/34 字节，WT 对象长度均精确结束在包尾。运行日志为
-`tmp/mock-service-19090.20260718-095331.stdout.log`，包含
-`mock_guild_slogan action=load|publish ... response=10/35`，且没有新的未处理 `10/34|35`。
+早期协议级回归虽验证了公告读取、临时公告发布和 MySQL 持久化，但只检查了服务端响应，
+没有覆盖客户端发布结果分派，因而错误地接受了 `10/34 -> 10/35`。运行时复测出现“发布后
+进度条不消失”后，补充 IDA 取证确认发布必须原样响应 `10/34 {result}`；回归同时检查
+读取 `10/35` 与发布 `10/34` 的 subtype、字段集合、WT 对象边界和数据库持久化。
+新构建的服务级回归使用 `guest00023/10023` 验证了当前公告读取、18 字节临时公告发布、
+畸形空发布 `result=0`、MySQL 复读及原 5 字节公告恢复；发布成功和失败响应均为 23 字节
+`10/34 {result}`。回归日志为 `tmp/mock-service-19090.20260718-113536.stdout.log`；回归后
+正式服务以 PID `31344` 重启，日志为 `tmp/mock-service-19090.20260718-113907.stdout.log`，
+唯一监听 `127.0.0.1:19090`，`CBMS` ping 返回 `CBMR/version=1/bodyLength=0`。
+
+## 设定位阶
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  rank_request_sender: `HandleFactionActionInput(0x01042198)`
+  replace_request_sender: `SendPKChallengeReq(0x010420E6)`
+  rank_page_parser: `HandleGuildRankResponse(0x01041130)`
+  action_result_parser: `HandleLoginResponse(0x010428D0)`
+  faction_dispatch: `DispatchFactionNetEvents(0x01042CB2)`
+
+成员管理与位阶表共用请求：
+
+```text
+1/10/37 { index:u32, pagesize:u8 }
+  -> 1/10/20 { result,cnum,mnum,allpgs,num,playerinfo }
+  -> 1/10/37 { result,flag,allpgs,num,rank }
+```
+
+`rank` 的每行顺序为 `u32 positionId, string positionName, string occupantName,
+u32 occupantRoleId`。第一个 `positionId` 和其他 blob 行一样必须使用 raw BE32；后续数值
+使用带类型的顺序字段。空位的 `occupantName` 必须是 GBK“无”、`occupantRoleId=0`；客户端
+在 `0x010413B6` 用“名称不等于无且 ID 大于 0”判断该位阶是否已经有人。当前持久化模型提供
+两个唯一干部位阶：`1=帮主`、`2=管理`，`3=普通成员`。响应 `flag` 返回当前操作者位阶，
+用于客户端限制对自己和帮主位阶的操作。
+
+位阶变更的三条真实请求及响应均只需要 `result:u8`：
+
+```text
+1/10/38 { aid:u32, id:u32 }
+  -> 1/10/38 { result:u8 }       // 把普通成员设到空位
+
+1/10/39 { dname:string, did:u32, drank:u32,
+          uname:string, uid:u32, urank:u32 }
+  -> 1/10/39 { result:u8 }       // 新旧成员原子交换位阶
+
+1/10/41 { uname:string, uid:u32, urank:u32 }
+  -> 1/10/41 { result:u8 }       // 帮主让位
+```
+
+服务端只允许当前帮主执行变更，并在每次操作前重新确认目标仍属于同一帮派、请求名称和旧
+位阶没有过期。`10/38` 拒绝重复占位；`10/39` 在同一条 SQL 中把原管理降为普通成员并
+提升目标；`10/41` 在一个 MySQL 事务中同时交换两人的 `guild_members.member_rank`，并
+更新 `guilds.leader_account_id/leader_role_id/leader_role_name`。所有被识别的畸形请求也
+返回同 subtype 的失败结果，避免客户端等待标记残留。
+
+协议回归临时加入两个普通成员，依次验证 `10/37` 双对象、`10/38` 空位任命、`10/39`
+管理替换和 `10/41` 帮主让位；响应结果均为 1，数据库位阶与帮主外键同步变化。测试结束
+后原帮主和成员数据已恢复。日志位于
+`tmp/mock-service-19090.20260718-102855.stdout.log`，包含
+`mock_guild_rank_page`、`mock_guild_rank_compat` 和三条 `mock_guild_rank_action`。
+
+### 位阶入口的权限门 `10/19`
+
+phase: guild rank dialog gate
+status: validated
+
+request:
+  wt_kind: 10
+  wt_subtype: 19
+  objects: `1/10/19`, empty payload
+  key_fields: none
+  sample_len: 9
+  packet_log: `tmp/mock-service-19090.20260718-110755.stdout.log`
+
+response:
+  wt_kind: 10
+  wt_subtype: 19
+  objects: `1/10/19`
+  fields: `result:u8`
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  function: `DispatchRoleAction(0x01040AD8)`, call at `0x01040B36`
+  dispatch_case: `DispatchGuildNetEvents(0x0104149E)`, subtype 19
+  parser_reads: `HandleDialogResult(0x01041094)` reads only `result`; entry clears
+    the global network wait state and `screen+145`
+  failure_branch: `result=2` displays “权限不足”; other failures display “操作失败”
+
+运行时中，设定位阶入口完成 `10/37` 后紧接着发送 9 字节空对象 `10/19`。旧服务未识别
+该包，记录 `unhandled wt=10/19 len=9` 后触发服务端断言，客户端因此一直显示进度条。
+现在 `builtin-guild-dialog-gate` 对当前帮主返回 `result=1`，由客户端调用自身的后续回调；
+非帮主或已经离帮返回 `result=2`。真正的位阶写入仍由 `10/38/39/41` 独立复核，权限门
+本身不改客户端或数据库状态。
+
+服务级回归对同一份 9 字节请求验证：帮主 `guest00023/10023` 收到 `result=1`，未入帮
+角色 `guest00024/10024` 收到 `result=2`；两份响应均为 23 字节单对象 `10/19`，服务继续
+监听且没有未处理断言。日志位于
+`tmp/mock-service-19090.20260718-111956.stdout.log`，handled source 为
+`builtin-guild-dialog-gate`。
+
+## 逐出帮派 `10/40`
+
+ida_evidence:
+  binary: `江湖OL.CBE`
+  request_sender: `ProcessBattleSceneInput(0x01042D18)`, call at `0x01042D92`
+  response_dispatcher: `HandleFactionBattleResult(0x01042F16)`
+  response_parser: `HandleBattleMenuResult(0x01042E3E)`
+
+成员页选择“逐出”并确认后发送：
+
+```text
+1/10/40 { id:u32, rid:u32 }
+  -> 1/10/40 { result:u8 }
+```
+
+`id` 是目标角色 ID，`rid` 是成员页当前行记录的旧位阶。客户端结果码为：`1` 操作成功
+并重新请求当前成员页，`2` 权限不足，`3` 目标已经离帮，`4` 目标是干部、必须先降为
+帮众，其余值显示“操作失败”。服务端据此只允许当前帮主逐出同帮的普通成员
+（`member_rank=3`），同时拒绝逐出帮主/管理、过期位阶、跨帮目标和无效角色。
+
+成功路径在 MySQL 事务中按 `guild_id + account_id + role_id + member_rank=3` 精确删除
+`guild_members` 行，并在提交前复查该成员关系已消失。畸形 `10/40` 仍返回同 subtype 的
+失败结果，以保证客户端清除等待状态；操作日志为 `mock_guild_kick`。
+
+服务级协议回归使用 `guest00023/10023` 作为帮主、临时加入
+`guest00024/10024`：普通成员逐出返回 `1` 且成员行消失；逐出管理返回 `4` 且成员保留；
+普通成员越权返回 `2`；过期位阶与缺少 `rid` 的畸形包均返回 `5`；目标删除后重试返回
+`3`。测试结束后临时成员关系已删除，数据库恢复为原状态。六条分支的服务日志位于
+`tmp/mock-service-19090.20260718-110008.stdout.log`。
 
 ## 验证
 
@@ -296,7 +424,8 @@ ida_evidence:
   `00000004` 开头；
 - 已入帮管理页的 `10/23 {id=4}` 返回 `10/23`, `resp=104`，完整 `faction`
   长 69 字节，前缀为 `00000004 0007 BADAC1FAB0EF 00`；
-- `10/37 {index=1,pagesize=10}` 返回单对象 `10/20`, `resp=121`；歧义的
+- `10/37 {index=1,pagesize=10}` 返回双对象 `10/20 + 10/37`；三成员回归夹具下
+  `resp=306`，位阶表包含两个位置且 `flag=1`；歧义的
   `10/20 {index=1,pagesize=10}` 返回双对象 `10/20 + 10/21`, `resp=226`；明确的
   `10/21` 仍为单对象 `10/21`, `resp=110`。三个 WT 包的对象长度都精确结束在包尾；
   成员数据长 33 字节，
