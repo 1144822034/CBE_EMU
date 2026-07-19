@@ -40683,18 +40683,19 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     }
 
     printf("[info][mock-service] listening=%s:%u\n", resolvedBindHost, port);
-    if (g_mockAdminPort == port && strcmp(resolvedBindHost, "127.0.0.1") == 0)
+    if (g_mockAdminPort == port)
     {
         printf("[error][mock-admin] port conflicts with game service port=%u\n", g_mockAdminPort);
     }
     else
     {
-        adminSocket = vm_mock_admin_open_listener(g_mockAdminPort);
+        adminSocket = vm_mock_admin_open_listener(g_mockAdminBindHost, g_mockAdminPort);
         if (adminSocket == VM_MOCK_SERVICE_INVALID_SOCKET)
-            printf("[error][mock-admin] listen 127.0.0.1:%u failed; game service remains available\n",
-                   g_mockAdminPort);
+            printf("[error][mock-admin] listen %s:%u failed; game service remains available\n",
+                   g_mockAdminBindHost, g_mockAdminPort);
         else
-            printf("[info][mock-admin] listening=http://127.0.0.1:%u/\n", g_mockAdminPort);
+            printf("[info][mock-admin] listening=http://%s:%u/\n",
+                   g_mockAdminBindHost, g_mockAdminPort);
     }
     for (;;)
     {

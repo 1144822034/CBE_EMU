@@ -296,28 +296,30 @@ static bool vm_mock_admin_header_value(const char *request, size_t headerLen,
     return false;
 }
 
-static bool vm_mock_admin_request_is_local_origin(const char *request, size_t headerLen)
+static bool vm_mock_admin_request_has_allowed_origin(const char *request, size_t headerLen)
 {
     char host[128];
     char origin[192];
-    char loopbackWithPort[64];
-    char localhostWithPort[64];
-    char originLoopback[96];
-    char originLocalhost[96];
+    char expectedHttpOrigin[192];
+    char expectedHttpsOrigin[192];
+    const char *cursor = NULL;
 
-    snprintf(loopbackWithPort, sizeof(loopbackWithPort), "127.0.0.1:%u", g_mockAdminPort);
-    snprintf(localhostWithPort, sizeof(localhostWithPort), "localhost:%u", g_mockAdminPort);
-    if (!vm_mock_admin_header_value(request, headerLen, "Host", host, sizeof(host)) ||
-        (strcmp(host, loopbackWithPort) != 0 && strcmp(host, localhostWithPort) != 0 &&
-         strcmp(host, "127.0.0.1") != 0 && strcmp(host, "localhost") != 0))
-    {
+    if (!vm_mock_admin_header_value(request, headerLen, "Host", host, sizeof(host)))
         return false;
+    for (cursor = host; *cursor != 0; ++cursor)
+    {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch <= 0x20 || ch >= 0x7f || ch == '/' || ch == '\\' ||
+            ch == '?' || ch == '#' || ch == '@')
+        {
+            return false;
+        }
     }
     if (!vm_mock_admin_header_value(request, headerLen, "Origin", origin, sizeof(origin)))
         return true;
-    snprintf(originLoopback, sizeof(originLoopback), "http://%s", loopbackWithPort);
-    snprintf(originLocalhost, sizeof(originLocalhost), "http://%s", localhostWithPort);
-    return strcmp(origin, originLoopback) == 0 || strcmp(origin, originLocalhost) == 0;
+    snprintf(expectedHttpOrigin, sizeof(expectedHttpOrigin), "http://%s", host);
+    snprintf(expectedHttpsOrigin, sizeof(expectedHttpsOrigin), "https://%s", host);
+    return strcmp(origin, expectedHttpOrigin) == 0 || strcmp(origin, expectedHttpsOrigin) == 0;
 }
 
 static int vm_mock_admin_send_response(vm_mock_service_socket client,
@@ -2869,7 +2871,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(&page,
                                "\" required><input type=\"password\" name=\"password\" maxlength=\"63\" placeholder=\"新密码\" required>"
                                "<button type=\"submit\">保存新密码</button></form></div></div>"
-                               "<p class=\"foot\">安全限制：后台仅绑定 127.0.0.1；所有请求有长度限制，页面不包含外部脚本。</p>"
+                               "<p class=\"foot\">安全限制：后台需要密码验证；所有请求有长度限制，页面不包含外部脚本。</p>"
                                "</section></div></main></body></html>");
 
     if (page.truncated)
@@ -3285,10 +3287,10 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL, "请求不完整。\n");
         return 0;
     }
-    if (!vm_mock_admin_request_is_local_origin(request, headerLen))
+    if (!vm_mock_admin_request_has_allowed_origin(request, headerLen))
     {
         vm_mock_admin_send_response(client, "403 Forbidden", NULL, NULL,
-                                    "只允许从本机后台页面访问。\n");
+                                    "Host 或 Origin 校验失败。\n");
         return 0;
     }
     body = request + headerLen;
@@ -3459,10 +3461,11 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
     return 0;
 }
 
-static vm_mock_service_socket vm_mock_admin_open_listener(u16 port)
+static vm_mock_service_socket vm_mock_admin_open_listener(const char *bindHost, u16 port)
 {
     vm_mock_service_socket server = VM_MOCK_SERVICE_INVALID_SOCKET;
     struct sockaddr_in address;
+    const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
     int reuse = 1;
 
     server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -3476,7 +3479,11 @@ static vm_mock_service_socket vm_mock_admin_open_listener(u16 port)
     memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (!vm_mock_service_resolve_ipv4_host(resolvedBindHost, 1, &address.sin_addr))
+    {
+        vm_mock_service_socket_close(server);
+        return VM_MOCK_SERVICE_INVALID_SOCKET;
+    }
     if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0 ||
         listen(server, 4) != 0)
     {
