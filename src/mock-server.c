@@ -1386,6 +1386,33 @@ static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *ou
     return copyLen;
 }
 
+static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode)
+{
+    FILE *fp = NULL;
+
+    if (path == NULL || path[0] == 0 || mode == NULL || mode[0] == 0)
+        return NULL;
+
+    /* ASCII and already-UTF-8 paths should keep working unchanged. */
+    fp = fopen(path, mode);
+    if (fp != NULL)
+        return fp;
+
+#ifdef CBE_HOST_UTF8_PATHS
+    /* Packet/SCE/XSE strings use GBK bytes. Linux filenames use UTF-8, so a
+     * path containing a Chinese resource name must be converted at the final
+     * host-filesystem boundary. */
+    {
+        char utf8Path[1024];
+        memset(utf8Path, 0, sizeof(utf8Path));
+        gbk_to_utf8((u8 *)path, (u8 *)utf8Path, sizeof(utf8Path));
+        if (utf8Path[0] != 0 && strcmp(utf8Path, path) != 0)
+            fp = fopen(utf8Path, mode);
+    }
+#endif
+    return fp;
+}
+
 static FILE *vm_net_mock_fopen_response_file(const char *path)
 {
     FILE *fp = NULL;
@@ -1393,7 +1420,7 @@ static FILE *vm_net_mock_fopen_response_file(const char *path)
     if (path == NULL || path[0] == 0)
         return NULL;
 
-    fp = fopen(path, "rb");
+    fp = vm_net_mock_fopen_game_path(path, "rb");
     if (fp != NULL)
         return fp;
 
@@ -1410,12 +1437,12 @@ static FILE *vm_net_mock_fopen_response_file(const char *path)
         {
             *slash = 0;
             snprintf(tryPath, sizeof(tryPath), "%s\\%s", exePath, path);
-            fp = fopen(tryPath, "rb");
+            fp = vm_net_mock_fopen_game_path(tryPath, "rb");
             if (fp != NULL)
                 return fp;
 
             snprintf(tryPath, sizeof(tryPath), "%s\\..\\%s", exePath, path);
-            fp = fopen(tryPath, "rb");
+            fp = vm_net_mock_fopen_game_path(tryPath, "rb");
             if (fp != NULL)
                 return fp;
         }
@@ -6482,7 +6509,7 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
         for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
         {
             snprintf(candidate, sizeof(candidate), pathFormats[i], scene, suffix);
-            FILE *fp = fopen(candidate, "rb");
+            FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
             if (fp == NULL)
                 continue;
             if (pathOut && pathOutCap != 0)
@@ -6581,7 +6608,7 @@ static bool vm_net_mock_client_data_resource_exists(const char *name,
     {
         FILE *fp = NULL;
         snprintf(candidate, sizeof(candidate), pathFormats[i], name);
-        fp = fopen(candidate, "rb");
+        fp = vm_net_mock_fopen_game_path(candidate, "rb");
         if (fp == NULL)
             continue;
         fclose(fp);
@@ -19853,7 +19880,11 @@ static bool vm_net_mock_validate_xse_task_resources(void)
     bool foundTestTaskNpc = false;
 
     if (!vm_net_mock_load_task_catalog())
+    {
+        printf("[error][network] mock_xse_catalog_validate task_catalog=missing "
+               "required=web/fs/JHOnlineData/task.dsh\n");
         return false;
+    }
     for (u32 i = 0; i < sizeof(scripts) / sizeof(scripts[0]); ++i)
     {
         vm_net_mock_xse_summary summary;
@@ -19904,6 +19935,20 @@ static bool vm_net_mock_validate_xse_task_resources(void)
            swordValleyScene, swordValleyCount, swordValleyTotal,
            foundBlacksmith ? 1u : 0u, foundMonkey ? 1u : 0u,
            foundTestTaskNpc ? 1u : 0u);
+    if (loadedCount != sizeof(scripts) / sizeof(scripts[0]) ||
+        copperStageCount != 1 || copperStageTotal != 1 || !foundGuoJing ||
+        swordValleyCount != 2 || swordValleyTotal != 2 ||
+        !foundBlacksmith || !foundMonkey || foundTestTaskNpc)
+    {
+        printf("[error][network] mock_xse_task_validate result=failed "
+               "scripts=%u/%u task_refs=%u copper=%u/%u guojing=%u "
+               "sword=%u/%u blacksmith=%u monkey=%u test_npc=%u\n",
+               loadedCount, (u32)(sizeof(scripts) / sizeof(scripts[0])),
+               taskRefCount, copperStageCount, copperStageTotal,
+               foundGuoJing ? 1u : 0u, swordValleyCount, swordValleyTotal,
+               foundBlacksmith ? 1u : 0u, foundMonkey ? 1u : 0u,
+               foundTestTaskNpc ? 1u : 0u);
+    }
     return loadedCount == sizeof(scripts) / sizeof(scripts[0]) &&
            copperStageCount == 1 && copperStageTotal == 1 && foundGuoJing &&
            swordValleyCount == 2 && swordValleyTotal == 2 &&
@@ -22307,7 +22352,7 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
     for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
     {
         snprintf(candidate, sizeof(candidate), pathFormats[i], name);
-        FILE *fp = fopen(candidate, "rb");
+        FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
         if (fp == NULL)
             continue;
         if (pathOut && pathOutCap != 0)

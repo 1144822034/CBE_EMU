@@ -7312,11 +7312,95 @@ int main(int argc, char *args[])
 #endif
 {
 #ifdef CBE_SERVER_ONLY
+    const char *resourceRoot = getenv("CBE_RESOURCE_ROOT");
+    char originalCwd[1024];
+    char resolvedCwd[1024];
+    bool resourceReady = false;
+
     /* Linux is a standalone authoritative service.  Do not load a client CBE
      * or initialize the Unicorn/LCD emulator before opening the game and web
      * listeners. */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+    originalCwd[0] = 0;
+    resolvedCwd[0] = 0;
+    (void)getcwd(originalCwd, sizeof(originalCwd));
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(args[i], "--resource-root=", 16) == 0 && args[i][16] != 0)
+            resourceRoot = args[i] + 16;
+    }
+    if (resourceRoot != NULL && resourceRoot[0] != 0)
+    {
+        if (chdir(resourceRoot) == 0)
+        {
+            FILE *probe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
+            if (probe == NULL)
+                probe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
+            if (probe != NULL)
+            {
+                fclose(probe);
+                resourceReady = true;
+            }
+        }
+        if (!resourceReady && originalCwd[0] != 0)
+            (void)chdir(originalCwd);
+    }
+    else
+    {
+        FILE *probe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
+        if (probe == NULL)
+            probe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
+        if (probe != NULL)
+        {
+            fclose(probe);
+            resourceReady = true;
+        }
+#ifndef _WIN32
+        if (!resourceReady)
+        {
+            char exePath[1024];
+            ssize_t exeLen = readlink("/proc/self/exe", exePath,
+                                      sizeof(exePath) - 1);
+            if (exeLen > 0)
+            {
+                char *slash = NULL;
+                exePath[exeLen] = 0;
+                slash = strrchr(exePath, '/');
+                if (slash != NULL)
+                {
+                    FILE *exeProbe = NULL;
+                    *slash = 0;
+                    if (chdir(exePath) == 0)
+                    {
+                        exeProbe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
+                        if (exeProbe == NULL)
+                            exeProbe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
+                        if (exeProbe != NULL)
+                        {
+                            fclose(exeProbe);
+                            resourceReady = true;
+                        }
+                    }
+                }
+            }
+            if (!resourceReady && originalCwd[0] != 0)
+                (void)chdir(originalCwd);
+        }
+#endif
+    }
+    if (!resourceReady)
+    {
+        printf("[error][mock-service] resource root unresolved cwd=%s "
+               "required=web/fs/JHOnlineData/task.dsh "
+               "hint=set-CBE_RESOURCE_ROOT-or-copy-web-fs-JHOnlineData\n",
+               originalCwd[0] ? originalCwd : "<unknown>");
+        return -1;
+    }
+    (void)getcwd(resolvedCwd, sizeof(resolvedCwd));
+    printf("[info][mock-service] resource_root=%s source=%s\n",
+           resolvedCwd[0] ? resolvedCwd : "<unknown>",
+           resourceRoot && resourceRoot[0] ? "configured" : "auto");
     vm_mock_service_init_config(argc, args);
     printf("[info][mock-service] starting server-only bind=%s:%u admin=127.0.0.1:%u\n",
            g_mockServiceBindHost, g_mockServicePort, g_mockAdminPort);
