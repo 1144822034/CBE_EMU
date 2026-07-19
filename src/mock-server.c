@@ -4648,6 +4648,7 @@ typedef struct
 {
     u32 skillId;
     u32 effectIndex;
+    u32 learnPrice;
     u32 mpCost;
     int32_t hpChange;
     u32 strengthCoeff;
@@ -4881,6 +4882,7 @@ static void vm_net_mock_sort_skill_catalog(void)
 static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
                                                u32 levelRequired,
                                                u32 effectIndex,
+                                               u32 learnPrice,
                                                u32 mpCost,
                                                int32_t hpChange,
                                                u32 strengthCoeff,
@@ -4903,6 +4905,7 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
     memset(skill, 0, sizeof(*skill));
     skill->skillId = skillId;
     skill->effectIndex = effectIndex;
+    skill->learnPrice = learnPrice;
     skill->mpCost = mpCost;
     skill->hpChange = hpChange;
     skill->strengthCoeff = strengthCoeff;
@@ -5066,6 +5069,7 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
         u32 rawJob = 0xff;
         u32 levelRequired = 1;
         u32 effectIndex = 0;
+        u32 learnPrice = 0;
         u32 mpCost = 0;
         int32_t hpChange = 0;
         u32 strengthCoeff = 0;
@@ -5103,6 +5107,10 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
             case 6:
                 rawJob = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
                 break;
+            case 7:
+                /* skill.dsh `价值`: copper charged by the skill trainer. */
+                learnPrice = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
             case 12:
                 mpCost = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
                 break;
@@ -5126,6 +5134,7 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
 
         if (vm_net_mock_add_skill_catalog_item(skillId, rawJob, levelRequired,
                                                effectIndex,
+                                               learnPrice,
                                                mpCost,
                                                hpChange,
                                                strengthCoeff,
@@ -5156,15 +5165,15 @@ static u32 vm_net_mock_load_skill_catalog(void)
 
     if (skillCount == 0)
     {
-        (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 14, 10,
+        (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 14, 50, 10,
                                                 -130, 50, 0, 0,
                                                 (const u8 *)"\xcd\xf2\xbd\xa3\xd6\xef\xcf\xc9\x31",
                                                 9);
-        (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 1, 20,
+        (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 1, 50, 20,
                                                 -75, 0, 50, 0,
                                                 (const u8 *)"\xb7\xe7\xce\xe8\xc8\xd0\xd0\xd0\x31",
                                                 9);
-        (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 7, 5,
+        (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 7, 50, 5,
                                                 -30, 0, 0, 110,
                                                 (const u8 *)"\xe7\xca\xd1\xd7\xbb\xc3\xb7\xa8\x31",
                                                 9);
@@ -5193,13 +5202,6 @@ static const vm_net_mock_skill_catalog_item *vm_net_mock_find_skill_catalog_item
 }
 
 static const vm_net_mock_skill_catalog_item *vm_net_mock_battle_operate_skill(u32 operate);
-
-static u32 vm_net_mock_role_learned_skill_limit(u32 level)
-{
-    if (level == 0)
-        level = 1;
-    return 1 + level / 5;
-}
 
 typedef struct
 {
@@ -5373,7 +5375,6 @@ static vm_net_mock_role_service_state *vm_net_mock_role_service_state_get(
     vm_net_mock_role_service_load_context context;
     char accountHex[129];
     char query[768];
-    u32 oldSkillLimit = 0;
     u8 rawJob = 0;
 
     if (role == NULL || accountId == NULL || accountId[0] == 0)
@@ -5435,26 +5436,23 @@ static vm_net_mock_role_service_state *vm_net_mock_role_service_state_get(
     state->loaded = true;
     vm_net_mock_role_service_sync_equipment(state, role);
 
-    /* One-time migration: preserve the previous level-derived learned list for
-     * roles that do not yet have relational skill rows.  After this seed, all
-     * additional skills are learned explicitly through a trainer NPC. */
+    /* A role starts with exactly one level-1 profession skill.  Never derive
+     * additional learned skills from the role level: every later skill must be
+     * persisted by an explicit trainer-NPC learning operation. */
     if (state->learnedSkillCount == 0)
     {
-        oldSkillLimit = vm_net_mock_role_learned_skill_limit(role->level);
-        if (oldSkillLimit > VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS)
-            oldSkillLimit = VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS;
         rawJob = vm_net_mock_role_job_to_skill_raw_job(role->job);
-        for (u32 i = 0;
-             i < vm_net_mock_load_skill_catalog() &&
-             state->learnedSkillCount < oldSkillLimit;
-             ++i)
+        for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
         {
             const vm_net_mock_skill_catalog_item *skill =
                 &g_vm_net_mock_skill_catalog[i];
-            if (skill->rawJob != rawJob)
+            if (skill->rawJob != rawJob || skill->levelRequired > 1)
                 continue;
             state->learnedSkillIds[state->learnedSkillCount++] = skill->skillId;
             (void)vm_net_mock_role_service_persist_skill(state, skill->skillId);
+            printf("[info][network] mock_role_skill_seed role=%u job=%u skill=%u policy=starter-only\n",
+                   role->roleId, role->job, skill->skillId);
+            break;
         }
     }
     printf("[info][network] mock_role_service_load account=%s role=%u skills=%u durability_slots=%u invalid=%u\n",
@@ -5574,10 +5572,8 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
                                                      char *previewOut,
                                                      u32 previewCap)
 {
-    u32 total = vm_net_mock_load_skill_catalog();
     u32 pos = 0;
     u32 learned = 0;
-    u32 limit = vm_net_mock_role_learned_skill_limit(role ? role->level : 1);
     vm_net_mock_role_service_state *serviceState =
         vm_net_mock_role_service_state_get(role);
     u8 roleJob = role ? role->job : 1;
@@ -5590,9 +5586,6 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
         previewOut[0] = 0;
     if (out == NULL || outCap == 0)
         return 0;
-    if (limit > VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS)
-        limit = VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS;
-
     if (serviceState != NULL)
     {
         for (u32 i = 0;
@@ -5613,24 +5606,6 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
             ++learned;
         }
     }
-    else
-    {
-        /* Database-disabled fallback keeps the historical level-derived list. */
-        for (u32 i = 0; i < total && learned < limit; ++i)
-        {
-            const vm_net_mock_skill_catalog_item *skill =
-                &g_vm_net_mock_skill_catalog[i];
-            if (skill->rawJob != rawJob)
-                continue;
-            if (!vm_net_mock_seq_put_u32(out, outCap, &pos, skill->skillId))
-                break;
-            if (previewOut && previewCap > 0)
-                vm_net_mock_append_preview_u32(previewOut, previewCap,
-                                               &previewPos, skill->skillId);
-            ++learned;
-        }
-    }
-
     if (learnedCountOut)
         *learnedCountOut = (u8)learned;
     return pos;
@@ -23790,6 +23765,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     const char *optionDescriptions[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     char optionNameStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
     char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
+    char dialogTextStorage[256];
     u32 optionValues[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     u32 serviceValue = 0;
     u32 operation = 0;
@@ -23804,6 +23780,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     bool appendSkills = false;
     const char *action = "invalid";
     u32 result = 0;
+    u32 skillEligibleCount = 0;
+    u32 skillLearnedCount = 0;
+    u32 skillLevelLockedCount = 0;
+    const vm_net_mock_skill_catalog_item *skillNextLocked = NULL;
 
     if (role == NULL || out == NULL || outCap < pos ||
         !vm_net_mock_is_npc_service_dialog_request(request, requestLen,
@@ -23815,6 +23795,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     memset(optionDescriptions, 0, sizeof(optionDescriptions));
     memset(optionNameStorage, 0, sizeof(optionNameStorage));
     memset(optionDescriptionStorage, 0, sizeof(optionDescriptionStorage));
+    memset(dialogTextStorage, 0, sizeof(dialogTextStorage));
     memset(optionValues, 0, sizeof(optionValues));
     operation = serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK;
     value = serviceValue & VM_NET_MOCK_NPC_SERVICE_VALUE_MASK;
@@ -24052,8 +24033,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                      ? "skill-learn"
                      : "skill-list";
         serviceState = vm_net_mock_role_service_state_get(role);
-        dialogText =
-            "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xba"; /* 请选择要学习的技能： */
+        snprintf(dialogTextStorage, sizeof(dialogTextStorage), "%s%u%s",
+                 "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xa8\xb5\xb1\xc7\xb0", /* 请选择要学习的技能（当前 */
+                 role->level,
+                 "\xbc\xb6\xa3\xa9\xa3\xba"); /* 级）： */
+        dialogText = dialogTextStorage;
         if (operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
         {
             const vm_net_mock_skill_catalog_item *skill =
@@ -24065,36 +24049,68 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             }
             else if (skill->levelRequired > role->level)
             {
-                dialogText =
-                    "\xb5\xc8\xbc\xb6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xd1\xa7\xcf\xb0\xa1\xa3"; /* 等级不足，无法学习。 */
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "%s%u%s%s%s%u%s",
+                         "\xb5\xb1\xc7\xb0\xb5\xc8\xbc\xb6", /* 当前等级 */
+                         role->level,
+                         "\xa3\xac", /* ， */
+                         skill->name,
+                         "\xd0\xe8\xd2\xaa", /* 需要 */
+                         skill->levelRequired,
+                         "\xbc\xb6\xa3\xac\xce\xde\xb7\xa8\xd1\xa7\xcf\xb0\xa1\xa3"); /* 级，无法学习。 */
             }
             else if (vm_net_mock_role_service_has_skill(serviceState,
-                                                        skill->skillId))
+                                                         skill->skillId))
             {
                 dialogText =
                     "\xb8\xc3\xbc\xbc\xc4\xdc\xd2\xd1\xbe\xad\xd1\xa7\xbb\xe1\xa1\xa3"; /* 该技能已经学会。 */
             }
+            else if (role->money < skill->learnPrice)
+            {
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "%s%u%s",
+                         "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa", /* 铜钱不足，需要 */
+                         skill->learnPrice,
+                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
+            }
             else if (vm_net_mock_role_service_add_skill(role, skill->skillId))
             {
-                dialogText =
-                    "\xbc\xbc\xc4\xdc\xd1\xa7\xcf\xb0\xb3\xc9\xb9\xa6\xa1\xa3"; /* 技能学习成功。 */
+                role->money -= skill->learnPrice;
+                vm_net_mock_role_db_save("npc-skill-learn");
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "%s%u%s",
+                         "\xbc\xbc\xc4\xdc\xd1\xa7\xcf\xb0\xb3\xc9\xb9\xa6\xa3\xac\xcf\xfb\xba\xc4", /* 技能学习成功，消耗 */
+                         skill->learnPrice,
+                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
                 appendSkills = true;
                 result = 1;
                 serviceState = vm_net_mock_role_service_state_get(role);
             }
         }
-        for (u32 i = 0;
-             i < vm_net_mock_load_skill_catalog() &&
-             optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
-             ++i)
+        for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
         {
             const vm_net_mock_skill_catalog_item *skill =
                 &g_vm_net_mock_skill_catalog[i];
-            if (skill->rawJob != rawJob ||
-                skill->levelRequired > role->level ||
-                skill->skillId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
-                vm_net_mock_role_service_has_skill(serviceState,
+            if (skill->rawJob != rawJob)
+            {
+                continue;
+            }
+            if (vm_net_mock_role_service_has_skill(serviceState,
                                                    skill->skillId))
+            {
+                ++skillLearnedCount;
+                continue;
+            }
+            if (skill->levelRequired > role->level)
+            {
+                ++skillLevelLockedCount;
+                if (skillNextLocked == NULL)
+                    skillNextLocked = skill;
+                continue;
+            }
+            ++skillEligibleCount;
+            if (skill->skillId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+                optionCount >= VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
             {
                 continue;
             }
@@ -24103,7 +24119,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                      "\xd1\xa7\xcf\xb0", skill->name); /* 学习... */
             snprintf(optionDescriptionStorage[optionCount],
                      sizeof(optionDescriptionStorage[optionCount]),
-                     "%s Lv.%u", skill->name, skill->levelRequired);
+                     "%s Lv.%u %u%s", skill->name, skill->levelRequired,
+                     skill->learnPrice, "\xcd\xad\xc7\xae"); /* 铜钱 */
             optionNames[optionCount] = optionNameStorage[optionCount];
             optionDescriptions[optionCount] =
                 optionDescriptionStorage[optionCount];
@@ -24111,9 +24128,29 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE | skill->skillId;
             ++optionCount;
         }
-        if (optionCount == 0 && !appendSkills)
-            dialogText =
-                "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xd4\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3"; /* 当前没有可以学习的技能。 */
+        if (operation != VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE &&
+            optionCount == 0 && !appendSkills)
+        {
+            if (skillNextLocked != NULL)
+            {
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "%s%u%s%s%s%u%s%u%s",
+                         "\xb5\xb1\xc7\xb0", /* 当前 */
+                         role->level,
+                         "\xbc\xb6\xa3\xbb\xcf\xc2\xd2\xbb\xbc\xbc\xc4\xdc", /* 级；下一技能 */
+                         skillNextLocked->name,
+                         "\xd0\xe8\xd2\xaa", /* 需要 */
+                         skillNextLocked->levelRequired,
+                         "\xbc\xb6\xa3\xac\xd1\xa7\xcf\xb0\xb7\xd1\xd3\xc3", /* 级，学习费用 */
+                         skillNextLocked->learnPrice,
+                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
+            }
+            else
+            {
+                dialogText =
+                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xd4\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3"; /* 当前没有可以学习的技能。 */
+            }
+        }
     }
 
     memset(dialog, 0, sizeof(dialog));
@@ -24157,9 +24194,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         ++objectCount;
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_npc_service action=%s opcode=%08x value=%u role=%u result=%u options=%u money=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8\n",
-           action, serviceValue, value, role->roleId, result, optionCount,
-           role->money, objectCount, pos);
+    printf("[info][network] mock_npc_service action=%s opcode=%08x value=%u role=%u job=%u level=%u result=%u options=%u money=%u skill_eligible=%u skill_learned=%u skill_level_locked=%u next_skill=%u next_level=%u next_price=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh\n",
+           action, serviceValue, value, role->roleId, role->job, role->level,
+           result, optionCount, role->money, skillEligibleCount,
+           skillLearnedCount, skillLevelLockedCount,
+           skillNextLocked ? skillNextLocked->skillId : 0,
+           skillNextLocked ? skillNextLocked->levelRequired : 0,
+           skillNextLocked ? skillNextLocked->learnPrice : 0,
+           objectCount, pos);
     return pos;
 }
 

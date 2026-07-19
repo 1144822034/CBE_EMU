@@ -64,17 +64,18 @@ Therefore the server only sends learned skill IDs, but those IDs must come from
 the same raw-job group that the actorinfo job byte selected. Names,
 descriptions, effects, and icons are supplied by the local `skill.dsh`.
 
-## Unlock Rule
+## Learned-Skill Rule
 
-The mock server now computes learned skills from the active role:
+The mock no longer derives learned skills from role level. A role with no
+persisted skill rows is initialized with exactly one level-1 skill for its
+profession. Every later skill is learned explicitly from a skill trainer and
+stored in `account_role_skills`; reaching level 5, 10, 15, and so on does not
+add any skill automatically.
 
-```text
-learned_count = 1 + floor(level / 5)
-```
-
-So level 1 starts with one skill, then new skills unlock at level 5, 10, 15,
-20, and so on. The list is capped by the number of skills available for the
-role's profession.
+The one-time initialization trace is
+`mock_role_skill_seed ... policy=starter-only`. Existing persisted skills are
+left intact because the table does not record whether an older row came from a
+trainer or from the removed level-derived migration.
 
 Response source remains the existing skill-tail object family. `learnednum`
 is read through object getter `+0x48`, so it must be encoded as tagged-u16.
@@ -199,6 +200,26 @@ This matches the actorinfo byte consumed by
 `LoadSkillDataSheet(actor+321)`. It avoids the previous implicit `+1/-1`
 alignment where role DB job values and client skill-sheet job values were easy
 to mix up.
+
+## 2026-07-19 Skill Trainer Conditions
+
+The trainer evaluates each `skill.dsh` row against the active role:
+
+1. raw profession must equal `role_job - 1`;
+2. `等级` must be no greater than the current role level;
+3. the skill ID must not already exist in `account_role_skills`;
+4. the role must have at least the row's `价值` amount in copper.
+
+The client loader at `0x0103550E` independently confirms that the sheet row
+contains `职业`, `ID`, `名称`, `说明`, `等级`, `价值`, and the following usage
+fields. No separate prerequisite-skill column is consumed by that loader, so no
+unproven skill-tree prerequisite is imposed by the mock.
+
+For the observed `guest00023/10027` role, `job=2`, `level=1`, and learned skill
+`101` are all consistent. The next Huanjian row is skill `111`, level `3`, value
+`160`, which explains why a strict level-1 list has zero selectable rows. The
+trainer now reports that exact next condition instead of the ambiguous generic
+empty-list message.
 
 ## 2026-06-28 Empty Spell List Follow-up
 
