@@ -385,7 +385,8 @@ enum
 {
     VM_MOCK_ADMIN_SCENE_FILE_MAX = 512,
     VM_MOCK_ADMIN_ACTOR_FILE_MAX = 1024,
-    VM_MOCK_ADMIN_XSE_FILE_MAX = 512
+    VM_MOCK_ADMIN_XSE_FILE_MAX = 512,
+    VM_MOCK_ADMIN_UPDATE_FILE_MAX = 1400
 };
 
 typedef struct
@@ -414,9 +415,20 @@ static const char g_vm_mock_admin_script[] =
     "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}"
     "if(reset)item.value='';};"
     "category.addEventListener('change',()=>apply(true));apply(false);};"
+    "const setupUpdateFilter=()=>{"
+    "const input=document.querySelector('#update-resource-filter');"
+    "const select=document.querySelector('#update-resource-select');if(!input||!select)return;"
+    "const apply=()=>{const wanted=input.value.trim().toLowerCase();"
+    "for(const option of select.options){if(!option.value)continue;"
+    "const show=!wanted||option.textContent.toLowerCase().includes(wanted);"
+    "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}};"
+    "input.addEventListener('input',apply);apply();};"
     "document.addEventListener('DOMContentLoaded',()=>{"
     "keep('.accounts','cbe-admin-accounts-scroll');"
-    "keep('.scene-list','cbe-admin-scenes-scroll');setupItemFilter();});"
+    "keep('.scene-list','cbe-admin-scenes-scroll');"
+    "keep('.update-left','cbe-admin-update-left-scroll');"
+    "keep('.update-right','cbe-admin-update-right-scroll');"
+    "setupItemFilter();setupUpdateFilter();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -516,13 +528,119 @@ static void vm_mock_admin_render_login(char *response, size_t responseCap,
 }
 
 static int vm_mock_admin_scene_file_compare(const void *leftValue,
-                                            const void *rightValue)
+                                             const void *rightValue)
 {
     const vm_mock_admin_scene_file *left =
         (const vm_mock_admin_scene_file *)leftValue;
     const vm_mock_admin_scene_file *right =
         (const vm_mock_admin_scene_file *)rightValue;
     return strcmp(left->name, right->name);
+}
+
+static bool vm_mock_admin_text_is_valid_utf8(const char *text)
+{
+    const unsigned char *cursor = (const unsigned char *)text;
+
+    if (cursor == NULL)
+        return false;
+    while (*cursor != 0)
+    {
+        if (*cursor < 0x80)
+        {
+            ++cursor;
+            continue;
+        }
+        if (*cursor >= 0xc2 && *cursor <= 0xdf &&
+            cursor[1] >= 0x80 && cursor[1] <= 0xbf)
+        {
+            cursor += 2;
+            continue;
+        }
+        if (*cursor == 0xe0 &&
+            cursor[1] >= 0xa0 && cursor[1] <= 0xbf &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf)
+        {
+            cursor += 3;
+            continue;
+        }
+        if (((*cursor >= 0xe1 && *cursor <= 0xec) ||
+             (*cursor >= 0xee && *cursor <= 0xef)) &&
+            cursor[1] >= 0x80 && cursor[1] <= 0xbf &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf)
+        {
+            cursor += 3;
+            continue;
+        }
+        if (*cursor == 0xed &&
+            cursor[1] >= 0x80 && cursor[1] <= 0x9f &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf)
+        {
+            cursor += 3;
+            continue;
+        }
+        if (*cursor == 0xf0 &&
+            cursor[1] >= 0x90 && cursor[1] <= 0xbf &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf &&
+            cursor[3] >= 0x80 && cursor[3] <= 0xbf)
+        {
+            cursor += 4;
+            continue;
+        }
+        if (*cursor >= 0xf1 && *cursor <= 0xf3 &&
+            cursor[1] >= 0x80 && cursor[1] <= 0xbf &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf &&
+            cursor[3] >= 0x80 && cursor[3] <= 0xbf)
+        {
+            cursor += 4;
+            continue;
+        }
+        if (*cursor == 0xf4 &&
+            cursor[1] >= 0x80 && cursor[1] <= 0x8f &&
+            cursor[2] >= 0x80 && cursor[2] <= 0xbf &&
+            cursor[3] >= 0x80 && cursor[3] <= 0xbf)
+        {
+            cursor += 4;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/* Resource names inside packets/SCE/XSE and the server state use GBK.  A
+ * normal Linux filesystem exposes names as UTF-8, while older deployments may
+ * still contain raw GBK filename bytes.  Normalize only at this boundary so
+ * the rest of the game server keeps using its established GBK keys. */
+static bool vm_mock_admin_host_resource_name_to_game(const char *hostName,
+                                                     char *gameName,
+                                                     size_t gameNameCap)
+{
+    if (gameName == NULL || gameNameCap == 0)
+        return false;
+    gameName[0] = 0;
+    if (hostName == NULL || hostName[0] == 0)
+        return false;
+#ifdef CBE_HOST_UTF8_PATHS
+    if (vm_mock_admin_text_is_valid_utf8(hostName))
+    {
+        char roundTrip[256];
+        memset(roundTrip, 0, sizeof(roundTrip));
+        utf8_to_gbk((u8 *)hostName, (u8 *)gameName, gameNameCap);
+        if (gameName[0] == 0)
+            return false;
+        gbk_to_utf8((u8 *)gameName, (u8 *)roundTrip, sizeof(roundTrip));
+        if (strcmp(roundTrip, hostName) != 0)
+        {
+            gameName[0] = 0;
+            return false;
+        }
+        return true;
+    }
+#endif
+    if (strlen(hostName) >= gameNameCap)
+        return false;
+    snprintf(gameName, gameNameCap, "%s", hostName);
+    return true;
 }
 
 static u32 vm_mock_admin_collect_scene_files(vm_mock_admin_scene_file *files,
@@ -588,17 +706,19 @@ static u32 vm_mock_admin_collect_scene_files(vm_mock_admin_scene_file *files,
             while (count < fileCap && (entry = readdir(directory)) != NULL)
             {
                 char path[1400];
+                char gameName[sizeof(files[0].name)];
                 struct stat info;
-                size_t nameLen = strlen(entry->d_name);
-                if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(entry->d_name, ".sce"))
+                memset(gameName, 0, sizeof(gameName));
+                if (!vm_net_mock_str_ends_with(entry->d_name, ".sce") ||
+                    !vm_mock_admin_host_resource_name_to_game(
+                        entry->d_name, gameName, sizeof(gameName)))
                     continue;
                 snprintf(path, sizeof(path), "%s/%s", directories[directoryIndex],
                          entry->d_name);
                 if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
                     continue;
                 snprintf(files[count].name, sizeof(files[count].name), "%s",
-                         entry->d_name);
+                         gameName);
                 files[count].size = (uint64_t)info.st_size;
                 ++count;
             }
@@ -764,16 +884,123 @@ static u32 vm_mock_admin_collect_xse_files(vm_mock_admin_scene_file *files,
             while (count < fileCap && (entry = readdir(directory)) != NULL)
             {
                 char path[1400];
+                char gameName[sizeof(files[0].name)];
                 struct stat info;
-                size_t nameLen = strlen(entry->d_name);
-                if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(entry->d_name, ".xse"))
+                memset(gameName, 0, sizeof(gameName));
+                if (!vm_net_mock_str_ends_with(entry->d_name, ".xse") ||
+                    !vm_mock_admin_host_resource_name_to_game(
+                        entry->d_name, gameName, sizeof(gameName)))
                 {
                     continue;
                 }
                 snprintf(path, sizeof(path), "%s/%s",
                          directories[directoryIndex], entry->d_name);
                 if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+                    continue;
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         gameName);
+                files[count].size = (uint64_t)info.st_size;
+                ++count;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (count > 1)
+        qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
+    return count;
+}
+
+static bool vm_mock_admin_update_file_is_visible(const char *name,
+                                                 uint64_t size)
+{
+    if (!vm_net_mock_update_name_is_safe(name) || size == 0 ||
+        size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX)
+        return false;
+    if (strcmp(name, "server_update_catalog.tsv") == 0 ||
+        strcmp(name, "server_update_delivery.tsv") == 0 ||
+        vm_net_mock_str_ends_with(name, ".cbm"))
+        return false;
+    return true;
+}
+
+static u32 vm_mock_admin_collect_update_files(vm_mock_admin_scene_file *files,
+                                              u32 fileCap)
+{
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+#ifdef _WIN32
+    {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        WIN32_FIND_DATAA found;
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            char pattern[1200];
+            HANDLE search = INVALID_HANDLE_VALUE;
+            if (directories[directoryIndex] == NULL)
+                continue;
+            snprintf(pattern, sizeof(pattern), "%s\\*", directories[directoryIndex]);
+            search = FindFirstFileA(pattern, &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                size_t nameLen = strlen(found.cFileName);
+                uint64_t size = ((uint64_t)found.nFileSizeHigh << 32) |
+                                found.nFileSizeLow;
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_mock_admin_update_file_is_visible(found.cFileName, size))
+                    continue;
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         found.cFileName);
+                files[count].size = size;
+                ++count;
+            } while (count < fileCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
+    }
+#else
+    {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = NULL;
+            struct dirent *entry = NULL;
+            if (directories[directoryIndex] == NULL)
+                continue;
+            directory = opendir(directories[directoryIndex]);
+            if (directory == NULL)
+                continue;
+            while (count < fileCap && (entry = readdir(directory)) != NULL)
+            {
+                char path[1400];
+                struct stat info;
+                size_t nameLen = strlen(entry->d_name);
+                if (nameLen == 0 || nameLen >= sizeof(files[0].name))
+                    continue;
+                snprintf(path, sizeof(path), "%s/%s", directories[directoryIndex],
+                         entry->d_name);
+                if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) ||
+                    !vm_mock_admin_update_file_is_visible(
+                        entry->d_name, (uint64_t)info.st_size))
                     continue;
                 snprintf(files[count].name, sizeof(files[count].name), "%s",
                          entry->d_name);
@@ -788,6 +1015,25 @@ static u32 vm_mock_admin_collect_xse_files(vm_mock_admin_scene_file *files,
     if (count > 1)
         qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
     return count;
+}
+
+static void vm_mock_admin_resource_name_to_utf8(const char *name,
+                                                char *out,
+                                                size_t outCap)
+{
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (name == NULL)
+        return;
+#ifdef CBE_HOST_UTF8_PATHS
+    if (vm_mock_admin_text_is_valid_utf8(name))
+        snprintf(out, outCap, "%s", name);
+    else
+        vm_net_mock_gbk_label_to_utf8(name, out, outCap);
+#else
+    vm_net_mock_gbk_label_to_utf8(name, out, outCap);
+#endif
 }
 
 static void vm_mock_admin_render_actor_select(
@@ -2199,7 +2445,8 @@ static void vm_mock_admin_render_content_page(char *response,
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a></nav>"
+        "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
@@ -2692,6 +2939,126 @@ static void vm_mock_admin_render_item_grant_form(
         "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
 }
 
+static void vm_mock_admin_render_update_page(char *response,
+                                             size_t responseCap,
+                                             const char *query)
+{
+    vm_mock_admin_text page;
+    vm_mock_admin_scene_file *files = NULL;
+    u32 fileCount = 0;
+    char status[16];
+    char message[256];
+    char catalogPath[1200];
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    memset(catalogPath, 0, sizeof(catalogPath));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    vm_net_mock_update_catalog_load();
+    vm_net_mock_update_delivery_load();
+    (void)vm_net_mock_update_state_path("server_update_catalog.tsv",
+                                        catalogPath, sizeof(catalogPath));
+    files = (vm_mock_admin_scene_file *)calloc(
+        VM_MOCK_ADMIN_UPDATE_FILE_MAX, sizeof(*files));
+    if (files != NULL)
+        fileCount = vm_mock_admin_collect_update_files(
+            files, VM_MOCK_ADMIN_UPDATE_FILE_MAX);
+
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 游戏内容更新管理</title><style>"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}h3{font-size:15px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
+        ".update-grid{display:grid;grid-template-columns:minmax(390px,.95fr) minmax(440px,1.15fr);gap:16px;flex:1;min-height:0}.pane{min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:12px}.module{border:1px solid #eaecf0;border-radius:8px;padding:12px;margin-top:9px}.module-head{display:flex;justify-content:space-between;gap:10px}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467}.badge.on{background:#ecfdf3;color:#027a48}.module form{display:grid;grid-template-columns:100px 1fr auto;gap:8px;align-items:end;margin-top:9px}.publish{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(220px,1.6fr) 90px auto;gap:8px;align-items:end;margin-top:9px}.module label,.publish label{display:grid;gap:4px}.module label span,.publish label span{font-size:12px;color:#667085}.check{display:flex!important;align-items:center;gap:7px;height:36px}.check input{width:auto}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}.danger{background:#b42318}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.callout{background:#eef4ff;color:#3538cd;border-radius:8px;padding:11px 12px}.published{width:100%%;border-collapse:collapse;margin-top:10px}.published th,.published td{text-align:left;padding:9px 7px;border-bottom:1px solid #eaecf0;vertical-align:middle}.published th{font-size:12px;color:#667085}.inline{display:flex;gap:7px;align-items:center}.foot{font-size:12px;color:#667085}.path{word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}"
+        "@media(max-width:850px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;overflow:visible}.update-grid{grid-template-columns:1fr;flex:none}.pane{overflow:visible}.module form,.publish{grid-template-columns:1fr}}"
+        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">启动 CBM 模块发布与具名资源下发</p></div>"
+        "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
+        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>");
+    if (message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<div class=\"update-grid\"><section class=\"pane update-left\">"
+        "<div class=\"card\"><h2>启动模块更新</h2>"
+        "<div class=\"callout\">客户端启动发送 WT 18/9；服务器按启用槽位返回 result 位图，客户端再以 WT 18/6 分块下载。替换 CBM 后必须修改版本号。</div>");
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+    {
+        const vm_net_mock_update_slot_config *slot =
+            &g_vm_net_mock_update_slots[i];
+        long size = -1;
+        size = vm_net_mock_update_file_size(
+            g_vm_net_mock_update_slot_files[i]);
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"module\"><div class=\"module-head\"><div><h3>槽位 %u · %s</h3><div class=\"foot\"><span class=\"path\">%s</span> · %ld 字节</div></div><span class=\"badge %s\">%s</span></div>"
+            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-update-slot\"><input type=\"hidden\" name=\"slot\" value=\"%u\">"
+            "<label><span>发布版本</span><input type=\"number\" name=\"version\" min=\"1\" max=\"65535\" value=\"%u\" required></label>"
+            "<label class=\"check\"><input type=\"checkbox\" name=\"enabled\" value=\"1\" %s>启动时下发</label><button type=\"submit\">保存发布设置</button></form></div>",
+            i + 1, g_vm_net_mock_update_slot_labels[i],
+            g_vm_net_mock_update_slot_files[i], size,
+            slot->enabled ? "on" : "", slot->enabled ? "已发布" : "未发布",
+            i + 1, slot->version, slot->enabled ? "checked" : "");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</div><div class=\"card\"><h2>下发记录</h2><p class=\"muted\">当前记录 %u 个客户端标识。只有完整发送最后一块后才记为已下发；发布新版本会自动再次触发。</p>"
+        "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"reset-update-delivery\"><button class=\"danger\" type=\"submit\">清空记录并让已发布模块重新下发</button></form></div>"
+        "</section><section class=\"pane update-right\"><div class=\"card\"><h2>具名资源发布</h2>"
+        "<p class=\"muted\">SCE、XSE、ACTOR、GIF 等资源走 WT 18/7，只会在客户端加载该资源时按名称拉取，不会因发布而在启动时主动下载。需要启动即更新时，应把改动打入对应 CBM。</p>"
+        "<form class=\"publish\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"publish-named-update\">"
+        "<label><span>筛选资源</span><input id=\"update-resource-filter\" type=\"search\" placeholder=\"输入文件名筛选\"></label>"
+        "<label><span>服务器资源（%u）</span><select id=\"update-resource-select\" name=\"resource\" required><option value=\"\" selected disabled>请选择要发布的资源</option>",
+        g_vm_net_mock_update_delivery_count, fileCount);
+    for (u32 i = 0; files != NULL && i < fileCount; ++i)
+    {
+        char nameUtf8[256];
+        vm_mock_admin_resource_name_to_utf8(files[i].name, nameUtf8,
+                                            sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(&page, "<option value=\"");
+        vm_mock_admin_text_append_html(&page, nameUtf8);
+        vm_mock_admin_text_appendf(&page, "\">");
+        vm_mock_admin_text_append_html(&page, nameUtf8);
+        vm_mock_admin_text_appendf(&page, " · %llu 字节</option>",
+                                   (unsigned long long)files[i].size);
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</select></label><label><span>响应版本</span><input type=\"number\" name=\"version\" min=\"1\" max=\"65535\" value=\"1\" required></label><button type=\"submit\">发布资源</button></form></div>"
+        "<div class=\"card\"><h2>已发布具名资源（%u）</h2><table class=\"published\"><thead><tr><th>资源</th><th>版本</th><th>操作</th></tr></thead><tbody>",
+        g_vm_net_mock_update_named_count);
+    for (u32 i = 0; i < g_vm_net_mock_update_named_count; ++i)
+    {
+        const vm_net_mock_update_named_config *row =
+            &g_vm_net_mock_update_named[i];
+        char nameUtf8[256];
+        vm_net_mock_gbk_label_to_utf8(row->name, nameUtf8, sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(&page, "<tr><td class=\"path\">");
+        vm_mock_admin_text_append_html(&page, nameUtf8);
+        vm_mock_admin_text_appendf(&page, "</td><td>%u</td><td><form class=\"inline\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"remove-named-update\"><input type=\"hidden\" name=\"resource\" value=\"",
+                                   row->version);
+        vm_mock_admin_text_append_html(&page, nameUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\"><button class=\"danger\" type=\"submit\">取消发布</button></form></td></tr>");
+    }
+    if (g_vm_net_mock_update_named_count == 0)
+        vm_mock_admin_text_appendf(&page,
+            "<tr><td colspan=\"3\" class=\"muted\">尚未发布具名资源</td></tr>");
+    vm_mock_admin_text_appendf(&page,
+        "</tbody></table></div><div class=\"card foot\"><strong>发布配置文件</strong><div class=\"path\">");
+    vm_mock_admin_text_append_html(&page,
+        catalogPath[0] ? catalogPath : "资源根目录未配置");
+    vm_mock_admin_text_appendf(&page,
+        "</div><p>配置保存在 server_update_catalog.tsv，下发完成记录保存在 server_update_delivery.tsv。</p></div></section></div></main></body></html>");
+    free(files);
+}
+
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
 {
@@ -2717,6 +3084,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "content") == 0)
     {
         vm_mock_admin_render_content_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "updates") == 0)
+    {
+        vm_mock_admin_render_update_page(response, responseCap, query);
         return;
     }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
@@ -2749,7 +3121,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
-        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a></nav><div class=\"grid\">"
+        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
         g_vm_mock_service_account_db.accountCount);
 
@@ -2920,6 +3293,24 @@ static void vm_mock_admin_redirect_content(vm_mock_service_socket client,
     snprintf(location, sizeof(location),
              "/?tab=content&scene=%s&status=%s&message=%s",
              sceneEncoded, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_updates(vm_mock_service_socket client,
+                                           const char *status,
+                                           const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             "/?tab=updates&status=%s&message=%s", statusEncoded,
+             messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
 
@@ -3136,6 +3527,96 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     vm_mock_admin_redirect_content(client, sceneUtf8, "ok", "NPC 保存成功");
 }
 
+static void vm_mock_admin_handle_update_action(vm_mock_service_socket client,
+                                               const char *action,
+                                               const char *body)
+{
+    const char *error = NULL;
+    u32 slot = 0;
+    u32 version = 0;
+    char enabledText[8];
+    char resourceUtf8[256];
+    char resourceGbk[128];
+
+    memset(enabledText, 0, sizeof(enabledText));
+    memset(resourceUtf8, 0, sizeof(resourceUtf8));
+    memset(resourceGbk, 0, sizeof(resourceGbk));
+    if (strcmp(action, "save-update-slot") == 0)
+    {
+        bool enabled = vm_mock_admin_form_value(body, "enabled", enabledText,
+                                                sizeof(enabledText)) &&
+                       strcmp(enabledText, "1") == 0;
+        if (!vm_mock_admin_form_u32(body, "slot",
+                                    VM_NET_MOCK_UPDATE_SLOT_COUNT, &slot) ||
+            slot == 0 ||
+            !vm_mock_admin_form_u32(body, "version", 0xffff, &version) ||
+            version == 0)
+        {
+            vm_mock_admin_redirect_updates(client, "error",
+                                           "槽位或版本号无效");
+            return;
+        }
+        if (!vm_net_mock_update_admin_save_slot((u8)slot, (u16)version,
+                                                enabled, &error))
+        {
+            vm_mock_admin_redirect_updates(client, "error",
+                                           error ? error : "模块发布设置保存失败");
+            return;
+        }
+        vm_mock_admin_redirect_updates(client, "ok",
+                                       enabled ? "启动模块已发布；新客户端将在启动时下载"
+                                               : "启动模块发布已停用");
+        return;
+    }
+    if (strcmp(action, "reset-update-delivery") == 0)
+    {
+        if (!vm_net_mock_update_admin_reset_delivery(&error))
+        {
+            vm_mock_admin_redirect_updates(client, "error",
+                                           error ? error : "下发记录清空失败");
+            return;
+        }
+        vm_mock_admin_redirect_updates(client, "ok",
+                                       "下发记录已清空；已发布模块会重新触发");
+        return;
+    }
+    if (!vm_mock_admin_form_value(body, "resource", resourceUtf8,
+                                  sizeof(resourceUtf8)) ||
+        !vm_mock_admin_utf8_to_gbk_text(resourceUtf8, resourceGbk,
+                                        sizeof(resourceGbk), false))
+    {
+        vm_mock_admin_redirect_updates(client, "error", "资源名称无效");
+        return;
+    }
+    if (strcmp(action, "publish-named-update") == 0)
+    {
+        if (!vm_mock_admin_form_u32(body, "version", 0xffff, &version) ||
+            version == 0 ||
+            !vm_net_mock_update_admin_save_named(resourceGbk, (u16)version,
+                                                 &error))
+        {
+            vm_mock_admin_redirect_updates(client, "error",
+                                           error ? error : "具名资源发布失败");
+            return;
+        }
+        vm_mock_admin_redirect_updates(client, "ok",
+                                       "具名资源已发布，将在客户端下次请求该资源时下发");
+        return;
+    }
+    if (strcmp(action, "remove-named-update") == 0)
+    {
+        if (!vm_net_mock_update_admin_remove_named(resourceGbk, &error))
+        {
+            vm_mock_admin_redirect_updates(client, "error",
+                                           error ? error : "取消发布失败");
+            return;
+        }
+        vm_mock_admin_redirect_updates(client, "ok", "具名资源已取消发布");
+        return;
+    }
+    vm_mock_admin_redirect_updates(client, "error", "不支持的更新管理操作");
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
@@ -3166,6 +3647,14 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "delete-npc-override") == 0)
     {
         vm_mock_admin_handle_npc_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-update-slot") == 0 ||
+        strcmp(action, "reset-update-delivery") == 0 ||
+        strcmp(action, "publish-named-update") == 0 ||
+        strcmp(action, "remove-named-update") == 0)
+    {
+        vm_mock_admin_handle_update_action(client, action, body);
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))

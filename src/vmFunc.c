@@ -854,18 +854,30 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
 
 static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
 {
-    FILE *fp;
+    static const char *pathFormats[] = {
+        "JHOnlineData/%s",
+        "../web/fs/JHOnlineData/%s",
+        "web/fs/JHOnlineData/%s"
+    };
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
     if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_dsh_resource(normalizedName))
         return 0;
-    if (snprintf(resolvedName, resolvedSize, "JHOnlineData/%s", normalizedName) >= (int)resolvedSize)
-        return 0;
-    fp = fopen(resolvedName, "rb");
-    if (fp == NULL)
-        return 0;
-    fclose(fp);
-    return 1;
+    for (size_t i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+    {
+        FILE *fp;
+        if (snprintf(resolvedName, resolvedSize, pathFormats[i], normalizedName) >=
+            (int)resolvedSize)
+        {
+            continue;
+        }
+        fp = fopen(resolvedName, "rb");
+        if (fp == NULL)
+            continue;
+        fclose(fp);
+        return 1;
+    }
+    return 0;
 }
 
 static int vm_file_try_resolve_cbe_module_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)

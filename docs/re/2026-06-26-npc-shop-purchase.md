@@ -4,6 +4,36 @@ Date: 2026-06-26
 
 Status: implemented for shop open, DSH-backed catalog paging, shop-friendly catalog ordering, host DSH lookup compatibility, and buy-result packets; needs end-to-end NPC click validation
 
+## 2026-07-19 Windows 服务资源根修复
+
+### 现象与根因
+
+- Windows 版以 `--mock-service-only` 启动时仍走完整模拟器编译分支，不会执行
+  `CBE_SERVER_ONLY` 分支中的资源根初始化。
+- 服务启动后先把工作目录切到 `bin/`，此时客户端可写缓存尚未下载
+  `item.dsh/equip.dsh`。商城目录第一次加载便永久缓存了英文传送石兜底行，日志为
+  `mock_shop_catalog fallback=item.dsh/equip.dsh-not-found item=800`。
+- 后续即使客户端已经下载 DSH，服务端缓存仍只有这一行，所以秘宝以外的
+  `14/6..13` 全部返回 `total=0 rows=0 iteminfo_len=3`。
+
+### 修复
+
+- `vm_net_mock_service_run_forever()` 在账号和角色数据初始化前统一解析服务资源根；
+  默认优先 `../web/fs/JHOnlineData`，并支持 `CBE_RESOURCE_ROOT`。Windows 与独立
+  服务编译现在使用同一正式资源源，不再依赖客户端缓存何时生成。
+- 客户端只读打开裸 `*.dsh` 时仍优先使用 `bin/JHOnlineData` 缓存；缓存尚未存在时，
+  回退到 `web/fs/JHOnlineData`，确保 `mmGame:0x418C` 能用本地 DSH 填充
+  `17/1` 行的名称和属性。
+
+### 回归结果
+
+- 启动日志：`resource_root=../web/fs/JHOnlineData source=service-auto`；装备属性目录
+  加载 `1485` 行，不再出现 fallback。
+- 商城目录：`total=1715 items=230 equips=1485 first=1001`。
+- `14/5` 返回 8 条秘宝；`14/6..13` 各分类第一页均返回 10 条，响应长度分别为
+  `532/532/530/530/533/532/532/530` 字节。
+- 商城返回场景的 NPC one-shot 回归同时通过；服务 stderr 为空。
+
 ## 1. Current Block
 
 - Visible symptom: after NPC dialog purchase flow, clicking the dialog `购买` button opens the shop, but the list either stayed on one `传送石` row or became selectable blank rows with no item names.

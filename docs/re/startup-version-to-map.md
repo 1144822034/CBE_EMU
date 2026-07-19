@@ -98,6 +98,12 @@ their payload happens to contain those strings.
 
 ## 2026-06-29 Clean Resource Release Version Loop
 
+> Superseded for server publishing on 2026-07-19: startup module availability
+> is now controlled by `server_update_catalog.tsv`, not inferred from files
+> installed in the local client resource directory. See
+> `2026-07-19-game-content-update-workflow.md`. The evidence and narrow WT
+> `18/6` dispatch described below remain valid.
+
 After clearing the released resource directory, the client can recreate
 `JHOnlineData/mmGameMstarWqvga.cbm` and `JHOnlineData/mmorpg_updateversioncbm`
 without creating `JHOnlineData/MMORPGTempcbm`. Treating the temp network-update

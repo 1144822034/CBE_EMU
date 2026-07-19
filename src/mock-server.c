@@ -1387,6 +1387,12 @@ static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *ou
 }
 
 static char g_vm_net_mock_resource_dir[1024];
+static long vm_net_mock_file_size(const char *path);
+static long vm_net_mock_update_file_size(const char *name);
+static u32 g_vm_mock_service_active_client_id;
+/* The headless service assigns this before dispatching every game packet.  The
+ * startup updater uses it to associate the pre-login 18/9 request with the
+ * later 18/6 chunk requests without relying on account state. */
 
 static bool vm_net_mock_set_resource_dir(const char *directory)
 {
@@ -1424,6 +1430,549 @@ static bool vm_net_mock_build_configured_resource_path(const char *name,
                     (g_vm_net_mock_resource_dir[dirLen - 1] == '/' ||
                      g_vm_net_mock_resource_dir[dirLen - 1] == '\\') ? "" : "/",
                     name) < (int)outCap;
+}
+
+enum
+{
+    VM_NET_MOCK_UPDATE_SLOT_COUNT = 4,
+    VM_NET_MOCK_UPDATE_NAMED_MAX = 128,
+    VM_NET_MOCK_UPDATE_DELIVERY_MAX = 256,
+    VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX = 64,
+    VM_NET_MOCK_UPDATE_PAYLOAD_MAX = 1024 * 1024
+};
+
+typedef struct
+{
+    bool enabled;
+    u16 version;
+} vm_net_mock_update_slot_config;
+
+typedef struct
+{
+    bool enabled;
+    u16 version;
+    char name[128];
+} vm_net_mock_update_named_config;
+
+typedef struct
+{
+    u32 identityHash;
+    u16 deliveredVersions[VM_NET_MOCK_UPDATE_SLOT_COUNT];
+} vm_net_mock_update_delivery;
+
+typedef struct
+{
+    u32 clientId;
+    u32 identityHash;
+} vm_net_mock_update_client_map;
+
+static const char *g_vm_net_mock_update_slot_files[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {
+    "mmTitleMstarWqvga.cbm",
+    "mmGameMstarWqvga.cbm",
+    "mmBattleMstarWqvga.cbm",
+    "mmShopMstarWqvga.cbm",
+};
+static const char *g_vm_net_mock_update_slot_labels[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {
+    "Title（登录模块）",
+    "Game（场景与玩法模块）",
+    "Battle（战斗模块）",
+    "Shop（商店模块）",
+};
+static vm_net_mock_update_slot_config
+    g_vm_net_mock_update_slots[VM_NET_MOCK_UPDATE_SLOT_COUNT];
+static vm_net_mock_update_named_config
+    g_vm_net_mock_update_named[VM_NET_MOCK_UPDATE_NAMED_MAX];
+static u32 g_vm_net_mock_update_named_count = 0;
+static vm_net_mock_update_delivery
+    g_vm_net_mock_update_deliveries[VM_NET_MOCK_UPDATE_DELIVERY_MAX];
+static u32 g_vm_net_mock_update_delivery_count = 0;
+static vm_net_mock_update_client_map
+    g_vm_net_mock_update_client_maps[VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX];
+static bool g_vm_net_mock_update_catalog_loaded = false;
+static bool g_vm_net_mock_update_delivery_loaded = false;
+
+static bool vm_net_mock_update_name_is_safe(const char *name)
+{
+    if (name == NULL || name[0] == 0 || strstr(name, "..") != NULL)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+    {
+        if (*p == '/' || *p == '\\' || *p == '\r' || *p == '\n' || *p == '\t' ||
+            *p < 0x20)
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_update_resource_path(const char *leaf,
+                                             char *out,
+                                             size_t outCap)
+{
+    static const char *fallbackRoots[] = {
+        "../web/fs/JHOnlineData",
+        "web/fs/JHOnlineData",
+        "JHOnlineData"
+    };
+    if (!vm_net_mock_update_name_is_safe(leaf))
+        return false;
+    if (vm_net_mock_build_configured_resource_path(leaf, out, outCap))
+        return true;
+    for (u32 i = 0; i < sizeof(fallbackRoots) / sizeof(fallbackRoots[0]); ++i)
+    {
+        char probePath[1200];
+        FILE *probe = NULL;
+        snprintf(probePath, sizeof(probePath), "%s/task.dsh", fallbackRoots[i]);
+        probe = fopen(probePath, "rb");
+        if (probe == NULL)
+            continue;
+        fclose(probe);
+        return snprintf(out, outCap, "%s/%s", fallbackRoots[i], leaf) <
+               (int)outCap;
+    }
+    return false;
+}
+
+static bool vm_net_mock_update_state_path(const char *leaf,
+                                          char *out,
+                                          size_t outCap)
+{
+    return vm_net_mock_update_resource_path(leaf, out, outCap);
+}
+
+static bool vm_net_mock_update_parse_u32(const char *text, u32 *valueOut)
+{
+    char *end = NULL;
+    unsigned long value = 0;
+    if (text == NULL || text[0] == 0)
+        return false;
+    value = strtoul(text, &end, 10);
+    if (end == text || *end != 0 || value > 0xfffffffful)
+        return false;
+    if (valueOut)
+        *valueOut = (u32)value;
+    return true;
+}
+
+static void vm_net_mock_update_catalog_defaults(void)
+{
+    memset(g_vm_net_mock_update_slots, 0, sizeof(g_vm_net_mock_update_slots));
+    memset(g_vm_net_mock_update_named, 0, sizeof(g_vm_net_mock_update_named));
+    g_vm_net_mock_update_named_count = 0;
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+        g_vm_net_mock_update_slots[i].version = 1;
+}
+
+static void vm_net_mock_update_catalog_load(void)
+{
+    char path[1200];
+    char line[512];
+    FILE *fp = NULL;
+
+    if (g_vm_net_mock_update_catalog_loaded)
+        return;
+    g_vm_net_mock_update_catalog_loaded = true;
+    vm_net_mock_update_catalog_defaults();
+    if (!vm_net_mock_update_state_path("server_update_catalog.tsv", path,
+                                       sizeof(path)))
+        return;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return;
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        char *kind = NULL;
+        char *a = NULL;
+        char *b = NULL;
+        char *c = NULL;
+        u32 first = 0;
+        u32 enabled = 0;
+        u32 version = 0;
+
+        line[strcspn(line, "\r\n")] = 0;
+        kind = strtok(line, "\t");
+        a = strtok(NULL, "\t");
+        b = strtok(NULL, "\t");
+        c = strtok(NULL, "\t");
+        if (kind == NULL || kind[0] == '#' || a == NULL || b == NULL || c == NULL ||
+            !vm_net_mock_update_parse_u32(a, &first) ||
+            !vm_net_mock_update_parse_u32(b, &enabled))
+            continue;
+        if (strcmp(kind, "slot") == 0)
+        {
+            if (first < 1 || first > VM_NET_MOCK_UPDATE_SLOT_COUNT ||
+                !vm_net_mock_update_parse_u32(c, &version) || version == 0 ||
+                version > 0xffff)
+                continue;
+            g_vm_net_mock_update_slots[first - 1].enabled = enabled != 0;
+            g_vm_net_mock_update_slots[first - 1].version = (u16)version;
+        }
+        else if (strcmp(kind, "named") == 0 &&
+                 g_vm_net_mock_update_named_count < VM_NET_MOCK_UPDATE_NAMED_MAX)
+        {
+            /* Named rows are: named<TAB>enabled<TAB>version<TAB>name. */
+            version = 0;
+            if (!vm_net_mock_update_parse_u32(b, &version) || version == 0 ||
+                version > 0xffff || !vm_net_mock_update_name_is_safe(c))
+                continue;
+            vm_net_mock_update_named_config *row =
+                &g_vm_net_mock_update_named[g_vm_net_mock_update_named_count++];
+            row->enabled = first != 0;
+            row->version = (u16)version;
+            snprintf(row->name, sizeof(row->name), "%s", c);
+        }
+    }
+    fclose(fp);
+}
+
+static bool vm_net_mock_update_catalog_save(const char **errorOut)
+{
+    char path[1200];
+    char tempPath[1240];
+    FILE *fp = NULL;
+
+    if (errorOut)
+        *errorOut = NULL;
+    vm_net_mock_update_catalog_load();
+    if (!vm_net_mock_update_state_path("server_update_catalog.tsv", path,
+                                       sizeof(path)))
+    {
+        if (errorOut)
+            *errorOut = "资源根目录尚未配置";
+        return false;
+    }
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+    fp = fopen(tempPath, "wb");
+    if (fp == NULL)
+    {
+        if (errorOut)
+            *errorOut = "更新配置文件不可写";
+        return false;
+    }
+    fprintf(fp, "# Jianghu OL server update catalog v1\n");
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+    {
+        fprintf(fp, "slot\t%u\t%u\t%u\n", i + 1,
+                g_vm_net_mock_update_slots[i].enabled ? 1 : 0,
+                g_vm_net_mock_update_slots[i].version);
+    }
+    for (u32 i = 0; i < g_vm_net_mock_update_named_count; ++i)
+    {
+        const vm_net_mock_update_named_config *row =
+            &g_vm_net_mock_update_named[i];
+        if (!vm_net_mock_update_name_is_safe(row->name))
+            continue;
+        fprintf(fp, "named\t%u\t%u\t%s\n", row->enabled ? 1 : 0,
+                row->version, row->name);
+    }
+    if (fclose(fp) != 0)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "更新配置写入失败";
+        return false;
+    }
+    remove(path);
+    if (rename(tempPath, path) != 0)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "更新配置替换失败";
+        return false;
+    }
+    return true;
+}
+
+static void vm_net_mock_update_delivery_load(void)
+{
+    char path[1200];
+    char line[256];
+    FILE *fp = NULL;
+
+    if (g_vm_net_mock_update_delivery_loaded)
+        return;
+    g_vm_net_mock_update_delivery_loaded = true;
+    memset(g_vm_net_mock_update_deliveries, 0,
+           sizeof(g_vm_net_mock_update_deliveries));
+    g_vm_net_mock_update_delivery_count = 0;
+    if (!vm_net_mock_update_state_path("server_update_delivery.tsv", path,
+                                       sizeof(path)))
+        return;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return;
+    while (g_vm_net_mock_update_delivery_count < VM_NET_MOCK_UPDATE_DELIVERY_MAX &&
+           fgets(line, sizeof(line), fp) != NULL)
+    {
+        unsigned int hash = 0;
+        unsigned int versions[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {0};
+        if (sscanf(line, "%x\t%u\t%u\t%u\t%u", &hash, &versions[0],
+                   &versions[1], &versions[2], &versions[3]) != 5 || hash == 0)
+            continue;
+        vm_net_mock_update_delivery *row =
+            &g_vm_net_mock_update_deliveries[g_vm_net_mock_update_delivery_count++];
+        row->identityHash = (u32)hash;
+        for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+            row->deliveredVersions[i] =
+                versions[i] <= 0xffff ? (u16)versions[i] : 0;
+    }
+    fclose(fp);
+}
+
+static bool vm_net_mock_update_delivery_save(const char **errorOut)
+{
+    char path[1200];
+    char tempPath[1240];
+    FILE *fp = NULL;
+
+    if (errorOut)
+        *errorOut = NULL;
+    vm_net_mock_update_delivery_load();
+    if (!vm_net_mock_update_state_path("server_update_delivery.tsv", path,
+                                       sizeof(path)))
+    {
+        if (errorOut)
+            *errorOut = "资源根目录尚未配置";
+        return false;
+    }
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+    fp = fopen(tempPath, "wb");
+    if (fp == NULL)
+    {
+        if (errorOut)
+            *errorOut = "更新下发记录不可写";
+        return false;
+    }
+    fprintf(fp, "# identity_hash title game battle shop\n");
+    for (u32 i = 0; i < g_vm_net_mock_update_delivery_count; ++i)
+    {
+        const vm_net_mock_update_delivery *row =
+            &g_vm_net_mock_update_deliveries[i];
+        fprintf(fp, "%08x\t%u\t%u\t%u\t%u\n", row->identityHash,
+                row->deliveredVersions[0], row->deliveredVersions[1],
+                row->deliveredVersions[2], row->deliveredVersions[3]);
+    }
+    if (fclose(fp) != 0)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "更新下发记录写入失败";
+        return false;
+    }
+    remove(path);
+    if (rename(tempPath, path) != 0)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "更新下发记录替换失败";
+        return false;
+    }
+    return true;
+}
+
+static u32 vm_net_mock_update_hash_bytes(u32 hash, const u8 *data, u32 len)
+{
+    if (hash == 0)
+        hash = 2166136261u;
+    for (u32 i = 0; data != NULL && i < len; ++i)
+    {
+        hash ^= data[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static u32 vm_net_mock_update_identity_hash(const u8 *request, u32 requestLen)
+{
+    static const char *fields[] = {"imsi", "client", "plat", "proj"};
+    char value[128];
+    u32 hash = 2166136261u;
+    bool haveValue = false;
+
+    for (u32 i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+    {
+        memset(value, 0, sizeof(value));
+        if (!vm_net_mock_get_object_string_field(request, requestLen, fields[i],
+                                                 value, sizeof(value)) ||
+            value[0] == 0)
+            continue;
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)fields[i],
+                                             (u32)strlen(fields[i]));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)value,
+                                             (u32)strlen(value));
+        haveValue = true;
+    }
+    return haveValue && hash != 0 ? hash : 0;
+}
+
+static void vm_net_mock_update_remember_client(u32 clientId, u32 identityHash)
+{
+    u32 freeIndex = VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX;
+    if (clientId == 0 || identityHash == 0)
+        return;
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX; ++i)
+    {
+        if (g_vm_net_mock_update_client_maps[i].clientId == clientId)
+        {
+            g_vm_net_mock_update_client_maps[i].identityHash = identityHash;
+            return;
+        }
+        if (freeIndex == VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX &&
+            g_vm_net_mock_update_client_maps[i].clientId == 0)
+            freeIndex = i;
+    }
+    if (freeIndex == VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX)
+        freeIndex = clientId % VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX;
+    g_vm_net_mock_update_client_maps[freeIndex].clientId = clientId;
+    g_vm_net_mock_update_client_maps[freeIndex].identityHash = identityHash;
+}
+
+static u32 vm_net_mock_update_identity_for_active_client(const u8 *request,
+                                                         u32 requestLen)
+{
+    for (u32 i = 0; g_vm_mock_service_active_client_id != 0 &&
+                    i < VM_NET_MOCK_UPDATE_CLIENT_MAP_MAX; ++i)
+    {
+        if (g_vm_net_mock_update_client_maps[i].clientId ==
+            g_vm_mock_service_active_client_id)
+            return g_vm_net_mock_update_client_maps[i].identityHash;
+    }
+    return vm_net_mock_update_identity_hash(request, requestLen);
+}
+
+static vm_net_mock_update_delivery *
+vm_net_mock_update_find_delivery(u32 identityHash, bool create)
+{
+    vm_net_mock_update_delivery *row = NULL;
+    if (identityHash == 0)
+        return NULL;
+    vm_net_mock_update_delivery_load();
+    for (u32 i = 0; i < g_vm_net_mock_update_delivery_count; ++i)
+    {
+        if (g_vm_net_mock_update_deliveries[i].identityHash == identityHash)
+            return &g_vm_net_mock_update_deliveries[i];
+    }
+    if (!create)
+        return NULL;
+    if (g_vm_net_mock_update_delivery_count < VM_NET_MOCK_UPDATE_DELIVERY_MAX)
+        row = &g_vm_net_mock_update_deliveries[g_vm_net_mock_update_delivery_count++];
+    else
+        row = &g_vm_net_mock_update_deliveries[identityHash %
+                                               VM_NET_MOCK_UPDATE_DELIVERY_MAX];
+    memset(row, 0, sizeof(*row));
+    row->identityHash = identityHash;
+    return row;
+}
+
+static vm_net_mock_update_named_config *
+vm_net_mock_update_find_named(const char *name)
+{
+    vm_net_mock_update_catalog_load();
+    for (u32 i = 0; i < g_vm_net_mock_update_named_count; ++i)
+    {
+        if (strcmp(g_vm_net_mock_update_named[i].name, name ? name : "") == 0)
+            return &g_vm_net_mock_update_named[i];
+    }
+    return NULL;
+}
+
+static bool vm_net_mock_update_admin_save_slot(u8 slot, u16 version,
+                                               bool enabled,
+                                               const char **errorOut)
+{
+    long size = -1;
+    if (slot < 1 || slot > VM_NET_MOCK_UPDATE_SLOT_COUNT || version == 0)
+    {
+        if (errorOut)
+            *errorOut = "模块槽位或版本号无效";
+        return false;
+    }
+    size = vm_net_mock_update_file_size(
+        g_vm_net_mock_update_slot_files[slot - 1]);
+    if (enabled && (size < 1024 || size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX))
+    {
+        if (errorOut)
+            *errorOut = "模块文件不存在、过小或超过 1 MiB";
+        return false;
+    }
+    vm_net_mock_update_catalog_load();
+    g_vm_net_mock_update_slots[slot - 1].version = version;
+    g_vm_net_mock_update_slots[slot - 1].enabled = enabled;
+    return vm_net_mock_update_catalog_save(errorOut);
+}
+
+static bool vm_net_mock_update_admin_save_named(const char *name, u16 version,
+                                                const char **errorOut)
+{
+    long size = -1;
+    vm_net_mock_update_named_config *row = NULL;
+    if (!vm_net_mock_update_name_is_safe(name) || version == 0)
+    {
+        if (errorOut)
+            *errorOut = "资源名称或版本号无效";
+        return false;
+    }
+    size = vm_net_mock_update_file_size(name);
+    if (size <= 0 || size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX)
+    {
+        if (errorOut)
+            *errorOut = "资源文件不存在或超过 1 MiB";
+        return false;
+    }
+    vm_net_mock_update_catalog_load();
+    row = vm_net_mock_update_find_named(name);
+    if (row == NULL)
+    {
+        if (g_vm_net_mock_update_named_count >= VM_NET_MOCK_UPDATE_NAMED_MAX)
+        {
+            if (errorOut)
+                *errorOut = "具名资源发布项已达到上限";
+            return false;
+        }
+        row = &g_vm_net_mock_update_named[g_vm_net_mock_update_named_count++];
+        memset(row, 0, sizeof(*row));
+        snprintf(row->name, sizeof(row->name), "%s", name);
+    }
+    row->enabled = true;
+    row->version = version;
+    return vm_net_mock_update_catalog_save(errorOut);
+}
+
+static bool vm_net_mock_update_admin_remove_named(const char *name,
+                                                  const char **errorOut)
+{
+    vm_net_mock_update_catalog_load();
+    for (u32 i = 0; i < g_vm_net_mock_update_named_count; ++i)
+    {
+        if (strcmp(g_vm_net_mock_update_named[i].name, name ? name : "") != 0)
+            continue;
+        if (i + 1 < g_vm_net_mock_update_named_count)
+            memmove(&g_vm_net_mock_update_named[i],
+                    &g_vm_net_mock_update_named[i + 1],
+                    sizeof(g_vm_net_mock_update_named[0]) *
+                        (g_vm_net_mock_update_named_count - i - 1));
+        --g_vm_net_mock_update_named_count;
+        memset(&g_vm_net_mock_update_named[g_vm_net_mock_update_named_count], 0,
+               sizeof(g_vm_net_mock_update_named[0]));
+        return vm_net_mock_update_catalog_save(errorOut);
+    }
+    if (errorOut)
+        *errorOut = "该具名资源尚未发布";
+    return false;
+}
+
+static bool vm_net_mock_get_object_entry_field(const u8 *request,
+                                               u32 requestLen,
+                                               const char *field,
+                                               const u8 **value,
+                                               u16 *valueLen);
+
+static bool vm_net_mock_update_admin_reset_delivery(const char **errorOut)
+{
+    vm_net_mock_update_delivery_load();
+    memset(g_vm_net_mock_update_deliveries, 0,
+           sizeof(g_vm_net_mock_update_deliveries));
+    g_vm_net_mock_update_delivery_count = 0;
+    return vm_net_mock_update_delivery_save(errorOut);
 }
 
 static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode)
@@ -1570,6 +2119,22 @@ static long vm_net_mock_file_size(const char *path)
     return size;
 }
 
+static long vm_net_mock_update_file_size(const char *name)
+{
+    char path[1200];
+    FILE *fp = NULL;
+    long size = -1;
+    if (!vm_net_mock_update_resource_path(name, path, sizeof(path)))
+        return -1;
+    fp = vm_net_mock_fopen_game_path(path, "rb");
+    if (fp == NULL)
+        return -1;
+    if (fseek(fp, 0, SEEK_END) == 0)
+        size = ftell(fp);
+    fclose(fp);
+    return size;
+}
+
 static u32 vm_net_mock_file_checksum(const char *path)
 {
     FILE *fp = vm_net_mock_fopen_response_file(path);
@@ -1668,6 +2233,56 @@ static u32 vm_net_mock_load_update_payload(u8 *out, u32 outCap)
         {
             continue;
         }
+        return len;
+    }
+    return 0;
+}
+
+static u32 vm_net_mock_load_update_slot_payload(u8 slot,
+                                                u8 *out,
+                                                u32 outCap,
+                                                char *sourcePath,
+                                                size_t sourcePathCap)
+{
+    char configuredPath[1200];
+    char fallbackPath[256];
+    FILE *fp = NULL;
+    long size = 0;
+    u32 len = 0;
+
+    if (sourcePath && sourcePathCap)
+        sourcePath[0] = 0;
+    if (slot < 1 || slot > VM_NET_MOCK_UPDATE_SLOT_COUNT || out == NULL ||
+        outCap == 0)
+        return 0;
+    if (vm_net_mock_update_resource_path(
+            g_vm_net_mock_update_slot_files[slot - 1], configuredPath,
+            sizeof(configuredPath)))
+    {
+        fp = vm_net_mock_fopen_game_path(configuredPath, "rb");
+        if (fp != NULL)
+        {
+            if (fseek(fp, 0, SEEK_END) == 0)
+                size = ftell(fp);
+            if (size >= 1024 && size <= (long)outCap &&
+                fseek(fp, 0, SEEK_SET) == 0)
+                len = (u32)fread(out, 1, (size_t)size, fp);
+            fclose(fp);
+            if (len == (u32)size && vm_net_mock_buffer_has_nonzero(out, len))
+            {
+                if (sourcePath && sourcePathCap)
+                    snprintf(sourcePath, sourcePathCap, "%s", configuredPath);
+                return len;
+            }
+        }
+    }
+    snprintf(fallbackPath, sizeof(fallbackPath), "JHOnlineData/%s",
+             g_vm_net_mock_update_slot_files[slot - 1]);
+    len = vm_net_mock_load_response_file(fallbackPath, out, outCap);
+    if (len >= 1024 && vm_net_mock_buffer_has_nonzero(out, len))
+    {
+        if (sourcePath && sourcePathCap)
+            snprintf(sourcePath, sourcePathCap, "%s", fallbackPath);
         return len;
     }
     return 0;
@@ -1966,7 +2581,7 @@ static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
     if (payloadName == NULL || payloadName[0] == 0 || out == NULL || outCap == 0)
         return 0;
 
-    char path[384];
+    char path[1200];
     static const char *pathFormats[] = {
         /*
          * Named update chunks represent server-side resource downloads. Use the
@@ -1981,6 +2596,33 @@ static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
 
     if (sourcePath && sourcePathCap)
         sourcePath[0] = 0;
+
+    if (!vm_net_mock_update_name_is_safe(payloadName))
+        return 0;
+
+    /* The configured server resource root is authoritative on both Windows
+     * and Linux. Do not accidentally read a stale client cache under bin/. */
+    if (vm_net_mock_update_resource_path(payloadName, path, sizeof(path)))
+    {
+        FILE *fp = vm_net_mock_fopen_game_path(path, "rb");
+        if (fp != NULL)
+        {
+            long size = 0;
+            u32 len = 0;
+            if (fseek(fp, 0, SEEK_END) == 0)
+                size = ftell(fp);
+            if (size > 0 && size <= (long)outCap &&
+                fseek(fp, 0, SEEK_SET) == 0)
+                len = (u32)fread(out, 1, (size_t)size, fp);
+            fclose(fp);
+            if (len == (u32)size)
+            {
+                if (sourcePath && sourcePathCap)
+                    snprintf(sourcePath, sourcePathCap, "%s", path);
+                return len;
+            }
+        }
+    }
 
     for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
     {
@@ -2074,10 +2716,26 @@ static u32 vm_net_mock_load_resource_update_payload(
         return vm_net_mock_build_minimal_actor_image_resource(out, outCap);
     }
 
-    u32 updateLen = vm_net_mock_load_update_payload(out, outCap);
-    if (updateLen > 0 && sourcePath && sourcePathCap)
-        snprintf(sourcePath, sourcePathCap, "JHOnlineData/mmGameMstarWqvga.cbm");
-    return updateLen;
+    {
+        u8 updateSlot = 0;
+        u32 updateLen = 0;
+        if (vm_net_mock_get_object_u8_field(request, requestLen, "id", &updateSlot) &&
+            updateSlot >= 1 && updateSlot <= VM_NET_MOCK_UPDATE_SLOT_COUNT)
+        {
+            if (payloadName)
+                *payloadName = g_vm_net_mock_update_slot_files[updateSlot - 1];
+            updateLen = vm_net_mock_load_update_slot_payload(
+                updateSlot, out, outCap, sourcePath, sourcePathCap);
+        }
+        else
+        {
+            updateLen = vm_net_mock_load_update_payload(out, outCap);
+            if (updateLen > 0 && sourcePath && sourcePathCap)
+                snprintf(sourcePath, sourcePathCap,
+                         "JHOnlineData/mmGameMstarWqvga.cbm");
+        }
+        return updateLen;
+    }
 }
 
 static void vm_net_mock_save_tempdata(const u8 *data, u32 len)
@@ -2809,18 +3467,184 @@ static const char *vm_net_mock_env_str(const char *name, const char *fallback)
     return spec;
 }
 
-static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
+static bool vm_net_mock_update_parse_cbm_versions(const u8 *request,
+                                                  u32 requestLen,
+                                                  u16 versions[VM_NET_MOCK_UPDATE_SLOT_COUNT])
+{
+    const u8 *data = NULL;
+    u16 dataLen = 0;
+    u32 values[VM_NET_MOCK_UPDATE_SLOT_COUNT * 2] = {0};
+    u32 valueCount = 0;
+
+    if (versions)
+        memset(versions, 0, sizeof(u16) * VM_NET_MOCK_UPDATE_SLOT_COUNT);
+    if (!vm_net_mock_get_object_entry_field(request, requestLen, "cbm", &data,
+                                            &dataLen) ||
+        data == NULL || dataLen == 0)
+        return false;
+    if (dataLen >= 2 && (((u16)data[0] << 8) | data[1]) == dataLen - 2)
+    {
+        data += 2;
+        dataLen -= 2;
+    }
+    for (u32 p = 0; p < dataLen &&
+                    valueCount < VM_NET_MOCK_UPDATE_SLOT_COUNT * 2;)
+    {
+        if (p + 3 <= dataLen && data[p] == 0 && data[p + 1] == 1)
+        {
+            values[valueCount++] = data[p + 2];
+            p += 3;
+        }
+        else if (p + 4 <= dataLen && data[p] == 0 && data[p + 1] == 2)
+        {
+            values[valueCount++] = ((u32)data[p + 2] << 8) | data[p + 3];
+            p += 4;
+        }
+        else if (p + 4 <= dataLen && data[p] == 3 && data[p + 1] == 0 &&
+                 data[p + 2] == 1)
+        {
+            values[valueCount++] = data[p + 3];
+            p += 4;
+        }
+        else if (p + 5 <= dataLen && data[p] == 4 && data[p + 1] == 0 &&
+                 data[p + 2] == 2)
+        {
+            values[valueCount++] = ((u32)data[p + 3] << 8) | data[p + 4];
+            p += 5;
+        }
+        else
+        {
+            ++p;
+        }
+    }
+    if (valueCount < VM_NET_MOCK_UPDATE_SLOT_COUNT * 2)
+        return false;
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+    {
+        if (values[i * 2] != i + 1 || values[i * 2 + 1] > 0xffff)
+            return false;
+        if (versions)
+            versions[i] = (u16)values[i * 2 + 1];
+    }
+    return true;
+}
+
+static u8 vm_net_mock_update_result_mask(const u8 *request, u32 requestLen,
+                                         u32 *identityHashOut,
+                                         bool *usedClientVersionsOut)
+{
+    u16 clientVersions[VM_NET_MOCK_UPDATE_SLOT_COUNT] = {0};
+    bool haveClientVersions = vm_net_mock_update_parse_cbm_versions(
+        request, requestLen, clientVersions);
+    u32 identityHash = vm_net_mock_update_identity_hash(request, requestLen);
+    vm_net_mock_update_delivery *delivery = NULL;
+    u8 result = 0;
+
+    vm_net_mock_update_catalog_load();
+    if (identityHash != 0)
+        vm_net_mock_update_remember_client(g_vm_mock_service_active_client_id,
+                                           identityHash);
+    if (!haveClientVersions)
+        delivery = vm_net_mock_update_find_delivery(identityHash, false);
+    for (u32 i = 0; i < VM_NET_MOCK_UPDATE_SLOT_COUNT; ++i)
+    {
+        long size = -1;
+        const vm_net_mock_update_slot_config *slot =
+            &g_vm_net_mock_update_slots[i];
+        if (!slot->enabled)
+            continue;
+        size = vm_net_mock_update_file_size(
+            g_vm_net_mock_update_slot_files[i]);
+        if (size < 1024 || size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX)
+        {
+            printf("[error][network] mock_update_publish_invalid slot=%u file=%s size=%ld action=skip\n",
+                   i + 1, g_vm_net_mock_update_slot_files[i], size);
+            continue;
+        }
+        if ((haveClientVersions && clientVersions[i] != slot->version) ||
+            (!haveClientVersions &&
+             (delivery == NULL ||
+              delivery->deliveredVersions[i] != slot->version)))
+            result |= (u8)(1u << i);
+    }
+    if (identityHashOut)
+        *identityHashOut = identityHash;
+    if (usedClientVersionsOut)
+        *usedClientVersionsOut = haveClientVersions;
+    return result;
+}
+
+static void vm_net_mock_update_mark_delivered(const u8 *request,
+                                              u32 requestLen,
+                                              u8 slot)
+{
+    u32 identityHash = 0;
+    vm_net_mock_update_delivery *delivery = NULL;
+    if (slot < 1 || slot > VM_NET_MOCK_UPDATE_SLOT_COUNT)
+        return;
+    vm_net_mock_update_catalog_load();
+    identityHash = vm_net_mock_update_identity_for_active_client(request,
+                                                                 requestLen);
+    delivery = vm_net_mock_update_find_delivery(identityHash, true);
+    if (delivery == NULL)
+        return;
+    delivery->deliveredVersions[slot - 1] =
+        g_vm_net_mock_update_slots[slot - 1].version;
+    if (!vm_net_mock_update_delivery_save(NULL))
+        printf("[warn][network] mock_update_delivery_save_failed identity=%08x slot=%u\n",
+               identityHash, slot);
+}
+
+static u16 vm_net_mock_update_response_version(u8 responseSubtype,
+                                               u8 updateSlot,
+                                               const char *requestName,
+                                               u16 requestVersion)
+{
+    vm_net_mock_update_named_config *named = NULL;
+    vm_net_mock_update_catalog_load();
+    if (responseSubtype == 6 && updateSlot >= 1 &&
+        updateSlot <= VM_NET_MOCK_UPDATE_SLOT_COUNT &&
+        g_vm_net_mock_update_slots[updateSlot - 1].enabled)
+        return g_vm_net_mock_update_slots[updateSlot - 1].version;
+    if (responseSubtype == 7 && requestName != NULL && requestName[0] != 0)
+    {
+        named = vm_net_mock_update_find_named(requestName);
+        if (named != NULL && named->enabled)
+            return named->version;
+    }
+    return requestVersion != 0 ? requestVersion : 1;
+}
+
+static bool vm_net_mock_is_update_version_catalog_request(const u8 *request,
+                                                          u32 requestLen)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind,
+                                                &subtype))
+        return false;
+    return kind == 0x12 && subtype == 5 &&
+           vm_net_mock_request_contains(request, requestLen, "cbm");
+}
+
+static u32 vm_net_mock_build_version_response(const u8 *request,
+                                              u32 requestLen,
+                                              u8 *out,
+                                              u32 outCap)
 {
     u32 pos = 5;
-    u8 result = 1;
+    u8 requestKind = 0;
+    u8 requestSubtype = 0;
+    u32 identityHash = 0;
+    bool usedClientVersions = false;
+    u8 result = vm_net_mock_update_result_mask(request, requestLen,
+                                               &identityHash,
+                                               &usedClientVersions);
     if (outCap < pos)
         return 0;
-
-    if (g_netMockUpdateDelivered || vm_net_mock_has_installed_update())
-    {
-        g_netMockUpdateDelivered = 1;
-        result = 0;
-    }
+    (void)vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                &requestKind,
+                                                &requestSubtype);
 
     u32 objectStart = 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x12, 5, &objectStart))
@@ -2830,7 +3654,7 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_object(out, objectStart, pos);
 
     u8 objectCount = 1;
-    if (result == 0)
+    if (result == 0 && requestKind == 0x12 && requestSubtype == 9)
     {
         /* CBE parses subtype 5 in handle_version_update_response and subtype 9
          * in startup_update_net_callback.  Keep both objects: removing subtype 9
@@ -2849,6 +3673,17 @@ static u32 vm_net_mock_build_version_response(u8 *out, u32 outCap)
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u\n",
+           requestKind, requestSubtype, result, identityHash,
+           usedClientVersions ? "client-cbm-versions" : "delivery-ledger",
+           g_vm_net_mock_update_slots[0].enabled ?
+               g_vm_net_mock_update_slots[0].version : 0,
+           g_vm_net_mock_update_slots[1].enabled ?
+               g_vm_net_mock_update_slots[1].version : 0,
+           g_vm_net_mock_update_slots[2].enabled ?
+               g_vm_net_mock_update_slots[2].version : 0,
+           g_vm_net_mock_update_slots[3].enabled ?
+               g_vm_net_mock_update_slots[3].version : 0);
     return pos;
 }
 
@@ -2862,14 +3697,16 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
     if (outCap < pos)
         return 0;
 
-    static u8 updateData[131072];
+    static u8 updateData[VM_NET_MOCK_UPDATE_PAYLOAD_MAX];
     char requestName[256];
     requestName[0] = 0;
     bool haveRequestName = vm_net_mock_get_object_string_field(request, requestLen, "name", requestName, sizeof(requestName)) &&
                             requestName[0] != 0;
     u8 requestType = 0;
     bool haveRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "type", &requestType);
+    u8 updateSlot = 0;
     u16 requestVersion = 1;
+    u16 responseVersion = 1;
     u8 versionBytes[2];
     const char *payloadName = NULL;
     char payloadNameUtf8[256];
@@ -2879,6 +3716,10 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
     (void)vm_net_mock_get_object_u16_field(request, requestLen, "version", &requestVersion);
     if (requestVersion == 0)
         requestVersion = 1;
+    (void)vm_net_mock_get_object_u8_field(request, requestLen, "id", &updateSlot);
+    responseVersion = vm_net_mock_update_response_version(
+        responseSubtype, updateSlot, haveRequestName ? requestName : NULL,
+        requestVersion);
 
     u32 updateLen = vm_net_mock_load_resource_update_payload(request,
                                                              requestLen,
@@ -2911,8 +3752,8 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
         chunkLen = 0x1000;
     u32 crc = vm_net_mock_signed_byte_sum(updateData, start + chunkLen);
 
-    versionBytes[0] = (u8)(requestVersion >> 8);
-    versionBytes[1] = (u8)requestVersion;
+    versionBytes[0] = (u8)(responseVersion >> 8);
+    versionBytes[1] = (u8)responseVersion;
 
     if (responseSubtype == 7 &&
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
@@ -2954,11 +3795,19 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
            chunkLen,
            updateLen,
            crc,
-           requestVersion,
+           responseVersion,
            sourcePathUtf8,
            pos);
     if (responseSubtype == 7 && start + chunkLen >= updateLen)
         vm_net_mock_note_update_chunk_complete(payloadName ? payloadName : haveRequestName ? requestName : "");
+    if (responseSubtype == 6 && start + chunkLen >= updateLen)
+    {
+        vm_net_mock_update_mark_delivered(request, requestLen, updateSlot);
+        printf("[info][network] mock_update_module_complete slot=%u file=%s version=%u\n",
+               updateSlot,
+               payloadNameUtf8,
+               responseVersion);
+    }
     return pos;
 }
 
@@ -12172,6 +13021,8 @@ typedef struct vm_mock_service_client_session
     u16 sceneVisibleX;
     u16 sceneVisibleY;
     u32 sceneVisibleTick;
+    bool shopSceneNpcReseedPending;
+    char shopSceneNpcReseedScene[64];
     bool lastMoveinfoValid;
     u16 lastMoveinfoLen;
     u8 lastMoveinfoFormat;
@@ -12547,6 +13398,36 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *source)
+{
+    vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
+    const char *scene = vm_net_mock_current_scene_name();
+    bool changed = false;
+
+    if (session == NULL)
+        return;
+    if (!vm_net_mock_scene_name_is_safe(scene) &&
+        session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+    {
+        scene = session->sceneVisibleScene;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene))
+        return;
+    changed = !session->shopSceneNpcReseedPending ||
+              session->shopSceneNpcReseedScene[0] == 0 ||
+              !vm_net_mock_scene_names_equal_loose(session->shopSceneNpcReseedScene,
+                                                   scene);
+    session->shopSceneNpcReseedPending = true;
+    snprintf(session->shopSceneNpcReseedScene,
+             sizeof(session->shopSceneNpcReseedScene), "%s", scene);
+    if (changed)
+    {
+        printf("[info][mock-service] scene_npc_reseed_arm client=%08x scene=%s trigger=shop-open source=%s delivery=next-scene-followup\n",
+               session->clientId, scene, source ? source : "-");
+    }
 }
 
 static int vm_mock_service_trade_client_index(const vm_mock_service_trade *trade,
@@ -14607,31 +15488,36 @@ static bool vm_net_mock_parse_sce_interactive_npc_at(const u8 *data, u32 len, u3
         return false;
     }
 
-    /* Some legacy SCE catalogs refer to actor files that were renamed before
-     * the current JHOnlineData bundle was produced.  Never expose a missing
-     * actor resource through 27/11: scene_parse_npcinfo_and_spawn_npcs stores
-     * the fourth string in a visual slot and the draw path later dereferences
-     * the resulting resource object without a null guard.  The old Penglai
-     * copper-stage row uses n_girl.actor, whose current equivalent is the
-     * shipped n_woman1.actor. */
-    if (!vm_net_mock_client_data_resource_exists(seed.actorResource, ".actor"))
+    /* bin/JHOnlineData is a writable client cache and may be empty before the
+     * service starts. SCE rows therefore validate against the clean server
+     * download source. Keep the proven n_girl.actor compatibility mapping
+     * explicit: that legacy visual crashed in the current renderer, while
+     * n_woman1.actor is its compatible current equivalent. */
     {
-        char missingActor[sizeof(seed.actorResource)];
         const char *replacement = NULL;
 
-        snprintf(missingActor, sizeof(missingActor), "%s", seed.actorResource);
         if (strcmp(seed.actorResource, "n_girl.actor") == 0)
             replacement = "n_woman1.actor";
-        if (replacement == NULL ||
-            !vm_net_mock_client_data_resource_exists(replacement, ".actor"))
+        if (replacement != NULL)
+        {
+            if (!vm_net_mock_open_server_data_resource(replacement, ".actor",
+                                                       NULL, NULL, 0))
+            {
+                printf("[error][network] mock_scene_npc_actor_resource_missing npc=%s actor=%s script=%s action=skip-row\n",
+                       seed.displayName, replacement, seed.scriptName);
+                return false;
+            }
+            printf("[info][network] mock_scene_npc_actor_resource_alias npc=%s legacy=%s current=%s script=%s evidence=compatible-server-resource\n",
+                   seed.displayName, seed.actorResource, replacement, seed.scriptName);
+            snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", replacement);
+        }
+        else if (!vm_net_mock_open_server_data_resource(seed.actorResource, ".actor",
+                                                        NULL, NULL, 0))
         {
             printf("[error][network] mock_scene_npc_actor_resource_missing npc=%s actor=%s script=%s action=skip-row\n",
-                   seed.displayName, missingActor, seed.scriptName);
+                   seed.displayName, seed.actorResource, seed.scriptName);
             return false;
         }
-        snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", replacement);
-        printf("[info][network] mock_scene_npc_actor_resource_alias npc=%s legacy=%s current=%s script=%s evidence=client-cache-resource-exists\n",
-               seed.displayName, missingActor, seed.actorResource, seed.scriptName);
     }
     *seedOut = seed;
     if (endOut)
@@ -30161,10 +31047,9 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
                                             scene))
     {
         /*
-         * Role select creates the first scene before any 30/1 transfer object.
-         * Deliver its armed NPC catalog on the first poll after sceneVisibleReady
-         * instead of burying it in the comparatively expensive startup task
-         * response, which can exceed the client's 1.5 s transport timeout.
+         * Normal startup consumes this one-shot in the first scene resource or
+         * task follow-up. Keep the poll path as a fallback for unusual clients
+         * that reach sceneVisibleReady without sending either follow-up.
          */
         if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
                                                            scene,
@@ -35798,6 +36683,8 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_netMockShop17ListPending = 1;
     g_netMockBackpackGridSeededRoleId = 0;
+    vm_mock_service_mark_shop_scene_npc_reseed_pending(
+        "scene-interaction-followup");
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, page6Index, 8, page6Ids, sizeof(page6Ids));
     printf("[info][network] mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u secret_ids=%s weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u weapon_ids=%s actorOther=%u fb11=%u fb4=%u books=%u grid_reseed=1\n",
@@ -35974,6 +36861,90 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
     return true;
 }
 
+static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
+                                                         u32 *pos, u8 *objectCount,
+                                                         const char *currentScene,
+                                                         bool allowStartupSeed,
+                                                         bool allowShopReturnSeed)
+{
+    vm_mock_service_client_session *activeSession =
+        vm_mock_service_get_active_client_session();
+    u8 npcCount = 0;
+    bool startupSeed = false;
+    bool shopReturnSeed = false;
+    const char *phase = NULL;
+
+    if (out == NULL || pos == NULL || objectCount == NULL ||
+        !vm_net_mock_scene_name_is_safe(currentScene))
+    {
+        return true;
+    }
+
+    if (activeSession != NULL && activeSession->shopSceneNpcReseedPending)
+    {
+        if (activeSession->shopSceneNpcReseedScene[0] != 0 &&
+            vm_net_mock_scene_names_equal_loose(activeSession->shopSceneNpcReseedScene,
+                                                currentScene))
+        {
+            shopReturnSeed = allowShopReturnSeed;
+        }
+        else
+        {
+            printf("[info][mock-service] scene_npc_reseed_cancel client=%08x armed_scene=%s current_scene=%s reason=scene-changed-before-shop-return\n",
+                   activeSession->clientId,
+                   activeSession->shopSceneNpcReseedScene,
+                   currentScene);
+            activeSession->shopSceneNpcReseedPending = false;
+            activeSession->shopSceneNpcReseedScene[0] = 0;
+        }
+    }
+
+    startupSeed = allowStartupSeed &&
+                  !g_vm_net_mock_scene_moveinfo_npc_seeded &&
+                  g_vm_net_mock_scene_moveinfo_npc_pending &&
+                  g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
+                  vm_net_mock_scene_names_equal_loose(
+                      g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+                      currentScene);
+    if (!startupSeed && !shopReturnSeed)
+        return true;
+
+    npcCount = vm_net_mock_scene_room_npc_seed_count(currentScene);
+    if (npcCount == 0)
+    {
+        if (shopReturnSeed && activeSession != NULL)
+        {
+            activeSession->shopSceneNpcReseedPending = false;
+            activeSession->shopSceneNpcReseedScene[0] = 0;
+        }
+        return true;
+    }
+
+    phase = startupSeed
+                ? "startup-scene-followup-immediate"
+                : "shop-return-scene-followup-reseed";
+    if (shopReturnSeed)
+        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
+    if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, pos,
+                                                       currentScene, phase))
+    {
+        return false;
+    }
+    *objectCount += 1;
+    if (shopReturnSeed && activeSession != NULL)
+    {
+        activeSession->shopSceneNpcReseedPending = false;
+        activeSession->shopSceneNpcReseedScene[0] = 0;
+    }
+    printf("[info][mock-service] scene_npc_lifecycle_seed client=%08x scene=%s phase=%s npcnum=%u objects=%u evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+           activeSession ? activeSession->clientId : 0,
+           currentScene,
+           phase,
+           (u32)npcCount,
+           (u32)*objectCount);
+    return true;
+}
+
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
                                                               u8 *out, u32 outCap)
 {
@@ -36000,6 +36971,9 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         return 0;
 
     currentScene = vm_net_mock_current_scene_name();
+    startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
+                                 (!g_vm_net_mock_last_scene_change_target_valid &&
+                                  !g_vm_net_mock_last_completed_scene_change_target_valid);
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
     if (!g_vm_net_mock_last_scene_change_target_valid &&
@@ -36016,6 +36990,11 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * Keep the requested resource/task objects, but acknowledge this as a
          * post-enter refresh only. The scene is already live on screen.
          */
+        if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos, &objectCount,
+                                                        currentScene, false, true))
+        {
+            return 0;
+        }
         if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                                includeSkillBooks, true, true, true,
                                                                false, false, false))
@@ -36066,9 +37045,6 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                          downloadedTarget.scene, downloadedTarget.x, downloadedTarget.y);
         return pos;
     }
-    startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
-                                 (!g_vm_net_mock_last_scene_change_target_valid &&
-                                  !g_vm_net_mock_last_completed_scene_change_target_valid);
     sceneSupportsActorOtherNpcSeed = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene);
     /*
      * Runtime evidence from the latest manual runs:
@@ -36121,6 +37097,13 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
      * (0x01037998), but both _02 and first-scene non-empty rows crashed in the
      * actor visual resolver before scene_npcinfo_create_return.
      */
+    if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos, &objectCount,
+                                                    currentScene,
+                                                    startupSceneAlreadyEntered,
+                                                    !g_vm_net_mock_last_scene_change_target_valid))
+    {
+        return 0;
+    }
     if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                            includeSkillBooks, true, true, true,
                                                            false, false,
@@ -36312,6 +37295,16 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
          * path only.
          */
         completeDeferredScene = false;
+    }
+    /* scene_runtime_init_and_sync(0x01012FB4) issues this subset only after
+     * rebuilding the 25-node scene table. Put 27/11 before 6/1 and 6/14 so
+     * their prompt refresh sees the freshly created NPC nodes. */
+    if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+            out, outCap, &pos, &objectCount, currentScene,
+            startupSceneAlreadyEntered && !completeDeferredScene,
+            !completeDeferredScene))
+    {
+        return 0;
     }
     seedSubsetNpcOther = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
                          vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_OTHERINFO", 0) != 0;
@@ -36673,6 +37666,7 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
      * response must be allowed to seed the active role backpack again.
      */
     g_netMockBackpackGridSeededRoleId = 0;
+    vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
     printf("[info][network] mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s\n",
@@ -36747,6 +37741,8 @@ static u32 vm_net_mock_build_shop_info14_response(const u8 *request, u32 request
 
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_netMockShop17ListPending = 1;
+    if (subtype == 14)
+        vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-info14");
     printf("[info][network] mock_shop_info14 subtype=%u response=14/%u\n", subtype, subtype);
     vm_autotest_note("mock_shop_info14 subtype=%u response=14/%u evidence=mmShop:0x6D6/0x6BC/0x9DE\n",
                      subtype, subtype);
@@ -38020,7 +39016,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * scene, so it never passes through append_scene_enter_object_for_scene()
          * (the transfer path that normally arms the one-shot 27/11 catalog).
          * Arm the same catalog lifecycle explicitly for the first scene-ready
-         * sync poll; otherwise NPCs only appear after the first map transfer.
+         * resource/task follow-up; the later sync poll remains a fallback only.
          */
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(role->scene);
     }
@@ -38624,6 +39620,18 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
                                           requestLen, hookedLen);
                 return hookedLen;
             }
+        }
+    }
+
+    if (vm_net_mock_is_update_version_catalog_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_version_response(request, requestLen,
+                                                       out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-update-version-catalog",
+                                      request, requestLen, hookedLen);
+            return hookedLen;
         }
     }
 
@@ -39482,7 +40490,8 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (vm_net_mock_request_contains(request, requestLen, "version"))
     {
         vm_net_mock_title_login_phase_reset("version-handshake");
-        hookedLen = vm_net_mock_build_version_response(out, outCap);
+        hookedLen = vm_net_mock_build_version_response(request, requestLen,
+                                                       out, outCap);
         if (hookedLen)
         {
             vm_net_log_handled_packet("builtin-version", request, requestLen, hookedLen);
@@ -39513,8 +40522,23 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
     vm_net_log_unhandled_packet(request, requestLen);
+#ifdef CBE_SERVER_ONLY
+    /*
+     * A production/headless server must not terminate because a client sent a
+     * packet whose protocol has not been implemented yet.  Keep the detailed
+     * unhandled-packet trace above, but complete this service request with an
+     * empty response so the connection can continue serving later packets.
+     *
+     * Emulator builds deliberately retain the assertion below: while reverse
+     * engineering locally, an unknown packet should still stop at the exact
+     * point where protocol coverage is missing.
+     */
+    vm_net_log_handled_packet("ignored-unhandled-server-only", request, requestLen, 0);
+    return 0;
+#else
     assert(0);
     return 0;
+#endif
 }
 
 static u32 vm_net_mock_sync_response_to_vm(void)
@@ -40592,6 +41616,54 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     return 1;
 }
 
+static bool vm_net_mock_service_ensure_resource_root(void)
+{
+    const char *configuredRoot = getenv("CBE_RESOURCE_ROOT");
+    char candidate[1200];
+
+    if (vm_net_mock_resource_dir()[0] != 0)
+        return true;
+
+    if (configuredRoot != NULL && configuredRoot[0] != 0)
+    {
+        static const char *suffixes[] = {
+            "", "/web/fs/JHOnlineData", "/JHOnlineData", "/bin/JHOnlineData"
+        };
+        for (u32 i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i)
+        {
+            if (snprintf(candidate, sizeof(candidate), "%s%s",
+                         configuredRoot, suffixes[i]) >= (int)sizeof(candidate))
+            {
+                continue;
+            }
+            if (vm_net_mock_set_resource_dir(candidate))
+            {
+                printf("[info][mock-service] resource_root=%s source=environment\n",
+                       vm_net_mock_resource_dir());
+                return true;
+            }
+        }
+    }
+
+    {
+        static const char *relativeCandidates[] = {
+            "../web/fs/JHOnlineData", "web/fs/JHOnlineData",
+            "JHOnlineData", "bin/JHOnlineData", "../bin/JHOnlineData"
+        };
+        for (u32 i = 0;
+             i < sizeof(relativeCandidates) / sizeof(relativeCandidates[0]); ++i)
+        {
+            if (vm_net_mock_set_resource_dir(relativeCandidates[i]))
+            {
+                printf("[info][mock-service] resource_root=%s source=service-auto\n",
+                       vm_net_mock_resource_dir());
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
 {
     vm_mock_service_socket serverSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
@@ -40601,6 +41673,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     int ok = 0;
     struct sockaddr_in addr;
     const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
+
+    if (!vm_net_mock_service_ensure_resource_root())
+    {
+        printf("[error][mock-service] resource root unresolved required=task.dsh+item.dsh+equip.dsh\n");
+        return -1;
+    }
 
     if (!vm_mock_service_socket_init())
     {
