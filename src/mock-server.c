@@ -4178,8 +4178,8 @@ enum
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 5,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_MP_PERCENT = 30,
-    VM_NET_MOCK_ROLE_INITIAL_X = 216,
-    VM_NET_MOCK_ROLE_INITIAL_Y = 216
+    VM_NET_MOCK_ROLE_INITIAL_X = 224,
+    VM_NET_MOCK_ROLE_INITIAL_Y = 132
 };
 
 typedef struct
@@ -10072,10 +10072,13 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     role->x = VM_NET_MOCK_ROLE_INITIAL_X;
     role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
-    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
-                                                          &role->x,
-                                                          &role->y,
-                                                          NULL);
+    if (!vm_net_mock_scene_is_penglai01(role->scene))
+    {
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+                                                              &role->x,
+                                                              &role->y,
+                                                              NULL);
+    }
     role->designationId = 0;
     vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
@@ -10271,10 +10274,13 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     {
         role->x = VM_NET_MOCK_ROLE_INITIAL_X;
         role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
-        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
-                                                              &role->x,
-                                                              &role->y,
-                                                              NULL);
+        if (!vm_net_mock_scene_is_penglai01(role->scene))
+        {
+            (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+                                                                  &role->x,
+                                                                  &role->y,
+                                                                  NULL);
+        }
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
     vm_net_mock_role_normalize_backpack(role);
