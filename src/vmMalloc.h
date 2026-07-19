@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include "config.h"
-#ifdef CBE_PLATFORM_ANDROID
+#ifdef CBE_PLATFORM_NO_WINDOW
 #include "android_compat.h"
 #else
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"

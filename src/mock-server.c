@@ -15,7 +15,9 @@
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 #include <stdlib.h>
@@ -16272,6 +16274,11 @@ static void vm_net_mock_mark_current_scene_reload(const char *scene)
 
 static bool vm_net_mock_scene_runtime_pending_without_target(void)
 {
+#ifdef CBE_SERVER_ONLY
+    /* A standalone service has no guest scene object.  Scene transitions are
+     * tracked by the per-client service session instead. */
+    return false;
+#else
     u32 sceneObj = 0;
     u8 pending = 0;
 
@@ -16282,6 +16289,7 @@ static bool vm_net_mock_scene_runtime_pending_without_target(void)
     if (uc_mem_read(MTK, Global_R9 + 0x5C6B, &pending, sizeof(pending)) != UC_ERR_OK)
         return false;
     return pending != 0;
+#endif
 }
 
 static bool vm_net_mock_should_use_full_scene_bootstrap(const char *currentScene,
@@ -28641,6 +28649,17 @@ static bool vm_net_mock_read_current_player_grid(u32 *nodeOut, u32 *actorIdOut,
                                                  u16 *gridXOut, u16 *gridYOut,
                                                  u16 *targetXOut, u16 *targetYOut)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Only the emulator process owns a guest scene-node table.  Headless
+     * movement state comes from uploaded moveinfo and service sessions. */
+    (void)nodeOut;
+    (void)actorIdOut;
+    (void)gridXOut;
+    (void)gridYOut;
+    (void)targetXOut;
+    (void)targetYOut;
+    return false;
+#else
     u32 hudState = 0;
     u32 currentSceneNode = 0;
     u32 actorId = 0;
@@ -28681,6 +28700,7 @@ static bool vm_net_mock_read_current_player_grid(u32 *nodeOut, u32 *actorIdOut,
     if (targetYOut)
         *targetYOut = targetY;
     return true;
+#endif
 }
 
 typedef struct
@@ -30407,6 +30427,14 @@ static bool vm_net_mock_select_scene_actor_moveinfo_target(u32 actorId,
                                                            u32 *posxOut,
                                                            u32 *posyOut)
 {
+#ifdef CBE_SERVER_ONLY
+    /* The authoritative service never patches an emulator-local actor node. */
+    (void)actorId;
+    (void)indexOut;
+    (void)posxOut;
+    (void)posyOut;
+    return false;
+#else
     u32 sceneNodeBase = 0;
 
     if (actorId == 0 || Global_R9 == 0)
@@ -30438,6 +30466,7 @@ static bool vm_net_mock_select_scene_actor_moveinfo_target(u32 actorId,
         return true;
     }
     return false;
+#endif
 }
 
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason)

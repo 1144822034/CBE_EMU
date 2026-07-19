@@ -9,6 +9,23 @@ The mock path is now service-first:
 
 ## Start the service
 
+### Linux
+
+Linux builds only the headless service executable. Install the compiler first
+(package name shown for Debian/Ubuntu):
+
+```bash
+apt-get install build-essential
+make -j2
+./bin/jh-online-server --mock-service-bind=0.0.0.0 --mock-service-port=19090
+```
+
+The Linux target does not require SDL or Unicorn and does not build or start
+the emulator client. MySQL connection settings remain controlled by the `CBE_MYSQL_*`
+environment variables documented under `server/mysql`.
+
+### Windows
+
 ```powershell
 bin/main.exe --mock-service-only --mock-service-port=19090
 ```

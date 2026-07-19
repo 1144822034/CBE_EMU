@@ -1,4 +1,5 @@
 #include "cbeParser.h"
+#include <stdio.h>
 
 cbeInfo g_cbeInfo;
 

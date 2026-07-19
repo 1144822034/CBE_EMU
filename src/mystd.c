@@ -216,8 +216,8 @@ void gbk_to_utf8(u8 *gbk, u8 *utf8, size_t outlen)
         return;
 
     size_t inlen = strlen(gbk);
-    u8 *pin = (u8 *)gbk;
-    u8 *pout = utf8;
+    char *pin = (char *)gbk;
+    char *pout = (char *)utf8;
 
     memset(utf8, 0, outlen);
 
@@ -232,8 +232,8 @@ void utf8_to_gbk(u8 *utf, u8 *gbk, size_t outlen)
         return;
 
     size_t inlen = strlen(utf);
-    u8 *pin = (u8 *)utf;
-    u8 *pout = gbk;
+    char *pin = (char *)utf;
+    char *pout = (char *)gbk;
 
     memset(gbk, 0, outlen);
 
@@ -248,8 +248,8 @@ void gbk_to_unicode(u8 *gbk, u8 *unicode, size_t outlen)
         return;
 
     size_t inlen = strlen((char *)gbk);
-    u8 *pin = (u8 *)gbk;
-    u8 *pout = unicode;
+    char *pin = (char *)gbk;
+    char *pout = (char *)unicode;
 
     memset(pout, 0, outlen);
 
@@ -390,10 +390,10 @@ int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len)
 #else
     iconv_t cd;
     char *inbuf = (char *)ucs2;
-    char *outbuf = gbk;
+    char *outbuf = (char *)gbk;
 
-    u32 inbytesleft = ucs2_len;
-    u32 outbytesleft = gbk_len;
+    size_t inbytesleft = ucs2_len;
+    size_t outbytesleft = gbk_len;
 
     cd = iconv_open("GBK", "UCS-2LE");
     if (cd == (iconv_t)-1)
@@ -401,7 +401,7 @@ int ucs2_to_gbk(u8 *ucs2, u32 ucs2_len, u8 *gbk, u32 gbk_len)
 
     memset(gbk, 0, gbk_len);
 
-    if (iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft) == (u32)-1)
+    if (iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft) == (size_t)-1)
     {
         iconv_close(cd);
         return -2;

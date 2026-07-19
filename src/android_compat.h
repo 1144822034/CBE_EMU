@@ -1,16 +1,18 @@
 #pragma once
 
-/* Small SDL surface used by the JNI build.  Android owns the window, input
- * widgets and final presentation; the emulator only needs timing, events and
- * allocation names shared with the desktop sources. */
+/* Small SDL-compatible surface used by no-window builds. */
+#ifdef CBE_PLATFORM_ANDROID
 #include <android/log.h>
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
+#ifdef CBE_PLATFORM_ANDROID
 #define CBE_LOG_TAG "CBE_EMU"
+#endif
 
 typedef int SDL_Keycode;
 typedef struct SDL_Window SDL_Window;
@@ -57,10 +59,11 @@ typedef struct SDL_Event
 #define SDL_max(a, b) ((a) > (b) ? (a) : (b))
 #define _stricmp strcasecmp
 
+#ifdef CBE_PLATFORM_ANDROID
 int cbe_android_printf(const char *fmt, ...);
 const char *cbe_android_get_print_buffer(void);
-
 #define printf(...) cbe_android_printf(__VA_ARGS__)
+#endif
 
 static inline uint32_t SDL_GetTicks(void)
 {
@@ -88,7 +91,7 @@ static inline SDL_Surface *SDL_GetWindowSurface(SDL_Window *window)
 
 static inline const char *SDL_GetError(void)
 {
-    return "SDL window backend is owned by Android";
+    return "SDL window backend is disabled";
 }
 
 static inline int SDL_SaveBMP(SDL_Surface *surface, const char *path)

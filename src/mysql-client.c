@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #define SOCKET int
 #define INVALID_SOCKET (-1)

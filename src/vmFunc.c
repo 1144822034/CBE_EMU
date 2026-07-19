@@ -389,7 +389,7 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
 static void vm_read_path_string(u32 namePtr, char *out, size_t outSize)
 {
     u8 rawName[256];
-#ifdef CBE_PLATFORM_ANDROID
+#ifdef CBE_HOST_UTF8_PATHS
     char gbkPath[256];
 #endif
     memset(out, 0, outSize);

@@ -359,7 +359,11 @@ static u8 g_netLastHandledValid = 0;
 static u32 g_netLastHandledResponseLen = 0;
 static char g_netLastHandledSource[64];
 static char g_netLastHandledSummary[512];
+#ifdef CBE_SERVER_ONLY
+static u8 g_mockServiceOnly = 1;
+#else
 static u8 g_mockServiceOnly = 0;
+#endif
 static u8 g_mockServiceWarnedUnavailable = 0;
 static char g_mockServiceHost[64] = "127.0.0.1";
 static char g_mockServiceBindHost[64] = "127.0.0.1";
@@ -2917,7 +2921,7 @@ static void vm_frame_delay(u32 ms) { SDL_Delay(ms); }
 static void vm_lcd_update_with_input_overlay(void)
 {
     uc_mem_read(MTK, VM_screenImage_ADDRESS, Lcd_Cache_Buffer, LCD_WIDTH * LCD_HEIGHT * PIXEL_PER_BYTE);
-#ifndef CBE_PLATFORM_ANDROID
+#ifndef CBE_PLATFORM_NO_WINDOW
     vm_input_draw_overlay();
 #endif
     UpdateLcd();
@@ -7307,6 +7311,18 @@ int cbeInit(const char *rootPath)
 int main(int argc, char *args[])
 #endif
 {
+#ifdef CBE_SERVER_ONLY
+    /* Linux is a standalone authoritative service.  Do not load a client CBE
+     * or initialize the Unicorn/LCD emulator before opening the game and web
+     * listeners. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    vm_mock_service_init_config(argc, args);
+    printf("[info][mock-service] starting server-only bind=%s:%u admin=127.0.0.1:%u\n",
+           g_mockServiceBindHost, g_mockServicePort, g_mockAdminPort);
+    return vm_net_mock_service_run_forever(g_mockServiceBindHost,
+                                           g_mockServicePort);
+#else
     uc_err err;
     uc_hook hookHandle;
 #ifdef CBE_PLATFORM_ANDROID
@@ -7333,7 +7349,7 @@ int main(int argc, char *args[])
 #endif
     // while(1);
 
-#ifndef CBE_PLATFORM_ANDROID
+#ifndef CBE_PLATFORM_NO_WINDOW
     if (SDL_Init((g_mockServiceOnly ? SDL_INIT_TIMER : (SDL_INIT_VIDEO | SDL_INIT_TIMER))) < 0)
     {
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
@@ -7365,7 +7381,7 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
-#ifdef CBE_PLATFORM_ANDROID
+#ifdef CBE_HOST_UTF8_PATHS
     snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", g_cbeLoadPathUtf8);
 #else
     utf8_to_gbk(g_cbeLoadPathUtf8, cbeTextString, mySizeOf(cbeTextString));
@@ -7511,6 +7527,7 @@ int main(int argc, char *args[])
 #endif
     }
     return 0;
+#endif
 }
 
 #ifdef CBE_PLATFORM_ANDROID

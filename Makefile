@@ -1,38 +1,81 @@
 CC := gcc
 
-OBJS := obj/gifDecode.o obj/cbeParser.o obj/mystd.o obj/fontEngine.o obj/vmMalloc.o obj/fileIoEngine.o obj/lcd.o obj/mysql-client.o obj/resource.o obj/main.o
+COMMON_SOURCES := \
+	src/gifDecode.c \
+	src/cbeParser.c \
+	src/mystd.c \
+	src/fontEngine.c \
+	src/vmMalloc.c \
+	src/fileIoEngine.c \
+	src/lcd.c \
+	src/mysql-client.c \
+	src/main.c
 
-UNICORN = Lib/unicorn-2.1.4/unicorn-import.lib
+ifeq ($(OS),Windows_NT)
+OBJDIR := obj
+TARGET := bin/main.exe
+OBJS := $(patsubst src/%.c,$(OBJDIR)/%.o,$(COMMON_SOURCES)) $(OBJDIR)/resource.o
+CPPFLAGS += -DNETWORK_SUPPORT
+CFLAGS += -g -w
+UNICORN_LIB := Lib/unicorn-2.1.4/unicorn-import.lib
+SDL2_DIR := Lib/sdl2-2.0.10
+LDLIBS += -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 \
+	$(UNICORN_LIB) -L$(SDL2_DIR)/lib/ -lSDL2main -lSDL2
+else
+# Linux deliberately produces only the authoritative headless service.  It
+# does not link SDL/Unicorn or build/run the emulator client.
+OBJDIR := obj/linux-server
+TARGET := bin/jh-online-server
+SERVER_SOURCES := \
+	src/gifDecode.c \
+	src/mystd.c \
+	src/mysql-client.c \
+	src/main.c \
+	src/server-headless.c
+OBJS := $(patsubst src/%.c,$(OBJDIR)/%.o,$(SERVER_SOURCES))
+CPPFLAGS += -DNETWORK_SUPPORT -DCBE_SERVER_ONLY
+CFLAGS += -g -O2 -std=gnu11 -ffunction-sections -fdata-sections -w
+LDFLAGS += -Wl,--gc-sections
+LDLIBS += -lpthread -lm
+endif
 
-SDL2 = Lib/sdl2-2.0.10
-
-# -Wl,-subsystem,windows gets rid of the console window
-# gcc  -o main.exe main.c -lmingw32 -Wl,-subsystem,windows -L./lib -lSDL2main -lSDL2
-# -mwindows 关闭控制台窗口
-# -lwinhttp http通信库
-.PHONY: all build
+.PHONY: all build clean
 
 all: build
 
-obj/cbeParser.o: src/cbeParser.c
-	$(CC) -g  -w -c src/cbeParser.c -o obj/cbeParser.o
-obj/mystd.o: src/mystd.c
-	$(CC) -g  -w -c src/mystd.c -o obj/mystd.o
-obj/fontEngine.o: src/fontEngine.c
-	$(CC) -g  -w -c src/fontEngine.c -o obj/fontEngine.o
-obj/vmMalloc.o: src/vmMalloc.c
-	$(CC) -g  -w -c src/vmMalloc.c -o obj/vmMalloc.o
-obj/fileIoEngine.o: src/fileIoEngine.c
-	$(CC) -g  -w -c src/fileIoEngine.c -o obj/fileIoEngine.o
-obj/lcd.o: src/lcd.c
-	$(CC) -g  -w -c src/lcd.c -o obj/lcd.o
-obj/mysql-client.o: src/mysql-client.c src/mysql-client.h
-	$(CC) -g -w -c src/mysql-client.c -o obj/mysql-client.o
-obj/main.o: src/main.c src/mock-server.c src/web_admin_server.c src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c
-	$(CC) -g -w -c src/main.c -o obj/main.o
-obj/gifDecode.o: src/gifDecode.c
-	$(CC) -g  -w -c src/gifDecode.c -o obj/gifDecode.o
-obj/resource.o: resource.rc
+build: $(TARGET)
+
+$(OBJDIR)/main.o: src/main.c src/mock-server.c src/web_admin_server.c \
+	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
+
+$(OBJDIR)/mystd.o: src/mystd.c src/mystd.h src/config.h
+
+$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+ifeq ($(OS),Windows_NT)
+$(OBJDIR)/resource.o: resource.rc | $(OBJDIR)
 	windres $< -O coff -o $@
-build: $(OBJS)
-	$(CC) $(OBJS) -o bin/main.exe -g -w -lpthread -liconv -lm -lmingw32 -lkernel32 -Wall -lws2_32 -DNETWORK_SUPPORT $(UNICORN) -L$(SDL2)/lib/ -lSDL2main -lSDL2
+
+$(OBJDIR):
+	@if not exist "$(OBJDIR)" mkdir "$(OBJDIR)"
+
+bin:
+	@if not exist "bin" mkdir "bin"
+else
+$(OBJDIR):
+	mkdir -p "$(OBJDIR)"
+
+bin:
+	mkdir -p bin
+endif
+
+$(TARGET): $(OBJS) | bin
+	$(CC) $(LDFLAGS) $(OBJS) -o $@ $(LDLIBS)
+
+clean:
+ifeq ($(OS),Windows_NT)
+	-del /Q "$(OBJDIR)\*.o" "$(TARGET)" 2>NUL
+else
+	rm -rf "$(OBJDIR)" "$(TARGET)"
+endif

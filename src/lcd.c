@@ -86,7 +86,7 @@ int LcdGetWindowHeight(void)
 
 int LcdGetToolbarHeight(void)
 {
-#ifdef CBE_PLATFORM_ANDROID
+#ifdef CBE_PLATFORM_NO_WINDOW
     return 0;
 #else
     return LCD_TOOLBAR_HEIGHT;
@@ -219,7 +219,7 @@ void InitLcd()
 #endif
 }
 
-#ifndef CBE_PLATFORM_ANDROID
+#ifndef CBE_PLATFORM_NO_WINDOW
 static void LcdSurfacePutPixel(SDL_Surface *sfc, int x, int y, u32 color)
 {
     if (!sfc || x < 0 || y < 0 || x >= sfc->w || y >= sfc->h)
@@ -354,6 +354,8 @@ void UpdateLcd()
                                              (u32)PIXEL565B(color));
         }
     }
+#elif defined(CBE_PLATFORM_HEADLESS)
+    return;
 #else
     LcdApplyWindowSize();
 

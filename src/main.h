@@ -8,9 +8,13 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include "config.h"
-#ifdef CBE_PLATFORM_ANDROID
+#ifdef CBE_PLATFORM_NO_WINDOW
 #include "android_compat.h"
+#endif
+#if defined(CBE_PLATFORM_ANDROID)
 #include <unicorn/unicorn.h>
+#elif defined(CBE_PLATFORM_HEADLESS)
+#include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"
 #else
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 #include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"

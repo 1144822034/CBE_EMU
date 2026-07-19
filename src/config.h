@@ -130,6 +130,15 @@
 #if defined(__ANDROID__) || defined(ANDROID_CBE_PORT)
 #define CBE_PLATFORM_ANDROID 1
 #define CBE_CLIENT_ONLY 1
+#define CBE_PLATFORM_NO_WINDOW 1
+#define CBE_HOST_UTF8_PATHS 1
+#endif
+
+/* The Linux target is an authoritative, headless game service. */
+#if defined(CBE_SERVER_ONLY)
+#define CBE_PLATFORM_HEADLESS 1
+#define CBE_PLATFORM_NO_WINDOW 1
+#define CBE_HOST_UTF8_PATHS 1
 #endif
 
 #define u8 unsigned char
