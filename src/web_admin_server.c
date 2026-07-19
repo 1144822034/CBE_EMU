@@ -568,7 +568,8 @@ static u32 vm_mock_admin_collect_scene_files(vm_mock_admin_scene_file *files,
     }
 #else
     {
-        static const char *directories[] = {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
             "../web/fs/JHOnlineData",
             "web/fs/JHOnlineData"
         };
@@ -576,13 +577,15 @@ static u32 vm_mock_admin_collect_scene_files(vm_mock_admin_scene_file *files,
              directoryIndex < sizeof(directories) / sizeof(directories[0]);
              ++directoryIndex)
         {
+            if (directories[directoryIndex] == NULL)
+                continue;
             DIR *directory = opendir(directories[directoryIndex]);
             struct dirent *entry = NULL;
             if (directory == NULL)
                 continue;
             while (count < fileCap && (entry = readdir(directory)) != NULL)
             {
-                char path[384];
+                char path[1400];
                 struct stat info;
                 size_t nameLen = strlen(entry->d_name);
                 if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
@@ -652,7 +655,8 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
     }
 #else
     {
-        static const char *directories[] = {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
             "../web/fs/JHOnlineData",
             "web/fs/JHOnlineData"
         };
@@ -660,13 +664,15 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
              directoryIndex < sizeof(directories) / sizeof(directories[0]);
              ++directoryIndex)
         {
+            if (directories[directoryIndex] == NULL)
+                continue;
             DIR *directory = opendir(directories[directoryIndex]);
             struct dirent *entry = NULL;
             if (directory == NULL)
                 continue;
             while (count < fileCap && (entry = readdir(directory)) != NULL)
             {
-                char path[384];
+                char path[1400];
                 struct stat info;
                 size_t nameLen = strlen(entry->d_name);
                 if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
@@ -738,7 +744,8 @@ static u32 vm_mock_admin_collect_xse_files(vm_mock_admin_scene_file *files,
     }
 #else
     {
-        static const char *directories[] = {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
             "../web/fs/JHOnlineData",
             "web/fs/JHOnlineData"
         };
@@ -746,13 +753,15 @@ static u32 vm_mock_admin_collect_xse_files(vm_mock_admin_scene_file *files,
              directoryIndex < sizeof(directories) / sizeof(directories[0]);
              ++directoryIndex)
         {
+            if (directories[directoryIndex] == NULL)
+                continue;
             DIR *directory = opendir(directories[directoryIndex]);
             struct dirent *entry = NULL;
             if (directory == NULL)
                 continue;
             while (count < fileCap && (entry = readdir(directory)) != NULL)
             {
-                char path[384];
+                char path[1400];
                 struct stat info;
                 size_t nameLen = strlen(entry->d_name);
                 if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||

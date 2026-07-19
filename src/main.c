@@ -7314,7 +7314,7 @@ int main(int argc, char *args[])
 #ifdef CBE_SERVER_ONLY
     const char *resourceRoot = getenv("CBE_RESOURCE_ROOT");
     char originalCwd[1024];
-    char resolvedCwd[1024];
+    char resourceCandidate[1200];
     bool resourceReady = false;
 
     /* Linux is a standalone authoritative service.  Do not load a client CBE
@@ -7323,7 +7323,7 @@ int main(int argc, char *args[])
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     originalCwd[0] = 0;
-    resolvedCwd[0] = 0;
+    resourceCandidate[0] = 0;
     (void)getcwd(originalCwd, sizeof(originalCwd));
     for (int i = 1; i < argc; ++i)
     {
@@ -7332,29 +7332,34 @@ int main(int argc, char *args[])
     }
     if (resourceRoot != NULL && resourceRoot[0] != 0)
     {
-        if (chdir(resourceRoot) == 0)
+        static const char *suffixes[] = {
+            "", "/web/fs/JHOnlineData", "/JHOnlineData", "/bin/JHOnlineData"
+        };
+        for (u32 i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i)
         {
-            FILE *probe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
-            if (probe == NULL)
-                probe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
-            if (probe != NULL)
+            snprintf(resourceCandidate, sizeof(resourceCandidate), "%s%s",
+                     resourceRoot, suffixes[i]);
+            if (vm_net_mock_set_resource_dir(resourceCandidate))
             {
-                fclose(probe);
                 resourceReady = true;
+                break;
             }
         }
-        if (!resourceReady && originalCwd[0] != 0)
-            (void)chdir(originalCwd);
     }
     else
     {
-        FILE *probe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
-        if (probe == NULL)
-            probe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
-        if (probe != NULL)
+        static const char *relativeCandidates[] = {
+            "web/fs/JHOnlineData", "../web/fs/JHOnlineData",
+            "JHOnlineData", "bin/JHOnlineData", "../bin/JHOnlineData"
+        };
+        for (u32 i = 0;
+             i < sizeof(relativeCandidates) / sizeof(relativeCandidates[0]); ++i)
         {
-            fclose(probe);
-            resourceReady = true;
+            if (vm_net_mock_set_resource_dir(relativeCandidates[i]))
+            {
+                resourceReady = true;
+                break;
+            }
         }
 #ifndef _WIN32
         if (!resourceReady)
@@ -7369,37 +7374,37 @@ int main(int argc, char *args[])
                 slash = strrchr(exePath, '/');
                 if (slash != NULL)
                 {
-                    FILE *exeProbe = NULL;
+                    static const char *exeSuffixes[] = {
+                        "/JHOnlineData", "/../web/fs/JHOnlineData",
+                        "/../bin/JHOnlineData"
+                    };
                     *slash = 0;
-                    if (chdir(exePath) == 0)
+                    for (u32 i = 0;
+                         i < sizeof(exeSuffixes) / sizeof(exeSuffixes[0]); ++i)
                     {
-                        exeProbe = fopen("../web/fs/JHOnlineData/task.dsh", "rb");
-                        if (exeProbe == NULL)
-                            exeProbe = fopen("web/fs/JHOnlineData/task.dsh", "rb");
-                        if (exeProbe != NULL)
+                        snprintf(resourceCandidate, sizeof(resourceCandidate),
+                                 "%s%s", exePath, exeSuffixes[i]);
+                        if (vm_net_mock_set_resource_dir(resourceCandidate))
                         {
-                            fclose(exeProbe);
                             resourceReady = true;
+                            break;
                         }
                     }
                 }
             }
-            if (!resourceReady && originalCwd[0] != 0)
-                (void)chdir(originalCwd);
         }
 #endif
     }
     if (!resourceReady)
     {
         printf("[error][mock-service] resource root unresolved cwd=%s "
-               "required=web/fs/JHOnlineData/task.dsh "
-               "hint=set-CBE_RESOURCE_ROOT-or-copy-web-fs-JHOnlineData\n",
+               "required=JHOnlineData/task.dsh "
+               "hint=CBE_RESOURCE_ROOT-may-point-to-project-root-or-JHOnlineData\n",
                originalCwd[0] ? originalCwd : "<unknown>");
         return -1;
     }
-    (void)getcwd(resolvedCwd, sizeof(resolvedCwd));
     printf("[info][mock-service] resource_root=%s source=%s\n",
-           resolvedCwd[0] ? resolvedCwd : "<unknown>",
+           vm_net_mock_resource_dir(),
            resourceRoot && resourceRoot[0] ? "configured" : "auto");
     vm_mock_service_init_config(argc, args);
     printf("[info][mock-service] starting server-only bind=%s:%u admin=127.0.0.1:%u\n",

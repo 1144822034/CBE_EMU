@@ -1386,6 +1386,46 @@ static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *ou
     return copyLen;
 }
 
+static char g_vm_net_mock_resource_dir[1024];
+
+static bool vm_net_mock_set_resource_dir(const char *directory)
+{
+    char taskPath[1200];
+    FILE *probe = NULL;
+    size_t len = 0;
+
+    if (directory == NULL || directory[0] == 0)
+        return false;
+    len = strlen(directory);
+    snprintf(taskPath, sizeof(taskPath), "%s%stask.dsh", directory,
+             (directory[len - 1] == '/' || directory[len - 1] == '\\') ? "" : "/");
+    probe = fopen(taskPath, "rb");
+    if (probe == NULL)
+        return false;
+    fclose(probe);
+    snprintf(g_vm_net_mock_resource_dir, sizeof(g_vm_net_mock_resource_dir),
+             "%s", directory);
+    return true;
+}
+
+static const char *vm_net_mock_resource_dir(void)
+{
+    return g_vm_net_mock_resource_dir;
+}
+
+static bool vm_net_mock_build_configured_resource_path(const char *name,
+                                                       char *out,
+                                                       size_t outCap)
+{
+    size_t dirLen = strlen(g_vm_net_mock_resource_dir);
+    if (out == NULL || outCap == 0 || name == NULL || name[0] == 0 || dirLen == 0)
+        return false;
+    return snprintf(out, outCap, "%s%s%s", g_vm_net_mock_resource_dir,
+                    (g_vm_net_mock_resource_dir[dirLen - 1] == '/' ||
+                     g_vm_net_mock_resource_dir[dirLen - 1] == '\\') ? "" : "/",
+                    name) < (int)outCap;
+}
+
 static FILE *vm_net_mock_fopen_game_path(const char *path, const char *mode)
 {
     FILE *fp = NULL;
@@ -1423,6 +1463,33 @@ static FILE *vm_net_mock_fopen_response_file(const char *path)
     fp = vm_net_mock_fopen_game_path(path, "rb");
     if (fp != NULL)
         return fp;
+
+    if (g_vm_net_mock_resource_dir[0] != 0)
+    {
+        static const char *prefixes[] = {
+            "JHOnlineData/", "bin/JHOnlineData/", "../bin/JHOnlineData/",
+            "web/fs/JHOnlineData/", "../web/fs/JHOnlineData/"
+        };
+        const char *leaf = NULL;
+        char configuredPath[1200];
+        for (u32 i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
+        {
+            size_t prefixLen = strlen(prefixes[i]);
+            if (strncmp(path, prefixes[i], prefixLen) == 0)
+            {
+                leaf = path + prefixLen;
+                break;
+            }
+        }
+        if (leaf != NULL && leaf[0] != 0 &&
+            vm_net_mock_build_configured_resource_path(leaf, configuredPath,
+                                                       sizeof(configuredPath)))
+        {
+            fp = vm_net_mock_fopen_game_path(configuredPath, "rb");
+            if (fp != NULL)
+                return fp;
+        }
+    }
 
 #ifdef _WIN32
     char exePath[MAX_PATH];
@@ -1468,7 +1535,7 @@ static u32 vm_net_mock_load_response_file(const char *path, u8 *out, u32 outCap)
 
 static bool vm_net_mock_file_has_data(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return false;
     fseek(fp, 0, SEEK_END);
@@ -1479,7 +1546,7 @@ static bool vm_net_mock_file_has_data(const char *path)
 
 static bool vm_net_mock_file_has_min_size(const char *path, long minSize)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return false;
     fseek(fp, 0, SEEK_END);
@@ -1490,7 +1557,7 @@ static bool vm_net_mock_file_has_min_size(const char *path, long minSize)
 
 static long vm_net_mock_file_size(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return -1;
     if (fseek(fp, 0, SEEK_END) != 0)
@@ -1505,7 +1572,7 @@ static long vm_net_mock_file_size(const char *path)
 
 static u32 vm_net_mock_file_checksum(const char *path)
 {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = vm_net_mock_fopen_response_file(path);
     if (fp == NULL)
         return 0;
     u32 sum = 2166136261u;
@@ -6492,7 +6559,7 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
         "../web/fs/JHOnlineData/%s%s",
         "web/fs/JHOnlineData/%s%s"
     };
-    char candidate[256];
+    char candidate[1200];
 
     if (fpOut)
         *fpOut = NULL;
@@ -6506,6 +6573,27 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
         const char *suffix = extPass == 0 ? "" : ".sce";
         if (extPass != 0 && vm_net_mock_str_ends_with(scene, ".sce"))
             continue;
+        if (g_vm_net_mock_resource_dir[0] != 0)
+        {
+            char resourceName[128];
+            FILE *fp = NULL;
+            snprintf(resourceName, sizeof(resourceName), "%s%s", scene, suffix);
+            if (vm_net_mock_build_configured_resource_path(resourceName, candidate,
+                                                           sizeof(candidate)))
+            {
+                fp = vm_net_mock_fopen_game_path(candidate, "rb");
+                if (fp != NULL)
+                {
+                    if (pathOut && pathOutCap != 0)
+                        snprintf(pathOut, pathOutCap, "%s", candidate);
+                    if (fpOut)
+                        *fpOut = fp;
+                    else
+                        fclose(fp);
+                    return true;
+                }
+            }
+        }
         for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
         {
             snprintf(candidate, sizeof(candidate), pathFormats[i], scene, suffix);
@@ -6595,7 +6683,7 @@ static bool vm_net_mock_client_data_resource_exists(const char *name,
         "bin/JHOnlineData/%s",
         "../bin/JHOnlineData/%s"
     };
-    char candidate[256];
+    char candidate[1200];
 
     if (name == NULL || name[0] == 0 ||
         vm_net_mock_scene_name_has_path_separator(name) ||
@@ -6613,6 +6701,17 @@ static bool vm_net_mock_client_data_resource_exists(const char *name,
             continue;
         fclose(fp);
         return true;
+    }
+    if (g_vm_net_mock_resource_dir[0] != 0 &&
+        vm_net_mock_build_configured_resource_path(name, candidate,
+                                                   sizeof(candidate)))
+    {
+        FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
+        if (fp != NULL)
+        {
+            fclose(fp);
+            return true;
+        }
     }
     return false;
 }
@@ -22335,7 +22434,7 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
         "../web/fs/JHOnlineData/%s",
         "web/fs/JHOnlineData/%s"
     };
-    char candidate[256];
+    char candidate[1200];
 
     if (fpOut)
         *fpOut = NULL;
@@ -22347,6 +22446,23 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
          !vm_net_mock_str_ends_with(name, requiredSuffix)))
     {
         return false;
+    }
+
+    if (g_vm_net_mock_resource_dir[0] != 0 &&
+        vm_net_mock_build_configured_resource_path(name, candidate,
+                                                   sizeof(candidate)))
+    {
+        FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
+        if (fp != NULL)
+        {
+            if (pathOut && pathOutCap != 0)
+                snprintf(pathOut, pathOutCap, "%s", candidate);
+            if (fpOut)
+                *fpOut = fp;
+            else
+                fclose(fp);
+            return true;
+        }
     }
 
     for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
