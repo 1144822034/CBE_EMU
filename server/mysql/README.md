@@ -46,6 +46,25 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_
 脚本只新增商品价格和上下架覆盖表，不会修改 `item.dsh`、`equip.dsh`
 或角色背包数据。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
 
+已有数据库升级到装备强化功能时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_equipment_enhancement.sql
+```
+
+脚本只为 `account_role_backpack` 增加 `enhance_level` 字段，已有装备
+默认强化等级为 0。
+
+将旧版蓬莱初始场景别名统一为 `c00蓬莱仙岛_01.sce` 时，停止
+mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_scene.sql
+```
+
+该迁移只修改 `00_蓬莱仙岛01[.sce]` 和缺少扩展名的
+`c00蓬莱仙岛_01`，不会改变处于其他场景的角色。
+
 密码由命令行交互输入。服务运行时的默认密码与本机开发环境一致，也可以通过以下环境变量覆盖，避免修改源代码：
 
 - `CBE_MYSQL_HOST`
@@ -61,7 +80,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
 - `account_role_equipment`：按角色和装备槽保存的装备。
-- `account_role_backpack`：按角色和背包槽保存的物品。
+- `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。

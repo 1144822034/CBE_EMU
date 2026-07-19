@@ -1034,6 +1034,11 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 if (f != NULL)
                     snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
             }
+            if (f == NULL && vm_file_is_read_only_mode(openMode) &&
+                vm_file_try_download_named_resource(normalizedName))
+            {
+                f = fopen(normalizedName, openMode);
+            }
             if (f == NULL && vm_file_mode_is_writeable(openMode))
             {
                 vm_file_ensure_parent_dirs(normalizedName);

@@ -64,6 +64,7 @@ CREATE TABLE `account_role_backpack` (
   `item_id` INT UNSIGNED NOT NULL,
   `item_seq` SMALLINT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_backpack_role`

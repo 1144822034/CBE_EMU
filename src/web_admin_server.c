@@ -744,17 +744,37 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
     memset(files, 0, sizeof(*files) * fileCap);
 #ifdef _WIN32
     {
-        static const char *patterns[] = {
+        char configuredPattern[1200];
+        const char *patterns[] = {
+            NULL,
             "../web/fs/JHOnlineData/*.actor",
             "web/fs/JHOnlineData/*.actor"
         };
         WIN32_FIND_DATAA found;
         HANDLE search = INVALID_HANDLE_VALUE;
 
+        memset(configuredPattern, 0, sizeof(configuredPattern));
+        if (g_vm_net_mock_resource_dir[0] != 0)
+        {
+            size_t dirLen = strlen(g_vm_net_mock_resource_dir);
+            if (snprintf(configuredPattern, sizeof(configuredPattern),
+                         "%s%s*.actor", g_vm_net_mock_resource_dir,
+                         (dirLen != 0 &&
+                          (g_vm_net_mock_resource_dir[dirLen - 1] == '/' ||
+                           g_vm_net_mock_resource_dir[dirLen - 1] == '\\'))
+                             ? ""
+                             : "/") < (int)sizeof(configuredPattern))
+            {
+                patterns[0] = configuredPattern;
+            }
+        }
+
         for (u32 patternIndex = 0;
              patternIndex < sizeof(patterns) / sizeof(patterns[0]);
              ++patternIndex)
         {
+            if (patterns[patternIndex] == NULL)
+                continue;
             search = FindFirstFileA(patterns[patternIndex], &found);
             if (search == INVALID_HANDLE_VALUE)
                 continue;
@@ -763,9 +783,7 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
                 size_t nameLen = strlen(found.cFileName);
                 if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
                     nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(found.cFileName, ".actor") ||
-                    !vm_net_mock_client_base_data_resource_exists(
-                        found.cFileName, ".actor"))
+                    !vm_net_mock_str_ends_with(found.cFileName, ".actor"))
                 {
                     continue;
                 }
@@ -802,9 +820,7 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
                 struct stat info;
                 size_t nameLen = strlen(entry->d_name);
                 if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(entry->d_name, ".actor") ||
-                    !vm_net_mock_client_base_data_resource_exists(
-                        entry->d_name, ".actor"))
+                    !vm_net_mock_str_ends_with(entry->d_name, ".actor"))
                 {
                     continue;
                 }
@@ -1814,6 +1830,275 @@ static bool vm_mock_admin_actor_read_string(const u8 *data, u32 len, u32 *pos,
     return true;
 }
 
+/* An Actor is usable when the authoritative game-data source contains a
+ * decodable Actor payload and every image it references is a decodable GIF.
+ * Presence in bin/JHOnlineData is a per-client cache state, not a validity
+ * rule. */
+static bool vm_mock_admin_actor_resource_inspect(
+    const char *actorResource,
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64],
+    u32 *imageCountOut)
+{
+    u8 *actorPayload = NULL;
+    u32 actorPayloadLen = 0;
+    u8 actorType = 0;
+    u32 pos = 0;
+    int32_t imageCountSigned = 0;
+    int32_t rectCountSigned = 0;
+    int32_t animationCountSigned = 0;
+    u32 imageCount = 0;
+    u32 totalFrameCount = 0;
+    const char *failureStage = "actor-header";
+    bool ok = false;
+
+    if (imageCountOut)
+        *imageCountOut = 0;
+    if (imageNames)
+        memset(imageNames, 0,
+               sizeof(imageNames[0]) * VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX);
+    if (actorResource == NULL || imageNames == NULL || imageCountOut == NULL ||
+        vm_net_mock_scene_name_has_path_separator(actorResource) ||
+        !vm_net_mock_str_ends_with(actorResource, ".actor") ||
+        !vm_mock_admin_load_data_payload(actorResource, ".actor",
+                                         &actorPayload, &actorPayloadLen,
+                                         &actorType) || actorType != 2 ||
+        !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &imageCountSigned) ||
+        imageCountSigned <= 0 ||
+        imageCountSigned > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        goto done;
+    }
+    imageCount = (u32)imageCountSigned;
+    failureStage = "image";
+    for (u32 i = 0; i < imageCount; ++i)
+    {
+        u8 *imagePayload = NULL;
+        u32 imagePayloadLen = 0;
+        u8 imageType = 0;
+        GifOutput image;
+        int mallocSize = 0;
+        bool imageOk = false;
+
+        memset(&image, 0, sizeof(image));
+        if (!vm_mock_admin_actor_read_string(actorPayload, actorPayloadLen,
+                                             &pos, imageNames[i],
+                                             sizeof(imageNames[i])) ||
+            vm_net_mock_scene_name_has_path_separator(imageNames[i]) ||
+            !vm_net_mock_str_ends_with(imageNames[i], ".gif") ||
+            !vm_mock_admin_load_data_payload(imageNames[i], ".gif",
+                                             &imagePayload, &imagePayloadLen,
+                                             &imageType) || imageType != 1)
+        {
+            free(imagePayload);
+            goto done;
+        }
+        imageOk = gifDecodeExt(imagePayload, &image, 1, &mallocSize) != 0 &&
+                  image.pixels != NULL && image.width != 0 && image.height != 0;
+        free(imagePayload);
+        if (image.owned && image.pixels)
+            free_mem(image.pixels);
+        if (!imageOk)
+            goto done;
+    }
+    failureStage = "rect-count";
+    if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &rectCountSigned) ||
+        rectCountSigned <= 0 ||
+        rectCountSigned > VM_MOCK_ADMIN_ACTOR_RECT_MAX)
+    {
+        goto done;
+    }
+    for (int32_t i = 0; i < rectCountSigned; ++i)
+    {
+        int32_t left = 0;
+        int32_t top = 0;
+        int32_t right = 0;
+        int32_t bottom = 0;
+        int32_t imageIndex = 0;
+        failureStage = "rect";
+        if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &left) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &top) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &right) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &bottom) ||
+            !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &imageIndex))
+        {
+            goto done;
+        }
+        /* Some shipped effect/UI Actors contain unused rectangle rows with a
+         * sentinel image index or zero-sized bounds.  The client accepts those
+         * files, so only validate the serialized shape here; live frame rows
+         * are checked against the rectangle table below. */
+        (void)left;
+        (void)top;
+        (void)right;
+        (void)bottom;
+        (void)imageIndex;
+    }
+    failureStage = "animation-count";
+    if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                      &animationCountSigned) ||
+        animationCountSigned <= 0 || animationCountSigned > 4096)
+    {
+        goto done;
+    }
+    for (int32_t animationIndex = 0;
+         animationIndex < animationCountSigned; ++animationIndex)
+    {
+        int32_t partCountSigned = 0;
+        failureStage = "part-count";
+        if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen, &pos,
+                                          &partCountSigned) ||
+            partCountSigned <= 0 || partCountSigned > 4096)
+        {
+            goto done;
+        }
+        for (int32_t partIndex = 0; partIndex < partCountSigned; ++partIndex)
+        {
+            int32_t partId = 0;
+            int32_t frameCountSigned = 0;
+            failureStage = "frame-count";
+            if (!vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                              &pos, &partId) ||
+                !vm_mock_admin_actor_read_s32(actorPayload, actorPayloadLen,
+                                              &pos, &frameCountSigned) ||
+                frameCountSigned < 0 || frameCountSigned > 65535 ||
+                (u32)frameCountSigned > (actorPayloadLen - pos) / 20u)
+            {
+                goto done;
+            }
+            (void)partId;
+            for (int32_t frameIndex = 0;
+                 frameIndex < frameCountSigned; ++frameIndex)
+            {
+                int32_t rectIndex = 0;
+                int32_t ignored = 0;
+                failureStage = "frame";
+                if (!vm_mock_admin_actor_read_s32(actorPayload,
+                                                  actorPayloadLen, &pos,
+                                                  &rectIndex) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload,
+                                                  actorPayloadLen, &pos,
+                                                  &ignored) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload,
+                                                  actorPayloadLen, &pos,
+                                                  &ignored) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload,
+                                                  actorPayloadLen, &pos,
+                                                  &ignored) ||
+                    !vm_mock_admin_actor_read_s32(actorPayload,
+                                                  actorPayloadLen, &pos,
+                                                  &ignored) ||
+                    rectIndex < 0 || rectIndex >= rectCountSigned)
+                {
+                    goto done;
+                }
+                ++totalFrameCount;
+            }
+        }
+    }
+    failureStage = "payload-tail";
+    if (pos != actorPayloadLen || totalFrameCount == 0)
+        goto done;
+    *imageCountOut = imageCount;
+    ok = true;
+
+done:
+    if (!ok && actorResource != NULL)
+    {
+        printf("[warn][mock-admin] actor_resource_validate_reject resource=%s stage=%s pos=%u len=%u images=%d rects=%d animations=%d frames=%u\n",
+               actorResource, failureStage, pos, actorPayloadLen,
+               imageCountSigned, rectCountSigned, animationCountSigned,
+               totalFrameCount);
+    }
+    free(actorPayload);
+    return ok;
+}
+
+/* Saving an NPC publishes its complete dependency set.  No file is copied to
+ * the emulator cache here. If the scene parser opens a missing Actor/GIF, the
+ * emulator client obtains that published name over WT 18/7, verifies every
+ * chunk, installs it into its own cache, and retries the original open. */
+static bool vm_mock_admin_publish_actor_resource(
+    const char *actorResource,
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64],
+    u32 imageCount,
+    const char **errorOut)
+{
+    const char *names[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX + 1];
+
+    if (actorResource == NULL || actorResource[0] == 0 ||
+        imageNames == NULL || imageCount > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        if (errorOut)
+            *errorOut = "Actor 资源依赖列表无效";
+        return false;
+    }
+    memset(names, 0, sizeof(names));
+    names[0] = actorResource;
+    for (u32 i = 0; i < imageCount; ++i)
+        names[i + 1] = imageNames[i];
+    return vm_net_mock_update_admin_publish_named_files(
+        names, imageCount + 1, errorOut);
+}
+
+/* Records created before named-resource publishing was introduced still need
+ * to be safe for a clean client cache. The DB loader publishes enabled rows at
+ * startup, and the scene catalog calls this again as an idempotent safety
+ * check for service-side companion rows. */
+static bool vm_net_mock_ensure_actor_resource_published(
+    const char *actorResource, const char **errorOut)
+{
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
+    const char *names[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX + 1];
+    u32 imageCount = 0;
+    bool current = true;
+
+    if (errorOut)
+        *errorOut = NULL;
+    memset(imageNames, 0, sizeof(imageNames));
+    memset(names, 0, sizeof(names));
+    if (!vm_mock_admin_actor_resource_inspect(actorResource, imageNames,
+                                              &imageCount))
+    {
+        if (errorOut)
+            *errorOut = "Actor 资源无效或引用图片不完整";
+        return false;
+    }
+    names[0] = actorResource;
+    for (u32 i = 0; i < imageCount; ++i)
+        names[i + 1] = imageNames[i];
+    for (u32 i = 0; i < imageCount + 1; ++i)
+    {
+        u16 contentVersion = 0;
+        vm_net_mock_update_named_config *published =
+            vm_net_mock_update_find_named(names[i]);
+        if (published == NULL || !published->enabled ||
+            !vm_net_mock_update_named_content_version(names[i],
+                                                      &contentVersion) ||
+            published->version != contentVersion)
+        {
+            current = false;
+            break;
+        }
+    }
+    if (current)
+        return true;
+    if (!vm_mock_admin_publish_actor_resource(actorResource, imageNames,
+                                              imageCount, errorOut))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_resource_lazy_publish actor=%s dependencies=%u trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7\n",
+           actorResource, imageCount);
+    return true;
+}
+
 static bool vm_mock_admin_build_actor_preview_svg(const char *actorResource,
                                                   u8 **svgOut,
                                                   u32 *svgLenOut)
@@ -2486,7 +2771,9 @@ static void vm_mock_admin_render_content_page(char *response,
         "</div></aside><section><div class=\"card\"><h2>动态 NPC：");
     vm_mock_admin_text_append_html(&page,
                                    selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择场景");
-    vm_mock_admin_text_appendf(&page, "</h2>");
+    vm_mock_admin_text_appendf(
+        &page,
+        "</h2><p class=\"foot\">保存 NPC 会自动发布 Actor 及引用 GIF。客户端加载时若文件缺失，会先通过 WT 18/7 从服务端下载、校验并安装，再继续创建 NPC；后台不会向客户端目录复制文件。</p>");
     if (status[0] != 0 && message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -3354,7 +3641,7 @@ static void vm_mock_admin_render_update_page(char *response,
         "</div><div class=\"card\"><h2>下发记录</h2><p class=\"muted\">当前记录 %u 个客户端标识。只有完整发送最后一块后才记为已下发；发布新版本会自动再次触发。</p>"
         "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"reset-update-delivery\"><button class=\"danger\" type=\"submit\">清空记录并让已发布模块重新下发</button></form></div>"
         "</section><section class=\"pane update-right\"><div class=\"card\"><h2>具名资源发布</h2>"
-        "<p class=\"muted\">SCE、XSE、ACTOR、GIF 等资源走 WT 18/7，只会在客户端加载该资源时按名称拉取，不会因发布而在启动时主动下载。需要启动即更新时，应把改动打入对应 CBM。</p>"
+        "<p class=\"muted\">SCE、XSE、ACTOR、GIF 等资源走 WT 18/7，只会在客户端加载该资源时按名称拉取。动态 NPC 保存时会自动发布 Actor/GIF；客户端文件打开缺失时会在进入 CBE 缺资源分支前下载并安装，后台不会复制客户端文件。其他需要启动即更新的内容仍应打入对应 CBM。</p>"
         "<form class=\"publish\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"publish-named-update\">"
         "<label><span>筛选资源</span><input id=\"update-resource-filter\" type=\"search\" placeholder=\"输入文件名筛选\"></label>"
         "<label><span>服务器资源（%u）</span><select id=\"update-resource-select\" name=\"resource\" required><option value=\"\" selected disabled>请选择要发布的资源</option>",
@@ -3755,6 +4042,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     char displayUtf8[128];
     char scriptUtf8[192];
     char actorResource[64];
+    char actorImageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
     char enabledText[8];
     vm_net_mock_scene_npcinfo_seed seed;
     const char *error = NULL;
@@ -3763,12 +4051,14 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 y = 0;
     u32 kind = 0;
     u32 orientation = 0;
+    u32 actorImageCount = 0;
 
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
     memset(runtimeScene, 0, sizeof(runtimeScene));
     memset(displayUtf8, 0, sizeof(displayUtf8));
     memset(scriptUtf8, 0, sizeof(scriptUtf8));
     memset(actorResource, 0, sizeof(actorResource));
+    memset(actorImageNames, 0, sizeof(actorImageNames));
     memset(enabledText, 0, sizeof(enabledText));
     memset(&seed, 0, sizeof(seed));
     if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
@@ -3822,6 +4112,19 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                 break;
             }
         }
+        if (found && enabled &&
+            (!vm_mock_admin_actor_resource_inspect(
+                 seed.actorResource, actorImageNames, &actorImageCount) ||
+             !vm_mock_admin_publish_actor_resource(
+                 seed.actorResource, actorImageNames, actorImageCount,
+                 &error)))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                error ? error :
+                        "Actor 资源无效、引用图片不完整或无法发布下载");
+            return;
+        }
         if (!found || !vm_net_mock_dynamic_npc_admin_save(
                           runtimeScene, &seed, enabled, &error))
         {
@@ -3831,7 +4134,8 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             return;
         }
         vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
-                                       enabled ? "NPC 已恢复" : "NPC 已停用");
+                                       enabled ? "NPC 已恢复；缺失资源将由客户端在线下载"
+                                               : "NPC 已停用");
         return;
     }
 
@@ -3860,13 +4164,19 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             return;
         }
     }
-    if (vm_net_mock_scene_name_has_path_separator(actorResource) ||
-        !vm_net_mock_str_ends_with(actorResource, ".actor") ||
-        !vm_net_mock_client_base_data_resource_exists(actorResource,
-                                                      ".actor"))
+    if (strlen(actorResource) >= sizeof(seed.actorResource) ||
+        vm_net_mock_scene_name_has_path_separator(actorResource) ||
+        !vm_net_mock_str_ends_with(actorResource, ".actor"))
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "所选 Actor 未安装在客户端基础资源中，场景启动时无法安全加载");
+                                       "Actor 资源名格式无效或名称过长");
+        return;
+    }
+    if (!vm_mock_admin_actor_resource_inspect(
+            actorResource, actorImageNames, &actorImageCount))
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "所选 Actor 不存在、格式无效或引用图片不完整");
         return;
     }
     if (!vm_mock_admin_utf8_to_gbk_text(displayUtf8, seed.displayName,
@@ -3894,13 +4204,23 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.kind = (u16)kind;
     seed.orientation = (u16)orientation;
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);
+    if (!vm_mock_admin_publish_actor_resource(
+            seed.actorResource, actorImageNames, actorImageCount, &error))
+    {
+        vm_mock_admin_redirect_content(
+            client, sceneUtf8, "error",
+            error ? error : "Actor 资源有效，但无法发布到 WT 18/7 下载目录");
+        return;
+    }
     if (!vm_net_mock_dynamic_npc_admin_save(runtimeScene, &seed, true, &error))
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        error ? error : "NPC 保存失败");
         return;
     }
-    vm_mock_admin_redirect_content(client, sceneUtf8, "ok", "NPC 保存成功");
+    vm_mock_admin_redirect_content(
+        client, sceneUtf8, "ok",
+        "NPC 保存成功；缺失的 Actor/GIF 将由客户端通过资源更新下载");
 }
 
 static void vm_mock_admin_handle_update_action(vm_mock_service_socket client,

@@ -70,6 +70,18 @@ on-demand: publishing a named resource does not make the unmodified client ask
 for it at startup. To require immediate startup installation, package the
 change into the appropriate CBM and publish that module slot.
 
+Dynamic NPC Actor loading has one additional emulator-side safety bridge. The
+stock scene parser can discover a missing Actor before its resource-name queue
+has been allocated, so entering its normal missing-resource branch writes via
+a null base (`30 * 11 == 0x14A`). For safe ASCII `.actor/.gif` names, the host
+file-open layer therefore sends a synchronous WT `18/7` request before it
+returns “not found” to the CBE. The request carries `clientmiss=1`; the server
+serves it only when that exact name is enabled in the named-resource catalog.
+The client writes to a same-directory temporary file, validates the cumulative
+signed-byte checksum after every chunk, atomically renames it, and retries the
+original file open. This is a real CBMS/WT transfer and never reads or copies
+the server resource tree directly.
+
 ## Server implementation
 
 - Update configuration is persisted as
@@ -83,6 +95,8 @@ change into the appropriate CBM and publish that module slot.
   before any writable client cache.
 - Resource names reject path separators, control bytes, and `..` traversal.
 - Managed payloads are bounded to 1 MiB and chunked at `0x1000` bytes.
+- Automatic Actor/GIF file-miss requests are additionally restricted to safe
+  ASCII leaf names and to catalog entries published by the admin workflow.
 - A narrow WT `18/5 + cbm` detector runs before broader fallback handlers.
 
 ## Admin workflow
@@ -110,6 +124,10 @@ manually deleted; normal releases should bump the version.
 3. Cause the client to enter/load content that references that resource.
 4. Confirm a `mock_update_chunk subtype=7` trace for the expected name.
 
+Saving or restoring an enabled dynamic NPC performs steps 1-2 automatically
+for the Actor and every GIF referenced by that Actor. No client cache file is
+created by the Web process; each client downloads on first use.
+
 ## Validation status
 
 - Windows `obj/main.o` compilation succeeds.
@@ -123,3 +141,7 @@ manually deleted; normal releases should bump the version.
 - A full in-client published-CBM installation still requires an intentional
   test release because enabling a module changes subsequent client startup
   behavior.
+- A clean-cache dynamic-NPC test downloaded `e_deity.actor` (456 bytes) and
+  `e_deity.gif` (3,696 bytes) through WT `18/7`, verified both SHA-256 hashes
+  against the authoritative source, remained stable in-scene for 50 seconds,
+  and made no repeat request on the next cache-hit login.

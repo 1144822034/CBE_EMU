@@ -13,6 +13,7 @@
 
 #include "main.h"
 #include "lcd.h"
+static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
 #include "hookRam.c"
 #include "vmEvent.c"
@@ -2458,6 +2459,378 @@ static uc_err scheduler_dispatch_net_tasks(void)
 #else
 #include "mock-server.c"
 #endif
+
+#define VM_NAMED_RESOURCE_DOWNLOAD_MAX (1024u * 1024u)
+#define VM_NAMED_RESOURCE_RESPONSE_CAP 8192u
+
+static bool vm_named_resource_put_bytes(u8 *out, u32 outCap, u32 *pos,
+                                        const void *data, u32 len)
+{
+    if (out == NULL || pos == NULL || data == NULL || *pos > outCap ||
+        len > outCap - *pos)
+    {
+        return false;
+    }
+    memcpy(out + *pos, data, len);
+    *pos += len;
+    return true;
+}
+
+static bool vm_named_resource_put_be16(u8 *out, u32 outCap, u32 *pos,
+                                       u16 value)
+{
+    u8 bytes[2] = {(u8)(value >> 8), (u8)value};
+    return vm_named_resource_put_bytes(out, outCap, pos, bytes, sizeof(bytes));
+}
+
+static bool vm_named_resource_put_field(u8 *out, u32 outCap, u32 *pos,
+                                        const char *name, const u8 *value,
+                                        u16 valueLen)
+{
+    u8 nameLen = 0;
+    if (name == NULL || value == NULL || strlen(name) > 0xffu)
+        return false;
+    nameLen = (u8)strlen(name);
+    return vm_named_resource_put_bytes(out, outCap, pos, &nameLen, 1) &&
+           vm_named_resource_put_bytes(out, outCap, pos, name, nameLen) &&
+           vm_named_resource_put_be16(out, outCap, pos, valueLen) &&
+           vm_named_resource_put_bytes(out, outCap, pos, value, valueLen);
+}
+
+static bool vm_named_resource_put_u8_field(u8 *out, u32 outCap, u32 *pos,
+                                           const char *name, u8 value)
+{
+    u8 encoded[3] = {0, 1, value};
+    return vm_named_resource_put_field(out, outCap, pos, name, encoded,
+                                       sizeof(encoded));
+}
+
+static bool vm_named_resource_put_u16_field(u8 *out, u32 outCap, u32 *pos,
+                                            const char *name, u16 value)
+{
+    u8 encoded[4] = {0, 2, (u8)(value >> 8), (u8)value};
+    return vm_named_resource_put_field(out, outCap, pos, name, encoded,
+                                       sizeof(encoded));
+}
+
+static bool vm_named_resource_put_u32_field(u8 *out, u32 outCap, u32 *pos,
+                                            const char *name, u32 value)
+{
+    u8 encoded[6] = {0, 4, (u8)(value >> 24), (u8)(value >> 16),
+                     (u8)(value >> 8), (u8)value};
+    return vm_named_resource_put_field(out, outCap, pos, name, encoded,
+                                       sizeof(encoded));
+}
+
+static bool vm_named_resource_put_string_field(u8 *out, u32 outCap, u32 *pos,
+                                               const char *name,
+                                               const char *value)
+{
+    u8 encoded[260];
+    u32 valueLen = value ? (u32)strlen(value) : 0;
+    if (valueLen > sizeof(encoded) - 2)
+        return false;
+    encoded[0] = (u8)(valueLen >> 8);
+    encoded[1] = (u8)valueLen;
+    if (valueLen != 0)
+        memcpy(encoded + 2, value, valueLen);
+    return vm_named_resource_put_field(out, outCap, pos, name, encoded,
+                                       (u16)(valueLen + 2));
+}
+
+static u32 vm_named_resource_build_chunk_request(const char *name, u32 start,
+                                                 u8 *out, u32 outCap)
+{
+    /* Uplink WT packets have no object-count byte: their first object starts
+     * at offset 4 and uses a 5-byte {major, kind, subtype, len16} header.
+     * Downlink WT packets do carry objectCount at offset 4 and start at 5. */
+    u32 pos = 9;
+    if (out == NULL || outCap < pos || name == NULL || name[0] == 0 ||
+        !vm_named_resource_put_string_field(out, outCap, &pos, "name", name) ||
+        !vm_named_resource_put_u8_field(out, outCap, &pos, "type", 0) ||
+        !vm_named_resource_put_u32_field(out, outCap, &pos, "start", start) ||
+        !vm_named_resource_put_u16_field(out, outCap, &pos, "version", 1) ||
+        !vm_named_resource_put_u8_field(out, outCap, &pos, "clientmiss", 1))
+    {
+        return 0;
+    }
+    out[0] = 'W';
+    out[1] = 'T';
+    out[2] = (u8)(pos >> 8);
+    out[3] = (u8)pos;
+    out[4] = 1;
+    out[5] = 18;
+    out[6] = 7;
+    out[7] = (u8)((pos - 4) >> 8);
+    out[8] = (u8)(pos - 4);
+    return pos;
+}
+
+static bool vm_named_resource_response_field(const u8 *response,
+                                             u32 responseLen,
+                                             const char *field,
+                                             const u8 **value,
+                                             u16 *valueLen)
+{
+    u32 pos = 11;
+    u32 objectEnd = 0;
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+    u32 packetLen = 0;
+    u32 objectLen = 0;
+
+    if (value)
+        *value = NULL;
+    if (valueLen)
+        *valueLen = 0;
+    if (response == NULL || responseLen < 11 || fieldLen == 0 ||
+        response[0] != 'W' || response[1] != 'T' || response[4] == 0 ||
+        response[5] != 1 || response[6] != 18 || response[7] != 7)
+    {
+        return false;
+    }
+    packetLen = ((u32)response[2] << 8) | response[3];
+    objectLen = ((u32)response[9] << 8) | response[10];
+    if (packetLen > responseLen || packetLen < 11 || objectLen < 6 ||
+        objectLen > packetLen - 5)
+    {
+        return false;
+    }
+    objectEnd = 5 + objectLen;
+    while (pos < objectEnd)
+    {
+        u32 nameLen = response[pos++];
+        u16 encodedLen = 0;
+        if (nameLen > objectEnd - pos || objectEnd - pos - nameLen < 2)
+            return false;
+        if (nameLen == fieldLen && memcmp(response + pos, field, fieldLen) == 0)
+        {
+            pos += nameLen;
+            encodedLen = (u16)(((u16)response[pos] << 8) | response[pos + 1]);
+            pos += 2;
+            if (encodedLen > objectEnd - pos)
+                return false;
+            if (value)
+                *value = response + pos;
+            if (valueLen)
+                *valueLen = encodedLen;
+            return true;
+        }
+        pos += nameLen;
+        encodedLen = (u16)(((u16)response[pos] << 8) | response[pos + 1]);
+        pos += 2;
+        if (encodedLen > objectEnd - pos)
+            return false;
+        pos += encodedLen;
+    }
+    return false;
+}
+
+static bool vm_named_resource_response_u8(const u8 *response, u32 responseLen,
+                                          const char *field, u8 *value)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+    if (!vm_named_resource_response_field(response, responseLen, field,
+                                          &encoded, &encodedLen) ||
+        encodedLen != 3 || encoded[0] != 0 || encoded[1] != 1)
+    {
+        return false;
+    }
+    if (value)
+        *value = encoded[2];
+    return true;
+}
+
+static bool vm_named_resource_response_u32(const u8 *response, u32 responseLen,
+                                           const char *field, u32 *value)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+    if (!vm_named_resource_response_field(response, responseLen, field,
+                                          &encoded, &encodedLen) ||
+        encodedLen != 6 || encoded[0] != 0 || encoded[1] != 4)
+    {
+        return false;
+    }
+    if (value)
+    {
+        *value = ((u32)encoded[2] << 24) | ((u32)encoded[3] << 16) |
+                 ((u32)encoded[4] << 8) | encoded[5];
+    }
+    return true;
+}
+
+static bool vm_named_resource_response_blob(const u8 *response,
+                                            u32 responseLen,
+                                            const char *field,
+                                            const u8 **data, u16 *dataLen)
+{
+    const u8 *encoded = NULL;
+    u16 encodedLen = 0;
+    u16 nestedLen = 0;
+    if (data)
+        *data = NULL;
+    if (dataLen)
+        *dataLen = 0;
+    if (!vm_named_resource_response_field(response, responseLen, field,
+                                          &encoded, &encodedLen) ||
+        encodedLen < 2)
+    {
+        return false;
+    }
+    nestedLen = (u16)(((u16)encoded[0] << 8) | encoded[1]);
+    if ((u32)nestedLen + 2u != encodedLen)
+        return false;
+    if (data)
+        *data = encoded + 2;
+    if (dataLen)
+        *dataLen = nestedLen;
+    return true;
+}
+
+static bool vm_named_resource_leaf_is_safe(const char *leaf)
+{
+    const char *ext = NULL;
+    size_t len = leaf ? strlen(leaf) : 0;
+    if (len == 0 || len >= 128)
+        return false;
+    for (size_t i = 0; i < len; ++i)
+    {
+        unsigned char ch = (unsigned char)leaf[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' ||
+              ch == '.'))
+        {
+            return false;
+        }
+    }
+    ext = strrchr(leaf, '.');
+    return ext != NULL &&
+           (_stricmp(ext, ".actor") == 0 || _stricmp(ext, ".gif") == 0);
+}
+
+static bool vm_file_try_download_named_resource(const char *normalizedPath)
+{
+    static bool active = false;
+    u8 request[512];
+    u8 response[VM_NAMED_RESOURCE_RESPONSE_CAP];
+    char target[256];
+    char temp[288];
+    const char *leaf = NULL;
+    FILE *fp = NULL;
+    u32 start = 0;
+    u32 totalSize = 0;
+    u32 runningCrc = 0;
+    bool ok = false;
+
+    if (active || g_mockServiceOnly || g_mockServiceClientId == 0 ||
+        normalizedPath == NULL || normalizedPath[0] == 0)
+    {
+        return false;
+    }
+    if (strncmp(normalizedPath, "JHOnlineData/", 13) == 0)
+        leaf = normalizedPath + 13;
+    else if (strchr(normalizedPath, '/') == NULL &&
+             strchr(normalizedPath, '\\') == NULL)
+        leaf = normalizedPath;
+    if (!vm_named_resource_leaf_is_safe(leaf))
+        return false;
+    snprintf(target, sizeof(target), "%s", normalizedPath);
+    if (snprintf(temp, sizeof(temp), "%s.cbe-download.tmp", target) >=
+        (int)sizeof(temp))
+    {
+        return false;
+    }
+
+    active = true;
+    vm_file_ensure_parent_dirs(target);
+    fp = fopen(temp, "wb");
+    if (fp == NULL)
+        goto done;
+    printf("[info][resource] resource_cache_miss_download_begin file=%s protocol=WT18/7 source=server-catalog\n",
+           leaf);
+
+    while (start < VM_NAMED_RESOURCE_DOWNLOAD_MAX)
+    {
+        const u8 *chunk = NULL;
+        u16 chunkLen = 0;
+        u8 result = 0;
+        u32 responseLen = 0;
+        u32 eventType = 7;
+        u32 responseTotal = 0;
+        u32 responseCrc = 0;
+        u32 requestLen = vm_named_resource_build_chunk_request(
+            leaf, start, request, sizeof(request));
+        bool requestOk = false;
+        if (requestLen == 0)
+            break;
+#ifdef CBE_CLIENT_ONLY
+        requestOk = vm_client_remote_request(
+            request, requestLen, response, sizeof(response), &responseLen,
+            &eventType, NULL, NULL, 0, NULL);
+#else
+        requestOk = vm_net_mock_remote_request(
+                        request, requestLen, response, sizeof(response),
+                        &responseLen, &eventType, NULL, NULL, 0, NULL) != 0;
+#endif
+        if (!requestOk || eventType != 7 || responseLen == 0 ||
+            !vm_named_resource_response_u8(response, responseLen, "result",
+                                           &result) ||
+            result != 1 ||
+            !vm_named_resource_response_u32(response, responseLen, "totalsize",
+                                            &responseTotal) ||
+            responseTotal == 0 ||
+            responseTotal > VM_NAMED_RESOURCE_DOWNLOAD_MAX ||
+            !vm_named_resource_response_u32(response, responseLen, "crc",
+                                            &responseCrc) ||
+            !vm_named_resource_response_blob(response, responseLen, "data",
+                                             &chunk, &chunkLen) ||
+            chunkLen == 0 || start + chunkLen > responseTotal ||
+            (totalSize != 0 && totalSize != responseTotal))
+        {
+            break;
+        }
+        totalSize = responseTotal;
+        if (fwrite(chunk, 1, chunkLen, fp) != chunkLen)
+            break;
+        for (u32 i = 0; i < chunkLen; ++i)
+            runningCrc += (u32)(int)(signed char)chunk[i];
+        if (runningCrc != responseCrc)
+            break;
+        start += chunkLen;
+        printf("[info][resource] resource_cache_download_chunk file=%s start=%u chunk=%u total=%u\n",
+               leaf, start - chunkLen, (u32)chunkLen, totalSize);
+        if (start == totalSize)
+        {
+            ok = true;
+            break;
+        }
+    }
+
+done:
+    if (fp != NULL)
+        fclose(fp);
+    if (ok)
+    {
+        if (rename(temp, target) != 0)
+            ok = false;
+    }
+    if (!ok)
+        remove(temp);
+    if (ok)
+    {
+        printf("[info][resource] resource_cache_download_complete file=%s bytes=%u crc=%u protocol=WT18/7 install=%s\n",
+               leaf, totalSize, runningCrc, target);
+    }
+    else
+    {
+        printf("[warn][resource] resource_cache_download_failed file=%s received=%u total=%u protocol=WT18/7\n",
+               leaf, start, totalSize);
+    }
+    active = false;
+    return ok;
+}
+
 static uc_err scheduler_dispatch_input_event(vm_event *evt);
 
 static u32 vm_net_queue_http_get_mock_response(u32 urlPtr, u32 callback, u32 context)
