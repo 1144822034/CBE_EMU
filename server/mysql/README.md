@@ -55,6 +55,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_equip
 脚本只为 `account_role_backpack` 增加 `enhance_level` 字段，已有装备
 默认强化等级为 0。
 
+已有数据库升级到动态 NPC 商店、修理和技能导师功能时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_npc_services.sql
+```
+
+脚本新增角色装备耐久和已学技能关系表，不修改现有角色 payload、背包或
+装备槽。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
+
 将旧版蓬莱初始场景别名统一为 `c00蓬莱仙岛_01.sce` 时，停止
 mock-service 后执行：
 
@@ -80,6 +89,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_s
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
 - `account_role_equipment`：按角色和装备槽保存的装备。
+- `account_role_equipment_durability`：按装备槽和当前物品保存耐久度。
+- `account_role_skills`：按角色保存已学习技能和技能等级。
 - `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。

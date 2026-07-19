@@ -1151,6 +1151,33 @@ static void vm_mock_admin_render_xse_select(
     vm_mock_admin_text_appendf(page, "</select>");
 }
 
+static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
+                                                 u16 currentKind)
+{
+    static const char *labels[] = {
+        "普通／任务 NPC",
+        "武器商人",
+        "装备修理",
+        "技能导师",
+        "防具商人（含腰带）",
+        "药品商人"
+    };
+
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(page,
+                               "<select name=\"kind\" required>");
+    for (u32 kind = VM_NET_MOCK_NPC_KIND_NORMAL;
+         kind <= VM_NET_MOCK_NPC_KIND_MAX; ++kind)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\"%s>%u · %s</option>",
+            kind, currentKind == kind ? " selected" : "", kind,
+            labels[kind]);
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
 static bool vm_mock_admin_utf8_to_gbk_text(const char *utf8,
                                            char *gbk, size_t gbkCap,
                                            bool allowEmpty)
@@ -3028,10 +3055,13 @@ static void vm_mock_admin_render_content_page(char *response,
             "</label>"
             "<label class=\"field\"><span>X</span><input type=\"number\" name=\"x\" min=\"1\" max=\"65535\" value=\"%u\" required></label>"
             "<label class=\"field\"><span>Y</span><input type=\"number\" name=\"y\" min=\"1\" max=\"65535\" value=\"%u\" required></label>"
-            "<label class=\"field\"><span>类型</span><input type=\"number\" name=\"kind\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
-            "<label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"%u\"></label></div>"
+            "<label class=\"field\"><span>服务类型</span>",
+            row->seed.x, row->seed.y);
+        vm_mock_admin_render_npc_kind_select(&page, row->seed.kind);
+        vm_mock_admin_text_appendf(&page,
+            "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"%u\"></label></div>"
             "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>",
-            row->seed.x, row->seed.y, row->seed.kind, row->seed.orientation);
+            row->seed.orientation);
         vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
                                         row->seed.scriptName);
         vm_mock_admin_text_appendf(&page,
@@ -3076,13 +3106,15 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label>"
         "<label class=\"field\"><span>X</span><input type=\"number\" name=\"x\" min=\"1\" max=\"65535\" required></label>"
         "<label class=\"field\"><span>Y</span><input type=\"number\" name=\"y\" min=\"1\" max=\"65535\" required></label>"
-        "<label class=\"field\"><span>类型</span><input type=\"number\" name=\"kind\" min=\"0\" max=\"65535\" value=\"0\"></label>"
-        "<label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
+        "<label class=\"field\"><span>服务类型</span>");
+    vm_mock_admin_render_npc_kind_select(&page, VM_NET_MOCK_NPC_KIND_NORMAL);
+    vm_mock_admin_text_appendf(&page,
+        "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
         "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
     vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "</label><div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">只显示和编辑服务端动态目录；SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div></section></div></main></body></html>");
 
     if (page.truncated)
@@ -4142,7 +4174,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     if (strcmp(action, "save-npc") != 0 ||
         !vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
-        !vm_mock_admin_form_u32(body, "kind", 0xffffu, &kind) ||
+        !vm_mock_admin_form_u32(body, "kind", VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
         !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||

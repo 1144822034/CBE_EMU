@@ -320,8 +320,9 @@ Response strategy:
 
 - return a same-subtype `1/16/4 {result:u8=0,value:u32=1}` object so the client
   enters its normal item-use confirmation callback;
-- retain the resolved scene/position server-side across the callback's compact
-  `16/2` and `16/3` requests;
+- retain the target wMap group's base row only as a provisional server-side
+  target, then replace it with the exact `sMap` row carried by the callback's
+  `16/2.exitID` before arming scene entry;
 - acknowledge the confirmed `16/2` with an empty WT packet, then return the
   validated `30/1 {scene,posinfo}` entry contract from `16/3`;
 - do not use a fixed `(120,120)` landing point. The request carries only
@@ -342,8 +343,9 @@ Response strategy:
 ```text
 objid=NN -> wMap.dsh row with teleport_id NN
 visible 16/4 fields do not carry selected child sMap row
-wMap.lower_map -> default sMap row
-if wMap.scene_count > 1, mark row_source=wmap-base-ambiguous in trace
+wMap.lower_map -> provisional sMap row used only during the 16/4 confirmation
+if wMap.scene_count > 1, mark row_source=wmap-base-await-confirm-exitID in trace
+confirmed 16/2.exitID -> exact selected sMap row and final scene target
 old fixed-coordinate behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ (120,120)
 old DSH-marker behavior: curid=1 objid=22 -> 22HuoYanShan_01.sce @ sMap.dsh UI position
 current behavior: DSH resolves the scene; SCE edge_portal supplies the safe actor landing
@@ -675,7 +677,7 @@ from the selected scene's SCE dimensions instead of a fixed point.
   If a live server later proves a different first landing scene for a specific
   `objid`, add a narrow override before the scan.
 
-### 2026-06-30 Dali Child Scene Evidence
+### 2026-06-30 Dali Child Scene Evidence (superseded)
 
 Runtime request:
 
@@ -693,7 +695,8 @@ sMap 131: c18大理_02.sce alias=大理校场 pos=(112,144)
 sMap 132: c18大理_03.sce alias=大理东市 pos=(144,144)
 ```
 
-New server rule:
+The rule below was an intermediate interpretation and is superseded by the
+2026-07-19 confirmed-exit evidence later in this document:
 
 - `objid` still selects the wMap row by `teleportID`;
 - if `1 <= curid <= scene_count`, treat `curid` as the selected child index and
@@ -1003,3 +1006,64 @@ scene key, including `.sce`, through the final `30/1` entry. This exception is
 limited to the map-stone path. Login and portal transitions keep their existing
 normalization, and server resource lookup plus loose scene matching continue to
 accept both forms. The trace marks the contract as `scene_key=smap-exact`.
+
+### 2026-07-19 Confirmed Child Row and NPC Lifecycle
+
+```text
+phase: teleport-stone confirmed child scene entry
+status: validated
+
+request:
+  wt_kind: 16
+  wt_subtype: 4 then combined 2+3
+  objects: 16/4{curid,objid}; 16/2{exitID,type}+16/3{exitID,type}[+7/1]
+  key_fields: curid=current wMap teleport id, objid=target wMap teleport id, exitID=selected absolute sMap row
+  sample_len: 37 then 70 in isolated regression; 130 with real item-use object
+  packet_log: builtin-teleport-stone-map-confirm, builtin-teleport-stone-confirmed-exit-combo
+
+response:
+  wt_kind: 16/4 confirmation, later 30/1 scene entry
+  wt_subtype: 4 then scene-channel 1
+  objects: 16/4{result=0,value=1}; deferred 30/1{scene,posinfo}
+  fields: exact sMap scene key and SCE-derived landing
+  arrays: none
+  strings: scene
+  blobs: posinfo
+
+ida_evidence:
+  binary: 江湖OL.CBE
+  function: SendItemUseReq(0x0103573A), LoadMapDataSheet(0x0103581E), ConsumeInventoryItem(0x01018F66)
+  dispatch_case: map item confirmation and scene-channel entry
+  parser_reads: 0x0103573A reads curid/objid from two wMap row +68 teleport-id fields and stores lower_map+child_offset separately
+  failure_branch: treating curid as a child index selects the wrong first/second child whenever current wMap id happens to fit target scene_count
+
+runtime_evidence:
+  trace_lines: mock_teleport_stone_confirmed_exit_resolve, mock_teleport_stone_deferred_enter, mock_scene_npc_seed
+  handled_source: builtin-teleport-stone-confirmed-exit-combo, builtin-scene-task-subset-followup
+  queued_event: event 7
+  client_effect: exitID 38 enters 00蓬莱仙岛_02.sce at (128,57), then emits its two-row 欧冶子/小猴子 27/11 catalog
+
+negative_evidence:
+  missing_or_bad_field: old 16/4 curid=1,objid=1 resolved child row as lower_map+curid-1 before confirmation
+  observed_failure: every Penglai child selection provisionally became row 37/c00蓬莱仙岛_01, so final scene and NPC catalog did not match the selected destination
+
+unknowns:
+  - name: live-server landing policy when several SCE edge portals exist
+    current_value: nearest SCE edge-portal spawn to scene centre with trigger safety gap
+    why_kept: exitID proves the scene row but carries no portal/entry selector; no server packet field proving a different portal has been observed
+```
+
+The isolated protocol matrix deliberately used a confirmation whose provisional
+group row differed from the confirmed child row:
+
+```text
+16/4 curid=1 objid=1 -> provisional row 37 c00蓬莱仙岛_01
+16/2+16/3 exitID=38 -> final 00蓬莱仙岛_02.sce (128,57), changed=1
+16/2+16/3 exitID=39 -> final c00蓬莱仙岛_03.sce (157,47), changed=1
+16/4 curid=1 objid=4 + exitID=47 -> c04临安府_01.sce (201,140), changed=0
+```
+
+The final scene entry calls the normal `30/1` builder, which re-arms the NPC
+one-shot for that exact scene. The first 44-byte task-subset completion then
+uses the same target scene for `27/11`; it must not reuse the provisional
+`16/4` base-row catalog.
