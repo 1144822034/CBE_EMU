@@ -37,6 +37,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_tasks
 
 脚本只新增按账号、角色保存的任务状态表，不会修改已有角色数据。
 
+已有数据库升级到商品管理功能时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_items.sql
+```
+
+脚本只新增商品价格和上下架覆盖表，不会修改 `item.dsh`、`equip.dsh`
+或角色背包数据。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
+
 密码由命令行交互输入。服务运行时的默认密码与本机开发环境一致，也可以通过以下环境变量覆盖，避免修改源代码：
 
 - `CBE_MYSQL_HOST`
@@ -58,6 +67,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_tasks
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
+- `server_shop_items`：后台覆盖的商品价格和上下架状态；没有记录的物品继续使用 DSH 默认价格并默认上架。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 
 服务启动时会连接 MySQL 并验证这些表。关系表为空时，旧 payload 备份或 `bin/nvram` 服务端二进制文件仅作为一次性迁移来源读取；迁移完成后的正常保存只写关系表，不再写回 payload 或旧文件。

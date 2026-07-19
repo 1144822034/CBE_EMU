@@ -386,7 +386,8 @@ enum
     VM_MOCK_ADMIN_SCENE_FILE_MAX = 512,
     VM_MOCK_ADMIN_ACTOR_FILE_MAX = 1024,
     VM_MOCK_ADMIN_XSE_FILE_MAX = 512,
-    VM_MOCK_ADMIN_UPDATE_FILE_MAX = 1400
+    VM_MOCK_ADMIN_UPDATE_FILE_MAX = 1400,
+    VM_MOCK_ADMIN_SHOP_PAGE_SIZE = 50
 };
 
 typedef struct
@@ -426,6 +427,7 @@ static const char g_vm_mock_admin_script[] =
     "document.addEventListener('DOMContentLoaded',()=>{"
     "keep('.accounts','cbe-admin-accounts-scroll');"
     "keep('.scene-list','cbe-admin-scenes-scroll');"
+    "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
     "setupItemFilter();setupUpdateFilter();});"
@@ -761,7 +763,9 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
                 size_t nameLen = strlen(found.cFileName);
                 if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
                     nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(found.cFileName, ".actor"))
+                    !vm_net_mock_str_ends_with(found.cFileName, ".actor") ||
+                    !vm_net_mock_client_base_data_resource_exists(
+                        found.cFileName, ".actor"))
                 {
                     continue;
                 }
@@ -798,7 +802,9 @@ static u32 vm_mock_admin_collect_actor_files(vm_mock_admin_scene_file *files,
                 struct stat info;
                 size_t nameLen = strlen(entry->d_name);
                 if (nameLen == 0 || nameLen >= sizeof(files[0].name) ||
-                    !vm_net_mock_str_ends_with(entry->d_name, ".actor"))
+                    !vm_net_mock_str_ends_with(entry->d_name, ".actor") ||
+                    !vm_net_mock_client_base_data_resource_exists(
+                        entry->d_name, ".actor"))
                 {
                     continue;
                 }
@@ -2446,6 +2452,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
         sceneCount);
@@ -2939,6 +2946,340 @@ static void vm_mock_admin_render_item_grant_form(
         "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
 }
 
+static bool vm_mock_admin_shop_category_filter(const char *filter,
+                                                bool *equipmentOut,
+                                                u8 *categoryOut)
+{
+    u32 category = 0;
+
+    if (filter == NULL || (filter[0] != 'e' && filter[0] != 'i') ||
+        filter[1] == 0 ||
+        !vm_net_mock_parse_u32_strict(filter + 1, &category) || category > 255)
+    {
+        return false;
+    }
+    if (equipmentOut)
+        *equipmentOut = filter[0] == 'e';
+    if (categoryOut)
+        *categoryOut = (u8)category;
+    return true;
+}
+
+static bool vm_mock_admin_shop_is_secret_treasure(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    return item != NULL && !item->isEquip && item->category == 14;
+}
+
+static bool vm_mock_admin_shop_is_divine_arms(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    u8 slot;
+
+    if (item == NULL || !item->isEquip)
+        return false;
+    slot = vm_net_mock_shop_page_equipment_slot(item);
+    return slot <= 7;
+}
+
+static const char *vm_mock_admin_shop_section_name(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    if (vm_mock_admin_shop_is_secret_treasure(item))
+        return "秘宝道具";
+    if (vm_mock_admin_shop_is_divine_arms(item))
+        return "神兵利器";
+    return "普通目录";
+}
+
+static bool vm_mock_admin_shop_item_matches(
+    const vm_net_mock_shop_catalog_item *item,
+    bool filterCategory, bool filterEquipment, u8 category,
+    bool filterSecretTreasure, bool filterDivineArms,
+    const char *search)
+{
+    char itemNameUtf8[128];
+    char itemIdText[32];
+
+    if (item == NULL)
+        return false;
+    if (filterCategory &&
+        ((item->isEquip != 0) != filterEquipment || item->category != category))
+    {
+        return false;
+    }
+    if (filterSecretTreasure &&
+        !vm_mock_admin_shop_is_secret_treasure(item))
+    {
+        return false;
+    }
+    if (filterDivineArms && !vm_mock_admin_shop_is_divine_arms(item))
+        return false;
+    if (search == NULL || search[0] == 0)
+        return true;
+    memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+    vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                  sizeof(itemNameUtf8));
+    snprintf(itemIdText, sizeof(itemIdText), "%u", item->itemId);
+    return strstr(itemNameUtf8, search) != NULL ||
+           strstr(itemIdText, search) != NULL;
+}
+
+static void vm_mock_admin_render_shop_page(char *response,
+                                           size_t responseCap,
+                                           const char *query)
+{
+    vm_mock_admin_text page;
+    bool equipmentCategories[256];
+    bool itemCategories[256];
+    char categoryFilter[16];
+    char search[128];
+    char pageText[32];
+    char status[16];
+    char message[256];
+    char categoryEncoded[64];
+    char searchEncoded[384];
+    bool filterCategory = false;
+    bool filterEquipment = false;
+    bool filterSecretTreasure = false;
+    bool filterDivineArms = false;
+    u8 filterCategoryValue = 0;
+    u32 itemCount = vm_net_mock_load_shop_catalog();
+    u32 matchedCount = 0;
+    u32 enabledCount = 0;
+    u32 disabledCount = 0;
+    u32 secretTreasureCount = 0;
+    u32 secretTreasureEnabledCount = 0;
+    u32 divineArmsCount = 0;
+    u32 divineArmsEnabledCount = 0;
+    u32 pageNumber = 1;
+    u32 pageCount = 1;
+    u32 rowStart = 0;
+    u32 rowEnd = 0;
+    u32 matchedIndex = 0;
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    memset(equipmentCategories, 0, sizeof(equipmentCategories));
+    memset(itemCategories, 0, sizeof(itemCategories));
+    memset(categoryFilter, 0, sizeof(categoryFilter));
+    memset(search, 0, sizeof(search));
+    memset(pageText, 0, sizeof(pageText));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "category", categoryFilter,
+                                   sizeof(categoryFilter));
+    (void)vm_mock_admin_form_value(query, "q", search, sizeof(search));
+    (void)vm_mock_admin_form_value(query, "page", pageText, sizeof(pageText));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    if (strcmp(categoryFilter, "secret") == 0)
+        filterSecretTreasure = true;
+    else if (strcmp(categoryFilter, "arsenal") == 0)
+        filterDivineArms = true;
+    else
+        filterCategory = vm_mock_admin_shop_category_filter(
+            categoryFilter, &filterEquipment, &filterCategoryValue);
+    if (!filterCategory && !filterSecretTreasure && !filterDivineArms)
+        snprintf(categoryFilter, sizeof(categoryFilter), "all");
+    if (pageText[0] != 0 &&
+        (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) || pageNumber == 0))
+    {
+        pageNumber = 1;
+    }
+
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        if (item->isEquip)
+            equipmentCategories[item->category] = true;
+        else
+            itemCategories[item->category] = true;
+        if (item->enabled)
+            ++enabledCount;
+        else
+            ++disabledCount;
+        if (vm_mock_admin_shop_is_secret_treasure(item))
+        {
+            ++secretTreasureCount;
+            if (item->enabled)
+                ++secretTreasureEnabledCount;
+        }
+        if (vm_mock_admin_shop_is_divine_arms(item))
+        {
+            ++divineArmsCount;
+            if (item->enabled)
+                ++divineArmsEnabledCount;
+        }
+        if (vm_mock_admin_shop_item_matches(
+                item, filterCategory, filterEquipment, filterCategoryValue,
+                filterSecretTreasure, filterDivineArms,
+                search))
+        {
+            ++matchedCount;
+        }
+    }
+    if (matchedCount != 0)
+        pageCount = (matchedCount + VM_MOCK_ADMIN_SHOP_PAGE_SIZE - 1) /
+                    VM_MOCK_ADMIN_SHOP_PAGE_SIZE;
+    if (pageNumber > pageCount)
+        pageNumber = pageCount;
+    rowStart = (pageNumber - 1) * VM_MOCK_ADMIN_SHOP_PAGE_SIZE;
+    rowEnd = rowStart + VM_MOCK_ADMIN_SHOP_PAGE_SIZE;
+    if (rowEnd > matchedCount)
+        rowEnd = matchedCount;
+    vm_mock_admin_url_encode(categoryFilter, categoryEncoded,
+                             sizeof(categoryEncoded));
+    vm_mock_admin_url_encode(search, searchEncoded, sizeof(searchEncoded));
+
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 商品管理</title><style>"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{max-width:1240px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
+        ".card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.shop-card{display:flex;flex-direction:column;min-height:0;flex:1}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.secret{background:#fff4e5;color:#b54708}.badge.arms{background:#f4f3ff;color:#5925dc}.badge.off{background:#fef3f2;color:#b42318}.filters{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(220px,1.2fr) auto;gap:9px;align-items:end;margin-bottom:12px}.filters label{display:grid;gap:4px}.filters span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.shop-list{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid #eaecf0;border-radius:8px}table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:middle}th{position:sticky;top:0;background:#f9fafb;color:#667085;z-index:1}.name{min-width:200px}.section{display:inline-block;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467;font-size:12px;white-space:nowrap}.section.secret{background:#fff4e5;color:#b54708}.section.arms{background:#f4f3ff;color:#5925dc}.row-form{display:grid;grid-template-columns:150px 100px auto;gap:7px;align-items:center}.state{font-size:12px;font-weight:600}.state.on{color:#027a48}.state.off{color:#b42318}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.foot{font-size:12px;color:#667085;margin:10px 0 0}"
+        "@media(max-width:760px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:16px 9px;overflow:visible}.shop-card{min-height:700px}.filters,.row-form{grid-template-columns:1fr}.shop-list{min-height:520px}.tabs{overflow:auto}.name{min-width:150px}}"
+        "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "<p class=\"sub\">商品价格与上下架状态 · 保存后立即生效</p></div>"
+        "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
+        "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab on\" href=\"/?tab=shop\">商品管理</a>"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<section class=\"card shop-card\">");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(
+        &page,
+        "<div class=\"summary\"><span class=\"badge\">目录 %u</span><span class=\"badge\">已上架 %u</span><span class=\"badge off\">已下架 %u</span>"
+        "<span class=\"badge secret\">秘宝道具 %u（上架 %u）</span><span class=\"badge arms\">神兵利器 %u（上架 %u）</span></div>"
+        "<form class=\"filters\" method=\"get\" action=\"/\"><input type=\"hidden\" name=\"tab\" value=\"shop\">"
+        "<label><span>商城分区 / 物品分类</span><select name=\"category\"><option value=\"all\"%s>全部商品</option>"
+        "<option value=\"secret\"%s>商城 · 秘宝道具</option><option value=\"arsenal\"%s>商城 · 神兵利器</option>",
+        itemCount, enabledCount, disabledCount,
+        secretTreasureCount, secretTreasureEnabledCount,
+        divineArmsCount, divineArmsEnabledCount,
+        filterCategory || filterSecretTreasure || filterDivineArms ? "" : " selected",
+        filterSecretTreasure ? " selected" : "",
+        filterDivineArms ? " selected" : "");
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!equipmentCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(
+            &page, "<option value=\"e%u\"%s>装备 · ", category,
+            filterCategory && filterEquipment &&
+                    filterCategoryValue == category
+                ? " selected" : "");
+        vm_mock_admin_text_append_html(
+            &page, vm_mock_admin_item_category_name(true, (u8)category));
+        vm_mock_admin_text_appendf(&page, "（%u）</option>", category);
+    }
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!itemCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(
+            &page, "<option value=\"i%u\"%s>物品 · ", category,
+            filterCategory && !filterEquipment && filterCategoryValue == category
+                ? " selected" : "");
+        vm_mock_admin_text_append_html(
+            &page, vm_mock_admin_item_category_name(false, (u8)category));
+        vm_mock_admin_text_appendf(&page, "（%u）</option>", category);
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</select></label><label><span>名称或物品 ID</span><input type=\"search\" name=\"q\" value=\"");
+    vm_mock_admin_text_append_html(&page, search);
+    vm_mock_admin_text_appendf(&page,
+        "\" placeholder=\"输入名称或 ID\"></label><button type=\"submit\">筛选</button></form>"
+        "<div class=\"shop-list\"><table><thead><tr><th>ID / 名称</th><th>商城分区</th><th>DSH 分类</th><th>当前状态</th><th>价格与操作</th></tr></thead><tbody>");
+
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        char itemNameUtf8[128];
+
+        if (!vm_mock_admin_shop_item_matches(
+                item, filterCategory, filterEquipment, filterCategoryValue,
+                filterSecretTreasure, filterDivineArms,
+                search))
+        {
+            continue;
+        }
+        if (matchedIndex < rowStart || matchedIndex >= rowEnd)
+        {
+            ++matchedIndex;
+            continue;
+        }
+        ++matchedIndex;
+        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                      sizeof(itemNameUtf8));
+        vm_mock_admin_text_appendf(&page, "<tr><td class=\"name\"><strong>[%u] ",
+                                   item->itemId);
+        vm_mock_admin_text_append_html(&page, itemNameUtf8);
+        vm_mock_admin_text_appendf(
+            &page, "</strong></td><td><span class=\"section %s\">%s</span></td><td>%s · ",
+            vm_mock_admin_shop_is_secret_treasure(item) ? "secret" :
+                (vm_mock_admin_shop_is_divine_arms(item) ? "arms" : ""),
+            vm_mock_admin_shop_section_name(item),
+            item->isEquip ? "装备" : "物品");
+        vm_mock_admin_text_append_html(
+            &page, vm_mock_admin_item_category_name(item->isEquip != 0,
+                                                    item->category));
+        vm_mock_admin_text_appendf(
+            &page, "（%u）</td><td><span class=\"state %s\">%s</span></td><td>"
+            "<form class=\"row-form\" method=\"post\" action=\"/action\">"
+            "<input type=\"hidden\" name=\"action\" value=\"save-shop-item\">"
+            "<input type=\"hidden\" name=\"item\" value=\"%u\">"
+            "<input type=\"hidden\" name=\"category\" value=\"",
+            item->category, item->enabled ? "on" : "off",
+            item->enabled ? "已上架" : "已下架", item->itemId);
+        vm_mock_admin_text_append_html(&page, categoryFilter);
+        vm_mock_admin_text_appendf(&page, "\"><input type=\"hidden\" name=\"q\" value=\"");
+        vm_mock_admin_text_append_html(&page, search);
+        vm_mock_admin_text_appendf(
+            &page, "\"><input type=\"hidden\" name=\"page\" value=\"%u\">"
+            "<input aria-label=\"商品价格\" type=\"number\" name=\"price\" min=\"1\" max=\"4294967295\" value=\"%u\" required>"
+            "<select aria-label=\"上下架状态\" name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select>"
+            "<button type=\"submit\">保存</button></form>%s</td></tr>",
+            pageNumber, item->price, item->enabled ? " selected" : "",
+            item->enabled ? "" : " selected",
+            item->itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID
+                ? "<div class=\"foot\">背包扩容的实际价格由客户端容量档位决定。</div>"
+                : "");
+    }
+    if (matchedCount == 0)
+        vm_mock_admin_text_appendf(
+            &page, "<tr><td colspan=\"5\" class=\"muted\">没有符合条件的物品</td></tr>");
+    vm_mock_admin_text_appendf(&page,
+        "</tbody></table></div><div class=\"pages\"><span>第 %u / %u 页 · 共 %u 项</span><div class=\"page-links\">",
+        pageNumber, pageCount, matchedCount);
+    if (pageNumber > 1)
+        vm_mock_admin_text_appendf(
+            &page, "<a href=\"/?tab=shop&amp;category=%s&amp;q=%s&amp;page=%u\">上一页</a>",
+            categoryEncoded, searchEncoded, pageNumber - 1);
+    if (pageNumber < pageCount)
+        vm_mock_admin_text_appendf(
+            &page, "<a href=\"/?tab=shop&amp;category=%s&amp;q=%s&amp;page=%u\">下一页</a>",
+            categoryEncoded, searchEncoded, pageNumber + 1);
+    vm_mock_admin_text_appendf(
+        &page,
+        "</div></div><p class=\"foot\">价格和上下架状态保存在 MySQL server_shop_items 表。价格覆盖用于服务端下发价格的商城页面；17/1 NPC 商店的显示价格仍由客户端本地 DSH 决定。下架不会删除角色已有物品，也不会影响后台赠送物品。</p></section></main></body></html>");
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><title>响应过大</title><p>商品管理页面超过大小限制。</p>");
+    }
+}
+
 static void vm_mock_admin_render_update_page(char *response,
                                              size_t responseCap,
                                              const char *query)
@@ -2979,6 +3320,7 @@ static void vm_mock_admin_render_update_page(char *response,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>");
     if (message[0] != 0)
     {
@@ -3091,6 +3433,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_update_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "shop") == 0)
+    {
+        vm_mock_admin_render_shop_page(response, responseCap, query);
+        return;
+    }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
@@ -3122,6 +3469,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
         g_vm_mock_service_account_db.accountCount);
@@ -3314,6 +3662,34 @@ static void vm_mock_admin_redirect_updates(vm_mock_service_socket client,
     vm_mock_admin_send_location(client, location, NULL);
 }
 
+static void vm_mock_admin_redirect_shop(vm_mock_service_socket client,
+                                        const char *category,
+                                        const char *search,
+                                        u32 page,
+                                        const char *status,
+                                        const char *message)
+{
+    char categoryEncoded[64];
+    char searchEncoded[384];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1500];
+
+    vm_mock_admin_url_encode(category && category[0] ? category : "all",
+                             categoryEncoded, sizeof(categoryEncoded));
+    vm_mock_admin_url_encode(search ? search : "", searchEncoded,
+                             sizeof(searchEncoded));
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             "/?tab=shop&category=%s&q=%s&page=%u&status=%s&message=%s",
+             categoryEncoded, searchEncoded, page ? page : 1, statusEncoded,
+             messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
 static bool vm_mock_admin_form_u32(const char *body, const char *field,
                                    u32 maximum, u32 *valueOut)
 {
@@ -3486,11 +3862,11 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     }
     if (vm_net_mock_scene_name_has_path_separator(actorResource) ||
         !vm_net_mock_str_ends_with(actorResource, ".actor") ||
-        !vm_net_mock_open_server_data_resource(actorResource, ".actor",
-                                               NULL, NULL, 0))
+        !vm_net_mock_client_base_data_resource_exists(actorResource,
+                                                      ".actor"))
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
-                                       "所选 Actor 资源不存在");
+                                       "所选 Actor 未安装在客户端基础资源中，场景启动时无法安全加载");
         return;
     }
     if (!vm_mock_admin_utf8_to_gbk_text(displayUtf8, seed.displayName,
@@ -3617,6 +3993,57 @@ static void vm_mock_admin_handle_update_action(vm_mock_service_socket client,
     vm_mock_admin_redirect_updates(client, "error", "不支持的更新管理操作");
 }
 
+static void vm_mock_admin_handle_shop_action(vm_mock_service_socket client,
+                                             const char *body)
+{
+    char category[16];
+    char search[128];
+    char pageText[32];
+    char enabledText[8];
+    const char *error = NULL;
+    u32 itemId = 0;
+    u32 price = 0;
+    u32 page = 1;
+    bool enabled = false;
+
+    memset(category, 0, sizeof(category));
+    memset(search, 0, sizeof(search));
+    memset(pageText, 0, sizeof(pageText));
+    memset(enabledText, 0, sizeof(enabledText));
+    (void)vm_mock_admin_form_value(body, "category", category,
+                                   sizeof(category));
+    (void)vm_mock_admin_form_value(body, "q", search, sizeof(search));
+    (void)vm_mock_admin_form_value(body, "page", pageText, sizeof(pageText));
+    if (pageText[0] != 0 &&
+        (!vm_net_mock_parse_u32_strict(pageText, &page) || page == 0))
+    {
+        page = 1;
+    }
+    if (!vm_mock_admin_form_u32(body, "item", 0xffffffffu, &itemId) ||
+        itemId == 0 ||
+        !vm_mock_admin_form_u32(body, "price", 0xffffffffu, &price) ||
+        price == 0 ||
+        !vm_mock_admin_form_value(body, "enabled", enabledText,
+                                  sizeof(enabledText)) ||
+        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0))
+    {
+        vm_mock_admin_redirect_shop(client, category, search, page, "error",
+                                    "商品、价格或上下架状态无效");
+        return;
+    }
+    enabled = strcmp(enabledText, "1") == 0;
+    if (!vm_net_mock_shop_admin_save(itemId, price, enabled, &error))
+    {
+        vm_mock_admin_redirect_shop(
+            client, category, search, page, "error",
+            error ? error : "商品保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_shop(
+        client, category, search, page, "ok",
+        enabled ? "商品价格已保存并上架" : "商品价格已保存并下架");
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
@@ -3655,6 +4082,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "remove-named-update") == 0)
     {
         vm_mock_admin_handle_update_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-shop-item") == 0)
+    {
+        vm_mock_admin_handle_shop_action(client, body);
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))

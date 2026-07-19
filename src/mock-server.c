@@ -4377,6 +4377,7 @@ typedef struct
     u8 visual;
     u8 isEquip;
     u8 category;
+    u8 enabled;
 } vm_net_mock_shop_catalog_item;
 
 typedef struct
@@ -4423,6 +4424,8 @@ typedef struct
 static vm_net_mock_shop_catalog_item g_vm_net_mock_shop_catalog[VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS];
 static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
+static bool g_vm_net_mock_shop_admin_db_loaded = false;
+static bool g_vm_net_mock_shop_admin_db_valid = false;
 static vm_net_mock_equipment_catalog_item g_vm_net_mock_equipment_catalog[VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_equipment_catalog_count = 0;
 static bool g_vm_net_mock_equipment_catalog_loaded = false;
@@ -4438,6 +4441,10 @@ static bool g_vm_net_mock_auto_monster_catalog_loaded = false;
 static bool g_vm_net_mock_eidolon_catalog_loaded = false;
 static bool g_vm_net_mock_eidolon_heal_effect_found = false;
 static u32 g_vm_net_mock_eidolon_heal_effect_index = 0;
+
+static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
+                                    u32 *result_out);
+static bool vm_net_mock_shop_admin_db_load(void);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -4996,6 +5003,7 @@ static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 na
     item->visual = visual ? visual : 1;
     item->isEquip = equip ? 1 : 0;
     item->category = (u8)(category > 255 ? 255 : category);
+    item->enabled = 1;
     return true;
 }
 
@@ -5139,6 +5147,11 @@ static u32 vm_net_mock_load_shop_catalog(void)
                g_vm_net_mock_shop_catalog_count, itemCount, equipCount, first->itemId);
     }
 
+    /* Price/availability overrides are authoritative server state.  Failure to
+     * load them must not hide the immutable DSH catalog, so retain base values
+     * and surface the database error through the admin log. */
+    (void)vm_net_mock_shop_admin_db_load();
+
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
     return g_vm_net_mock_shop_catalog_count;
@@ -5154,6 +5167,137 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
             return &g_vm_net_mock_shop_catalog[i];
     }
     return NULL;
+}
+
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+} vm_net_mock_shop_admin_load_context;
+
+static bool vm_net_mock_shop_admin_db_row(void *contextValue,
+                                          unsigned int columnCount,
+                                          const char *const *values,
+                                          const size_t *lengths)
+{
+    vm_net_mock_shop_admin_load_context *context =
+        (vm_net_mock_shop_admin_load_context *)contextValue;
+    u32 itemId = 0;
+    u32 price = 0;
+    u32 enabled = 0;
+    vm_net_mock_shop_catalog_item *item = NULL;
+
+    if (context == NULL || columnCount != 3 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &itemId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &price) || price == 0 ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &enabled) || enabled > 1)
+    {
+        if (context != NULL)
+            ++context->skipped;
+        return true;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == itemId)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        ++context->skipped;
+        return true;
+    }
+    item->price = price;
+    item->enabled = enabled ? 1 : 0;
+    ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_shop_admin_db_load(void)
+{
+    vm_net_mock_shop_admin_load_context context;
+
+    if (g_vm_net_mock_shop_admin_db_loaded)
+        return g_vm_net_mock_shop_admin_db_valid;
+    g_vm_net_mock_shop_admin_db_loaded = true;
+    g_vm_net_mock_shop_admin_db_valid = false;
+    memset(&context, 0, sizeof(context));
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_shop_items ("
+            "item_id INT UNSIGNED NOT NULL,price INT UNSIGNED NOT NULL,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(item_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT item_id,price,enabled FROM server_shop_items ORDER BY item_id",
+            vm_net_mock_shop_admin_db_row, &context))
+    {
+        printf("[error][mock-admin] shop_item_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_shop_admin_db_valid = true;
+    printf("[info][mock-admin] shop_item_db_load rows=%u skipped=%u\n",
+           context.loaded, context.skipped);
+    return true;
+}
+
+static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
+                                        const char **errorOut)
+{
+    vm_net_mock_shop_catalog_item *item = NULL;
+    char query[512];
+
+    if (errorOut)
+        *errorOut = "商品参数无效";
+    (void)vm_net_mock_load_shop_catalog();
+    if (!g_vm_net_mock_shop_admin_db_valid)
+    {
+        g_vm_net_mock_shop_admin_db_loaded = false;
+        if (!vm_net_mock_shop_admin_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+    if (itemId == 0 || price == 0)
+        return false;
+    for (u32 i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == itemId)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (errorOut)
+            *errorOut = "商品目录中不存在该物品";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_shop_items(item_id,price,enabled) VALUES(%u,%u,%u) "
+             "ON DUPLICATE KEY UPDATE price=VALUES(price),enabled=VALUES(enabled)",
+             itemId, price, enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    item->price = price;
+    item->enabled = enabled ? 1 : 0;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] shop_item_save item=%u price=%u enabled=%u\n",
+           itemId, price, enabled ? 1u : 0u);
+    return true;
 }
 
 static u8 vm_net_mock_equipment_slot_for_category(u32 category)
@@ -5525,7 +5669,8 @@ static bool vm_net_mock_item_effect_is_usable(const vm_net_mock_item_effect_cata
     return item->category == 10 || item->hp != 0 || item->mp != 0 || item->exp != 0;
 }
 
-static bool vm_net_mock_shop17_should_include_item(u32 itemId);
+static bool vm_net_mock_shop17_should_include_item(
+    const vm_net_mock_shop_catalog_item *item);
 static u32 vm_net_mock_shop17_order_group(u32 itemId);
 
 static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 value)
@@ -5590,7 +5735,7 @@ static bool vm_net_mock_shop_page_item_matches_subtype(u8 subtype,
 {
     u8 slot = vm_net_mock_shop_page_equipment_slot(item);
 
-    if (item == NULL)
+    if (item == NULL || !item->enabled)
         return false;
     switch (subtype)
     {
@@ -5711,6 +5856,7 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
     u32 pos = 0;
     u32 total = vm_net_mock_load_shop_catalog();
     u32 filteredCount = 0;
+    u32 availableCount = 0;
     u32 rowCount = 0;
     u32 emitted = 0;
     bool useFilteredCatalog = false;
@@ -5720,11 +5866,16 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
     out[0] = 0;
     for (u32 i = 0; i < total; ++i)
     {
-        if (vm_net_mock_shop17_should_include_item(g_vm_net_mock_shop_catalog[i].itemId))
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        if (!item->enabled)
+            continue;
+        ++availableCount;
+        if (vm_net_mock_shop17_should_include_item(item))
             ++filteredCount;
     }
     useFilteredCatalog = filteredCount > 0;
-    rowCount = useFilteredCatalog ? filteredCount : total;
+    rowCount = useFilteredCatalog ? filteredCount : availableCount;
     if (rowCount > VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS)
         rowCount = VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS;
     if (rowCount > maxRows)
@@ -5735,7 +5886,8 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
         for (u32 i = 0; i < total && emitted < rowCount; ++i)
         {
             const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
-            if (useFilteredCatalog && !vm_net_mock_shop17_should_include_item(item->itemId))
+            if (!item->enabled ||
+                (useFilteredCatalog && !vm_net_mock_shop17_should_include_item(item)))
                 continue;
             if (vm_net_mock_shop17_order_group(item->itemId) != group)
                 continue;
@@ -5804,7 +5956,8 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
     return true;
 }
 
-static bool vm_net_mock_shop17_should_include_item(u32 itemId)
+static bool vm_net_mock_shop17_should_include_item(
+    const vm_net_mock_shop_catalog_item *item)
 {
     /*
      * The 17/1 list is rendered by mmGame:0x418C.  The NPC purchase screen in
@@ -5812,7 +5965,7 @@ static bool vm_net_mock_shop17_should_include_item(u32 itemId)
      * low material/task drops.  Keep the packet page-sized: the parser copies
      * iteminfo into a 1024-byte stream buffer.
      */
-    return itemId >= 800;
+    return item != NULL && item->enabled && item->itemId >= 800;
 }
 
 static u32 vm_net_mock_shop17_order_group(u32 itemId)
@@ -5831,15 +5984,21 @@ static u32 vm_net_mock_shop17_first_item_id(void)
     {
         for (u32 i = 0; i < total; ++i)
         {
-            u32 itemId = g_vm_net_mock_shop_catalog[i].itemId;
-            if (vm_net_mock_shop17_should_include_item(itemId) &&
-                vm_net_mock_shop17_order_group(itemId) == group)
+            const vm_net_mock_shop_catalog_item *item =
+                &g_vm_net_mock_shop_catalog[i];
+            if (vm_net_mock_shop17_should_include_item(item) &&
+                vm_net_mock_shop17_order_group(item->itemId) == group)
             {
-                return itemId;
+                return item->itemId;
             }
         }
     }
-    return total > 0 ? g_vm_net_mock_shop_catalog[0].itemId : 0;
+    for (u32 i = 0; i < total; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].enabled)
+            return g_vm_net_mock_shop_catalog[i].itemId;
+    }
+    return 0;
 }
 
 static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
@@ -5848,6 +6007,7 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
     u32 pos = 0;
     u32 total = vm_net_mock_load_shop_catalog();
     u32 filteredCount = 0;
+    u32 availableCount = 0;
     u32 rowCount = 0;
     bool useFilteredCatalog = false;
 
@@ -5858,16 +6018,18 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
 
     for (u32 i = 0; i < total; ++i)
     {
-        if (vm_net_mock_shop17_should_include_item(g_vm_net_mock_shop_catalog[i].itemId))
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        if (!item->enabled)
+            continue;
+        ++availableCount;
+        if (vm_net_mock_shop17_should_include_item(item))
             ++filteredCount;
     }
     useFilteredCatalog = filteredCount > 0;
-    rowCount = useFilteredCatalog ? filteredCount : total;
+    rowCount = useFilteredCatalog ? filteredCount : availableCount;
     if (rowCount > VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS)
         rowCount = VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS;
-    if (rowCount == 0 && total > 0)
-        rowCount = total < VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS ? total : VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS;
-
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, (u8)rowCount))
         return false;
 
@@ -5876,7 +6038,8 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
         for (u32 i = 0; i < total && emitted < rowCount; ++i)
         {
             const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
-            if (useFilteredCatalog && !vm_net_mock_shop17_should_include_item(item->itemId))
+            if (!item->enabled ||
+                (useFilteredCatalog && !vm_net_mock_shop17_should_include_item(item)))
                 continue;
             if (vm_net_mock_shop17_order_group(item->itemId) != group)
                 continue;
@@ -7522,8 +7685,8 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
                                                   char *pathOut,
                                                   size_t pathOutCap);
 
-static bool vm_net_mock_client_data_resource_exists(const char *name,
-                                                    const char *requiredSuffix)
+static bool vm_net_mock_client_base_data_resource_exists(
+    const char *name, const char *requiredSuffix)
 {
     static const char *pathFormats[] = {
         /* The service changes cwd to bin/ before startup validation. */
@@ -7550,6 +7713,23 @@ static bool vm_net_mock_client_data_resource_exists(const char *name,
             continue;
         fclose(fp);
         return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_client_data_resource_exists(const char *name,
+                                                    const char *requiredSuffix)
+{
+    char candidate[1200];
+
+    if (vm_net_mock_client_base_data_resource_exists(name, requiredSuffix))
+        return true;
+    if (name == NULL || name[0] == 0 ||
+        vm_net_mock_scene_name_has_path_separator(name) ||
+        (requiredSuffix != NULL && requiredSuffix[0] != 0 &&
+         !vm_net_mock_str_ends_with(name, requiredSuffix)))
+    {
+        return false;
     }
     if (g_vm_net_mock_resource_dir[0] != 0 &&
         vm_net_mock_build_configured_resource_path(name, candidate,
@@ -14400,14 +14580,37 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     }
     session->roleOnline = false;
     session->onlinePresenceValid = false;
+    session->onlineRoleId = 0;
+    session->onlineRoleName[0] = 0;
+    session->onlineRoleTitle[0] = 0;
+    session->onlineRoleTitleBadge[0] = 0;
+    session->onlineScene[0] = 0;
+    session->onlineX = 0;
+    session->onlineY = 0;
     session->sceneVisibleReady = false;
     session->sceneVisiblePending = false;
+    session->sceneVisibleScene[0] = 0;
+    session->sceneVisibleX = 0;
+    session->sceneVisibleY = 0;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    session->shopSceneNpcReseedPending = false;
+    session->shopSceneNpcReseedScene[0] = 0;
+    memset(session->socialNotices, 0, sizeof(session->socialNotices));
     memset(session->chatNotices, 0, sizeof(session->chatNotices));
     session->chatNoticeHead = 0;
     session->chatNoticeCount = 0;
     session->systemWelcomeQueued = false;
+    session->friendInviteReplyActive = false;
+    session->friendInviteSourceClientId = 0;
+    session->friendInviteSourceRoleId = 0;
+    session->tradeInviteReplyActive = false;
+    session->tradeInviteSourceClientId = 0;
+    session->tradeInviteSourceRoleId = 0;
+    session->teamInviteReplyActive = false;
+    session->teamInviteSourceClientId = 0;
+    session->teamInviteSourceWireId = 0;
+    session->pendingTeamBattleSerial = 0;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
@@ -14449,8 +14652,20 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
     session = vm_mock_service_get_or_create_client_session(clientId);
     if (session == NULL)
         return;
-    if (session->accountId[0] != 0 && strcmp(session->accountId, accountId) != 0)
-        vm_mock_service_session_mark_offline(session, "account-rebind");
+    if (session->accountId[0] != 0)
+    {
+        bool sameAccount = strcmp(session->accountId, accountId) == 0;
+        printf("[info][mock-service] session_login_lifecycle_reset client=%08x old_account=%s new_account=%s same=%u scene_ready=%u role_online=%u evidence=runtime:return-title-relogin-before-scene-init\n",
+               clientId,
+               session->accountId,
+               accountId,
+               sameAccount ? 1u : 0u,
+               session->sceneVisibleReady ? 1u : 0u,
+               session->roleOnline ? 1u : 0u);
+        vm_mock_service_session_mark_offline(
+            session,
+            sameAccount ? "title-login-rebind" : "account-rebind");
+    }
     snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
     printf("[info][mock-service] session_bind client=%08x account=%s\n", clientId, accountId);
 }
@@ -15590,6 +15805,7 @@ typedef struct
 {
     u32 loaded;
     u32 skipped;
+    u32 quarantined;
 } vm_net_mock_dynamic_npc_load_context;
 
 static vm_net_mock_dynamic_npc_override
@@ -15662,12 +15878,29 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_str_ends_with(row.seed.actorResource, ".actor") ||
         (row.seed.scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(row.seed.scriptName, ".xse")) ||
-        !vm_net_mock_client_data_resource_exists(row.seed.actorResource, ".actor") ||
+        !vm_net_mock_open_server_data_resource(row.seed.actorResource, ".actor",
+                                               NULL, NULL, 0) ||
         (row.seed.scriptName[0] != 0 &&
-         !vm_net_mock_client_data_resource_exists(row.seed.scriptName, ".xse")))
+         !vm_net_mock_open_server_data_resource(row.seed.scriptName, ".xse",
+                                                NULL, NULL, 0)))
     {
         ++context->skipped;
         return true;
+    }
+
+    /* 27/11 is parsed while the scene actor table is being created.  If an
+     * actor is present only in the server download source, LoadAssetFromFile
+     * takes its missing-resource branch before the client's 30-byte resource
+     * request table is allocated (0x01044E48), producing a write near address
+     * zero.  Retain the row for admin repair, but never expose it to a client. */
+    if (!vm_net_mock_client_base_data_resource_exists(
+            row.seed.actorResource, ".actor"))
+    {
+        printf("[error][mock-admin] dynamic_npc_quarantine scene=%s actor=%u actor_res=%s db_enabled=%u action=disable-runtime reason=actor-not-installed-in-client-base evidence=JianghuOL.CBE:0x01044E48\n",
+               row.scene, row.seed.actorId, row.seed.actorResource,
+               row.enabled ? 1u : 0u);
+        row.enabled = false;
+        ++context->quarantined;
     }
 
     snprintf(g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].scene,
@@ -15714,8 +15947,8 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         return false;
     }
     g_vm_net_mock_dynamic_npc_db_valid = true;
-    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u\n",
-           context.loaded, context.skipped);
+    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u quarantined=%u\n",
+           context.loaded, context.skipped, context.quarantined);
     return true;
 }
 
@@ -15765,12 +15998,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
-        !vm_net_mock_client_data_resource_exists(seed->actorResource, ".actor") ||
+        !vm_net_mock_client_base_data_resource_exists(seed->actorResource,
+                                                      ".actor") ||
         (seed->scriptName[0] != 0 &&
-         !vm_net_mock_client_data_resource_exists(seed->scriptName, ".xse")))
+         !vm_net_mock_open_server_data_resource(seed->scriptName, ".xse",
+                                                NULL, NULL, 0)))
     {
         if (errorOut)
-            *errorOut = "NPC fields or resources are invalid";
+            *errorOut = "NPC fields are invalid or Actor is not installed in the client base bundle";
         return false;
     }
     existing = vm_net_mock_dynamic_npc_find_override(scene, seed->actorId);
@@ -20921,8 +21156,8 @@ static bool vm_net_mock_validate_xse_task_resources(void)
            foundBlacksmith ? 1u : 0u, foundMonkey ? 1u : 0u,
            foundTestTaskNpc ? 1u : 0u);
     if (loadedCount != sizeof(scripts) / sizeof(scripts[0]) ||
-        copperStageCount != 1 || copperStageTotal != 1 || !foundGuoJing ||
-        swordValleyCount != 2 || swordValleyTotal != 2 ||
+        copperStageCount < 1 || copperStageTotal < 1 || !foundGuoJing ||
+        swordValleyCount < 2 || swordValleyTotal < 2 ||
         !foundBlacksmith || !foundMonkey || foundTestTaskNpc)
     {
         printf("[error][network] mock_xse_task_validate result=failed "
@@ -20935,8 +21170,8 @@ static bool vm_net_mock_validate_xse_task_resources(void)
                foundTestTaskNpc ? 1u : 0u);
     }
     return loadedCount == sizeof(scripts) / sizeof(scripts[0]) &&
-           copperStageCount == 1 && copperStageTotal == 1 && foundGuoJing &&
-           swordValleyCount == 2 && swordValleyTotal == 2 &&
+           copperStageCount >= 1 && copperStageTotal >= 1 && foundGuoJing &&
+           swordValleyCount >= 2 && swordValleyTotal >= 2 &&
            foundBlacksmith && foundMonkey && !foundTestTaskNpc;
 }
 
@@ -22058,15 +22293,19 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         return 0;
     }
     /* The real completion path flushes its progress-banner request before the
-     * task request: `25/5(empty) + 6/4{taskid}`.  Keep this exception narrow;
-     * other task operations either contain one object or, for 6/11 accept,
-     * carry the empty 25/5 object after the task object. */
+     * task request.  Runtime has shown exactly two prefix forms:
+     *   `25/5(empty) + 6/4{taskid}` commits the completed task;
+     *   `25/5(empty) + 6/10{taskid,state,agree}` refreshes its detail text.
+     * Keep this exception narrow; other task operations either contain one
+     * object or, for 6/11 accept, carry the empty 25/5 object after the task
+     * object. */
     if (object.major == 1 && object.kind == 0x19 &&
         object.subtype == 5 && object.payloadLen == 0)
     {
         if (!vm_net_mock_next_request_object(request, requestLen, &offset,
                                              &object) ||
-            object.major != 1 || object.kind != 6 || object.subtype != 4 ||
+            object.major != 1 || object.kind != 6 ||
+            (object.subtype != 4 && object.subtype != 10) ||
             offset != requestLen)
         {
             return 0;
@@ -22100,8 +22339,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     memset(destinationText, 0, sizeof(destinationText));
 
     /* Preserve the request ordering.  result=4 is the normal 25/5 completion
-     * consumed by net_handle_info_banner_state; the following 6/16 then removes
-     * the completed task through HandleTaskCompleteResult(0x01038E6E). */
+     * consumed by net_handle_info_banner_state.  The following task object is
+     * either 6/16 completion or 6/10 detail, matching the second request object. */
     if (hasInfoBannerPrefix)
     {
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
@@ -30044,6 +30283,47 @@ static bool vm_net_mock_is_actor_moveinfo_upload_request(const u8 *request, u32 
     return offset == requestLen;
 }
 
+static bool vm_net_mock_is_actor_type_control_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u8 controlType = 0;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != 2 || object.subtype != 1)
+        return false;
+    if (vm_net_mock_request_contains(request, requestLen, "moveinfo"))
+        return false;
+    if (!vm_net_mock_get_object_u8_field(request, requestLen, "type", &controlType))
+        return false;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen;
+}
+
+static u32 vm_net_mock_build_actor_type_control_ack_response(const u8 *request, u32 requestLen,
+                                                              u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_is_actor_type_control_request(request, requestLen) || outCap < pos)
+        return 0;
+    /*
+     * The client only needs completion of this scene/actor control object.  Keep
+     * the original 2/1 identity and do not reinterpret its generic `type` field
+     * as the unrelated 7/7 bootstrap command.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 2, 1, &objectStart))
+        return 0;
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
 static bool vm_net_mock_is_actor_moveinfo_name_update_request(const u8 *request, u32 requestLen)
 {
     u32 offset = 4;
@@ -37887,7 +38167,7 @@ static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
         *unitPriceOut = unitPrice;
     if (costOut)
         *costOut = cost;
-    return item != NULL;
+    return item != NULL && item->enabled;
 }
 
 static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestLen,
@@ -38054,12 +38334,17 @@ static u32 vm_net_mock_build_shop_buy17_response(const u8 *request, u32 requestL
     u8 count = 1;
     u16 seq = 0;
     u8 result = 0;
+    const vm_net_mock_shop_catalog_item *catalogItem = NULL;
 
     if (outCap < pos || out == NULL)
         return 0;
     if (!vm_net_mock_is_shop_buy17_request(request, requestLen, &shopId, &count))
         return 0;
-    result = vm_net_mock_role_add_backpack_item(shopId, count, &seq) ? 1 : 0;
+    catalogItem = vm_net_mock_find_shop_catalog_item(shopId);
+    result = catalogItem != NULL && catalogItem->enabled &&
+                     vm_net_mock_role_add_backpack_item(shopId, count, &seq)
+                 ? 1
+                 : 0;
     if (result)
     {
         g_netMockShop17ListPending = 0;
@@ -39599,6 +39884,16 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    if (vm_net_mock_is_actor_type_control_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_actor_type_control_ack_response(request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-actor-type-control-ack", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
     /* Chat is commonly flushed together with the scene's 2/10 refresh object.
      * Handle it before the generic `type` detector, whose unrelated type=2
      * branch would otherwise consume a world/team chat request. */
@@ -40476,7 +40771,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    if (vm_net_mock_get_object_u8_field(request, requestLen, "type", &gameRequestType) &&
+    /*
+     * The type=1/2/3 bootstrap exchange belongs to WT 7/7.  Do not use the
+     * field name alone as a detector: actor movement/scene combo packets can
+     * also contain a type field.  Rewriting such a WT 2/1 request as 2/26
+     * opens the task-hall screen without list data and leaves its touch
+     * callback null (JianghuOL.CBE:0x01010C34 -> 0x0104A2C0).
+     */
+    if (requestKind == 7 && requestSubtype == 7 &&
+        vm_net_mock_get_object_u8_field(request, requestLen, "type", &gameRequestType) &&
         (gameRequestType == 1 || gameRequestType == 2 || gameRequestType == 3))
     {
         hookedLen = vm_net_mock_build_game_type_response(request, requestLen, out, outCap, gameRequestType);
