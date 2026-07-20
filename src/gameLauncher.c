@@ -347,6 +347,33 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
             SDL_MapRGB(sfc->format, 0x88, 0x88, 0x88));
     }
 
+    if (state->loading) {
+        SDL_Rect full = {0, 0, state->viewport_w, state->viewport_h};
+        SDL_FillRect(sfc, &full, SDL_MapRGB(sfc->format, 0x10, 0x10, 0x20));
+        draw_rounded_rect(sfc,
+            (state->viewport_w - 200) / 2,
+            (state->viewport_h - 80) / 2,
+            200, 80, 0x16213e, 1);
+        draw_rect_border(sfc,
+            (state->viewport_w - 200) / 2,
+            (state->viewport_h - 80) / 2,
+            200, 80, SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
+        const char *label = "Loading...";
+        int lw = launcher_measure_string_width(label);
+        launcher_draw_font_string(sfc, label,
+            (state->viewport_w - lw) / 2,
+            (state->viewport_h - getFontHeight()) / 2,
+            SDL_MapRGB(sfc->format, 0xff, 0xff, 0xff));
+        const char *name = state->loading_name;
+        if (name[0]) {
+            int nw = launcher_measure_string_width(name);
+            launcher_draw_font_string(sfc, name,
+                (state->viewport_w - nw) / 2,
+                (state->viewport_h - getFontHeight()) / 2 + getFontHeight() + 4,
+                SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
+        }
+    }
+
     SDL_UpdateWindowSurface(sfc);
 }
 

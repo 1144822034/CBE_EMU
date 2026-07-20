@@ -27,6 +27,8 @@ typedef struct {
     int viewport_h;
     int scrollbar_w;
     bool active;          /* Public: whether the launcher is currently active. */
+    bool loading;         /* Public: rendering "Loading..." overlay, awaiting VM start. */
+    char loading_name[128]; /* Name of the game being loaded (shown in overlay). */
     bool _internal_is_scrolling;  /* Internal: scrollbar thumb drag in progress. */
 } GameLauncherState;
 

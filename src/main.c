@@ -6157,14 +6157,23 @@ void loop()
                                 &g_gameLauncherState);
                             if (path)
                             {
-                                g_gameLauncherActive = false;
                                 snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8),
                                          "%s", path);
                                 printf("[info][launcher] launching %s\n", path);
+                                g_gameLauncherState.loading = true;
+                                snprintf(g_gameLauncherState.loading_name,
+                                         sizeof(g_gameLauncherState.loading_name),
+                                         "%s", g_gameLauncherState.entries[
+                                             g_gameLauncherState.selected_index].display_name);
+                                vm_game_launcher_render(&g_gameLauncherState,
+                                    SDL_GetWindowSurface(window));
+
+                                g_gameLauncherActive = false;
                                 if (!vm_cbe_load_and_start(path))
                                 {
                                     printf("[error][launcher] failed to load %s\n", path);
                                     g_gameLauncherActive = true;
+                                    g_gameLauncherState.loading = false;
                                 }
                                 else
                                 {
