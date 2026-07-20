@@ -34904,6 +34904,102 @@ static u8 vm_net_mock_append_scene_nearby_role_objects(u8 *out, u32 outCap, u32 
     return (u8)(1 + moveinfoCount);
 }
 
+/*
+ * The first scene resource completion already carries the requested empty
+ * 2/10 object and has a confirmed practical ceiling of ten WT objects.  A
+ * newly entering observer does not need historical 2/2 movement in order to
+ * create a peer node: sub_1012958 consumes the coordinates embedded in
+ * otherinfo and calls scene_node_find_or_create directly.  Publish one compact
+ * non-empty 2/10 baseline after the scene is ready, then advance each
+ * observer-side movement cursor to the source's current serial.  The next
+ * real movement burst is still delivered once by the normal scene poll, while
+ * an old queue cannot be replayed immediately after node creation.
+ */
+static u32 vm_mock_service_mark_scene_nearby_role_baseline_visible(const char *scene)
+{
+    vm_mock_service_client_session *observer =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 seedCount = 0;
+    u32 markedCount = 0;
+
+    if (observer == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_mock_service_session_scene_is_visible(observer, scene))
+    {
+        return 0;
+    }
+
+    seedCount = vm_net_mock_build_scene_role_seeds(scene,
+                                                    seeds,
+                                                    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    for (u8 i = 0; i < seedCount; ++i)
+    {
+        vm_mock_service_client_session *source = seeds[i].session;
+        vm_mock_service_peer_sync *peerSync = NULL;
+
+        if (source == NULL)
+            continue;
+        peerSync = vm_mock_service_get_peer_sync(observer,
+                                                 source->clientId,
+                                                 seeds[i].actorId,
+                                                 source->pendingDirQueueSerial,
+                                                 true,
+                                                 NULL);
+        if (peerSync == NULL)
+            continue;
+        peerSync->visible = true;
+        peerSync->actorId = seeds[i].actorId;
+        peerSync->lastMoveSerial = source->pendingDirQueueSerial;
+        ++markedCount;
+    }
+    return markedCount;
+}
+
+static u8 vm_net_mock_append_scene_ready_nearby_role_baseline10_object(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    const char *scene,
+    u32 *roleCountOut,
+    u32 *otherInfoLenOut)
+{
+    u32 savedPos = 0;
+    u32 roleCount = 0;
+    u32 otherInfoLen = 0;
+
+    if (roleCountOut)
+        *roleCountOut = 0;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = 0;
+    if (out == NULL || pos == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return 0;
+    }
+
+    savedPos = *pos;
+    if (!vm_net_mock_append_actor_other_scene_roles10_object(out,
+                                                             outCap,
+                                                             pos,
+                                                             scene,
+                                                             &roleCount,
+                                                             &otherInfoLen) ||
+        roleCount == 0)
+    {
+        *pos = savedPos;
+        return 0;
+    }
+
+    (void)vm_mock_service_mark_scene_nearby_role_baseline_visible(scene);
+
+    if (roleCountOut)
+        *roleCountOut = roleCount;
+    if (otherInfoLenOut)
+        *otherInfoLenOut = otherInfoLen;
+    return 1;
+}
+
 static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_role_seed *seeds,
                                                         u8 roleCount,
                                                         u32 clientId)
@@ -42025,6 +42121,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 timingObjectsMs = 0;
     u32 timingTailMs = 0;
     u32 timingReadyMs = 0;
+    u32 readyNearbyRoleCount = 0;
+    u32 readyNearbyOtherInfoLen = 0;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
         return 0;
 
@@ -42247,6 +42345,20 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         if (readyChatObjects < 0)
             return 0;
         objectCount = (u8)(objectCount + readyChatObjects);
+
+        if (vm_net_mock_append_scene_ready_nearby_role_baseline10_object(
+                out, outCap, &pos, currentScene,
+                &readyNearbyRoleCount,
+                &readyNearbyOtherInfoLen) > 0)
+        {
+            objectCount += 1;
+            printf("[info][network] mock_scene_resource_ready_nearby scene=%s nearby_roles=%u otherinfo_len=%u objects=%u resp=%u delivery=same-scene-completion history_replay=0 evidence=JianghuOL.CBE:0x01012958\n",
+                   currentScene ? currentScene : "-",
+                   readyNearbyRoleCount,
+                   readyNearbyOtherInfoLen,
+                   objectCount,
+                   pos);
+        }
     }
     timingReadyMs = scheduler_get_tick_ms();
 
@@ -42256,6 +42368,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                                                     "scene-resource-followup",
                                                     objectCount,
                                                     pos);
+    /* complete_startup_scene_followup intentionally performs a final
+     * pending->ready transition and clears peerSync[].visible.  The baseline
+     * is already in this response, so restore the observer cursor after that
+     * lifecycle transition instead of making the next poll send it again. */
+    if (readyNearbyRoleCount > 0)
+        (void)vm_mock_service_mark_scene_nearby_role_baseline_visible(currentScene);
     {
         u32 timingEndMs = scheduler_get_tick_ms();
         printf("[debug][mock-service] scene_resource_followup_timing scene=%s total_ms=%u lifecycle_ms=%u objects_ms=%u tail_ms=%u ready_ms=%u complete_ms=%u\n",
