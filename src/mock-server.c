@@ -14178,6 +14178,8 @@ enum
     VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX = 8,
     VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX = 2048,
     VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX = 512,
+    VM_MOCK_SERVICE_DUEL_MAX = 16,
+    VM_MOCK_SERVICE_DUEL_EVENT_MAX = 8,
     VM_MOCK_SERVICE_TRADE_MAX = 16,
     VM_MOCK_SERVICE_TRADE_ITEM_MAX = 10
 };
@@ -14222,7 +14224,9 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE = 8,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_HSP = 9,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED = 10,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED = 11
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED = 11,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE = 12,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT = 13
 };
 
 typedef struct
@@ -14274,6 +14278,19 @@ typedef struct
     u16 actionInfoLen;
     u8 actionInfo[VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX];
 } vm_mock_service_team_battle_round_action;
+
+typedef struct
+{
+    bool valid;
+    bool terminal;
+    u32 serial;
+    u8 sourceIndex;
+    u8 deliveredMask;
+    u32 operate;
+    u32 damage;
+    u32 sourceMpAfter;
+    u32 targetHpAfter;
+} vm_mock_service_duel_event;
 
 typedef struct
 {
@@ -14364,6 +14381,12 @@ typedef struct vm_mock_service_client_session
     bool teamInviteReplyActive;
     u32 teamInviteSourceClientId;
     u32 teamInviteSourceWireId;
+    bool sparInviteReplyActive;
+    u32 sparInviteSourceClientId;
+    u32 sparInviteSourceWireId;
+    bool sparBattleReadyPending;
+    u32 sparBattlePeerClientId;
+    u32 sparBattlePeerWireId;
     u32 pendingTeamBattleSerial;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
@@ -14416,7 +14439,32 @@ typedef struct
     vm_mock_service_team_battle_event battleEvents[VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX];
 } vm_mock_service_team;
 
+/* A spar is service-local and intentionally keeps its combat HP/MP separate
+ * from durable role HP/MP.  A friendly duel must not leave either player dead
+ * or consume persistent MP after the battle screen closes. */
+typedef struct
+{
+    bool active;
+    bool finished;
+    u32 serial;
+    u32 clientIds[2];
+    char scene[64];
+    u32 hp[2];
+    u32 hpMax[2];
+    u32 mp[2];
+    u32 mpMax[2];
+    u8 startPendingMask;
+    u8 startedMask;
+    u8 turnIndex;
+    u8 terminalPendingMask;
+    u32 terminalNotBeforeTick;
+    u32 actionSerial;
+    vm_mock_service_duel_event events[VM_MOCK_SERVICE_DUEL_EVENT_MAX];
+} vm_mock_service_duel;
+
 static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
+static vm_mock_service_duel g_vm_mock_service_duels[VM_MOCK_SERVICE_DUEL_MAX];
+static u32 g_vm_mock_service_duel_serial = 0;
 static vm_mock_service_trade g_vm_mock_service_trades[VM_MOCK_SERVICE_TRADE_MAX];
 
 enum
@@ -14711,6 +14759,76 @@ static vm_mock_service_client_session *vm_mock_service_get_active_client_session
     if (g_vm_mock_service_active_client_id == 0)
         return NULL;
     return vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+}
+
+static int vm_mock_service_duel_client_index(const vm_mock_service_duel *duel,
+                                             u32 clientId)
+{
+    if (duel == NULL || !duel->active || clientId == 0)
+        return -1;
+    if (duel->clientIds[0] == clientId)
+        return 0;
+    if (duel->clientIds[1] == clientId)
+        return 1;
+    return -1;
+}
+
+static vm_mock_service_duel *vm_mock_service_duel_find_for_client(u32 clientId,
+                                                                   int *indexOut)
+{
+    if (indexOut)
+        *indexOut = -1;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
+    {
+        int index = vm_mock_service_duel_client_index(&g_vm_mock_service_duels[i],
+                                                      clientId);
+        if (index >= 0)
+        {
+            if (indexOut)
+                *indexOut = index;
+            return &g_vm_mock_service_duels[i];
+        }
+    }
+    return NULL;
+}
+
+static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
+{
+    if (duel != NULL && duel->active && duel->finished &&
+        duel->startPendingMask == 0 && duel->terminalPendingMask == 0)
+    {
+        for (u8 i = 0; i < VM_MOCK_SERVICE_DUEL_EVENT_MAX; ++i)
+        {
+            if (duel->events[i].valid)
+                return;
+        }
+        printf("[info][mock-service] duel_release serial=%u first=%08x second=%08x\n",
+               duel->serial, duel->clientIds[0], duel->clientIds[1]);
+        memset(duel, 0, sizeof(*duel));
+    }
+}
+
+static void vm_mock_service_duel_cancel_for_client(u32 clientId,
+                                                    const char *reason)
+{
+    int index = -1;
+    vm_mock_service_duel *duel = vm_mock_service_duel_find_for_client(clientId,
+                                                                      &index);
+    u8 peerBit = 0;
+
+    if (duel == NULL || index < 0)
+        return;
+    peerBit = (u8)(1u << (1 - index));
+    printf("[info][mock-service] duel_cancel serial=%u client=%08x peer=%08x "
+           "started=%02x reason=%s\n",
+           duel->serial, clientId, duel->clientIds[1 - index],
+           duel->startedMask, reason ? reason : "cancel");
+    duel->finished = true;
+    duel->startPendingMask = 0;
+    memset(duel->events, 0, sizeof(duel->events));
+    duel->terminalPendingMask = (u8)(duel->startedMask & peerBit);
+    duel->terminalNotBeforeTick = g_schedulerTick;
+    vm_mock_service_duel_release_if_done(duel);
 }
 
 static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *source)
@@ -15066,6 +15184,10 @@ static const char *vm_mock_service_social_notice_name(u8 type)
         return "guild-application-approved";
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED:
         return "guild-application-rejected";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE:
+        return "spar-invite";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT:
+        return "spar-result";
     default:
         return "unknown";
     }
@@ -15700,6 +15822,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     (void)vm_mock_service_team_remove_member(session, reason ? reason : "offline");
     vm_mock_service_trade_cancel_for_client(session->clientId,
                                             reason ? reason : "offline");
+    vm_mock_service_duel_cancel_for_client(session->clientId,
+                                           reason ? reason : "offline");
     if (wasOnline)
     {
         printf("[info][mock-service] session_offline client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",
@@ -15744,6 +15868,12 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->teamInviteReplyActive = false;
     session->teamInviteSourceClientId = 0;
     session->teamInviteSourceWireId = 0;
+    session->sparInviteReplyActive = false;
+    session->sparInviteSourceClientId = 0;
+    session->sparInviteSourceWireId = 0;
+    session->sparBattleReadyPending = false;
+    session->sparBattlePeerClientId = 0;
+    session->sparBattlePeerWireId = 0;
     session->pendingTeamBattleSerial = 0;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
@@ -26342,12 +26472,460 @@ static u32 vm_net_mock_build_team_leave_response(const u8 *request, u32 requestL
     return pos;
 }
 
+static vm_mock_service_duel *vm_mock_service_duel_begin(
+    vm_mock_service_client_session *inviter,
+    vm_mock_service_client_session *responder)
+{
+    vm_mock_service_duel *slot = NULL;
+    vm_mock_service_team *inviterTeam = NULL;
+    vm_mock_service_team *responderTeam = NULL;
+
+    if (inviter == NULL || responder == NULL || inviter == responder ||
+        inviter->clientId == 0 || responder->clientId == 0 ||
+        !inviter->roleOnline || !responder->roleOnline ||
+        inviter->onlineRoleId == 0 || responder->onlineRoleId == 0 ||
+        !inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
+        inviter->sceneVisiblePending || responder->sceneVisiblePending ||
+        !vm_mock_service_session_scene_is_visible(responder,
+                                                  inviter->sceneVisibleScene) ||
+        vm_mock_service_duel_find_for_client(inviter->clientId, NULL) != NULL ||
+        vm_mock_service_duel_find_for_client(responder->clientId, NULL) != NULL)
+    {
+        return NULL;
+    }
+    inviterTeam = vm_mock_service_team_find_for_client(inviter->clientId);
+    responderTeam = vm_mock_service_team_find_for_client(responder->clientId);
+    if ((inviterTeam != NULL && inviterTeam->battleActive) ||
+        (responderTeam != NULL && responderTeam->battleActive))
+    {
+        return NULL;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_DUEL_MAX; ++i)
+    {
+        if (!g_vm_mock_service_duels[i].active)
+        {
+            slot = &g_vm_mock_service_duels[i];
+            break;
+        }
+    }
+    if (slot == NULL)
+        return NULL;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->active = true;
+    slot->serial = ++g_vm_mock_service_duel_serial;
+    if (slot->serial == 0)
+        slot->serial = ++g_vm_mock_service_duel_serial;
+    slot->clientIds[0] = inviter->clientId;
+    slot->clientIds[1] = responder->clientId;
+    snprintf(slot->scene, sizeof(slot->scene), "%s", inviter->sceneVisibleScene);
+    slot->hpMax[0] = inviter->onlineHpMax ? inviter->onlineHpMax : 1;
+    slot->hpMax[1] = responder->onlineHpMax ? responder->onlineHpMax : 1;
+    slot->hp[0] = inviter->onlineHp ?
+        vm_net_mock_min_u32(inviter->onlineHp, slot->hpMax[0]) : slot->hpMax[0];
+    slot->hp[1] = responder->onlineHp ?
+        vm_net_mock_min_u32(responder->onlineHp, slot->hpMax[1]) : slot->hpMax[1];
+    slot->mpMax[0] = inviter->onlineMpMax;
+    slot->mpMax[1] = responder->onlineMpMax;
+    slot->mp[0] = vm_net_mock_min_u32(inviter->onlineMp, slot->mpMax[0]);
+    slot->mp[1] = vm_net_mock_min_u32(responder->onlineMp, slot->mpMax[1]);
+    slot->startPendingMask = 3;
+    slot->turnIndex = 0xff;
+    printf("[info][mock-service] duel_begin serial=%u inviter=%08x/%u "
+           "responder=%08x/%u scene=%s hp=%u/%u,%u/%u mp=%u/%u,%u/%u\n",
+           slot->serial,
+           inviter->clientId, inviter->onlineRoleId,
+           responder->clientId, responder->onlineRoleId,
+           slot->scene,
+           slot->hp[0], slot->hpMax[0], slot->hp[1], slot->hpMax[1],
+           slot->mp[0], slot->mpMax[0], slot->mp[1], slot->mpMax[1]);
+    return slot;
+}
+
+static u32 vm_net_mock_build_duel_start_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer)
+{
+    int observerIndex = -1;
+    int peerIndex = -1;
+    vm_mock_service_duel *duel = observer ?
+        vm_mock_service_duel_find_for_client(observer->clientId,
+                                             &observerIndex) : NULL;
+    vm_mock_service_client_session *peer = NULL;
+    u8 battleInfo[256];
+    u32 battleInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 observerWireId = 0;
+    u32 peerWireId = 0;
+    u8 observerBit = 0;
+
+    if (out == NULL || outCap < pos || observer == NULL || duel == NULL ||
+        observerIndex < 0 || observerIndex > 1)
+    {
+        return 0;
+    }
+    observerBit = (u8)(1u << observerIndex);
+    if ((duel->startPendingMask & observerBit) == 0)
+        return 0;
+    peerIndex = 1 - observerIndex;
+    peer = vm_mock_service_find_client_session(duel->clientIds[peerIndex]);
+    if (peer == NULL || !peer->roleOnline || peer->onlineRoleId == 0 ||
+        !vm_mock_service_session_scene_is_visible(observer, duel->scene) ||
+        !vm_mock_service_session_scene_is_visible(peer, duel->scene))
+    {
+        vm_mock_service_duel_cancel_for_client(observer->clientId,
+                                               "start-peer-or-scene-unavailable");
+        return 0;
+    }
+    observerWireId = vm_mock_service_team_member_wire_id(observer, observer);
+    peerWireId = vm_mock_service_team_member_wire_id(observer, peer);
+    if (observerWireId == 0 || peerWireId == 0)
+        return 0;
+
+    /* mmBattle HandleBattleStartMsg(0x66CC), subtype 10:
+     *   left/full row  = the remote opponent
+     *   right/id row   = this observer's local controllable role
+     * With side=1 and one fighter per side, wire 0 maps to the right/local
+     * fighter and wire 1 maps to the left/opponent fighter. */
+    memset(battleInfo, 0, sizeof(battleInfo));
+    if (!vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen, 1) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 peerWireId) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->hp[peerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->hpMax[peerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->mp[peerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->mpMax[peerIndex]) ||
+        !vm_net_mock_seq_put_string(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                    peer->onlineRoleName[0] ?
+                                        peer->onlineRoleName : "Player") ||
+        !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                vm_mock_service_team_member_job_code(peer)) ||
+        !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                vm_mock_service_team_member_sex_code(peer)) ||
+        !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen, 1) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 observerWireId) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->hp[observerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->hpMax[observerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->mp[observerIndex]) ||
+        !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                 duel->mpMax[observerIndex]))
+    {
+        return 0;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 10,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "side", 1) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo",
+                                    battleInfo, (u16)battleInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    duel->startPendingMask &= (u8)~observerBit;
+    duel->startedMask |= observerBit;
+    printf("[info][mock-service] duel_start_deliver serial=%u observer=%08x "
+           "peer=%08x local_wire=%u peer_wire=%u side=1 subtype=10 "
+           "battleinfo=%u started=%02x pending=%02x resp=%u "
+           "evidence=mmBattle:0x66CC/0x6C5E/0x6CE8\n",
+           duel->serial, observer->clientId, peer->clientId,
+           observerWireId, peerWireId, battleInfoLen,
+           duel->startedMask, duel->startPendingMask, pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_nearby_social_action_ack_response(
-        request, requestLen, out, outCap, vm_net_mock_is_nearby_spar_request,
-        "spar-request", VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE, false);
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    u32 actorId = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 result = 4; /* net_handle_login_or_name_result: player not found. */
+    bool queued = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_spar_request(request, requestLen, &actorId))
+    {
+        return 0;
+    }
+    if (sourceSession != NULL && sourceRole != NULL &&
+        vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+        targetSeed.session != NULL &&
+        targetSeed.session->clientId != sourceSession->clientId)
+    {
+        queued = vm_mock_service_session_enqueue_social_notice(
+            targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE, 0,
+            sourceSession, sourceRole, sourceAccountId);
+        result = queued ? 1 : 3; /* target state cannot accept another modal. */
+    }
+
+    /* Subtype 14 accepts result=1 without presenting another message; the
+     * sender already displayed "request sent".  Errors 2..7 are rendered by
+     * net_handle_login_or_name_result(0x0101258A). */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 14, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_spar_request actor=%u source=%08x/%u "
+           "target=%08x/%u scene=%s queued=%u result=%u resp=%u "
+           "evidence=JianghuOL.CBE:0x0102E624+0x0101258A(subtype14/15)\n",
+           actorId,
+           sourceSession ? sourceSession->clientId : 0,
+           sourceRole ? sourceRole->roleId : 0,
+           targetSeed.session ? targetSeed.session->clientId : 0,
+           targetSeed.session ? targetSeed.session->onlineRoleId : 0,
+           scene ? scene : "-", queued ? 1u : 0u, result, pos);
+    return pos;
+}
+
+static bool vm_net_mock_parse_spar_invite_reply_request(
+    const u8 *request, u32 requestLen, u32 *sourceWireIdOut,
+    u8 *resultOut, bool *readyIncludedOut)
+{
+    u32 offset = 4;
+    u32 sourceWireId = 0;
+    u32 readyWireId = 0;
+    u8 result = 0;
+    u8 objectCount = 0;
+    bool haveReply = false;
+    bool haveReady = false;
+    vm_net_mock_request_object object;
+
+    if (sourceWireIdOut)
+        *sourceWireIdOut = 0;
+    if (resultOut)
+        *resultOut = 0;
+    if (readyIncludedOut)
+        *readyIncludedOut = false;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        ++objectCount;
+        if (object.major != 1 || object.kind != 4 || objectCount > 2)
+            return false;
+        if (object.subtype == 16 && !haveReply &&
+            vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                             "id", &sourceWireId) &&
+            vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                            "result", &result) &&
+            sourceWireId != 0 && (result == 1 || result == 2))
+        {
+            haveReply = true;
+        }
+        else if (object.subtype == 9 && !haveReady &&
+                 vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                                  "id", &readyWireId) &&
+                 readyWireId != 0)
+        {
+            haveReady = true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    if (offset != requestLen || !haveReply ||
+        (haveReady && (result != 1 || readyWireId != sourceWireId)))
+    {
+        return false;
+    }
+    if (sourceWireIdOut)
+        *sourceWireIdOut = sourceWireId;
+    if (resultOut)
+        *resultOut = result;
+    if (readyIncludedOut)
+        *readyIncludedOut = haveReady;
+    return true;
+}
+
+static u32 vm_net_mock_build_spar_invite_reply_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responder = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *source = NULL;
+    vm_mock_service_duel *duel = NULL;
+    vm_net_mock_role_state *responderRole = vm_net_mock_active_role();
+    u32 sourceWireId = 0;
+    u32 pos = 5;
+    u8 result = 0;
+    bool readyIncluded = false;
+    bool accepted = false;
+    bool sourceNotified = false;
+    bool startDelivered = false;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_spar_invite_reply_request(
+            request, requestLen, &sourceWireId, &result, &readyIncluded))
+    {
+        return 0;
+    }
+    if (responder == NULL || responderRole == NULL ||
+        !responder->sparInviteReplyActive ||
+        responder->sparInviteSourceWireId != sourceWireId)
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        printf("[warn][network] mock_spar_reply_reject target=%08x id=%u "
+               "result=%u pending=%u pending_source=%u reason=stale-or-id-mismatch\n",
+               responder ? responder->clientId : 0, sourceWireId, result,
+               responder && responder->sparInviteReplyActive ? 1u : 0u,
+               responder ? responder->sparInviteSourceWireId : 0);
+        return pos;
+    }
+
+    source = vm_mock_service_find_client_session(responder->sparInviteSourceClientId);
+    accepted = result == 1 && source != NULL && source->roleOnline &&
+               source->clientId != responder->clientId &&
+               responder->sceneVisibleReady &&
+               vm_mock_service_session_scene_is_visible(source,
+                                                        responder->sceneVisibleScene);
+    if (accepted && readyIncluded)
+    {
+        duel = vm_mock_service_duel_begin(source, responder);
+        accepted = duel != NULL;
+    }
+    if (source != NULL)
+    {
+        sourceNotified = vm_mock_service_session_enqueue_social_notice(
+            source, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT,
+            accepted ? 1 : 2, responder, responderRole,
+            g_vm_mock_service_active_account_id);
+    }
+    if (accepted && !readyIncluded)
+    {
+        responder->sparBattleReadyPending = true;
+        responder->sparBattlePeerClientId = source->clientId;
+        responder->sparBattlePeerWireId = sourceWireId;
+    }
+    else
+    {
+        responder->sparBattleReadyPending = false;
+        responder->sparBattlePeerClientId = 0;
+        responder->sparBattlePeerWireId = 0;
+    }
+    responder->sparInviteReplyActive = false;
+    responder->sparInviteSourceClientId = 0;
+    responder->sparInviteSourceWireId = 0;
+
+    /* An inline 4/9 is the responder's battle-ready edge.  PvP uses subtype
+     * 10 rather than the scene-monster subtype 5, so return the responder's
+     * mirrored start immediately and leave the inviter's start pending for
+     * its service poll.  A separated 4/9 is handled below. */
+    if (accepted && readyIncluded && duel != NULL)
+    {
+        pos = vm_net_mock_build_duel_start_response(out, outCap, responder);
+        startDelivered = pos != 0;
+        if (!startDelivered)
+        {
+            vm_mock_service_duel_cancel_for_client(responder->clientId,
+                                                   "inline-start-build-failed");
+            pos = 5;
+            vm_net_mock_finish_wt_packet(out, pos, 0);
+        }
+    }
+    else
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+    }
+    printf("[info][network] mock_spar_reply source=%08x/%u target=%08x/%u "
+           "result=%u accepted=%u ready_inline=%u notify_source=%u duel=%u "
+           "start=%u resp=%u evidence=JianghuOL.CBE:0x010124EE+0x01012528;"
+           "mmBattle:0x66CC(subtype10)\n",
+           source ? source->clientId : 0, sourceWireId,
+           responder->clientId, responderRole->roleId,
+           result, accepted ? 1u : 0u, readyIncluded ? 1u : 0u,
+           sourceNotified ? 1u : 0u, duel ? duel->serial : 0,
+           startDelivered ? 1u : 0u, pos);
+    return pos;
+}
+
+static bool vm_net_mock_is_spar_ready_request(const u8 *request, u32 requestLen,
+                                               u32 *sourceWireIdOut)
+{
+    u32 offset = 4;
+    u32 sourceWireId = 0;
+    vm_net_mock_request_object object;
+
+    if (sourceWireIdOut)
+        *sourceWireIdOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 4 ||
+        object.subtype != 9 ||
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                          "id", &sourceWireId) ||
+        sourceWireId == 0)
+    {
+        return false;
+    }
+    if (sourceWireIdOut)
+        *sourceWireIdOut = sourceWireId;
+    return true;
+}
+
+static u32 vm_net_mock_build_spar_ready_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *responder = vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *source = NULL;
+    vm_mock_service_duel *duel = NULL;
+    u32 sourceWireId = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_spar_ready_request(request, requestLen, &sourceWireId) ||
+        responder == NULL || !responder->sparBattleReadyPending ||
+        responder->sparBattlePeerWireId != sourceWireId)
+    {
+        return 0;
+    }
+    source = vm_mock_service_find_client_session(responder->sparBattlePeerClientId);
+    if (source != NULL && source->roleOnline &&
+        vm_mock_service_session_scene_is_visible(source,
+                                                 responder->sceneVisibleScene))
+    {
+        duel = vm_mock_service_duel_begin(source, responder);
+    }
+    if (duel != NULL)
+        pos = vm_net_mock_build_duel_start_response(out, outCap, responder);
+    if (duel == NULL || pos == 0)
+    {
+        if (duel != NULL)
+            vm_mock_service_duel_cancel_for_client(responder->clientId,
+                                                   "ready-start-build-failed");
+        pos = 5;
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+    }
+    printf("[info][network] mock_spar_ready target=%08x peer=%08x wire=%u "
+           "duel=%u action=%s resp=%u evidence=JianghuOL.CBE:0x01012528(4/9);"
+           "mmBattle:0x66CC(subtype10)\n",
+           responder->clientId, responder->sparBattlePeerClientId,
+           sourceWireId, duel ? duel->serial : 0,
+           duel ? "battle-start" : "empty-ack", pos);
+    responder->sparBattleReadyPending = false;
+    responder->sparBattlePeerClientId = 0;
+    responder->sparBattlePeerWireId = 0;
+    return pos;
 }
 
 static bool vm_net_mock_is_friend_add_request(const u8 *request, u32 requestLen,
@@ -32908,9 +33486,9 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         return -1;
 
     /* A modal invitation remains pending until the target emits 10/5, 21/3,
-     * or 5/3.  Do not stack another modal over it. */
+     * 5/3, or 4/16.  Do not stack another modal over it. */
     if (observer->friendInviteReplyActive || observer->tradeInviteReplyActive ||
-        observer->teamInviteReplyActive)
+        observer->teamInviteReplyActive || observer->sparInviteReplyActive)
         return 0;
 
     for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
@@ -33004,6 +33582,66 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         observer->teamInviteReplyActive = true;
         observer->teamInviteSourceClientId = notice->sourceClientId;
         observer->teamInviteSourceWireId = sourceWireId;
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        u32 sourceWireId = 0;
+
+        if (source == NULL || !source->roleOnline ||
+            source->onlineRoleId != notice->sourceRoleId ||
+            !observer->sceneVisibleReady ||
+            !vm_mock_service_session_scene_is_visible(source,
+                                                       observer->sceneVisibleScene) ||
+            (sourceWireId = vm_mock_service_team_member_wire_id(observer, source)) == 0)
+        {
+            printf("[warn][mock-service] spar_invite_drop observer=%08x "
+                   "source=%08x/%u reason=source-unavailable-or-scene-changed\n",
+                   observer->clientId, notice->sourceClientId,
+                   notice->sourceRoleId);
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+        /* net_handle_login_or_name_result(0x0101258A), subtype 15, stores id
+         * and name then opens the native duel confirmation dialog. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 15,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                           notice->sourceName))
+        {
+            return -1;
+        }
+        observer->sparInviteReplyActive = true;
+        observer->sparInviteSourceClientId = notice->sourceClientId;
+        observer->sparInviteSourceWireId = sourceWireId;
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        u32 sourceWireId = source ?
+            vm_mock_service_team_member_wire_id(observer, source) :
+            notice->sourceRoleId;
+
+        /* Subtype 17 result=2 renders "<name>不同意和你切磋".  Result=1 is
+         * intentionally silent in the client but records the accepted reply. */
+        if (sourceWireId == 0 ||
+            !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 17,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result",
+                                       notice->result) ||
+            !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "name",
+                                           notice->sourceName))
+        {
+            return -1;
+        }
         break;
     }
 
@@ -33234,6 +33872,14 @@ static u32 vm_net_mock_build_pending_team_battle_action_response(
     u8 *out,
     u32 outCap,
     vm_mock_service_client_session *observer);
+static u32 vm_net_mock_build_pending_duel_action_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer);
+static u32 vm_net_mock_build_pending_duel_terminal_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer);
 
 static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 {
@@ -33272,6 +33918,18 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
     teamBattleResponseLen = vm_net_mock_build_pending_team_battle_action_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_duel_start_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_pending_duel_action_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_pending_duel_terminal_response(
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
@@ -37801,6 +38459,382 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
     return vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, pos, 0);
 }
 
+static u32 vm_mock_service_duel_damage(vm_mock_service_duel *duel,
+                                       int sourceIndex,
+                                       u32 operate,
+                                       u32 *sourceMpAfterOut)
+{
+    vm_mock_service_client_session *source = NULL;
+    vm_mock_service_client_session *target = NULL;
+    vm_net_mock_role_state *sourceRole = NULL;
+    vm_net_mock_role_state *targetRole = NULL;
+    vm_net_mock_player_stats sourceStats;
+    vm_net_mock_player_stats targetStats;
+    const vm_net_mock_skill_catalog_item *skill = NULL;
+    u32 rawDamage = 1;
+    u32 defense = 0;
+    u32 mpAfter = 0;
+
+    if (sourceMpAfterOut)
+        *sourceMpAfterOut = 0;
+    if (duel == NULL || sourceIndex < 0 || sourceIndex > 1)
+        return 0;
+    source = vm_mock_service_find_client_session(duel->clientIds[sourceIndex]);
+    target = vm_mock_service_find_client_session(duel->clientIds[1 - sourceIndex]);
+    sourceRole = vm_mock_service_trade_role_for_session(source, NULL);
+    targetRole = vm_mock_service_trade_role_for_session(target, NULL);
+    memset(&sourceStats, 0, sizeof(sourceStats));
+    memset(&targetStats, 0, sizeof(targetStats));
+    vm_net_mock_role_build_player_stats(sourceRole, &sourceStats);
+    vm_net_mock_role_build_player_stats(targetRole, &targetStats);
+    defense = targetStats.defense;
+    mpAfter = duel->mp[sourceIndex];
+
+    skill = vm_net_mock_battle_operate_skill(operate);
+    if (operate > 2 && skill != NULL && mpAfter >= skill->mpCost)
+    {
+        uint64_t coeffDamage = 0;
+        u32 baseDamage = vm_net_mock_battle_skill_min_hp_damage(skill);
+
+        mpAfter -= skill->mpCost;
+        coeffDamage += (uint64_t)sourceStats.strength * skill->strengthCoeff;
+        coeffDamage += (uint64_t)sourceStats.agility * skill->agilityCoeff;
+        coeffDamage += (uint64_t)sourceStats.wisdom * skill->wisdomCoeff;
+        coeffDamage = (coeffDamage + 50u) / 100u;
+        rawDamage = baseDamage;
+        if (coeffDamage > 0xffffffffull - rawDamage)
+            rawDamage = 0xffffffffu;
+        else
+            rawDamage += (u32)coeffDamage;
+        if (rawDamage == 0)
+            rawDamage = sourceStats.attack ? sourceStats.attack : 1;
+    }
+    else
+    {
+        rawDamage = sourceStats.attack ? sourceStats.attack : 1;
+    }
+    rawDamage = vm_net_mock_env_u32_if_set(
+        operate > 2 ? "CBE_DUEL_SKILL_DAMAGE" : "CBE_DUEL_DAMAGE",
+        vm_net_mock_damage_after_defense(rawDamage, defense));
+    if (rawDamage == 0)
+        rawDamage = 1;
+    if (sourceMpAfterOut)
+        *sourceMpAfterOut = mpAfter;
+    return vm_net_mock_min_u32(rawDamage, duel->hp[1 - sourceIndex]);
+}
+
+static u32 vm_net_mock_build_duel_action_packet(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_duel *duel,
+    const vm_mock_service_duel_event *event,
+    vm_mock_service_client_session *observer,
+    int observerIndex)
+{
+    vm_mock_service_client_session *source = NULL;
+    u8 actionInfo[256];
+    u32 actionInfoLen = 0;
+    u32 pos = 5;
+    u8 actionCount = 1;
+    u8 actorWire = 0;
+    u8 targetWire = 1;
+    u8 deadWire = 1;
+    u8 actionType = 0;
+    u32 effectIndex = 0;
+    u32 sourceWireId = 0;
+    bool includeTeamInfo = false;
+
+    if (out == NULL || outCap < pos || duel == NULL || event == NULL ||
+        !event->valid || observer == NULL || observerIndex < 0 || observerIndex > 1)
+    {
+        return 0;
+    }
+    source = vm_mock_service_find_client_session(duel->clientIds[event->sourceIndex]);
+    if (source == NULL)
+        return 0;
+    if (observerIndex != event->sourceIndex)
+    {
+        actorWire = 1;
+        targetWire = 0;
+        deadWire = 0;
+    }
+    actionType = event->operate > 2 ? 1 : 0;
+    effectIndex = actionType == 1 ?
+        vm_net_mock_battle_operate_skill_effect(event->operate) : 0;
+    memset(actionInfo, 0, sizeof(actionInfo));
+    if (!vm_net_mock_append_battle_actioninfo_record(
+            actionInfo, sizeof(actionInfo), &actionInfoLen,
+            actionType, actorWire, targetWire, 0,
+            vm_net_mock_battle_negative_delta_u32(event->damage), 0,
+            effectIndex, 0, 0, 0))
+    {
+        return 0;
+    }
+    if (event->terminal)
+    {
+        u8 deathActionType = (u8)vm_net_mock_env_u32(
+            "CBE_BATTLE_DEATH_ACTION_TYPE", 3);
+        if (!vm_net_mock_append_battle_actioninfo_record(
+                actionInfo, sizeof(actionInfo), &actionInfoLen,
+                deathActionType, deadWire, 0, 0, 0, 0, 0, 0, 0, 0))
+        {
+            return 0;
+        }
+        ++actionCount;
+    }
+    includeTeamInfo = actionType == 1 && observerIndex == event->sourceIndex;
+    sourceWireId = vm_mock_service_team_member_wire_id(observer, source);
+    if (!vm_net_mock_append_battle_action6_object_ex(
+            out, outCap, &pos, actionInfo, actionInfoLen, actionCount,
+            includeTeamInfo, sourceWireId,
+            duel->hp[event->sourceIndex], event->sourceMpAfter))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_build_duel_operate_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
+    vm_mock_service_duel *duel = NULL;
+    vm_mock_service_duel_event *event = NULL;
+    int sourceIndex = -1;
+    int targetIndex = -1;
+    u32 operate = 0;
+    u8 operate8 = 0;
+    u32 damage = 0;
+    u32 sourceMpAfter = 0;
+    u32 responseLen = 0;
+    u32 nextSerial = 0;
+    u8 sourceBit = 0;
+    u8 sourceSlot = 0;
+
+    if (out == NULL || outCap < 5 || source == NULL ||
+        !vm_net_mock_is_battle_operate_request(request, requestLen))
+    {
+        return 0;
+    }
+    duel = vm_mock_service_duel_find_for_client(source->clientId, &sourceIndex);
+    if (duel == NULL || sourceIndex < 0)
+    {
+        return 0;
+    }
+    if (duel->finished)
+    {
+        responseLen = vm_net_mock_build_pending_duel_terminal_response(
+            out, outCap, source);
+        if (responseLen != 0)
+            return responseLen;
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+    if ((duel->startedMask & (1u << sourceIndex)) == 0)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+    if (!vm_net_mock_get_object_u32_field(request, requestLen,
+                                          "Operate", &operate) &&
+        vm_net_mock_get_object_u8_field(request, requestLen,
+                                        "Operate", &operate8))
+    {
+        operate = operate8;
+    }
+    if (operate != 0 && operate <= 2)
+    {
+        /* Item/escape have their own packet types.  Unknown 4/2 operations
+         * are downgraded to a physical spar hit instead of entering the
+         * battle-item branch with a null selected-item pointer. */
+        operate = 0;
+    }
+    if (duel->turnIndex != 0xff && duel->turnIndex != sourceIndex)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        printf("[info][mock-service] duel_action_wait serial=%u source=%08x "
+               "actor=%d expected=%u action=empty-ack\n",
+               duel->serial, source->clientId, sourceIndex, duel->turnIndex);
+        return 5;
+    }
+
+    targetIndex = 1 - sourceIndex;
+    if (operate > 2)
+    {
+        const vm_net_mock_skill_catalog_item *skill =
+            vm_net_mock_battle_operate_skill(operate);
+        if (skill == NULL || duel->mp[sourceIndex] < skill->mpCost)
+            operate = 0;
+    }
+    damage = vm_mock_service_duel_damage(duel, sourceIndex, operate,
+                                         &sourceMpAfter);
+    if (damage == 0)
+        return 0;
+    nextSerial = duel->actionSerial + 1;
+    if (nextSerial == 0)
+        ++nextSerial;
+    sourceSlot = (u8)((nextSerial - 1) % VM_MOCK_SERVICE_DUEL_EVENT_MAX);
+    event = &duel->events[sourceSlot];
+    if (event->valid)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        printf("[warn][mock-service] duel_action_wait serial=%u source=%08x "
+               "reason=event-ring-full slot=%u action=empty-ack\n",
+               duel->serial, source->clientId, sourceSlot);
+        return 5;
+    }
+    memset(event, 0, sizeof(*event));
+    event->valid = true;
+    event->serial = nextSerial;
+    event->sourceIndex = (u8)sourceIndex;
+    event->operate = operate;
+    event->damage = damage;
+    event->sourceMpAfter = sourceMpAfter;
+    event->targetHpAfter = duel->hp[targetIndex] - damage;
+    event->terminal = event->targetHpAfter == 0;
+
+    responseLen = vm_net_mock_build_duel_action_packet(
+        out, outCap, duel, event, source, sourceIndex);
+    if (responseLen == 0)
+    {
+        memset(event, 0, sizeof(*event));
+        return 0;
+    }
+    sourceBit = (u8)(1u << sourceIndex);
+    event->deliveredMask = sourceBit;
+    duel->actionSerial = nextSerial;
+    duel->hp[targetIndex] = event->targetHpAfter;
+    duel->mp[sourceIndex] = sourceMpAfter;
+    duel->turnIndex = event->terminal ? 0xff : (u8)targetIndex;
+    if (event->terminal)
+    {
+        duel->finished = true;
+        duel->startPendingMask = 0;
+        duel->terminalPendingMask = duel->startedMask;
+        duel->terminalNotBeforeTick = g_schedulerTick + 25;
+    }
+    printf("[info][mock-service] duel_action serial=%u action=%u source=%08x "
+           "actor=%d target=%08x operate=%u damage=%u target_hp=%u/%u "
+           "source_mp=%u/%u terminal=%u delivered=%02x resp=%u "
+           "mapping=source(0->1),peer(1->0) evidence=mmBattle:0x2B26/0x6CE8/0x6EB0\n",
+           duel->serial, event->serial, source->clientId, sourceIndex,
+           duel->clientIds[targetIndex], operate, damage,
+           duel->hp[targetIndex], duel->hpMax[targetIndex],
+           duel->mp[sourceIndex], duel->mpMax[sourceIndex],
+           event->terminal ? 1u : 0u, event->deliveredMask, responseLen);
+    if (event->terminal)
+    {
+        printf("[info][mock-service] duel_terminal_arm serial=%u pending=%02x "
+               "now=%u not_before=%u delay_ticks=25\n",
+               duel->serial, duel->terminalPendingMask,
+               g_schedulerTick, duel->terminalNotBeforeTick);
+    }
+    return responseLen;
+}
+
+static u32 vm_net_mock_build_pending_duel_action_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer)
+{
+    vm_mock_service_duel *duel = NULL;
+    vm_mock_service_duel_event *event = NULL;
+    int observerIndex = -1;
+    u8 observerBit = 0;
+    u32 oldestSerial = 0xffffffffu;
+    u32 responseLen = 0;
+
+    if (out == NULL || outCap < 5 || observer == NULL)
+        return 0;
+    duel = vm_mock_service_duel_find_for_client(observer->clientId,
+                                                &observerIndex);
+    if (duel == NULL || observerIndex < 0 ||
+        (duel->startedMask & (1u << observerIndex)) == 0)
+    {
+        return 0;
+    }
+    observerBit = (u8)(1u << observerIndex);
+    for (u8 i = 0; i < VM_MOCK_SERVICE_DUEL_EVENT_MAX; ++i)
+    {
+        vm_mock_service_duel_event *candidate = &duel->events[i];
+        if (!candidate->valid || (candidate->deliveredMask & observerBit) != 0)
+            continue;
+        if (candidate->serial < oldestSerial)
+        {
+            oldestSerial = candidate->serial;
+            event = candidate;
+        }
+    }
+    if (event == NULL)
+        return 0;
+    responseLen = vm_net_mock_build_duel_action_packet(
+        out, outCap, duel, event, observer, observerIndex);
+    if (responseLen == 0)
+        return 0;
+    event->deliveredMask |= observerBit;
+    printf("[info][mock-service] duel_action_deliver serial=%u action=%u "
+           "observer=%08x source=%08x actor=%u damage=%u terminal=%u "
+           "delivered=%02x resp=%u\n",
+           duel->serial, event->serial, observer->clientId,
+           duel->clientIds[event->sourceIndex], event->sourceIndex,
+           event->damage, event->terminal ? 1u : 0u,
+           event->deliveredMask, responseLen);
+    if (event->deliveredMask == 3)
+        memset(event, 0, sizeof(*event));
+    return responseLen;
+}
+
+static u32 vm_net_mock_build_pending_duel_terminal_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *observer)
+{
+    vm_mock_service_duel *duel = NULL;
+    int observerIndex = -1;
+    u8 observerBit = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || observer == NULL)
+        return 0;
+    duel = vm_mock_service_duel_find_for_client(observer->clientId,
+                                                &observerIndex);
+    if (duel == NULL || observerIndex < 0 || !duel->finished)
+        return 0;
+    observerBit = (u8)(1u << observerIndex);
+    if ((duel->terminalPendingMask & observerBit) == 0)
+        return 0;
+    if (g_schedulerTick < duel->terminalNotBeforeTick)
+        return 0;
+    for (u8 i = 0; i < VM_MOCK_SERVICE_DUEL_EVENT_MAX; ++i)
+    {
+        if (duel->events[i].valid &&
+            (duel->events[i].deliveredMask & observerBit) == 0)
+        {
+            return 0;
+        }
+    }
+    if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
+        !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
+    {
+        printf("[error][mock-service] duel_terminal_build_failed serial=%u "
+               "observer=%08x pos=%u cap=%u\n",
+               duel->serial, observer->clientId, pos, outCap);
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    duel->terminalPendingMask &= (u8)~observerBit;
+    printf("[info][mock-service] duel_terminal_deliver serial=%u observer=%08x "
+           "remaining=%02x resp=%u response=4/11+4/9\n",
+           duel->serial, observer->clientId,
+           duel->terminalPendingMask, pos);
+    vm_mock_service_duel_release_if_done(duel);
+    return pos;
+}
+
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
@@ -37978,6 +39012,44 @@ static bool vm_net_mock_is_battle_escape_request(const u8 *request, u32 requestL
            object.kind == 4 &&
            object.subtype == 4 &&
            object.payloadLen == 0;
+}
+
+static u32 vm_net_mock_build_duel_escape_response(const u8 *request,
+                                                   u32 requestLen,
+                                                   u8 *out,
+                                                   u32 outCap)
+{
+    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
+    vm_mock_service_duel *duel = NULL;
+    int sourceIndex = -1;
+    u8 sourceBit = 0;
+    u8 peerBit = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || source == NULL ||
+        !vm_net_mock_is_battle_escape_request(request, requestLen))
+    {
+        return 0;
+    }
+    duel = vm_mock_service_duel_find_for_client(source->clientId, &sourceIndex);
+    if (duel == NULL || sourceIndex < 0)
+        return 0;
+    sourceBit = (u8)(1u << sourceIndex);
+    peerBit = (u8)(1u << (1 - sourceIndex));
+    if (!vm_net_mock_append_battle_escape4_object(out, outCap, &pos, 1))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    duel->finished = true;
+    duel->startPendingMask = 0;
+    memset(duel->events, 0, sizeof(duel->events));
+    duel->terminalPendingMask = (u8)(duel->startedMask & peerBit);
+    duel->terminalNotBeforeTick = g_schedulerTick + 5;
+    printf("[info][mock-service] duel_escape serial=%u source=%08x actor=%d "
+           "direct=%02x peer_terminal=%02x resp=%u response=4/4\n",
+           duel->serial, source->clientId, sourceIndex,
+           sourceBit, duel->terminalPendingMask, pos);
+    vm_mock_service_duel_release_if_done(duel);
+    return pos;
 }
 
 static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 requestLen,
@@ -42288,6 +43360,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_spar_invite_reply_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-spar-invite-reply", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_spar_ready_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-spar-ready", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_friend_invite_reply_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -42586,11 +43672,29 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_duel_escape_response(request, requestLen,
+                                                       out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-duel-escape", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_battle_escape_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
         vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-escape", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_duel_operate_response(request, requestLen,
+                                                        out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-duel-operate", request, requestLen,
+                                  hookedLen);
         return hookedLen;
     }
 
