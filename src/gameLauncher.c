@@ -252,6 +252,11 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
     int content_h = state->viewport_h - state->header_h - state->footer_h;
     int sb_x = state->viewport_w - state->scrollbar_w;
 
+    if (button == 0 && state->_internal_is_scrolling) {
+        state->_internal_is_scrolling = false;
+        return true;
+    }
+
     if (x >= sb_x && y >= content_y && y < content_y + content_h) {
         float total = vm_game_launcher_compute_total_height(state);
         float thumb_ratio = (total > 0) ? (float)content_h / total : 1.0f;
@@ -280,11 +285,6 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
         if (new_offset < 0) new_offset = 0;
         if (new_offset > total - (float)content_h) new_offset = total - (float)content_h;
         state->scroll_offset = new_offset;
-        return true;
-    }
-
-    if (button == 0 && state->_internal_is_scrolling) {
-        state->_internal_is_scrolling = false;
         return true;
     }
 
