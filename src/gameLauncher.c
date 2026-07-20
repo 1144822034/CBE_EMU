@@ -14,15 +14,6 @@
 #define LAUNCHER_HEADER_H 48
 #define LAUNCHER_FOOTER_H 24
 #define LAUNCHER_SCROLLBAR_W 12
-#define LAUNCHER_BG_COLOR 0x1a1a2e
-#define LAUNCHER_TILE_BG_COLOR 0x16213e
-#define LAUNCHER_TILE_SELECTED_BG 0x0f3460
-#define LAUNCHER_TILE_BORDER_COLOR 0xe94560
-#define LAUNCHER_TILE_TEXT_COLOR 0xffffff
-#define LAUNCHER_HEADER_TEXT_COLOR 0xe94560
-#define LAUNCHER_FOOTER_TEXT_COLOR 0x888888
-#define LAUNCHER_SCROLLBAR_COLOR 0x555555
-#define LAUNCHER_SCROLLBAR_THUMB_COLOR 0xe94560
 
 static int cmp_entries(const void *a, const void *b)
 {
@@ -134,12 +125,6 @@ bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewpor
     qsort(state->entries, state->count, sizeof(GameEntry), cmp_entries);
 
     state->scroll_offset = 0;
-    {
-        float max = vm_game_launcher_compute_max_scroll(state);
-        if (max < 0) state->scroll_offset = 0;
-        else state->scroll_offset = max;
-    }
-
     return true;
 }
 
@@ -187,12 +172,6 @@ static void draw_rect_border(SDL_Surface *sfc, int x, int y, int w, int h, u32 c
         dst[x] = mapped;
         dst[x + w - 1] = mapped;
     }
-}
-
-static void blit_text_centered(SDL_Surface *sfc, const char *text, int x, int y,
-                               int w, int h, u32 color)
-{
-    (void)sfc; (void)text; (void)x; (void)y; (void)w; (void)h; (void)color;
 }
 
 void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
@@ -284,7 +263,7 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
 
         if (button == 1) {
             if (y >= track_start && y <= track_start + thumb_h) {
-                state->is_scrolling = true;
+                state->_internal_is_scrolling = true;
             } else {
                 float new_offset = ((float)(y - content_y) / content_h) * (total - (float)content_h);
                 if (new_offset < 0) new_offset = 0;
@@ -295,12 +274,17 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
         return true;
     }
 
-    if (state->is_scrolling && button == 1) {
+    if (state->_internal_is_scrolling && button == 1) {
         float total = vm_game_launcher_compute_total_height(state);
         float new_offset = ((float)(y - content_y - state->tile_h / 2) / content_h) * (total - (float)content_h);
         if (new_offset < 0) new_offset = 0;
         if (new_offset > total - (float)content_h) new_offset = total - (float)content_h;
         state->scroll_offset = new_offset;
+        return true;
+    }
+
+    if (button == 0 && state->_internal_is_scrolling) {
+        state->_internal_is_scrolling = false;
         return true;
     }
 

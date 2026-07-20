@@ -20,14 +20,13 @@ typedef struct {
     int tile_h;
     int gap;
     int margin_x;
-    int margin_y;
     int header_h;
     int footer_h;
     int viewport_w;
     int viewport_h;
     int scrollbar_w;
-    bool active;
-    bool is_scrolling;
+    bool active;          /* Public: whether the launcher is currently active. */
+    bool _internal_is_scrolling;  /* Internal: scrollbar thumb drag in progress. */
 } GameLauncherState;
 
 bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewport_h);
