@@ -6118,7 +6118,7 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
-        if (g_gameLauncherActive)
+    if (g_gameLauncherActive && !g_autotestEnabled)
         {
             vm_game_launcher_update();
             if (g_hostQuitRequested)
@@ -8039,7 +8039,7 @@ int main(int argc, char *args[])
     {
         InitLcd();
         InitFontEngine();
-        if (!g_forceLaunchCbe)
+        if (!g_forceLaunchCbe && !g_autotestEnabled)
         {
             char lastPath[260];
             if (vm_game_launcher_load_last(lastPath, sizeof(lastPath)))
@@ -8054,6 +8054,13 @@ int main(int argc, char *args[])
                        g_gameLauncherState.count);
             }
         }
+    }
+
+    if (g_gameLauncherActive)
+    {
+        printf("[info][launcher] showing launcher, deferring CBE load\n");
+        loop();
+        goto _launcher_done;
     }
 
 #ifdef CBE_HOST_UTF8_PATHS
@@ -8201,6 +8208,7 @@ int main(int argc, char *args[])
         vm_net_mock_service_notify_disconnect("host-loop-exit");
 #endif
     }
+_launcher_done:
     return 0;
 #endif
 }
