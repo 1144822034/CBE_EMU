@@ -54,6 +54,18 @@ static bool vm_net_mock_consume_update_completed_scene_reenter(
     return false;
 }
 
+static u32 vm_net_mock_apply_remote_observation(
+    const vm_net_remote_observation *observation)
+{
+    (void)observation;
+    return 0;
+}
+
+static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
+{
+    (void)sceneTargetSerial;
+}
+
 static bool vm_net_mock_should_rearm_send_ready(void)
 {
     return false;

@@ -42,6 +42,7 @@ static u32 g_netMockTitleSelectedServerId = 0;
 static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
+static u32 g_vm_net_mock_remote_completed_scene_target_serial = 0;
 static const char *g_vm_mock_service_active_account_id = NULL;
 static u8 g_vmNetMockFollowupResponse[65536];
 static u32 g_vmNetMockFollowupResponseLen = 0;
@@ -31387,17 +31388,25 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
                                                                u8 *out, u32 outCap)
 {
     u32 pos = 5;
+    u32 objectStart = 0;
     u8 objectCount = 0;
     vm_net_mock_scene_change_target target;
     u16 currentX = 0;
     u16 currentY = 0;
     u8 fb4Type = 1;
     bool hasFb4 = false;
+    bool closeTeleportDirectEnter = false;
 
     if (outCap < pos || !vm_net_mock_is_current_scene_completion_request(request, requestLen))
         return 0;
 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
+    closeTeleportDirectEnter =
+        g_vm_net_mock_teleport_stone_direct_enter_pending &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        vm_net_mock_scene_names_equal_loose(
+            target.scene,
+            g_vm_net_mock_last_scene_change_target.scene);
     hasFb4 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 4);
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, g_vm_net_mock_last_scene_change_fb4_type);
     if (!hasFb4 && vm_net_mock_read_current_player_grid(NULL, NULL, &currentX, &currentY, NULL, NULL))
@@ -31435,12 +31444,47 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
         return 0;
     objectCount += 1;
 
+    /*
+     * A teleport-stone 30/1 is deliberately delivered from a later poll so
+     * the item confirmation callback can unwind before EnterSceneByMapName().
+     * Its first same-scene 2/3 request lands in this completion path rather
+     * than the normal 25/5 resource path.  The common current-scene response
+     * intentionally omits 30/2 to avoid a second position-bearing scene enter,
+     * but that also leaves the teleport loading widget active forever.
+     *
+     * JianghuOL.CBE:0x01039770 handles 30/2 and unconditionally calls
+     * ResetDownloadState at 0x0103993C.  A result=1 scene ack without posinfo
+     * reaches that cleanup without calling the scene-position entry method.
+     * Append it only for the saved teleport lifecycle and keep it last, like
+     * the normal mmGame resource + 30/2 completion response.
+     */
+    if (closeTeleportDirectEnter)
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                         &objectStart))
+            return 0;
+        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2,
+                                                       target.scene))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+    }
+
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_mark_completed_scene_change_target(&target);
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "scene-change-current-scene-ack");
     g_vm_net_mock_last_scene_change_target_valid = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    if (closeTeleportDirectEnter)
+    {
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        printf("[info][network] mock_teleport_stone_current_scene_complete scene=%s pos=(%u,%u) objects=%u resp=%u response=27-family+30/2-no-posinfo action=reset-download-state\n",
+               target.scene, target.x, target.y, objectCount, pos);
+        vm_autotest_note("mock_teleport_stone_current_scene_complete scene=%s pos=(%u,%u) objects=%u response=30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
+                         target.scene, target.x, target.y, objectCount);
+    }
     return pos;
 }
 
@@ -46163,15 +46207,13 @@ static bool vm_net_mock_response_object_posinfo(
     return true;
 }
 
-/* In standalone-service mode the server-side scene target and update-complete
- * flags live in another process.  Mirror only the packet facts needed by the
- * emulator's existing same-screen guard before the guest callback consumes
- * the response.  Without this observation every post-download
- * EnterSceneByMapName() is accepted and a resource family can repeatedly
- * rebuild the same scene shell, leaving DrawSceneMapLayer with a stale host
- * object. */
-static void vm_net_mock_observe_remote_completion(
-    const vm_net_mock_async_completion *completion)
+/* Capture packet facts while draining the worker queue, but do not mutate the
+ * scene lifecycle yet.  Several responses can be queued in one scheduler tick;
+ * applying a later 30/2 before the earlier 30/1 guest callback runs destroys
+ * their protocol order and disables the same-scene guard. */
+static void vm_net_mock_capture_remote_completion(
+    const vm_net_mock_async_completion *completion,
+    vm_net_remote_observation *observation)
 {
     const u8 *response = NULL;
     u32 responseLen = 0;
@@ -46181,6 +46223,9 @@ static void vm_net_mock_observe_remote_completion(
     u8 parsedObjects = 0;
     vm_net_mock_response_object object;
 
+    if (observation == NULL)
+        return;
+    memset(observation, 0, sizeof(*observation));
     if (completion == NULL || completion->response == NULL ||
         completion->responseLen < 5)
     {
@@ -46202,7 +46247,6 @@ static void vm_net_mock_observe_remote_completion(
         if (object.major == 1 && object.kind == 30 &&
             (object.subtype == 1 || object.subtype == 2))
         {
-            vm_net_mock_scene_change_target target;
             char scene[64];
             u16 x = 0;
             u16 y = 0;
@@ -46212,43 +46256,21 @@ static void vm_net_mock_observe_remote_completion(
 
             if (haveScene && havePos)
             {
-                memset(&target, 0, sizeof(target));
-                snprintf(target.scene, sizeof(target.scene), "%s", scene);
-                target.x = x;
-                target.y = y;
-                target.mapType = 2;
-                target.hasSceEntry = true;
-                target.needsSceneDownload = false;
-                /* A newly observed scene-enter packet starts a new lifecycle.
-                 * Do not let a completed resource from the previous scene be
-                 * consumed as this target's one permitted update re-entry. */
-                g_vm_net_mock_update_completed_reenter_pending = false;
-                g_vm_net_mock_update_completed_name[0] = 0;
-                g_vm_net_mock_last_scene_change_target = target;
-                g_vm_net_mock_last_scene_change_target_valid = true;
-                ++g_vm_net_mock_last_scene_change_target_serial;
-                if (g_vm_net_mock_last_scene_change_target_serial == 0)
-                    g_vm_net_mock_last_scene_change_target_serial = 1;
-                printf("[info][screen] remote_scene_target_observe serial=%u subtype=%u scene=%s pos=(%u,%u) evidence=WT30/%u-before-guest-callback\n",
-                       g_vm_net_mock_last_scene_change_target_serial,
-                       object.subtype,
-                       target.scene,
-                       target.x,
-                       target.y,
-                       object.subtype);
+                observation->hasSceneTarget = 1;
+                observation->sceneSubtype = object.subtype;
+                observation->sceneX = x;
+                observation->sceneY = y;
+                snprintf(observation->scene, sizeof(observation->scene),
+                         "%s", scene);
+                if (object.subtype == 2)
+                    observation->sceneCompleteAfterCallback = 1;
             }
-            else if (object.subtype == 2 &&
-                     g_vm_net_mock_last_scene_change_target_valid &&
-                     (!haveScene ||
-                      vm_net_mock_scene_names_equal_loose(
-                          scene,
-                          g_vm_net_mock_last_scene_change_target.scene)))
+            else if (object.subtype == 2)
             {
-                printf("[info][screen] remote_scene_target_complete serial=%u scene=%s evidence=WT30/2-no-posinfo\n",
-                       g_vm_net_mock_last_scene_change_target_serial,
-                       haveScene ? scene
-                                 : g_vm_net_mock_last_scene_change_target.scene);
-                g_vm_net_mock_last_scene_change_target_valid = false;
+                observation->sceneCompleteAfterCallback = 1;
+                if (haveScene)
+                    snprintf(observation->scene,
+                             sizeof(observation->scene), "%s", scene);
             }
         }
         ++parsedObjects;
@@ -46278,14 +46300,143 @@ static void vm_net_mock_observe_remote_completion(
                 snprintf(payloadName, sizeof(payloadName), "%s",
                          completion->updateChunkName);
             }
-            vm_net_mock_note_update_chunk_complete(payloadName);
-            printf("[info][screen] remote_update_complete_observe file=%s start=%u chunk=%u total=%u action=arm-one-scene-reenter\n",
-                   payloadName,
-                   completion->updateChunkStart,
-                   (u32)chunkLen,
-                   totalSize);
+            observation->updateComplete = 1;
+            snprintf(observation->updateName,
+                     sizeof(observation->updateName), "%s", payloadName);
         }
     }
+}
+
+static void vm_net_mock_snapshot_remote_completed_target(u32 serial)
+{
+    if (!g_vm_net_mock_last_scene_change_target_valid || serial == 0 ||
+        serial != g_vm_net_mock_last_scene_change_target_serial)
+    {
+        return;
+    }
+    g_vm_net_mock_last_completed_scene_change_target =
+        g_vm_net_mock_last_scene_change_target;
+    g_vm_net_mock_last_completed_scene_change_target.needsSceneDownload = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = true;
+    g_vm_net_mock_last_completed_scene_change_tick = g_schedulerTick;
+    g_vm_net_mock_remote_completed_scene_target_serial = serial;
+}
+
+/* Apply observations immediately before their own guest callback.  This keeps
+ * TCP worker completion order and guest parser order identical even when the
+ * worker produced several responses during one emulator frame. */
+static u32 vm_net_mock_apply_remote_observation(
+    const vm_net_remote_observation *observation)
+{
+    u32 clearAfterCallbackSerial = 0;
+    bool restoredCompletedTarget = false;
+
+    if (observation == NULL)
+        return 0;
+
+    if (observation->hasSceneTarget && observation->scene[0] != 0)
+    {
+        vm_net_mock_scene_change_target target;
+
+        memset(&target, 0, sizeof(target));
+        snprintf(target.scene, sizeof(target.scene), "%s",
+                 observation->scene);
+        target.x = observation->sceneX;
+        target.y = observation->sceneY;
+        target.mapType = 2;
+        target.hasSceEntry = true;
+        target.needsSceneDownload = false;
+
+        /* A position-bearing WT30 object starts a new packet-visible target.
+         * Do not let a resource completion from the previous target authorize
+         * this lifecycle's re-entry. */
+        g_vm_net_mock_update_completed_reenter_pending = false;
+        g_vm_net_mock_update_completed_name[0] = 0;
+        g_vm_net_mock_last_completed_scene_change_target_valid = false;
+        g_vm_net_mock_remote_completed_scene_target_serial = 0;
+        g_vm_net_mock_last_scene_change_target = target;
+        g_vm_net_mock_last_scene_change_target_valid = true;
+        ++g_vm_net_mock_last_scene_change_target_serial;
+        if (g_vm_net_mock_last_scene_change_target_serial == 0)
+            g_vm_net_mock_last_scene_change_target_serial = 1;
+        printf("[info][screen] remote_scene_target_apply serial=%u subtype=%u scene=%s pos=(%u,%u) evidence=WT30/%u-immediately-before-guest-callback\n",
+               g_vm_net_mock_last_scene_change_target_serial,
+               observation->sceneSubtype,
+               target.scene,
+               target.x,
+               target.y,
+               observation->sceneSubtype);
+    }
+
+    if (observation->sceneCompleteAfterCallback &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        (observation->scene[0] == 0 ||
+         vm_net_mock_scene_names_equal_loose(
+             observation->scene,
+             g_vm_net_mock_last_scene_change_target.scene)))
+    {
+        clearAfterCallbackSerial =
+            g_vm_net_mock_last_scene_change_target_serial;
+        vm_net_mock_snapshot_remote_completed_target(
+            clearAfterCallbackSerial);
+        printf("[info][screen] remote_scene_target_complete_pending serial=%u scene=%s action=clear-after-own-callback evidence=WT30/2\n",
+               clearAfterCallbackSerial,
+               g_vm_net_mock_last_scene_change_target.scene);
+    }
+
+    if (observation->updateComplete && observation->updateName[0] != 0)
+    {
+        if (!g_vm_net_mock_last_scene_change_target_valid &&
+            g_vm_net_mock_last_completed_scene_change_target_valid &&
+            g_vm_net_mock_remote_completed_scene_target_serial != 0 &&
+            g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick <
+                VM_NET_MOCK_COMPLETED_SCENE_REUSE_TICKS)
+        {
+            g_vm_net_mock_last_scene_change_target =
+                g_vm_net_mock_last_completed_scene_change_target;
+            g_vm_net_mock_last_scene_change_target_valid = true;
+            g_vm_net_mock_last_scene_change_target_serial =
+                g_vm_net_mock_remote_completed_scene_target_serial;
+            g_vm_net_mock_last_completed_scene_change_tick = g_schedulerTick;
+            restoredCompletedTarget = true;
+            printf("[info][screen] remote_scene_target_restore serial=%u scene=%s file=%s reason=resource-completion-callback\n",
+                   g_vm_net_mock_last_scene_change_target_serial,
+                   g_vm_net_mock_last_scene_change_target.scene,
+                   observation->updateName);
+        }
+
+        if (g_vm_net_mock_last_scene_change_target_valid)
+        {
+            vm_net_mock_note_update_chunk_complete(observation->updateName);
+            if (restoredCompletedTarget)
+                clearAfterCallbackSerial =
+                    g_vm_net_mock_last_scene_change_target_serial;
+            printf("[info][screen] remote_update_complete_apply file=%s serial=%u action=arm-one-scene-reenter immediately-before-guest-callback\n",
+                   observation->updateName,
+                   g_vm_net_mock_last_scene_change_target_serial);
+        }
+        else
+        {
+            printf("[warn][screen] remote_update_complete_unbound file=%s action=no-scene-reenter reason=no-recent-packet-target\n",
+                   observation->updateName);
+        }
+    }
+
+    return clearAfterCallbackSerial;
+}
+
+static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
+{
+    if (sceneTargetSerial == 0 ||
+        !g_vm_net_mock_last_scene_change_target_valid ||
+        sceneTargetSerial != g_vm_net_mock_last_scene_change_target_serial)
+    {
+        return;
+    }
+    printf("[info][screen] remote_scene_target_complete serial=%u scene=%s action=cleared-after-own-guest-callback\n",
+           sceneTargetSerial,
+           g_vm_net_mock_last_scene_change_target.scene);
+    g_vm_net_mock_last_scene_change_target_valid = false;
 }
 
 static void *vm_net_mock_async_worker_main(void *unused)
@@ -46519,6 +46670,9 @@ static void vm_net_mock_async_drain_completions(void)
         u32 generation = 0;
         u32 responsePtr = 0;
         u32 nowMs = 0;
+        vm_net_remote_observation remoteObservation;
+
+        memset(&remoteObservation, 0, sizeof(remoteObservation));
 
         pthread_mutex_lock(&g_vmNetMockAsync.mutex);
         completion = g_vmNetMockAsync.completionHead;
@@ -46567,7 +46721,8 @@ static void vm_net_mock_async_drain_completions(void)
             vm_net_mock_async_free_completion(completion);
             continue;
         }
-        vm_net_mock_observe_remote_completion(completion);
+        vm_net_mock_capture_remote_completion(completion,
+                                              &remoteObservation);
         responsePtr = vm_net_mock_sync_buffer_to_vm(completion->response,
                                                     completion->responseLen);
         if (responsePtr == 0)
@@ -46588,6 +46743,18 @@ static void vm_net_mock_async_drain_completions(void)
                                   completion->responseLen,
                                   channel->callback,
                                   channel->context);
+        if (!scheduler_attach_net_remote_observation(
+                completion->responseEventType,
+                responsePtr,
+                channel->callback,
+                channel->context,
+                &remoteObservation))
+        {
+            printf("[warn][screen] remote_observation_attach_failed sequence=%u event=%u resp=%u action=no-early-global-mutation\n",
+                   completion->sequence,
+                   completion->responseEventType,
+                   completion->responseLen);
+        }
         nowMs = SDL_GetTicks();
         if (completion->kind == VM_NET_MOCK_ASYNC_JOB_SCENE_POLL)
         {
