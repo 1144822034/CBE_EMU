@@ -4,6 +4,7 @@
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -369,6 +370,22 @@ static bool vm_mysql_connect(void)
     {
         vm_mysql_set_error("Could not connect to MySQL server");
         return false;
+    }
+
+    /* Queries are encoded as a four-byte MySQL packet header followed by a
+     * small payload. With Nagle enabled, the second send may wait for the
+     * header ACK. MySQL already frames every packet, so disabling Nagle avoids
+     * adding that latency to the scene bootstrap's small request/response
+     * queries. */
+    {
+        int noDelay = 1;
+#ifdef _WIN32
+        setsockopt(g_vm_mysql_socket, IPPROTO_TCP, TCP_NODELAY,
+                   (const char *)&noDelay, sizeof(noDelay));
+#else
+        setsockopt(g_vm_mysql_socket, IPPROTO_TCP, TCP_NODELAY,
+                   &noDelay, sizeof(noDelay));
+#endif
     }
 
 #ifdef _WIN32

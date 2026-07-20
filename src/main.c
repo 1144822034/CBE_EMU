@@ -7760,7 +7760,7 @@ int main(int argc, char *args[])
     /* Linux is a standalone authoritative service.  Do not load a client CBE
      * or initialize the Unicorn/LCD emulator before opening the game and web
      * listeners. */
-    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IOFBF, 262144);
     setvbuf(stderr, NULL, _IONBF, 0);
     originalCwd[0] = 0;
     resourceCandidate[0] = 0;
@@ -7855,6 +7855,7 @@ int main(int argc, char *args[])
 #else
     uc_err err;
     uc_hook hookHandle;
+    bool bufferMockServiceStdout = false;
 #ifdef CBE_PLATFORM_ANDROID
     int argc = 0;
     char **args = NULL;
@@ -7866,7 +7867,29 @@ int main(int argc, char *args[])
         return -1;
     }
 #endif
-    setvbuf(stdout, NULL, _IONBF, 0);
+    /* Windows mock-service-only used to make every trace line an immediate
+     * filesystem write.  The first scene response emits many evidence lines;
+     * synchronous writes delayed the NPC catalog and welcome message by
+     * several seconds.  Buffer only the standalone service process and flush
+     * after each response has already been sent.  Keep the emulator process
+     * unbuffered so crash diagnostics remain immediate. */
+#ifndef CBE_PLATFORM_ANDROID
+    {
+        const char *serviceOnlyEnv = getenv("CBE_MOCK_SERVICE_ONLY");
+        bufferMockServiceStdout = serviceOnlyEnv != NULL &&
+                                  serviceOnlyEnv[0] != 0 &&
+                                  strcmp(serviceOnlyEnv, "0") != 0;
+        for (int i = 1; i < argc && !bufferMockServiceStdout; ++i)
+        {
+            if (strcmp(args[i], "--mock-service-only") == 0)
+                bufferMockServiceStdout = true;
+        }
+    }
+#endif
+    if (bufferMockServiceStdout)
+        setvbuf(stdout, NULL, _IOFBF, 262144);
+    else
+        setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_cbe_init_config(argc, args);
     vm_autotest_init(argc, args);
