@@ -5,6 +5,73 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
+#include "fontEngine.h"
+
+static void launcher_put_pixel(SDL_Surface *sfc, int x, int y, u32 color)
+{
+    if (!sfc || x < 0 || y < 0 || x >= sfc->w || y >= sfc->h) return;
+    u32 *row = (u32 *)((u8 *)sfc->pixels + y * sfc->pitch);
+    row[x] = color;
+}
+
+static void launcher_draw_font_char(SDL_Surface *sfc, u16 gbCode, int x, int y, u32 color)
+{
+    int bw = getFontWidth();
+    int bh = getFontHeight();
+    int bmpSize = (bw * bh) / 8;
+    char *bmp = SDL_malloc(bmpSize);
+    if (!bmp) return;
+    if (!getFontBitMap(gbCode, bmp)) { SDL_free(bmp); return; }
+    int lp = bw / 8;
+    for (int j = 0; j < bh; j++) {
+        int py = y + j;
+        if (py < 0 || py >= sfc->h) continue;
+        for (int i = 0; i < bw; i++) {
+            int px = x + i;
+            if (px < 0 || px >= sfc->w) continue;
+            int byteIdx = j * lp + i / 8;
+            int bitIdx = 7 - (i % 8);
+            if ((bmp[byteIdx] >> bitIdx) & 1)
+                launcher_put_pixel(sfc, px, py, color);
+        }
+    }
+    SDL_free(bmp);
+}
+
+static void launcher_draw_font_string(SDL_Surface *sfc, const char *gbkStr, int x, int y, u32 color)
+{
+    if (!gbkStr) return;
+    int cw = getFontCellWidth();
+    int fw = getFontWidth();
+    int ri = 0;
+    for (u32 i = 0; gbkStr[i] != 0;) {
+        u8 ch = (u8)gbkStr[i];
+        if (ch < 0x80) {
+            launcher_draw_font_char(sfc, (u16)(ch << 8), x + ri, y, color);
+            ri += cw;
+            i++;
+        } else {
+            u16 code = (u16)ch | ((u16)(u8)gbkStr[i + 1] << 8);
+            launcher_draw_font_char(sfc, code, x + ri, y, color);
+            ri += fw;
+            i += 2;
+        }
+    }
+}
+
+static int launcher_measure_string_width(const char *gbkStr)
+{
+    if (!gbkStr) return 0;
+    int w = 0;
+    int cw = getFontCellWidth();
+    int fw = getFontWidth();
+    for (u32 i = 0; gbkStr[i] != 0;) {
+        u8 ch = (u8)gbkStr[i];
+        if (ch < 0x80) { w += cw; i++; }
+        else { w += fw; i += 2; }
+    }
+    return w;
+}
 
 /* Layout constants */
 #define LAUNCHER_TILE_W 140
@@ -194,8 +261,14 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     clip.h = content_h;
     SDL_SetClipRect(sfc, &clip);
 
-    u32 header_color = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
     draw_rounded_rect(sfc, 0, 0, state->viewport_w, state->header_h, 0x0f3460, 0);
+    {
+        const char *title = "Game Center";
+        int tw = launcher_measure_string_width(title);
+        int tx = (state->viewport_w - tw) / 2;
+        launcher_draw_font_string(sfc, title, tx, (state->header_h - getFontHeight()) / 2,
+            SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
+    }
 
     float max_scroll = vm_game_launcher_compute_max_scroll(state);
     if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
@@ -221,6 +294,31 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
 
         draw_rounded_rect(sfc, tile_x, ty, state->tile_w, state->tile_h, tile_bg, 0);
         draw_rect_border(sfc, tile_x, ty, state->tile_w, state->tile_h, border);
+        {
+            const char *name = state->entries[i].display_name;
+            int nameW = launcher_measure_string_width(name);
+            int maxW = state->tile_w - 8;
+            int drawX = tile_x + (state->tile_w - (nameW > maxW ? maxW : nameW)) / 2;
+            int drawY = ty + (state->tile_h - getFontHeight()) / 2;
+            u32 textColor = SDL_MapRGB(sfc->format, 0xff, 0xff, 0xff);
+            if (nameW > maxW) {
+                const char *p = name;
+                int acc = 0;
+                while (*p && acc + getFontCellWidth() <= maxW) {
+                    u8 ch = (u8)*p;
+                    if (ch < 0x80) { acc += getFontCellWidth(); p++; }
+                    else { acc += getFontWidth(); p += 2; }
+                }
+                char trunc[128];
+                size_t len = p - name;
+                if (len >= sizeof(trunc)) len = sizeof(trunc) - 1;
+                memcpy(trunc, name, len);
+                trunc[len] = '\0';
+                launcher_draw_font_string(sfc, trunc, drawX, drawY, textColor);
+            } else {
+                launcher_draw_font_string(sfc, name, drawX, drawY, textColor);
+            }
+        }
     }
 
     float total = vm_game_launcher_compute_total_height(state);
@@ -239,6 +337,16 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     draw_rounded_rect(sfc, sb_x, (int)thumb_y, state->scrollbar_w, (int)thumb_h, thumb_color, 0);
 
     SDL_SetClipRect(sfc, NULL);
+
+    {
+        const char *footer = "Up/Down Select  Enter Launch";
+        int fw = launcher_measure_string_width(footer);
+        int fx = (state->viewport_w - fw) / 2;
+        int fy = state->viewport_h - state->footer_h + (state->footer_h - getFontHeight()) / 2;
+        launcher_draw_font_string(sfc, footer, fx, fy,
+            SDL_MapRGB(sfc->format, 0x88, 0x88, 0x88));
+    }
+
     SDL_UpdateWindowSurface(sfc);
 }
 
