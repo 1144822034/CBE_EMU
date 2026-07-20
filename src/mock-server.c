@@ -4136,6 +4136,7 @@ enum
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
     VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID = 806,
+    VM_NET_MOCK_SMALL_HORN_ITEM_ID = 807,
     VM_NET_MOCK_BACKPACK_EXPAND_STEP = 5,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
@@ -7680,6 +7681,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     u8 countInfo[32];
     u32 countInfoLen = 0;
     u8 itemUseType = 1;
+    bool suppressUseSuccessPopup = false;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 0;
@@ -7711,6 +7713,14 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
 
     effect = vm_net_mock_find_item_effect_catalog_item(itemId);
     reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
+    /* item.dsh category 14 uses num=1 as the small-horn consume amount after
+     * the chat input is accepted.  It is not an HP-effect value. */
+    if (itemId == VM_NET_MOCK_SMALL_HORN_ITEM_ID)
+    {
+        parsed.hp = 0;
+        parsed.mp = 0;
+        parsed.exp = 0;
+    }
     if (vm_net_mock_item_effect_is_usable(effect))
     {
         hp = effect->hp;
@@ -7799,22 +7809,33 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
 
     itemUseType = parsed.type ? parsed.type : 1;
+    suppressUseSuccessPopup = itemId == VM_NET_MOCK_SMALL_HORN_ITEM_ID;
     /*
      * JianghuOL.CBE:0x1033544 handles 7/1 as the original item-use success
      * acknowledgement.  When the client has a pending use row, result=1 calls
      * the item-manager operation at +56 with type/id/count=1; this is the path
      * that also updates the occupied-slot counter when the stack reaches zero.
+     *
+     * Small-horn chat is submitted while the message screen is active.  The
+     * same 7/1 success branch also calls ui_show_message_box("使用成功",...,10).
+     * That screen does not run the scene toast countdown, leaving the bar on
+     * screen indefinitely.  Its following 7/11 refresh already clears the
+     * pending-use flag at R9+38036, while 7/7 performs the row refresh/removal,
+     * so item 807 must omit only this popup-producing acknowledgement.
      */
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart))
-        return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
-        return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", itemUseType))
-        return 0;
-    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "id", (u16)itemId))
-        return 0;
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    objectCount += 1;
+    if (!suppressUseSuccessPopup)
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", itemUseType))
+            return 0;
+        if (!vm_net_mock_put_object_u16(out, outCap, &pos, "id", (u16)itemId))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+    }
 
     if (!reservoirItem)
     {
@@ -7868,17 +7889,19 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
            reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
            oldCapacity, newCapacity, expandedCount,
            applied ? 1 : 0, consumed ? 1 : 0,
-           capacityExpanded ? "7/1+7/7+7/11+17/1-followup" :
-               (reservoirItem ? "7/1+7/11-reservoir" : "7/1+7/7+7/11"),
+           suppressUseSuccessPopup ? "7/7+7/11-small-horn-no-popup" :
+           (capacityExpanded ? "7/1+7/7+7/11+17/1-followup" :
+               (reservoirItem ? "7/1+7/11-reservoir" : "7/1+7/7+7/11")),
            pos);
     vm_autotest_note("mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u response=%s evidence=runtime:wt7/1 JianghuOL.CBE:0x1033544 item.dsh:consumeMode\n",
                      itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
                      reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
                      oldCapacity, newCapacity, expandedCount,
                      applied ? 1 : 0, consumed ? 1 : 0,
-                     capacityExpanded ? "7/1-use-ok+7/7-type2+7/11-info+17/1-followup" :
-                         (reservoirItem ? "7/1-use-ok+7/11-reservoir" :
-                                          "7/1-use-ok+7/7-type2+7/11-info"));
+                      suppressUseSuccessPopup ? "7/7-type2+7/11-info-small-horn-no-popup" :
+                       (capacityExpanded ? "7/1-use-ok+7/7-type2+7/11-info+17/1-followup" :
+                           (reservoirItem ? "7/1-use-ok+7/11-reservoir" :
+                                           "7/1-use-ok+7/7-type2+7/11-info")));
     return pos;
 }
 
@@ -14450,8 +14473,10 @@ enum
 {
     VM_MOCK_SERVICE_PEER_SYNC_MAX = 16,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX = 4,
-    VM_MOCK_SERVICE_CHAT_NOTICE_MAX = 16,
+    VM_MOCK_SERVICE_CHAT_NOTICE_MAX = 64,
     VM_MOCK_SERVICE_CHAT_POLL_MAX = 4,
+    VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX = 30,
+    VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX = 10,
     VM_MOCK_SERVICE_TEAM_MAX = 16,
     VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3,
     VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX = 8,
@@ -14465,13 +14490,14 @@ enum
 
 enum
 {
+    VM_MOCK_CHAT_TYPE_WORLD = 0,
     VM_MOCK_CHAT_TYPE_TEAM = 2,
     VM_MOCK_CHAT_TYPE_GUILD = 3,
     VM_MOCK_CHAT_TYPE_LOCAL = 4,
     VM_MOCK_CHAT_TYPE_SYSTEM = 5,
-    VM_MOCK_CHAT_TYPE_WORLD = 6,
     VM_MOCK_CHAT_TYPE_PRIVATE = 7,
-    VM_MOCK_CHAT_TYPE_TEAM_NOTICE = 8
+    VM_MOCK_CHAT_TYPE_TEAM_NOTICE = 8,
+    VM_MOCK_CHAT_TYPE_INVALID = 0xFF
 };
 
 enum
@@ -14653,6 +14679,7 @@ typedef struct vm_mock_service_client_session
     u8 chatNoticeHead;
     u8 chatNoticeCount;
     bool systemWelcomeQueued;
+    bool worldChatHistoryQueued;
     bool friendInviteReplyActive;
     u32 friendInviteSourceClientId;
     u32 friendInviteSourceRoleId;
@@ -15594,10 +15621,11 @@ static const char *vm_mock_service_chat_type_name(u8 type)
     }
 }
 
-static bool vm_mock_service_session_enqueue_chat_notice(
+static bool vm_mock_service_session_enqueue_chat_notice_identity(
     vm_mock_service_client_session *target,
     u8 type,
-    const vm_mock_service_client_session *source,
+    u32 sourceClientId,
+    u32 sourceRoleId,
     const char *sourceName,
     const char *message)
 {
@@ -15605,7 +15633,8 @@ static bool vm_mock_service_session_enqueue_chat_notice(
     u8 slotIndex = 0;
 
     if (target == NULL || message == NULL || message[0] == 0 ||
-        (type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE))
+        (type != VM_MOCK_CHAT_TYPE_WORLD &&
+         (type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE)))
     {
         return false;
     }
@@ -15622,11 +15651,10 @@ static bool vm_mock_service_session_enqueue_chat_notice(
     memset(slot, 0, sizeof(*slot));
     slot->valid = true;
     slot->type = type;
-    slot->sourceClientId = source ? source->clientId : 0;
-    slot->sourceRoleId = source ? source->onlineRoleId : 0;
+    slot->sourceClientId = sourceClientId;
+    slot->sourceRoleId = sourceRoleId;
     snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
-             sourceName && sourceName[0] ? sourceName :
-             (source && source->onlineRoleName[0] ? source->onlineRoleName : "System"));
+             sourceName && sourceName[0] ? sourceName : "System");
     snprintf(slot->message, sizeof(slot->message), "%s", message);
     slot->queuedTick = g_schedulerTick;
     ++target->chatNoticeCount;
@@ -15640,6 +15668,23 @@ static bool vm_mock_service_session_enqueue_chat_notice(
     return true;
 }
 
+static bool vm_mock_service_session_enqueue_chat_notice(
+    vm_mock_service_client_session *target,
+    u8 type,
+    const vm_mock_service_client_session *source,
+    const char *sourceName,
+    const char *message)
+{
+    return vm_mock_service_session_enqueue_chat_notice_identity(
+        target,
+        type,
+        source ? source->clientId : 0,
+        source ? source->onlineRoleId : 0,
+        sourceName && sourceName[0] ? sourceName :
+            (source && source->onlineRoleName[0] ? source->onlineRoleName : "System"),
+        message);
+}
+
 static bool vm_mock_service_session_enqueue_system_message(
     vm_mock_service_client_session *target,
     const char *message)
@@ -15647,6 +15692,178 @@ static bool vm_mock_service_session_enqueue_system_message(
     static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
     return vm_mock_service_session_enqueue_chat_notice(
         target, VM_MOCK_CHAT_TYPE_SYSTEM, NULL, systemNameGbk, message);
+}
+
+typedef struct
+{
+    vm_mock_service_client_session *target;
+    u32 queued;
+    u32 skipped;
+} vm_mock_world_chat_history_context;
+
+static bool g_vm_mock_world_chat_table_checked = false;
+static bool g_vm_mock_world_chat_table_valid = false;
+
+static bool vm_mock_world_chat_table_ensure(void)
+{
+    if (g_vm_mock_world_chat_table_checked)
+        return g_vm_mock_world_chat_table_valid;
+    g_vm_mock_world_chat_table_checked = true;
+    g_vm_mock_world_chat_table_valid = vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS world_chat_messages ("
+        "message_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+        "source_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "source_role_id INT UNSIGNED NOT NULL,"
+        "source_name VARBINARY(15) NOT NULL,"
+        "message VARBINARY(81) NOT NULL,"
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(message_id),"
+        "KEY idx_world_chat_source(source_account_id,source_role_id)) ENGINE=InnoDB");
+    if (!g_vm_mock_world_chat_table_valid)
+    {
+        printf("[error][mock-service] world_chat_schema error=%s\n",
+               vm_mysql_last_error());
+    }
+    return g_vm_mock_world_chat_table_valid;
+}
+
+static bool vm_mock_world_chat_store(
+    const vm_mock_service_client_session *source,
+    const char *sourceName,
+    const char *message)
+{
+    char accountHex[129];
+    char sourceNameHex[31];
+    char messageHex[163];
+    char query[768];
+    const char *accountId = NULL;
+    size_t accountLen = 0;
+    size_t sourceNameLen = 0;
+    size_t messageLen = 0;
+
+    if (source == NULL || source->onlineRoleId == 0 || sourceName == NULL ||
+        message == NULL)
+    {
+        return false;
+    }
+    accountId = source->accountId[0] ? source->accountId : "-";
+    accountLen = strlen(accountId);
+    sourceNameLen = strlen(sourceName);
+    messageLen = strlen(message);
+    if (accountLen == 0 || accountLen >= sizeof(source->accountId) ||
+        sourceNameLen == 0 || sourceNameLen > 15 ||
+        messageLen == 0 || messageLen > 81 ||
+        !vm_mock_world_chat_table_ensure() ||
+        vm_mysql_hex_encode(accountId, accountLen,
+                            accountHex, sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(sourceName, sourceNameLen,
+                            sourceNameHex, sizeof(sourceNameHex)) == 0 ||
+        vm_mysql_hex_encode(message, messageLen,
+                            messageHex, sizeof(messageHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO world_chat_messages("
+             "source_account_id,source_role_id,source_name,message) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,X'%s',X'%s')",
+             accountHex, source->onlineRoleId, sourceNameHex, messageHex);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] world_chat_store source=%08x/%u error=%s\n",
+               source->clientId, source->onlineRoleId, vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][mock-service] world_chat_store source=%08x/%u bytes=%u storage=mysql\n",
+           source->clientId, source->onlineRoleId, (u32)messageLen);
+    return true;
+}
+
+static bool vm_mock_world_chat_history_row(
+    void *contextValue,
+    unsigned int columnCount,
+    const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_world_chat_history_context *context =
+        (vm_mock_world_chat_history_context *)contextValue;
+    char roleIdText[32];
+    char sourceName[16];
+    char message[82];
+    size_t decodedLen = 0;
+    u32 sourceRoleId = 0;
+
+    if (context == NULL || context->target == NULL || columnCount < 3 ||
+        values == NULL || lengths == NULL || values[0] == NULL ||
+        values[1] == NULL || values[2] == NULL ||
+        lengths[0] == 0 || lengths[0] >= sizeof(roleIdText))
+    {
+        if (context != NULL)
+            ++context->skipped;
+        return true;
+    }
+    memset(roleIdText, 0, sizeof(roleIdText));
+    memcpy(roleIdText, values[0], lengths[0]);
+    sourceRoleId = (u32)strtoul(roleIdText, NULL, 10);
+    memset(sourceName, 0, sizeof(sourceName));
+    if (sourceRoleId == 0 ||
+        !vm_mysql_hex_decode(values[1], lengths[1], sourceName,
+                             sizeof(sourceName) - 1, &decodedLen) ||
+        decodedLen == 0 || decodedLen > 15)
+    {
+        ++context->skipped;
+        return true;
+    }
+    sourceName[decodedLen] = 0;
+    memset(message, 0, sizeof(message));
+    if (!vm_mysql_hex_decode(values[2], lengths[2], message,
+                             sizeof(message) - 1, &decodedLen) ||
+        decodedLen == 0 || decodedLen > 81)
+    {
+        ++context->skipped;
+        return true;
+    }
+    message[decodedLen] = 0;
+    if (!vm_mock_service_session_enqueue_chat_notice_identity(
+            context->target, VM_MOCK_CHAT_TYPE_WORLD, 0, sourceRoleId,
+            sourceName, message))
+    {
+        ++context->skipped;
+        return true;
+    }
+    ++context->queued;
+    return true;
+}
+
+static bool vm_mock_world_chat_queue_recent(
+    vm_mock_service_client_session *target,
+    u32 *queuedOut)
+{
+    vm_mock_world_chat_history_context context;
+    const char query[] =
+        "SELECT source_role_id,HEX(source_name),HEX(message) FROM ("
+        "SELECT message_id,source_role_id,source_name,message "
+        "FROM world_chat_messages ORDER BY message_id DESC LIMIT 30"
+        ") AS recent ORDER BY message_id ASC";
+
+    if (queuedOut)
+        *queuedOut = 0;
+    if (target == NULL || !vm_mock_world_chat_table_ensure())
+        return false;
+    memset(&context, 0, sizeof(context));
+    context.target = target;
+    if (!vm_mysql_query(query, vm_mock_world_chat_history_row, &context))
+    {
+        printf("[error][mock-service] world_chat_history_load target=%08x error=%s\n",
+               target->clientId, vm_mysql_last_error());
+        return false;
+    }
+    if (queuedOut)
+        *queuedOut = context.queued;
+    printf("[info][mock-service] world_chat_history_queue target=%08x queued=%u skipped=%u limit=%u\n",
+           target->clientId, context.queued, context.skipped,
+           VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX);
+    return true;
 }
 
 static vm_mock_service_team *vm_mock_service_team_find_for_client(u32 clientId)
@@ -16057,6 +16274,7 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     {
         static const char welcomeMessageGbk[] =
             "\xBB\xB6\xD3\xAD\xBD\xF8\xC8\xEB\xBD\xAD\xBA\xFE\xCA\xC0\xBD\xE7";
+        u32 worldHistoryQueued = 0;
         printf("[info][mock-service] session_online client=%08x account=%s role=%u name=%s scene=%s pos=(%u,%u) reason=%s\n",
                session->clientId,
                session->accountId[0] ? session->accountId : "-",
@@ -16066,6 +16284,11 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
                session->sceneVisibleX,
                session->sceneVisibleY,
                reason ? reason : "-");
+        if (!session->worldChatHistoryQueued)
+        {
+            (void)vm_mock_world_chat_queue_recent(session, &worldHistoryQueued);
+            session->worldChatHistoryQueued = true;
+        }
         if (!session->systemWelcomeQueued &&
             vm_mock_service_session_enqueue_system_message(session, welcomeMessageGbk))
         {
@@ -16156,6 +16379,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->chatNoticeHead = 0;
     session->chatNoticeCount = 0;
     session->systemWelcomeQueued = false;
+    session->worldChatHistoryQueued = false;
     session->friendInviteReplyActive = false;
     session->friendInviteSourceClientId = 0;
     session->friendInviteSourceRoleId = 0;
@@ -34969,7 +35193,12 @@ static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_
  * chatinfo is count:u8 followed by repeated
  *   senderName:len16-string, senderRoleId:tagged-u32, message:len16-string.
  * The blob field's own len16 prefix supplies the first tagged reader header,
- * so the count itself is deliberately written as one raw byte. */
+ * so the count itself is deliberately written as one raw byte.
+ *
+ * The parser always appends to the aggregate chat list before its type switch.
+ * Type 0 therefore is not ignored: it remains the native [世] entry rendered
+ * by RenderColoredTextLines(0x01034DF6) as RGB 0xFFDE00.  Type 6 is a [系]
+ * entry rendered green and must not be used as a world-message surrogate. */
 static bool vm_net_mock_append_chat_message_object(
     u8 *out,
     u32 outCap,
@@ -34984,7 +35213,8 @@ static bool vm_net_mock_append_chat_message_object(
     u32 objectStart = 0;
 
     if (out == NULL || pos == NULL || sourceName == NULL || message == NULL ||
-        type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE ||
+        (type != VM_MOCK_CHAT_TYPE_WORLD &&
+         (type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE)) ||
         strlen(sourceName) > 15 || strlen(message) > 81)
     {
         return false;
@@ -35004,17 +35234,20 @@ static bool vm_net_mock_append_chat_message_object(
     return true;
 }
 
-static int vm_net_mock_append_scene_sync_chat_objects(
+static int vm_net_mock_append_scene_sync_chat_objects_limited(
     u8 *out,
     u32 outCap,
     u32 *pos,
-    vm_mock_service_client_session *observer)
+    vm_mock_service_client_session *observer,
+    u8 maxObjects)
 {
     int appended = 0;
 
     if (out == NULL || pos == NULL || observer == NULL)
         return -1;
-    while (observer->chatNoticeCount > 0 && appended < VM_MOCK_SERVICE_CHAT_POLL_MAX)
+    while (observer->chatNoticeCount > 0 &&
+           appended < VM_MOCK_SERVICE_CHAT_POLL_MAX &&
+           appended < maxObjects)
     {
         vm_mock_service_chat_notice *notice =
             &observer->chatNotices[observer->chatNoticeHead];
@@ -35064,6 +35297,16 @@ static int vm_net_mock_append_scene_sync_chat_objects(
         ++appended;
     }
     return appended;
+}
+
+static int vm_net_mock_append_scene_sync_chat_objects(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    vm_mock_service_client_session *observer)
+{
+    return vm_net_mock_append_scene_sync_chat_objects_limited(
+        out, outCap, pos, observer, VM_MOCK_SERVICE_CHAT_POLL_MAX);
 }
 
 /*
@@ -35859,7 +36102,7 @@ static u8 vm_net_mock_chat_response_type(u8 requestType)
     case VM_MOCK_CHAT_REQUEST_LOCAL:
         return VM_MOCK_CHAT_TYPE_LOCAL;
     default:
-        return 0;
+        return VM_MOCK_CHAT_TYPE_INVALID;
     }
 }
 
@@ -35875,15 +36118,18 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
         "\xB6\xD4\xB7\xBD\xB2\xBB\xD4\xDA\xCF\xDF";
     static const char guildUnavailableGbk[] =
         "\xB0\xEF\xC5\xC9\xCF\xFB\xCF\xA2\xD4\xDD\xCE\xB4\xBF\xAA\xB7\xC5";
+    static const char worldStoreFailedGbk[] =
+        "\xCA\xC0\xBD\xE7\xCF\xFB\xCF\xA2\xB7\xA2\xCB\xCD\xCA\xA7\xB0\xDC";
     vm_net_mock_chat_request chat;
     vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
     vm_mock_service_client_session *privateTarget = NULL;
     vm_mock_service_team *team = NULL;
     const char *systemMessage = NULL;
-    u8 deliveryType = 0;
+    u8 deliveryType = VM_MOCK_CHAT_TYPE_INVALID;
     char sourceName[16];
     u32 pos = 5;
     u32 recipientCount = 0;
+    bool senderEcho = false;
 
     if (out == NULL || outCap < pos || source == NULL || source->onlineRoleId == 0 ||
         !vm_net_mock_parse_chat_request(request, requestLen, &chat))
@@ -35914,9 +36160,14 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
             systemMessage = guildUnavailableGbk;
     }
 
-    if (deliveryType == 0)
+    if (deliveryType == VM_MOCK_CHAT_TYPE_INVALID)
     {
         return 0;
+    }
+    if (systemMessage == NULL && deliveryType == VM_MOCK_CHAT_TYPE_WORLD &&
+        !vm_mock_world_chat_store(source, sourceName, chat.message))
+    {
+        systemMessage = worldStoreFailedGbk;
     }
     if (systemMessage != NULL)
     {
@@ -35928,13 +36179,28 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
         }
         vm_net_mock_finish_wt_packet(out, pos, 1);
     }
+    else if (deliveryType == VM_MOCK_CHAT_TYPE_WORLD)
+    {
+        /* World chat is the small-horn path. DispatchSceneTransition
+         * (0x01015FAC) sends 1/3/1 and consumes item 807, but unlike the
+         * ordinary local/team paths it does not make the submitted text
+         * visible in the world list. Return the authoritative 1/3/3 object in
+         * the same response so a lone online player also sees the message. */
+        if (!vm_net_mock_append_chat_message_object(out, outCap, &pos,
+                                                    deliveryType,
+                                                    source->onlineRoleId,
+                                                    sourceName,
+                                                    chat.message))
+        {
+            return 0;
+        }
+        senderEcho = true;
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+    }
     else
     {
-        /* DispatchSceneTransition(0x01015FAC) inserts the sender's successful
-         * message into the local UI before the request is sent.  A second
-         * 1/3/3 echo duplicates the row and can place it in a different
-         * channel.  The server only acknowledges success and delivers the
-         * message to the other recipients. */
+        /* Other successful channel sends are inserted by the client-side
+         * submission flow; only remote recipients need a server delivery. */
         vm_net_mock_finish_wt_packet(out, pos, 0);
     }
 
@@ -35983,13 +36249,15 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
         recipientCount = 1;
     }
 
-    printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s send_to=%u recipients=%u bytes=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",
+    printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s sender_echo=%u send_to=%u recipients=%u bytes=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",
            source->clientId,
            source->onlineRoleId,
            chat.requestSubtype,
            chat.requestType,
            vm_mock_service_chat_type_name(deliveryType),
-           systemMessage != NULL ? "system-error" : "empty",
+           systemMessage != NULL ? "system-error" :
+               (senderEcho ? "server-echo" : "empty"),
+           senderEcho ? 1u : 0u,
            chat.sendTo,
            recipientCount,
            (u32)strlen(chat.message),
@@ -42051,7 +42319,8 @@ static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
                                                         u32 outCap,
                                                         u32 *pos,
                                                         const char *scene,
-                                                        const char *reason)
+                                                        const char *reason,
+                                                        u8 maxObjects)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
@@ -42073,8 +42342,11 @@ static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
     {
         return 0;
     }
-    appended = vm_net_mock_append_scene_sync_chat_objects(out, outCap, pos,
-                                                          session);
+    /* The main business callback allocates exactly ten WT object slots.  When
+     * first-scene bootstrap has filled them, mark the session ready (which
+     * queues the welcome notice) but leave that notice for the next poll. */
+    appended = vm_net_mock_append_scene_sync_chat_objects_limited(
+        out, outCap, pos, session, maxObjects);
     if (appended > 0)
     {
         printf("[info][mock-service] scene_ready_messages client=%08x scene=%s objects=%d reason=%s delivery=same-scene-completion evidence=JianghuOL.CBE:0x01012FB4+0x010126C6\n",
@@ -42335,8 +42607,13 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
 
     if (startupSceneAlreadyEntered)
     {
+        u8 readyChatCapacity =
+            objectCount < VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX
+                ? (u8)(VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX - objectCount)
+                : 0;
         int readyChatObjects = vm_net_mock_append_scene_ready_chat_objects(
-            out, outCap, &pos, currentScene, "scene-resource-followup");
+            out, outCap, &pos, currentScene, "scene-resource-followup",
+            readyChatCapacity);
         if (readyChatObjects < 0)
             return 0;
         objectCount = (u8)(objectCount + readyChatObjects);
@@ -42613,8 +42890,13 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
 
     if (!completeDeferredScene)
     {
+        u8 readyChatCapacity =
+            objectCount < VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX
+                ? (u8)(VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX - objectCount)
+                : 0;
         int readyChatObjects = vm_net_mock_append_scene_ready_chat_objects(
-            out, outCap, &pos, currentScene, "scene-task-subset-followup");
+            out, outCap, &pos, currentScene, "scene-task-subset-followup",
+            readyChatCapacity);
         if (readyChatObjects < 0)
             return 0;
         objectCount = (u8)(objectCount + readyChatObjects);
@@ -44714,7 +44996,8 @@ static bool vm_net_mock_object_is_split_safe(const vm_net_mock_request_object *o
         return true;
     if (object->kind == 4 && object->subtype == 1)
         return true;
-    if (object->kind == 7 && (object->subtype == 7 || object->subtype == 18))
+    if (object->kind == 7 &&
+        (object->subtype == 1 || object->subtype == 7 || object->subtype == 18))
         return true;
     if (object->kind == 0x19 && object->subtype == 5)
         return true;
@@ -44783,9 +45066,11 @@ static bool vm_net_mock_append_response_objects(u8 *out, u32 outCap, u32 *pos, u
 static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 offset = 4;
+    u32 validationOffset = 4;
     u32 pos = 5;
     u8 objectCount = 0;
     u32 subCount = 0;
+    u32 validatedCount = 0;
     vm_net_mock_request_object object;
     u8 subRequest[512];
     u8 subResponse[8192];
@@ -44793,6 +45078,20 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
     if (g_netMockSplitProbe || request == NULL || requestLen < 9 || outCap < pos)
         return 0;
     if (request[0] != 'W' || request[1] != 'T')
+        return 0;
+
+    /* Validate the complete object set before invoking any state-changing
+     * single-object builder.  Small-horn world chat is emitted as
+     * 3/1 + 2/10 + 7/1 + 2/10; the previous one-pass splitter persisted the
+     * chat and then abandoned the packet when it reached 7/1. */
+    while (vm_net_mock_next_request_object(request, requestLen,
+                                           &validationOffset, &object))
+    {
+        if (!vm_net_mock_object_is_split_safe(&object))
+            return 0;
+        ++validatedCount;
+    }
+    if (validationOffset != requestLen || validatedCount < 2)
         return 0;
 
     while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
@@ -44814,7 +45113,7 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
         ++subCount;
     }
 
-    if (offset != requestLen || subCount < 2 || objectCount == 0)
+    if (offset != requestLen || subCount != validatedCount || objectCount == 0)
         return 0;
     if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
                                                            &objectCount,

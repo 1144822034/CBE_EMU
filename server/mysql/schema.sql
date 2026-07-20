@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS `server_data_migrations` (
   PRIMARY KEY (`migration_name`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `world_chat_messages` (
+  `message_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `source_role_id` INT UNSIGNED NOT NULL,
+  `source_name` VARBINARY(15) NOT NULL,
+  `message` VARBINARY(81) NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`message_id`),
+  KEY `idx_world_chat_source` (`source_account_id`, `source_role_id`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `friendships` (
   `owner_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `owner_role_id` INT UNSIGNED NOT NULL,
