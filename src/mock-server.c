@@ -8545,7 +8545,6 @@ static void vm_net_mock_copy_normalized_scene_name(const char *scene, char *out,
     if (scene == NULL || scene[0] == 0)
         return;
     snprintf(out, outCap, "%s", scene);
-    if (out[0] == 'c')
     {
         size_t len = strlen(out);
         if (len > 4 && strcmp(out + len - 4, ".sce") == 0)
@@ -16569,6 +16568,9 @@ enum
 typedef struct
 {
     u32 actorId;
+    /* Optional server-managed task binding.  SCE/XSE actors keep this zero
+     * and continue to discover their tasks from the script resource. */
+    u32 taskId;
     u16 x;
     u16 y;
     u16 kind;
@@ -17108,7 +17110,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 10 ||
+    if (context == NULL || columnCount != 11 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -17124,7 +17126,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             row.seed.displayName, sizeof(row.seed.displayName)) ||
         !vm_net_mock_dynamic_npc_decode_hex(values[8], lengths[8],
                                             row.seed.scriptName, sizeof(row.seed.scriptName)) ||
-        !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u)
+        !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
+        !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]))
     {
         if (context != NULL)
             ++context->skipped;
@@ -17137,6 +17140,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.kind = (u16)number[3];
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
+    row.seed.taskId = number[6];
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -17189,10 +17193,21 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_dynamic_npc_tasks ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "task_id INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
+            "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
+            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
         !vm_mysql_query(
             "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
-            "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled "
-            "FROM server_dynamic_npcs ORDER BY scene,actor_id",
+            "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
+            "COALESCE(server_dynamic_npc_tasks.task_id,0) "
+            "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
+            "USING(scene,actor_id) ORDER BY scene,actor_id",
             vm_net_mock_dynamic_npc_row, &context))
     {
         printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
@@ -17317,6 +17332,25 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = vm_mysql_last_error();
         return false;
     }
+    if (seed->taskId != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id) "
+                 "VALUES(X'%s',%u,%u) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)",
+                 sceneHex, seed->actorId, seed->taskId);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_dynamic_npc_tasks WHERE scene=X'%s' AND actor_id=%u",
+                 sceneHex, seed->actorId);
+    }
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
     memset(&row, 0, sizeof(row));
     snprintf(row.scene, sizeof(row.scene), "%s", scene);
     row.seed = *seed;
@@ -17327,9 +17361,10 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u pos=(%u,%u) actor_res=%s script=%s\n",
-           scene, seed->actorId, enabled ? 1u : 0u, seed->kind, seed->x, seed->y,
-           seed->actorResource, seed->scriptName[0] ? seed->scriptName : "-");
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u pos=(%u,%u) actor_res=%s script=%s\n",
+           scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
+           seed->taskId, seed->x, seed->y, seed->actorResource,
+           seed->scriptName[0] ? seed->scriptName : "-");
     return true;
 }
 
@@ -21798,7 +21833,7 @@ static bool vm_net_mock_is_npc_dialog_request(const u8 *request, u32 requestLen,
 
 enum
 {
-    VM_NET_MOCK_TASK_CATALOG_MAX = 160,
+    VM_NET_MOCK_TASK_CATALOG_MAX = 256,
     VM_NET_MOCK_XSE_TASK_REF_MAX = 8,
     VM_NET_MOCK_XSE_DIRECT_DIALOG_MAX = 16
 };
@@ -21806,6 +21841,9 @@ enum
 typedef struct
 {
     u32 taskId;
+    bool enabled;
+    bool builtin;
+    bool overridden;
     u8 level;
     u8 difficulty;
     u8 classification;
@@ -21824,10 +21862,16 @@ typedef struct
     u32 rewardItemCount;
     u8 rewardItemType;
     char name[32];
+    /* Preserve the task.dsh name as an XSE marker alias when the admin edits
+     * the player-facing title of a built-in task. */
+    char sourceName[32];
     char giver[16];
     char receiver[16];
     char goal[96];
     char rewardText[32];
+    char offerDialog[256];
+    char activeDialog[256];
+    char completedDialog[256];
 } vm_net_mock_task_definition;
 
 typedef struct
@@ -21898,6 +21942,173 @@ static u32 vm_net_mock_parse_decimal_slice(const u8 *data, u32 len)
         value = value * 10u + (u32)(data[i] - '0');
     }
     return sawDigit ? value : 0;
+}
+
+typedef struct
+{
+    u32 loaded;
+    u32 overridden;
+    u32 custom;
+    u32 skipped;
+} vm_net_mock_task_catalog_db_context;
+
+static int vm_net_mock_task_catalog_raw_index(u32 taskId)
+{
+    for (u32 i = 0; i < g_vm_net_mock_task_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_task_catalog[i].taskId == taskId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static bool vm_net_mock_task_definition_is_valid(
+    const vm_net_mock_task_definition *task)
+{
+    return task != NULL && task->taskId != 0 &&
+           task->taskId != VM_NET_MOCK_TEST_TASK_ID &&
+           task->name[0] != 0 && task->giver[0] != 0 &&
+           task->receiver[0] != 0 &&
+           strlen(task->name) < sizeof(task->name) &&
+           strlen(task->giver) < sizeof(task->giver) &&
+           strlen(task->receiver) < sizeof(task->receiver) &&
+           strlen(task->goal) < sizeof(task->goal) &&
+           strlen(task->rewardText) < sizeof(task->rewardText) &&
+           strlen(task->offerDialog) < sizeof(task->offerDialog) &&
+           strlen(task->activeDialog) < sizeof(task->activeDialog) &&
+           strlen(task->completedDialog) < sizeof(task->completedDialog) &&
+           task->requirementType1 <= 2 && task->requirementType2 <= 2 &&
+           task->prerequisiteTaskId != task->taskId;
+}
+
+static bool vm_net_mock_task_catalog_db_row(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_net_mock_task_catalog_db_context *context =
+        (vm_net_mock_task_catalog_db_context *)contextValue;
+    vm_net_mock_task_definition task;
+    u32 number[19];
+    int existing = -1;
+
+    memset(&task, 0, sizeof(task));
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 27)
+        return false;
+    for (u32 i = 0; i < 19; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            ++context->skipped;
+            return true;
+        }
+    }
+    if (number[0] == 0 || number[0] == VM_NET_MOCK_TEST_TASK_ID ||
+        number[1] > 1 || number[2] > 0xffu || number[3] > 0xffu ||
+        number[4] > 0xffu || number[5] > 2 || number[6] > 0xffu ||
+        number[8] > 2 || number[9] > 0xffu || number[18] > 0xffu)
+    {
+        ++context->skipped;
+        return true;
+    }
+
+    existing = vm_net_mock_task_catalog_raw_index(number[0]);
+    if (existing >= 0)
+        task = g_vm_net_mock_task_catalog[existing];
+    else if (g_vm_net_mock_task_catalog_count >= VM_NET_MOCK_TASK_CATALOG_MAX)
+    {
+        ++context->skipped;
+        return true;
+    }
+    task.taskId = number[0];
+    task.enabled = number[1] != 0;
+    task.level = (u8)number[2];
+    task.difficulty = (u8)number[3];
+    task.classification = (u8)number[4];
+    task.requirementType1 = (u8)number[5];
+    task.requirementCount1 = (u8)number[6];
+    task.requirementId1 = number[7];
+    task.requirementType2 = (u8)number[8];
+    task.requirementCount2 = (u8)number[9];
+    task.requirementId2 = number[10];
+    task.prerequisiteTaskId = number[11];
+    task.givenItemId = number[12];
+    task.givenItemCount = number[13];
+    task.rewardExp = number[14];
+    task.rewardMoney = number[15];
+    task.rewardItemId = number[16];
+    task.rewardItemCount = number[17];
+    task.rewardItemType = (u8)number[18];
+    if (!vm_net_mock_dynamic_npc_decode_hex(values[19], lengths[19],
+                                             task.name, sizeof(task.name)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[20], lengths[20],
+                                             task.giver, sizeof(task.giver)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[21], lengths[21],
+                                             task.receiver, sizeof(task.receiver)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[22], lengths[22],
+                                             task.goal, sizeof(task.goal)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[23], lengths[23],
+                                             task.rewardText, sizeof(task.rewardText)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[24], lengths[24],
+                                             task.offerDialog, sizeof(task.offerDialog)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[25], lengths[25],
+                                             task.activeDialog, sizeof(task.activeDialog)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[26], lengths[26],
+                                             task.completedDialog, sizeof(task.completedDialog)) ||
+        !vm_net_mock_task_definition_is_valid(&task))
+    {
+        ++context->skipped;
+        return true;
+    }
+    task.builtin = existing >= 0 && g_vm_net_mock_task_catalog[existing].builtin;
+    task.overridden = true;
+    if (existing >= 0)
+    {
+        g_vm_net_mock_task_catalog[existing] = task;
+        ++context->overridden;
+    }
+    else
+    {
+        g_vm_net_mock_task_catalog[g_vm_net_mock_task_catalog_count++] = task;
+        ++context->custom;
+    }
+    ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_task_catalog_apply_db(void)
+{
+    vm_net_mock_task_catalog_db_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_tasks ("
+            "task_id INT UNSIGNED NOT NULL,enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "level TINYINT UNSIGNED NOT NULL DEFAULT 1,difficulty TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "classification TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "requirement_type1 TINYINT UNSIGNED NOT NULL DEFAULT 0,requirement_count1 TINYINT UNSIGNED NOT NULL DEFAULT 0,requirement_id1 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "requirement_type2 TINYINT UNSIGNED NOT NULL DEFAULT 0,requirement_count2 TINYINT UNSIGNED NOT NULL DEFAULT 0,requirement_id2 INT UNSIGNED NOT NULL DEFAULT 0,"
+            "prerequisite_task_id INT UNSIGNED NOT NULL DEFAULT 0,given_item_id INT UNSIGNED NOT NULL DEFAULT 0,given_item_count INT UNSIGNED NOT NULL DEFAULT 0,"
+            "reward_exp INT UNSIGNED NOT NULL DEFAULT 0,reward_money INT UNSIGNED NOT NULL DEFAULT 0,reward_item_id INT UNSIGNED NOT NULL DEFAULT 0,reward_item_count INT UNSIGNED NOT NULL DEFAULT 0,reward_item_type TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "name VARBINARY(31) NOT NULL,giver VARBINARY(15) NOT NULL,receiver VARBINARY(15) NOT NULL,goal VARBINARY(95) NOT NULL DEFAULT '',reward_text VARBINARY(31) NOT NULL DEFAULT '',"
+            "offer_dialog VARBINARY(255) NOT NULL DEFAULT '',active_dialog VARBINARY(255) NOT NULL DEFAULT '',completed_dialog VARBINARY(255) NOT NULL DEFAULT '',"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(task_id),KEY idx_server_tasks_enabled(enabled,task_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT task_id,enabled,level,difficulty,classification,"
+            "requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,"
+            "prerequisite_task_id,given_item_id,given_item_count,reward_exp,reward_money,reward_item_id,reward_item_count,reward_item_type,"
+            "HEX(name),HEX(giver),HEX(receiver),HEX(goal),HEX(reward_text),HEX(offer_dialog),HEX(active_dialog),HEX(completed_dialog) "
+            "FROM server_tasks ORDER BY task_id",
+            vm_net_mock_task_catalog_db_row, &context))
+    {
+        printf("[error][mock-admin] task_catalog_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][mock-admin] task_catalog_db_load rows=%u overridden=%u custom=%u skipped=%u\n",
+           context.loaded, context.overridden, context.custom, context.skipped);
+    return true;
 }
 
 static bool vm_net_mock_load_task_catalog(void)
@@ -21999,7 +22210,11 @@ static bool vm_net_mock_load_task_catalog(void)
         task.requirementId2 = vm_net_mock_parse_decimal_slice(values[21], valueLens[21]);
         task.requirementCount2 = (u8)vm_net_mock_parse_decimal_slice(values[23], valueLens[23]);
         task.prerequisiteTaskId = vm_net_mock_parse_decimal_slice(values[24], valueLens[24]);
+        task.enabled = true;
+        task.builtin = true;
+        task.overridden = false;
         vm_net_mock_copy_bounded_field(task.name, sizeof(task.name), values[1], valueLens[1]);
+        snprintf(task.sourceName, sizeof(task.sourceName), "%s", task.name);
         vm_net_mock_copy_bounded_field(task.giver, sizeof(task.giver), values[5], valueLens[5]);
         vm_net_mock_copy_bounded_field(task.receiver, sizeof(task.receiver), values[6], valueLens[6]);
         vm_net_mock_copy_bounded_field(task.goal, sizeof(task.goal), values[7], valueLens[7]);
@@ -22010,7 +22225,9 @@ static bool vm_net_mock_load_task_catalog(void)
             g_vm_net_mock_task_catalog[g_vm_net_mock_task_catalog_count++] = task;
         }
     }
-    printf("[info][network] mock_task_catalog source=task.dsh rows=%u declared_rows=%u path=%s\n",
+    if (!vm_net_mock_task_catalog_apply_db())
+        return false;
+    printf("[info][network] mock_task_catalog source=task.dsh+mysql rows=%u declared_rows=%u path=%s\n",
            g_vm_net_mock_task_catalog_count, rowCount, path);
     return g_vm_net_mock_task_catalog_count != 0;
 }
@@ -22021,7 +22238,8 @@ static const vm_net_mock_task_definition *vm_net_mock_task_catalog_find_by_id(u3
         return NULL;
     for (u32 i = 0; i < g_vm_net_mock_task_catalog_count; ++i)
     {
-        if (g_vm_net_mock_task_catalog[i].taskId == taskId)
+        if (g_vm_net_mock_task_catalog[i].taskId == taskId &&
+            g_vm_net_mock_task_catalog[i].enabled)
             return &g_vm_net_mock_task_catalog[i];
     }
     return NULL;
@@ -22080,13 +22298,224 @@ static const vm_net_mock_task_definition *vm_net_mock_task_catalog_find_by_name(
     for (u32 i = 0; i < g_vm_net_mock_task_catalog_count; ++i)
     {
         char normalizedCatalogName[64];
+        if (!g_vm_net_mock_task_catalog[i].enabled)
+            continue;
         vm_net_mock_normalize_task_name(g_vm_net_mock_task_catalog[i].name,
                                         normalizedCatalogName,
                                         sizeof(normalizedCatalogName));
         if (strcmp(normalizedName, normalizedCatalogName) == 0)
             return &g_vm_net_mock_task_catalog[i];
+        if (g_vm_net_mock_task_catalog[i].sourceName[0] != 0)
+        {
+            vm_net_mock_normalize_task_name(
+                g_vm_net_mock_task_catalog[i].sourceName,
+                normalizedCatalogName, sizeof(normalizedCatalogName));
+            if (strcmp(normalizedName, normalizedCatalogName) == 0)
+                return &g_vm_net_mock_task_catalog[i];
+        }
     }
     return NULL;
+}
+
+static const vm_net_mock_task_definition *vm_net_mock_task_admin_find(u32 taskId)
+{
+    int index = -1;
+    if (!vm_net_mock_load_task_catalog())
+        return NULL;
+    index = vm_net_mock_task_catalog_raw_index(taskId);
+    return index >= 0 ? &g_vm_net_mock_task_catalog[index] : NULL;
+}
+
+static u32 vm_net_mock_task_admin_list(vm_net_mock_task_definition *rows,
+                                       u32 rowCap)
+{
+    u32 count = 0;
+    if (!vm_net_mock_load_task_catalog())
+        return 0;
+    count = g_vm_net_mock_task_catalog_count;
+    if (count > rowCap)
+        count = rowCap;
+    if (rows != NULL && count != 0)
+        memcpy(rows, g_vm_net_mock_task_catalog, count * sizeof(*rows));
+    return count;
+}
+
+static bool vm_net_mock_task_active_state_count(u32 taskId, u32 *countOut)
+{
+    char query[256];
+    vm_mock_mysql_guild_u32_context context;
+
+    if (countOut)
+        *countOut = 0;
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM account_role_tasks WHERE task_id=%u AND task_state IN (1,2)",
+             taskId);
+    if (!vm_mysql_query(query, vm_mock_mysql_guild_u32_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (countOut)
+        *countOut = context.value;
+    return true;
+}
+
+static bool vm_net_mock_task_catalog_reload(void)
+{
+    g_vm_net_mock_task_catalog_attempted = false;
+    g_vm_net_mock_task_catalog_count = 0;
+    memset(g_vm_net_mock_task_catalog, 0, sizeof(g_vm_net_mock_task_catalog));
+    return vm_net_mock_load_task_catalog();
+}
+
+static bool vm_net_mock_task_admin_save(
+    const vm_net_mock_task_definition *task, const char **errorOut)
+{
+    char nameHex[sizeof(task->name) * 2 + 1];
+    char giverHex[sizeof(task->giver) * 2 + 1];
+    char receiverHex[sizeof(task->receiver) * 2 + 1];
+    char goalHex[sizeof(task->goal) * 2 + 1];
+    char rewardTextHex[sizeof(task->rewardText) * 2 + 1];
+    char offerHex[sizeof(task->offerDialog) * 2 + 1];
+    char activeHex[sizeof(task->activeDialog) * 2 + 1];
+    char completedHex[sizeof(task->completedDialog) * 2 + 1];
+    char query[8192];
+    u32 activeCount = 0;
+
+    if (errorOut)
+        *errorOut = "invalid task definition";
+    if (!vm_net_mock_load_task_catalog() ||
+        !vm_net_mock_task_definition_is_valid(task))
+    {
+        return false;
+    }
+    if (!task->enabled &&
+        (!vm_net_mock_task_active_state_count(task->taskId, &activeCount) ||
+         activeCount != 0))
+    {
+        if (errorOut)
+            *errorOut = activeCount != 0
+                            ? "the task still has active player states"
+                            : vm_mysql_last_error();
+        return false;
+    }
+    memset(nameHex, 0, sizeof(nameHex));
+    memset(giverHex, 0, sizeof(giverHex));
+    memset(receiverHex, 0, sizeof(receiverHex));
+    memset(goalHex, 0, sizeof(goalHex));
+    memset(rewardTextHex, 0, sizeof(rewardTextHex));
+    memset(offerHex, 0, sizeof(offerHex));
+    memset(activeHex, 0, sizeof(activeHex));
+    memset(completedHex, 0, sizeof(completedHex));
+#define VM_TASK_ENCODE_TEXT(field, output)                                      \
+    do                                                                          \
+    {                                                                           \
+        if ((field)[0] != 0 &&                                                  \
+            vm_mysql_hex_encode((field), strlen(field), (output),               \
+                                sizeof(output)) == 0)                            \
+        {                                                                       \
+            if (errorOut)                                                       \
+                *errorOut = "task text encoding failed";                       \
+            return false;                                                       \
+        }                                                                       \
+    } while (0)
+    VM_TASK_ENCODE_TEXT(task->name, nameHex);
+    VM_TASK_ENCODE_TEXT(task->giver, giverHex);
+    VM_TASK_ENCODE_TEXT(task->receiver, receiverHex);
+    VM_TASK_ENCODE_TEXT(task->goal, goalHex);
+    VM_TASK_ENCODE_TEXT(task->rewardText, rewardTextHex);
+    VM_TASK_ENCODE_TEXT(task->offerDialog, offerHex);
+    VM_TASK_ENCODE_TEXT(task->activeDialog, activeHex);
+    VM_TASK_ENCODE_TEXT(task->completedDialog, completedHex);
+#undef VM_TASK_ENCODE_TEXT
+    snprintf(
+        query, sizeof(query),
+        "INSERT INTO server_tasks(task_id,enabled,level,difficulty,classification,"
+        "requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,"
+        "prerequisite_task_id,given_item_id,given_item_count,reward_exp,reward_money,reward_item_id,reward_item_count,reward_item_type,"
+        "name,giver,receiver,goal,reward_text,offer_dialog,active_dialog,completed_dialog) "
+        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+        "X'%s',X'%s',X'%s',X'%s',X'%s',X'%s',X'%s',X'%s') "
+        "ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),level=VALUES(level),difficulty=VALUES(difficulty),classification=VALUES(classification),"
+        "requirement_type1=VALUES(requirement_type1),requirement_count1=VALUES(requirement_count1),requirement_id1=VALUES(requirement_id1),"
+        "requirement_type2=VALUES(requirement_type2),requirement_count2=VALUES(requirement_count2),requirement_id2=VALUES(requirement_id2),"
+        "prerequisite_task_id=VALUES(prerequisite_task_id),given_item_id=VALUES(given_item_id),given_item_count=VALUES(given_item_count),"
+        "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),reward_item_id=VALUES(reward_item_id),reward_item_count=VALUES(reward_item_count),reward_item_type=VALUES(reward_item_type),"
+        "name=VALUES(name),giver=VALUES(giver),receiver=VALUES(receiver),goal=VALUES(goal),reward_text=VALUES(reward_text),"
+        "offer_dialog=VALUES(offer_dialog),active_dialog=VALUES(active_dialog),completed_dialog=VALUES(completed_dialog)",
+        task->taskId, task->enabled ? 1u : 0u, task->level,
+        task->difficulty, task->classification,
+        task->requirementType1, task->requirementCount1, task->requirementId1,
+        task->requirementType2, task->requirementCount2, task->requirementId2,
+        task->prerequisiteTaskId, task->givenItemId, task->givenItemCount,
+        task->rewardExp, task->rewardMoney, task->rewardItemId,
+        task->rewardItemCount, task->rewardItemType,
+        nameHex, giverHex, receiverHex, goalHex, rewardTextHex,
+        offerHex, activeHex, completedHex);
+    if (!vm_mysql_exec(query) || !vm_net_mock_task_catalog_reload())
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] task_save task=%u enabled=%u builtin=%u name=%s\n",
+           task->taskId, task->enabled ? 1u : 0u,
+           task->builtin ? 1u : 0u, task->name);
+    return true;
+}
+
+static bool vm_net_mock_task_admin_delete_override(u32 taskId,
+                                                    const char **errorOut)
+{
+    const vm_net_mock_task_definition *task = vm_net_mock_task_admin_find(taskId);
+    char query[256];
+    u32 activeCount = 0;
+    u32 bindingCount = 0;
+    vm_mock_mysql_guild_u32_context countContext;
+
+    if (errorOut)
+        *errorOut = "task override not found";
+    if (task == NULL || !task->overridden)
+        return false;
+    if (!vm_net_mock_task_active_state_count(taskId, &activeCount) ||
+        activeCount != 0)
+    {
+        if (errorOut)
+            *errorOut = activeCount != 0
+                            ? "the task still has active player states"
+                            : vm_mysql_last_error();
+        return false;
+    }
+    memset(&countContext, 0, sizeof(countContext));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM server_dynamic_npc_tasks WHERE task_id=%u",
+             taskId);
+    if (!task->builtin &&
+        (!vm_mysql_query(query, vm_mock_mysql_guild_u32_row, &countContext) ||
+         countContext.invalid || !countContext.found ||
+         (bindingCount = countContext.value) != 0))
+    {
+        if (errorOut)
+            *errorOut = bindingCount != 0
+                            ? "the task is still bound to a dynamic npc"
+                            : vm_mysql_last_error();
+        return false;
+    }
+    snprintf(query, sizeof(query), "DELETE FROM server_tasks WHERE task_id=%u",
+             taskId);
+    if (!vm_mysql_exec(query) || !vm_net_mock_task_catalog_reload())
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] task_override_delete task=%u\n", taskId);
+    return true;
 }
 
 static bool vm_net_mock_xse_ascii_identifier(const u8 *data, u32 len, u32 *pos,
@@ -22817,6 +23246,24 @@ static u32 vm_net_mock_scene_npc_seed_priority(
 
     if (seed == NULL)
         return 0;
+    if (seed->taskId != 0)
+    {
+        const vm_net_mock_task_state_list_row *persisted =
+            vm_net_mock_task_state_list_find(states, stateCount, seed->taskId);
+        const vm_net_mock_task_definition *task =
+            vm_net_mock_task_catalog_find_by_id(seed->taskId);
+
+        priority = 20;
+        if (persisted != NULL && persisted->state == 2)
+            return 500;
+        if (persisted != NULL && persisted->state == 1)
+            return 400;
+        if (persisted == NULL &&
+            vm_net_mock_task_definition_available(task, role, states, stateCount))
+        {
+            return 300;
+        }
+    }
     if (seed->scriptName[0] == 0)
         return priority;
     priority = 10;
@@ -23516,7 +23963,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
 
-    if (matchedSeed != NULL && activeRole != NULL && xseSummary.loaded)
+    if (matchedSeed != NULL && activeRole != NULL && xseSummary.loaded &&
+        matchedSeed->taskId == 0)
     {
         for (u32 refIndex = 0; refIndex < xseSummary.taskRefCount; ++refIndex)
         {
@@ -23586,6 +24034,72 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             dialogText = xseSummary.completedDialog;
         else if (hasOffer && xseSummary.offerDialog[0] != 0)
             dialogText = xseSummary.offerDialog;
+    }
+
+    if (matchedSeed != NULL && matchedSeed->taskId != 0 && activeRole != NULL)
+    {
+        const vm_net_mock_task_definition *task =
+            vm_net_mock_task_catalog_find_by_id(matchedSeed->taskId);
+        const vm_net_mock_task_state_list_row *persisted =
+            vm_net_mock_task_state_list_find(allTaskStates,
+                                             allTaskStateCount,
+                                             matchedSeed->taskId);
+        u8 state = persisted ? persisted->state : 0;
+        u8 progress1 = persisted ? persisted->progress1 : 0;
+        u8 progress2 = persisted ? persisted->progress2 : 0;
+        bool duplicate = false;
+
+        for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
+        {
+            if (optionTasks[optionIndex] != NULL &&
+                optionTasks[optionIndex]->taskId == matchedSeed->taskId)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (task != NULL && state == 1 &&
+            progress1 >= task->requirementCount1 &&
+            progress2 >= task->requirementCount2 &&
+            vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
+        {
+            state = 2;
+            if (completedTaskCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+                completedTaskIds[completedTaskCount++] = task->taskId;
+        }
+        if (task != NULL && !duplicate && optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+        {
+            if (state == 0 &&
+                vm_net_mock_task_definition_available(task, activeRole,
+                                                      allTaskStates,
+                                                      allTaskStateCount))
+            {
+                optionTasks[optionCount] = task;
+                optionSubmits[optionCount] = false;
+                optionCount += 1;
+            }
+            else if (state == 2)
+            {
+                optionTasks[optionCount] = task;
+                optionSubmits[optionCount] = true;
+                optionCount += 1;
+            }
+        }
+        if (task != NULL)
+        {
+            if (state == 0)
+                dialogText = task->offerDialog[0] != 0
+                                 ? task->offerDialog
+                                 : "\xce\xd2\xd5\xe2\xc0\xef\xd3\xd0\xd2\xbb\xcf\xee\xc8\xce\xce\xf1\xa3\xac\xc4\xe3\xd4\xb8\xd2\xe2\xb0\xef\xc3\xa6\xc2\xf0\xa3\xbf";
+            else if (state == 1)
+                dialogText = task->activeDialog[0] != 0
+                                 ? task->activeDialog
+                                 : "\xc8\xce\xce\xf1\xbb\xb9\xd4\xda\xbd\xf8\xd0\xd0\xd6\xd0\xa3\xac\xc7\xeb\xcd\xea\xb3\xc9\xc4\xbf\xb1\xea\xba\xf3\xd4\xd9\xc0\xb4\xa1\xa3";
+            else
+                dialogText = task->completedDialog[0] != 0
+                                 ? task->completedDialog
+                                 : "\xc8\xce\xce\xf1\xd2\xd1\xbe\xad\xcd\xea\xb3\xc9\xa3\xac\xbf\xc9\xd2\xd4\xcc\xe1\xbd\xbb\xc1\xcb\xa1\xa3";
+        }
     }
 
     if (matchedSeed != NULL)
@@ -31925,6 +32439,36 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
          ++seedIndex)
     {
         vm_net_mock_xse_summary summary;
+
+        if (seeds[seedIndex].taskId != 0)
+        {
+            const vm_net_mock_task_definition *boundTask =
+                vm_net_mock_task_catalog_find_by_id(seeds[seedIndex].taskId);
+            bool duplicate = false;
+
+            for (u32 existing = 0; existing < taskNum; ++existing)
+            {
+                if (candidateTaskIds[existing] == seeds[seedIndex].taskId)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate &&
+                vm_net_mock_task_definition_available(boundTask, activeRole,
+                                                       states, stateCount))
+            {
+                if (!vm_net_mock_append_catalog_task_candidate_record(
+                        taskInfo, sizeof(taskInfo), &taskInfoLen,
+                        boundTask, seeds[seedIndex].displayName))
+                {
+                    return false;
+                }
+                candidateTaskIds[taskNum++] = boundTask->taskId;
+                if (taskNum >= 10)
+                    break;
+            }
+        }
 
         memset(&summary, 0, sizeof(summary));
         if (seeds[seedIndex].scriptName[0] == 0 ||

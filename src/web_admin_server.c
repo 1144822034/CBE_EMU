@@ -16,8 +16,15 @@ enum
 {
     VM_MOCK_ADMIN_REQUEST_MAX = 8192,
     VM_MOCK_ADMIN_RESPONSE_MAX = 524288,
-    VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 100
+    VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 100,
+    VM_MOCK_USER_SESSION_MAX = 64
 };
+
+#define VM_MOCK_ADMIN_BASE_PATH "/admin-418yz6"
+#define VM_MOCK_ADMIN_ROOT_PATH VM_MOCK_ADMIN_BASE_PATH "/"
+#define VM_MOCK_ADMIN_LOGIN_PATH VM_MOCK_ADMIN_BASE_PATH "/login"
+#define VM_MOCK_ADMIN_LOGOUT_PATH VM_MOCK_ADMIN_BASE_PATH "/logout"
+#define VM_MOCK_ADMIN_ACTION_PATH VM_MOCK_ADMIN_BASE_PATH "/action"
 
 typedef struct
 {
@@ -398,6 +405,26 @@ typedef struct
 
 static char g_vm_mock_admin_session_token[40];
 
+typedef struct
+{
+    bool active;
+    char token[40];
+    char accountId[64];
+    u32 lastUsedTick;
+} vm_mock_user_session;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    char password[65];
+    u32 failedAttempts;
+    bool locked;
+} vm_mock_admin_login_config;
+
+static vm_mock_user_session g_vm_mock_user_sessions[VM_MOCK_USER_SESSION_MAX];
+static u32 g_vm_mock_user_session_serial = 0;
+
 static const char g_vm_mock_admin_script[] =
     "(()=>{"
     "const keep=(selector,key)=>{"
@@ -483,6 +510,328 @@ static bool vm_mock_admin_request_is_authenticated(const char *request,
         }
         cursor = value + valueLen;
     }
+    return false;
+}
+
+static bool vm_mock_admin_login_config_row(void *contextValue,
+                                           unsigned int columnCount,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_mock_admin_login_config *config =
+        (vm_mock_admin_login_config *)contextValue;
+    size_t passwordLen = 0;
+
+    if (config == NULL || config->found || columnCount != 3 ||
+        values[0] == NULL || values[1] == NULL || values[2] == NULL ||
+        !vm_mysql_hex_decode(values[0], lengths[0], config->password,
+                             sizeof(config->password) - 1, &passwordLen) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1],
+                                 &config->failedAttempts))
+    {
+        if (config != NULL)
+            config->invalid = true;
+        return true;
+    }
+    u32 locked = 0;
+    if (!vm_mock_mysql_parse_u32(values[2], lengths[2], &locked) || locked > 1)
+    {
+        config->invalid = true;
+        return true;
+    }
+    config->password[passwordLen] = 0;
+    config->locked = locked != 0;
+    config->found = true;
+    return true;
+}
+
+static bool vm_mock_admin_load_login_config(vm_mock_admin_login_config *config)
+{
+    if (config == NULL)
+        return false;
+    memset(config, 0, sizeof(*config));
+    if (!vm_mysql_query(
+            "SELECT HEX(password_value),failed_attempts,locked "
+            "FROM server_admin_config WHERE config_id=1",
+            vm_mock_admin_login_config_row, config) ||
+        config->invalid || !config->found || config->password[0] == 0)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_verify_login_password(const char *password,
+                                                const char **messageOut)
+{
+    vm_mock_admin_login_config config;
+    bool matches = false;
+
+    if (messageOut)
+        *messageOut = "后台登录配置不可用，请检查 MySQL";
+    if (!vm_mock_admin_load_login_config(&config))
+    {
+        printf("[error][admin] login_config_load_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    if (config.locked)
+    {
+        if (messageOut)
+            *messageOut = "后台已锁定，请先在 MySQL 中解锁";
+        printf("[warn][admin] login_rejected reason=locked failed_attempts=%u\n",
+               config.failedAttempts);
+        return false;
+    }
+    matches = password != NULL && strcmp(config.password, password) == 0;
+    memset(config.password, 0, sizeof(config.password));
+    if (matches)
+    {
+        if (!vm_mysql_exec(
+                "UPDATE server_admin_config SET failed_attempts=0 "
+                "WHERE config_id=1 AND locked=0"))
+        {
+            if (messageOut)
+                *messageOut = "后台登录状态无法保存，请检查 MySQL";
+            printf("[error][admin] login_reset_failed error=%s\n",
+                   vm_mysql_last_error());
+            return false;
+        }
+        if (messageOut)
+            *messageOut = "ok";
+        printf("[info][admin] login_success failed_attempts_reset=1\n");
+        return true;
+    }
+    if (!vm_mysql_exec(
+            "UPDATE server_admin_config "
+            "SET locked=IF(failed_attempts+1>=5,1,locked),"
+            "failed_attempts=LEAST(failed_attempts+1,5) "
+            "WHERE config_id=1 AND locked=0"))
+    {
+        if (messageOut)
+            *messageOut = "后台登录状态无法保存，请检查 MySQL";
+        printf("[error][admin] login_failure_store_failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    if (!vm_mock_admin_load_login_config(&config))
+    {
+        if (messageOut)
+            *messageOut = "后台登录配置不可用，请检查 MySQL";
+        return false;
+    }
+    if (messageOut)
+        *messageOut = config.locked ?
+            "密码连续错误 5 次，后台已锁定" : "管理密码错误";
+    printf("[warn][admin] login_failure failed_attempts=%u locked=%u\n",
+           config.failedAttempts, config.locked ? 1u : 0u);
+    memset(config.password, 0, sizeof(config.password));
+    return false;
+}
+
+static bool vm_mock_web_cookie_value(const char *request, size_t headerLen,
+                                     const char *name, char *out,
+                                     size_t outCap)
+{
+    char cookie[1024];
+    char key[96];
+    const char *cursor = NULL;
+
+    if (out == NULL || outCap == 0 || name == NULL || name[0] == 0)
+        return false;
+    out[0] = 0;
+    snprintf(key, sizeof(key), "%s=", name);
+    if (!vm_mock_admin_header_value(request, headerLen, "Cookie",
+                                    cookie, sizeof(cookie)))
+        return false;
+    cursor = cookie;
+    while ((cursor = strstr(cursor, key)) != NULL)
+    {
+        const char *value = cursor + strlen(key);
+        size_t valueLen = strcspn(value, "; ");
+        if (valueLen > 0 && valueLen < outCap)
+        {
+            memcpy(out, value, valueLen);
+            out[valueLen] = 0;
+            return true;
+        }
+        cursor = value + valueLen;
+    }
+    return false;
+}
+
+static void vm_mock_user_make_session_token(const char *accountId,
+                                            char *out, size_t outCap)
+{
+    u32 value = (u32)time(NULL) ^ (u32)getpid() ^ scheduler_get_tick_ms() ^
+                ++g_vm_mock_user_session_serial ^
+                (u32)(uintptr_t)&g_vm_mock_user_sessions;
+    u32 words[4];
+
+    for (const unsigned char *p = (const unsigned char *)(accountId ? accountId : "");
+         *p != 0; ++p)
+        value = (value ^ *p) * 16777619u;
+    if (value == 0)
+        value = 0xbb67ae85u;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        value += 0x9e3779b9u + i * 0x85ebca6bu;
+        words[i] = value;
+    }
+    snprintf(out, outCap, "%08x%08x%08x%08x",
+             words[0], words[1], words[2], words[3]);
+}
+
+static vm_mock_user_session *vm_mock_user_request_session(const char *request,
+                                                          size_t headerLen)
+{
+    char token[40];
+
+    memset(token, 0, sizeof(token));
+    if (!vm_mock_web_cookie_value(request, headerLen, "cbe_user",
+                                  token, sizeof(token)))
+        return NULL;
+    for (u32 i = 0; i < VM_MOCK_USER_SESSION_MAX; ++i)
+    {
+        vm_mock_user_session *session = &g_vm_mock_user_sessions[i];
+        if (session->active && strcmp(session->token, token) == 0)
+        {
+            if (vm_mock_service_account_find_record(session->accountId) == NULL)
+            {
+                memset(session, 0, sizeof(*session));
+                return NULL;
+            }
+            session->lastUsedTick = scheduler_get_tick_ms();
+            return session;
+        }
+    }
+    return NULL;
+}
+
+static vm_mock_user_session *vm_mock_user_issue_session(const char *accountId)
+{
+    vm_mock_user_session *selected = NULL;
+
+    for (u32 i = 0; i < VM_MOCK_USER_SESSION_MAX; ++i)
+    {
+        if (!g_vm_mock_user_sessions[i].active)
+        {
+            selected = &g_vm_mock_user_sessions[i];
+            break;
+        }
+        if (selected == NULL ||
+            g_vm_mock_user_sessions[i].lastUsedTick < selected->lastUsedTick)
+            selected = &g_vm_mock_user_sessions[i];
+    }
+    if (selected == NULL)
+        return NULL;
+    memset(selected, 0, sizeof(*selected));
+    selected->active = true;
+    snprintf(selected->accountId, sizeof(selected->accountId), "%s", accountId);
+    vm_mock_user_make_session_token(accountId, selected->token,
+                                    sizeof(selected->token));
+    selected->lastUsedTick = scheduler_get_tick_ms();
+    return selected;
+}
+
+static void vm_mock_user_clear_request_session(const char *request,
+                                               size_t headerLen)
+{
+    vm_mock_user_session *session =
+        vm_mock_user_request_session(request, headerLen);
+    if (session != NULL)
+        memset(session, 0, sizeof(*session));
+}
+
+static bool vm_mock_user_valid_registration(const char *account,
+                                            const char *password,
+                                            const char **messageOut)
+{
+    size_t accountLen = account ? strlen(account) : 0;
+    size_t passwordLen = password ? strlen(password) : 0;
+
+    if (accountLen < 4 || accountLen > 32)
+    {
+        if (messageOut)
+            *messageOut = "账号名长度须为 4 至 32 个字符";
+        return false;
+    }
+    for (size_t i = 0; i < accountLen; ++i)
+    {
+        unsigned char ch = (unsigned char)account[i];
+        if (!((ch >= 'a' && ch <= 'z') ||
+              (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_'))
+        {
+            if (messageOut)
+                *messageOut = "账号名只能包含字母、数字和下划线";
+            return false;
+        }
+    }
+    if (passwordLen < 6 || passwordLen > 63)
+    {
+        if (messageOut)
+            *messageOut = "密码长度须为 6 至 63 个字符";
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_prefix_page_routes(char *html, size_t htmlCap)
+{
+    static const char *needles[] = { "href=\"/", "action=\"/", "src=\"/" };
+    static const char *replacements[] = {
+        "href=\"" VM_MOCK_ADMIN_ROOT_PATH,
+        "action=\"" VM_MOCK_ADMIN_ROOT_PATH,
+        "src=\"" VM_MOCK_ADMIN_ROOT_PATH
+    };
+    char *rewritten = NULL;
+    size_t sourceLen = 0;
+    size_t sourcePos = 0;
+    size_t targetPos = 0;
+
+    if (html == NULL || htmlCap == 0)
+        return false;
+    sourceLen = strlen(html);
+    rewritten = (char *)malloc(htmlCap);
+    if (rewritten == NULL)
+        return false;
+    while (sourcePos < sourceLen)
+    {
+        bool replaced = false;
+        for (u32 i = 0; i < sizeof(needles) / sizeof(needles[0]); ++i)
+        {
+            size_t needleLen = strlen(needles[i]);
+            size_t replacementLen = strlen(replacements[i]);
+            if (sourcePos + needleLen <= sourceLen &&
+                memcmp(html + sourcePos, needles[i], needleLen) == 0)
+            {
+                if (targetPos + replacementLen >= htmlCap)
+                    goto fail;
+                memcpy(rewritten + targetPos, replacements[i], replacementLen);
+                targetPos += replacementLen;
+                sourcePos += needleLen;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced)
+        {
+            if (targetPos + 1 >= htmlCap)
+                goto fail;
+            rewritten[targetPos++] = html[sourcePos++];
+        }
+    }
+    rewritten[targetPos] = 0;
+    memcpy(html, rewritten, targetPos + 1);
+    free(rewritten);
+    return true;
+
+fail:
+    free(rewritten);
     return false;
 }
 
@@ -1174,6 +1523,38 @@ static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
             page, "<option value=\"%u\"%s>%u · %s</option>",
             kind, currentKind == kind ? " selected" : "", kind,
             labels[kind]);
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
+                                                 u32 currentTaskId)
+{
+    vm_net_mock_task_definition tasks[VM_NET_MOCK_TASK_CATALOG_MAX];
+    u32 taskCount = 0;
+
+    if (page == NULL)
+        return;
+    memset(tasks, 0, sizeof(tasks));
+    taskCount = vm_net_mock_task_admin_list(
+        tasks, VM_NET_MOCK_TASK_CATALOG_MAX);
+    vm_mock_admin_text_appendf(
+        page, "<select name=\"task_id\"><option value=\"0\"%s>不绑定任务</option>",
+        currentTaskId == 0 ? " selected" : "");
+    for (u32 i = 0; i < taskCount; ++i)
+    {
+        char nameUtf8[128];
+        if (!tasks[i].enabled)
+            continue;
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        vm_net_mock_gbk_label_to_utf8(tasks[i].name,
+                                      nameUtf8, sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\"%s>%u · ", tasks[i].taskId,
+            currentTaskId == tasks[i].taskId ? " selected" : "",
+            tasks[i].taskId);
+        vm_mock_admin_text_append_html(page, nameUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
     }
     vm_mock_admin_text_appendf(page, "</select>");
 }
@@ -2764,6 +3145,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
@@ -3065,6 +3447,9 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
                                         row->seed.scriptName);
         vm_mock_admin_text_appendf(&page,
+            "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
+        vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
+        vm_mock_admin_text_appendf(&page,
             "</label><div class=\"actions\"><button type=\"submit\">保存修改</button></div></form>"
             "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"toggle-npc\">"
             "<input type=\"hidden\" name=\"scene\" value=\"");
@@ -3112,6 +3497,9 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
         "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
     vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
+    vm_mock_admin_text_appendf(&page,
+        "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
+    vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
         "</label><div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
         "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
@@ -3464,6 +3852,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab on\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<section class=\"card shop-card\">");
@@ -3639,6 +4028,7 @@ static void vm_mock_admin_render_update_page(char *response,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>");
     if (message[0] != 0)
@@ -3720,6 +4110,157 @@ static void vm_mock_admin_render_update_page(char *response,
     free(files);
 }
 
+static void vm_mock_admin_render_task_requirement_select(
+    vm_mock_admin_text *page, const char *name, u8 current)
+{
+    static const char *labels[] = {"无", "收集物品", "击败怪物"};
+    vm_mock_admin_text_appendf(page, "<select name=\"%s\">", name);
+    for (u32 value = 0; value <= 2; ++value)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\"%s>%u · %s</option>", value,
+            current == value ? " selected" : "", value, labels[value]);
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_task_page(char *response,
+                                           size_t responseCap,
+                                           const char *query)
+{
+    vm_net_mock_task_definition tasks[VM_NET_MOCK_TASK_CATALOG_MAX];
+    vm_net_mock_task_definition edit;
+    vm_mock_admin_text page;
+    char taskText[32];
+    char newText[8];
+    char status[16];
+    char message[256];
+    char nameUtf8[128];
+    char giverUtf8[64];
+    char receiverUtf8[64];
+    char goalUtf8[384];
+    char rewardUtf8[128];
+    char offerUtf8[768];
+    char activeUtf8[768];
+    char completedUtf8[768];
+    u32 taskCount = 0;
+    u32 selectedTaskId = 0;
+    bool createNew = false;
+    bool found = false;
+
+    memset(tasks, 0, sizeof(tasks));
+    memset(&edit, 0, sizeof(edit));
+    memset(taskText, 0, sizeof(taskText));
+    memset(newText, 0, sizeof(newText));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    memset(nameUtf8, 0, sizeof(nameUtf8));
+    memset(giverUtf8, 0, sizeof(giverUtf8));
+    memset(receiverUtf8, 0, sizeof(receiverUtf8));
+    memset(goalUtf8, 0, sizeof(goalUtf8));
+    memset(rewardUtf8, 0, sizeof(rewardUtf8));
+    memset(offerUtf8, 0, sizeof(offerUtf8));
+    memset(activeUtf8, 0, sizeof(activeUtf8));
+    memset(completedUtf8, 0, sizeof(completedUtf8));
+    vm_mock_admin_text_init(&page, response, responseCap);
+    taskCount = vm_net_mock_task_admin_list(
+        tasks, VM_NET_MOCK_TASK_CATALOG_MAX);
+    (void)vm_mock_admin_form_value(query, "task", taskText, sizeof(taskText));
+    (void)vm_mock_admin_form_value(query, "new", newText, sizeof(newText));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    createNew = strcmp(newText, "1") == 0;
+    if (!createNew && taskText[0] != 0)
+        (void)vm_net_mock_parse_u32_strict(taskText, &selectedTaskId);
+    if (!createNew && selectedTaskId == 0 && taskCount != 0)
+        selectedTaskId = tasks[0].taskId;
+    for (u32 i = 0; !createNew && i < taskCount; ++i)
+    {
+        if (tasks[i].taskId == selectedTaskId)
+        {
+            edit = tasks[i];
+            found = true;
+            break;
+        }
+    }
+    if (createNew)
+    {
+        edit.taskId = 100000;
+        edit.enabled = true;
+        edit.level = 1;
+        found = true;
+    }
+    if (found)
+    {
+        vm_net_mock_gbk_label_to_utf8(edit.name, nameUtf8, sizeof(nameUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.giver, giverUtf8, sizeof(giverUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.receiver, receiverUtf8, sizeof(receiverUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.goal, goalUtf8, sizeof(goalUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.rewardText, rewardUtf8, sizeof(rewardUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.offerDialog, offerUtf8, sizeof(offerUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.activeDialog, activeUtf8, sizeof(activeUtf8));
+        vm_net_mock_gbk_label_to_utf8(edit.completedDialog, completedUtf8, sizeof(completedUtf8));
+    }
+
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>江湖OL 任务管理</title><style>"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.list{height:100%%;overflow:auto;display:flex;flex-direction:column;gap:4px}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
+        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}}</style></head><body><main class=\"wrap\">"
+        "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<div class=\"grid\"><aside class=\"card list\"><a class=\"button\" href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2>",
+        taskCount);
+    for (u32 i = 0; i < taskCount; ++i)
+    {
+        char listNameUtf8[128];
+        memset(listNameUtf8, 0, sizeof(listNameUtf8));
+        vm_net_mock_gbk_label_to_utf8(tasks[i].name, listNameUtf8,
+                                      sizeof(listNameUtf8));
+        vm_mock_admin_text_appendf(
+            &page, "<a class=\"task%s%s\" href=\"/?tab=tasks&amp;task=%u\"><strong>%u</strong> · ",
+            (!createNew && tasks[i].taskId == selectedTaskId) ? " on" : "",
+            tasks[i].enabled ? "" : " off", tasks[i].taskId, tasks[i].taskId);
+        vm_mock_admin_text_append_html(&page, listNameUtf8);
+        vm_mock_admin_text_appendf(&page, "%s</a>",
+                                   tasks[i].overridden ? " · 已编辑" : "");
+    }
+    vm_mock_admin_text_appendf(&page, "</aside><section class=\"card editor\">");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (!found)
+    {
+        vm_mock_admin_text_appendf(&page, "<p>没有可编辑的任务。</p></section></div></main></body></html>");
+        return;
+    }
+    vm_mock_admin_text_appendf(&page, "<h2>%s <span class=\"badge\">%s</span></h2><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-task\">%s<div class=\"fields\">",
+                               createNew ? "新增任务" : "编辑任务",
+                               edit.builtin ? (edit.overridden ? "task.dsh 覆盖" : "task.dsh 原始") : "自定义",
+                               createNew ? "<input type=\"hidden\" name=\"create_new\" value=\"1\">" : "");
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>任务 ID</span><input type=\"number\" name=\"task_id\" min=\"1\" max=\"4294967295\" value=\"%u\" %s required></label>", edit.taskId, createNew ? "" : "readonly");
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>启用</option><option value=\"0\"%s>停用</option></select></label>", edit.enabled ? " selected" : "", edit.enabled ? "" : " selected");
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>要求等级</span><input type=\"number\" name=\"level\" min=\"0\" max=\"255\" value=\"%u\" required></label><label class=\"field\"><span>前置任务 ID</span><input type=\"number\" name=\"prerequisite_task_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>", edit.level, edit.prerequisiteTaskId);
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>难度</span><input type=\"number\" name=\"difficulty\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>分类</span><input type=\"number\" name=\"classification\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.difficulty, edit.classification);
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>任务名称（最多31字节）</span><input name=\"name\" maxlength=\"31\" value=\""); vm_mock_admin_text_append_html(&page, nameUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>发布者（最多15字节）</span><input name=\"giver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, giverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>交付者（最多15字节）</span><input name=\"receiver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, receiverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label>");
+    vm_mock_admin_text_appendf(&page, "</div><div class=\"group\"><h2>任务目标</h2><div class=\"fields\"><label class=\"field\"><span>条件一类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type1", edit.requirementType1); vm_mock_admin_text_appendf(&page, "</label><label class=\"field\"><span>条件一目标 ID</span><input type=\"number\" name=\"requirement_id1\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>条件一数量</span><input type=\"number\" name=\"requirement_count1\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.requirementId1, edit.requirementCount1);
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>条件二类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type2", edit.requirementType2); vm_mock_admin_text_appendf(&page, "</label><label class=\"field\"><span>条件二目标 ID</span><input type=\"number\" name=\"requirement_id2\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>条件二数量</span><input type=\"number\" name=\"requirement_count2\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field wide\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">", edit.requirementId2, edit.requirementCount2); vm_mock_admin_text_append_html(&page, goalUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\"><label class=\"field\"><span>接取给予物品 ID</span><input type=\"number\" name=\"given_item_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品 ID</span><input type=\"number\" name=\"reward_item_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品数量</span><input type=\"number\" name=\"reward_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品类型</span><input type=\"number\" name=\"reward_item_type\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.givenItemId, edit.givenItemCount, edit.rewardExp, edit.rewardMoney, edit.rewardItemId, edit.rewardItemCount, edit.rewardItemType); vm_mock_admin_text_append_html(&page, rewardUtf8); vm_mock_admin_text_appendf(&page, "\"></label></div></div>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品、2 为击败怪物；两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
+    if (!createNew && edit.overridden)
+    {
+        vm_mock_admin_text_appendf(&page, "<form class=\"actions\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"delete-task-override\"><input type=\"hidden\" name=\"task_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">%s</button></form>", edit.taskId, edit.builtin ? "恢复 task.dsh 默认" : "删除自定义任务");
+    }
+    vm_mock_admin_text_appendf(&page, "</section></div></main></body></html>");
+    if (page.truncated)
+        snprintf(response, responseCap, "<!doctype html><meta charset=\"utf-8\"><p>任务管理页面超过大小限制。</p>");
+}
+
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
 {
@@ -3745,6 +4286,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "content") == 0)
     {
         vm_mock_admin_render_content_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "tasks") == 0)
+    {
+        vm_mock_admin_render_task_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "updates") == 0)
@@ -3788,6 +4334,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
+        "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
@@ -3934,7 +4481,8 @@ static void vm_mock_admin_redirect(vm_mock_service_socket client,
     vm_mock_admin_url_encode(account ? account : "", accountEncoded, sizeof(accountEncoded));
     vm_mock_admin_url_encode(status ? status : "error", statusEncoded, sizeof(statusEncoded));
     vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded, sizeof(messageEncoded));
-    snprintf(location, sizeof(location), "/?account=%s&status=%s&message=%s",
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH "?account=%s&status=%s&message=%s",
              accountEncoded, statusEncoded, messageEncoded);
     snprintf(extraHeaders, sizeof(extraHeaders), "Location: %s\r\n", location);
     (void)vm_mock_admin_send_response(client, "303 See Other", "text/plain; charset=utf-8",
@@ -3958,7 +4506,7 @@ static void vm_mock_admin_redirect_content(vm_mock_service_socket client,
     vm_mock_admin_url_encode(message ? message : "操作失败",
                              messageEncoded, sizeof(messageEncoded));
     snprintf(location, sizeof(location),
-             "/?tab=content&scene=%s&status=%s&message=%s",
+             VM_MOCK_ADMIN_ROOT_PATH "?tab=content&scene=%s&status=%s&message=%s",
              sceneEncoded, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
@@ -3976,7 +4524,7 @@ static void vm_mock_admin_redirect_updates(vm_mock_service_socket client,
     vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
-             "/?tab=updates&status=%s&message=%s", statusEncoded,
+             VM_MOCK_ADMIN_ROOT_PATH "?tab=updates&status=%s&message=%s", statusEncoded,
              messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
@@ -4003,9 +4551,28 @@ static void vm_mock_admin_redirect_shop(vm_mock_service_socket client,
     vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
-             "/?tab=shop&category=%s&q=%s&page=%u&status=%s&message=%s",
+             VM_MOCK_ADMIN_ROOT_PATH "?tab=shop&category=%s&q=%s&page=%u&status=%s&message=%s",
              categoryEncoded, searchEncoded, page ? page : 1, statusEncoded,
              messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_tasks(vm_mock_service_socket client,
+                                         u32 taskId,
+                                         const char *status,
+                                         const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH "?tab=tasks&task=%u&status=%s&message=%s",
+             taskId, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
 
@@ -4024,6 +4591,181 @@ static bool vm_mock_admin_form_u32(const char *body, const char *field,
     if (valueOut)
         *valueOut = parsed;
     return true;
+}
+
+static bool vm_mock_admin_utf8_to_gbk_task_text(const char *utf8,
+                                                char *gbk,
+                                                size_t gbkCap,
+                                                bool allowEmpty)
+{
+    char converted[1024];
+
+    if (gbk == NULL || gbkCap == 0)
+        return false;
+    gbk[0] = 0;
+    if (utf8 == NULL || utf8[0] == 0)
+        return allowEmpty;
+    memset(converted, 0, sizeof(converted));
+    utf8_to_gbk((u8 *)utf8, (u8 *)converted, sizeof(converted));
+    if (converted[0] == 0 || strlen(converted) >= gbkCap)
+        return false;
+    snprintf(gbk, gbkCap, "%s", converted);
+    return true;
+}
+
+static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
+                                             const char *action,
+                                             const char *body)
+{
+    vm_net_mock_task_definition task;
+    const vm_net_mock_task_definition *existing = NULL;
+    const char *error = NULL;
+    char enabledText[8];
+    char createNewText[8];
+    char nameUtf8[128];
+    char giverUtf8[64];
+    char receiverUtf8[64];
+    char goalUtf8[384];
+    char rewardUtf8[128];
+    char offerUtf8[768];
+    char activeUtf8[768];
+    char completedUtf8[768];
+    u32 taskId = 0;
+    u32 value = 0;
+
+    memset(&task, 0, sizeof(task));
+    memset(enabledText, 0, sizeof(enabledText));
+    memset(createNewText, 0, sizeof(createNewText));
+    memset(nameUtf8, 0, sizeof(nameUtf8));
+    memset(giverUtf8, 0, sizeof(giverUtf8));
+    memset(receiverUtf8, 0, sizeof(receiverUtf8));
+    memset(goalUtf8, 0, sizeof(goalUtf8));
+    memset(rewardUtf8, 0, sizeof(rewardUtf8));
+    memset(offerUtf8, 0, sizeof(offerUtf8));
+    memset(activeUtf8, 0, sizeof(activeUtf8));
+    memset(completedUtf8, 0, sizeof(completedUtf8));
+    if (!vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
+        taskId == 0 || taskId == VM_NET_MOCK_TEST_TASK_ID)
+    {
+        vm_mock_admin_redirect_tasks(client, taskId, "error", "任务 ID 无效或使用了保留 ID");
+        return;
+    }
+    if (strcmp(action, "delete-task-override") == 0)
+    {
+        bool restoreBuiltin = false;
+        existing = vm_net_mock_task_admin_find(taskId);
+        restoreBuiltin = existing != NULL && existing->builtin;
+        if (!vm_net_mock_task_admin_delete_override(taskId, &error))
+        {
+            vm_mock_admin_redirect_tasks(
+                client, taskId, "error",
+                error ? error : "任务覆盖记录删除失败");
+            return;
+        }
+        vm_mock_admin_redirect_tasks(
+            client, restoreBuiltin ? taskId : 0,
+            "ok", restoreBuiltin
+                      ? "已恢复 task.dsh 原始任务定义"
+                      : "自定义任务已删除");
+        return;
+    }
+    if (strcmp(action, "save-task") != 0 ||
+        !vm_mock_admin_form_value(body, "enabled", enabledText, sizeof(enabledText)) ||
+        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0) ||
+        !vm_mock_admin_form_value(body, "name", nameUtf8, sizeof(nameUtf8)) ||
+        !vm_mock_admin_form_value(body, "giver", giverUtf8, sizeof(giverUtf8)) ||
+        !vm_mock_admin_form_value(body, "receiver", receiverUtf8, sizeof(receiverUtf8)) ||
+        !vm_mock_admin_form_value(body, "goal", goalUtf8, sizeof(goalUtf8)) ||
+        !vm_mock_admin_form_value(body, "reward_text", rewardUtf8, sizeof(rewardUtf8)) ||
+        !vm_mock_admin_form_value(body, "offer_dialog", offerUtf8, sizeof(offerUtf8)) ||
+        !vm_mock_admin_form_value(body, "active_dialog", activeUtf8, sizeof(activeUtf8)) ||
+        !vm_mock_admin_form_value(body, "completed_dialog", completedUtf8, sizeof(completedUtf8)))
+    {
+        vm_mock_admin_redirect_tasks(client, taskId, "error", "任务表单字段不完整");
+        return;
+    }
+    task.taskId = taskId;
+    task.enabled = strcmp(enabledText, "1") == 0;
+    existing = vm_net_mock_task_admin_find(taskId);
+    (void)vm_mock_admin_form_value(body, "create_new", createNewText,
+                                   sizeof(createNewText));
+    if (strcmp(createNewText, "1") == 0 && existing != NULL)
+    {
+        vm_mock_admin_redirect_tasks(client, taskId, "error",
+                                     "任务 ID 已存在，请更换后再新增");
+        return;
+    }
+    task.builtin = existing != NULL && existing->builtin;
+#define VM_TASK_FORM_U8(fieldName, member)                                      \
+    do                                                                          \
+    {                                                                           \
+        if (!vm_mock_admin_form_u32(body, (fieldName), 0xffu, &value))          \
+        {                                                                       \
+            vm_mock_admin_redirect_tasks(client, taskId, "error",             \
+                                          "任务数值字段无效");                 \
+            return;                                                             \
+        }                                                                       \
+        task.member = (u8)value;                                                 \
+    } while (0)
+#define VM_TASK_FORM_U32(fieldName, member)                                     \
+    do                                                                          \
+    {                                                                           \
+        if (!vm_mock_admin_form_u32(body, (fieldName), 0xffffffffu, &task.member)) \
+        {                                                                       \
+            vm_mock_admin_redirect_tasks(client, taskId, "error",             \
+                                          "任务数值字段无效");                 \
+            return;                                                             \
+        }                                                                       \
+    } while (0)
+    VM_TASK_FORM_U8("level", level);
+    VM_TASK_FORM_U8("difficulty", difficulty);
+    VM_TASK_FORM_U8("classification", classification);
+    VM_TASK_FORM_U8("requirement_type1", requirementType1);
+    VM_TASK_FORM_U8("requirement_count1", requirementCount1);
+    VM_TASK_FORM_U32("requirement_id1", requirementId1);
+    VM_TASK_FORM_U8("requirement_type2", requirementType2);
+    VM_TASK_FORM_U8("requirement_count2", requirementCount2);
+    VM_TASK_FORM_U32("requirement_id2", requirementId2);
+    VM_TASK_FORM_U32("prerequisite_task_id", prerequisiteTaskId);
+    VM_TASK_FORM_U32("given_item_id", givenItemId);
+    VM_TASK_FORM_U32("given_item_count", givenItemCount);
+    VM_TASK_FORM_U32("reward_exp", rewardExp);
+    VM_TASK_FORM_U32("reward_money", rewardMoney);
+    VM_TASK_FORM_U32("reward_item_id", rewardItemId);
+    VM_TASK_FORM_U32("reward_item_count", rewardItemCount);
+    VM_TASK_FORM_U8("reward_item_type", rewardItemType);
+#undef VM_TASK_FORM_U8
+#undef VM_TASK_FORM_U32
+    if (task.requirementType1 > 2 || task.requirementType2 > 2 ||
+        !vm_mock_admin_utf8_to_gbk_task_text(nameUtf8, task.name,
+                                             sizeof(task.name), false) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(giverUtf8, task.giver,
+                                             sizeof(task.giver), false) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(receiverUtf8, task.receiver,
+                                             sizeof(task.receiver), false) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(goalUtf8, task.goal,
+                                             sizeof(task.goal), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(rewardUtf8, task.rewardText,
+                                             sizeof(task.rewardText), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(offerUtf8, task.offerDialog,
+                                             sizeof(task.offerDialog), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(activeUtf8, task.activeDialog,
+                                             sizeof(task.activeDialog), true) ||
+        !vm_mock_admin_utf8_to_gbk_task_text(completedUtf8, task.completedDialog,
+                                             sizeof(task.completedDialog), true))
+    {
+        vm_mock_admin_redirect_tasks(
+            client, taskId, "error",
+            "任务文本无法转换为 GBK，或超过客户端安全字节长度");
+        return;
+    }
+    if (!vm_net_mock_task_admin_save(&task, &error))
+    {
+        vm_mock_admin_redirect_tasks(client, taskId, "error",
+                                     error ? error : "任务保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_tasks(client, taskId, "ok", "任务定义已保存并立即生效");
 }
 
 static bool vm_mock_admin_scene_from_form(const char *body,
@@ -4082,6 +4824,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 x = 0;
     u32 y = 0;
     u32 kind = 0;
+    u32 taskId = 0;
     u32 orientation = 0;
     u32 actorImageCount = 0;
 
@@ -4175,6 +4918,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
         !vm_mock_admin_form_u32(body, "kind", VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
+        !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
         !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
@@ -4185,6 +4929,12 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "NPC 表单字段不完整或数值越界");
+        return;
+    }
+    if (taskId != 0 && vm_net_mock_task_catalog_find_by_id(taskId) == NULL)
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "绑定任务不存在或已停用");
         return;
     }
     for (const unsigned char *p = (const unsigned char *)actorResource; *p; ++p)
@@ -4234,6 +4984,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.x = (u16)x;
     seed.y = (u16)y;
     seed.kind = (u16)kind;
+    seed.taskId = taskId;
     seed.orientation = (u16)orientation;
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);
     if (!vm_mock_admin_publish_actor_resource(
@@ -4428,6 +5179,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_handle_npc_action(client, action, body);
         return;
     }
+    if (strcmp(action, "save-task") == 0 ||
+        strcmp(action, "delete-task-override") == 0)
+    {
+        vm_mock_admin_handle_task_action(client, action, body);
+        return;
+    }
     if (strcmp(action, "save-update-slot") == 0 ||
         strcmp(action, "reset-update-delivery") == 0 ||
         strcmp(action, "publish-named-update") == 0 ||
@@ -4511,6 +5268,192 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     vm_mock_admin_redirect(client, account, "error", "不支持的管理操作");
 }
 
+static void vm_mock_user_render_landing(char *response, size_t responseCap,
+                                        const char *error,
+                                        bool registerActive)
+{
+    vm_mock_admin_text page;
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 账号中心</title><style>"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 18%% 12%%,#d1fae5 0,transparent 28%%),radial-gradient(circle at 82%% 18%%,#dbeafe 0,transparent 26%%),#f6f8fb;color:#1f2937;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{width:min(480px,calc(100%% - 28px));margin:0 auto;padding:58px 0}.hero{text-align:center;margin-bottom:24px}.mark{display:grid;place-items:center;width:58px;height:58px;margin:0 auto 12px;border-radius:18px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 26px/1 serif;box-shadow:0 10px 26px #175cd333}.hero h1{font-size:30px;margin:0 0 5px}.hero p{color:#667085;margin:0}.card{background:#fffffff2;border:1px solid #e0e6ed;border-radius:16px;padding:8px 24px 24px;box-shadow:0 18px 50px #10182817;backdrop-filter:blur(8px)}"
+        ".tab-toggle{position:absolute;opacity:0;pointer-events:none}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:0 -16px 20px;padding:6px;border-radius:12px;background:#f2f4f7}.tabs label{padding:9px 12px;border-radius:8px;color:#667085;font-weight:650;text-align:center;cursor:pointer}.panels>section{display:none}#login-mode:checked~.tabs label[for=\"login-mode\"],#register-mode:checked~.tabs label[for=\"register-mode\"]{background:#fff;color:#175cd3;box-shadow:0 1px 4px #10182818}#login-mode:checked~.panels .login-panel,#register-mode:checked~.panels .register-panel{display:block}"
+        "h2{font-size:20px;margin:0 0 3px}.sub{color:#667085;margin:0 0 18px}.error{margin:0 0 17px;padding:10px 12px;border-radius:8px;background:#fef3f2;color:#b42318}form{display:grid;gap:12px}.field{display:grid;gap:5px;color:#475467;font-weight:550}.field input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:10px 11px;font:inherit;background:#fff;outline:none}.field input:focus{border-color:#84adff;box-shadow:0 0 0 3px #2e90fa18}button{border:0;border-radius:8px;padding:11px 13px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.register-panel button{background:#027a48}.note{margin:12px 0 0;color:#98a2b3;font-size:12px}@media(max-width:540px){.wrap{padding:28px 0}.hero h1{font-size:26px}.card{padding-inline:18px}}"
+        "</style></head><body><main class=\"wrap\"><header class=\"hero\"><div class=\"mark\">江</div><h1>江湖OL 账号中心</h1><p>管理你的江湖账号与角色资料</p></header>"
+        "<section class=\"card\"><input class=\"tab-toggle\" type=\"radio\" id=\"login-mode\" name=\"auth-mode\"%s>"
+        "<input class=\"tab-toggle\" type=\"radio\" id=\"register-mode\" name=\"auth-mode\"%s>"
+        "<div class=\"tabs\" role=\"tablist\"><label for=\"login-mode\" role=\"tab\">登录账号</label><label for=\"register-mode\" role=\"tab\">注册账号</label></div>",
+        registerActive ? "" : " checked",
+        registerActive ? " checked" : "");
+    if (error != NULL && error[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"error\">");
+        vm_mock_admin_text_append_html(&page, error);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<div class=\"panels\"><section class=\"login-panel\" role=\"tabpanel\"><h2>欢迎回来</h2><p class=\"sub\">使用游戏账号登录</p>"
+        "<form method=\"post\" action=\"/user/login\"><label class=\"field\">账号<input name=\"account\" maxlength=\"63\" autocomplete=\"username\" required></label>"
+        "<label class=\"field\">密码<input type=\"password\" name=\"password\" maxlength=\"63\" autocomplete=\"current-password\" required></label>"
+        "<button type=\"submit\">登录账号</button></form></section>"
+        "<section class=\"register-panel\" role=\"tabpanel\"><h2>创建新账号</h2><p class=\"sub\">注册后将自动登录账号中心</p>"
+        "<form method=\"post\" action=\"/user/register\"><label class=\"field\">账号<input name=\"account\" minlength=\"4\" maxlength=\"32\" pattern=\"[A-Za-z0-9_]+\" autocomplete=\"username\" required></label>"
+        "<label class=\"field\">密码<input type=\"password\" name=\"password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label>"
+        "<button type=\"submit\">注册并登录</button></form><p class=\"note\">账号名仅支持字母、数字和下划线，长度 4 至 32 位。</p></section></div></section>"
+        "</main></body></html>");
+}
+
+static const char *vm_mock_user_job_label(u8 job)
+{
+    switch (job)
+    {
+    case 2:
+        return "刺客";
+    case 3:
+        return "法师";
+    case 1:
+        return "战士";
+    default:
+        return "未知职业";
+    }
+}
+
+static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
+                                          const char *accountId,
+                                          const char *status,
+                                          const char *message)
+{
+    vm_mock_admin_text page;
+    vm_mock_service_account_state *accountState = NULL;
+    const char *roleError = NULL;
+    bool online = vm_mock_admin_account_is_online(accountId);
+
+    accountState = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                        &roleError);
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>我的江湖账号</title><style>"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f4f7f9;color:#17202a;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(1080px,calc(100%% - 28px));margin:0 auto;padding:30px 0 46px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 20px serif}h1{font-size:24px;margin:0}.sub,.muted{color:#667085;margin:2px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;color:#475467;cursor:pointer}.hero{position:relative;overflow:hidden;border-radius:16px;padding:24px;background:linear-gradient(125deg,#12372d,#175cd3);color:#fff;box-shadow:0 14px 34px #175cd326;margin-bottom:18px}.hero:after{content:\"\";position:absolute;width:220px;height:220px;border-radius:50%%;right:-70px;top:-125px;background:#ffffff12}.account-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.account-name{font-size:25px;font-weight:750}.hero .sub{color:#dbeafe}.badge{font-size:12px;padding:3px 9px;border-radius:999px;background:#ffffff20;color:#fff}.badge.on{background:#d1fadf;color:#05603a}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:19px}.overview div{padding:11px 13px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff10}.overview strong{display:block;font-size:18px}.section-title{display:flex;align-items:end;justify-content:space-between;margin:23px 0 10px}.section-title h2{font-size:18px;margin:0}.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.card,.role{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 2px 7px #1018280a}.role-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.role h3{font-size:19px;margin:0}.active{display:inline-block;color:#175cd3;background:#eef4ff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650}.vitals{display:grid;gap:10px;margin:17px 0}.vital-head{display:flex;justify-content:space-between;color:#475467}.bar{height:7px;border-radius:999px;background:#edf1f5;overflow:hidden}.bar i{display:block;height:100%%;border-radius:inherit;background:#12b76a}.bar.mp i{background:#2e90fa}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding-top:13px;border-top:1px solid #eaecf0}.stats strong{display:block;color:#667085;font-size:12px;font-weight:550}.empty{color:#667085;text-align:center}.security{display:grid;grid-template-columns:minmax(190px,.65fr) minmax(0,1.35fr);gap:22px;align-items:start;margin-top:18px}.security h2{font-size:18px;margin:0 0 4px}.password-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.password-form label{display:grid;gap:4px;color:#475467}.password-form .current{grid-column:1/-1}.password-form input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.password-form button{grid-column:1/-1;justify-self:start;border:0;border-radius:8px;padding:9px 14px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:16px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}@media(max-width:720px){.wrap{padding:18px 0}.overview{grid-template-columns:1fr}.roles,.security,.password-form{grid-template-columns:1fr}.password-form .current{grid-column:auto}.password-form button{grid-column:auto}.stats{grid-template-columns:1fr}header{align-items:center}}"
+        "</style></head><body><main class=\"wrap\"><header><div class=\"brand\"><div class=\"brand-mark\">江</div><div><h1>账号中心</h1><p class=\"sub\">查看角色资料与管理账号安全</p></div></div>"
+        "<form method=\"post\" action=\"/user/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
+    if (status != NULL && status[0] != 0 && message != NULL && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "<section class=\"hero\"><div class=\"account-line\"><span class=\"account-name\">");
+    vm_mock_admin_text_append_html(&page, accountId);
+    vm_mock_admin_text_appendf(&page,
+        "</span><span class=\"badge %s\">%s</span></div><p class=\"sub\">账号数据已连接至江湖服务</p>"
+        "<div class=\"overview\"><div><span>账号状态</span><strong>正常</strong></div><div><span>角色数量</span><strong>%u</strong></div><div><span>当前状态</span><strong>%s</strong></div></div></section>"
+        "<div class=\"section-title\"><h2>我的角色</h2><span class=\"muted\">角色数据实时读取</span></div><section class=\"roles\">",
+        online ? "on" : "", online ? "游戏在线" : "游戏离线",
+        accountState != NULL ? g_vm_net_mock_role_db.roleCount : 0,
+        online ? "在线" : "离线");
+
+    if (accountState != NULL && g_vm_net_mock_role_db.roleCount > 0)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+            char roleNameUtf8[128];
+            char sceneUtf8[192];
+            u32 gold = role->money / 10000u;
+            u32 silver = (role->money / 100u) % 100u;
+            u32 copper = role->money % 100u;
+            bool active = role->roleId == g_vm_net_mock_role_db.activeRoleId;
+            u32 hpPercent = role->hpMax ? (u32)(((uint64_t)role->hp * 100u) / role->hpMax) : 0;
+            u32 mpPercent = role->mpMax ? (u32)(((uint64_t)role->mp * 100u) / role->mpMax) : 0;
+
+            if (hpPercent > 100)
+                hpPercent = 100;
+            if (mpPercent > 100)
+                mpPercent = 100;
+
+            memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
+            memset(sceneUtf8, 0, sizeof(sceneUtf8));
+            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+                                          roleNameUtf8, sizeof(roleNameUtf8));
+            vm_net_mock_gbk_label_to_utf8(role->scene[0] ? role->scene : "-",
+                                          sceneUtf8, sizeof(sceneUtf8));
+            vm_mock_admin_text_appendf(&page, "<article class=\"role\"><div class=\"role-head\"><div><h3>");
+            vm_mock_admin_text_append_html(&page, roleNameUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "</h3><div class=\"muted\">角色 ID %u</div></div>%s</div>"
+                "<div class=\"vitals\"><div><div class=\"vital-head\"><span>生命</span><span>%u / %u</span></div><div class=\"bar\"><i style=\"width:%u%%\"></i></div></div>"
+                "<div><div class=\"vital-head\"><span>法力</span><span>%u / %u</span></div><div class=\"bar mp\"><i style=\"width:%u%%\"></i></div></div></div><div class=\"stats\">"
+                "<div><strong>等级 / 经验</strong>Lv.%u · %u</div>"
+                "<div><strong>职业 / 性别</strong>%s · %s</div>"
+                "<div><strong>普通钱币</strong>%u 金 %u 银 %u 铜</div>"
+                "<div><strong>元宝</strong>%u</div>"
+                "<div><strong>所在场景</strong>",
+                role->roleId, active ? "<span class=\"active\">当前角色</span>" : "",
+                role->hp, role->hpMax, hpPercent, role->mp, role->mpMax,
+                mpPercent, role->level, role->exp,
+                vm_mock_user_job_label(role->job), role->sex == 1 ? "女" : "男",
+                gold, silver, copper, role->wcoin);
+            vm_mock_admin_text_append_html(&page, sceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "</div><div><strong>坐标</strong>(%u, %u)</div></div></article>",
+                role->x, role->y);
+        }
+        vm_mock_service_close_account_role_db_for_management(accountState, false);
+    }
+    else
+    {
+        if (accountState != NULL)
+            vm_mock_service_close_account_role_db_for_management(accountState, false);
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"card empty\">%s</div>",
+            roleError ? roleError : "该账号尚未创建角色，请进入游戏创建角色。");
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</section><section class=\"card security\"><div><h2>账号安全</h2><p class=\"sub\">修改后请使用新密码登录游戏和账号中心。其他网页登录会话将自动退出。</p></div>"
+        "<form class=\"password-form\" method=\"post\" action=\"/user/password\">"
+        "<label class=\"current\">当前密码<input type=\"password\" name=\"current_password\" maxlength=\"63\" autocomplete=\"current-password\" required></label>"
+        "<label>新密码<input type=\"password\" name=\"new_password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label>"
+        "<label>确认新密码<input type=\"password\" name=\"confirm_password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label>"
+        "<button type=\"submit\">保存新密码</button></form></section></main></body></html>");
+}
+
+static void vm_mock_user_invalidate_other_sessions(
+    const char *accountId, const vm_mock_user_session *keepSession)
+{
+    for (u32 i = 0; i < VM_MOCK_USER_SESSION_MAX; ++i)
+    {
+        vm_mock_user_session *session = &g_vm_mock_user_sessions[i];
+        if (session->active && session != keepSession &&
+            strcmp(session->accountId, accountId) == 0)
+            memset(session, 0, sizeof(*session));
+    }
+}
+
+static void vm_mock_user_redirect_message(vm_mock_service_socket client,
+                                          const char *status,
+                                          const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[960];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location), "/?status=%s&message=%s",
+             statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
 static int vm_mock_admin_handle_client(vm_mock_service_socket client)
 {
     char request[VM_MOCK_ADMIN_REQUEST_MAX + 1];
@@ -4590,22 +5533,257 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
-    if (strcmp(target, "/login") == 0)
+    if (strcmp(target, "/") == 0)
     {
+        vm_mock_user_session *session = NULL;
+        char status[16];
+        char message[256];
+
+        if (strcmp(method, "GET") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: GET\r\n",
+                                        "账号中心首页只允许 GET。\n");
+            return 0;
+        }
+        memset(status, 0, sizeof(status));
+        memset(message, 0, sizeof(message));
+        (void)vm_mock_admin_form_value(query, "status", status,
+                                       sizeof(status));
+        (void)vm_mock_admin_form_value(query, "message", message,
+                                       sizeof(message));
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session != NULL)
+            vm_mock_user_render_dashboard(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                                          session->accountId, status, message);
+        else
+            vm_mock_user_render_landing(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                                        NULL, false);
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "text/html; charset=utf-8", NULL, response);
+        free(response);
+        return 1;
+    }
+    if (strcmp(target, "/user/login") == 0 ||
+        strcmp(target, "/user/register") == 0)
+    {
+        char account[64];
         char password[64];
+        const char *message = NULL;
+        bool registering = strcmp(target, "/user/register") == 0;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "账号登录和注册只允许 POST。\n");
+            return 0;
+        }
+        memset(account, 0, sizeof(account));
+        memset(password, 0, sizeof(password));
+        if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)) ||
+            !vm_mock_admin_form_value(body, "password", password, sizeof(password)))
+        {
+            message = "账号或密码参数不完整";
+        }
+        else if (registering)
+        {
+            const char *createMessage = NULL;
+            if (vm_mock_user_valid_registration(account, password, &message))
+            {
+                ok = vm_mock_service_account_create_record(account, password,
+                                                           &createMessage);
+                if (!ok)
+                {
+                    if (createMessage && strcmp(createMessage,
+                                                "account already exists") == 0)
+                        message = "该账号名已被注册";
+                    else
+                        message = "账号注册失败，请稍后重试";
+                }
+            }
+        }
+        else
+        {
+            ok = vm_mock_service_account_verify_credentials(account, password);
+            if (!ok)
+                message = "账号或密码错误";
+        }
+        memset(password, 0, sizeof(password));
+        if (ok)
+        {
+            vm_mock_user_session *session = vm_mock_user_issue_session(account);
+            char cookieHeader[256];
+            if (session == NULL)
+            {
+                vm_mock_admin_send_response(client, "503 Service Unavailable",
+                                            NULL, NULL, "登录会话暂不可用。\n");
+                return 0;
+            }
+            snprintf(cookieHeader, sizeof(cookieHeader),
+                     "Set-Cookie: cbe_user=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
+                     session->token);
+            printf("[info][user-web] %s account=%s result=success\n",
+                   registering ? "register" : "login", account);
+            vm_mock_admin_send_location(client, "/", cookieHeader);
+            return 1;
+        }
+        printf("[warn][user-web] %s account=%s result=rejected\n",
+               registering ? "register" : "login",
+               account[0] ? account : "-");
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        vm_mock_user_render_landing(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                                    message ? message : "操作失败", registering);
+        vm_mock_admin_send_response(client,
+                                    registering ? "409 Conflict" :
+                                                  "401 Unauthorized",
+                                    "text/html; charset=utf-8", NULL, response);
+        free(response);
+        return 1;
+    }
+    if (strcmp(target, "/user/password") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        char currentPassword[64];
+        char newPassword[64];
+        char confirmPassword[64];
+        const char *error = NULL;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "修改密码只允许 POST。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(currentPassword, 0, sizeof(currentPassword));
+        memset(newPassword, 0, sizeof(newPassword));
+        memset(confirmPassword, 0, sizeof(confirmPassword));
+        if (!vm_mock_admin_form_value(body, "current_password",
+                                      currentPassword,
+                                      sizeof(currentPassword)) ||
+            !vm_mock_admin_form_value(body, "new_password", newPassword,
+                                      sizeof(newPassword)) ||
+            !vm_mock_admin_form_value(body, "confirm_password",
+                                      confirmPassword,
+                                      sizeof(confirmPassword)))
+        {
+            error = "密码参数不完整";
+        }
+        else if (!vm_mock_service_account_verify_credentials(
+                     session->accountId, currentPassword))
+        {
+            error = "当前密码不正确";
+        }
+        else if (strcmp(newPassword, confirmPassword) != 0)
+        {
+            error = "两次输入的新密码不一致";
+        }
+        else if (strlen(newPassword) < 6 || strlen(newPassword) > 63)
+        {
+            error = "新密码长度须为 6 至 63 个字符";
+        }
+        else
+        {
+            ok = vm_mock_service_account_set_password(
+                session->accountId, newPassword, &error);
+        }
+        memset(currentPassword, 0, sizeof(currentPassword));
+        memset(newPassword, 0, sizeof(newPassword));
+        memset(confirmPassword, 0, sizeof(confirmPassword));
+        if (ok)
+        {
+            vm_mock_user_invalidate_other_sessions(session->accountId,
+                                                   session);
+            printf("[info][user-web] password_change account=%s result=success other_sessions=invalidated\n",
+                   session->accountId);
+            vm_mock_user_redirect_message(client, "ok", "密码修改成功");
+        }
+        else
+        {
+            printf("[warn][user-web] password_change account=%s result=rejected\n",
+                   session->accountId);
+            vm_mock_user_redirect_message(client, "error",
+                                          error ? error : "密码修改失败");
+        }
+        return 1;
+    }
+    if (strcmp(target, "/user/logout") == 0)
+    {
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "退出登录只允许 POST。\n");
+            return 0;
+        }
+        vm_mock_user_clear_request_session(request, headerLen);
+        vm_mock_admin_send_location(
+            client, "/",
+            "Set-Cookie: cbe_user=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+        return 1;
+    }
+    if (strcmp(target, VM_MOCK_ADMIN_BASE_PATH) == 0)
+    {
+        if (strcmp(method, "GET") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: GET\r\n", "只允许 GET。\n");
+            return 0;
+        }
+        vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH, NULL);
+        return 1;
+    }
+    if (strncmp(target, VM_MOCK_ADMIN_ROOT_PATH,
+                strlen(VM_MOCK_ADMIN_ROOT_PATH)) != 0)
+    {
+        vm_mock_admin_send_response(client, "404 Not Found", NULL, NULL,
+                                    "页面不存在。\n");
+        return 0;
+    }
+    if (strcmp(target, VM_MOCK_ADMIN_LOGIN_PATH) == 0)
+    {
+        char password[65];
+        const char *loginMessage = NULL;
+        bool loginOk = false;
 
         memset(password, 0, sizeof(password));
         if (strcmp(method, "POST") == 0 &&
             vm_mock_admin_form_value(body, "password", password,
-                                     sizeof(password)) &&
-            strcmp(password, "123456") == 0)
+                                     sizeof(password)))
+            loginOk = vm_mock_admin_verify_login_password(password,
+                                                          &loginMessage);
+        memset(password, 0, sizeof(password));
+        if (loginOk)
         {
             char cookieHeader[256];
             vm_mock_admin_ensure_session_token();
             snprintf(cookieHeader, sizeof(cookieHeader),
-                     "Set-Cookie: cbe_admin=%s; Path=/; HttpOnly; SameSite=Strict\r\n",
+                     "Set-Cookie: cbe_admin=%s; Path=" VM_MOCK_ADMIN_BASE_PATH "; HttpOnly; SameSite=Strict\r\n",
                      g_vm_mock_admin_session_token);
-            vm_mock_admin_send_location(client, "/", cookieHeader);
+            vm_mock_admin_send_location(client, VM_MOCK_ADMIN_ROOT_PATH,
+                                        cookieHeader);
             return 1;
         }
         if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0)
@@ -4624,7 +5802,14 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         }
         vm_mock_admin_render_login(
             response, VM_MOCK_ADMIN_RESPONSE_MAX,
-            strcmp(method, "POST") == 0 ? "管理密码错误" : NULL);
+            strcmp(method, "POST") == 0 ?
+                (loginMessage ? loginMessage : "管理密码错误") : NULL);
+        if (!vm_mock_admin_prefix_page_routes(response,
+                                              VM_MOCK_ADMIN_RESPONSE_MAX))
+        {
+            snprintf(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                     "<!doctype html><meta charset=\"utf-8\"><p>后台登录页面生成失败。</p>");
+        }
         vm_mock_admin_send_response(
             client,
             strcmp(method, "POST") == 0 ? "401 Unauthorized" : "200 OK",
@@ -4632,7 +5817,7 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         free(response);
         return 1;
     }
-    if (strcmp(target, "/logout") == 0)
+    if (strcmp(target, VM_MOCK_ADMIN_LOGOUT_PATH) == 0)
     {
         if (strcmp(method, "POST") != 0)
         {
@@ -4641,24 +5826,26 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
             return 0;
         }
         vm_mock_admin_send_location(
-            client, "/login",
-            "Set-Cookie: cbe_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
+            client, VM_MOCK_ADMIN_LOGIN_PATH,
+            "Set-Cookie: cbe_admin=; Path=" VM_MOCK_ADMIN_BASE_PATH "; Max-Age=0; HttpOnly; SameSite=Strict\r\n");
         return 1;
     }
     if (!vm_mock_admin_request_is_authenticated(request, headerLen))
     {
-        vm_mock_admin_send_location(client, "/login", NULL);
+        vm_mock_admin_send_location(client, VM_MOCK_ADMIN_LOGIN_PATH, NULL);
         return 0;
     }
 
-    if (strcmp(method, "GET") == 0 && strcmp(target, "/admin.js") == 0)
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/admin.js") == 0)
     {
         vm_mock_admin_send_response(client, "200 OK",
                                     "application/javascript; charset=utf-8",
                                     NULL, g_vm_mock_admin_script);
         return 1;
     }
-    if (strcmp(method, "GET") == 0 && strcmp(target, "/actor-preview.svg") == 0)
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/actor-preview.svg") == 0)
     {
         char actorResource[128];
         u8 *svg = NULL;
@@ -4681,7 +5868,8 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         free(svg);
         return 1;
     }
-    if (strcmp(method, "GET") == 0 && strcmp(target, "/scene-preview.bmp") == 0)
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/scene-preview.bmp") == 0)
     {
         char sceneUtf8[192];
         char runtimeScene[64];
@@ -4706,7 +5894,8 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         return 1;
     }
 
-    if (strcmp(method, "GET") == 0 && strcmp(target, "/") == 0)
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_ROOT_PATH) == 0)
     {
         response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
         if (response == NULL)
@@ -4715,11 +5904,17 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
             return 0;
         }
         vm_mock_admin_render_page(response, VM_MOCK_ADMIN_RESPONSE_MAX, query);
+        if (!vm_mock_admin_prefix_page_routes(response,
+                                              VM_MOCK_ADMIN_RESPONSE_MAX))
+        {
+            snprintf(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                     "<!doctype html><meta charset=\"utf-8\"><p>后台页面生成失败。</p>");
+        }
         vm_mock_admin_send_response(client, "200 OK", "text/html; charset=utf-8", NULL, response);
         free(response);
         return 1;
     }
-    if (strcmp(target, "/action") == 0)
+    if (strcmp(target, VM_MOCK_ADMIN_ACTION_PATH) == 0)
     {
         if (strcmp(method, "POST") != 0)
         {

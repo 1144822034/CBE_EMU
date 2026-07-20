@@ -37,6 +37,41 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_tasks
 
 脚本只新增按账号、角色保存的任务状态表，不会修改已有角色数据。
 
+已有数据库升级到后台任务管理与动态 NPC 任务绑定时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_task_management.sql
+```
+
+脚本新增 `server_tasks` 和 `server_dynamic_npc_tasks`。原版 `task.dsh`
+不会导入或改写；后台只保存编辑覆盖项和新增任务。服务启动时也会自动执行同等的
+`CREATE TABLE IF NOT EXISTS`。
+
+已有数据库升级到用户账号中心和数据库后台密码时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_web_accounts.sql
+```
+
+脚本新增 `server_admin_config`，不会修改游戏账号或角色数据。后台入口为
+`/admin-418yz6/`，管理密码、连续失败次数和锁定状态都从该表读取。默认密码只在
+首次建表时写入为 `123456`，已有配置不会被覆盖。连续错误 5 次后，即使输入正确
+密码也无法登录，执行下面的 SQL 可解锁：
+
+```sql
+UPDATE server_admin_config
+SET failed_attempts = 0, locked = 0
+WHERE config_id = 1;
+```
+
+修改密码时建议同时清除失败次数和锁定状态：
+
+```sql
+UPDATE server_admin_config
+SET password_value = '新密码', failed_attempts = 0, locked = 0
+WHERE config_id = 1;
+```
+
 已有数据库升级到商品管理功能时执行：
 
 ```powershell
@@ -85,6 +120,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_s
 ## 表说明
 
 - `accounts`：账号与登录密码。
+- `server_admin_config`：后台管理密码、连续失败次数和数据库锁定状态。
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
@@ -93,6 +129,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_s
 - `account_role_skills`：按角色保存已学习技能和技能等级。
 - `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
+- `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
+- `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。
