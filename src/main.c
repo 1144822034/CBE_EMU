@@ -379,8 +379,8 @@ static u8 g_mockServiceOnly = 1;
 static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
-static char g_mockServiceHost[64] = "127.0.0.1";
-// static char g_mockServiceHost[64] = "23.141.172.143";
+// static char g_mockServiceHost[64] = "127.0.0.1";
+static char g_mockServiceHost[64] = "23.141.172.143";
 #ifdef CBE_SERVER_ONLY
 static char g_mockServiceBindHost[64] = "0.0.0.0";
 static char g_mockAdminBindHost[64] = "0.0.0.0";
@@ -3736,15 +3736,18 @@ const char *cbeAndroidInputGetPromptUtf8(void)
     char gbk[128];
     memset(utf8, 0, sizeof(utf8));
     memset(gbk, 0, sizeof(gbk));
+    /* The edit buffer is UCS-2, but the legacy input descriptor stores its
+     * prompt as a GBK char pointer.  Reading this field as UCS-2 combines each
+     * pair of GBK bytes into an unrelated Unicode code point and garbles the
+     * Android dialog title. */
     if (g_vmInputPrompt && MTK)
-        vm_debug_read_guest_ucs2_as_gbk(g_vmInputPrompt, gbk, sizeof(gbk), 63);
+        vm_debug_read_guest_cstr(g_vmInputPrompt, gbk, sizeof(gbk));
     if (gbk[0] != 0)
         gbk_to_utf8((u8 *)gbk, (u8 *)utf8, sizeof(utf8));
     if (utf8[0] == 0)
         snprintf(utf8, sizeof(utf8), "%s", g_vmInputPassword ? "请输入密码" : "请输入文本");
     return utf8;
 }
-
 void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled)
 {
     u32 copyLen;
