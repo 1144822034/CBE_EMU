@@ -23965,6 +23965,41 @@ static bool vm_net_mock_task_read_tagged_u32(const u8 *data, u32 dataLen, u32 *v
     return true;
 }
 
+static bool vm_net_mock_task_read_progress_blob(const u8 *data, u32 dataLen,
+                                                u32 *taskIdOut,
+                                                u8 *progress1Out,
+                                                u8 *progress2Out)
+{
+    u32 taskId = 0;
+
+    if (taskIdOut)
+        *taskIdOut = 0;
+    if (progress1Out)
+        *progress1Out = 0;
+    if (progress2Out)
+        *progress2Out = 0;
+    /* UpdateTaskProgress(0x01047ACE) writes taskinfo with the tagged stream
+     * callbacks: u32 task id, u8 first progress, u8 second progress. */
+    if (data == NULL || dataLen != 12 ||
+        data[0] != 0 || data[1] != 4 ||
+        data[6] != 0 || data[7] != 1 ||
+        data[9] != 0 || data[10] != 1)
+    {
+        return false;
+    }
+    taskId = ((u32)data[2] << 24) | ((u32)data[3] << 16) |
+             ((u32)data[4] << 8) | (u32)data[5];
+    if (taskId == 0)
+        return false;
+    if (taskIdOut)
+        *taskIdOut = taskId;
+    if (progress1Out)
+        *progress1Out = data[8];
+    if (progress2Out)
+        *progress2Out = data[11];
+    return true;
+}
+
 static const char *vm_net_mock_npc_dialog_text(u32 actorId)
 {
     switch (actorId)
@@ -24998,6 +25033,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u16 taskBlobLen = 0;
     u32 taskId = 0;
     u8 requestState = 0;
+    u8 reportedProgress1 = 0;
+    u8 reportedProgress2 = 0;
     u8 taskInfo[512];
     u32 taskInfoLen = 0;
     u32 pos = 5;
@@ -25040,7 +25077,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         hasInfoBannerPrefix = true;
     }
     if (object.major != 1 || object.kind != 6 ||
-        (object.subtype != 4 && object.subtype != 6 && object.subtype != 7 &&
+        (object.subtype != 3 && object.subtype != 4 && object.subtype != 6 && object.subtype != 7 &&
          object.subtype != 10 && object.subtype != 11 &&
          object.subtype != 12))
     {
@@ -25075,7 +25112,69 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         responseObjectCount += 1;
     }
 
-    if (object.subtype == 4)
+    if (object.subtype == 3)
+    {
+        u8 authoritativeProgress1 = 0;
+        u8 authoritativeProgress2 = 0;
+        u8 nextState = 1;
+        bool stored = false;
+
+        if (!vm_net_mock_get_object_entry_bytes(object.payload, object.payloadLen,
+                                                "taskinfo", &taskBlob,
+                                                &taskBlobLen) ||
+            !vm_net_mock_task_read_progress_blob(taskBlob, taskBlobLen,
+                                                 &taskId,
+                                                 &reportedProgress1,
+                                                 &reportedProgress2))
+        {
+            return 0;
+        }
+        activeRole = vm_net_mock_active_role();
+        taskDefinition = vm_net_mock_task_catalog_find_by_id(taskId);
+        if (activeRole != NULL && taskDefinition != NULL &&
+            vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
+            taskState.found && (taskState.state == 1 || taskState.state == 2))
+        {
+            authoritativeProgress1 = (u8)vm_net_mock_min_u32(
+                reportedProgress1, taskDefinition->requirementCount1);
+            authoritativeProgress2 = (u8)vm_net_mock_min_u32(
+                reportedProgress2, taskDefinition->requirementCount2);
+            if (authoritativeProgress1 < taskState.progress1)
+                authoritativeProgress1 = taskState.progress1;
+            if (authoritativeProgress2 < taskState.progress2)
+                authoritativeProgress2 = taskState.progress2;
+            nextState = taskState.state;
+            if (nextState == 1 &&
+                authoritativeProgress1 >= taskDefinition->requirementCount1 &&
+                authoritativeProgress2 >= taskDefinition->requirementCount2)
+            {
+                nextState = 2;
+            }
+            stored = taskState.state == 2 ||
+                     vm_net_mock_task_progress_store(activeRole->roleId, taskId,
+                                                     authoritativeProgress1,
+                                                     authoritativeProgress2,
+                                                     nextState);
+        }
+        result = stored ? 0 : 1;
+        responseSubtype = 2;
+        /* The task response dispatcher has no case 3.  Its case 2 is the
+         * progress-upload acknowledgement and consumes only "result". */
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6,
+                                         responseSubtype, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        {
+            return 0;
+        }
+        action = "progress";
+        evidence = "JianghuOL.CBE:0x01047ACE+0x01047BEC+0x0104726C(case2)";
+        printf("[info][network] mock_task_progress_report task=%u role=%u reported=%u/%u authoritative=%u/%u state=%u result=%u\n",
+               taskId, activeRole ? activeRole->roleId : 0,
+               reportedProgress1, reportedProgress2,
+               authoritativeProgress1, authoritativeProgress2,
+               nextState, result);
+    }
+    else if (object.subtype == 4)
     {
         if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                                  "taskid", &taskId))
