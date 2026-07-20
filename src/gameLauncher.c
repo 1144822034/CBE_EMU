@@ -1,0 +1,416 @@
+#include "gameLauncher.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
+
+/* Layout constants */
+#define LAUNCHER_TILE_W 140
+#define LAUNCHER_TILE_H 90
+#define LAUNCHER_GAP 12
+#define LAUNCHER_MARGIN_X 16
+#define LAUNCHER_HEADER_H 48
+#define LAUNCHER_FOOTER_H 24
+#define LAUNCHER_SCROLLBAR_W 12
+#define LAUNCHER_BG_COLOR 0x1a1a2e
+#define LAUNCHER_TILE_BG_COLOR 0x16213e
+#define LAUNCHER_TILE_SELECTED_BG 0x0f3460
+#define LAUNCHER_TILE_BORDER_COLOR 0xe94560
+#define LAUNCHER_TILE_TEXT_COLOR 0xffffff
+#define LAUNCHER_HEADER_TEXT_COLOR 0xe94560
+#define LAUNCHER_FOOTER_TEXT_COLOR 0x888888
+#define LAUNCHER_SCROLLBAR_COLOR 0x555555
+#define LAUNCHER_SCROLLBAR_THUMB_COLOR 0xe94560
+
+static int cmp_entries(const void *a, const void *b)
+{
+    const GameEntry *ea = (const GameEntry *)a;
+    const GameEntry *eb = (const GameEntry *)b;
+    return strcmp(ea->display_name, eb->display_name);
+}
+
+static void extract_display_name(const char *filepath, char *out, size_t out_size)
+{
+    const char *base = strrchr(filepath, '/');
+    if (!base) base = strrchr(filepath, '\\');
+    if (base) base++; else base = filepath;
+
+    size_t len = strlen(base);
+    if (len > 4 && strcasecmp(base + len - 4, ".CBE") == 0)
+        len -= 4;
+
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, base, len);
+    out[len] = '\0';
+}
+
+static int count_cbe_files(const char *dir_path)
+{
+    DIR *d = opendir(dir_path);
+    if (!d) return 0;
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        size_t nlen = strlen(ent->d_name);
+        if (nlen > 4 && strcasecmp(ent->d_name + nlen - 4, ".CBE") == 0)
+            count++;
+    }
+    closedir(d);
+    return count;
+}
+
+static float vm_game_launcher_compute_total_height(const GameLauncherState *state)
+{
+    int total_rows = (state->count + state->columns - 1) / state->columns;
+    return (float)(total_rows * (state->tile_h + state->gap));
+}
+
+static float vm_game_launcher_compute_max_scroll(const GameLauncherState *state);
+
+bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewport_h)
+{
+    if (!state || viewport_w <= 0 || viewport_h <= 0) return false;
+
+    memset(state, 0, sizeof(*state));
+    state->viewport_w = viewport_w;
+    state->viewport_h = viewport_h;
+    state->tile_w = LAUNCHER_TILE_W;
+    state->tile_h = LAUNCHER_TILE_H;
+    state->gap = LAUNCHER_GAP;
+    state->margin_x = LAUNCHER_MARGIN_X;
+    state->header_h = LAUNCHER_HEADER_H;
+    state->footer_h = LAUNCHER_FOOTER_H;
+    state->scrollbar_w = LAUNCHER_SCROLLBAR_W;
+
+    int available_w = viewport_w - 2 * state->margin_x - state->scrollbar_w;
+    if (available_w < state->tile_w) available_w = state->tile_w;
+    state->columns = available_w / (state->tile_w + state->gap);
+    if (state->columns < 1) state->columns = 1;
+
+    int available_h = viewport_h - state->header_h - state->footer_h;
+    state->rows_visible = available_h / (state->tile_h + state->gap);
+    if (state->rows_visible < 1) state->rows_visible = 1;
+
+    const char *scan_dir = "bin/CBE";
+    if (!dirExists((char *)scan_dir)) scan_dir = "CBE";
+
+    int max_entries = count_cbe_files((char *)scan_dir);
+    if (max_entries <= 0) max_entries = 64;
+
+    state->capacity = max_entries;
+    state->entries = (GameEntry *)calloc(state->capacity, sizeof(GameEntry));
+    if (!state->entries) return false;
+
+    DIR *d = opendir(scan_dir);
+    if (!d) {
+        free(state->entries);
+        state->entries = NULL;
+        return false;
+    }
+
+    int idx = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && idx < state->capacity) {
+        size_t nlen = strlen(ent->d_name);
+        if (nlen <= 4 || strcasecmp(ent->d_name + nlen - 4, ".CBE") != 0) continue;
+
+        snprintf(state->entries[idx].filepath, sizeof(state->entries[idx].filepath),
+                 "%s/%s", scan_dir, ent->d_name);
+
+        struct stat st;
+        if (stat(state->entries[idx].filepath, &st) == 0)
+            state->entries[idx].file_size = (u32)st.st_size;
+
+        extract_display_name(state->entries[idx].filepath,
+                             state->entries[idx].display_name,
+                             sizeof(state->entries[idx].display_name));
+        idx++;
+    }
+    closedir(d);
+
+    state->count = idx;
+    qsort(state->entries, state->count, sizeof(GameEntry), cmp_entries);
+
+    state->scroll_offset = 0;
+    {
+        float max = vm_game_launcher_compute_max_scroll(state);
+        if (max < 0) state->scroll_offset = 0;
+        else state->scroll_offset = max;
+    }
+
+    return true;
+}
+
+static float vm_game_launcher_compute_max_scroll(const GameLauncherState *state)
+{
+    int visible_area = state->rows_visible * (state->tile_h + state->gap);
+    float total = vm_game_launcher_compute_total_height(state);
+    float max = total - visible_area;
+    if (max < 0) max = 0;
+    return max;
+}
+
+void vm_game_launcher_destroy(GameLauncherState *state)
+{
+    if (!state) return;
+    free(state->entries);
+    state->entries = NULL;
+    state->count = 0;
+    state->capacity = 0;
+}
+
+static void draw_rounded_rect(SDL_Surface *sfc, int x, int y, int w, int h,
+                              u32 color, int radius)
+{
+    (void)radius;
+    u32 mapped = SDL_MapRGB(sfc->format,
+        ((color >> 16) & 0xff), ((color >> 8) & 0xff), (color & 0xff));
+    for (int row = 0; row < h; ++row) {
+        u32 *dst = (u32 *)((u8 *)sfc->pixels + (y + row) * sfc->pitch);
+        for (int col = 0; col < w; ++col)
+            dst[x + col] = mapped;
+    }
+}
+
+static void draw_rect_border(SDL_Surface *sfc, int x, int y, int w, int h, u32 color)
+{
+    u32 mapped = SDL_MapRGB(sfc->format,
+        ((color >> 16) & 0xff), ((color >> 8) & 0xff), (color & 0xff));
+    for (int col = 0; col < w; ++col) {
+        ((u32 *)((u8 *)sfc->pixels + y * sfc->pitch))[x + col] = mapped;
+        ((u32 *)((u8 *)sfc->pixels + (y + h - 1) * sfc->pitch))[x + col] = mapped;
+    }
+    for (int row = 0; row < h; ++row) {
+        u32 *dst = (u32 *)((u8 *)sfc->pixels + (y + row) * sfc->pitch);
+        dst[x] = mapped;
+        dst[x + w - 1] = mapped;
+    }
+}
+
+static void blit_text_centered(SDL_Surface *sfc, const char *text, int x, int y,
+                               int w, int h, u32 color)
+{
+    (void)sfc; (void)text; (void)x; (void)y; (void)w; (void)h; (void)color;
+}
+
+void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
+{
+    SDL_Surface *sfc = (SDL_Surface *)surface_ptr;
+    if (!sfc || !state || !state->entries) return;
+
+    u32 bg = SDL_MapRGB(sfc->format, 0x1a, 0x1a, 0x2e);
+    SDL_FillRect(sfc, NULL, bg);
+
+    int content_x = state->margin_x;
+    int content_y = state->header_h;
+    int content_w = state->viewport_w - 2 * state->margin_x - state->scrollbar_w;
+    int content_h = state->viewport_h - state->header_h - state->footer_h;
+
+    SDL_Rect clip;
+    clip.x = content_x;
+    clip.y = content_y;
+    clip.w = content_w;
+    clip.h = content_h;
+    SDL_SetClipRect(sfc, &clip);
+
+    u32 header_color = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
+    draw_rounded_rect(sfc, 0, 0, state->viewport_w, state->header_h, 0x0f3460, 0);
+
+    float max_scroll = vm_game_launcher_compute_max_scroll(state);
+    if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
+    if (state->scroll_offset < 0) state->scroll_offset = 0;
+
+    for (int i = 0; i < state->count; ++i) {
+        int row = i / state->columns;
+        int col = i % state->columns;
+
+        float tile_y = (float)(row * (state->tile_h + state->gap)) - state->scroll_offset;
+        if (tile_y < -state->tile_h || tile_y > content_h) continue;
+
+        int tile_x = content_x + col * (state->tile_w + state->gap);
+        int ty = content_y + (int)tile_y;
+
+        u32 tile_bg = SDL_MapRGB(sfc->format, 0x16, 0x21, 0x3e);
+        u32 border = SDL_MapRGB(sfc->format, 0x33, 0x33, 0x55);
+
+        if (i == state->selected_index) {
+            tile_bg = SDL_MapRGB(sfc->format, 0x0f, 0x34, 0x60);
+            border = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
+        }
+
+        draw_rounded_rect(sfc, tile_x, ty, state->tile_w, state->tile_h, tile_bg, 0);
+        draw_rect_border(sfc, tile_x, ty, state->tile_w, state->tile_h, border);
+    }
+
+    float total = vm_game_launcher_compute_total_height(state);
+    float thumb_ratio = (total > 0) ? (float)content_h / total : 1.0f;
+    float thumb_h = content_h * thumb_ratio;
+    if (thumb_h < 20) thumb_h = 20;
+    float scrollbar_track_h = content_h;
+    float scroll_ratio = (total > (float)content_h) ?
+        state->scroll_offset / (total - (float)content_h) : 0;
+    float thumb_y = content_y + scroll_ratio * (scrollbar_track_h - thumb_h);
+
+    u32 sb_color = SDL_MapRGB(sfc->format, 0x55, 0x55, 0x55);
+    u32 thumb_color = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
+    int sb_x = state->viewport_w - state->scrollbar_w;
+    draw_rounded_rect(sfc, sb_x, content_y, state->scrollbar_w, content_h, sb_color, 0);
+    draw_rounded_rect(sfc, sb_x, (int)thumb_y, state->scrollbar_w, (int)thumb_h, thumb_color, 0);
+
+    SDL_SetClipRect(sfc, NULL);
+    SDL_UpdateWindowSurface(sfc);
+}
+
+bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int button)
+{
+    if (!state || !state->entries) return false;
+
+    int content_x = state->margin_x;
+    int content_y = state->header_h;
+    int content_w = state->viewport_w - 2 * state->margin_x - state->scrollbar_w;
+    int content_h = state->viewport_h - state->header_h - state->footer_h;
+    int sb_x = state->viewport_w - state->scrollbar_w;
+
+    if (x >= sb_x && y >= content_y && y < content_y + content_h) {
+        float total = vm_game_launcher_compute_total_height(state);
+        float thumb_ratio = (total > 0) ? (float)content_h / total : 1.0f;
+        float thumb_h = content_h * thumb_ratio;
+        if (thumb_h < 20) thumb_h = 20;
+        float scroll_ratio = (total > (float)content_h) ?
+            state->scroll_offset / (total - (float)content_h) : 0;
+        float track_start = content_y + scroll_ratio * (content_h - thumb_h);
+
+        if (button == 1) {
+            if (y >= track_start && y <= track_start + thumb_h) {
+                state->is_scrolling = true;
+            } else {
+                float new_offset = ((float)(y - content_y) / content_h) * (total - (float)content_h);
+                if (new_offset < 0) new_offset = 0;
+                if (new_offset > total - (float)content_h) new_offset = total - (float)content_h;
+                state->scroll_offset = new_offset;
+            }
+        }
+        return true;
+    }
+
+    if (state->is_scrolling && button == 1) {
+        float total = vm_game_launcher_compute_total_height(state);
+        float new_offset = ((float)(y - content_y - state->tile_h / 2) / content_h) * (total - (float)content_h);
+        if (new_offset < 0) new_offset = 0;
+        if (new_offset > total - (float)content_h) new_offset = total - (float)content_h;
+        state->scroll_offset = new_offset;
+        return true;
+    }
+
+    if (x >= content_x && x < content_x + content_w &&
+        y >= content_y && y < content_y + content_h) {
+        for (int i = 0; i < state->count; ++i) {
+            int row = i / state->columns;
+            int col = i % state->columns;
+            float tile_y = (float)(row * (state->tile_h + state->gap)) - state->scroll_offset;
+            if (tile_y < -state->tile_h || tile_y > content_h) continue;
+
+            int tile_x = content_x + col * (state->tile_w + state->gap);
+            int ty = content_y + (int)tile_y;
+
+            if (x >= tile_x && x < tile_x + state->tile_w &&
+                y >= ty && y < ty + state->tile_h) {
+                state->selected_index = i;
+                if (button == 1) return true;
+                return true;
+            }
+        }
+    }
+
+    if (button == 4) {
+        state->scroll_offset -= 30;
+        if (state->scroll_offset < 0) state->scroll_offset = 0;
+        return true;
+    }
+    if (button == 5) {
+        float max_scroll = vm_game_launcher_compute_max_scroll(state);
+        state->scroll_offset += 30;
+        if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
+        return true;
+    }
+
+    return false;
+}
+
+bool vm_game_launcher_handle_key(GameLauncherState *state, int key_sym, bool is_down)
+{
+    if (!state || !state->entries) return false;
+    if (!is_down) return false;
+
+    float max_scroll = vm_game_launcher_compute_max_scroll(state);
+    int step = state->tile_h + state->gap;
+
+    switch (key_sym) {
+    case SDLK_UP:
+        if (state->selected_index > 0) state->selected_index--;
+        break;
+    case SDLK_DOWN:
+        if (state->selected_index < state->count - 1) state->selected_index++;
+        break;
+    case SDLK_PAGEUP:
+        state->selected_index -= state->rows_visible;
+        if (state->selected_index < 0) state->selected_index = 0;
+        break;
+    case SDLK_PAGEDOWN:
+        state->selected_index += state->rows_visible;
+        if (state->selected_index >= state->count) state->selected_index = state->count - 1;
+        break;
+    case SDLK_HOME:
+        state->selected_index = 0;
+        break;
+    case SDLK_END:
+        state->selected_index = state->count - 1;
+        break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        return true;
+    case SDLK_ESCAPE:
+        return true;
+    default:
+        return false;
+    }
+
+    int row = state->selected_index / state->columns;
+    int col = state->selected_index % state->columns;
+    float tile_abs_y = (float)(row * step) - state->scroll_offset;
+
+    if (tile_abs_y < 0)
+        state->scroll_offset = (float)(row * step);
+    else if (tile_abs_y > state->viewport_h - state->header_h - state->footer_h - state->tile_h)
+        state->scroll_offset = (float)(row * step) -
+            (state->viewport_h - state->header_h - state->footer_h - state->tile_h);
+
+    if (state->scroll_offset < 0) state->scroll_offset = 0;
+    if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
+
+    return true;
+}
+
+int vm_game_launcher_get_selected_index(const GameLauncherState *state)
+{
+    return state ? state->selected_index : -1;
+}
+
+const char *vm_game_launcher_get_selected_filepath(const GameLauncherState *state)
+{
+    if (!state || !state->entries || state->selected_index < 0 ||
+        state->selected_index >= state->count) return NULL;
+    return state->entries[state->selected_index].filepath;
+}
+
+bool vm_game_launcher_is_active(const GameLauncherState *state)
+{
+    return state && state->active;
+}
+
+void vm_game_launcher_set_active(GameLauncherState *state, bool active)
+{
+    if (state) state->active = active;
+}
