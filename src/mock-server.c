@@ -34904,17 +34904,11 @@ static u8 vm_net_mock_append_scene_nearby_role_objects(u8 *out, u32 outCap, u32 
     return (u8)(1 + moveinfoCount);
 }
 
-/*
- * The first scene resource completion already carries the requested empty
- * 2/10 object and has a confirmed practical ceiling of ten WT objects.  A
- * newly entering observer does not need historical 2/2 movement in order to
- * create a peer node: sub_1012958 consumes the coordinates embedded in
- * otherinfo and calls scene_node_find_or_create directly.  Publish one compact
- * non-empty 2/10 baseline after the scene is ready, then advance each
- * observer-side movement cursor to the source's current serial.  The next
- * real movement burst is still delivered once by the normal scene poll, while
- * an old queue cannot be replayed immediately after node creation.
- */
+/* A first-scene response has a confirmed practical ceiling of ten WT objects.
+ * Put nearby rows into the request's existing 2/10 response slot, then use
+ * this helper to baseline the observer-side movement cursors after the active
+ * session becomes visible.  The next real movement serial is still delivered
+ * once, while an old queue cannot replay immediately after node creation. */
 static u32 vm_mock_service_mark_scene_nearby_role_baseline_visible(const char *scene)
 {
     vm_mock_service_client_session *observer =
@@ -34954,50 +34948,6 @@ static u32 vm_mock_service_mark_scene_nearby_role_baseline_visible(const char *s
         ++markedCount;
     }
     return markedCount;
-}
-
-static u8 vm_net_mock_append_scene_ready_nearby_role_baseline10_object(
-    u8 *out,
-    u32 outCap,
-    u32 *pos,
-    const char *scene,
-    u32 *roleCountOut,
-    u32 *otherInfoLenOut)
-{
-    u32 savedPos = 0;
-    u32 roleCount = 0;
-    u32 otherInfoLen = 0;
-
-    if (roleCountOut)
-        *roleCountOut = 0;
-    if (otherInfoLenOut)
-        *otherInfoLenOut = 0;
-    if (out == NULL || pos == NULL ||
-        !vm_net_mock_scene_name_is_safe(scene))
-    {
-        return 0;
-    }
-
-    savedPos = *pos;
-    if (!vm_net_mock_append_actor_other_scene_roles10_object(out,
-                                                             outCap,
-                                                             pos,
-                                                             scene,
-                                                             &roleCount,
-                                                             &otherInfoLen) ||
-        roleCount == 0)
-    {
-        *pos = savedPos;
-        return 0;
-    }
-
-    (void)vm_mock_service_mark_scene_nearby_role_baseline_visible(scene);
-
-    if (roleCountOut)
-        *roleCountOut = roleCount;
-    if (otherInfoLenOut)
-        *otherInfoLenOut = otherInfoLen;
-    return 1;
 }
 
 static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_role_seed *seeds,
@@ -41847,14 +41797,15 @@ static bool vm_net_mock_append_info_banner_result5_object(u8 *out, u32 outCap, u
     return true;
 }
 
-static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
-                                                               u8 *objectCount, const char *sceneOverride,
-                                                               bool includeSkillBooks,
-                                                               bool includeTaskLists,
-                                                               bool includeActorOther, bool includeInfoBanner,
-                                                               bool includeFbTargetClear,
-                                                               bool includeFbTargetSeedOnly,
-                                                               bool preferSceneNpcOther)
+static bool vm_net_mock_append_scene_resource_followup_objects_ex(u8 *out, u32 outCap, u32 *pos,
+                                                                  u8 *objectCount, const char *sceneOverride,
+                                                                  bool includeSkillBooks,
+                                                                  bool includeTaskLists,
+                                                                  bool includeActorOther, bool includeInfoBanner,
+                                                                  bool includeFbTargetClear,
+                                                                  bool includeFbTargetSeedOnly,
+                                                                  bool preferSceneNpcOther,
+                                                                  bool preferSceneRoleOther)
 {
     /*
      * In the first scene-enter dispatch window we have a confirmed practical
@@ -41878,7 +41829,27 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
      */
     if (includeActorOther)
     {
-        if (preferSceneNpcOther || vm_net_mock_env_u32("CBE_SCENE_NPC_OTHERINFO", 0) != 0)
+        if (preferSceneRoleOther)
+        {
+            const char *scene = vm_net_mock_scene_name_is_safe(sceneOverride)
+                                    ? sceneOverride
+                                    : vm_net_mock_current_scene_name();
+            u32 savedPos = *pos;
+            u32 roleCount = 0;
+            u32 otherInfoLen = 0;
+
+            if (!vm_net_mock_append_actor_other_scene_roles10_object(out, outCap, pos,
+                                                                     scene,
+                                                                     &roleCount,
+                                                                     &otherInfoLen) ||
+                roleCount == 0)
+            {
+                *pos = savedPos;
+                if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, pos))
+                    return false;
+            }
+        }
+        else if (preferSceneNpcOther || vm_net_mock_env_u32("CBE_SCENE_NPC_OTHERINFO", 0) != 0)
         {
             const char *scene = vm_net_mock_scene_name_is_safe(sceneOverride)
                                     ? sceneOverride
@@ -41969,6 +41940,27 @@ static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outC
     }
 
     return true;
+}
+
+static bool vm_net_mock_append_scene_resource_followup_objects(u8 *out, u32 outCap, u32 *pos,
+                                                               u8 *objectCount, const char *sceneOverride,
+                                                               bool includeSkillBooks,
+                                                               bool includeTaskLists,
+                                                               bool includeActorOther, bool includeInfoBanner,
+                                                               bool includeFbTargetClear,
+                                                               bool includeFbTargetSeedOnly,
+                                                               bool preferSceneNpcOther)
+{
+    return vm_net_mock_append_scene_resource_followup_objects_ex(out, outCap, pos,
+                                                                 objectCount, sceneOverride,
+                                                                 includeSkillBooks,
+                                                                 includeTaskLists,
+                                                                 includeActorOther,
+                                                                 includeInfoBanner,
+                                                                 includeFbTargetClear,
+                                                                 includeFbTargetSeedOnly,
+                                                                 preferSceneNpcOther,
+                                                                 false);
 }
 
 static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
@@ -42107,6 +42099,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     bool sceneSupportsActorOtherNpcSeed = false;
     bool actorOtherNpcSeedInFollowup = false;
     bool preferActorOtherNpcRows = false;
+    bool startupNearbyInRequestedObject = false;
     bool probeActorOtherNpcInFollowup = false;
     bool sceneNpcInfo11SeedInFollowup = false;
     bool sceneNpcActorInfoSeedInFollowup = false;
@@ -42122,7 +42115,6 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 timingTailMs = 0;
     u32 timingReadyMs = 0;
     u32 readyNearbyRoleCount = 0;
-    u32 readyNearbyOtherInfoLen = 0;
     if (outCap < pos || !vm_net_mock_is_scene_resource_followup_request(request, requestLen))
         return 0;
 
@@ -42234,6 +42226,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                                   sceneSupportsActorOtherNpcSeed &&
                                   probeActorOtherNpcInFollowup;
     preferActorOtherNpcRows = actorOtherNpcSeedInFollowup;
+    startupNearbyInRequestedObject = startupSceneAlreadyEntered &&
+                                       !preferActorOtherNpcRows;
     sceneNpcInfo11SeedInFollowup = !keepBusinessGate &&
                                    includeSkillBooks &&
                                    vm_net_mock_env_u8("CBE_SCENE_FOLLOWUP_NPCINFO11", 0) != 0 &&
@@ -42264,11 +42258,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         return 0;
     }
     timingLifecycleMs = scheduler_get_tick_ms();
-    if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
-                                                           currentScene,
-                                                           includeSkillBooks, true, true, true,
-                                                           false, false,
-                                                           preferActorOtherNpcRows))
+    if (!vm_net_mock_append_scene_resource_followup_objects_ex(out, outCap, &pos, &objectCount,
+                                                              currentScene,
+                                                              includeSkillBooks, true, true, true,
+                                                              false, false,
+                                                              preferActorOtherNpcRows,
+                                                              startupNearbyInRequestedObject))
         return 0;
     timingObjectsMs = scheduler_get_tick_ms();
     appendSceneRoomNpcAfterEnter = !keepBusinessGate &&
@@ -42346,18 +42341,18 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
             return 0;
         objectCount = (u8)(objectCount + readyChatObjects);
 
-        if (vm_net_mock_append_scene_ready_nearby_role_baseline10_object(
-                out, outCap, &pos, currentScene,
-                &readyNearbyRoleCount,
-                &readyNearbyOtherInfoLen) > 0)
+        if (startupNearbyInRequestedObject)
         {
-            objectCount += 1;
-            printf("[info][network] mock_scene_resource_ready_nearby scene=%s nearby_roles=%u otherinfo_len=%u objects=%u resp=%u delivery=same-scene-completion history_replay=0 evidence=JianghuOL.CBE:0x01012958\n",
-                   currentScene ? currentScene : "-",
-                   readyNearbyRoleCount,
-                   readyNearbyOtherInfoLen,
-                   objectCount,
-                   pos);
+            readyNearbyRoleCount =
+                vm_mock_service_mark_scene_nearby_role_baseline_visible(currentScene);
+            if (readyNearbyRoleCount > 0)
+            {
+                printf("[info][network] mock_scene_resource_ready_nearby scene=%s nearby_roles=%u objects=%u resp=%u delivery=requested-2/10 history_replay=0 evidence=JianghuOL.CBE:0x01012958\n",
+                       currentScene ? currentScene : "-",
+                       readyNearbyRoleCount,
+                       objectCount,
+                       pos);
+            }
         }
     }
     timingReadyMs = scheduler_get_tick_ms();
@@ -42442,6 +42437,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     const char *nearbyScene = NULL;
     bool seedSubsetNpcOther = false;
     bool seedSubsetNpcActorInfo = false;
+    bool startupNearbyInRequestedObject = false;
     bool includeSkillBooks = false;
     u32 subsetNpcActorInfoLen = 0;
     u32 subsetNpcActorId = 0;
@@ -42514,10 +42510,15 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                          vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_OTHERINFO", 0) != 0;
     seedSubsetNpcActorInfo = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
                              vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_ACTORINFO", 0) != 0;
-    if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
-                                                           currentScene,
-                                                           includeSkillBooks, true, true, true, false, false,
-                                                           seedSubsetNpcOther))
+    startupNearbyInRequestedObject = startupSceneAlreadyEntered &&
+                                       !completeDeferredScene &&
+                                       !seedSubsetNpcOther;
+    if (!vm_net_mock_append_scene_resource_followup_objects_ex(out, outCap, &pos, &objectCount,
+                                                              currentScene,
+                                                              includeSkillBooks, true, true, true,
+                                                              false, false,
+                                                              seedSubsetNpcOther,
+                                                              startupNearbyInRequestedObject))
         return 0;
 
     if (completeDeferredScene)
@@ -42576,6 +42577,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
             return 0;
         objectCount += 1;
     }
+    if (!startupNearbyInRequestedObject)
     {
         u8 addedNearbyObjects = vm_net_mock_append_scene_nearby_role_objects(out,
                                                                              outCap,
@@ -42595,6 +42597,19 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                    pos);
         }
     }
+    else
+    {
+        nearbyRoleCount =
+            vm_mock_service_mark_scene_nearby_role_baseline_visible(nearbyScene);
+        if (nearbyRoleCount > 0)
+        {
+            printf("[info][network] mock_scene_task_subset_nearby scene=%s nearby_roles=%u moveinfo=0 objects=%u resp=%u delivery=requested-2/10 history_replay=0 evidence=JianghuOL.CBE:0x01012958\n",
+                   nearbyScene ? nearbyScene : "-",
+                   nearbyRoleCount,
+                   objectCount,
+                   pos);
+        }
+    }
 
     if (!completeDeferredScene)
     {
@@ -42611,6 +42626,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                     "scene-task-subset-followup",
                                                     objectCount,
                                                     pos);
+    if (startupNearbyInRequestedObject && nearbyRoleCount > 0)
+        (void)vm_mock_service_mark_scene_nearby_role_baseline_visible(currentScene);
     if (seedSubsetNpcOther)
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
