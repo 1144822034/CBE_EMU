@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "../Lib/sdl2-2.0.10/include/SDL2/SDL.h"
 #include "fontEngine.h"
+#include "mystd.h"
 
 static void launcher_put_pixel(SDL_Surface *sfc, int x, int y, u32 color)
 {
@@ -174,8 +175,11 @@ bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewpor
         size_t nlen = strlen(ent->d_name);
         if (nlen <= 4 || strcasecmp(ent->d_name + nlen - 4, ".CBE") != 0) continue;
 
+        char name_utf8[260];
+        gbk_to_utf8((u8 *)ent->d_name, (u8 *)name_utf8, sizeof(name_utf8));
+
         snprintf(state->entries[idx].filepath, sizeof(state->entries[idx].filepath),
-                 "%s/%s", scan_dir, ent->d_name);
+                 "%s/%s", scan_dir, name_utf8);
 
         struct stat st;
         if (stat(state->entries[idx].filepath, &st) == 0)
