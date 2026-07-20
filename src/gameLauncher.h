@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include "config.h"
 
 typedef struct {
@@ -38,3 +39,6 @@ int vm_game_launcher_get_selected_index(const GameLauncherState *state);
 const char *vm_game_launcher_get_selected_filepath(const GameLauncherState *state);
 bool vm_game_launcher_is_active(const GameLauncherState *state);
 void vm_game_launcher_set_active(GameLauncherState *state, bool active);
+
+void vm_game_launcher_save_last(const char *filepath);
+const char *vm_game_launcher_load_last(char *buf, size_t buf_size);

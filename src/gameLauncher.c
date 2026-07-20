@@ -506,3 +506,29 @@ void vm_game_launcher_set_active(GameLauncherState *state, bool active)
 {
     if (state) state->active = active;
 }
+
+void vm_game_launcher_save_last(const char *filepath)
+{
+    if (!filepath) return;
+    FILE *f = fopen("game_launcher_last.txt", "w");
+    if (f) {
+        fprintf(f, "%s\n", filepath);
+        fclose(f);
+    }
+}
+
+const char *vm_game_launcher_load_last(char *buf, size_t buf_size)
+{
+    if (!buf || buf_size == 0) return NULL;
+    FILE *f = fopen("game_launcher_last.txt", "r");
+    if (!f) return NULL;
+    if (fgets(buf, (int)buf_size, f)) {
+        size_t len = strlen(buf);
+        while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
+            buf[--len] = '\0';
+        fclose(f);
+        return len > 0 ? buf : NULL;
+    }
+    fclose(f);
+    return NULL;
+}

@@ -6166,6 +6166,10 @@ void loop()
                                     printf("[error][launcher] failed to load %s\n", path);
                                     g_gameLauncherActive = true;
                                 }
+                                else
+                                {
+                                    vm_game_launcher_save_last(path);
+                                }
                             }
                         }
                     }
@@ -8022,15 +8026,24 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
-    if (!g_mockServiceOnly && !g_forceLaunchCbe)
+    if (!g_mockServiceOnly)
     {
         InitLcd();
         InitFontEngine();
-        if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(), LcdGetWindowHeight()))
+        if (!g_forceLaunchCbe)
         {
-            g_gameLauncherActive = true;
-            printf("[info][launcher] game center initialized, %d games found\n",
-                   g_gameLauncherState.count);
+            char lastPath[260];
+            if (vm_game_launcher_load_last(lastPath, sizeof(lastPath)))
+            {
+                printf("[info][launcher] auto-launching last selected: %s\n", lastPath);
+                snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", lastPath);
+            }
+            else if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(), LcdGetWindowHeight()))
+            {
+                g_gameLauncherActive = true;
+                printf("[info][launcher] game center initialized, %d games found\n",
+                       g_gameLauncherState.count);
+            }
         }
     }
 
