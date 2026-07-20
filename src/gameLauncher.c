@@ -408,9 +408,9 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     SDL_SetClipRect(sfc, NULL);
 }
 
-bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int button)
+const char *vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int button)
 {
-    if (!state || !state->entries) return false;
+    if (!state || !state->entries) return NULL;
 
     int content_x = state->margin_x;
     int content_y = state->header_h;
@@ -420,7 +420,7 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
 
     if (button == 0 && state->_internal_is_scrolling) {
         state->_internal_is_scrolling = false;
-        return true;
+        return NULL;
     }
 
     if (x >= sb_x && y >= content_y && y < content_y + content_h) {
@@ -442,7 +442,7 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
                 state->scroll_offset = new_offset;
             }
         }
-        return true;
+        return NULL;
     }
 
     if (state->_internal_is_scrolling && button == 1) {
@@ -451,7 +451,7 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
         if (new_offset < 0) new_offset = 0;
         if (new_offset > total - (float)content_h) new_offset = total - (float)content_h;
         state->scroll_offset = new_offset;
-        return true;
+        return NULL;
     }
 
     if (x >= content_x && x < content_x + content_w &&
@@ -468,8 +468,15 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
             if (x >= tile_x && x < tile_x + state->tile_w &&
                 y >= ty && y < ty + state->tile_h) {
                 state->selected_index = i;
-                if (button == 1) return true;
-                return true;
+                if (button == 1) {
+                    u32 now = SDL_GetTicks();
+                    if (now - state->last_click_time <= 300 && i == state->last_click_index) {
+                        return state->entries[i].filepath;
+                    }
+                    state->last_click_time = now;
+                    state->last_click_index = i;
+                }
+                return NULL;
             }
         }
     }
@@ -477,16 +484,16 @@ bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int b
     if (button == 4) {
         state->scroll_offset -= 30;
         if (state->scroll_offset < 0) state->scroll_offset = 0;
-        return true;
+        return NULL;
     }
     if (button == 5) {
         float max_scroll = vm_game_launcher_compute_max_scroll(state);
         state->scroll_offset += 30;
         if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
-        return true;
+        return NULL;
     }
 
-    return false;
+    return NULL;
 }
 
 bool vm_game_launcher_handle_key(GameLauncherState *state, int key_sym, bool is_down)
