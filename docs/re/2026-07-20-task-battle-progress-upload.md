@@ -70,3 +70,41 @@ net_send connect=0 wt=6/3 len=32 source=builtin-task resp=23
 - 回放服务 stderr 为空，进程没有断言退出。验证日志：
   `tmp/mock-service-19090.task-progress.20260720-122619.stdout.log`。
 
+## 满进度时的 `6/3 + 6/6` 组合包
+
+任务 19 达到 `10/10` 后，真实客户端把 `UpdateTaskProgress` 和紧接着的
+`SendTaskStateUpdate` 一起刷新为 65 字节 WT 包：
+
+```text
+1/6/3 payload=23 { taskinfo = u32 taskId + u8 progress1 + u8 progress2 }
+1/6/6 payload=28 { tasknum=1, taskid = tagged u32 }
+```
+
+旧处理器只允许单对象 `6/3`，因此该包落入：
+
+```text
+unhandled wt=6/3 len=65 first=1/6/3:23,1/6/6:28
+Assertion failed: src/mock-server.c:44998
+```
+
+客户端证据：
+
+- `江湖OL.CBE:UpdateTaskProgress(0x01047ACE)` 生成 `6/3`；进度满足要求时
+  紧接着调用 `SendTaskStateUpdate(0x01046E64)`。
+- `SendTaskStateUpdate` 生成 `6/6`，写入 `tasknum=1`，并把同一任务 ID
+  作为 `taskid` tagged-u32 流。
+- `net_handle_task_response_dispatch(0x0104726C)` 分别以 case 2 消费进度
+  ACK、case 6 消费任务状态刷新。
+
+服务端只接受这一种精确尾随形式：首对象必须是 payload 23 的合法进度流，
+尾对象必须是 payload 28 的 `tasknum=1` 状态流，而且两者 task ID 必须一致，
+不允许第三个对象。处理时按请求顺序复用单对象任务处理器，响应为：
+
+```text
+1/6/2 { result=0 }
+1/6/6 { tasknum=1, taskstate=(taskId,state=2) }
+```
+
+回放结果：请求长度 `65`，响应长度 `63`，日志来源
+`builtin-task`；MySQL 权威状态保持 `progress=10/0,state=2`，服务继续运行且
+stderr 为 0。验证日志：`tmp/mock-service-19090.task-combo.*.stdout.log`。
