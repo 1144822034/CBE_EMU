@@ -1,6 +1,6 @@
 # Game Launcher UI — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: COMPLETE** — All 6 tasks implemented and verified. See commits `f0d7aa0..23f6605`.
 
 **Goal:** Add a host-side SDL overlay game center that lists all `.CBE` files as icon tiles, supports scrolling and click/keyboard selection, and reloads the chosen CBE into the Unicorn VM at runtime.
 
