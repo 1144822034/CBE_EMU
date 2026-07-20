@@ -219,8 +219,13 @@ static void draw_rounded_rect(SDL_Surface *sfc, int x, int y, int w, int h,
     (void)radius;
     u32 mapped = SDL_MapRGB(sfc->format,
         ((color >> 16) & 0xff), ((color >> 8) & 0xff), (color & 0xff));
+    if (x + w > sfc->w) w = sfc->w - x;
+    if (y + h > sfc->h) h = sfc->h - y;
+    if (w <= 0 || h <= 0) return;
     for (int row = 0; row < h; ++row) {
-        u32 *dst = (u32 *)((u8 *)sfc->pixels + (y + row) * sfc->pitch);
+        int ry = y + row;
+        if (ry < 0 || ry >= sfc->h) continue;
+        u32 *dst = (u32 *)((u8 *)sfc->pixels + ry * sfc->pitch);
         for (int col = 0; col < w; ++col)
             dst[x + col] = mapped;
     }
@@ -228,6 +233,8 @@ static void draw_rounded_rect(SDL_Surface *sfc, int x, int y, int w, int h,
 
 static void draw_rect_border(SDL_Surface *sfc, int x, int y, int w, int h, u32 color)
 {
+    if (x < 0 || y < 0 || x + w > sfc->w || y + h > sfc->h) return;
+    if (w <= 0 || h <= 0) return;
     u32 mapped = SDL_MapRGB(sfc->format,
         ((color >> 16) & 0xff), ((color >> 8) & 0xff), (color & 0xff));
     for (int col = 0; col < w; ++col) {
