@@ -499,9 +499,11 @@ bool vm_game_launcher_handle_key(GameLauncherState *state, int key_sym, bool is_
 
     switch (key_sym) {
     case SDLK_UP:
+    case SDLK_w:
         if (state->selected_index > 0) state->selected_index--;
         break;
     case SDLK_DOWN:
+    case SDLK_s:
         if (state->selected_index < state->count - 1) state->selected_index++;
         break;
     case SDLK_PAGEUP:
@@ -518,8 +520,7 @@ bool vm_game_launcher_handle_key(GameLauncherState *state, int key_sym, bool is_
     case SDLK_END:
         state->selected_index = state->count - 1;
         break;
-    case SDLK_RETURN:
-    case SDLK_KP_ENTER:
+    case SDLK_q:
         return true;
     case SDLK_ESCAPE:
         return true;

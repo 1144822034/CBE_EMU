@@ -6151,8 +6151,7 @@ void loop()
                     if (vm_game_launcher_handle_key(&g_gameLauncherState,
                             ev.key.keysym.sym, true))
                     {
-                        if (ev.key.keysym.sym == SDLK_RETURN ||
-                            ev.key.keysym.sym == SDLK_KP_ENTER)
+                        if (ev.key.keysym.sym == SDLK_q)
                         {
                             const char *path = vm_game_launcher_get_selected_filepath(
                                 &g_gameLauncherState);
