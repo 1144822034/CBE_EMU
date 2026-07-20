@@ -27,6 +27,12 @@ INSERT IGNORE INTO `server_admin_config`
 VALUES
   (1, '123456', 0, 0);
 
+CREATE TABLE IF NOT EXISTS `server_data_migrations` (
+  `migration_name` VARCHAR(127) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`migration_name`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `friendships` (
   `owner_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `owner_role_id` INT UNSIGNED NOT NULL,
@@ -131,7 +137,7 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   `slot_index` SMALLINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
   `item_seq` SMALLINT UNSIGNED NOT NULL,
-  `item_count` INT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL COMMENT '普通物品为堆叠数；802/803 为剩余 HP/MP 储量',
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),

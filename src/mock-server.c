@@ -4638,7 +4638,7 @@ typedef struct
     u8 category;
     u8 levelRequired;
     u8 stack;
-    u8 reserved0;
+    u8 consumeMode;
     u32 hp;
     u32 mp;
     u32 exp;
@@ -6131,6 +6131,7 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
 
 static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
                                                      u32 levelRequired, u32 stack,
+                                                     u32 consumeMode,
                                                      u32 hp, u32 mp, u32 exp)
 {
     vm_net_mock_item_effect_catalog_item *item = NULL;
@@ -6147,6 +6148,7 @@ static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
     item->category = (u8)(category > 255 ? 255 : category);
     item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
     item->stack = (u8)(stack > 255 ? 255 : stack);
+    item->consumeMode = (u8)(consumeMode > 255 ? 255 : consumeMode);
     item->hp = hp;
     item->mp = mp;
     item->exp = exp;
@@ -6189,6 +6191,7 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
         u32 category = 0xff;
         u32 levelRequired = 1;
         u32 stack = 1;
+        u32 consumeMode = 0;
         u32 hp = 0;
         u32 mp = 0;
         u32 exp = 0;
@@ -6219,6 +6222,9 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
             case 10:
                 stack = parsed ? parsed : 1;
                 break;
+            case 12:
+                consumeMode = parsed;
+                break;
             case 15:
                 hp = parsed;
                 break;
@@ -6235,7 +6241,7 @@ static u32 vm_net_mock_load_item_effect_catalog_dsh(const char *path)
         }
 
         if (vm_net_mock_add_item_effect_catalog_item(itemId, category, levelRequired,
-                                                     stack, hp, mp, exp))
+                                                     stack, consumeMode, hp, mp, exp))
         {
             ++added;
         }
@@ -6260,16 +6266,18 @@ static u32 vm_net_mock_load_item_effect_catalog(void)
 
     if (itemCount == 0)
     {
-        (void)vm_net_mock_add_item_effect_catalog_item(301, 10, 1, 20, 100, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(302, 10, 1, 20, 350, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(303, 10, 1, 20, 600, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(304, 10, 1, 20, 850, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(305, 10, 1, 20, 1100, 0, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(321, 10, 1, 20, 0, 100, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(322, 10, 1, 20, 0, 350, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(323, 10, 1, 20, 0, 600, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(324, 10, 1, 20, 0, 850, 0);
-        (void)vm_net_mock_add_item_effect_catalog_item(325, 10, 1, 20, 0, 1100, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(301, 10, 1, 20, 1, 100, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(302, 10, 1, 20, 1, 350, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(303, 10, 1, 20, 1, 600, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(304, 10, 1, 20, 1, 850, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(305, 10, 1, 20, 1, 1100, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(321, 10, 1, 20, 1, 0, 100, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(322, 10, 1, 20, 1, 0, 350, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(323, 10, 1, 20, 1, 0, 600, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(324, 10, 1, 20, 1, 0, 850, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(325, 10, 1, 20, 1, 0, 1100, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(802, 10, 200, 1, 2, 50000, 0, 0);
+        (void)vm_net_mock_add_item_effect_catalog_item(803, 10, 200, 1, 2, 0, 50000, 0);
         printf("[warn][network] mock_item_effect_catalog fallback=item.dsh-not-found total=%u\n",
                g_vm_net_mock_item_effect_catalog_count);
     }
@@ -6300,6 +6308,47 @@ static bool vm_net_mock_item_effect_is_usable(const vm_net_mock_item_effect_cata
     if (item == NULL)
         return false;
     return item->category == 10 || item->hp != 0 || item->mp != 0 || item->exp != 0;
+}
+
+static bool vm_net_mock_item_effect_is_reservoir(
+    const vm_net_mock_item_effect_catalog_item *item)
+{
+    return item != NULL && item->consumeMode == 2 &&
+           (item->hp != 0 || item->mp != 0);
+}
+
+static u32 vm_net_mock_item_effect_reservoir_capacity(
+    const vm_net_mock_item_effect_catalog_item *item)
+{
+    if (!vm_net_mock_item_effect_is_reservoir(item))
+        return 0;
+    return item->hp > item->mp ? item->hp : item->mp;
+}
+
+static u32 vm_net_mock_item_effect_plan_reservoir_restore(
+    const vm_net_mock_item_effect_catalog_item *item,
+    u32 remaining, u32 missingHp, u32 missingMp,
+    u32 *hpOut, u32 *mpOut)
+{
+    u32 available = remaining;
+    u32 hp = 0;
+    u32 mp = 0;
+
+    if (hpOut)
+        *hpOut = 0;
+    if (mpOut)
+        *mpOut = 0;
+    if (!vm_net_mock_item_effect_is_reservoir(item) || available == 0)
+        return 0;
+
+    hp = vm_net_mock_min_u32(missingHp, vm_net_mock_min_u32(item->hp, available));
+    available -= hp;
+    mp = vm_net_mock_min_u32(missingMp, vm_net_mock_min_u32(item->mp, available));
+    if (hpOut)
+        *hpOut = hp;
+    if (mpOut)
+        *mpOut = mp;
+    return hp + mp;
 }
 
 static bool vm_net_mock_shop17_should_include_item(
@@ -7532,14 +7581,18 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     u32 hp = 0;
     u32 mp = 0;
     u32 exp = 0;
+    u32 hpApplied = 0;
+    u32 mpApplied = 0;
     u32 useCount = 0;
     u32 consumedCount = 0;
+    u32 reservoirBefore = 0;
     u32 expandedCount = 0;
     u8 oldCapacity = 0;
     u8 newCapacity = 0;
     u32 remaining = 0;
     bool consumed = false;
     bool applied = false;
+    bool reservoirItem = false;
     bool capacityExpanded = false;
     u8 itemInfo[64];
     u32 itemInfoLen = 0;
@@ -7576,6 +7629,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
 
     effect = vm_net_mock_find_item_effect_catalog_item(itemId);
+    reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
     if (vm_net_mock_item_effect_is_usable(effect))
     {
         hp = effect->hp;
@@ -7588,8 +7642,36 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         mp = parsed.mp;
     if (exp == 0)
         exp = parsed.exp;
+    if (reservoirItem && item == NULL)
+        return vm_net_mock_build_item_use_hint_response(out, outCap, "item unavailable");
 
-    if (vm_net_mock_item_is_backpack_expand_card(itemId, effect))
+    if (reservoirItem && item != NULL)
+    {
+        u32 missingHp = 0;
+        u32 missingMp = 0;
+
+        vm_net_mock_role_sync_derived_vitals(role);
+        reservoirBefore = item->count;
+        missingHp = role->hpMax > role->hp ? role->hpMax - role->hp : 0;
+        missingMp = role->mpMax > role->mp ? role->mpMax - role->mp : 0;
+        consumedCount = vm_net_mock_item_effect_plan_reservoir_restore(
+            effect, reservoirBefore, missingHp, missingMp, &hpApplied, &mpApplied);
+        remaining = reservoirBefore;
+        if (consumedCount != 0)
+            consumed = vm_net_mock_role_consume_backpack_item(
+                role, itemId, seq, consumedCount, &remaining);
+        else
+            consumed = true;
+        if (consumed)
+        {
+            role->hp = vm_net_mock_min_u32(
+                vm_net_mock_add_capped_u32(role->hp, hpApplied), role->hpMax);
+            role->mp = vm_net_mock_min_u32(
+                vm_net_mock_add_capped_u32(role->mp, mpApplied), role->mpMax);
+            applied = hpApplied != 0 || mpApplied != 0;
+        }
+    }
+    else if (vm_net_mock_item_is_backpack_expand_card(itemId, effect))
     {
         consumedCount = vm_net_mock_role_backpack_expand_usable_count(role, useCount);
         if (consumedCount == 0)
@@ -7600,7 +7682,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         consumedCount = useCount;
     }
 
-    if (itemId != 0 && consumedCount != 0)
+    if (!reservoirItem && itemId != 0 && consumedCount != 0)
         consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq, consumedCount, &remaining);
 
     if (consumed && vm_net_mock_item_is_backpack_expand_card(itemId, effect))
@@ -7613,9 +7695,11 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         }
     }
 
-    if (consumed && (hp != 0 || mp != 0 || exp != 0))
+    if (!reservoirItem && consumed && (hp != 0 || mp != 0 || exp != 0))
     {
         vm_net_mock_role_apply_item_effect(role, hp, mp, exp, consumedCount);
+        hpApplied = hp != 0 ? vm_net_mock_mul_capped_u32(hp, consumedCount) : 0;
+        mpApplied = mp != 0 ? vm_net_mock_mul_capped_u32(mp, consumedCount) : 0;
         applied = true;
     }
 
@@ -7651,23 +7735,27 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     objectCount += 1;
 
-    /*
-     * mmGame:0xD04 reads 7/7 rows as seq, itemId, count, common-extra.  Use
-     * type=2 for item-use consumption; type=1 is the add/update path and has
-     * already been observed to duplicate stacks when used as a refresh.
-     */
-    if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
-                                                  seq, itemId, remaining,
-                                                  &itemInfoLen))
-        return 0;
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart))
-        return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2))
-        return 0;
-    if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo, (u16)itemInfoLen))
-        return 0;
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    objectCount += 1;
+    if (!reservoirItem)
+    {
+        /*
+         * mmGame:0xD04 type=2 invokes the ordinary selected-row removal path.
+         * Do not send it for consumeMode=2 flasks: JianghuOL.CBE:0x10336CA
+         * updates their HP/MP reservoir directly from 7/11 and removes the row
+         * only when that value reaches zero.
+         */
+        if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
+                                                      seq, itemId, remaining,
+                                                      &itemInfoLen))
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 7, &objectStart))
+            return 0;
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", 2))
+            return 0;
+        if (!vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo, (u16)itemInfoLen))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+    }
 
     /*
      * JianghuOL.CBE:0x1033544 handles 7/11 and 7/12 by reading an "info"
@@ -7694,18 +7782,22 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_item_use item=%u seq=%u count=%u consumed=%u remaining=%u hp=%u mp=%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u refresh=%s resp=%u\n",
-           itemId, seq, parsed.count, consumedCount, remaining, hp, mp, exp,
+    printf("[info][network] mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u refresh=%s resp=%u evidence=JianghuOL.CBE:0x1033544+item.dsh:consumeMode\n",
+           itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+           reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
            oldCapacity, newCapacity, expandedCount,
            applied ? 1 : 0, consumed ? 1 : 0,
-           capacityExpanded ? "7/1+7/7+7/11+17/1-followup" : "7/1+7/7+7/11",
+           capacityExpanded ? "7/1+7/7+7/11+17/1-followup" :
+               (reservoirItem ? "7/1+7/11-reservoir" : "7/1+7/7+7/11"),
            pos);
-    vm_autotest_note("mock_item_use item=%u seq=%u count=%u consumed=%u remaining=%u hp=%u mp=%u exp=%u cap=%u->%u expand=%u applied=%u consumed=%u response=%s evidence=runtime:wt7/1 mmGame:0x11CE->0xD04 JianghuOL.CBE:0x1033544\n",
-                     itemId, seq, parsed.count, consumedCount, remaining, hp, mp, exp,
+    vm_autotest_note("mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u response=%s evidence=runtime:wt7/1 JianghuOL.CBE:0x1033544 item.dsh:consumeMode\n",
+                     itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+                     reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
                      oldCapacity, newCapacity, expandedCount,
                      applied ? 1 : 0, consumed ? 1 : 0,
                      capacityExpanded ? "7/1-use-ok+7/7-type2+7/11-info+17/1-followup" :
-                                        "7/1-use-ok+7/7-type2+7/11-info");
+                         (reservoirItem ? "7/1-use-ok+7/11-reservoir" :
+                                          "7/1-use-ok+7/7-type2+7/11-info"));
     return pos;
 }
 
@@ -12549,6 +12641,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         u16 *seqOut,
                                                         const char *reason)
 {
+    const vm_net_mock_item_effect_catalog_item *effect = NULL;
+    u32 reservoirCapacity = 0;
     u8 itemCount = 0;
 
     if (seqOut)
@@ -12558,6 +12652,45 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
+    effect = vm_net_mock_find_item_effect_catalog_item(itemId);
+    reservoirCapacity = vm_net_mock_item_effect_reservoir_capacity(effect);
+    if (reservoirCapacity != 0)
+    {
+        u32 freeSlots = role->backpackCapacity > itemCount
+                            ? (u32)role->backpackCapacity - itemCount
+                            : 0;
+        u16 firstSeq = 0;
+
+        /*
+         * item.dsh marks the two vitality flasks as stack=1/consumeMode=2.
+         * JianghuOL.CBE:0x10336CA stores their remaining HP/MP pool in the
+         * backpack row's u32 count field, so each acquired flask needs its own
+         * sequence and starts with the DSH capacity rather than count=1.
+         */
+        if (count > freeSlots || count > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
+            return false;
+        for (u32 unit = 0; unit < count; ++unit)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
+            memset(item, 0, sizeof(*item));
+            item->itemId = itemId;
+            item->seq = role->nextBackpackSeq;
+            if (item->seq == 0)
+                item->seq = 1;
+            item->count = reservoirCapacity;
+            if (firstSeq == 0)
+                firstSeq = item->seq;
+            role->nextBackpackSeq = (u16)(item->seq + 1);
+            if (role->nextBackpackSeq == 0)
+                role->nextBackpackSeq = 1;
+        }
+        role->backpackItemCount = (u8)(itemCount + count);
+        if (seqOut)
+            *seqOut = firstSeq;
+        vm_net_mock_role_normalize_backpack(role);
+        vm_net_mock_role_db_save(reason ? reason : "backpack-add-reservoir-item");
+        return true;
+    }
     for (u32 i = 0; i < itemCount; ++i)
     {
         vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
@@ -36315,10 +36448,15 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     u32 hpApplied = 0;
     u32 mpApplied = 0;
     u32 expApplied = 0;
+    u32 hpPlanned = 0;
+    u32 mpPlanned = 0;
+    u32 reservoirBefore = 0;
+    u32 reservoirConsumed = 0;
     u32 counterDamageValue = 0;
     u32 counterHpDelta = 0;
     bool consumed = false;
     bool applied = false;
+    bool reservoirItem = false;
     bool includeCounterattack = false;
     bool bundleWholeRound = false;
     bool battleEndsThisRound = false;
@@ -36377,6 +36515,12 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     if (role != NULL)
     {
         vm_net_mock_role_sync_derived_vitals(role);
+        if (g_mockBattleRoleHpCurrent == 0)
+            g_mockBattleRoleHpCurrent = role->hp;
+        if (g_mockBattleRoleHpMax == 0)
+            g_mockBattleRoleHpMax = role->hpMax ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
+        if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
+            g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
         item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
     }
     if (item != NULL)
@@ -36389,26 +36533,44 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
             hpEffect = effect->hp;
             mpEffect = effect->mp;
             expEffect = effect->exp;
-            consumed = vm_net_mock_role_consume_backpack_item(role, itemId, parsed.seq, 1, &remaining);
+            reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
+            if (reservoirItem)
+            {
+                u32 mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
+                u32 mpCurrent = vm_net_mock_battle_role_mp_current();
+                u32 missingHp = g_mockBattleRoleHpMax > g_mockBattleRoleHpCurrent
+                                    ? g_mockBattleRoleHpMax - g_mockBattleRoleHpCurrent
+                                    : 0;
+                u32 missingMp = mpMax > mpCurrent ? mpMax - mpCurrent : 0;
+
+                reservoirBefore = item->count;
+                reservoirConsumed = vm_net_mock_item_effect_plan_reservoir_restore(
+                    effect, reservoirBefore, missingHp, missingMp,
+                    &hpPlanned, &mpPlanned);
+                remaining = reservoirBefore;
+                if (reservoirConsumed != 0)
+                    consumed = vm_net_mock_role_consume_backpack_item(
+                        role, itemId, parsed.seq, reservoirConsumed, &remaining);
+                else
+                    consumed = true;
+            }
+            else
+            {
+                consumed = vm_net_mock_role_consume_backpack_item(
+                    role, itemId, parsed.seq, 1, &remaining);
+            }
         }
     }
 
     if (role != NULL && consumed)
     {
-        u32 hpMax = role->hpMax ? role->hpMax : VM_NET_MOCK_ROLE_DEFAULT_HP;
         u32 mpMax = role->mpMax ? role->mpMax : VM_NET_MOCK_ROLE_DEFAULT_MP;
         u32 beforeHp = 0;
         u32 beforeMp = vm_net_mock_battle_role_mp_current();
-        u32 addHp = vm_net_mock_mul_capped_u32(hpEffect, 1);
-        u32 addMp = vm_net_mock_mul_capped_u32(mpEffect, 1);
-        u32 addExp = vm_net_mock_mul_capped_u32(expEffect, 1);
+        u32 addHp = reservoirItem ? hpPlanned : vm_net_mock_mul_capped_u32(hpEffect, 1);
+        u32 addMp = reservoirItem ? mpPlanned : vm_net_mock_mul_capped_u32(mpEffect, 1);
+        u32 addExp = reservoirItem ? 0 : vm_net_mock_mul_capped_u32(expEffect, 1);
 
-        if (g_mockBattleRoleHpCurrent == 0)
-            g_mockBattleRoleHpCurrent = role->hp;
-        if (g_mockBattleRoleHpMax == 0)
-            g_mockBattleRoleHpMax = hpMax;
-        if (g_mockBattleRoleHpMax < g_mockBattleRoleHpCurrent)
-            g_mockBattleRoleHpMax = g_mockBattleRoleHpCurrent;
         beforeHp = g_mockBattleRoleHpCurrent;
 
         if (addHp != 0)
@@ -36665,8 +36827,10 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         g_mockBattlePendingEnemyTurn = 0;
     }
 
-    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u action=%u consumed=%u applied=%u counters=%u counterdmg=%u death=%u armed=%u bundle=%u enemies=%u slots=%u/%u/%u sync=%u noop=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6,eidolon.dsh:f_renew1\n",
-           parsed.index, parsed.seq, itemId, itemSeq, remaining,
+    printf("[info][network] mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u mode=%u reserve=%u->%u reserve_used=%u hp=%u/%u mp=%u/%u exp=%u effect=%u action=%u consumed=%u applied=%u counters=%u counterdmg=%u death=%u armed=%u bundle=%u enemies=%u slots=%u/%u/%u sync=%u noop=%u resp=%u evidence=mmBattle:0x2B50->4/3,0x7BD0/0x6EB0->4/6,JianghuOL.CBE:0x1033544,item.dsh:consumeMode\n",
+           parsed.index, parsed.seq, itemId, itemSeq,
+           reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+           reservoirBefore, remaining, reservoirConsumed,
            hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
            itemEffectIndex, itemActionType, consumed ? 1 : 0, applied ? 1 : 0,
            counterWireCount, counterDamageValue, deathActionNeeded ? 1 : 0,
@@ -36674,8 +36838,10 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
            vm_net_mock_battle_enemy_count_current(),
            g_mockBattleEnemyHpSlots[0], g_mockBattleEnemyHpSlots[1], g_mockBattleEnemyHpSlots[2],
            includeBackpackSync ? 1 : 0, responseIsNoop ? 1 : 0, pos);
-    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u remaining=%u hp=%u/%u mp=%u/%u exp=%u effect=%u action=%u consumed=%u applied=%u counters=%u counterdmg=%u death=%u armed=%u bundle=%u enemies=%u slots=%u/%u/%u sync=%u noop=%u response=%s evidence=mmBattle:0x2B50,0x6EB0,eidolon.dsh:f_renew1\n",
-                     parsed.index, parsed.seq, itemId, itemSeq, remaining,
+    vm_autotest_note("mock_battle_item_use index=%u seq=%u item=%u itemSeq=%u mode=%u reserve=%u->%u reserve_used=%u hp=%u/%u mp=%u/%u exp=%u effect=%u action=%u consumed=%u applied=%u counters=%u counterdmg=%u death=%u armed=%u bundle=%u enemies=%u slots=%u/%u/%u sync=%u noop=%u response=%s evidence=mmBattle:0x2B50,0x6EB0,JianghuOL.CBE:0x1033544,item.dsh:consumeMode\n",
+                     parsed.index, parsed.seq, itemId, itemSeq,
+                     reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+                     reservoirBefore, remaining, reservoirConsumed,
                      hpApplied, hpEffect, mpApplied, mpEffect, expApplied,
                      itemEffectIndex, itemActionType, consumed ? 1 : 0, applied ? 1 : 0,
                      counterWireCount, counterDamageValue, deathActionNeeded ? 1 : 0,

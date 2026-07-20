@@ -109,6 +109,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_s
 该迁移只修改 `00_蓬莱仙岛01[.sce]` 和缺少扩展名的
 `c00蓬莱仙岛_01`，不会改变处于其他场景的角色。
 
+已有数据库升级逍遥壶/神仙壶剩余容量语义时，停止 mock-service 后执行一次：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_flask_reserve.sql
+```
+
+迁移会把旧服务端为 802/803 保存的普通物品数量换算成每壶 50000 点容量，
+并通过 `server_data_migrations` 保证脚本重复执行时不会再次放大容量。新获得的
+神仙壶保存剩余 HP，逍遥壶保存剩余 MP；只在剩余值归零时删除背包行。
+
 密码由命令行交互输入。服务运行时的默认密码与本机开发环境一致，也可以通过以下环境变量覆盖，避免修改源代码：
 
 - `CBE_MYSQL_HOST`
@@ -121,13 +131,14 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_initial_s
 
 - `accounts`：账号与登录密码。
 - `server_admin_config`：后台管理密码、连续失败次数和数据库锁定状态。
+- `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
 - `account_role_equipment`：按角色和装备槽保存的装备。
 - `account_role_equipment_durability`：按装备槽和当前物品保存耐久度。
 - `account_role_skills`：按角色保存已学习技能和技能等级。
-- `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级。
+- `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
 - `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系。
