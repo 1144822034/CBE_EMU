@@ -81,6 +81,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_
 脚本只新增商品价格和上下架覆盖表，不会修改 `item.dsh`、`equip.dsh`
 或角色背包数据。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
 
+已有数据库升级到怪物管理功能时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monster_management.sql
+```
+
+脚本只新增怪物属性覆盖表。没有覆盖记录的怪物继续使用服务端目录中的
+等级、类型和统一属性公式；服务启动时也会自动创建该表。
+
 已有数据库升级到装备强化功能时，停止 mock-service 后执行：
 
 ```powershell
@@ -147,6 +156,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
 - `server_shop_items`：后台覆盖的商品价格和上下架状态；没有记录的物品继续使用 DSH 默认价格并默认上架。
+- `server_monsters`：后台保存的怪物等级、类型、战斗属性、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 
 服务启动时会连接 MySQL 并验证这些表。关系表为空时，旧 payload 备份或 `bin/nvram` 服务端二进制文件仅作为一次性迁移来源读取；迁移完成后的正常保存只写关系表，不再写回 payload 或旧文件。

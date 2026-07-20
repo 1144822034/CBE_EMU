@@ -46,6 +46,7 @@ all: build
 build: $(TARGET)
 
 $(OBJDIR)/main.o: src/main.c src/mock-server.c src/web_admin_server.c \
+	src/web_admin_monsters.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(OBJDIR)/mystd.o: src/mystd.c src/mystd.h src/config.h

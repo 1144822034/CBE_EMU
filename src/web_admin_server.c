@@ -451,13 +451,18 @@ static const char g_vm_mock_admin_script[] =
     "const show=!wanted||option.textContent.toLowerCase().includes(wanted);"
     "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}};"
     "input.addEventListener('input',apply);apply();};"
+    "const setupNpcKinds=()=>{for(const form of document.querySelectorAll('.npc form')){"
+    "const kind=form.querySelector('select[name=kind]');const fields=form.querySelector('.instance-fields');"
+    "if(!kind||!fields)continue;const apply=()=>{const show=kind.value==='6';"
+    "fields.hidden=!show;for(const input of fields.querySelectorAll('input,select'))input.disabled=!show;};"
+    "kind.addEventListener('change',apply);apply();}};"
     "document.addEventListener('DOMContentLoaded',()=>{"
     "keep('.accounts','cbe-admin-accounts-scroll');"
     "keep('.scene-list','cbe-admin-scenes-scroll');"
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
-    "setupItemFilter();setupUpdateFilter();});"
+    "setupItemFilter();setupUpdateFilter();setupNpcKinds();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -1509,7 +1514,8 @@ static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
         "装备修理",
         "技能导师",
         "防具商人（含腰带）",
-        "药品商人"
+        "药品商人",
+        "副本向导（传送／挑战）"
     };
 
     if (page == NULL)
@@ -1525,6 +1531,77 @@ static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
             labels[kind]);
     }
     vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static bool vm_mock_admin_scene_file_to_runtime_key(const char *sceneFile,
+                                                    char *runtimeScene,
+                                                    size_t runtimeSceneCap);
+
+static void vm_mock_admin_render_instance_scene_select(
+    vm_mock_admin_text *page,
+    const vm_mock_admin_scene_file *sceneFiles,
+    u32 sceneCount,
+    const char *currentRuntimeScene)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page, "<select name=\"instance_scene\"><option value=\"\">不传送（仅挑战）</option>");
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char runtimeScene[64];
+        char sceneUtf8[192];
+        bool selected = false;
+
+        memset(runtimeScene, 0, sizeof(runtimeScene));
+        memset(sceneUtf8, 0, sizeof(sceneUtf8));
+        if (!vm_mock_admin_scene_file_to_runtime_key(
+                sceneFiles[i].name, runtimeScene, sizeof(runtimeScene)))
+        {
+            continue;
+        }
+        selected = currentRuntimeScene != NULL && currentRuntimeScene[0] != 0 &&
+                   vm_net_mock_scene_names_equal_loose(
+                       currentRuntimeScene, runtimeScene);
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, sceneUtf8,
+                                      sizeof(sceneUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_instance_fields(
+    vm_mock_admin_text *page,
+    const vm_mock_admin_scene_file *sceneFiles,
+    u32 sceneCount,
+    const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    u32 x = seed ? seed->instanceX : 0;
+    u32 y = seed ? seed->instanceY : 0;
+    u32 enemyId = seed ? seed->challengeEnemyId : 0;
+    u32 minimumLevel = seed && seed->instanceMinLevel != 0
+                           ? seed->instanceMinLevel
+                           : 1;
+
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"instance-fields\"><label class=\"field instance-scene\"><span>副本目标场景</span>");
+    vm_mock_admin_render_instance_scene_select(
+        page, sceneFiles, sceneCount, seed ? seed->instanceScene : NULL);
+    vm_mock_admin_text_appendf(
+        page,
+        "</label><label class=\"field\"><span>落点 X</span><input type=\"number\" name=\"instance_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
+        "<label class=\"field\"><span>落点 Y</span><input type=\"number\" name=\"instance_y\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
+        "<label class=\"field\"><span>挑战怪物 ID</span><input type=\"number\" name=\"challenge_enemy_id\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
+        "<label class=\"field\"><span>最低等级</span><input type=\"number\" name=\"instance_min_level\" min=\"1\" max=\"255\" value=\"%u\"></label>"
+        "<p class=\"instance-help\">目标场景留空时只提供挑战；怪物 ID 为 0 时只提供传送。落点 X/Y 都填 0 会自动解析目标 SCE 的安全入口。</p></div>",
+        x, y, enemyId, minimumLevel);
 }
 
 static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
@@ -3137,15 +3214,16 @@ static void vm_mock_admin_render_content_page(char *response,
         ".logout{background:none;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
         ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
-        ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}"
+        ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-help{grid-column:1/-1;margin:0;color:#7a2e0e;font-size:12px}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
-        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields{grid-template-columns:1fr 1fr}}"
+        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
+        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
@@ -3450,7 +3528,11 @@ static void vm_mock_admin_render_content_page(char *response,
             "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
         vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
         vm_mock_admin_text_appendf(&page,
-            "</label><div class=\"actions\"><button type=\"submit\">保存修改</button></div></form>"
+            "</label>");
+        vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount,
+                                             &row->seed);
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"actions\"><button type=\"submit\">保存修改</button></div></form>"
             "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"toggle-npc\">"
             "<input type=\"hidden\" name=\"scene\" value=\"");
         vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
@@ -3501,8 +3583,11 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
     vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
-        "</label><div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "</label>");
+    vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
+    vm_mock_admin_text_appendf(&page,
+        "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
+        "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。副本向导可独立启用场景传送、守关怪挑战或同时启用两者，并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div></section></div></main></body></html>");
 
     if (page.truncated)
@@ -3853,6 +3938,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
+        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab on\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<section class=\"card shop-card\">");
@@ -4029,6 +4115,7 @@ static void vm_mock_admin_render_update_page(char *response,
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
+        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>");
     if (message[0] != 0)
@@ -4209,7 +4296,7 @@ static void vm_mock_admin_render_task_page(char *response,
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.list{height:100%%;overflow:auto;display:flex;flex-direction:column;gap:4px}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}}</style></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card list\"><a class=\"button\" href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2>",
         taskCount);
     for (u32 i = 0; i < taskCount; ++i)
@@ -4261,6 +4348,8 @@ static void vm_mock_admin_render_task_page(char *response,
         snprintf(response, responseCap, "<!doctype html><meta charset=\"utf-8\"><p>任务管理页面超过大小限制。</p>");
 }
 
+#include "web_admin_monsters.inc.c"
+
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
 {
@@ -4291,6 +4380,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "tasks") == 0)
     {
         vm_mock_admin_render_task_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "monsters") == 0)
+    {
+        vm_mock_admin_render_monster_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "updates") == 0)
@@ -4335,6 +4429,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
+        "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
@@ -4576,6 +4671,26 @@ static void vm_mock_admin_redirect_tasks(vm_mock_service_socket client,
     vm_mock_admin_send_location(client, location, NULL);
 }
 
+static void vm_mock_admin_redirect_monster(vm_mock_service_socket client,
+                                           u32 monsterId,
+                                           const char *status,
+                                           const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=monsters&monster=%u&status=%s&message=%s",
+             monsterId, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
 static bool vm_mock_admin_form_u32(const char *body, const char *field,
                                    u32 maximum, u32 *valueOut)
 {
@@ -4614,8 +4729,8 @@ static bool vm_mock_admin_utf8_to_gbk_task_text(const char *utf8,
 }
 
 static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
-                                             const char *action,
-                                             const char *body)
+                                              const char *action,
+                                              const char *body)
 {
     vm_net_mock_task_definition task;
     const vm_net_mock_task_definition *existing = NULL;
@@ -4768,6 +4883,72 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
     vm_mock_admin_redirect_tasks(client, taskId, "ok", "任务定义已保存并立即生效");
 }
 
+static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
+                                                 const char *action,
+                                                 const char *body)
+{
+    vm_net_mock_monster_admin_row row;
+    const char *error = NULL;
+    u32 family = 0;
+
+    memset(&row, 0, sizeof(row));
+    if (!vm_mock_admin_form_u32(body, "monster_id", 0xffffu,
+                                &row.enemyId) || row.enemyId == 0)
+    {
+        vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                       "怪物 ID 无效");
+        return;
+    }
+    if (strcmp(action, "reset-monster") == 0)
+    {
+        if (!vm_net_mock_monster_admin_reset(row.enemyId, &error))
+        {
+            vm_mock_admin_redirect_monster(
+                client, row.enemyId, "error",
+                error ? error : "恢复怪物默认属性失败");
+            return;
+        }
+        vm_mock_admin_redirect_monster(client, row.enemyId, "ok",
+                                       "已恢复服务端默认怪物属性");
+        return;
+    }
+    if (strcmp(action, "save-monster") != 0 ||
+        !vm_mock_admin_form_u32(body, "level", 0xffu, &row.level) ||
+        !vm_mock_admin_form_u32(body, "family", VM_NET_MOCK_MONSTER_BOSS,
+                                &family) ||
+        !vm_mock_admin_form_u32(body, "hp", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.hp) ||
+        !vm_mock_admin_form_u32(body, "mp", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.mp) ||
+        !vm_mock_admin_form_u32(body, "attack", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.attack) ||
+        !vm_mock_admin_form_u32(body, "defense", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.defense) ||
+        !vm_mock_admin_form_u32(body, "exp", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.exp) ||
+        !vm_mock_admin_form_u32(body, "gold", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
+                                &row.gold) ||
+        !vm_mock_admin_form_u32(body, "drop_item_id", 0xffffffffu,
+                                &row.dropItemId) ||
+        !vm_mock_admin_form_u32(body, "drop_rate", 100u,
+                                &row.dropRatePercent))
+    {
+        vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                       "怪物表单字段不完整或数值越界");
+        return;
+    }
+    row.family = (u8)family;
+    if (!vm_net_mock_monster_admin_save(&row, &error))
+    {
+        vm_mock_admin_redirect_monster(
+            client, row.enemyId, "error",
+            error ? error : "怪物属性保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_monster(client, row.enemyId, "ok",
+                                   "怪物属性已保存并立即生效");
+}
+
 static bool vm_mock_admin_scene_from_form(const char *body,
                                           char *sceneUtf8,
                                           size_t sceneUtf8Cap,
@@ -4807,6 +4988,48 @@ static bool vm_mock_admin_scene_from_form(const char *body,
                          sceneFile, runtimeScene, runtimeSceneCap);
 }
 
+static bool vm_mock_admin_optional_scene_from_form(
+    const char *body,
+    const char *fieldName,
+    char *sceneUtf8,
+    size_t sceneUtf8Cap,
+    char *runtimeScene,
+    size_t runtimeSceneCap)
+{
+    vm_mock_admin_scene_file files[VM_MOCK_ADMIN_SCENE_FILE_MAX];
+    char sceneFile[64];
+    u32 fileCount = 0;
+
+    if (fieldName == NULL || sceneUtf8 == NULL || sceneUtf8Cap == 0 ||
+        runtimeScene == NULL || runtimeSceneCap == 0)
+    {
+        return false;
+    }
+    sceneUtf8[0] = 0;
+    runtimeScene[0] = 0;
+    memset(sceneFile, 0, sizeof(sceneFile));
+    if (!vm_mock_admin_form_value(body, fieldName, sceneUtf8, sceneUtf8Cap))
+        return false;
+    if (sceneUtf8[0] == 0)
+        return true;
+    if (!vm_mock_admin_utf8_to_gbk_text(sceneUtf8, sceneFile,
+                                        sizeof(sceneFile), false))
+    {
+        return false;
+    }
+    fileCount = vm_mock_admin_collect_scene_files(
+        files, VM_MOCK_ADMIN_SCENE_FILE_MAX);
+    for (u32 i = 0; i < fileCount; ++i)
+    {
+        if (strcmp(files[i].name, sceneFile) == 0)
+        {
+            return vm_mock_admin_scene_file_to_runtime_key(
+                sceneFile, runtimeScene, runtimeSceneCap);
+        }
+    }
+    return false;
+}
+
 static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                                             const char *action,
                                             const char *body)
@@ -4816,6 +5039,8 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     char displayUtf8[128];
     char scriptUtf8[192];
     char actorResource[64];
+    char instanceSceneUtf8[192];
+    char instanceRuntimeScene[64];
     char actorImageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
     char enabledText[8];
     vm_net_mock_scene_npcinfo_seed seed;
@@ -4827,12 +5052,18 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 taskId = 0;
     u32 orientation = 0;
     u32 actorImageCount = 0;
+    u32 instanceX = 0;
+    u32 instanceY = 0;
+    u32 challengeEnemyId = 0;
+    u32 instanceMinLevel = 1;
 
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
     memset(runtimeScene, 0, sizeof(runtimeScene));
     memset(displayUtf8, 0, sizeof(displayUtf8));
     memset(scriptUtf8, 0, sizeof(scriptUtf8));
     memset(actorResource, 0, sizeof(actorResource));
+    memset(instanceSceneUtf8, 0, sizeof(instanceSceneUtf8));
+    memset(instanceRuntimeScene, 0, sizeof(instanceRuntimeScene));
     memset(actorImageNames, 0, sizeof(actorImageNames));
     memset(enabledText, 0, sizeof(enabledText));
     memset(&seed, 0, sizeof(seed));
@@ -4937,6 +5168,71 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                                        "绑定任务不存在或已停用");
         return;
     }
+    if (kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+    {
+        vm_mock_admin_scene_preview targetPreview;
+
+        memset(&targetPreview, 0, sizeof(targetPreview));
+        if (!vm_mock_admin_optional_scene_from_form(
+                body, "instance_scene", instanceSceneUtf8,
+                sizeof(instanceSceneUtf8), instanceRuntimeScene,
+                sizeof(instanceRuntimeScene)) ||
+            !vm_mock_admin_form_u32(body, "instance_x", 0xffffu,
+                                    &instanceX) ||
+            !vm_mock_admin_form_u32(body, "instance_y", 0xffffu,
+                                    &instanceY) ||
+            !vm_mock_admin_form_u32(body, "challenge_enemy_id", 0xffffu,
+                                    &challengeEnemyId) ||
+            !vm_mock_admin_form_u32(body, "instance_min_level", 0xffu,
+                                    &instanceMinLevel) ||
+            instanceMinLevel == 0)
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "副本配置字段不完整或数值越界");
+            return;
+        }
+        if (instanceRuntimeScene[0] == 0 && challengeEnemyId == 0)
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "副本传送场景和挑战怪物至少配置一项");
+            return;
+        }
+        if (instanceRuntimeScene[0] != 0 &&
+            instanceX == 0 && instanceY == 0)
+        {
+            u16 resolvedX = 0;
+            u16 resolvedY = 0;
+            u16 entryId = 0xffff;
+
+            if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(
+                    instanceRuntimeScene, &resolvedX, &resolvedY, &entryId))
+            {
+                vm_mock_admin_redirect_content(
+                    client, sceneUtf8, "error", "无法从目标 SCE 解析安全副本落点");
+                return;
+            }
+            instanceX = resolvedX;
+            instanceY = resolvedY;
+        }
+        if (instanceRuntimeScene[0] != 0 &&
+            ((instanceX == 0) != (instanceY == 0) ||
+             !vm_mock_admin_scene_preview_info(instanceRuntimeScene,
+                                               &targetPreview) ||
+             instanceX >= targetPreview.width ||
+             instanceY >= targetPreview.height))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "副本落点不在目标场景的有效像素范围内");
+            return;
+        }
+        if (challengeEnemyId != 0 &&
+            !vm_net_mock_monster_enemy_id_known(challengeEnemyId))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error", "挑战怪物 ID 不在当前服务端怪物目录中");
+            return;
+        }
+    }
     for (const unsigned char *p = (const unsigned char *)actorResource; *p; ++p)
     {
         if (*p >= 0x80)
@@ -4986,6 +5282,12 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.kind = (u16)kind;
     seed.taskId = taskId;
     seed.orientation = (u16)orientation;
+    seed.instanceX = (u16)instanceX;
+    seed.instanceY = (u16)instanceY;
+    seed.challengeEnemyId = challengeEnemyId;
+    seed.instanceMinLevel = (u16)instanceMinLevel;
+    snprintf(seed.instanceScene, sizeof(seed.instanceScene), "%s",
+             instanceRuntimeScene);
     snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", actorResource);
     if (!vm_mock_admin_publish_actor_resource(
             seed.actorResource, actorImageNames, actorImageCount, &error))
@@ -5183,6 +5485,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "delete-task-override") == 0)
     {
         vm_mock_admin_handle_task_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "save-monster") == 0 ||
+        strcmp(action, "reset-monster") == 0)
+    {
+        vm_mock_admin_handle_monster_action(client, action, body);
         return;
     }
     if (strcmp(action, "save-update-slot") == 0 ||

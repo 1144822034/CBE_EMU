@@ -4196,7 +4196,8 @@ enum
     VM_NET_MOCK_NPC_KIND_SKILL_TRAINER = 3,
     VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT = 4,
     VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT = 5,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT,
+    VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
     VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX = 100,
     VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7
@@ -4215,6 +4216,9 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE     0xe7000001u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE 0xe8000000u
 #define VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE     0xe9000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE 0xea000000u
+#define VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE 0xeb000000u
+#define VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE 0xec000000u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
@@ -10292,6 +10296,8 @@ typedef enum
     VM_NET_MOCK_MONSTER_BOSS
 } vm_net_mock_monster_family;
 
+#define VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX 0x7fffffffu
+
 typedef struct
 {
     u16 enemyId;
@@ -10314,6 +10320,31 @@ typedef struct
     u32 dropItemId;
     u32 dropRatePercent;
 } vm_net_mock_monster_stats;
+
+typedef struct
+{
+    bool used;
+    u8 family;
+    vm_net_mock_monster_stats stats;
+} vm_net_mock_monster_override;
+
+typedef struct
+{
+    u32 enemyId;
+    u32 level;
+    u32 hp;
+    u32 mp;
+    u32 attack;
+    u32 defense;
+    u32 exp;
+    u32 gold;
+    u32 dropItemId;
+    u32 dropRatePercent;
+    u8 family;
+    bool overridden;
+    char displayName[32];
+    char firstScene[64];
+} vm_net_mock_monster_admin_row;
 
 static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     {  1,  6, VM_NET_MOCK_MONSTER_BEAST, 27, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
@@ -10395,6 +10426,27 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     {300, 55, VM_NET_MOCK_MONSTER_BOSS, 0, 0}
 };
 
+static vm_net_mock_monster_override
+    g_vm_net_mock_monster_overrides[sizeof(g_vm_net_mock_monster_entries) /
+                                    sizeof(g_vm_net_mock_monster_entries[0])];
+static bool g_vm_net_mock_monster_db_loaded = false;
+static bool g_vm_net_mock_monster_db_valid = false;
+
+static bool vm_net_mock_monster_enemy_id_known(u32 enemyId)
+{
+    if (enemyId == 0 || enemyId > 0xffffu)
+        return false;
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_monster_entries) /
+                 sizeof(g_vm_net_mock_monster_entries[0]);
+         ++i)
+    {
+        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
+            return true;
+    }
+    return false;
+}
+
 static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_entry fallback;
@@ -10425,7 +10477,7 @@ static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId
     return fallback;
 }
 
-static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId)
+static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
     vm_net_mock_monster_stats stats;
@@ -10559,6 +10611,258 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
     if (stats.exp == 0)
         stats.exp = 1;
     return stats;
+}
+
+static int vm_net_mock_monster_catalog_index(u32 enemyId)
+{
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_monster_entries) /
+                 sizeof(g_vm_net_mock_monster_entries[0]);
+         ++i)
+    {
+        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
+            return (int)i;
+    }
+    return -1;
+}
+
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+} vm_net_mock_monster_db_load_context;
+
+static bool vm_net_mock_monster_db_row(void *contextValue,
+                                       unsigned int columnCount,
+                                       const char *const *values,
+                                       const size_t *lengths)
+{
+    vm_net_mock_monster_db_load_context *context =
+        (vm_net_mock_monster_db_load_context *)contextValue;
+    u32 number[11];
+    int index = -1;
+    vm_net_mock_monster_override *override = NULL;
+
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 11)
+        return false;
+    for (u32 i = 0; i < 11; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            ++context->skipped;
+            return true;
+        }
+    }
+    index = vm_net_mock_monster_catalog_index(number[0]);
+    if (index < 0 || number[1] == 0 || number[1] > 0xffu ||
+        number[2] > VM_NET_MOCK_MONSTER_BOSS || number[3] == 0 ||
+        number[4] == 0 || number[5] == 0 ||
+        number[3] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[4] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[5] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[6] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[7] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[8] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        number[10] > 100u ||
+        ((number[9] == 0) != (number[10] == 0)))
+    {
+        ++context->skipped;
+        return true;
+    }
+
+    override = &g_vm_net_mock_monster_overrides[index];
+    memset(override, 0, sizeof(*override));
+    override->used = true;
+    override->family = (u8)number[2];
+    override->stats.enemyId = number[0];
+    override->stats.level = number[1];
+    override->stats.hp = number[3];
+    override->stats.mp = number[4];
+    override->stats.attack = number[5];
+    override->stats.defense = number[6];
+    override->stats.exp = number[7];
+    override->stats.gold = number[8];
+    override->stats.dropItemId = number[9];
+    override->stats.dropRatePercent = number[10];
+    ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_monster_db_load(void)
+{
+    vm_net_mock_monster_db_load_context context;
+
+    if (g_vm_net_mock_monster_db_loaded)
+        return g_vm_net_mock_monster_db_valid;
+    g_vm_net_mock_monster_db_loaded = true;
+    g_vm_net_mock_monster_db_valid = false;
+    memset(g_vm_net_mock_monster_overrides, 0,
+           sizeof(g_vm_net_mock_monster_overrides));
+    memset(&context, 0, sizeof(context));
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_monsters ("
+            "monster_id SMALLINT UNSIGNED NOT NULL,level TINYINT UNSIGNED NOT NULL,"
+            "family TINYINT UNSIGNED NOT NULL,hp INT UNSIGNED NOT NULL,"
+            "mp INT UNSIGNED NOT NULL,attack_value INT UNSIGNED NOT NULL,"
+            "defense_value INT UNSIGNED NOT NULL,reward_exp INT UNSIGNED NOT NULL,"
+            "reward_money INT UNSIGNED NOT NULL,drop_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "drop_rate_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(monster_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT monster_id,level,family,hp,mp,attack_value,defense_value,"
+            "reward_exp,reward_money,drop_item_id,drop_rate_percent "
+            "FROM server_monsters ORDER BY monster_id",
+            vm_net_mock_monster_db_row, &context))
+    {
+        printf("[error][mock-admin] monster_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_monster_db_valid = true;
+    printf("[info][mock-admin] monster_db_load rows=%u skipped=%u\n",
+           context.loaded, context.skipped);
+    return true;
+}
+
+static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId)
+{
+    int index = vm_net_mock_monster_catalog_index(enemyId);
+
+    (void)vm_net_mock_monster_db_load();
+    if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
+        return g_vm_net_mock_monster_overrides[index].stats;
+    return vm_net_mock_monster_base_stats_for_enemy(enemyId);
+}
+
+static bool vm_net_mock_monster_admin_save(
+    const vm_net_mock_monster_admin_row *row, const char **errorOut)
+{
+    char query[1024];
+    int index = -1;
+    vm_net_mock_monster_override *override = NULL;
+
+    if (errorOut)
+        *errorOut = "怪物属性无效";
+    if (row == NULL || row->enemyId == 0 || row->level == 0 ||
+        row->level > 0xffu || row->family > VM_NET_MOCK_MONSTER_BOSS ||
+        row->hp == 0 || row->mp == 0 || row->attack == 0 ||
+        row->hp > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->mp > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->attack > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->defense > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->exp > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->gold > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
+        row->dropRatePercent > 100u ||
+        ((row->dropItemId == 0) != (row->dropRatePercent == 0)))
+    {
+        return false;
+    }
+    index = vm_net_mock_monster_catalog_index(row->enemyId);
+    if (index < 0)
+    {
+        if (errorOut)
+            *errorOut = "怪物目录中不存在该 ID";
+        return false;
+    }
+    if (row->dropItemId != 0 &&
+        vm_net_mock_find_shop_catalog_item(row->dropItemId) == NULL)
+    {
+        if (errorOut)
+            *errorOut = "掉落物品 ID 不在物品目录中";
+        return false;
+    }
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+
+    snprintf(
+        query, sizeof(query),
+        "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
+        "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
+        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
+        "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
+        "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
+        "drop_item_id=VALUES(drop_item_id),drop_rate_percent=VALUES(drop_rate_percent)",
+        row->enemyId, row->level, row->family, row->hp, row->mp,
+        row->attack, row->defense, row->exp, row->gold,
+        row->dropItemId, row->dropRatePercent);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+
+    override = &g_vm_net_mock_monster_overrides[index];
+    memset(override, 0, sizeof(*override));
+    override->used = true;
+    override->family = (u8)row->family;
+    override->stats.enemyId = row->enemyId;
+    override->stats.level = row->level;
+    override->stats.hp = row->hp;
+    override->stats.mp = row->mp;
+    override->stats.attack = row->attack;
+    override->stats.defense = row->defense;
+    override->stats.exp = row->exp;
+    override->stats.gold = row->gold;
+    override->stats.dropItemId = row->dropItemId;
+    override->stats.dropRatePercent = row->dropRatePercent;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] monster_save id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u drop=%u rate=%u\n",
+           row->enemyId, row->level, row->family, row->hp, row->mp,
+           row->attack, row->defense, row->exp, row->gold,
+           row->dropItemId, row->dropRatePercent);
+    return true;
+}
+
+static bool vm_net_mock_monster_admin_reset(u32 enemyId,
+                                            const char **errorOut)
+{
+    char query[256];
+    int index = vm_net_mock_monster_catalog_index(enemyId);
+
+    if (errorOut)
+        *errorOut = "怪物目录中不存在该 ID";
+    if (index < 0)
+        return false;
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_monsters WHERE monster_id=%u", enemyId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&g_vm_net_mock_monster_overrides[index], 0,
+           sizeof(g_vm_net_mock_monster_overrides[index]));
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] monster_reset id=%u source=server-default\n",
+           enemyId);
+    return true;
 }
 
 static u32 vm_net_mock_battle_role_attack_default(void)
@@ -17093,13 +17397,18 @@ typedef struct
     /* Optional server-managed task binding.  SCE/XSE actors keep this zero
      * and continue to discover their tasks from the script resource. */
     u32 taskId;
+    u32 challengeEnemyId;
     u16 x;
     u16 y;
     u16 kind;
     u16 orientation;
+    u16 instanceX;
+    u16 instanceY;
+    u16 instanceMinLevel;
     char actorResource[64];
     char displayName[32];
     char scriptName[64];
+    char instanceScene[64];
 } vm_net_mock_scene_npcinfo_seed;
 
 typedef struct
@@ -17694,6 +18003,143 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
     return false;
 }
 
+typedef struct
+{
+    char displayName[32];
+    char firstScene[64];
+} vm_net_mock_monster_resource_label;
+
+static vm_net_mock_monster_resource_label
+    g_vm_net_mock_monster_resource_labels[
+        sizeof(g_vm_net_mock_monster_entries) /
+        sizeof(g_vm_net_mock_monster_entries[0])];
+static bool g_vm_net_mock_monster_resource_labels_loaded = false;
+
+static void vm_net_mock_monster_resource_labels_load(void)
+{
+    u32 catalogCount = 0;
+
+    if (g_vm_net_mock_monster_resource_labels_loaded)
+        return;
+    g_vm_net_mock_monster_resource_labels_loaded = true;
+    memset(g_vm_net_mock_monster_resource_labels, 0,
+           sizeof(g_vm_net_mock_monster_resource_labels));
+    catalogCount = vm_net_mock_load_auto_monster_catalog();
+
+    for (u32 catalogIndex = 0; catalogIndex < catalogCount; ++catalogIndex)
+    {
+        const vm_net_mock_auto_monster_catalog_item *catalog =
+            &g_vm_net_mock_auto_monster_catalog[catalogIndex];
+        u8 data[8192];
+        char resourceScene[64];
+        char legacyScene[64];
+
+        snprintf(resourceScene, sizeof(resourceScene), "%s", catalog->scene);
+        legacyScene[0] = 0;
+        for (u32 idIndex = 0; idIndex < 3; ++idIndex)
+        {
+            int monsterIndex = vm_net_mock_monster_catalog_index(
+                catalog->monsterIds[idIndex]);
+            if (monsterIndex >= 0 &&
+                g_vm_net_mock_monster_resource_labels[monsterIndex]
+                    .firstScene[0] == 0)
+            {
+                snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                             .firstScene,
+                         sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                    .firstScene),
+                         "%s", catalog->scene);
+            }
+        }
+
+        for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
+        {
+            u32 len = vm_net_mock_load_scene_resource(resourceScene, data,
+                                                       sizeof(data));
+            u32 start = vm_net_mock_scene_payload_start(data, len);
+
+            if (len != 0 && start != 0)
+            {
+                for (u32 off = start; off + 14 <= len; ++off)
+                {
+                    vm_net_mock_sce_combat_spawn spawn;
+                    u32 end = 0;
+                    int monsterIndex = -1;
+
+                    if (!vm_net_mock_parse_sce_combat_spawn_at(
+                            data, len, off, &spawn, &end))
+                    {
+                        continue;
+                    }
+                    monsterIndex = vm_net_mock_monster_catalog_index(spawn.actorId);
+                    if (monsterIndex >= 0 &&
+                        g_vm_net_mock_monster_resource_labels[monsterIndex]
+                            .displayName[0] == 0)
+                    {
+                        snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                     .displayName,
+                                 sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                            .displayName),
+                                 "%s", spawn.displayName);
+                    }
+                    if (end > off)
+                        off = end - 1;
+                }
+            }
+            if (resourcePass != 0 ||
+                !vm_net_mock_scene_resource_legacy_alias(
+                    catalog->scene, legacyScene, sizeof(legacyScene)) ||
+                strcmp(resourceScene, legacyScene) == 0)
+            {
+                break;
+            }
+            snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
+        }
+    }
+}
+
+static u32 vm_net_mock_monster_admin_list(
+    vm_net_mock_monster_admin_row *rows, u32 rowCap)
+{
+    u32 total = (u32)(sizeof(g_vm_net_mock_monster_entries) /
+                      sizeof(g_vm_net_mock_monster_entries[0]));
+    u32 copied = vm_net_mock_min_u32(total, rowCap);
+
+    if (rows == NULL || rowCap == 0)
+        return total;
+    (void)vm_net_mock_monster_db_load();
+    vm_net_mock_monster_resource_labels_load();
+    memset(rows, 0, sizeof(*rows) * copied);
+
+    for (u32 i = 0; i < copied; ++i)
+    {
+        const vm_net_mock_monster_entry *entry =
+            &g_vm_net_mock_monster_entries[i];
+        vm_net_mock_monster_stats stats =
+            vm_net_mock_monster_stats_for_enemy(entry->enemyId);
+        const vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[i];
+
+        rows[i].enemyId = stats.enemyId;
+        rows[i].level = stats.level;
+        rows[i].family = override->used ? override->family : entry->family;
+        rows[i].hp = stats.hp;
+        rows[i].mp = stats.mp;
+        rows[i].attack = stats.attack;
+        rows[i].defense = stats.defense;
+        rows[i].exp = stats.exp;
+        rows[i].gold = stats.gold;
+        rows[i].dropItemId = stats.dropItemId;
+        rows[i].dropRatePercent = stats.dropRatePercent;
+        rows[i].overridden = override->used;
+        snprintf(rows[i].displayName, sizeof(rows[i].displayName), "%s",
+                 g_vm_net_mock_monster_resource_labels[i].displayName);
+        snprintf(rows[i].firstScene, sizeof(rows[i].firstScene), "%s",
+                 g_vm_net_mock_monster_resource_labels[i].firstScene);
+    }
+    return total;
+}
+
 static u32 vm_net_mock_scene_npcinfo_hash(const char *scene,
                                           const vm_net_mock_scene_npcinfo_seed *seed)
 {
@@ -17791,11 +18237,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[7];
+    u32 number[11];
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 11 ||
+    if (context == NULL || columnCount != 16 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -17812,7 +18258,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_dynamic_npc_decode_hex(values[8], lengths[8],
                                             row.seed.scriptName, sizeof(row.seed.scriptName)) ||
         !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
-        !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]))
+        !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[11], lengths[11],
+                                            row.seed.instanceScene,
+                                            sizeof(row.seed.instanceScene)) ||
+        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[7]) || number[7] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[8]) || number[8] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[9]) || number[9] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffu)
     {
         if (context != NULL)
             ++context->skipped;
@@ -17826,6 +18279,10 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
     row.seed.taskId = number[6];
+    row.seed.instanceX = (u16)number[7];
+    row.seed.instanceY = (u16)number[8];
+    row.seed.challengeEnemyId = number[9];
+    row.seed.instanceMinLevel = (u16)number[10];
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -17835,6 +18292,15 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_str_ends_with(row.seed.actorResource, ".actor") ||
         (row.seed.scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(row.seed.scriptName, ".xse")) ||
+        (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+         ((row.seed.instanceScene[0] == 0 && row.seed.challengeEnemyId == 0) ||
+          (row.seed.instanceScene[0] != 0 &&
+           (!vm_net_mock_scene_name_is_safe(row.seed.instanceScene) ||
+            row.seed.instanceX == 0 || row.seed.instanceY == 0 ||
+            !vm_net_mock_scene_resource_exists(row.seed.instanceScene))) ||
+          (row.seed.challengeEnemyId != 0 &&
+           !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId)) ||
+          row.seed.instanceMinLevel == 0)) ||
         !vm_net_mock_open_server_data_resource(row.seed.actorResource, ".actor",
                                                NULL, NULL, 0) ||
         (row.seed.scriptName[0] != 0 &&
@@ -17887,11 +18353,30 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
             "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "target_scene VARBINARY(64) NOT NULL DEFAULT '',"
+            "target_x SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "target_y SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "challenge_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "minimum_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id),"
+            "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
+            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
         !vm_mysql_query(
             "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
             "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
-            "COALESCE(server_dynamic_npc_tasks.task_id,0) "
+            "COALESCE(server_dynamic_npc_tasks.task_id,0),"
+            "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
+            "COALESCE(server_dynamic_npc_instances.target_x,0),"
+            "COALESCE(server_dynamic_npc_instances.target_y,0),"
+            "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
+            "COALESCE(server_dynamic_npc_instances.minimum_level,1) "
             "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
+            "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
             "USING(scene,actor_id) ORDER BY scene,actor_id",
             vm_net_mock_dynamic_npc_row, &context))
     {
@@ -17948,6 +18433,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     char actorHex[sizeof(seed->actorResource) * 2 + 1];
     char nameHex[sizeof(seed->displayName) * 2 + 1];
     char scriptHex[sizeof(seed->scriptName) * 2 + 1];
+    char instanceSceneHex[sizeof(seed->instanceScene) * 2 + 1];
     char query[2048];
     int existing = -1;
     vm_net_mock_dynamic_npc_override row;
@@ -17969,6 +18455,17 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
+        (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+         ((seed->instanceScene[0] == 0 && seed->challengeEnemyId == 0) ||
+          (seed->instanceScene[0] != 0 &&
+           (!vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
+            seed->instanceX == 0 || seed->instanceY == 0 ||
+            !vm_net_mock_scene_resource_exists(seed->instanceScene))) ||
+          (seed->challengeEnemyId != 0 &&
+           !vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId)) ||
+          seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
+          seed->challengeEnemyId > 0xffffu ||
+          seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||
         !vm_net_mock_open_server_data_resource(seed->actorResource, ".actor",
                                                NULL, NULL, 0) ||
         (seed->scriptName[0] != 0 &&
@@ -18002,6 +18499,15 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     }
     if (seed->scriptName[0] == 0)
         scriptHex[0] = 0;
+    instanceSceneHex[0] = 0;
+    if (seed->instanceScene[0] != 0 &&
+        vm_mysql_hex_encode(seed->instanceScene, strlen(seed->instanceScene),
+                            instanceSceneHex, sizeof(instanceSceneHex)) == 0)
+    {
+        if (errorOut)
+            *errorOut = "instance scene encoding failed";
+        return false;
+    }
     snprintf(query, sizeof(query),
              "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
              "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',%u) "
@@ -18011,6 +18517,29 @@ static bool vm_net_mock_dynamic_npc_admin_save(
              "script_name=VALUES(script_name),enabled=VALUES(enabled)",
              sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
              seed->orientation, actorHex, nameHex, scriptHex, enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
+                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "target_scene=VALUES(target_scene),target_x=VALUES(target_x),target_y=VALUES(target_y),"
+                 "challenge_enemy_id=VALUES(challenge_enemy_id),minimum_level=VALUES(minimum_level)",
+                 sceneHex, seed->actorId, instanceSceneHex, seed->instanceX,
+                 seed->instanceY, seed->challengeEnemyId,
+                 seed->instanceMinLevel);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_dynamic_npc_instances WHERE scene=X'%s' AND actor_id=%u",
+                 sceneHex, seed->actorId);
+    }
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
@@ -18046,9 +18575,12 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u pos=(%u,%u) actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
-           seed->taskId, seed->x, seed->y, seed->actorResource,
+           seed->taskId, seed->x, seed->y,
+           seed->instanceScene[0] ? seed->instanceScene : "-",
+           seed->instanceX, seed->instanceY, seed->challengeEnemyId,
+           seed->instanceMinLevel, seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
     return true;
 }
@@ -25049,6 +25581,15 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             serviceOptionDescription = "\xd2\xa9\xc6\xb7\xc9\xcc\xb5\xea"; /* 药品商店 */
             serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE;
             break;
+        case VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE:
+            if (matchedSeed->actorId <= VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+            {
+                serviceOptionName = "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xd3\xeb\xcc\xf4\xd5\xbd"; /* 副本传送与挑战 */
+                serviceOptionDescription = "\xb8\xb1\xb1\xbe\xcf\xf2\xb5\xbc"; /* 副本向导 */
+                serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE |
+                                     matchedSeed->actorId;
+            }
+            break;
         default:
             break;
         }
@@ -25293,7 +25834,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE &
+            (VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
@@ -25314,6 +25855,107 @@ static bool vm_net_mock_append_npc_service_dialog_option(
            vm_net_mock_seq_put_u32(dialog, dialogCap, dialogLen, value) &&
            vm_net_mock_seq_put_string(dialog, dialogCap, dialogLen,
                                       description ? description : "");
+}
+
+static u32 vm_net_mock_build_challenge_interaction_response_ex(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap,
+    bool forceNonSceneStart);
+
+static const vm_net_mock_scene_npcinfo_seed *
+vm_net_mock_instance_guide_seed(u32 actorId)
+{
+    const char *scene = vm_net_mock_current_scene_name();
+    int index = vm_net_mock_dynamic_npc_find_override(scene, actorId);
+
+    if (index < 0 ||
+        g_vm_net_mock_dynamic_npc_overrides[index].seed.kind !=
+            VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
+        !g_vm_net_mock_dynamic_npc_overrides[index].enabled)
+    {
+        return NULL;
+    }
+    return &g_vm_net_mock_dynamic_npc_overrides[index].seed;
+}
+
+static u32 vm_net_mock_build_instance_enter_response(
+    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
+{
+    vm_net_mock_scene_change_target target;
+    u32 pos = 0;
+
+    if (seed == NULL || seed->instanceScene[0] == 0 ||
+        seed->instanceX == 0 || seed->instanceY == 0)
+    {
+        return 0;
+    }
+    memset(&target, 0, sizeof(target));
+    snprintf(target.scene, sizeof(target.scene), "%s", seed->instanceScene);
+    target.x = seed->instanceX;
+    target.y = seed->instanceY;
+    target.mapType = 2;
+    target.hasSceEntry = true;
+    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(
+        &target, out, outCap);
+    if (pos == 0)
+        return 0;
+
+    vm_net_mock_remember_scene_change_target(&target);
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = true;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                      "npc-instance-enter");
+    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+           seed->actorId, target.scene, target.x, target.y, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_instance_challenge_response(
+    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
+{
+    u8 synthetic[192];
+    u32 requestPos = 9;
+    u32 objectStart = 4;
+    u32 responseLen = 0;
+    u32 challengeX = 0;
+    u32 challengeY = 0;
+
+    if (seed == NULL || seed->challengeEnemyId == 0)
+        return 0;
+    challengeX = seed->instanceX != 0 ? seed->instanceX : seed->x;
+    challengeY = seed->instanceY != 0 ? seed->instanceY : seed->y;
+    memset(synthetic, 0, sizeof(synthetic));
+    synthetic[0] = 'W';
+    synthetic[1] = 'T';
+    synthetic[objectStart] = 1;
+    synthetic[objectStart + 1] = 4;
+    synthetic[objectStart + 2] = 1;
+    if (!vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "id", seed->challengeEnemyId) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "index", 0) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posx", challengeX) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posy", challengeY))
+    {
+        return 0;
+    }
+    synthetic[2] = (u8)(requestPos >> 8);
+    synthetic[3] = (u8)requestPos;
+    synthetic[objectStart + 3] = (u8)((requestPos - objectStart) >> 8);
+    synthetic[objectStart + 4] = (u8)(requestPos - objectStart);
+    responseLen = vm_net_mock_build_challenge_interaction_response_ex(
+        synthetic, requestPos, out, outCap, true);
+    if (responseLen != 0)
+    {
+        printf("[info][network] mock_npc_instance_challenge actor=%u enemy=%u pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+battle-non-scene-start\n",
+               seed->actorId, seed->challengeEnemyId, challengeX, challengeY,
+               responseLen);
+    }
+    return responseLen;
 }
 
 static u32 vm_net_mock_build_npc_service_dialog_response(
@@ -25346,6 +25988,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 skillLearnedCount = 0;
     u32 skillLevelLockedCount = 0;
     const vm_net_mock_skill_catalog_item *skillNextLocked = NULL;
+    const vm_net_mock_scene_npcinfo_seed *instanceSeed = NULL;
 
     if (role == NULL || out == NULL || outCap < pos ||
         !vm_net_mock_is_npc_service_dialog_request(request, requestLen,
@@ -25362,7 +26005,79 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     operation = serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK;
     value = serviceValue & VM_NET_MOCK_NPC_SERVICE_VALUE_MASK;
 
-    if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON)
+    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
+        operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
+        operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
+    {
+        instanceSeed = vm_net_mock_instance_guide_seed(value);
+        action = operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE
+                     ? "instance-menu"
+                     : (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE
+                            ? "instance-enter"
+                            : "instance-challenge");
+        if (instanceSeed == NULL)
+        {
+            dialogText =
+                "\xb8\xb1\xb1\xbe\xc5\xe4\xd6\xc3\xd2\xd1\xca\xa7\xd0\xa7\xa1\xa3"; /* 副本配置已失效。 */
+        }
+        else if (role->level < instanceSeed->instanceMinLevel)
+        {
+            snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                     "%s%u%s",
+                     "\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xd0\xe8\xd2\xaa\xb5\xbd\xb4\xef", /* 进入副本需要到达 */
+                     instanceSeed->instanceMinLevel,
+                     "\xbc\xb6\xa1\xa3"); /* 级。 */
+            dialogText = dialogTextStorage;
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE)
+        {
+            u32 transferLen = vm_net_mock_build_instance_enter_response(
+                instanceSeed, out, outCap);
+            if (transferLen != 0)
+                return transferLen;
+            dialogText =
+                "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xb5\xe3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本传送点未配置。 */
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
+        {
+            u32 challengeLen = vm_net_mock_build_instance_challenge_response(
+                instanceSeed, out, outCap);
+            if (challengeLen != 0)
+                return challengeLen;
+            dialogText =
+                "\xb8\xb1\xb1\xbe\xcc\xf4\xd5\xbd\xb6\xd4\xcf\xf3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本挑战对象未配置。 */
+        }
+        else
+        {
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xb8\xb1\xb1\xbe\xb2\xd9\xd7\xf7\xa3\xba"; /* 请选择副本操作： */
+            if (instanceSeed->instanceScene[0] != 0)
+            {
+                optionNames[optionCount] =
+                    "\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe"; /* 进入副本 */
+                optionDescriptions[optionCount] =
+                    "\xb4\xab\xcb\xcd\xb5\xbd\xb8\xb1\xb1\xbe\xb3\xa1\xbe\xb0"; /* 传送到副本场景 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE |
+                    instanceSeed->actorId;
+                ++optionCount;
+            }
+            if (instanceSeed->challengeEnemyId != 0 &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    "\xcc\xf4\xd5\xbd\xca\xd8\xb9\xd8\xb9\xd6"; /* 挑战守关怪 */
+                optionDescriptions[optionCount] =
+                    "\xbf\xaa\xca\xbc\xb8\xb1\xb1\xbe\xd5\xbd\xb6\xb7"; /* 开始副本战斗 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE |
+                    instanceSeed->actorId;
+                ++optionCount;
+            }
+        }
+    }
+
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON)
     {
         static const u8 weaponSelectors[] = {8, 9, 10};
 
@@ -41538,8 +42253,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     return pos;
 }
 
-static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u32 requestLen,
-                                                            u8 *out, u32 outCap)
+static u32 vm_net_mock_build_challenge_interaction_response_ex(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap,
+    bool forceNonSceneStart)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -41578,7 +42294,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
-    bool useSceneMonsterStart = playerOnRight &&
+    bool useSceneMonsterStart = !forceNonSceneStart && playerOnRight &&
                                 vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_START", 1) != 0;
     u8 battleStartSubtype = useSceneMonsterStart ? 5 : 10;
     bool seedSceneMonsterMoveinfo = useSceneMonsterStart &&
@@ -41861,6 +42577,13 @@ static u32 vm_net_mock_build_challenge_interaction_response(const u8 *request, u
                pos);
     }
     return pos;
+}
+
+static u32 vm_net_mock_build_challenge_interaction_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_challenge_interaction_response_ex(
+        request, requestLen, out, outCap, false);
 }
 
 static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *request, u32 requestLen,

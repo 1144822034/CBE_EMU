@@ -246,6 +246,40 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_tasks` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
+  `scene` VARBINARY(64) NOT NULL,
+  `actor_id` INT UNSIGNED NOT NULL,
+  `target_scene` VARBINARY(64) NOT NULL DEFAULT '',
+  `target_x` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `target_y` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `challenge_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `minimum_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`scene`, `actor_id`),
+  CONSTRAINT `fk_server_dynamic_npc_instances_npc`
+    FOREIGN KEY (`scene`, `actor_id`)
+    REFERENCES `server_dynamic_npcs` (`scene`, `actor_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_monsters` (
+  `monster_id` SMALLINT UNSIGNED NOT NULL,
+  `level` TINYINT UNSIGNED NOT NULL,
+  `family` TINYINT UNSIGNED NOT NULL,
+  `hp` INT UNSIGNED NOT NULL,
+  `mp` INT UNSIGNED NOT NULL,
+  `attack_value` INT UNSIGNED NOT NULL,
+  `defense_value` INT UNSIGNED NOT NULL,
+  `reward_exp` INT UNSIGNED NOT NULL,
+  `reward_money` INT UNSIGNED NOT NULL,
+  `drop_item_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `drop_rate_percent` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`monster_id`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `server_shop_items` (
   `item_id` INT UNSIGNED NOT NULL,
   `price` INT UNSIGNED NOT NULL,
