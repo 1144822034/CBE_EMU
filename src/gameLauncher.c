@@ -75,13 +75,13 @@ static int launcher_measure_string_width(const char *gbkStr)
 }
 
 /* Layout constants */
-#define LAUNCHER_TILE_W 140
-#define LAUNCHER_TILE_H 90
-#define LAUNCHER_GAP 12
-#define LAUNCHER_MARGIN_X 16
-#define LAUNCHER_HEADER_H 48
-#define LAUNCHER_FOOTER_H 24
-#define LAUNCHER_SCROLLBAR_W 12
+#define LAUNCHER_TILE_W 100
+#define LAUNCHER_TILE_H 36
+#define LAUNCHER_GAP 6
+#define LAUNCHER_MARGIN_X 8
+#define LAUNCHER_HEADER_H 30
+#define LAUNCHER_FOOTER_H 26
+#define LAUNCHER_SCROLLBAR_W 6
 
 static int cmp_entries(const void *a, const void *b)
 {
@@ -188,6 +188,13 @@ bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewpor
         extract_display_name(state->entries[idx].filepath,
                              state->entries[idx].display_name,
                              sizeof(state->entries[idx].display_name));
+
+        char name_gbk[260];
+        utf8_to_gbk((u8 *)state->entries[idx].display_name,
+                     (u8 *)name_gbk, sizeof(name_gbk));
+        snprintf(state->entries[idx].display_name,
+                 sizeof(state->entries[idx].display_name), "%s", name_gbk);
+
         idx++;
     }
     closedir(d);
@@ -257,7 +264,7 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     SDL_Surface *sfc = (SDL_Surface *)surface_ptr;
     if (!sfc || !state || !state->entries) return;
 
-    u32 bg = SDL_MapRGB(sfc->format, 0x1a, 0x1a, 0x2e);
+    u32 bg = SDL_MapRGB(sfc->format, 0x12, 0x12, 0x20);
     SDL_FillRect(sfc, NULL, bg);
 
     int content_x = state->margin_x;
@@ -272,13 +279,15 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     clip.h = content_h;
     SDL_SetClipRect(sfc, &clip);
 
-    draw_rounded_rect(sfc, 0, 0, state->viewport_w, state->header_h, 0x0f3460, 0);
+    draw_rounded_rect(sfc, 0, 0, state->viewport_w, state->header_h, 0x1a1a3e, 0);
+    draw_rounded_rect(sfc, 0, state->header_h - 1, state->viewport_w, 1,
+        SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60), 0);
     {
         const char *title = "Game Center";
         int tw = launcher_measure_string_width(title);
         int tx = (state->viewport_w - tw) / 2;
         launcher_draw_font_string(sfc, title, tx, (state->header_h - getFontHeight()) / 2,
-            SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
+            SDL_MapRGB(sfc->format, 0xff, 0xff, 0xff));
     }
 
     float max_scroll = vm_game_launcher_compute_max_scroll(state);
@@ -295,16 +304,20 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
         int tile_x = content_x + col * (state->tile_w + state->gap);
         int ty = content_y + (int)tile_y;
 
-        u32 tile_bg = SDL_MapRGB(sfc->format, 0x16, 0x21, 0x3e);
-        u32 border = SDL_MapRGB(sfc->format, 0x33, 0x33, 0x55);
+        u32 tile_bg = SDL_MapRGB(sfc->format, 0x1e, 0x1e, 0x36);
+        u32 border = SDL_MapRGB(sfc->format, 0x2a, 0x2a, 0x44);
 
         if (i == state->selected_index) {
-            tile_bg = SDL_MapRGB(sfc->format, 0x0f, 0x34, 0x60);
+            tile_bg = SDL_MapRGB(sfc->format, 0x1a, 0x30, 0x55);
             border = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
         }
 
         draw_rounded_rect(sfc, tile_x, ty, state->tile_w, state->tile_h, tile_bg, 0);
         draw_rect_border(sfc, tile_x, ty, state->tile_w, state->tile_h, border);
+        if (i == state->selected_index) {
+            draw_rounded_rect(sfc, tile_x, ty + 4, 2, state->tile_h - 8,
+                SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60), 0);
+        }
         {
             const char *name = state->entries[i].display_name;
             int nameW = launcher_measure_string_width(name);
@@ -341,7 +354,7 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
         state->scroll_offset / (total - (float)content_h) : 0;
     float thumb_y = content_y + scroll_ratio * (scrollbar_track_h - thumb_h);
 
-    u32 sb_color = SDL_MapRGB(sfc->format, 0x55, 0x55, 0x55);
+    u32 sb_color = SDL_MapRGB(sfc->format, 0x2a, 0x2a, 0x40);
     u32 thumb_color = SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60);
     int sb_x = state->viewport_w - state->scrollbar_w;
     draw_rounded_rect(sfc, sb_x, content_y, state->scrollbar_w, content_h, sb_color, 0);
@@ -349,38 +362,42 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
 
     SDL_SetClipRect(sfc, NULL);
 
+    int footer_y = state->viewport_h - state->footer_h;
+    draw_rounded_rect(sfc, 0, footer_y, state->viewport_w, state->footer_h, 0x1a1a3e, 0);
+    draw_rounded_rect(sfc, 0, footer_y, state->viewport_w, 1,
+        SDL_MapRGB(sfc->format, 0x2a, 0x2a, 0x44), 0);
     {
         const char *footer = "Up/Down Select  Enter Launch";
         int fw = launcher_measure_string_width(footer);
         int fx = (state->viewport_w - fw) / 2;
-        int fy = state->viewport_h - state->footer_h + (state->footer_h - getFontHeight()) / 2;
+        int fy = footer_y + (state->footer_h - getFontHeight()) / 2;
         launcher_draw_font_string(sfc, footer, fx, fy,
-            SDL_MapRGB(sfc->format, 0x88, 0x88, 0x88));
+            SDL_MapRGB(sfc->format, 0x66, 0x66, 0x88));
     }
 
     if (state->loading) {
         SDL_Rect full = {0, 0, state->viewport_w, state->viewport_h};
         SDL_FillRect(sfc, &full, SDL_MapRGB(sfc->format, 0x10, 0x10, 0x20));
         draw_rounded_rect(sfc,
-            (state->viewport_w - 200) / 2,
-            (state->viewport_h - 80) / 2,
-            200, 80, 0x16213e, 1);
+            (state->viewport_w - 160) / 2,
+            (state->viewport_h - 60) / 2,
+            160, 60, 0x1a1a3e, 1);
         draw_rect_border(sfc,
-            (state->viewport_w - 200) / 2,
-            (state->viewport_h - 80) / 2,
-            200, 80, SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
+            (state->viewport_w - 160) / 2,
+            (state->viewport_h - 60) / 2,
+            160, 60, SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
         const char *label = "Loading...";
         int lw = launcher_measure_string_width(label);
         launcher_draw_font_string(sfc, label,
             (state->viewport_w - lw) / 2,
-            (state->viewport_h - getFontHeight()) / 2,
+            (state->viewport_h - getFontHeight()) / 2 - 4,
             SDL_MapRGB(sfc->format, 0xff, 0xff, 0xff));
         const char *name = state->loading_name;
         if (name[0]) {
             int nw = launcher_measure_string_width(name);
             launcher_draw_font_string(sfc, name,
                 (state->viewport_w - nw) / 2,
-                (state->viewport_h - getFontHeight()) / 2 + getFontHeight() + 4,
+                (state->viewport_h - getFontHeight()) / 2 + getFontHeight() + 2,
                 SDL_MapRGB(sfc->format, 0xe9, 0x45, 0x60));
         }
     }
