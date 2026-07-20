@@ -381,7 +381,7 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
         }
     }
 
-    SDL_UpdateWindowSurface(sfc);
+    SDL_SetClipRect(sfc, NULL);
 }
 
 bool vm_game_launcher_handle_mouse(GameLauncherState *state, int x, int y, int button)

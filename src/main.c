@@ -269,6 +269,7 @@ static void vm_game_launcher_update(void)
     SDL_Surface *surface = SDL_GetWindowSurface(window);
     if (surface)
         vm_game_launcher_render(&g_gameLauncherState, surface);
+    SDL_UpdateWindowSurface(window);
 }
 static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
