@@ -4,6 +4,7 @@
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -19,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <pthread.h>
+#endif
 
 #define VM_MYSQL_CLIENT_LONG_PASSWORD       0x00000001u
 #define VM_MYSQL_CLIENT_LONG_FLAG           0x00000004u
@@ -39,10 +43,27 @@ typedef struct
     size_t block_len;
 } vm_mysql_sha1_context;
 
-static SOCKET g_vm_mysql_socket = INVALID_SOCKET;
-static char g_vm_mysql_error[512];
+#if defined(_MSC_VER)
+#define VM_MYSQL_THREAD_LOCAL __declspec(thread)
+#else
+#define VM_MYSQL_THREAD_LOCAL __thread
+#endif
+
+/* A MySQL protocol stream cannot be shared by concurrent requests: packet
+ * sequence numbers and result rows would interleave.  Each long-lived service
+ * worker therefore owns and reuses its own connection and error buffer. */
+static VM_MYSQL_THREAD_LOCAL SOCKET g_vm_mysql_socket = INVALID_SOCKET;
+static VM_MYSQL_THREAD_LOCAL char g_vm_mysql_error[512];
 #ifdef _WIN32
+static pthread_once_t g_vm_mysql_wsa_once = PTHREAD_ONCE_INIT;
 static int g_vm_mysql_wsa_ready = 0;
+
+static void vm_mysql_wsa_initialize_once(void)
+{
+    WSADATA wsa_data;
+    g_vm_mysql_wsa_ready =
+        WSAStartup(MAKEWORD(2, 2), &wsa_data) == 0 ? 1 : -1;
+}
 #endif
 
 static uint32_t vm_mysql_rotl32(uint32_t value, unsigned int bits)
@@ -307,15 +328,11 @@ static bool vm_mysql_connect(void)
         return true;
 
 #ifdef _WIN32
-    if (!g_vm_mysql_wsa_ready)
+    if (pthread_once(&g_vm_mysql_wsa_once, vm_mysql_wsa_initialize_once) != 0 ||
+        g_vm_mysql_wsa_ready != 1)
     {
-        WSADATA wsa_data;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0)
-        {
-            vm_mysql_set_error("WSAStartup failed for MySQL connection");
-            return false;
-        }
-        g_vm_mysql_wsa_ready = 1;
+        vm_mysql_set_error("WSAStartup failed for MySQL connection");
+        return false;
     }
 #endif
 
@@ -353,6 +370,22 @@ static bool vm_mysql_connect(void)
     {
         vm_mysql_set_error("Could not connect to MySQL server");
         return false;
+    }
+
+    /* Queries are encoded as a four-byte MySQL packet header followed by a
+     * small payload. With Nagle enabled, the second send may wait for the
+     * header ACK. MySQL already frames every packet, so disabling Nagle avoids
+     * adding that latency to the scene bootstrap's small request/response
+     * queries. */
+    {
+        int noDelay = 1;
+#ifdef _WIN32
+        setsockopt(g_vm_mysql_socket, IPPROTO_TCP, TCP_NODELAY,
+                   (const char *)&noDelay, sizeof(noDelay));
+#else
+        setsockopt(g_vm_mysql_socket, IPPROTO_TCP, TCP_NODELAY,
+                   &noDelay, sizeof(noDelay));
+#endif
     }
 
 #ifdef _WIN32

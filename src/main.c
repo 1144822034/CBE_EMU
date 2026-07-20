@@ -302,6 +302,18 @@ static u32 g_cbeFileSize = 0;
 
 typedef struct
 {
+    u8 hasSceneTarget;
+    u8 sceneSubtype;
+    u8 sceneCompleteAfterCallback;
+    u8 updateComplete;
+    u16 sceneX;
+    u16 sceneY;
+    char scene[64];
+    char updateName[64];
+} vm_net_remote_observation;
+
+typedef struct
+{
     u8 active;
     u8 fired;
     u8 downloadSnapshotValid;
@@ -314,6 +326,7 @@ typedef struct
     u32 callback;
     u32 context;
     u8 downloadSnapshot[0x60];
+    vm_net_remote_observation remoteObservation;
 } vm_net_task;
 
 typedef struct
@@ -428,6 +441,9 @@ static u32 vm_net_mock_min_u32(u32 a, u32 b);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static uc_err scheduler_dispatch_net_tasks(void);
 static bool vm_net_mock_should_rearm_send_ready(void);
+static u32 vm_net_mock_apply_remote_observation(
+    const vm_net_remote_observation *observation);
+static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
 static u32 vm_dl_current_sp_bf(void);
 static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
@@ -2238,6 +2254,8 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
             g_netTasks[i].downloadSnapshotValid = 0;
             g_netTasks[i].downloadSnapshotState = 0;
             memset(g_netTasks[i].downloadSnapshot, 0, sizeof(g_netTasks[i].downloadSnapshot));
+            memset(&g_netTasks[i].remoteObservation, 0,
+                   sizeof(g_netTasks[i].remoteObservation));
             if (eventType == 7 && Global_R9)
             {
                 u32 downloadBase = Global_R9 + 0x9584;
@@ -2263,6 +2281,27 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
             return;
         }
     }
+}
+
+static bool scheduler_attach_net_remote_observation(
+    u32 eventType, u32 r0, u32 callback, u32 context,
+    const vm_net_remote_observation *observation)
+{
+    if (observation == NULL)
+        return false;
+    for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
+    {
+        vm_net_task *task = &g_netTasks[i];
+        if (!task->active || task->fired || task->eventType != eventType ||
+            task->r0 != r0 || task->callback != callback ||
+            task->context != context)
+        {
+            continue;
+        }
+        task->remoteObservation = *observation;
+        return true;
+    }
+    return false;
 }
 
 static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
@@ -2399,6 +2438,9 @@ static uc_err scheduler_dispatch_net_tasks(void)
             u32 taskR2 = task->r2;
             u32 taskCallback = task->callback;
             u32 taskContext = task->context;
+            vm_net_remote_observation taskRemoteObservation =
+                task->remoteObservation;
+            u32 remoteSceneTargetClearSerial = 0;
             task->fired = 1;
             task->active = 0;
             g_netTaskDispatchDepth++;
@@ -2418,6 +2460,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
                     uc_mem_write(MTK, downloadBase, task->downloadSnapshot, sizeof(task->downloadSnapshot));
                 }
             }
+            remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
+                &taskRemoteObservation);
             uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
             if (g_netDebugReadWindow)
             {
@@ -2427,6 +2471,9 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             g_netTaskDispatchDepth--;
             g_netTaskDispatchSlot = -1;
+            if (err == UC_ERR_OK)
+                vm_net_mock_finish_remote_observation(
+                    remoteSceneTargetClearSerial);
             if (err != UC_ERR_OK)
                 return err;
             if (taskEvent == 7)
@@ -7909,7 +7956,7 @@ int main(int argc, char *args[])
     /* Linux is a standalone authoritative service.  Do not load a client CBE
      * or initialize the Unicorn/LCD emulator before opening the game and web
      * listeners. */
-    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IOFBF, 262144);
     setvbuf(stderr, NULL, _IONBF, 0);
     originalCwd[0] = 0;
     resourceCandidate[0] = 0;
@@ -8004,6 +8051,7 @@ int main(int argc, char *args[])
 #else
     uc_err err;
     uc_hook hookHandle;
+    bool bufferMockServiceStdout = false;
 #ifdef CBE_PLATFORM_ANDROID
     int argc = 0;
     char **args = NULL;
@@ -8015,7 +8063,29 @@ int main(int argc, char *args[])
         return -1;
     }
 #endif
-    setvbuf(stdout, NULL, _IONBF, 0);
+    /* Windows mock-service-only used to make every trace line an immediate
+     * filesystem write.  The first scene response emits many evidence lines;
+     * synchronous writes delayed the NPC catalog and welcome message by
+     * several seconds.  Buffer only the standalone service process and flush
+     * after each response has already been sent.  Keep the emulator process
+     * unbuffered so crash diagnostics remain immediate. */
+#ifndef CBE_PLATFORM_ANDROID
+    {
+        const char *serviceOnlyEnv = getenv("CBE_MOCK_SERVICE_ONLY");
+        bufferMockServiceStdout = serviceOnlyEnv != NULL &&
+                                  serviceOnlyEnv[0] != 0 &&
+                                  strcmp(serviceOnlyEnv, "0") != 0;
+        for (int i = 1; i < argc && !bufferMockServiceStdout; ++i)
+        {
+            if (strcmp(args[i], "--mock-service-only") == 0)
+                bufferMockServiceStdout = true;
+        }
+    }
+#endif
+    if (bufferMockServiceStdout)
+        setvbuf(stdout, NULL, _IOFBF, 262144);
+    else
+        setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     vm_cbe_init_config(argc, args);
     vm_autotest_init(argc, args);
@@ -12579,6 +12649,11 @@ static bool hook_vm_manager_screen_func(u32 address)
             if (vm_net_mock_consume_update_completed_scene_reenter(activeTarget))
             {
                 acceptChange = true;
+                /* The update callback can call EnterSceneByMapName more than
+                 * once before returning.  Refresh the serial-bound guard for
+                 * the one accepted resource-completion re-entry so any later
+                 * call in the same callback is suppressed. */
+                vm_scene_same_reenter_remember_target(activeTarget);
             }
             else if (vm_scene_same_reenter_matches_target(activeTarget))
             {
