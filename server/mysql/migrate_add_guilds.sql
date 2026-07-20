@@ -28,12 +28,12 @@ CREATE TABLE IF NOT EXISTS `guilds` (
 ) ENGINE=InnoDB;
 
 -- 兼容已执行过早期迁移（外键曾是 RESTRICT）的开发库。
-ALTER TABLE `guilds`
-  DROP FOREIGN KEY `fk_guilds_leader_role`,
-  ADD CONSTRAINT `fk_guilds_leader_role`
-    FOREIGN KEY (`leader_account_id`, `leader_role_id`)
-    REFERENCES `account_roles` (`account_id`, `role_id`)
-    ON DELETE CASCADE;
+-- ALTER TABLE `guilds`
+--   DROP FOREIGN KEY `fk_guilds_leader_role`,
+--   ADD CONSTRAINT `fk_guilds_leader_role`
+--     FOREIGN KEY (`leader_account_id`, `leader_role_id`)
+--     REFERENCES `account_roles` (`account_id`, `role_id`)
+ --    ON DELETE CASCADE;
 
 CREATE TABLE IF NOT EXISTS `guild_members` (
   `guild_id` INT UNSIGNED NOT NULL,

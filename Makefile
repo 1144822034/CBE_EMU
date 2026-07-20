@@ -9,7 +9,8 @@ COMMON_SOURCES := \
 	src/fileIoEngine.c \
 	src/lcd.c \
 	src/mysql-client.c \
-	src/main.c
+	src/main.c \
+	src/gameLauncher.c
 
 ifeq ($(OS),Windows_NT)
 OBJDIR := obj

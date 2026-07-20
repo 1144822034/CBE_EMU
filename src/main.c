@@ -13,6 +13,7 @@
 
 #include "main.h"
 #include "lcd.h"
+#include "gameLauncher.h"
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
 #include "hookRam.c"
@@ -258,6 +259,18 @@ static u32 g_screenRootExitPendingTick = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
+
+bool g_gameLauncherActive = false;
+GameLauncherState g_gameLauncherState;
+
+static void vm_game_launcher_update(void)
+{
+    if (!g_gameLauncherActive) return;
+    SDL_Surface *surface = SDL_GetWindowSurface(window);
+    if (surface)
+        vm_game_launcher_render(&g_gameLauncherState, surface);
+    SDL_UpdateWindowSurface(window);
+}
 static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
 static u8 g_wpayMockFlowActive = 0;
@@ -6036,6 +6049,115 @@ static void vm_autotest_tick(void)
     }
 }
 
+#ifndef CBE_PLATFORM_ANDROID
+static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.CBE";
+#else
+static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.cbe";
+#endif
+static u8 g_forceLaunchCbe = 0;
+
+static void vm_init_fixed_base_manager_directory(void);
+
+static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
+{
+    uc_err err;
+    uc_hook hookHandle;
+    snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", cbe_path_utf8);
+
+#ifdef CBE_HOST_UTF8_PATHS
+    snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", cbe_path_utf8);
+#else
+    utf8_to_gbk(cbe_path_utf8, cbeTextString, mySizeOf(cbeTextString));
+#endif
+
+    char *fileBuffer = readFile(cbeTextString, &changeTmp1);
+    if (fileBuffer == NULL || changeTmp1 == 0)
+    {
+        printf("[error][cbe] failed to load %s\n", cbeTextString);
+        return false;
+    }
+    g_cbeFileBuffer = (u8 *)fileBuffer;
+    g_cbeFileSize = changeTmp1;
+    parseCbeHeader(fileBuffer, changeTmp1);
+    vm_config_program_mapping();
+
+    if (g_cbeInfo.isBiggianProgram)
+        err = uc_open(UC_ARCH_ARM, UC_MODE_ARM | UC_MODE_BIG_ENDIAN, &MTK);
+    else
+        err = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &MTK);
+
+    if (err)
+    {
+        printf("[error][cbe] uc_open failed: %u (%s)\n", err, uc_strerror(err));
+        return false;
+    }
+
+    ROM_MEMPOOL = SDL_malloc(Program_ROM_Mapped_Size);
+    STACK_MEMPOOL = SDL_malloc(size_4mb);
+    PRAM_MEMPOOL = SDL_malloc(size_1mb);
+    RAM_MEMPOOL = SDL_malloc(VM_MEMPOOL_TOTAL_SIZE);
+    if (ROM_MEMPOOL)
+        memset(ROM_MEMPOOL, 0, Program_ROM_Mapped_Size);
+
+    uc_mem_map_ptr(MTK, Program_ROM_Address, Program_ROM_Mapped_Size, UC_PROT_ALL, ROM_MEMPOOL);
+    uc_mem_map_ptr(MTK, STACK_ADDRESS, size_1mb, UC_PROT_ALL, STACK_MEMPOOL);
+    uc_mem_map_ptr(MTK, VM_Manager_Table_ADDRESS, size_1mb, UC_PROT_ALL, PRAM_MEMPOOL);
+    uc_mem_map_ptr(MTK, VM_FUNC_HK_TABLE_ADDRESS, size_1mb, UC_PROT_ALL, SDL_malloc(size_1mb));
+    uc_mem_map_ptr(MTK, VM_Memory_Pool_ADDRESS, VM_MEMPOOL_TOTAL_SIZE, UC_PROT_ALL, RAM_MEMPOOL);
+    uc_mem_map(MTK, PROGRAM_EXIT_ADDR, 0x1000, UC_PROT_ALL);
+
+    InitVmMalloc();
+    if (!g_mockServiceOnly)
+    {
+        InitLcd();
+        vm_lcd_update_with_input_overlay();
+        InitFontEngine();
+    }
+
+    err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0, 0xFFFFFFFF);
+    if (err == UC_ERR_OK)
+        err = add_manager_code_hooks(MTK);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, hookRamCallBack, 0, 0, 0xFFFFFFFF);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack, 2, 0, 0xFFFFFFFF);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack, 3, 0, 0xFFFFFFFF);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_FETCH_UNMAPPED, hookRamErrorBack, 4, 0, 0xFFFFFFFF);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_INTR, hookCpuIntr, NULL, 1, 0);
+    uc_hook_add(MTK, &hookHandle, UC_HOOK_INSN_INVALID, hookInsnInvalid, 4, 0, 0xFFFFFFFF);
+
+    if (err != UC_ERR_OK)
+    {
+        printf("[error][cbe] hook add failed: %u (%s)\n", err, uc_strerror(err));
+        return false;
+    }
+
+    uc_mem_write(MTK, Program_ROM_Address, fileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+    printf("[info][cbe] loaded %s entry=0x%x loadBase=0x%x\n",
+           cbe_path_utf8, g_cbeInfo.codeOffset, Program_ROM_Address);
+    uc_mem_write(MTK, Program_Data_Address, fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+
+    changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3);
+    changeTmp3 = VM_LOG_NOOP_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 12, changeTmp3);
+    changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
+    vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3);
+
+    vm_initManagerTable();
+    vm_init_fixed_base_manager_directory();
+
+    Global_R9 = Program_Data_Address;
+    uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9);
+
+    changeTmp2 = STACK_ADDRESS + size_1mb;
+    uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
+
+    changeTmp1 = Program_ROM_Address;
+    g_vmThreadFinished = 0;
+    pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
+    printf("[info][cbe] VM started\n");
+    return true;
+}
+
 
 void loop()
 {
@@ -6044,6 +6166,100 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
+    if (g_gameLauncherActive && !g_autotestEnabled)
+        {
+            vm_game_launcher_update();
+            if (g_hostQuitRequested)
+                break;
+            while (SDL_PollEvent(&ev))
+            {
+                if (ev.type == SDL_QUIT)
+                {
+                    vm_request_host_quit("window_close");
+                    break;
+                }
+                if (g_hostQuitRequested)
+                    continue;
+                switch (ev.type)
+                {
+                case SDL_MOUSEBUTTONDOWN:
+                {
+                    const char *path = vm_game_launcher_handle_mouse(&g_gameLauncherState,
+                        ev.button.x, ev.button.y, ev.button.button);
+                    if (path)
+                    {
+                        printf("[info][launcher] launching %s\n", path);
+                        g_gameLauncherState.loading = true;
+                        snprintf(g_gameLauncherState.loading_name,
+                                 sizeof(g_gameLauncherState.loading_name),
+                                 "%s", g_gameLauncherState.entries[
+                                     g_gameLauncherState.selected_index].display_name);
+                        vm_game_launcher_render(&g_gameLauncherState,
+                            SDL_GetWindowSurface(window));
+
+                        g_gameLauncherActive = false;
+                        if (!vm_cbe_load_and_start(path))
+                        {
+                            printf("[error][launcher] failed to load %s\n", path);
+                            g_gameLauncherActive = true;
+                            g_gameLauncherState.loading = false;
+                        }
+                        else
+                        {
+                            vm_game_launcher_record_launch(path);
+                        }
+                    }
+                }
+                break;
+                case SDL_MOUSEBUTTONUP:
+                    vm_game_launcher_handle_mouse(&g_gameLauncherState,
+                        ev.button.x, ev.button.y, 0);
+                    break;
+                case SDL_MOUSEWHEEL:
+                    vm_game_launcher_handle_mouse(&g_gameLauncherState, 0, 0,
+                        ev.wheel.y > 0 ? 5 : 4);
+                    break;
+                case SDL_KEYDOWN:
+                    if (vm_game_launcher_handle_key(&g_gameLauncherState,
+                            ev.key.keysym.sym, true))
+                    {
+                        if (ev.key.keysym.sym == SDLK_q)
+                        {
+                            const char *path = vm_game_launcher_get_selected_filepath(
+                                &g_gameLauncherState);
+                            if (path)
+                            {
+                                snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8),
+                                         "%s", path);
+                                printf("[info][launcher] launching %s\n", path);
+                                g_gameLauncherState.loading = true;
+                                snprintf(g_gameLauncherState.loading_name,
+                                         sizeof(g_gameLauncherState.loading_name),
+                                         "%s", g_gameLauncherState.entries[
+                                             g_gameLauncherState.selected_index].display_name);
+                                vm_game_launcher_render(&g_gameLauncherState,
+                                    SDL_GetWindowSurface(window));
+
+                                g_gameLauncherActive = false;
+                                if (!vm_cbe_load_and_start(path))
+                                {
+                                    printf("[error][launcher] failed to load %s\n", path);
+                                    g_gameLauncherActive = true;
+                                    g_gameLauncherState.loading = false;
+                                }
+                                else
+                                {
+                                    vm_game_launcher_record_launch(path);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            SDL_Delay(16);
+            continue;
+        }
         vm_input_sync_sdl_text_input();
         while (SDL_PollEvent(&ev))
         {
@@ -6213,34 +6429,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "CBE/僵尸先生.CBE"//这个加载太慢了
-#define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
-#define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
-#define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/战争机器.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/魔塔.CBE"
-#define LOAD_CBE_PATH "CBE/孤岛.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/血剑Online.CBE"
-#define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
-#define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
-#define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
-#define LOAD_CBE_PATH "CBE/众神之战.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
-#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
-
-#ifdef CBE_PLATFORM_ANDROID
-static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.cbe";
-#else
-static char g_cbeLoadPathUtf8[260] = LOAD_CBE_PATH;
-#endif
-
 static void vm_cbe_init_config(int argc, char *args[])
 {
     for (int i = 1; i < argc; ++i)
@@ -6248,6 +6436,14 @@ static void vm_cbe_init_config(int argc, char *args[])
         if (strncmp(args[i], "--cbe=", 6) == 0 && args[i][6] != 0)
         {
             snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", args[i] + 6);
+        }
+        if (strcmp(args[i], "--no-launcher") == 0)
+        {
+            g_forceLaunchCbe = 1;
+        }
+        if (strcmp(args[i], "--launcher") == 0)
+        {
+            g_forceLaunchCbe = 0;
         }
     }
     printf("[info][cbe] selected=%s\n", g_cbeLoadPathUtf8);
@@ -6670,12 +6866,12 @@ static vm_lcd_rotation vm_lcd_auto_rotation_for_current_cbe(void)
         0xbd, 0xa9, 0xca, 0xac, 0xcf, 0xc8, 0xc9, 0xfa
     };
 
-    if (vm_bytes_contains(LOAD_CBE_PATH, angryUtf8, sizeof(angryUtf8)) ||
-        vm_bytes_contains(LOAD_CBE_PATH, angryGbk, sizeof(angryGbk)) ||
-        strstr(LOAD_CBE_PATH, "Angry") != NULL ||
-        strstr(LOAD_CBE_PATH, "angry") != NULL ||
-        vm_bytes_contains(LOAD_CBE_PATH, zombieUtf8, sizeof(zombieUtf8)) ||
-        vm_bytes_contains(LOAD_CBE_PATH, zombieGbk, sizeof(zombieGbk)))
+    if (vm_bytes_contains(g_cbeLoadPathUtf8, angryUtf8, sizeof(angryUtf8)) ||
+        vm_bytes_contains(g_cbeLoadPathUtf8, angryGbk, sizeof(angryGbk)) ||
+        strstr(g_cbeLoadPathUtf8, "Angry") != NULL ||
+        strstr(g_cbeLoadPathUtf8, "angry") != NULL ||
+        vm_bytes_contains(g_cbeLoadPathUtf8, zombieUtf8, sizeof(zombieUtf8)) ||
+        vm_bytes_contains(g_cbeLoadPathUtf8, zombieGbk, sizeof(zombieGbk)))
         return VM_LCD_ROTATE_90_CCW;
     return VM_LCD_ROTATE_0;
 }
@@ -6800,7 +6996,7 @@ static void vm_persist_sanitize_name(const char *src, char *dst, size_t dstSize)
 static void vm_persist_build_path(char *path, size_t pathSize, const char *kind, u32 slot)
 {
     char appName[96];
-    vm_persist_sanitize_name(LOAD_CBE_PATH, appName, sizeof(appName));
+    vm_persist_sanitize_name(g_cbeLoadPathUtf8, appName, sizeof(appName));
     snprintf(path, pathSize, "nvram/%s_%s_%08x.bin", appName, kind, slot);
 }
 
@@ -6992,7 +7188,7 @@ static void vm_storage_date_build_path(char *path, size_t pathSize, u32 namePtr)
     char appName[96];
     char rawName[96];
     char storeName[96];
-    vm_persist_sanitize_name(LOAD_CBE_PATH, appName, sizeof(appName));
+    vm_persist_sanitize_name(g_cbeLoadPathUtf8, appName, sizeof(appName));
     vm_storage_read_name(namePtr, rawName, sizeof(rawName));
     if (rawName[0] == 0)
         snprintf(rawName, sizeof(rawName), "ptr_%08x", namePtr);
@@ -7934,6 +8130,28 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
+    if (!g_mockServiceOnly)
+    {
+        InitLcd();
+        InitFontEngine();
+        if (!g_forceLaunchCbe && !g_autotestEnabled)
+        {
+            if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(), LcdGetWindowHeight()))
+            {
+                g_gameLauncherActive = true;
+                printf("[info][launcher] game center initialized, %d games found\n",
+                       g_gameLauncherState.count);
+            }
+        }
+    }
+
+    if (g_gameLauncherActive)
+    {
+        printf("[info][launcher] showing launcher, deferring CBE load\n");
+        loop();
+        goto _launcher_done;
+    }
+
 #ifdef CBE_HOST_UTF8_PATHS
     snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", g_cbeLoadPathUtf8);
 #else
@@ -8079,6 +8297,7 @@ int main(int argc, char *args[])
         vm_net_mock_service_notify_disconnect("host-loop-exit");
 #endif
     }
+_launcher_done:
     return 0;
 #endif
 }
