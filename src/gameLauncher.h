@@ -7,6 +7,7 @@ typedef struct {
     char filepath[260];       /* e.g. "bin/CBE/江湖 OL.CBE" */
     char display_name[128];   /* extracted name without dir/suffix */
     u32 file_size;
+    int launch_count;         /* usage frequency for sorting */
 } GameEntry;
 
 typedef struct {
@@ -42,5 +43,5 @@ const char *vm_game_launcher_get_selected_filepath(const GameLauncherState *stat
 bool vm_game_launcher_is_active(const GameLauncherState *state);
 void vm_game_launcher_set_active(GameLauncherState *state, bool active);
 
-void vm_game_launcher_save_last(const char *filepath);
-const char *vm_game_launcher_load_last(char *buf, size_t buf_size);
+void vm_game_launcher_record_launch(const char *filepath);
+void vm_game_launcher_load_history(GameLauncherState *state);

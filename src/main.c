@@ -6178,7 +6178,7 @@ void loop()
                                 }
                                 else
                                 {
-                                    vm_game_launcher_save_last(path);
+                                    vm_game_launcher_record_launch(path);
                                 }
                             }
                         }
@@ -8042,13 +8042,7 @@ int main(int argc, char *args[])
         InitFontEngine();
         if (!g_forceLaunchCbe && !g_autotestEnabled)
         {
-            char lastPath[260];
-            if (vm_game_launcher_load_last(lastPath, sizeof(lastPath)))
-            {
-                printf("[info][launcher] auto-launching last selected: %s\n", lastPath);
-                snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", lastPath);
-            }
-            else if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(), LcdGetWindowHeight()))
+            if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(), LcdGetWindowHeight()))
             {
                 g_gameLauncherActive = true;
                 printf("[info][launcher] game center initialized, %d games found\n",

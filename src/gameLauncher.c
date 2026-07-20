@@ -87,6 +87,8 @@ static int cmp_entries(const void *a, const void *b)
 {
     const GameEntry *ea = (const GameEntry *)a;
     const GameEntry *eb = (const GameEntry *)b;
+    if (eb->launch_count != ea->launch_count)
+        return eb->launch_count - ea->launch_count;
     return strcmp(ea->display_name, eb->display_name);
 }
 
@@ -200,6 +202,7 @@ bool vm_game_launcher_init(GameLauncherState *state, int viewport_w, int viewpor
     closedir(d);
 
     state->count = idx;
+    vm_game_launcher_load_history(state);
     qsort(state->entries, state->count, sizeof(GameEntry), cmp_entries);
 
     state->scroll_offset = 0;
@@ -562,28 +565,61 @@ void vm_game_launcher_set_active(GameLauncherState *state, bool active)
     if (state) state->active = active;
 }
 
-void vm_game_launcher_save_last(const char *filepath)
+static const char *HISTORY_FILE = "game_launcher_history.txt";
+
+void vm_game_launcher_record_launch(const char *filepath)
 {
     if (!filepath) return;
-    FILE *f = fopen("game_launcher_last.txt", "w");
+    int counts[256];
+    char paths[256][260];
+    int n = 0;
+    FILE *f = fopen(HISTORY_FILE, "r");
     if (f) {
-        fprintf(f, "%s\n", filepath);
+        while (n < 256 && fscanf(f, "%d %[^\n]", &counts[n], paths[n]) == 2) {
+            n++;
+        }
+        fclose(f);
+    }
+    int found = -1;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(paths[i], filepath) == 0) { found = i; break; }
+    }
+    if (found >= 0) {
+        counts[found]++;
+    } else if (n < 256) {
+        counts[n] = 1;
+        snprintf(paths[n], sizeof(paths[n]), "%s", filepath);
+        n++;
+    }
+    f = fopen(HISTORY_FILE, "w");
+    if (f) {
+        for (int i = 0; i < n; i++) {
+            fprintf(f, "%d %s\n", counts[i], paths[i]);
+        }
         fclose(f);
     }
 }
 
-const char *vm_game_launcher_load_last(char *buf, size_t buf_size)
+void vm_game_launcher_load_history(GameLauncherState *state)
 {
-    if (!buf || buf_size == 0) return NULL;
-    FILE *f = fopen("game_launcher_last.txt", "r");
-    if (!f) return NULL;
-    if (fgets(buf, (int)buf_size, f)) {
-        size_t len = strlen(buf);
-        while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r'))
-            buf[--len] = '\0';
+    if (!state || !state->entries) return;
+    int counts[256];
+    char paths[256][260];
+    int n = 0;
+    FILE *f = fopen(HISTORY_FILE, "r");
+    if (f) {
+        while (n < 256 && fscanf(f, "%d %[^\n]", &counts[n], paths[n]) == 2) {
+            n++;
+        }
         fclose(f);
-        return len > 0 ? buf : NULL;
     }
-    fclose(f);
-    return NULL;
+    for (int i = 0; i < state->count; i++) {
+        state->entries[i].launch_count = 0;
+        for (int j = 0; j < n; j++) {
+            if (strcmp(state->entries[i].filepath, paths[j]) == 0) {
+                state->entries[i].launch_count = counts[j];
+                break;
+            }
+        }
+    }
 }
