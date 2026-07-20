@@ -370,7 +370,7 @@ void vm_game_launcher_render(GameLauncherState *state, void *surface_ptr)
     draw_rounded_rect(sfc, 0, footer_y, state->viewport_w, 1,
         SDL_MapRGB(sfc->format, 0x2a, 0x2a, 0x44), 0);
     {
-        const char *footer = "Up/Down Select  Enter Launch";
+        const char *footer = "W/S Select  Q Confirm";
         int fw = launcher_measure_string_width(footer);
         int fx = (state->viewport_w - fw) / 2;
         int fy = footer_y + (state->footer_h - getFontHeight()) / 2;
