@@ -388,6 +388,45 @@ static int vm_mock_admin_send_binary_response(vm_mock_service_socket client,
            (body != NULL && vm_mock_service_send_all(client, body, bodyLen));
 }
 
+static int vm_mock_admin_send_payment_qrcode_script(vm_mock_service_socket client)
+{
+    static const char *paths[] = {
+        "web/payment-qrcode.js",
+        "../web/payment-qrcode.js"
+    };
+    FILE *fp = NULL;
+    u8 *body = NULL;
+    long lengthLong = 0;
+    u32 length = 0;
+    int sent = 0;
+
+    for (u32 i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+    {
+        fp = fopen(paths[i], "rb");
+        if (fp != NULL)
+            break;
+    }
+    if (fp == NULL || fseek(fp, 0, SEEK_END) != 0 ||
+        (lengthLong = ftell(fp)) <= 0 || lengthLong > 128 * 1024 ||
+        fseek(fp, 0, SEEK_SET) != 0)
+        goto done;
+    length = (u32)lengthLong;
+    body = (u8 *)malloc(length);
+    if (body == NULL || fread(body, 1, length, fp) != length)
+        goto done;
+    sent = vm_mock_admin_send_binary_response(
+        client, "200 OK", "application/javascript; charset=utf-8", body, length);
+
+done:
+    if (fp != NULL)
+        fclose(fp);
+    free(body);
+    if (!sent)
+        sent = vm_mock_admin_send_response(client, "404 Not Found", NULL, NULL,
+                                           "二维码脚本不可用。\n");
+    return sent;
+}
+
 enum
 {
     VM_MOCK_ADMIN_SCENE_FILE_MAX = 512,
@@ -5883,6 +5922,9 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, "/payment/qrcode.js") == 0)
+        return vm_mock_admin_send_payment_qrcode_script(client);
     if (strcmp(target, "/payment/cbhub/notify") == 0 ||
         strcmp(target, "/payment/cbhub/return") == 0)
     {

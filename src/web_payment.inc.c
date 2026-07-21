@@ -1333,7 +1333,7 @@ static bool vm_mock_payment_refresh_order(const char *accountId,
         now - order.lastCheckedAt < 2)
         return true;
     if (order.createdAt != 0 && order.timeoutMinutes != 0 &&
-        now > order.createdAt + order.timeoutMinutes * 60u + 60u)
+        now >= order.createdAt + order.timeoutMinutes * 60u)
     {
         if (vm_mysql_hex_encode(payId, strlen(payId), payHex, sizeof(payHex)) != 0)
         {
@@ -1400,6 +1400,21 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
 {
     vm_mock_admin_text page;
     char refreshUrl[256];
+    u32 actualPriceCents = order && order->reallyPriceCents != 0 ?
+        order->reallyPriceCents : (order ? order->priceCents : 0);
+    u32 remainingSeconds = 0;
+    u32 now = (u32)time(NULL);
+
+    if (order != NULL && order->createdAt != 0 && order->timeoutMinutes != 0)
+    {
+        uint64_t expiresAt = (uint64_t)order->createdAt +
+                             (uint64_t)order->timeoutMinutes * 60u;
+        if (expiresAt > now)
+        {
+            uint64_t remaining = expiresAt - now;
+            remainingSeconds = remaining > UINT32_MAX ? UINT32_MAX : (u32)remaining;
+        }
+    }
 
     vm_mock_admin_text_init(&page, response, responseCap);
     snprintf(refreshUrl, sizeof(refreshUrl), "/user/recharge/order?id=%s",
@@ -1407,8 +1422,8 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
     vm_mock_admin_text_appendf(&page,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "%s<title>W币充值订单</title><style>"
-        "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20%% 10%%,#dbeafe,transparent 32%%),#f5f7fa;color:#17202a;font:14px/1.65 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(560px,calc(100%% - 28px))}.card{background:#fff;border:1px solid #e4e7ec;border-radius:18px;padding:28px;box-shadow:0 20px 55px #10182818}.icon{display:grid;place-items:center;width:54px;height:54px;border-radius:16px;background:%s;color:#fff;font-size:25px;font-weight:800;margin-bottom:15px}h1{font-size:25px;margin:0 0 5px}.sub{color:#667085;margin:0 0 20px}.amount{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:17px;border-radius:12px;background:#f8fafc;margin:16px 0}.amount strong{font-size:25px}.amount span{color:#667085}.details{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:17px 0}.details div{border:1px solid #eaecf0;border-radius:10px;padding:11px}.details span{display:block;color:#667085;font-size:12px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}.button{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:9px;padding:10px 15px;font-weight:700;background:#175cd3;color:#fff}.button.secondary{background:#fff;color:#475467;border:1px solid #d0d5dd}.pending{color:#b54708}.success{color:#027a48}.failed{color:#b42318}.hint{padding:11px 13px;border-radius:9px;background:#fffaeb;color:#7a2e0e;margin-top:14px}@media(max-width:520px){.card{padding:21px}.details{grid-template-columns:1fr}.amount{align-items:start;flex-direction:column}}"
+        "%s<title>W币充值订单</title><script defer src=\"/payment/qrcode.js\"></script><style>"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20%% 10%%,#dbeafe,transparent 32%%),#f5f7fa;color:#17202a;font:14px/1.65 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(700px,calc(100%% - 28px));padding:24px 0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:18px;padding:28px;box-shadow:0 20px 55px #10182818}.icon{display:grid;place-items:center;width:54px;height:54px;border-radius:16px;background:%s;color:#fff;font-size:25px;font-weight:800;margin-bottom:15px}h1{font-size:25px;margin:0 0 5px}.sub{color:#667085;margin:0 0 20px}.amount{display:flex;align-items:end;justify-content:space-between;gap:16px;padding:17px;border-radius:12px;background:#f8fafc;margin:16px 0}.amount strong{display:block;font-size:27px}.amount span{color:#667085}.details{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:17px 0}.details div{border:1px solid #eaecf0;border-radius:10px;padding:11px}.details span{display:block;color:#667085;font-size:12px}.payment-box{display:grid;grid-template-columns:280px 1fr;gap:22px;align-items:center;margin-top:18px;padding:20px;border:2px solid #f79009;border-radius:14px;background:#fffcf5}.qr-frame{display:grid;justify-items:center;gap:7px;padding:15px;border:1px solid #fedf89;border-radius:12px;background:#fff}.qr-frame small{color:#667085}.payment-copy .label{color:#7a2e0e;font-weight:700}.actual-price{color:#d92d20;font-size:38px;line-height:1.2;font-weight:850;letter-spacing:.3px;margin:3px 0 10px}.countdown{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 13px;padding:9px 11px;border-radius:9px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}.countdown span{font-size:13px}.countdown strong{font:800 23px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:1px;color:#c2410c}.countdown strong.expired{color:#b42318}.pay-warning{padding:13px 14px;border-radius:10px;background:#fee4e2;color:#912018;border:1px solid #fda29b}.pay-warning strong{display:block;font-size:17px;margin-bottom:3px}.pay-warning p{margin:0}.qr-error{width:248px;min-height:120px;display:grid;place-items:center;text-align:center;color:#b42318}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}.button{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:9px;padding:10px 15px;font-weight:700;background:#175cd3;color:#fff}.button.secondary{background:#fff;color:#475467;border:1px solid #d0d5dd}.pending{color:#b54708}.success{color:#027a48}.failed{color:#b42318}.hint{padding:11px 13px;border-radius:9px;background:#fffaeb;color:#7a2e0e;margin-top:14px}@media(max-width:650px){.card{padding:21px}.details{grid-template-columns:1fr}.amount{align-items:start;flex-direction:column}.payment-box{grid-template-columns:1fr}.qr-frame{width:100%%}.payment-copy{text-align:center}.pay-warning{text-align:left}}"
         "</style></head><body><main class=\"wrap\"><section class=\"card\"><div class=\"icon\">%s</div><h1 class=\"%s\">%s</h1>",
         order && order->status == VM_MOCK_PAYMENT_STATUS_CREDITED ?
             "<meta http-equiv=\"refresh\" content=\"3;url=/\">" :
@@ -1430,7 +1445,7 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
     else
     {
         vm_mock_admin_text_appendf(&page,
-            "<p class=\"sub\">%s</p><div class=\"amount\"><div><span>应付金额</span><strong>￥%u.%02u</strong></div><div><span>到账 W 币</span><strong>%u</strong></div></div>"
+            "<p class=\"sub\">%s</p><div class=\"amount\"><div><span>平台实际应付金额</span><strong>￥%u.%02u</strong></div><div><span>到账 W 币</span><strong>%u</strong></div></div>"
             "<div class=\"details\"><div><span>角色 ID</span>%u</div><div><span>支付方式</span>%s</div><div><span>商户订单号</span>",
             order->status == VM_MOCK_PAYMENT_STATUS_CREDITED ?
                 "W 币已经安全入账，3 秒后返回用户中心。" :
@@ -1439,7 +1454,7 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
             order->status == VM_MOCK_PAYMENT_STATUS_WAITING ?
                 "完成支付后请保留本页，系统每 3 秒检查一次。" :
                 "该订单已停止检查，你可以返回用户中心重新下单。",
-            order->priceCents / 100u, order->priceCents % 100u,
+            actualPriceCents / 100u, actualPriceCents % 100u,
             order->wcoinAmount, order->roleId,
             order->payType == 1 ? "微信支付" : "支付宝支付");
         vm_mock_admin_text_append_html(&page, order->payId);
@@ -1449,10 +1464,24 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
             vm_mock_payment_url_has_safe_scheme(order->payUrl))
         {
             vm_mock_admin_text_appendf(&page,
-                "<div class=\"hint\">支付平台实际收款金额为 ￥%u.%02u，请以支付页面显示为准。</div><div class=\"actions\"><a class=\"button\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
-                order->reallyPriceCents / 100u, order->reallyPriceCents % 100u);
+                "<div class=\"payment-box\"><div class=\"qr-frame\"><div id=\"payment-qr\" data-payment-url=\"");
             vm_mock_admin_text_append_html(&page, order->payUrl);
-            vm_mock_admin_text_appendf(&page, "\">打开支付链接</a><a class=\"button secondary\" href=\"/\">返回用户中心</a></div>");
+            vm_mock_admin_text_appendf(&page,
+                "\"></div><small>请使用对应支付应用扫码</small></div>"
+                "<div class=\"payment-copy\"><div class=\"label\">本单唯一有效支付金额</div>"
+                "<div class=\"actual-price\">￥%u.%02u</div>"
+                "<div class=\"countdown\"><span>剩余支付时间（有效期 %u 分钟）</span>"
+                "<strong id=\"payment-countdown\" data-remaining-seconds=\"%u\">%02u:%02u</strong></div>"
+                "<div class=\"pay-warning\"><strong>付款金额必须与上方金额完全一致</strong>"
+                "<p>请在支付时准确输入 ￥%u.%02u。多付或少付均无法自动匹配订单，W币将不会自动到账。</p></div></div></div>"
+                "<div class=\"actions\"><a class=\"button\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
+                actualPriceCents / 100u, actualPriceCents % 100u,
+                order->timeoutMinutes, remainingSeconds,
+                remainingSeconds / 60u, remainingSeconds % 60u,
+                actualPriceCents / 100u, actualPriceCents % 100u);
+            vm_mock_admin_text_append_html(&page, order->payUrl);
+            vm_mock_admin_text_appendf(&page,
+                "\">打开支付链接</a><a class=\"button secondary\" href=\"/\">返回用户中心</a></div>");
         }
         else
         {
@@ -1555,6 +1584,6 @@ static void vm_mock_payment_render_dashboard(vm_mock_admin_text *page,
         }
     }
     vm_mock_admin_text_appendf(page,
-        "<p class=\"recharge-note\">支付结果只以服务端签名通知为准；重复通知不会重复增加 W币。</p></section>");
+        "<p class=\"recharge-note\"></p></section>");
     memset(config.secretKey, 0, sizeof(config.secretKey));
 }
