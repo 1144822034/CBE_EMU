@@ -425,6 +425,8 @@ typedef struct
 static vm_mock_user_session g_vm_mock_user_sessions[VM_MOCK_USER_SESSION_MAX];
 static u32 g_vm_mock_user_session_serial = 0;
 
+#include "web_payment.inc.c"
+
 static const char g_vm_mock_admin_script[] =
     "(()=>{"
     "const keep=(selector,key)=>{"
@@ -434,15 +436,36 @@ static const char g_vm_mock_admin_script[] =
     "const save=()=>sessionStorage.setItem(key,String(box.scrollTop));"
     "restore();box.addEventListener('scroll',save,{passive:true});"
     "box.addEventListener('click',save);window.addEventListener('load',restore,{once:true});};"
-    "const setupItemFilter=()=>{"
-    "const category=document.querySelector('#item-category');"
-    "const item=document.querySelector('#item-select');if(!category||!item)return;"
-    "const apply=(reset)=>{const wanted=category.value;"
-    "for(const option of item.options){if(!option.value)continue;"
-    "const show=wanted==='all'||option.dataset.category===wanted;"
-    "option.hidden=!show;option.disabled=!show;option.style.display=show?'':'none';}"
-    "if(reset)item.value='';};"
-    "category.addEventListener('change',()=>apply(true));apply(false);};"
+    "const setupItemPicker=()=>{"
+    "const form=document.querySelector('.grant-form');const category=document.querySelector('#item-category');"
+    "const item=document.querySelector('#item-select');const open=document.querySelector('#item-picker-open');"
+    "const modal=document.querySelector('#item-picker-modal');const close=document.querySelector('#item-picker-close');"
+    "const search=document.querySelector('#item-search');const list=document.querySelector('#item-picker-list');"
+    "const empty=document.querySelector('#item-picker-empty');const count=document.querySelector('#item-result-count');"
+    "const selected=document.querySelector('#item-selected-name');const error=document.querySelector('#item-picker-error');"
+    "if(!form||!category||!item||!open||!modal||!close||!search||!list||!empty||!count||!selected||!error)return;"
+    "const labels=new Map(Array.from(category.options,o=>[o.value,o.textContent]));const choices=[];"
+    "for(const option of item.options){if(!option.value)continue;const button=document.createElement('button');"
+    "button.type='button';button.className='item-choice';button.dataset.itemId=option.value;"
+    "button.dataset.category=option.dataset.category||'';button.dataset.search=option.textContent.toLowerCase();"
+    "const title=document.createElement('strong');title.textContent=option.textContent;"
+    "const meta=document.createElement('span');meta.textContent=labels.get(button.dataset.category)||'未分类';"
+    "button.append(title,meta);button.addEventListener('click',()=>{item.value=option.value;"
+    "selected.textContent=option.textContent;error.textContent='';"
+    "for(const choice of choices)choice.classList.toggle('selected',choice===button);hide();});"
+    "choices.push(button);list.appendChild(button);}"
+    "const apply=()=>{const wanted=category.value;const keyword=search.value.trim().toLowerCase();let shown=0;"
+    "for(const choice of choices){const visible=(wanted==='all'||choice.dataset.category===wanted)&&"
+    "(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}"
+    "count.textContent=`找到 ${shown} 件物品`;empty.hidden=shown!==0;};"
+    "const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');apply();search.focus();};"
+    "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');open.focus();}"
+    "open.addEventListener('click',show);close.addEventListener('click',hide);"
+    "modal.addEventListener('click',event=>{if(event.target===modal)hide();});"
+    "document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});"
+    "category.addEventListener('change',apply);search.addEventListener('input',apply);"
+    "form.addEventListener('submit',event=>{if(item.value)return;event.preventDefault();"
+    "error.textContent='请先选择物品';show();});apply();};"
     "const setupUpdateFilter=()=>{"
     "const input=document.querySelector('#update-resource-filter');"
     "const select=document.querySelector('#update-resource-select');if(!input||!select)return;"
@@ -462,7 +485,7 @@ static const char g_vm_mock_admin_script[] =
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
-    "setupItemFilter();setupUpdateFilter();setupNpcKinds();});"
+    "setupItemPicker();setupUpdateFilter();setupNpcKinds();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -3691,8 +3714,34 @@ static void vm_mock_admin_render_item_grant_form(
     }
     vm_mock_admin_text_appendf(
         page,
-        "</select></label><label><span>物品分类</span>"
-        "<select id=\"item-category\"><option value=\"all\">全部分类</option>");
+        "</select></label><div class=\"item-field\"><span>物品</span>"
+        "<button class=\"item-picker-trigger\" id=\"item-picker-open\" type=\"button\" aria-haspopup=\"dialog\" aria-controls=\"item-picker-modal\">"
+        "<span id=\"item-selected-name\">请选择物品</span><small>点击打开分类搜索</small></button>"
+        "<select id=\"item-select\" name=\"item\" hidden>"
+        "<option value=\"\" selected disabled>请选择物品</option>");
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
+        char itemNameUtf8[128];
+
+        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                      sizeof(itemNameUtf8));
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"%u\" data-category=\"%c%u\">[%u] ",
+            item->itemId, item->isEquip ? 'e' : 'i', item->category,
+            item->itemId);
+        vm_mock_admin_text_append_html(page, itemNameUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></div><label><span>数量</span>"
+        "<input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required>"
+        "</label><button type=\"submit\">给予物品</button>"
+        "<div class=\"item-modal\" id=\"item-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"item-picker-title\" hidden>"
+        "<section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"item-picker-title\">选择物品</h3>"
+        "<p>按分类或名称、物品 ID 快速查找</p></div><button class=\"item-picker-close\" id=\"item-picker-close\" type=\"button\" aria-label=\"关闭物品选择\">×</button></div>"
+        "<div class=\"item-picker-tools\"><label><span>物品分类</span><select id=\"item-category\"><option value=\"all\">全部分类</option>");
     for (u32 category = 0; category < 256; ++category)
     {
         if (!equipmentCategories[category])
@@ -3713,28 +3762,10 @@ static void vm_mock_admin_render_item_grant_form(
     }
     vm_mock_admin_text_appendf(
         page,
-        "</select></label><label class=\"item-field\"><span>物品</span>"
-        "<select id=\"item-select\" name=\"item\" required>"
-        "<option value=\"\" selected disabled>请选择物品</option>");
-    for (u32 i = 0; i < itemCount; ++i)
-    {
-        const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
-        char itemNameUtf8[128];
-
-        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
-                                      sizeof(itemNameUtf8));
-        vm_mock_admin_text_appendf(
-            page, "<option value=\"%u\" data-category=\"%c%u\">[%u] ",
-            item->itemId, item->isEquip ? 'e' : 'i', item->category,
-            item->itemId);
-        vm_mock_admin_text_append_html(page, itemNameUtf8);
-        vm_mock_admin_text_appendf(page, "</option>");
-    }
-    vm_mock_admin_text_appendf(
-        page,
-        "</select></label><label><span>数量</span>"
-        "<input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required>"
-        "</label><button type=\"submit\">给予物品</button></form>"
+        "</select></label><label><span>搜索</span><input id=\"item-search\" type=\"search\" placeholder=\"输入名称或物品 ID\" autocomplete=\"off\"></label></div>"
+        "<div class=\"item-result-bar\"><span id=\"item-result-count\"></span><span class=\"item-picker-error\" id=\"item-picker-error\"></span></div>"
+        "<div class=\"item-picker-list\" id=\"item-picker-list\"></div><p class=\"item-picker-empty\" id=\"item-picker-empty\" hidden>没有符合条件的物品</p>"
+        "</section></div></form>"
         "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
 }
 
@@ -4421,8 +4452,10 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(150px,1fr) minmax(260px,1.8fr) 90px auto;gap:9px;align-items:end}.grant-form label{display:grid;gap:4px}.grant-form label>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}.foot{margin-top:16px;color:#667085;font-size:12px}"
-        "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form button{justify-self:start}}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}"
+        "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
+        "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
@@ -5648,6 +5681,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>我的江湖账号</title><style>"
         "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f4f7f9;color:#17202a;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(1080px,calc(100%% - 28px));margin:0 auto;padding:30px 0 46px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 20px serif}h1{font-size:24px;margin:0}.sub,.muted{color:#667085;margin:2px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;color:#475467;cursor:pointer}.hero{position:relative;overflow:hidden;border-radius:16px;padding:24px;background:linear-gradient(125deg,#12372d,#175cd3);color:#fff;box-shadow:0 14px 34px #175cd326;margin-bottom:18px}.hero:after{content:\"\";position:absolute;width:220px;height:220px;border-radius:50%%;right:-70px;top:-125px;background:#ffffff12}.account-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.account-name{font-size:25px;font-weight:750}.hero .sub{color:#dbeafe}.badge{font-size:12px;padding:3px 9px;border-radius:999px;background:#ffffff20;color:#fff}.badge.on{background:#d1fadf;color:#05603a}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:19px}.overview div{padding:11px 13px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff10}.overview strong{display:block;font-size:18px}.section-title{display:flex;align-items:end;justify-content:space-between;margin:23px 0 10px}.section-title h2{font-size:18px;margin:0}.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.card,.role{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 2px 7px #1018280a}.role-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.role h3{font-size:19px;margin:0}.active{display:inline-block;color:#175cd3;background:#eef4ff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650}.vitals{display:grid;gap:10px;margin:17px 0}.vital-head{display:flex;justify-content:space-between;color:#475467}.bar{height:7px;border-radius:999px;background:#edf1f5;overflow:hidden}.bar i{display:block;height:100%%;border-radius:inherit;background:#12b76a}.bar.mp i{background:#2e90fa}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding-top:13px;border-top:1px solid #eaecf0}.stats strong{display:block;color:#667085;font-size:12px;font-weight:550}.empty{color:#667085;text-align:center}.security{display:grid;grid-template-columns:minmax(190px,.65fr) minmax(0,1.35fr);gap:22px;align-items:start;margin-top:18px}.security h2{font-size:18px;margin:0 0 4px}.password-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.password-form label{display:grid;gap:4px;color:#475467}.password-form .current{grid-column:1/-1}.password-form input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.password-form button{grid-column:1/-1;justify-self:start;border:0;border-radius:8px;padding:9px 14px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:16px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}@media(max-width:720px){.wrap{padding:18px 0}.overview{grid-template-columns:1fr}.roles,.security,.password-form{grid-template-columns:1fr}.password-form .current{grid-column:auto}.password-form button{grid-column:auto}.stats{grid-template-columns:1fr}header{align-items:center}}"
+        ".recharge{margin-top:18px}.recharge h2{font-size:18px;margin:0 0 4px}.recharge-form{display:grid;grid-template-columns:1.2fr .8fr .8fr auto;gap:10px;align-items:end;margin-top:15px}.recharge-form label{display:grid;gap:4px;color:#475467}.recharge-form input,.recharge-form select{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit;background:#fff}.recharge-form button{border:0;border-radius:8px;padding:10px 14px;background:#175cd3;color:#fff;font-weight:700;cursor:pointer}.recharge-unavailable{padding:12px;border-radius:9px;background:#f2f4f7;color:#667085}.recharge-history{margin-top:18px;border-top:1px solid #eaecf0;padding-top:13px}.recharge-history h3{font-size:14px;margin:0 0 6px}.recharge-history a{display:flex;justify-content:space-between;gap:12px;padding:7px 0;color:#344054;text-decoration:none}.recharge-history a strong{color:#175cd3;font-size:12px}.recharge-note{color:#98a2b3;font-size:12px;margin:13px 0 0}@media(max-width:900px){.recharge-form{grid-template-columns:1fr 1fr}.recharge-form button{align-self:stretch}}@media(max-width:720px){.recharge-form{grid-template-columns:1fr}}"
         "</style></head><body><main class=\"wrap\"><header><div class=\"brand\"><div class=\"brand-mark\">江</div><div><h1>账号中心</h1><p class=\"sub\">查看角色资料与管理账号安全</p></div></div>"
         "<form method=\"post\" action=\"/user/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
     if (status != NULL && status[0] != 0 && message != NULL && message[0] != 0)
@@ -5714,18 +5748,26 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
                 "</div><div><strong>坐标</strong>(%u, %u)</div></div></article>",
                 role->x, role->y);
         }
+        vm_mock_payment_render_dashboard(&page, accountId);
         vm_mock_service_close_account_role_db_for_management(accountState, false);
     }
     else
     {
-        if (accountState != NULL)
-            vm_mock_service_close_account_role_db_for_management(accountState, false);
         vm_mock_admin_text_appendf(&page,
             "<div class=\"card empty\">%s</div>",
             roleError ? roleError : "该账号尚未创建角色，请进入游戏创建角色。");
+        if (accountState != NULL)
+        {
+            vm_mock_payment_render_dashboard(&page, accountId);
+            vm_mock_service_close_account_role_db_for_management(accountState, false);
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(&page, "</section>");
+        }
     }
     vm_mock_admin_text_appendf(&page,
-        "</section><section class=\"card security\"><div><h2>账号安全</h2><p class=\"sub\">修改后请使用新密码登录游戏和账号中心。其他网页登录会话将自动退出。</p></div>"
+        "<section class=\"card security\"><div><h2>账号安全</h2><p class=\"sub\">修改后请使用新密码登录游戏和账号中心。其他网页登录会话将自动退出。</p></div>"
         "<form class=\"password-form\" method=\"post\" action=\"/user/password\">"
         "<label class=\"current\">当前密码<input type=\"password\" name=\"current_password\" maxlength=\"63\" autocomplete=\"current-password\" required></label>"
         "<label>新密码<input type=\"password\" name=\"new_password\" minlength=\"6\" maxlength=\"63\" autocomplete=\"new-password\" required></label>"
@@ -5841,6 +5883,64 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
+    if (strcmp(target, "/payment/cbhub/notify") == 0 ||
+        strcmp(target, "/payment/cbhub/return") == 0)
+    {
+        bool synchronous = strcmp(target, "/payment/cbhub/return") == 0;
+        char payId[64];
+        vm_mock_payment_settle_result settleResult;
+
+        if (strcmp(method, "GET") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: GET\r\n", "fail");
+            return 0;
+        }
+        settleResult = vm_mock_payment_process_callback_query(
+            query, synchronous ? "return" : "notify", payId);
+        if (!synchronous)
+        {
+            vm_mock_admin_send_response(
+                client,
+                settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID ?
+                    "400 Bad Request" : "200 OK",
+                "text/plain; charset=utf-8", NULL,
+                settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID ?
+                    "error_sign" : "success");
+            return settleResult != VM_MOCK_PAYMENT_SETTLE_INVALID;
+        }
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        if (settleResult == VM_MOCK_PAYMENT_SETTLE_INVALID)
+        {
+            vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL,
+                                        "支付回调校验失败。\n");
+            free(response);
+            return 0;
+        }
+        else
+        {
+            vm_mock_payment_order order;
+            if (vm_mock_payment_load_order(payId, false, &order))
+                vm_mock_payment_render_order_page(response,
+                                                  VM_MOCK_ADMIN_RESPONSE_MAX,
+                                                  &order);
+            else
+                vm_mock_payment_render_order_page(response,
+                                                  VM_MOCK_ADMIN_RESPONSE_MAX,
+                                                  NULL);
+            vm_mock_admin_send_response(client, "200 OK",
+                                        "text/html; charset=utf-8", NULL,
+                                        response);
+            free(response);
+            return 1;
+        }
+    }
     if (strcmp(target, "/") == 0)
     {
         vm_mock_user_session *session = NULL;
@@ -5878,6 +5978,104 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                                     "text/html; charset=utf-8", NULL, response);
         free(response);
         return 1;
+    }
+    if (strcmp(target, "/user/recharge/create") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        char roleText[32];
+        char yuanText[32];
+        char typeText[16];
+        char payId[64];
+        char location[192];
+        u32 roleId = 0;
+        u32 yuan = 0;
+        u32 payType = 0;
+        const char *message = NULL;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "创建充值订单只允许 POST。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(roleText, 0, sizeof(roleText));
+        memset(yuanText, 0, sizeof(yuanText));
+        memset(typeText, 0, sizeof(typeText));
+        if (!vm_mock_admin_form_value(body, "role_id", roleText,
+                                      sizeof(roleText)) ||
+            !vm_mock_admin_form_value(body, "yuan", yuanText,
+                                      sizeof(yuanText)) ||
+            !vm_mock_admin_form_value(body, "pay_type", typeText,
+                                      sizeof(typeText)) ||
+            !vm_net_mock_parse_u32_strict(roleText, &roleId) || roleId == 0 ||
+            !vm_net_mock_parse_u32_strict(yuanText, &yuan) || yuan == 0 ||
+            !vm_net_mock_parse_u32_strict(typeText, &payType))
+        {
+            vm_mock_user_redirect_message(client, "error", "充值参数无效");
+            return 0;
+        }
+        if (!vm_mock_payment_create_order(session->accountId, roleId, yuan,
+                                          payType, payId, &message))
+        {
+            vm_mock_user_redirect_message(
+                client, "error", message ? message : "订单创建失败");
+            return 0;
+        }
+        snprintf(location, sizeof(location), "/user/recharge/order?id=%s",
+                 payId);
+        vm_mock_admin_send_location(client, location, NULL);
+        return 1;
+    }
+    if (strcmp(target, "/user/recharge/order") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        vm_mock_payment_order order;
+        char payId[64];
+        bool visible = false;
+
+        if (strcmp(method, "GET") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: GET\r\n",
+                                        "充值订单页面只允许 GET。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(payId, 0, sizeof(payId));
+        memset(&order, 0, sizeof(order));
+        if (vm_mock_admin_form_value(query, "id", payId, sizeof(payId)) &&
+            vm_mock_payment_load_order(payId, false, &order) &&
+            strcmp(order.accountId, session->accountId) == 0)
+        {
+            visible = true;
+            (void)vm_mock_payment_refresh_order(session->accountId, payId);
+            (void)vm_mock_payment_load_order(payId, false, &order);
+        }
+        response = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (response == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        vm_mock_payment_render_order_page(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                                          visible ? &order : NULL);
+        vm_mock_admin_send_response(client, visible ? "200 OK" : "404 Not Found",
+                                    "text/html; charset=utf-8", NULL, response);
+        free(response);
+        return visible ? 1 : 0;
     }
     if (strcmp(target, "/user/login") == 0 ||
         strcmp(target, "/user/register") == 0)

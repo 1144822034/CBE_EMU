@@ -9,6 +9,7 @@ COMMON_SOURCES := \
 	src/fileIoEngine.c \
 	src/lcd.c \
 	src/mysql-client.c \
+	src/md5.c \
 	src/main.c
 
 ifeq ($(OS),Windows_NT)
@@ -30,6 +31,7 @@ SERVER_SOURCES := \
 	src/gifDecode.c \
 	src/mystd.c \
 	src/mysql-client.c \
+	src/md5.c \
 	src/main.c \
 	src/server-headless.c
 OBJS := $(patsubst src/%.c,$(OBJDIR)/%.o,$(SERVER_SOURCES))
@@ -46,10 +48,13 @@ all: build
 build: $(TARGET)
 
 $(OBJDIR)/main.o: src/main.c src/mock-server.c src/web_admin_server.c \
+	src/web_payment.inc.c src/md5.h \
 	src/web_admin_monsters.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(OBJDIR)/mystd.o: src/mystd.c src/mystd.h src/config.h
+
+$(OBJDIR)/md5.o: src/md5.c src/md5.h
 
 $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@

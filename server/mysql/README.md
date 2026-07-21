@@ -72,6 +72,17 @@ SET password_value = '新密码', failed_attempts = 0, locked = 0
 WHERE config_id = 1;
 ```
 
+已有数据库增加 W 币充值功能时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_wcoin_recharge.sql
+```
+
+脚本新增支付配置和充值订单表，不会改动已有账号、角色或 W 币余额。通讯密钥
+只保存在 `server_payment_config.secret_key`，不要写入网页、日志或提交到源码。
+`callback_base_url` 应填写外网能够访问账号中心的地址；留空时会使用支付后台配置
+的回调地址，并由订单状态查询返回的签名数据提供兜底确认。
+
 已有数据库升级到商品管理功能时执行：
 
 ```powershell
@@ -140,6 +151,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 
 - `accounts`：账号与登录密码。
 - `server_admin_config`：后台管理密码、连续失败次数和数据库锁定状态。
+- `server_payment_config`：支付接口地址、通讯密钥、公开回调地址和 W 币兑换比例。
+- `wcoin_recharge_orders`：充值订单、支付确认及幂等入账状态。
 - `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。

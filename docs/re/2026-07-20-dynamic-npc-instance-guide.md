@@ -50,8 +50,8 @@ ECxxxxxx  挑战守关怪
 
 传送会记忆正常的 scene-change target、保存角色位置并返回 `30/1`。挑战分为两个请求阶段：
 
-1. `26/1 {type=2,id=ECxxxxxx}` 校验副本向导和等级，返回 `30/9`，并在当前服务连接上保存 Actor ID、怪物 ID、场景、坐标和确认时间；
-2. 客户端确认回调发送严格的 9 字节空 `30/10`。服务端只在同一连接存在未过期且场景一致的待确认记录时消费它，构造内部 `4/1 {id,index,posx,posy}` 请求，再调用共享战斗 builder 的 `forceNonSceneStart=true` 入口返回 `4/10`。
+1. `26/1 {type=2,id=ECxxxxxx}` 校验副本向导和等级，按顺序返回空的 `26/0` 与 `30/9`，并在当前服务连接上保存 Actor ID、怪物 ID、场景、坐标和确认时间。`26/0` 只让 `DispatchItemEvent(0x01039C28)` 清掉 action=1 请求留下的 pending/progress 状态；随后 `30/9` 才创建可操作的确认框；
+2. 客户端确认回调发送严格的 20 字节 `30/10 {agree}`。服务端只在同一连接存在未过期且场景一致的待确认记录时消费它，构造内部 `4/1 {id,index,posx,posy}` 请求，再调用共享战斗 builder 的 `forceNonSceneStart=true` 入口返回 `4/10`。取消按钮走另一个客户端回调，不发送 `30/10`。
 
 待确认记录按 `clientId` 隔离，断线时清理，60 秒后或场景改变时作废。普通场景怪物的原有 `4/1 -> 4/5` 路径不变。
 
@@ -61,5 +61,5 @@ ECxxxxxx  挑战守关怪
 - 后台页面回归：成功登录 `127.0.0.1:19091/admin-418yz6/`，页面包含副本类型及全部条件字段，HTML 167174 字节。
 - 后台保存回归：临时 Actor `39990` 的 X/Y 均填 `0`，自动解析为 `(223,370)`，扩展表保存怪物 `105`、最低等级 `1`。
 - 协议回归（初版）：副本菜单响应 141 字节；进入响应 53 字节并包含 `1/30/1`。
-- 2026-07-20 客户端实测修正：挑战菜单选择先收到 `1/30/9`，客户端随后发送空 `1/30/10`，第二个响应才包含 `1/4/10`。运行日志依次为 `mock_npc_instance_challenge_prompt`、`mock_npc_instance_challenge_confirm` 和 `mock_challenge_battle_start subtype=10 scene_start=0`。
+- 2026-07-21 客户端实测修正：只返回 `1/30/9` 时，确认/取消按钮虽然出现，但原 `26/1` 的取数进度层仍覆盖在确认框上并拦截输入，客户端因而不会发送 `30/10`。`DispatchItemEvent(0x01039C28)` 证明 kind-26 分支结束时才清请求 pending 字段，所以挑战提示改为同包有序的 `1/26/0 + 1/30/9`。进度层清除后真机确认按钮发出的包为 20 字节 `1/30/10 {agree}`，不是旧回归脚本假设的 9 字节空对象；`SendGameEvent(0x01037E56)` 也明确写入 `agree`。第二个响应才包含 `1/4/10`。运行日志依次为 `mock_npc_instance_challenge_prompt`、`mock_npc_instance_challenge_confirm` 和 `mock_challenge_battle_start subtype=10 scene_start=0`。
 - 临时 NPC 及扩展表记录已级联删除，测试角色坐标已恢复。
