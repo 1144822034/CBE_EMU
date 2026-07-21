@@ -210,15 +210,26 @@ static bool vm_mock_payment_constant_sign_equal(const char *left,
     return difference == 0;
 }
 
-static bool vm_mock_payment_url_has_safe_scheme(const char *url)
+static bool vm_mock_payment_payload_chars_are_safe(const char *value)
 {
-    static const char *schemes[] = {
-        "http://", "https://", "weixin://", "alipays://"
-    };
-
-    if (url == NULL || url[0] == 0)
+    if (value == NULL || value[0] == 0)
         return false;
-    for (u32 i = 0; i < sizeof(schemes) / sizeof(schemes[0]); ++i)
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != 0; ++cursor)
+    {
+        if (*cursor < 0x20u || *cursor == 0x7fu)
+            return false;
+    }
+    return true;
+}
+
+static bool vm_mock_payment_url_has_scheme(const char *url,
+                                           const char *const *schemes,
+                                           size_t schemeCount)
+{
+    if (!vm_mock_payment_payload_chars_are_safe(url))
+        return false;
+    for (size_t i = 0; i < schemeCount; ++i)
     {
         size_t length = strlen(schemes[i]);
         if (strlen(url) >= length &&
@@ -226,6 +237,24 @@ static bool vm_mock_payment_url_has_safe_scheme(const char *url)
             return true;
     }
     return false;
+}
+
+static bool vm_mock_payment_qr_payload_is_safe(const char *url)
+{
+    static const char *schemes[] = {
+        "http://", "https://", "wxp://", "weixin://", "alipays://"
+    };
+
+    return vm_mock_payment_url_has_scheme(
+        url, schemes, sizeof(schemes) / sizeof(schemes[0]));
+}
+
+static bool vm_mock_payment_click_url_is_safe(const char *url)
+{
+    static const char *schemes[] = { "http://", "https://" };
+
+    return vm_mock_payment_url_has_scheme(
+        url, schemes, sizeof(schemes) / sizeof(schemes[0]));
 }
 
 static bool vm_mock_payment_config_row(void *contextValue,
@@ -724,7 +753,66 @@ static bool vm_mock_payment_parse_create_result(const char *json,
         result->timeoutMinutes = (u32)timeout;
     else
         result->timeoutMinutes = 5;
-    return result->orderId[0] != 0 && vm_mock_payment_url_has_safe_scheme(result->payUrl);
+    return result->orderId[0] != 0 &&
+           vm_mock_payment_qr_payload_is_safe(result->payUrl);
+}
+
+static const char *vm_mock_payment_provider_create_error(const char *json,
+                                                         int httpStatus,
+                                                         const char **reasonOut)
+{
+    char message[256];
+    int code = 0;
+
+    if (reasonOut)
+        *reasonOut = "invalid-response";
+    memset(message, 0, sizeof(message));
+    if (json == NULL ||
+        !vm_mock_payment_json_int(json, "code", &code) ||
+        !vm_mock_payment_json_string(json, "msg", message, sizeof(message)))
+    {
+        if (httpStatus < 200 || httpStatus >= 300)
+        {
+            if (reasonOut)
+                *reasonOut = "http-error";
+            return "支付平台连接异常，请稍后重试";
+        }
+        return "支付平台返回了无法识别的数据，请联系管理员";
+    }
+    if (strcmp(message, "监控端状态异常，请检查") == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "monitor-offline";
+        return "支付平台监控端离线，请先启动并检查 V免签监控端";
+    }
+    if (strcmp(message, "请您先进入后台配置程序") == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "channel-not-configured";
+        return "支付平台尚未配置该支付方式；微信支付需在平台后台单独配置 wxpay 收款码";
+    }
+    if (strcmp(message, "签名错误") == 0 ||
+        strcmp(message, "签名校验不通过") == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "signature-rejected";
+        return "支付平台签名校验失败，请检查通讯密钥";
+    }
+    if (strcmp(message, "订单超出负荷，请稍后重试") == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "provider-overloaded";
+        return "支付平台当前订单金额已被占用，请稍后重试";
+    }
+    if (strcmp(message, "商户订单号已存在") == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "duplicate-pay-id";
+        return "支付订单号冲突，请重新提交";
+    }
+    if (reasonOut)
+        *reasonOut = code == 1 ? "invalid-success-payload" : "provider-rejected";
+    return "支付平台拒绝创建订单，请检查对应支付方式的收款配置";
 }
 
 static bool vm_mock_payment_decode_hex_text(const char *value, size_t valueLen,
@@ -1033,6 +1121,10 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
     char notifyEncoded[1536];
     char returnEncoded[1536];
     char response[VM_MOCK_PAYMENT_HTTP_RESPONSE_MAX + 1];
+    const char *failureReason = "local-validation";
+    const char *providerMessage = NULL;
+    bool httpOk = false;
+    bool providerOk = false;
     int httpStatus = 0;
 
     if (payIdOut)
@@ -1044,6 +1136,9 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
     memset(&provider, 0, sizeof(provider));
     memset(notifyUrl, 0, sizeof(notifyUrl));
     memset(returnUrl, 0, sizeof(returnUrl));
+    memset(response, 0, sizeof(response));
+    printf("[info][payment] order_create_request account=%s role=%u type=%u yuan=%u\n",
+           accountId ? accountId : "-", roleId, payType, yuan);
     if (!vm_mock_payment_load_config(&config))
         goto failed;
     if (payType != 1 && payType != 2)
@@ -1102,15 +1197,28 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
         snprintf(form + strlen(form), sizeof(form) - strlen(form),
                  "&notifyUrl=%s&returnUrl=%s", notifyEncoded, returnEncoded);
     }
-    if (!vm_mock_payment_http_post_locked(config.apiBaseUrl, "/createOrder", form,
-                                          response, sizeof(response), &httpStatus) ||
-        !vm_mock_payment_parse_create_result(response, &provider) ||
-        strcmp(provider.payId, order.payId) != 0 ||
-        !vm_mock_payment_store_created_order(order.payId, &provider))
+    httpOk = vm_mock_payment_http_post_locked(config.apiBaseUrl, "/createOrder",
+                                              form, response, sizeof(response),
+                                              &httpStatus);
+    providerOk = httpOk &&
+                 vm_mock_payment_parse_create_result(response, &provider) &&
+                 strcmp(provider.payId, order.payId) == 0;
+    if (!providerOk || !vm_mock_payment_store_created_order(order.payId, &provider))
     {
+        if (!providerOk)
+            providerMessage = vm_mock_payment_provider_create_error(
+                response, httpStatus, &failureReason);
+        else
+        {
+            failureReason = "store-provider-order";
+            providerMessage = "支付订单保存失败，请稍后重试";
+        }
         vm_mock_payment_mark_create_failed(order.payId);
         if (messageOut)
-            *messageOut = "支付平台创建订单失败，请稍后重试";
+            *messageOut = providerMessage;
+        printf("[error][payment] order_create_failed pay_id=%s account=%s role=%u type=%u http=%d reason=%s\n",
+               order.payId, accountId, roleId, payType, httpStatus,
+               failureReason);
         goto failed;
     }
     if (payIdOut)
@@ -1461,7 +1569,7 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
         vm_mock_admin_text_appendf(&page, "</div><div><span>订单状态</span>%s</div></div>",
                                    vm_mock_payment_status_label(order));
         if (order->status == VM_MOCK_PAYMENT_STATUS_WAITING &&
-            vm_mock_payment_url_has_safe_scheme(order->payUrl))
+            vm_mock_payment_qr_payload_is_safe(order->payUrl))
         {
             vm_mock_admin_text_appendf(&page,
                 "<div class=\"payment-box\"><div class=\"qr-frame\"><div id=\"payment-qr\" data-payment-url=\"");
@@ -1473,15 +1581,21 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
                 "<div class=\"countdown\"><span>剩余支付时间（有效期 %u 分钟）</span>"
                 "<strong id=\"payment-countdown\" data-remaining-seconds=\"%u\">%02u:%02u</strong></div>"
                 "<div class=\"pay-warning\"><strong>付款金额必须与上方金额完全一致</strong>"
-                "<p>请在支付时准确输入 ￥%u.%02u。多付或少付均无法自动匹配订单，W币将不会自动到账。</p></div></div></div>"
-                "<div class=\"actions\"><a class=\"button\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
+                "<p>请在支付时准确输入 ￥%u.%02u。多付或少付均无法自动匹配订单，W币将不会自动到账。</p></div></div></div>",
                 actualPriceCents / 100u, actualPriceCents % 100u,
                 order->timeoutMinutes, remainingSeconds,
                 remainingSeconds / 60u, remainingSeconds % 60u,
                 actualPriceCents / 100u, actualPriceCents % 100u);
-            vm_mock_admin_text_append_html(&page, order->payUrl);
+            vm_mock_admin_text_appendf(&page, "<div class=\"actions\">");
+            if (vm_mock_payment_click_url_is_safe(order->payUrl))
+            {
+                vm_mock_admin_text_appendf(&page,
+                    "<a class=\"button\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
+                vm_mock_admin_text_append_html(&page, order->payUrl);
+                vm_mock_admin_text_appendf(&page, "\">打开支付链接</a>");
+            }
             vm_mock_admin_text_appendf(&page,
-                "\">打开支付链接</a><a class=\"button secondary\" href=\"/\">返回用户中心</a></div>");
+                "<a class=\"button secondary\" href=\"/\">返回用户中心</a></div>");
         }
         else
         {
