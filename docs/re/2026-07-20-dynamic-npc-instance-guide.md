@@ -14,7 +14,7 @@
 | `江湖OL.CBE` | `HandleResConfirmCb(0x01039566)` | 确认界面结束后发送空的 `30/10`，不能单靠该包恢复动态 NPC 的目标场景和怪物 ID。 |
 | `江湖OL.CBE` | battle response dispatcher | 非场景节点战斗使用既有 `1/4/10 {side,battleinfo}` 契约；场景怪物触碰继续使用 `1/4/5`。 |
 
-因此动态副本配置由服务端按 NPC Actor ID 查找。客户端仍通过已经验证的 `action=1 -> 26/1` 选择“进入副本”或“挑战守关怪”。传送返回 `30/1 scene+posinfo`；NPC 挑战明确走非场景怪物的 `4/10`，避免把向导节点误当作怪物节点。
+因此动态副本配置由服务端按 NPC Actor ID 查找。客户端仍通过已经验证的 `action=1 -> 26/1` 选择“进入副本”或“挑战守关怪”。传送返回 `30/1 scene+posinfo`；NPC 挑战必须先返回 `30/9 {isleader,challenge}`，由客户端关闭菜单请求的等待状态并显示确认框。确认回调发出空 `30/10` 后，服务端才返回非场景怪物战斗包 `4/10`，避免把向导节点误当作怪物节点。
 
 ## 数据模型
 
@@ -48,14 +48,18 @@ EBxxxxxx  进入副本
 ECxxxxxx  挑战守关怪
 ```
 
-传送会记忆正常的 scene-change target、保存角色位置并返回 `30/1`。挑战构造一份内部 `4/1 {id,index,posx,posy}` 请求，再调用共享战斗 builder 的 `forceNonSceneStart=true` 入口，返回 `4/10`。普通场景怪物的原有 `4/1 -> 4/5` 路径不变。
+传送会记忆正常的 scene-change target、保存角色位置并返回 `30/1`。挑战分为两个请求阶段：
+
+1. `26/1 {type=2,id=ECxxxxxx}` 校验副本向导和等级，返回 `30/9`，并在当前服务连接上保存 Actor ID、怪物 ID、场景、坐标和确认时间；
+2. 客户端确认回调发送严格的 9 字节空 `30/10`。服务端只在同一连接存在未过期且场景一致的待确认记录时消费它，构造内部 `4/1 {id,index,posx,posy}` 请求，再调用共享战斗 builder 的 `forceNonSceneStart=true` 入口返回 `4/10`。
+
+待确认记录按 `clientId` 隔离，断线时清理，60 秒后或场景改变时作废。普通场景怪物的原有 `4/1 -> 4/5` 路径不变。
 
 ## 验证
 
 - `make -j2`：通过。
 - 后台页面回归：成功登录 `127.0.0.1:19091/admin-418yz6/`，页面包含副本类型及全部条件字段，HTML 167174 字节。
 - 后台保存回归：临时 Actor `39990` 的 X/Y 均填 `0`，自动解析为 `(223,370)`，扩展表保存怪物 `105`、最低等级 `1`。
-- 协议回归：副本菜单响应 141 字节；进入响应 53 字节并包含 `1/30/1`；挑战响应 116 字节并包含 `1/4/10`。
-- 运行日志：`mock_npc_instance_enter`、`mock_npc_instance_challenge` 和 `mock_challenge_battle_start subtype=10 scene_start=0` 均出现；stderr 为 0。
+- 协议回归（初版）：副本菜单响应 141 字节；进入响应 53 字节并包含 `1/30/1`。
+- 2026-07-20 客户端实测修正：挑战菜单选择先收到 `1/30/9`，客户端随后发送空 `1/30/10`，第二个响应才包含 `1/4/10`。运行日志依次为 `mock_npc_instance_challenge_prompt`、`mock_npc_instance_challenge_confirm` 和 `mock_challenge_battle_start subtype=10 scene_start=0`。
 - 临时 NPC 及扩展表记录已级联删除，测试角色坐标已恢复。
-

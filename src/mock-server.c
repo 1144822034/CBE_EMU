@@ -15000,6 +15000,16 @@ typedef struct vm_mock_service_client_session
     u32 sparBattlePeerClientId;
     u32 sparBattlePeerWireId;
     u32 pendingTeamBattleSerial;
+    /* HandleChallengeResponse(0x010395AA) first consumes 30/9 and its
+     * confirmation callback sends an empty 30/10.  Keep the target on the
+     * service session because 30/10 carries no actor/enemy fields. */
+    bool instanceChallengePending;
+    u32 instanceChallengeActorId;
+    u32 instanceChallengeEnemyId;
+    u16 instanceChallengeX;
+    u16 instanceChallengeY;
+    u32 instanceChallengeTick;
+    char instanceChallengeScene[64];
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -16700,6 +16710,13 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparBattlePeerClientId = 0;
     session->sparBattlePeerWireId = 0;
     session->pendingTeamBattleSerial = 0;
+    session->instanceChallengePending = false;
+    session->instanceChallengeActorId = 0;
+    session->instanceChallengeEnemyId = 0;
+    session->instanceChallengeX = 0;
+    session->instanceChallengeY = 0;
+    session->instanceChallengeTick = 0;
+    session->instanceChallengeScene[0] = 0;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
@@ -22808,10 +22825,10 @@ static bool vm_net_mock_append_misc_player_sync8_object(u8 *out, u32 outCap, u32
     u32 objectStart = 0;
     static const u8 seqOne[] = {0x00, 0x02, 0x00, 0x01};
     /*
-     * Focused protocol experiment for the bundled post-login 1/7/7 type=1
-     * request. Static analysis shows top-level 7 -> local subtype 8 with
-     * type=4/result=1 is one of the few branches that can seed the empty
-     * type=15 HUD source head and immediately trigger rebuild(2)->rebuild(1).
+     * Unsafe negative-evidence experiment; disabled by default.  The client's
+     * 7/8 type=4 success handler removes the object referenced by its local
+     * pending-unequip pointer (R9+38020).  A login push has no such pointer and
+     * must never be treated as an equipment-list bootstrap.
      */
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 8, &objectStart))
         return false;
@@ -25912,20 +25929,17 @@ static u32 vm_net_mock_build_instance_enter_response(
     return pos;
 }
 
-static u32 vm_net_mock_build_instance_challenge_response(
-    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
+static u32 vm_net_mock_build_instance_challenge_battle_response(
+    u32 actorId, u32 enemyId, u16 challengeX, u16 challengeY,
+    u8 *out, u32 outCap)
 {
     u8 synthetic[192];
     u32 requestPos = 9;
     u32 objectStart = 4;
     u32 responseLen = 0;
-    u32 challengeX = 0;
-    u32 challengeY = 0;
 
-    if (seed == NULL || seed->challengeEnemyId == 0)
+    if (actorId == 0 || enemyId == 0 || challengeX == 0 || challengeY == 0)
         return 0;
-    challengeX = seed->instanceX != 0 ? seed->instanceX : seed->x;
-    challengeY = seed->instanceY != 0 ? seed->instanceY : seed->y;
     memset(synthetic, 0, sizeof(synthetic));
     synthetic[0] = 'W';
     synthetic[1] = 'T';
@@ -25933,7 +25947,7 @@ static u32 vm_net_mock_build_instance_challenge_response(
     synthetic[objectStart + 1] = 4;
     synthetic[objectStart + 2] = 1;
     if (!vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "id", seed->challengeEnemyId) ||
+                                    "id", enemyId) ||
         !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
                                     "index", 0) ||
         !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
@@ -25951,10 +25965,132 @@ static u32 vm_net_mock_build_instance_challenge_response(
         synthetic, requestPos, out, outCap, true);
     if (responseLen != 0)
     {
-        printf("[info][network] mock_npc_instance_challenge actor=%u enemy=%u pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+battle-non-scene-start\n",
-               seed->actorId, seed->challengeEnemyId, challengeX, challengeY,
+        printf("[info][network] mock_npc_instance_challenge_start actor=%u enemy=%u pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x01039566(30/10)+battle-non-scene-start\n",
+               actorId, enemyId, challengeX, challengeY,
                responseLen);
     }
+    return responseLen;
+}
+
+static u32 vm_net_mock_build_instance_challenge_prompt_response(
+    const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = session != NULL
+                                        ? vm_mock_service_team_find_for_client(
+                                              session->clientId)
+                                        : NULL;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *challengeText =
+        "\xca\xc7\xb7\xf1\xbf\xaa\xca\xbc\xb8\xb1\xb1\xbe\xcc\xf4\xd5\xbd\xa3\xbf"; /* 是否开始副本挑战？ */
+    bool leaderBlocked = team != NULL &&
+                         !vm_mock_service_team_is_leader(team, session->clientId);
+    u16 challengeX = 0;
+    u16 challengeY = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (seed == NULL || seed->challengeEnemyId == 0 || session == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) || out == NULL || outCap < pos)
+    {
+        return 0;
+    }
+    challengeX = seed->instanceX != 0 ? seed->instanceX : seed->x;
+    challengeY = seed->instanceY != 0 ? seed->instanceY : seed->y;
+    if (leaderBlocked)
+    {
+        challengeText =
+            "\xd6\xbb\xd3\xd0\xb6\xd3\xb3\xa4\xbf\xc9\xd2\xd4\xb7\xa2\xc6\xf0\xb8\xb1\xb1\xbe\xcc\xf4\xd5\xbd\xa1\xa3"; /* 只有队长可以发起副本挑战。 */
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 30, 9,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "isleader",
+                                   leaderBlocked ? 1u : 0u) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "challenge",
+                                       challengeText))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    session->instanceChallengePending = !leaderBlocked;
+    session->instanceChallengeActorId = !leaderBlocked ? seed->actorId : 0;
+    session->instanceChallengeEnemyId =
+        !leaderBlocked ? seed->challengeEnemyId : 0;
+    session->instanceChallengeX = !leaderBlocked ? challengeX : 0;
+    session->instanceChallengeY = !leaderBlocked ? challengeY : 0;
+    session->instanceChallengeTick = !leaderBlocked ? g_schedulerTick : 0;
+    if (!leaderBlocked)
+    {
+        snprintf(session->instanceChallengeScene,
+                 sizeof(session->instanceChallengeScene), "%s", scene);
+    }
+    else
+    {
+        session->instanceChallengeScene[0] = 0;
+    }
+    printf("[info][network] mock_npc_instance_challenge_prompt client=%08x actor=%u enemy=%u scene=%s pos=(%u,%u) blocked=%u response=30/9 resp=%u evidence=JianghuOL.CBE:0x010395AA\n",
+           session->clientId, seed->actorId, seed->challengeEnemyId, scene,
+           challengeX, challengeY, leaderBlocked ? 1u : 0u, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_instance_challenge_confirm_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    const char *scene = vm_net_mock_current_scene_name();
+    u32 responseLen = 0;
+    u32 ageTicks = 0;
+
+    /* SendGameEvent(0,0,30,10) emits one empty 30/10 object.  Do not consume
+     * broader packets: this subtype is meaningful only while this client owns
+     * a pending NPC challenge confirmation. */
+    if (request == NULL || requestLen != 9 || request[0] != 'W' ||
+        request[1] != 'T' || request[2] != 0 || request[3] != 9 ||
+        request[4] != 1 || request[5] != 30 || request[6] != 10 ||
+        request[7] != 0 || request[8] != 5 || session == NULL ||
+        !session->instanceChallengePending)
+    {
+        return 0;
+    }
+    ageTicks = g_schedulerTick - session->instanceChallengeTick;
+    if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS) ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_names_equal_loose(
+            scene, session->instanceChallengeScene))
+    {
+        printf("[warn][network] mock_npc_instance_challenge_confirm_drop client=%08x actor=%u enemy=%u age_ticks=%u current_scene=%s pending_scene=%s reason=expired-or-scene-changed\n",
+               session->clientId, session->instanceChallengeActorId,
+               session->instanceChallengeEnemyId, ageTicks,
+               scene ? scene : "-", session->instanceChallengeScene);
+        session->instanceChallengePending = false;
+        return 0;
+    }
+
+    responseLen = vm_net_mock_build_instance_challenge_battle_response(
+        session->instanceChallengeActorId,
+        session->instanceChallengeEnemyId,
+        session->instanceChallengeX,
+        session->instanceChallengeY,
+        out, outCap);
+    if (responseLen == 0)
+        return 0;
+
+    printf("[info][network] mock_npc_instance_challenge_confirm client=%08x actor=%u enemy=%u age_ticks=%u request=30/10 response=4/10 resp=%u evidence=JianghuOL.CBE:0x01039566\n",
+           session->clientId, session->instanceChallengeActorId,
+           session->instanceChallengeEnemyId, ageTicks, responseLen);
+    session->instanceChallengePending = false;
+    session->instanceChallengeActorId = 0;
+    session->instanceChallengeEnemyId = 0;
+    session->instanceChallengeX = 0;
+    session->instanceChallengeY = 0;
+    session->instanceChallengeTick = 0;
+    session->instanceChallengeScene[0] = 0;
     return responseLen;
 }
 
@@ -26040,7 +26176,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
         {
-            u32 challengeLen = vm_net_mock_build_instance_challenge_response(
+            u32 challengeLen = vm_net_mock_build_instance_challenge_prompt_response(
                 instanceSeed, out, outCap);
             if (challengeLen != 0)
                 return challengeLen;
@@ -46318,6 +46454,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-nearby-spar-request", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_instance_challenge_confirm_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-npc-instance-challenge-confirm",
+                                  request, requestLen, hookedLen);
         return hookedLen;
     }
 
