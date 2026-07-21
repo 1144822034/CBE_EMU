@@ -7454,6 +7454,64 @@ static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
     return true;
 }
 
+static bool vm_net_mock_build_equipment_login_iteminfo_blob(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
+    u32 *blobLenOut, u8 *rowCountOut)
+{
+    vm_net_mock_role_service_state *serviceState = NULL;
+    u32 pos = 0;
+    u8 rowCount = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (out == NULL || blobLenOut == NULL || role == NULL)
+        return false;
+
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 itemId = role->equippedItemIds[slot];
+
+        if (itemId != 0 && vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
+            ++rowCount;
+    }
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
+        return false;
+
+    serviceState = vm_net_mock_role_service_state_get(role);
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 itemId = role->equippedItemIds[slot];
+        u32 durability = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
+
+        /* mmGameMstarWqvga.cbm:sub_D04 reads every 7/7 row as
+         * seq(u16), itemId(u32), current-count(u32), and the common equipment
+         * attributes.  For item ids >= 1000 it writes current-count to the
+         * equipment current-durability field at item+272. */
+        if (itemId == 0 || vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+            continue;
+        if (serviceState != NULL &&
+            serviceState->equipmentItemIds[slot] == itemId &&
+            serviceState->durability[slot] <= serviceState->durabilityMax[slot])
+        {
+            durability = serviceState->durability[slot];
+        }
+        if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, durability) ||
+            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0))
+        {
+            return false;
+        }
+    }
+
+    *blobLenOut = pos;
+    if (rowCountOut)
+        *rowCountOut = rowCount;
+    return true;
+}
+
 static bool vm_net_mock_build_backpack_reservoir_count_info_blob(
     u8 *out, u32 outCap, const vm_net_mock_role_state *role,
     u32 *blobLenOut, u32 *rowCountOut)
@@ -8161,27 +8219,80 @@ static bool vm_net_mock_append_backpack_reservoir_counts_object(
     return true;
 }
 
+static bool vm_net_mock_append_equipment_login_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *rowCountOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u8 itemInfo[512];
+    u32 itemInfoLen = 0;
+    u32 objectStart = 0;
+    u8 rowCount = 0;
+
+    if (rowCountOut)
+        *rowCountOut = 0;
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    memset(itemInfo, 0, sizeof(itemInfo));
+    if (!vm_net_mock_build_equipment_login_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), role, &itemInfoLen, &rowCount) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
+    {
+        return false;
+    }
+
+    /* mmGameMstarWqvga.cbm:sub_D04(0x0D04) dispatches 7/7 type=2 rows to
+     * the main item manager's +104 operation.  JianghuOL.CBE:0x01032B8A
+     * copies each row, preserves the original DSH category in item+283,
+     * changes item+282 to category 15, and inserts it into the equipment
+     * list.  Passing -1 on this bootstrap path deliberately does not remove a
+     * pending backpack row. */
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    itemInfo, (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (rowCountOut)
+        *rowCountOut = rowCount;
+
+    printf("[info][network] mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+           role->roleId, rowCount, itemInfoLen);
+    vm_autotest_note("mock_equipment_login role=%u rows=%u iteminfo_len=%u response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A\n",
+                     role->roleId, rowCount, itemInfoLen);
+    return true;
+}
+
 static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     if (out == NULL || pos == NULL || objectCount == NULL)
         return false;
-    if (role == NULL || vm_net_mock_role_backpack_count(role) == 0)
+    if (role == NULL)
         return true;
     if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
         bool appendedReservoirCounts = false;
+        u8 equipmentRows = 0;
 
-        if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
+        if (vm_net_mock_role_backpack_count(role) != 0)
+        {
+            if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
+                return false;
+            *objectCount = (u8)(*objectCount + 1);
+            if (!vm_net_mock_append_backpack_reservoir_counts_object(
+                    out, outCap, pos, &appendedReservoirCounts))
+            {
+                return false;
+            }
+            if (appendedReservoirCounts)
+                *objectCount = (u8)(*objectCount + 1);
+        }
+        if (!vm_net_mock_append_equipment_login_object(
+                out, outCap, pos, &equipmentRows))
             return false;
         *objectCount = (u8)(*objectCount + 1);
-        if (!vm_net_mock_append_backpack_reservoir_counts_object(
-                out, outCap, pos, &appendedReservoirCounts))
-        {
-            return false;
-        }
-        if (appendedReservoirCounts)
-            *objectCount = (u8)(*objectCount + 1);
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;
