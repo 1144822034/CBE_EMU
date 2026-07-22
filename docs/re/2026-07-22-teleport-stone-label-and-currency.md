@@ -103,6 +103,43 @@ handler，并合并已有响应对象；只允许 `16/1`，不拆分有顺序语
 `itemId=800`）→ 纯 `16/1` → 本地取消（无线包）→ `16/1 + 2/10` 合并重试。它断言两次
 响应均包含 `1/16/1`。
 
+## 场景传送石确认后的场景进入（2026-07-22）
+
+### 运行时请求与失败点
+
+持有 `itemId=800` 的角色在场景传送石上选择目的地后，服务端依次观察到：
+
+```text
+16/1                         -> 16/1.exitinfo
+16/2 {exitID=1,type=3}       -> 16/2 result=2 的本地确认框
+16/2 + 16/3 {exitID=1,type=3}
+```
+
+最后一个包长度为 64，并且没有 `7/1` 物品对象；这与
+`JianghuOL.CBE:ConsumeInventoryItem(0x01018F66)` 的证据一致：客户端先发送
+`16/2`、`16/3`，再在本地更新 `itemId=800`。旧服务在最后一个包错误记录：
+
+```text
+mock_teleport_stone_confirmed_exit_unresolved exit=1 provisional_scene=c00... provisional_row=1
+unhandled wt=16/2 len=64 first=1/16/2:25,1/16/3:25
+```
+
+因此客户端收不到确认回调的 WT 应答，进度条自然不会结束。
+
+### 正确的 `exitID` 解释
+
+`16/2.exitID` 不是始终等于 `sMap.dsh` 行号：
+
+- 先有 `16/4 {curid,objid}` 的世界地图流程中，它可以代表所选的子场景行；当其与
+  已保存的父级目标不同，服务端据此精确查询 `sMap.dsh`。
+- 场景传送石列表流程会在确认回调中重复列表项自身的父级目的地 ID。运行时的 `1` 与
+  已保存目标的 `exitId=1` 相同，不能把它当作 `sMap` 行 1。
+
+`vm_net_mock_refine_teleport_stone_confirmed_target()` 先比较确认 ID 与已保存目标：相同
+（或为零）则保留该目标；不同时才查询 `sMap.dsh`。此规则在单独 `16/2` 和最终
+`16/2 + 16/3` 两条路径共用。最终组合包仍仅回空 WT 物品确认，随后在下一次
+scene-sync poll 通过既有 deferred `30/1` 进入场景，避免在确认回调内切图的历史崩溃。
+
 ## 验证
 
 - `make -j2` 已通过；已以新二进制启动本地 mock service，并通过

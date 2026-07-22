@@ -3082,6 +3082,37 @@ static bool vm_net_mock_get_teleport_stone_smap_row_target(
     return true;
 }
 
+/*
+ * `16/2.exitID` has two packet-visible meanings.  The map-stone 16/4 flow
+ * uses it as the selected child sMap row, while the ordinary scene-stone list
+ * repeats the parent list entry's id during the local item-confirmation
+ * callback.  The latter is already represented by the saved provisional
+ * target and must not be looked up as an sMap row.
+ */
+static bool vm_net_mock_refine_teleport_stone_confirmed_target(
+    const vm_net_mock_scene_change_target *provisional,
+    u32 confirmedExitId,
+    vm_net_mock_scene_change_target *target,
+    const char **posSourceOut)
+{
+    vm_net_mock_scene_change_target baseTarget;
+
+    if (provisional == NULL || target == NULL || provisional->scene[0] == 0)
+        return false;
+
+    baseTarget = *provisional;
+    *target = baseTarget;
+    if (posSourceOut)
+        *posSourceOut = "confirmed-exit-matches-provisional";
+
+    if (confirmedExitId == 0 || confirmedExitId == baseTarget.exitId)
+        return true;
+
+    return vm_net_mock_get_teleport_stone_smap_row_target(confirmedExitId,
+                                                           target,
+                                                           posSourceOut);
+}
+
 static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 requestLen,
                                                       vm_net_mock_scene_change_target *target,
                                                       u32 *curIdOut,
@@ -3679,16 +3710,14 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
                                                   "exitid", &confirmedExitId)) &&
                 confirmedExitId != 0)
             {
-                vm_net_mock_scene_change_target exactTarget;
-                if (!vm_net_mock_get_teleport_stone_smap_row_target(
-                        confirmedExitId, &exactTarget, &confirmedPosSource))
+                if (!vm_net_mock_refine_teleport_stone_confirmed_target(
+                        &target, confirmedExitId, &target, &confirmedPosSource))
                 {
                     printf("[error][network] mock_teleport_stone_confirm_target_unresolved subtype=%u exit=%u provisional_scene=%s action=no-wrong-scene-fallback\n",
                            subtype, confirmedExitId, target.scene);
                     return 0;
                 }
-                target = exactTarget;
-                g_vm_net_mock_teleport_stone_confirm_target = exactTarget;
+                g_vm_net_mock_teleport_stone_confirm_target = target;
                 printf("[info][network] mock_teleport_stone_confirm_target_refine subtype=%u exit=%u scene=%s pos=(%u,%u) pos_source=%s\n",
                        subtype, confirmedExitId, target.scene, target.x, target.y,
                        confirmedPosSource);
@@ -3750,15 +3779,13 @@ static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request,
                                               "exitid", &confirmedExitId)) &&
             confirmedExitId != 0)
         {
-            vm_net_mock_scene_change_target exactTarget;
-            if (!vm_net_mock_get_teleport_stone_smap_row_target(
-                    confirmedExitId, &exactTarget, &confirmedPosSource))
+            if (!vm_net_mock_refine_teleport_stone_confirmed_target(
+                    &target, confirmedExitId, &target, &confirmedPosSource))
             {
                 printf("[error][network] mock_teleport_stone_confirm_target_unresolved subtype=%u exit=%u provisional_scene=%s action=no-wrong-scene-fallback\n",
                        subtype, confirmedExitId, target.scene);
                 return 0;
             }
-            target = exactTarget;
             printf("[info][network] mock_teleport_stone_confirm_target_refine subtype=%u exit=%u scene=%s pos=(%u,%u) pos_source=%s\n",
                    subtype, confirmedExitId, target.scene, target.x, target.y,
                    confirmedPosSource);
@@ -3952,8 +3979,8 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
     }
 
     provisionalTarget = g_vm_net_mock_teleport_stone_confirm_target;
-    if (!vm_net_mock_get_teleport_stone_smap_row_target(exitId, &target,
-                                                        &posSource))
+    if (!vm_net_mock_refine_teleport_stone_confirmed_target(
+            &provisionalTarget, exitId, &target, &posSource))
     {
         printf("[error][network] mock_teleport_stone_confirmed_exit_unresolved exit=%u provisional_scene=%s provisional_row=%u action=no-wrong-scene-fallback\n",
                exitId, provisionalTarget.scene, provisionalTarget.exitId);
