@@ -1,7 +1,7 @@
 # Backpack Equipment Operation
 
-Status: implemented for backpack weapon/equipment equip and unequip from
-`WT 1/7/8`.
+Status: implemented for empty-slot equip/unequip from `WT 1/7/8`, and for an
+occupied-slot replacement from the distinct `WT 1/7/9 + 1/2/10` transaction.
 
 ## Symptom
 
@@ -44,6 +44,41 @@ Status: implemented for backpack weapon/equipment equip and unequip from
 
 The detector is intentionally narrow.  It only consumes `WT 7/8` item-operation
 requests with documented `type` values `3` or `4`.
+
+## Occupied-slot replacement contract
+
+The wooden broad sword repro does not follow the `7/8 type=3` path: the
+starter weapon already occupies its weapon slot.  Runtime recorded the exact
+two-object request as `WT 7/9 len=45`, with:
+
+- `1/7/9`, payload length 21: `body:u16`, `bag:u16`;
+- followed by `1/2/10`, payload length 10.
+
+`JianghuOL.CBE:0x010328D4 BuildGameEventPacket` writes `body` and `bag` when
+the event subtype is 9.  The calling UI selects the current equipment row for
+`body` and the selected backpack row for `bag`.  The equipment catalog sent by
+the mock encodes equipment row sequence as `slot + 1`, so the server verifies
+that relation before changing state.
+
+`JianghuOL.CBE:0x01033544 HandleItemOperationResponse` case 9 parses **only**
+`result`.  On `result=1` it locally replaces the current equipment with the
+selected backpack item, returns the old item to the backpack using the
+selected backpack row sequence, runs the pending callback, and clears the
+wait layer.  Therefore the response must be precisely:
+
+- `1/7/9 { result:u8 }`.
+
+The server mirrors the same atomic sequence-preserving replacement before it
+sends success.  It does not model this as consume-plus-append, because append
+would assign the old item a new backpack sequence and diverge from the client.
+The `1/2/10` companion is checked as part of the detector but needs no response
+object for the item-operation completion.
+
+Expected trace:
+
+```text
+mock_item_equip_swap body=<slot+1> bag=<backpack-seq> item=<new-id> old=<old-id> slot=<slot> result=1 reason=ok resp=7/9
+```
 
 ## Response Contract
 

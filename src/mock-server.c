@@ -7116,6 +7116,19 @@ typedef struct
     bool haveItemSelector;
 } vm_net_mock_item_equip_request;
 
+/*
+ * Replacing an item in an occupied equipment slot is not the 7/8 type=3
+ * operation.  JianghuOL.CBE:0x010328D4 serializes its request as
+ * 1/7/9 { body:u16, bag:u16 }, where body is the equipped row sequence and
+ * bag is the selected backpack row sequence.  The caller appends 1/2/10 as
+ * part of the same WT packet.
+ */
+typedef struct
+{
+    u16 bodySeq;
+    u16 backpackSeq;
+} vm_net_mock_item_equip_swap_request;
+
 typedef struct
 {
     u8 subtype;
@@ -7397,6 +7410,48 @@ static bool vm_net_mock_parse_item_equip_request(const u8 *request, u32 requestL
             parsed.itemId = candidate;
             parsed.haveItemSelector = true;
         }
+    }
+
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_parse_item_equip_swap_request(
+    const u8 *request, u32 requestLen,
+    vm_net_mock_item_equip_swap_request *parsedOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object swapObject;
+    vm_net_mock_request_object companionObject;
+    vm_net_mock_item_equip_swap_request parsed;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+
+    if (request == NULL || requestLen < 14 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &swapObject) ||
+        swapObject.major != 1 || swapObject.kind != 7 || swapObject.subtype != 9 ||
+        !vm_net_mock_get_object_u16_field(swapObject.payload, swapObject.payloadLen,
+                                          "body", &parsed.bodySeq) ||
+        !vm_net_mock_get_object_u16_field(swapObject.payload, swapObject.payloadLen,
+                                          "bag", &parsed.backpackSeq) ||
+        parsed.bodySeq == 0 || parsed.backpackSeq == 0)
+    {
+        return false;
+    }
+
+    /* The observed client packet is a deliberate 7/9 + 2/10 transaction.
+     * Keeping the companion in the detector prevents this handler from
+     * consuming an unrelated future 7/9 request. */
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &companionObject) ||
+        companionObject.major != 1 || companionObject.kind != 2 ||
+        companionObject.subtype != 10 || companionObject.payloadLen != 10 ||
+        offset != requestLen)
+    {
+        return false;
     }
 
     if (parsedOut)
@@ -13540,6 +13595,111 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     return true;
 }
 
+static bool vm_net_mock_role_swap_equipped_backpack_item(
+    vm_net_mock_role_state *role,
+    u16 bodySeq,
+    u16 backpackSeq,
+    u32 *equippedItemIdOut,
+    u32 *oldItemIdOut,
+    u8 *slotOut,
+    const char **reasonOut)
+{
+    vm_net_mock_backpack_item_state *backpackItem = NULL;
+    const vm_net_mock_equipment_catalog_item *newEquip = NULL;
+    u32 newItemId = 0;
+    u32 oldItemId = 0;
+    u8 slot = 0xff;
+    u8 itemCount = 0;
+
+    if (equippedItemIdOut)
+        *equippedItemIdOut = 0;
+    if (oldItemIdOut)
+        *oldItemIdOut = 0;
+    if (slotOut)
+        *slotOut = 0xff;
+    if (reasonOut)
+        *reasonOut = "ok";
+
+    if (role == NULL)
+    {
+        if (reasonOut)
+            *reasonOut = "no-role";
+        return false;
+    }
+
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (role->backpackItems[i].seq == backpackSeq)
+        {
+            backpackItem = &role->backpackItems[i];
+            break;
+        }
+    }
+    if (backpackItem == NULL || backpackItem->count != 1)
+    {
+        if (reasonOut)
+            *reasonOut = backpackItem == NULL ? "backpack-seq-not-found" : "backpack-not-single-equipment";
+        return false;
+    }
+
+    newItemId = backpackItem->itemId;
+    newEquip = vm_net_mock_find_equipment_catalog_item(newItemId);
+    if (newEquip == NULL || newEquip->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+    {
+        if (reasonOut)
+            *reasonOut = "not-equipment";
+        return false;
+    }
+    if (role->level == 0)
+        role->level = vm_net_mock_role_level_from_exp(role->exp);
+    if (role->level < newEquip->levelRequired)
+    {
+        if (reasonOut)
+            *reasonOut = "level-too-low";
+        return false;
+    }
+
+    slot = newEquip->slot;
+    oldItemId = role->equippedItemIds[slot];
+    /* Equipment list rows are encoded as seq=slot+1; accepting any other
+     * body value would make the persistent swap disagree with the client's
+     * pending equipped-item pointer. */
+    if (oldItemId == 0)
+    {
+        if (reasonOut)
+            *reasonOut = "slot-empty-use-7-8";
+        return false;
+    }
+    if (bodySeq != (u16)(slot + 1))
+    {
+        if (reasonOut)
+            *reasonOut = "body-seq-slot-mismatch";
+        return false;
+    }
+
+    /* HandleItemOperationResponse(7/9) removes the selected backpack item
+     * and reuses its sequence for the former equipped item locally.  Mirror
+     * that exact replacement in the saved role instead of consume+append:
+     * append would allocate a different sequence and make the next operation
+     * target the wrong item. */
+    backpackItem->itemId = oldItemId;
+    backpackItem->count = 1;
+    backpackItem->enhanceLevel = 0;
+    role->equippedItemIds[slot] = newItemId;
+    vm_net_mock_role_sync_derived_vitals(role);
+    vm_net_mock_role_db_save("item-equip-swap");
+
+    if (equippedItemIdOut)
+        *equippedItemIdOut = newItemId;
+    if (oldItemIdOut)
+        *oldItemIdOut = oldItemId;
+    if (slotOut)
+        *slotOut = slot;
+    return true;
+}
+
 static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
                                           u32 requestedItemId,
                                           u16 requestedSeq,
@@ -13724,6 +13884,58 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
                      oldItemId,
                      result,
                      reason ? reason : "-");
+    return pos;
+}
+
+static u32 vm_net_mock_build_item_equip_swap_response(const u8 *request,
+                                                      u32 requestLen,
+                                                      u8 *out, u32 outCap)
+{
+    vm_net_mock_item_equip_swap_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    u32 itemId = 0;
+    u32 oldItemId = 0;
+    u8 slot = 0xff;
+    const char *reason = "not-matched";
+    u8 result = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_item_equip_swap_request(request, requestLen, &parsed))
+    {
+        return 0;
+    }
+
+    role = vm_net_mock_active_role();
+    if (vm_net_mock_role_swap_equipped_backpack_item(role,
+                                                      parsed.bodySeq,
+                                                      parsed.backpackSeq,
+                                                      &itemId,
+                                                      &oldItemId,
+                                                      &slot,
+                                                      &reason))
+    {
+        result = 1;
+    }
+
+    /* JianghuOL.CBE:0x01033544 subtype 9 reads only result.  On success the
+     * client itself moves body -> backpack (with bag's sequence), moves bag
+     * into the equipment slot, invokes the UI callback, and clears the wait. */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 9, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_item_equip_swap body=%u bag=%u item=%u old=%u slot=%u result=%u reason=%s resp=7/9 evidence=JianghuOL.CBE:0x010328D4+0x01033544\n",
+           parsed.bodySeq, parsed.backpackSeq, itemId, oldItemId, slot, result,
+           reason ? reason : "-");
+    vm_autotest_note("mock_item_equip_swap body=%u bag=%u item=%u old=%u slot=%u result=%u reason=%s response=7/9 evidence=JianghuOL.CBE:0x010328D4(body-bag)+0x01033544(result-only)\n",
+                     parsed.bodySeq, parsed.backpackSeq, itemId, oldItemId, slot,
+                     result, reason ? reason : "-");
     return pos;
 }
 
@@ -47048,6 +47260,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-item-discard", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_item_equip_swap_response(request, requestLen,
+                                                           out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-item-equip-swap", request,
+                                  requestLen, hookedLen);
         return hookedLen;
     }
 
