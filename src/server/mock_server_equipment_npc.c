@@ -13,6 +13,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     u32 oldItemId = 0;
     u8 slot = 0xff;
     u8 itemCount = 0;
+    vm_net_mock_role_state before;
 
     if (equippedItemIdOut)
         *equippedItemIdOut = 0;
@@ -30,6 +31,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         return false;
     }
 
+    before = *role;
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
     for (u32 i = 0; i < itemCount; ++i)
@@ -92,7 +94,13 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     backpackItem->enhanceLevel = 0;
     role->equippedItemIds[slot] = newItemId;
     vm_net_mock_role_sync_derived_vitals(role);
-    vm_net_mock_role_db_save("item-equip-swap");
+    if (!vm_net_mock_role_db_save("item-equip-swap"))
+    {
+        *role = before;
+        if (reasonOut)
+            *reasonOut = "persistence-failed";
+        return false;
+    }
 
     if (equippedItemIdOut)
         *equippedItemIdOut = newItemId;

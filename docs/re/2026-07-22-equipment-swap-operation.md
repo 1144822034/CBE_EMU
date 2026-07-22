@@ -1,14 +1,15 @@
 # Equipment swap operation `WT 7/9` (2026-07-22)
 
-Status: investigating the request selectors; client response contract confirmed.
+Status: implemented and regression-tested against the mock-service TCP protocol.
 
 ## Reproduction
 
-1. Open the backpack.
-2. Select the equipment `1001` (wooden broadsword / 木制宽剑).
-3. Choose equip.
+1. Equip a weapon, then keep a second weapon in the backpack.
+2. Select the backpack weapon and choose the replacement action for the
+   occupied slot.
 
-The server received and then asserted on this previously unhandled packet:
+Before the dedicated handler was added, the server received and asserted on
+this request:
 
 ```text
 unhandled wt=7/9 len=45 objects=1 first=1/7/9:21,1/2/10:10
@@ -40,29 +41,41 @@ WT 1/7/9 { result: u8 }
 It must not be redirected to the generic `7/7` game-type handlers and must not
 be answered as the older `7/8 {type,result,seq}` operation contract.
 
-## Current unknowns and first divergence
+## Confirmed request grammar and implementation
 
-The first object has a 21-byte payload.  Its exact selectors still need to be
-captured before changing persisted state: the source may carry the selected
-backpack item id and sequence, and the second `1/2/10` object may carry an
-operation context rather than an independent game request.
+IDA selected the `江湖OL.CBE` instance by `binary_name` and shows that
+`BuildGameEventPacket(0x010328D4)` builds the 21-byte object payload as:
 
-The first invalid state is clear: `vm_net_mock_build_response` has no narrow
-handler for `1/7/9` plus its companion `1/2/10`, so it reaches the global
-unhandled assertion before a response is built.
+```text
+WT 1/7/9 { body: u16, bag: u16 }
+```
 
-## Next probe and planned repair
+- `body` is the equipped-row sequence (`slot + 1` in the persisted equipment
+  list).
+- `bag` is the selected backpack-row sequence.
+- A same-packet `1/2/10` object is an optional scene follow-up.  It is not an
+  additional selector of the replacement operation.
 
-Add a temporary bounded field/hex trace only for unhandled packets, reproduce
-the 45-byte request once, and record its selectors.  Then add a narrow
-`vm_net_mock_is_item_equip_swap_request()` detector and builder that:
+The dedicated handler now runs before generic equipment processing.  It
+validates both sequences, the target item's equipment slot and level
+requirement, then replaces the selected backpack row in place with the old
+equipped item.  Keeping the backpack sequence is required because the client
+does that same local replacement after receiving success.  The new item is
+written to the equipment slot, derived attributes are recalculated, and the
+whole role state is saved.  If the relational save fails, the in-memory role
+snapshot is restored and the normal `result=0` response is returned; no client
+state is force-written.
 
-1. validates the two-object request grammar;
-2. resolves the selected backpack equipment and target slot from those fields;
-3. atomically returns the old slot item to the role backpack, equips the new
-   item, syncs derived vitals, and persists the role;
-4. returns `1/7/9 {result}` so the client completes its own local UI swap.
+`7/8` remains a separate contract for equipping into an empty slot.
 
-The older `1/7/8` path remains separate until its currently documented request
-grammar is observed again.
+## Regression
 
+`tmp/npc-purchase-equipment-swap-regression.php` creates an isolated role with
+`1001` equipped and backpack row `7001=1002`, sends the client-shaped
+`1/7/9 {body=1,bag=7001}` request through a real mock-service TCP connection,
+and verifies both `1/7/9 {result=1}` and MySQL state:
+
+```text
+equipment slot 0 = 1002
+backpack sequence 7001 = 1001, count 1
+```

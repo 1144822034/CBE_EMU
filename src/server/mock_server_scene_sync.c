@@ -3542,8 +3542,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 1;
-    bool appendBackpack = false;
+    bool appendBackpackAdd = false;
     bool appendSkills = false;
+    u32 backpackAddItemId = 0;
+    u32 backpackAddCount = 0;
+    u16 backpackAddSeq = 0;
     const char *action = "invalid";
     u32 result = 0;
     u32 skillEligibleCount = 0;
@@ -3743,9 +3746,15 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             }
             else
             {
+                /* vm_net_mock_role_add_backpack_item_to_role persists its
+                 * mutation.  Retain the complete pre-purchase state so an
+                 * impossible postcondition can be rolled back consistently
+                 * instead of refunding only money in RAM after the item has
+                 * already reached MySQL. */
+                vm_net_mock_role_state purchaseBefore = *role;
                 role->money -= buyItem->price;
                 if (!vm_net_mock_role_add_backpack_item_to_role(
-                        role, buyItem->itemId, 1, NULL,
+                        role, buyItem->itemId, 1, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy"))
                 {
@@ -3755,10 +3764,46 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 }
                 else
                 {
-                    dialogText =
-                        "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
-                    appendBackpack = true;
-                    result = 1;
+                    vm_net_mock_backpack_item_state *purchasedItem =
+                        vm_net_mock_role_find_backpack_item(
+                            role, buyItem->itemId, backpackAddSeq);
+
+                    /* Normal rows are an additive one-item delta.  The two
+                     * reservoir flasks are not stackable: their item row must
+                     * carry the newly allocated HP/MP pool, while the common
+                     * extra still exposes one visible flask. */
+                    if (purchasedItem == NULL || backpackAddSeq == 0)
+                    {
+                        *role = purchaseBefore;
+                        if (!vm_net_mock_role_db_save("npc-purchase-rollback"))
+                            return 0;
+                        dialogText =
+                            "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                    }
+                    else
+                    {
+                        backpackAddItemId = buyItem->itemId;
+                        backpackAddCount =
+                            vm_net_mock_backpack_item_id_uses_reservoir_count(
+                                buyItem->itemId)
+                                ? purchasedItem->count
+                                : 1;
+                        appendBackpackAdd = backpackAddCount != 0;
+                        if (appendBackpackAdd)
+                        {
+                            dialogText =
+                                "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
+                            result = 1;
+                        }
+                        else
+                        {
+                            *role = purchaseBefore;
+                            if (!vm_net_mock_role_db_save("npc-purchase-rollback"))
+                                return 0;
+                            dialogText =
+                                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                        }
+                    }
                 }
             }
             page = 0;
@@ -3837,7 +3882,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 selector;
             ++optionCount;
         }
-        if (optionCount == 0 && !appendBackpack)
+        if (optionCount == 0 && !appendBackpackAdd)
             dialogText =
                 "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
     }
@@ -4027,9 +4072,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    if (appendBackpack)
+    if (appendBackpackAdd)
     {
-        if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+        if (!vm_net_mock_append_backpack_item_add7_object(
+                out, outCap, &pos, backpackAddSeq, backpackAddItemId,
+                backpackAddCount))
             return 0;
         ++objectCount;
     }

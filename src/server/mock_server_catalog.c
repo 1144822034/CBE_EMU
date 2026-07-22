@@ -2898,6 +2898,47 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     return true;
 }
 
+/*
+ * mmGameMstarWqvga.cbm:sub_11CE consumes 1/7/7 before it reaches the
+ * ordinary scene business dispatcher.  With type=1, sub_D04 builds the one
+ * received item row and sends it to TimerControl_ProcessItem, which is the
+ * client-side additive/stacking path.  This is deliberately not 1/17/1:
+ * that full-list object is only consumed while the backpack/shop list module
+ * owns the network callback, so it cannot refresh an item bought from the
+ * scene NPC service dialog.
+ */
+static bool vm_net_mock_append_backpack_item_add7_object(
+    u8 *out, u32 outCap, u32 *pos, u16 seq, u32 itemId, u32 count)
+{
+    u8 itemInfo[64];
+    u32 itemInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || seq == 0 || itemId == 0 || count == 0)
+        return false;
+    if (!vm_net_mock_build_item_use_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), seq, itemId, count, &itemInfoLen) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
+    {
+        return false;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 1) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+
+    printf("[info][network] mock_backpack_add item=%u seq=%u delta=%u iteminfo_len=%u response=7/7-type1 evidence=mmGame:0x11CE+0x0D04\n",
+           itemId, seq, count, itemInfoLen);
+    vm_autotest_note("mock_backpack_add item=%u seq=%u delta=%u iteminfo_len=%u response=7/7-type1 evidence=mmGame:0x11CE+0x0D04\n",
+                     itemId, seq, count, itemInfoLen);
+    return true;
+}
+
 static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
                                                        u16 seq, u32 count,
                                                        u32 *blobLenOut)
