@@ -1602,7 +1602,8 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         g_mockBattleAwaitingSettlement = (g_mockBattleRoleHpCurrent == 0) ? 0 : 1;
         if (g_mockBattleRoleHpCurrent == 0)
         {
-            vm_net_mock_battle_save_current_role_state("battle-item-use-death");
+            vm_net_mock_battle_save_completed_current_role_state(
+                "battle-item-use-death");
         }
     }
     else
@@ -1845,7 +1846,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 g_mockBattleOperateSessionFinished = 0;
                 g_mockBattlePendingEnemyTurn = 0;
                 g_mockBattleAwaitingSettlement = 0;
-                vm_net_mock_battle_save_current_role_state("battle-pending-enemy-death");
+                vm_net_mock_battle_save_completed_current_role_state(
+                    "battle-pending-enemy-death");
             }
             printf("[info][network] mock_battle_pending_enemy_turn actor=%u target=%u damage=%u enemyhp=%u slots=%u/%u/%u rolehp=%u resp=%u evidence=mmBattle:0x6EB0\n",
                    counterActorWireSlot,
@@ -2176,7 +2178,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     {
         if (g_mockBattleRoleHpCurrent == 0)
         {
-            vm_net_mock_battle_save_current_role_state("battle-operate-death");
+            vm_net_mock_battle_save_completed_current_role_state(
+                "battle-operate-death");
         }
         else
             vm_net_mock_battle_save_terminal_role_state("battle-operate");
@@ -2457,7 +2460,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                 g_mockBattleOperateSessionFinished = 0;
                 g_mockBattlePendingEnemyTurn = 0;
                 g_mockBattleAwaitingSettlement = 0;
-                vm_net_mock_battle_save_current_role_state("battle-pending-enemy-fallback-death");
+                vm_net_mock_battle_save_completed_current_role_state(
+                    "battle-pending-enemy-fallback-death");
             }
             printf("[info][network] mock_battle_pending_enemy_turn actor=%u target=%u damage=%u enemyhp=%u slots=%u/%u/%u rolehp=%u resp=%u evidence=mmBattle:0x6EB0\n",
                    counterActorWireSlot,
@@ -2779,7 +2783,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     {
         if (g_mockBattleRoleHpCurrent == 0)
         {
-            vm_net_mock_battle_save_current_role_state("battle-operate-fallback-death");
+            vm_net_mock_battle_save_completed_current_role_state(
+                "battle-operate-fallback-death");
         }
         else
             vm_net_mock_battle_save_terminal_role_state("battle-operate-fallback");
@@ -4747,7 +4752,8 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
         g_mockBattleOperateSessionFinished = 0;
         g_mockBattlePendingEnemyTurn = 0;
         g_mockBattleAwaitingSettlement = 0;
-        vm_net_mock_battle_save_current_role_state("battle-escape-success");
+        vm_net_mock_battle_save_completed_current_role_state(
+            "battle-escape-success");
         printf("[info][network] mock_battle_escape result=success rate=%u enemyhp=%u slots=%u/%u/%u rolehp=%u resp=%u evidence=mmBattle:0x7BD0 case4 result=1\n",
                escapeRate,
                g_mockBattleEnemyHpCurrent,
@@ -4846,7 +4852,15 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
         g_mockBattleOperateSessionFinished = 0;
         g_mockBattleAwaitingSettlement = 0;
     }
-    vm_net_mock_battle_save_current_role_state("battle-escape-failed");
+    if (battleEndsThisRound)
+    {
+        vm_net_mock_battle_save_completed_current_role_state(
+            "battle-escape-failed-death");
+    }
+    else
+    {
+        vm_net_mock_battle_save_current_role_state("battle-escape-failed");
+    }
 
     printf("[info][network] mock_battle_escape result=failed rate=%u actions=%u damage=%u enemyhp=%u slots=%u/%u/%u rolehp=%u terminal=%u resp=%u evidence=mmBattle:0x7BD0 case4 result=0 + 0x6EB0 action6\n",
            escapeRate,

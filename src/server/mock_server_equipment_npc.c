@@ -959,7 +959,6 @@ static void vm_net_mock_role_apply_battle_settlement(u32 hp, u32 mp,
     role->mp = mp;
     vm_net_mock_role_add_exp(role, rewardExp);
     role->money = (0xffffffffu - role->money < rewardGold) ? 0xffffffffu : role->money + rewardGold;
-    vm_net_mock_role_service_apply_battle_wear(role);
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_db_save("battle-settle");
 
@@ -1062,6 +1061,11 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
                                              &statusLastExp, &statusCurExp,
                                              &statusPercentExp, &statusLevel,
                                              &statusGold, &roleHp, &roleMp);
+    /* Reward settlement is only one terminal outcome.  Account for wear here
+     * for the victory path; death and a successful escape use the companion
+     * completed-state helper below.  The durable-state serial guard makes a
+     * repeated terminal response harmless. */
+    vm_net_mock_role_service_apply_battle_wear(role);
     vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
@@ -1098,6 +1102,18 @@ static void vm_net_mock_battle_save_current_role_state(const char *reason)
         role->mp = vm_net_mock_min_u32(g_mockBattleRoleMpCurrent, mpMax);
     }
     vm_net_mock_role_db_save(reason ? reason : "battle-state");
+}
+
+/* Keep the ordinary state-save helper usable for non-terminal actions such as
+ * a failed escape.  Only callers that have ended the battle may charge the
+ * one-per-session durability wear. */
+static void vm_net_mock_battle_save_completed_current_role_state(const char *reason)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    vm_net_mock_battle_save_current_role_state(reason);
+    if (role != NULL)
+        vm_net_mock_role_service_apply_battle_wear(role);
 }
 
 static u32 vm_net_mock_role_revive_floor_after_death(const char *reason)
