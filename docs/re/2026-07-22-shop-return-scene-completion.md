@@ -1,65 +1,44 @@
-# 商城返回场景完成包与位置保持
+# 商城返回场景加载完成链（2026-07-22）
 
 ## 现象
 
-- 从商城返回 `mmGame` 后，客户端重新请求当前场景资源，但加载提示不会结束。
-- 少数情况下人物坐标被重新套用为场景出生点。
+从传送石触发“酷宝不足”并进入商城后，若玩家在商城停留一段时间再返回，
+`mmGame` 的场景加载界面一直不关闭。
 
-最新运行日志中的实际返回请求是 `WT 6/1 len=39`，对象集合为：
+## 运行时证据
 
-- `6/1`
-- `6/13`
-- `6/14`
-- `2/10 Type=101`
-- `25/5`
+`tmp/mock-service-19090.current.stdout.log` 的同一会话顺序为：
 
-服务端此前把它识别为“已显示场景的普通重复刷新”，只回放资源、任务和
-NPC 对象。日志停在 `builtin-scene-resource-followup`，没有结束客户端场景下载
-状态的对象。
+1. `16/2` 传送石目标确认；
+2. `2/10` 场景交互后续包与 `1/14` 商城打开，服务端为该会话和原场景设置
+   `shopSceneNpcReseedPending`；
+3. 返回商城后客户端重新发送 `WT6/1` 场景资源/任务请求；
+4. 服务端只下发 `27/11` NPC 等资源对象，随后客户端一直停留在加载界面。
 
-## 客户端证据
+该最后一个 `WT6/1` 缺少 `30/2` 场景完成对象。
 
-`江湖OL.CBE`：
+## 客户端契约
 
-- `0x01039770` 是 `30/2` 场景结果解析器。
-- `result=1` 时解析 `scene`，只有存在 `posinfo` 才读取 `x/y` 并调用场景位置
-  入口。
-- 无论是否存在 `posinfo`，解析器都会在 `0x0103993C` 调用
-  `ResetDownloadState` 并清理下载状态。
+已记录的客户端解析证据表明，`JianghuOL.CBE:0x01039770` 解析 `30/2`，并在
+`0x0103993C` 无条件执行 `ResetDownloadState`。不携带 `posinfo` 的 `30/2` 只结束
+下载/加载状态，不会重新写入角色场景坐标。
 
-因此，`30/2 result=1 + type=2 + scene` 且不携带 `posinfo`，正好满足商城
-返回需求：结束加载状态，同时不改写角色当前坐标。
+所以商城返回的正确结束包是：在重建 NPC/资源对象后附加一个无 `posinfo` 的
+`30/2`，而不是再次下发 `30/1` 进入场景。
 
-## 服务端修复
+## 根因与修复
 
-商城打开时已有 `shopSceneNpcReseedPending` 和对应场景名。现在
-`vm_net_mock_build_scene_resource_followup_response` 在处理最近完成的同场景
-`6/1 len=39` 请求时：
+旧实现把商城返回也放在“最近完成场景”的 90 tick（`VM_SCHED_FRAME_MS=100`，即 9 秒）
+分支内。玩家在商城停留超过 9 秒后，已存在的、同会话同场景的
+`shopSceneNpcReseedPending` 被跳过，因而缺少 `30/2`。
 
-1. 在消费 NPC 重播标记前，确认该请求是否属于同一场景的商城返回。
-2. 先下发场景资源、任务和一次性 NPC 列表。
-3. 仅对匹配的商城返回，最后追加一个不含 `posinfo` 的 `30/2`。
-4. 普通同场景刷新仍不追加 `30/2`，避免重复结束或重新进入场景。
+`vm_net_mock_build_scene_resource_followup_response` 现在以显式的商城返回生命周期标记
+作为独立的进入条件：只要标记仍匹配当前会话和原场景，就会重建一次 NPC 并下发
+无位置的 `30/2`；场景改变时该标记仍会被取消。普通场景重复请求仍保持原来的 90 tick
+防重复逻辑。
 
-新增日志字段：
+## 回归覆盖
 
-```text
-mock_scene_resource_followup_repeat_ack ... shop_return=1 completion=30/2-no-posinfo
-```
-
-## 回归
-
-`tmp/scene-npc-lifecycle-regression.php` 使用真实的 `WT 6/1 len=39` 顺序覆盖：
-
-- 首次进入场景；
-- 打开商城并加载各商城分页；
-- 商城返回，必须重播 NPC 并收到不含 `posinfo` 的 `30/2`；
-- 随后的稳定刷新不得再次收到 NPC 列表或 `30/2`；
-- 返回标题后重新登录。
-
-本地结果：
-
-```text
-scene npc lifecycle regression passed startup_len=795 shop_return_len=620 steady_refresh_len=221 relogin_preinit_poll_len=0 relogin_startup_len=795
-```
-
+`tmp/scene-npc-lifecycle-regression.php` 在商城页面请求后等待 10 秒（超过旧窗口），再
+检查商城返回响应同时具有非空 `27/11` NPC 列表和无 `posinfo` 的 `30/2`。随后一次稳定
+场景刷新仍不得重复 NPC 列表或 `30/2`。

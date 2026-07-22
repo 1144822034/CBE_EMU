@@ -582,6 +582,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 sceneNpcActorId = 0;
     const char *currentScene = NULL;
     bool startupSceneAlreadyEntered = false;
+    bool recentCompletedScene = false;
+    bool shopReturnReload = false;
     bool completeTeleportResourceEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
     bool useDownloadedTarget = false;
@@ -658,11 +660,25 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
                                  (!g_vm_net_mock_last_scene_change_target_valid &&
                                   !g_vm_net_mock_last_completed_scene_change_target_valid);
+    recentCompletedScene =
+        !g_vm_net_mock_last_scene_change_target_valid &&
+        currentScene != NULL &&
+        vm_net_mock_is_recent_completed_scene_name(currentScene, 90);
+    /*
+     * This is session-scoped provenance from the actual shop-open request.
+     * Unlike the generic completed-scene reuse guard, it remains valid until
+     * this same scene has received the one matching mmShop -> mmGame return
+     * completion (or the session changes scenes).  A player can legitimately
+     * spend longer than the 90-tick reuse window in the shop.
+     */
+    shopReturnReload =
+        !g_vm_net_mock_last_scene_change_target_valid &&
+        currentScene != NULL &&
+        vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
     if (!g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
-        vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
+        (recentCompletedScene || shopReturnReload))
     {
-        bool shopReturnReload = vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
         u32 objectStart = 0;
 
         /*
@@ -676,9 +692,10 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * post-enter refresh only. The scene is already live on screen.
          *
          * mmShop is different: returning from it constructs a fresh mmGame
-         * shell while the service still sees the same, recently completed
-         * scene. The shop-open lifecycle flag distinguishes that reload from a
-         * normal visible-scene repeat. JianghuOL.CBE:0x01039770 handles 30/2
+         * shell. The shop-open lifecycle flag distinguishes that reload from a
+         * normal visible-scene repeat; it must not be gated by the generic
+         * recent-scene window because the player may browse the shop for longer
+         * than nine seconds. JianghuOL.CBE:0x01039770 handles 30/2
          * and always reaches ResetDownloadState at 0x0103993C; without
          * posinfo it does not invoke the scene-position entry method. Append
          * that position-preserving completion only for the matching shop
@@ -708,11 +725,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
             objectCount += 1;
         }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u shop_return=%u completion=%s\n",
+        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u completion=%s\n",
                currentScene,
                objectCount,
                pos,
                g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
+               recentCompletedScene ? 1u : 0u,
                shopReturnReload ? 1u : 0u,
                shopReturnReload ? "30/2-no-posinfo" : "none");
         vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
