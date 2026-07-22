@@ -1492,13 +1492,21 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
         return -1;
     }
 
-    /* Validate the authoritative store before accepting a game client.  This
-     * also performs the one-time read-only import of legacy account/friend
-     * files when the freshly created tables are empty. */
+    /* Validate the transactional authority before accepting a game client.
+     * Legacy files and payload snapshots are allowed only during the first
+     * migration; after the seal is recorded, an absent relational row is
+     * surfaced as data loss instead of silently restoring an old snapshot. */
+    if (!vm_mock_service_mysql_authority_prepare())
+    {
+        printf("[error][mock-service] mysql persistence unavailable reason=authority-prepare error=%s\n",
+               vm_mysql_last_error());
+        return -1;
+    }
     vm_mock_service_account_db_load();
     vm_mock_service_friend_db_load();
     if (!g_vm_mock_service_account_db_valid || !g_vm_mock_service_friend_db_valid ||
-        !vm_mock_service_migrate_account_role_databases())
+        !vm_mock_service_migrate_account_role_databases() ||
+        !vm_mock_service_mysql_authority_seal())
     {
         printf("[error][mock-service] mysql persistence unavailable error=%s\n",
                vm_mysql_last_error());

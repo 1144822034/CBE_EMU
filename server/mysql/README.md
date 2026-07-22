@@ -172,6 +172,10 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `server_monsters`：后台保存的怪物等级、类型、战斗属性、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 
-服务启动时会连接 MySQL 并验证这些表。关系表为空时，旧 payload 备份或 `bin/nvram` 服务端二进制文件仅作为一次性迁移来源读取；迁移完成后的正常保存只写关系表，不再写回 payload 或旧文件。
+服务启动时会连接 MySQL 并验证这些表。首次完成关系表迁移后，服务会在
+`server_data_migrations` 写入 `mysql-authoritative-v1` 标记。标记写入前，旧 payload
+备份或 `bin/nvram` 服务端二进制文件仅可作为一次性迁移来源读取；标记写入后 MySQL
+关系表是唯一权威来源，服务不会在重启时再次回放旧快照。若已封印的数据库缺少关系行，
+请从备份恢复或显式执行迁移，不要依赖旧快照自动覆盖当前数据。
 
 模拟器自身的 NVRAM、资源文件和更新缓存不属于服务端玩家数据，仍保持原有文件机制。

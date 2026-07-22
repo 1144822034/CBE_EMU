@@ -4568,7 +4568,10 @@ static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
-static void vm_net_mock_role_db_save(const char *reason);
+static bool vm_net_mock_role_db_save(const char *reason);
+static bool vm_mock_service_mysql_authority_prepare(void);
+static bool vm_mock_service_mysql_authority_seal(void);
+static bool vm_mock_service_mysql_authority_is_sealed(void);
 static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
                                                         u32 itemId,
                                                         u32 count,

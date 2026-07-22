@@ -3954,7 +3954,15 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
     }
     before = role->wcoin;
     after = vm_net_mock_role_add_wcoin(role, amount);
-    vm_net_mock_role_db_save("admin-wcoin-add");
+    if (!vm_net_mock_role_db_save("admin-wcoin-add"))
+    {
+        role->wcoin = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "role persistence failed";
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
     vm_mock_service_account_capture(state);
     printf("[info][mock-service] account_wcoin_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
            accountId,
@@ -3997,7 +4005,15 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
     before = role->money;
     after = (0xffffffffu - before < amount) ? 0xffffffffu : before + amount;
     role->money = after;
-    vm_net_mock_role_db_save("admin-money-add");
+    if (!vm_net_mock_role_db_save("admin-money-add"))
+    {
+        role->money = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "role persistence failed";
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
     vm_mock_service_account_capture(state);
     printf("[info][mock-service] account_money_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
            accountId,
