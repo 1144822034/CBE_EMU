@@ -1790,6 +1790,8 @@ typedef struct
     u32 battleMemberHpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     u32 battleMemberMp[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     u32 battleMemberMpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    vm_net_mock_battle_stat_modifier
+        battleMemberModifiers[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     u8 battleRoundActedMask;
     u32 battleRoundSerial;
     bool battleRoundTerminalPending;
@@ -3831,6 +3833,9 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     memset(team->battleMemberHpMax, 0, sizeof(team->battleMemberHpMax));
     memset(team->battleMemberMp, 0, sizeof(team->battleMemberMp));
     memset(team->battleMemberMpMax, 0, sizeof(team->battleMemberMpMax));
+    /* Timed skill effects are scoped to this battle instance.  A new battle
+     * must never inherit a previous encounter's modifier rows. */
+    memset(team->battleMemberModifiers, 0, sizeof(team->battleMemberModifiers));
     for (u8 i = 0; i < participantCount; ++i)
     {
         vm_mock_service_client_session *member =

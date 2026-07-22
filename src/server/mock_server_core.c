@@ -33,6 +33,22 @@ typedef struct
     u32 responseLen;
 } vm_net_mock_rule;
 
+/* Timed stat effects are battle-local.  They deliberately never mutate the
+ * durable role row: skill.dsh duration is measured in battle rounds. */
+typedef struct
+{
+    u8 remainingRounds;
+    int32_t strength;
+    int32_t agility;
+    int32_t wisdom;
+    int32_t attack;
+    int32_t defense;
+    int32_t crit;
+    int32_t hit;
+    int32_t dodge;
+    int32_t resist;
+} vm_net_mock_battle_stat_modifier;
+
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
 static u32 g_netMockBackpackGridSeededRoleId = 0;
@@ -52,6 +68,21 @@ static u32 g_vmNetMockFollowupResponseEventType = 7;
  * The values describe the subtype-5 right-side roster in server wire order. */
 static u8 g_vm_net_mock_team_battle_party_count_current = 0;
 static u8 g_vm_net_mock_team_battle_actor_slot_current = 0;
+/* The active team-battle operation snapshots all three party HP rows before a
+ * skill is evaluated.  Friendly group skills update this authoritative copy;
+ * finish_operation then commits it atomically to the shared team state. */
+static u8 g_vm_net_mock_team_battle_member_count_current = 0;
+static u32 g_vm_net_mock_team_battle_member_hp_current[3] = {0, 0, 0};
+static u32 g_vm_net_mock_team_battle_member_hp_max_current[3] = {0, 0, 0};
+static u8 g_vm_net_mock_team_battle_group_hp_changed_mask = 0;
+static vm_net_mock_battle_stat_modifier
+    g_vm_net_mock_team_battle_member_modifiers_current[3];
+static u8 g_vm_net_mock_team_battle_group_modifier_changed_mask = 0;
+/* The role currently evaluating a battle action reads this copy.  In a solo
+ * battle it is the durable-in-session copy below; team prepare_operation
+ * replaces it with the acting member's shared snapshot. */
+static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_active_modifier_current;
+static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_solo_modifier;
 /* The ordinary solo builder bundles monster actions with every offensive
  * operation.  During a synchronized party battle this flag is armed only for
  * the last still-alive member that has not acted in the current round. */

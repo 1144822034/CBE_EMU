@@ -66,10 +66,19 @@ and clears visible MP after a spell. Subtype `4/7` field `mp` remains the
 settlement/recovery display delta; default battle-end MP recovery is `0`,
 overrideable through `CBE_BATTLE_RECOVER_MP` only for explicit experiments.
 
-Current contract: a skill response keeps type-1 scoped to the enemy target only.
-That record carries skill-derived HP damage in `valueA`, target MP delta `0` in
-`valueB`, and the mapped battle-effect index from `skill.dsh` column `技能图片`.
-The same `4/6`
+Current contract: a skill response uses `skill.dsh` column `目标指向` to choose
+the type-1 child list. A single-target enemy skill (`目标指向=3`) has one child;
+an enemy-wide skill (`目标指向=4`) has one child for every live enemy; and a
+positive-HP friendly-wide skill (`目标指向=2`, such as 三花聚顶) has one child for
+every living party member. Enemy child `valueA` is a negative target HP delta;
+friendly-heal child `valueA` is a positive, max-HP-clamped recovery amount.
+For a timed friendly-wide stat effect (`目标指向=2`, `生命变化=0`, nonzero `时效`
+and columns 16--24, such as 神臂担山), each living party member instead has a
+zero `valueA/valueB` child under the single type-1 record.  The duration and
+stat changes are server battle-state fields, not fake HP/MP deltas or durable
+role attribute updates.
+All use target MP delta `0` in `valueB`; the mapped battle-effect index from
+`skill.dsh` column `技能图片` is record-wide. The same `4/6`
 object carries `teaminfo = roleId, currentHp, postCostMp`, and the mock server
 also updates the selected role's MP in the local role database. `actionnum`
 still permits multiple records: if the enemy survives the skill hit, append the

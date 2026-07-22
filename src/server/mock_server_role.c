@@ -1613,6 +1613,75 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->resist = vm_net_mock_cap_u32(stats->resist, 9999);
 }
 
+static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change)
+{
+    if (change >= 0)
+    {
+        uint64_t raised = (uint64_t)value + (uint32_t)change;
+        return raised > 9999u ? 9999u : (u32)raised;
+    }
+    {
+        u32 reduction = (u32)(0 - change);
+        return value > reduction ? value - reduction : 0;
+    }
+}
+
+/* Timed spell modifiers live only for the active battle.  Applying them here
+ * keeps normal role panels and durable base attributes untouched while the
+ * existing battle formulas use the same derived-stat model as equipment. */
+static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_stats *stats)
+{
+    const vm_net_mock_battle_stat_modifier *modifier =
+        &g_vm_net_mock_battle_active_modifier_current;
+    u32 strengthBefore = 0;
+    u32 agilityBefore = 0;
+    u32 wisdomBefore = 0;
+
+    if (stats == NULL || modifier->remainingRounds == 0)
+        return;
+    strengthBefore = stats->strength;
+    agilityBefore = stats->agility;
+    wisdomBefore = stats->wisdom;
+    stats->strength = vm_net_mock_battle_apply_signed_stat_change(
+        stats->strength, modifier->strength);
+    stats->agility = vm_net_mock_battle_apply_signed_stat_change(
+        stats->agility, modifier->agility);
+    stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
+        stats->wisdom, modifier->wisdom);
+    /* The derived combat values were originally calculated from the unbuffed
+     * primary attributes.  Apply their exact formula deltas before any direct
+     * skill.dsh combat-stat deltas, so `力量+60` really changes attack rather
+     * than merely changing an otherwise unused display field. */
+    stats->attack = vm_net_mock_battle_apply_signed_stat_change(
+        stats->attack, (int32_t)(stats->strength / 2) -
+                      (int32_t)(strengthBefore / 2));
+    stats->hit = vm_net_mock_battle_apply_signed_stat_change(
+        stats->hit, ((int32_t)stats->agility - (int32_t)agilityBefore) * 2);
+    stats->dodge = vm_net_mock_battle_apply_signed_stat_change(
+        stats->dodge, (int32_t)(stats->agility / 2) -
+                      (int32_t)(agilityBefore / 2));
+    stats->crit = vm_net_mock_battle_apply_signed_stat_change(
+        stats->crit, (int32_t)(stats->agility / 3) -
+                     (int32_t)(agilityBefore / 3) +
+                     (int32_t)(stats->wisdom / 5) -
+                     (int32_t)(wisdomBefore / 5));
+    stats->resist = vm_net_mock_battle_apply_signed_stat_change(
+        stats->resist, (int32_t)(stats->wisdom / 2) -
+                       (int32_t)(wisdomBefore / 2));
+    stats->attack = vm_net_mock_battle_apply_signed_stat_change(
+        stats->attack, modifier->attack);
+    stats->defense = vm_net_mock_battle_apply_signed_stat_change(
+        stats->defense, modifier->defense);
+    stats->crit = vm_net_mock_battle_apply_signed_stat_change(
+        stats->crit, modifier->crit);
+    stats->hit = vm_net_mock_battle_apply_signed_stat_change(
+        stats->hit, modifier->hit);
+    stats->dodge = vm_net_mock_battle_apply_signed_stat_change(
+        stats->dodge, modifier->dodge);
+    stats->resist = vm_net_mock_battle_apply_signed_stat_change(
+        stats->resist, modifier->resist);
+}
+
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
 {
     vm_net_mock_player_stats stats;
@@ -2294,6 +2363,7 @@ static u32 vm_net_mock_battle_role_attack_default(void)
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_player_stats stats;
     vm_net_mock_role_build_player_stats(role, &stats);
+    vm_net_mock_battle_apply_active_stat_modifier(&stats);
     return stats.attack ? stats.attack : 1;
 }
 
@@ -2302,6 +2372,7 @@ static u32 vm_net_mock_battle_role_defense_default(void)
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_player_stats stats;
     vm_net_mock_role_build_player_stats(role, &stats);
+    vm_net_mock_battle_apply_active_stat_modifier(&stats);
     return stats.defense;
 }
 
@@ -2346,6 +2417,7 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
         return vm_net_mock_battle_player_damage_to_enemy(enemyId, enemyHpCurrent);
 
     vm_net_mock_role_build_player_stats(role, &playerStats);
+    vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
     coeffDamage += (uint64_t)playerStats.strength * skill->strengthCoeff;
     coeffDamage += (uint64_t)playerStats.agility * skill->agilityCoeff;
     coeffDamage += (uint64_t)playerStats.wisdom * skill->wisdomCoeff;

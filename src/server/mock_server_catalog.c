@@ -90,6 +90,20 @@ typedef struct
     u32 wisdomCoeff;
     u8 rawJob;
     u8 levelRequired;
+    /* skill.dsh `目标指向`: 2=friendly group, 3=one enemy, 4=enemy group. */
+    u8 targetDirection;
+    u8 durationRounds;
+    /* Timed battle modifiers from skill.dsh columns 16..24.  They are kept
+     * signed because defensive spell rows may trade one attribute for another. */
+    int32_t strengthChange;
+    int32_t agilityChange;
+    int32_t wisdomChange;
+    int32_t attackChange;
+    int32_t defenseChange;
+    int32_t critChange;
+    int32_t hitChange;
+    int32_t dodgeChange;
+    int32_t resistChange;
     char name[VM_NET_MOCK_SKILL_NAME_BYTES + 1];
 } vm_net_mock_skill_catalog_item;
 
@@ -322,6 +336,17 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
                                                u32 strengthCoeff,
                                                u32 agilityCoeff,
                                                u32 wisdomCoeff,
+                                               u32 targetDirection,
+                                               u32 durationRounds,
+                                               int32_t strengthChange,
+                                               int32_t agilityChange,
+                                               int32_t wisdomChange,
+                                               int32_t attackChange,
+                                               int32_t defenseChange,
+                                               int32_t critChange,
+                                               int32_t hitChange,
+                                               int32_t dodgeChange,
+                                               int32_t resistChange,
                                                const u8 *name,
                                                u32 nameLen)
 {
@@ -348,6 +373,17 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
     skill->rawJob = (u8)rawJob;
     skill->levelRequired = (u8)((levelRequired == 0) ? 1 :
                                 (levelRequired > 255 ? 255 : levelRequired));
+    skill->targetDirection = (u8)(targetDirection > 255 ? 255 : targetDirection);
+    skill->durationRounds = (u8)(durationRounds > 255 ? 255 : durationRounds);
+    skill->strengthChange = strengthChange;
+    skill->agilityChange = agilityChange;
+    skill->wisdomChange = wisdomChange;
+    skill->attackChange = attackChange;
+    skill->defenseChange = defenseChange;
+    skill->critChange = critChange;
+    skill->hitChange = hitChange;
+    skill->dodgeChange = dodgeChange;
+    skill->resistChange = resistChange;
     copyLen = vm_net_mock_shop_safe_name_len(name, nameLen, VM_NET_MOCK_SKILL_NAME_BYTES);
     if (copyLen > 0)
         memcpy(skill->name, name, copyLen);
@@ -509,6 +545,17 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
         u32 strengthCoeff = 0;
         u32 agilityCoeff = 0;
         u32 wisdomCoeff = 0;
+        u32 targetDirection = 0;
+        u32 durationRounds = 0;
+        int32_t strengthChange = 0;
+        int32_t agilityChange = 0;
+        int32_t wisdomChange = 0;
+        int32_t attackChange = 0;
+        int32_t defenseChange = 0;
+        int32_t critChange = 0;
+        int32_t hitChange = 0;
+        int32_t dodgeChange = 0;
+        int32_t resistChange = 0;
         const u8 *name = NULL;
         u32 nameLen = 0;
 
@@ -548,8 +595,42 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
             case 12:
                 mpCost = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
                 break;
+            case 10:
+                /* `目标指向`: authoritative battle target scope. */
+                targetDirection = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
+            case 9:
+                durationRounds = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
             case 14:
                 hpChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 16:
+                strengthChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 17:
+                agilityChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 18:
+                wisdomChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 19:
+                attackChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 20:
+                defenseChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 21:
+                critChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 22:
+                hitChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 23:
+                dodgeChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
+                break;
+            case 24:
+                resistChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
                 break;
             case 29:
                 strengthCoeff = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
@@ -574,6 +655,17 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
                                                strengthCoeff,
                                                agilityCoeff,
                                                wisdomCoeff,
+                                               targetDirection,
+                                               durationRounds,
+                                               strengthChange,
+                                               agilityChange,
+                                               wisdomChange,
+                                               attackChange,
+                                               defenseChange,
+                                               critChange,
+                                               hitChange,
+                                               dodgeChange,
+                                               resistChange,
                                                name, nameLen))
         {
             ++added;
@@ -600,15 +692,18 @@ static u32 vm_net_mock_load_skill_catalog(void)
     if (skillCount == 0)
     {
         (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 14, 50, 10,
-                                                -130, 50, 0, 0,
+                                                -130, 50, 0, 0, 3, 0,
+                                                0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xcd\xf2\xbd\xa3\xd6\xef\xcf\xc9\x31",
                                                 9);
         (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 1, 50, 20,
-                                                -75, 0, 50, 0,
+                                                -75, 0, 50, 0, 3, 0,
+                                                0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xb7\xe7\xce\xe8\xc8\xd0\xd0\xd0\x31",
                                                 9);
         (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 7, 50, 5,
-                                                -30, 0, 0, 110,
+                                                -30, 0, 0, 110, 3, 0,
+                                                0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xe7\xca\xd1\xd7\xbb\xc3\xb7\xa8\x31",
                                                 9);
         printf("[warn][network] mock_skill_catalog fallback=skill.dsh-not-found total=%u\n",
