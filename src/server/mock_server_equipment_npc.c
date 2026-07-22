@@ -829,6 +829,12 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u32 enemyCount = vm_net_mock_battle_enemy_count_current();
     u32 dropRate = stats.dropRatePercent;
     u32 dropItemIdDefault = stats.dropItemId;
+    u32 rolledDropCount = 0;
+    u32 taskMaterialRemaining = 0;
+    bool dropIsTaskMaterial = false;
+    bool dropPolicyOk = true;
+    bool dropEligible = false;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     if (dropItemIdOut)
         *dropItemIdOut = 0;
@@ -867,13 +873,39 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     }
     dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_RATE", dropRate);
     dropItemIdDefault = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_ITEM_ID", dropItemIdDefault);
-    if (dropItemIdDefault != 0)
+    if (dropItemIdDefault != 0 && role != NULL)
+    {
+        dropPolicyOk = vm_net_mock_task_material_drop_policy(
+            role->roleId, dropItemIdDefault, &dropIsTaskMaterial,
+            &taskMaterialRemaining);
+        dropEligible = dropPolicyOk &&
+                       (!dropIsTaskMaterial || taskMaterialRemaining != 0);
+    }
+    if (dropEligible)
     {
         for (u32 i = 0; i < enemyCount; ++i)
         {
             if (vm_net_mock_battle_roll_percent(dropRate))
                 ++dropCount;
         }
+        rolledDropCount = dropCount;
+        /* The task-progress writer clamps each matching task independently.
+         * A material grant must therefore be capped to the largest remaining
+         * matching requirement rather than adding surplus items once every
+         * accepted task is already complete. */
+        if (dropIsTaskMaterial && dropCount > taskMaterialRemaining)
+            dropCount = taskMaterialRemaining;
+    }
+    if (dropItemIdDefault != 0)
+    {
+        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u item=%u rate=%u "
+               "task_material=%u remaining=%u policy=%s eligible=%u rolled=%u grant=%u\n",
+               g_vm_net_mock_battle_enemy_id_current,
+               role ? role->roleId : 0,
+               dropItemIdDefault, dropRate,
+               dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
+               dropPolicyOk ? "ok" : "unavailable",
+               dropEligible ? 1u : 0u, rolledDropCount, dropCount);
     }
     if (dropItemIdDefault != 0 && dropCount != 0)
     {

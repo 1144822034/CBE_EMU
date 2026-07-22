@@ -1863,6 +1863,87 @@ static const vm_net_mock_task_state_list_row *vm_net_mock_task_state_list_find(
     return NULL;
 }
 
+/* Task material drops are authored as ordinary monster drops, but their
+ * eligibility belongs to the role's accepted task state.  The battle reward
+ * path calls this before adding an item to the backpack; this routine uses the
+ * same catalog and persisted progress that task settlement uses afterwards.
+ *
+ * `remainingOut` is the greatest remaining requirement among active matching
+ * tasks.  The subsequent battle-progress path applies a single received item
+ * to every matching task row, so summing would over-grant materials when two
+ * accepted tasks happen to require the same item. */
+static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
+                                                  bool *isTaskMaterialOut,
+                                                  u32 *remainingOut)
+{
+    vm_net_mock_task_state_list_row states[VM_NET_MOCK_TASK_CATALOG_MAX];
+    u32 stateCount = 0;
+    bool isTaskMaterial = false;
+    u32 remaining = 0;
+
+    if (isTaskMaterialOut)
+        *isTaskMaterialOut = false;
+    if (remainingOut)
+        *remainingOut = 0;
+    if (roleId == 0 || itemId == 0 || !vm_net_mock_load_task_catalog())
+        return false;
+
+    for (u32 i = 0; i < g_vm_net_mock_task_catalog_count; ++i)
+    {
+        const vm_net_mock_task_definition *task = &g_vm_net_mock_task_catalog[i];
+
+        if (!task->enabled)
+            continue;
+        if ((task->requirementType1 == 1 &&
+             task->requirementId1 == itemId && task->requirementCount1 != 0) ||
+            (task->requirementType2 == 1 &&
+             task->requirementId2 == itemId && task->requirementCount2 != 0))
+        {
+            isTaskMaterial = true;
+            break;
+        }
+    }
+    if (!isTaskMaterial)
+        return true;
+
+    if (!vm_net_mock_task_state_list_load(roleId, true, states,
+                                          VM_NET_MOCK_TASK_CATALOG_MAX,
+                                          &stateCount))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < stateCount; ++i)
+    {
+        const vm_net_mock_task_definition *task =
+            vm_net_mock_task_catalog_find_by_id(states[i].taskId);
+        u32 taskRemaining = 0;
+
+        /* State 2 has already met its requirements and must not continue to
+         * receive material drops while waiting for its turn-in dialog. */
+        if (task == NULL || states[i].state != 1)
+            continue;
+        if (task->requirementType1 == 1 && task->requirementId1 == itemId &&
+            task->requirementCount1 > states[i].progress1)
+        {
+            taskRemaining = task->requirementCount1 - states[i].progress1;
+        }
+        if (task->requirementType2 == 1 && task->requirementId2 == itemId &&
+            task->requirementCount2 > states[i].progress2)
+        {
+            u32 secondRemaining = task->requirementCount2 - states[i].progress2;
+            if (secondRemaining > taskRemaining)
+                taskRemaining = secondRemaining;
+        }
+        if (taskRemaining > remaining)
+            remaining = taskRemaining;
+    }
+    if (isTaskMaterialOut)
+        *isTaskMaterialOut = true;
+    if (remainingOut)
+        *remainingOut = remaining;
+    return true;
+}
+
 static bool vm_net_mock_task_definition_available(
     const vm_net_mock_task_definition *task,
     const vm_net_mock_role_state *role,

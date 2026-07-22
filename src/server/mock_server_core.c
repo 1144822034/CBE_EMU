@@ -4627,6 +4627,13 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                                                    u32 enemyCount,
                                                    u32 dropItemId,
                                                    u32 dropCount);
+/* Resolve whether a configured monster drop is a task material and, when it
+ * is, how many units the active role can still legitimately receive.  Battle
+ * settlement calls this before mutating the backpack; task progress consumes
+ * the same authoritative state after a successful grant. */
+static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
+                                                  bool *isTaskMaterialOut,
+                                                  u32 *remainingOut);
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
