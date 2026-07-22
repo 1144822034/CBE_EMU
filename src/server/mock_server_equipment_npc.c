@@ -3537,9 +3537,48 @@ static const char *vm_mock_service_find_session_account(u32 clientId)
     return session ? session->accountId : NULL;
 }
 
+/* A CBE client restart allocates a new transport client id.  A direct process
+ * exit does not necessarily emit CBMS CLIENT_DISCONNECT, so waiting for the
+ * heartbeat timeout would leave the prior incarnation visible as a second
+ * copy of the same role during the next scene's 2/10 baseline.  Authentication
+ * is the authoritative ownership boundary: one account has one live service
+ * session.  Reuse the normal offline transition so team/trade/duel state is
+ * removed consistently before the new client enters a scene. */
+static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
+                                                     const char *accountId)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    u32 displacedCount = 0;
+
+    if (authenticatedClientId == 0 || accountId == NULL || accountId[0] == 0)
+        return 0;
+    while (session != NULL)
+    {
+        vm_mock_service_client_session *next = session->next;
+
+        if (session->clientId != authenticatedClientId &&
+            strcmp(session->accountId, accountId) == 0 &&
+            (session->roleOnline || session->onlinePresenceValid ||
+             session->sceneVisibleReady))
+        {
+            printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s\n",
+                   accountId,
+                   authenticatedClientId,
+                   session->clientId,
+                   session->onlineRoleId,
+                   session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-");
+            vm_mock_service_session_mark_offline(session, "account-login-takeover");
+            ++displacedCount;
+        }
+        session = next;
+    }
+    return displacedCount;
+}
+
 static void vm_mock_service_bind_session_account(u32 clientId, const char *accountId)
 {
     vm_mock_service_client_session *session = NULL;
+    u32 displacedCount = 0;
     if (clientId == 0 || accountId == NULL || accountId[0] == 0)
         return;
     session = vm_mock_service_get_or_create_client_session(clientId);
@@ -3559,8 +3598,10 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
             session,
             sameAccount ? "title-login-rebind" : "account-rebind");
     }
+    displacedCount = vm_mock_service_session_take_over_account(clientId, accountId);
     snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
-    printf("[info][mock-service] session_bind client=%08x account=%s\n", clientId, accountId);
+    printf("[info][mock-service] session_bind client=%08x account=%s displaced=%u\n",
+           clientId, accountId, displacedCount);
 }
 
 static void vm_mock_service_capture_session_presence(u32 clientId)

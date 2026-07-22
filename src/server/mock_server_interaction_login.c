@@ -586,6 +586,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     bool currentSceneReload = false;
     bool sceneShellAlreadyEntered = false;
     bool shopReturnReload = false;
+    bool tongquetaiNpcSeedAfterCurrentCompletion = false;
     bool completeTeleportResourceEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
     bool useDownloadedTarget = false;
@@ -690,6 +691,21 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+    /* See the paired direct-map-stone completion response.  That WT2/3 sends
+     * the required empty 27/11 gate object and leaves this one-shot catalog
+     * pending.  WT6/1 is the first client-requested scene-runtime phase after
+     * the no-posinfo 30/2, so it owns the non-empty 27/11 NPC creation data. */
+    vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(currentScene);
+    tongquetaiNpcSeedAfterCurrentCompletion =
+        recentCompletedScene &&
+        !shopReturnReload &&
+        currentScene != NULL &&
+        vm_net_mock_scene_is_penglai01(currentScene) &&
+        !g_vm_net_mock_scene_moveinfo_npc_seeded &&
+        g_vm_net_mock_scene_moveinfo_npc_pending &&
+        g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
+        vm_net_mock_scene_names_equal_loose(
+            g_vm_net_mock_scene_moveinfo_npc_pending_scene, currentScene);
     if (!g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         (recentCompletedScene || shopReturnReload))
@@ -716,8 +732,20 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * that position-preserving completion only for the matching shop
          * return, after all scene/NPC objects have been delivered.
          */
-        if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos, &objectCount,
-                                                         currentScene, false, true))
+        if (tongquetaiNpcSeedAfterCurrentCompletion)
+        {
+            if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                    out, outCap, &pos, currentScene,
+                    "tongquetai-current-scene-completion-followup"))
+            {
+                return 0;
+            }
+            objectCount += 1;
+            printf("[info][network] mock_scene_npc_seed_deliver scene=%s phase=WT6/1 after=current-scene-completion\n",
+                   currentScene);
+        }
+        else if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+                     out, outCap, &pos, &objectCount, currentScene, false, true))
         {
             return 0;
         }

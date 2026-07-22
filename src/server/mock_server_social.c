@@ -705,6 +705,7 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
     u8 fb4Type = 1;
     bool hasFb4 = false;
     bool closeTeleportDirectEnter = false;
+    bool deferTongquetaiNpcSeedToFollowup = false;
 
     if (outCap < pos || !vm_net_mock_is_current_scene_completion_request(request, requestLen))
         return 0;
@@ -716,6 +717,9 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
         vm_net_mock_scene_names_equal_loose(
             target.scene,
             g_vm_net_mock_last_scene_change_target.scene);
+    deferTongquetaiNpcSeedToFollowup =
+        closeTeleportDirectEnter &&
+        vm_net_mock_scene_is_penglai01(target.scene);
     hasFb4 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 4);
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, g_vm_net_mock_last_scene_change_fb4_type);
     if (!hasFb4 && vm_net_mock_read_current_player_grid(NULL, NULL, &currentX, &currentY, NULL, NULL))
@@ -751,9 +755,22 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
                                                          target.scene, target.x, target.y))
         return 0;
     objectCount += 1;
-    if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                       target.scene,
-                                                       "current-scene-completion"))
+    /*
+     * The direct Tongquetai map-stone route is special in one respect: this
+     * WT2/3 must close the loading shell with 30/2, but the client's next
+     * WT6/1 is the first scene-runtime follow-up where 27/11 can create visible
+     * NPC nodes.  Consuming the one-shot catalog here made the later WT6/1 a
+     * repeat refresh and left the completed map without NPCs.
+     *
+     * Still answer the requested 27/11 object now so the fb-target gate stays
+     * in sync; keep the catalog pending and deliver its non-empty form from
+     * that real WT6/1 request below.
+     */
+    if (deferTongquetaiNpcSeedToFollowup
+            ? !vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos)
+            : !vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
+                                                              target.scene,
+                                                              "current-scene-completion"))
         return 0;
     objectCount += 1;
     if (!vm_net_mock_append_fb_target_result4_object(out, outCap, &pos,
@@ -803,6 +820,11 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
         g_vm_net_mock_teleport_stone_direct_enter_pending = false;
         printf("[info][network] mock_teleport_stone_current_scene_complete scene=%s pos=(%u,%u) objects=%u resp=%u response=27-family+30/2-no-posinfo action=reset-download-state\n",
                target.scene, target.x, target.y, objectCount, pos);
+        if (deferTongquetaiNpcSeedToFollowup)
+        {
+            printf("[info][network] mock_scene_npc_seed_defer scene=%s phase=current-scene-completion next=WT6/1 reason=tongquetai-shell-not-runtime-ready\n",
+                   target.scene);
+        }
         vm_autotest_note("mock_teleport_stone_current_scene_complete scene=%s pos=(%u,%u) objects=%u response=30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
                          target.scene, target.x, target.y, objectCount);
     }
