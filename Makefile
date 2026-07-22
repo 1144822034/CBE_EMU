@@ -1,5 +1,20 @@
 CC := gcc
 
+MOCK_SERVER_FRAGMENTS := \
+	src/server/mock-server.c \
+	src/server/mock_server_core.c \
+	src/server/mock_server_catalog.c \
+	src/server/mock_server_role.c \
+	src/server/mock_server_equipment_npc.c \
+	src/server/mock_server_scene_task.c \
+	src/server/mock_server_scene_sync.c \
+	src/server/mock_server_guild.c \
+	src/server/mock_server_social.c \
+	src/server/mock_server_battle.c \
+	src/server/mock_server_interaction_login.c \
+	src/server/mock_server_dispatch.c \
+	src/server/mock_server_transport.c
+
 COMMON_SOURCES := \
 	src/gifDecode.c \
 	src/cbeParser.c \
@@ -47,7 +62,7 @@ all: build
 
 build: $(TARGET)
 
-$(OBJDIR)/main.o: src/main.c src/mock-server.c src/web_admin_server.c \
+$(OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h \
 	src/web_admin_monsters.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h

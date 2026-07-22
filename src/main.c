@@ -2504,7 +2504,7 @@ static uc_err scheduler_dispatch_net_tasks(void)
 #ifdef CBE_CLIENT_ONLY
 #include "network-client.c"
 #else
-#include "mock-server.c"
+#include "server/mock-server.c"
 #endif
 
 #define VM_NAMED_RESOURCE_DOWNLOAD_MAX (1024u * 1024u)
