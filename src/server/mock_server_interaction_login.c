@@ -61,6 +61,8 @@ static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *reques
     u16 targetX = 0;
     u16 targetY = 0;
     bool saveImmediately = false;
+    vm_net_mock_scene_change_target target;
+    char sourceScene[64];
 
     if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
         return 0;
@@ -95,6 +97,7 @@ static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *reques
     {
         return 0;
     }
+    snprintf(sourceScene, sizeof(sourceScene), "%s", scene ? scene : "");
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 1, &objectStart))
         return 0;
@@ -102,10 +105,30 @@ static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *reques
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    /* `30/1 {scene,posinfo}` is the native scene-enter contract
+     * (EnterSceneByMapName), not an in-place coordinate update.  The target
+     * position is persisted below, but the source must stop being eligible for
+     * old-scene nearby baselines before the response reaches the client.  This
+     * special portal previously skipped the ordinary scene-target lifecycle,
+     * leaving sceneVisibleScene on the old TaoHuaDao map until a later
+     * follow-up happened to promote it. */
+    memset(&target, 0, sizeof(target));
+    snprintf(target.scene, sizeof(target.scene), "%s", targetScene);
+    target.x = targetX;
+    target.y = targetY;
+    target.mapType = 2;
+    target.hasSceEntry = true;
+    target.needsSceneDownload = false;
+    vm_mock_service_mark_active_session_scene_pending(
+        &target, "special-scene-interaction-30-1");
     if (saveImmediately)
         vm_net_mock_save_player_pos_state(targetScene, targetX, targetY, "special-scene-interaction");
     else
         vm_net_mock_mark_pending_scene_pos_save(targetScene, targetX, targetY, "special-scene-interaction");
+    printf("[info][mock-service] special_scene_portal_pending client=%08x source=%s target=%s pos=(%u,%u) response=30/1 evidence=JianghuOL.CBE:0x010396D6+0x01018150\n",
+           g_vm_mock_service_active_client_id,
+           sourceScene[0] ? sourceScene : "-", target.scene, target.x, target.y);
     return pos;
 }
 
