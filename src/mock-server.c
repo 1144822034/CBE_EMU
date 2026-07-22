@@ -4400,7 +4400,7 @@ typedef struct
 } vm_net_mock_role_db_file;
 
 #define VM_MOCK_SERVICE_ACCOUNT_DB_VERSION 1
-#define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 64
+#define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 1000000
 #define VM_MOCK_SERVICE_FRIEND_DB_VERSION 1
 #define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256
 
@@ -15611,6 +15611,18 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
     }
 }
 
+static bool vm_mock_service_shop_scene_npc_reseed_matches(const char *scene)
+{
+    vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
+
+    return session != NULL &&
+           session->shopSceneNpcReseedPending &&
+           session->shopSceneNpcReseedScene[0] != 0 &&
+           vm_net_mock_scene_name_is_safe(scene) &&
+           vm_net_mock_scene_names_equal_loose(session->shopSceneNpcReseedScene,
+                                               scene);
+}
+
 static int vm_mock_service_trade_client_index(const vm_mock_service_trade *trade,
                                               u32 clientId)
 {
@@ -18101,9 +18113,11 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
                 }
                 /* Scene actor slot zero is reserved by the runtime; recovered
                  * combat spawns occupy subsequent slots in SCE record order.
-                 * The subtype-5 parser also scans by x/y if this ordinal is no
-                 * longer the live slot, and the preceding 2/2 seed moves the
-                 * first matching actor-id row to this same coordinate. */
+                 * Autonomous battle creation has no client-selected node, so
+                 * it uses the same SCE record catalog that originally creates
+                 * the live scene nodes.  Normal collision challenges must not
+                 * use this selector: their request already identifies the
+                 * exact live node selected by the client. */
                 ++spawnIndex;
                 if (spawn.actorId == actorId)
                 {
@@ -33621,6 +33635,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     u8 objectCount = 0;
     vm_net_mock_scene_change_target target;
     bool recentCompletedTarget = false;
+    bool deferTeleportResourceCompletion = false;
     const char *currentScene = NULL;
     char missingResource[64];
     bool resourcesReady = false;
@@ -33643,6 +33658,13 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
                                 currentScene != NULL &&
                                 vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
                                 vm_net_mock_scene_names_equal_loose(currentScene, target.scene);
+    deferTeleportResourceCompletion =
+        !recentCompletedTarget &&
+        g_vm_net_mock_teleport_stone_direct_enter_pending &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        vm_net_mock_scene_names_equal_loose(
+            g_vm_net_mock_last_scene_change_target.scene,
+            target.scene);
     if (!recentCompletedTarget &&
         vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
     {
@@ -33714,12 +33736,23 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, 1);
     if (splitScenePosCommit)
     {
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
-        objectCount += 1;
+        /*
+         * A deferred teleport 30/1 can make the destination the service's
+         * current scene before the client has installed its SCE-declared MAP,
+         * Actor and GIF dependencies.  A 30/2 here calls ResetDownloadState
+         * and snapshots the target as completed while WT18/7 downloads are
+         * still in flight.  Keep the request's other result objects, but leave
+         * the scene lifecycle pending until the post-download WT6/1 callback.
+         */
+        if (!deferTeleportResourceCompletion)
+        {
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
+                return 0;
+            if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
+                return 0;
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
     }
     else
     {
@@ -33768,6 +33801,18 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         objectCount += 1;
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (deferTeleportResourceCompletion)
+    {
+        g_vm_net_mock_last_scene_change_target = target;
+        g_vm_net_mock_last_scene_change_target_valid = true;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_last_scene_change_fb4_type = fb4Type;
+        printf("[info][network] mock_scene_change_teleport_resource_pending scene=%s pos=(%u,%u) objects=%u resp=%u completion=defer-30/2-until-WT6/1 evidence=WT18/7-client-download\n",
+               target.scene, target.x, target.y, objectCount, pos);
+        vm_autotest_note("mock_scene_change_teleport_resource_pending scene=%s pos=(%u,%u) objects=%u response=no-30/2 completion=WT6/1-after-download evidence=JianghuOL.CBE:0x01037000+0x01039770\n",
+                         target.scene, target.x, target.y, objectCount);
+        return pos;
+    }
     if (vm_net_mock_scene_change_target_is_unresolved_existing_scene(&target))
     {
         /*
@@ -42677,6 +42722,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     u8 battleStartSubtype = useSceneMonsterStart ? 5 : 10;
     bool seedSceneMonsterMoveinfo = useSceneMonsterStart &&
                                     vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_MOVEINFO", 1) != 0;
+    const char *sceneMonsterTargetSource = useSceneMonsterStart
+                                               ? "request-live-node"
+                                               : "not-applicable";
     u8 battleEnemyCount = 1;
     bool prefillEnemyTemplate = false;
     bool prefillPlayerTemplate = false;
@@ -42733,19 +42781,16 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(id);
     g_vm_net_mock_battle_enemy_id_current = requestedEnemyId;
     enemyWireId = vm_net_mock_resolve_battle_enemy_id(requestedEnemyId, &enemyTable, enemyTableIds);
-    if (seedSceneMonsterMoveinfo)
-    {
-        /*
-         * net_handle_actor_move_info case 2 locates a scene node by actorId
-         * only. The bundled SCE has multiple 毒泥怪 rows with actorId 105, so
-         * use the same first-active row for both moveinfo and subtype-5 battle
-         * start until the unique live monster instance id contract is recovered.
-         */
-        (void)vm_net_mock_select_scene_actor_moveinfo_target(requestedEnemyId,
-                                                            &sceneMonsterIndex,
-                                                            &sceneMonsterPosX,
-                                                            &sceneMonsterPosY);
-    }
+    /*
+     * The normal collision request's index/posx/posy is the client's live
+     * scene-node tuple consumed by mmBattle subtype 5.  Do not replace it with
+     * the first same-actor-id SCE row: duplicate actor ids are legal, and the
+     * offline row can be absent from the client's current 25-node table.
+     *
+     * The preceding 2/2 object still seeds HP/MP through the client's
+     * actor-id lookup.  Its outer x/y updates node+24/+26 and cannot establish
+     * the node+240/+244 coordinate contract used by HandleBattleStartMsg.
+     */
     if (playerOnRight && !useSceneMonsterStart)
         enemyWireId = requestedEnemyId;
     prefillEnemyTemplate = !playerOnRight &&
@@ -42892,7 +42937,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         if (perEnemyMaxHp < perEnemyHp)
             perEnemyMaxHp = perEnemyHp;
         vm_net_mock_battle_reset_enemy_hp_from_stats(requestedEnemyId);
-        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u) prefill_player=%u prefill_enemy=%u objects=%u\n",
+        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u) req_index=%u req_pos=(%u,%u) target_source=%s prefill_player=%u prefill_enemy=%u objects=%u\n",
                id, requestedEnemyId,
                g_vm_net_mock_battle_role_id_current,
                vm_net_mock_battle_enemy_count_current(),
@@ -42907,10 +42952,12 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp),
                battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
                sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
+               index, posx, posy,
+               sceneMonsterTargetSource,
                prefillPlayerTemplate ? 1u : 0u,
                prefillEnemyTemplate ? 1u : 0u,
                responseObjectCount);
-        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
+        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) target_source=%s subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
                          id, requestedEnemyId,
                          g_vm_net_mock_battle_role_id_current,
                          vm_net_mock_battle_enemy_count_current(),
@@ -42929,6 +42976,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                          vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", stats.gold),
                          sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,
                          index, posx, posy,
+                         sceneMonsterTargetSource,
                          battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
                           enemyTable, enemyTableIds[0], enemyTableIds[1],
                           enemyTableIds[2], enemyTableIds[3]);
@@ -43518,6 +43566,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     u32 sceneNpcActorId = 0;
     const char *currentScene = NULL;
     bool startupSceneAlreadyEntered = false;
+    bool completeTeleportResourceEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
     bool useDownloadedTarget = false;
     u32 timingStartMs = 0;
@@ -43530,15 +43579,76 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         return 0;
 
     currentScene = vm_net_mock_current_scene_name();
+    includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
+                        vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
+    completeTeleportResourceEnter =
+        g_vm_net_mock_teleport_stone_direct_enter_pending &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        currentScene != NULL &&
+        vm_net_mock_scene_names_equal_loose(
+            currentScene,
+            g_vm_net_mock_last_scene_change_target.scene);
+
+    if (completeTeleportResourceEnter)
+    {
+        vm_net_mock_scene_change_target target =
+            g_vm_net_mock_last_scene_change_target;
+        u32 objectStart = 0;
+
+        /*
+         * This WT6/1 is emitted by scene_runtime_init_and_sync only after the
+         * resource queue's final WT18/7 install callback has returned.  It is
+         * therefore the first packet-visible point where the teleport can be
+         * closed without racing DrawSceneMapLayer.  Complete with a no-posinfo
+         * 30/2 so ResetDownloadState runs without a second scene-position
+         * entry.
+         */
+        if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos,
+                                                         &objectCount,
+                                                         target.scene,
+                                                         false, true))
+            return 0;
+        if (!vm_net_mock_append_scene_resource_followup_objects(
+                out, outCap, &pos, &objectCount, target.scene,
+                includeSkillBooks, true, true, true,
+                false, false, false))
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                         &objectStart))
+            return 0;
+        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2,
+                                                       target.scene))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "teleport-resource-followup");
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        g_vm_net_mock_teleport_stone_map_enter_pending = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        (void)vm_mock_service_mark_active_session_scene_ready_from_role(
+            target.scene, "teleport-resource-followup");
+        printf("[info][network] mock_teleport_resource_followup_complete scene=%s pos=(%u,%u) objects=%u resp=%u completion=30/2-no-posinfo-after-WT18/7 evidence=JianghuOL.CBE:0x01037000+0x01039770\n",
+               target.scene, target.x, target.y, objectCount, pos);
+        vm_autotest_note("mock_teleport_resource_followup_complete scene=%s pos=(%u,%u) objects=%u response=resources+30/2-no-posinfo evidence=WT6/1-after-final-WT18/7\n",
+                         target.scene, target.x, target.y, objectCount);
+        return pos;
+    }
     startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
                                  (!g_vm_net_mock_last_scene_change_target_valid &&
                                   !g_vm_net_mock_last_completed_scene_change_target_valid);
-    includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
-                        vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
     if (!g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
     {
+        bool shopReturnReload = vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+        u32 objectStart = 0;
+
         /*
          * Runtime repeat after visible scene entry:
          * - the client can re-emit the full WT49 resource/task/other request
@@ -43548,9 +43658,18 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          *
          * Keep the requested resource/task objects, but acknowledge this as a
          * post-enter refresh only. The scene is already live on screen.
+         *
+         * mmShop is different: returning from it constructs a fresh mmGame
+         * shell while the service still sees the same, recently completed
+         * scene. The shop-open lifecycle flag distinguishes that reload from a
+         * normal visible-scene repeat. JianghuOL.CBE:0x01039770 handles 30/2
+         * and always reaches ResetDownloadState at 0x0103993C; without
+         * posinfo it does not invoke the scene-position entry method. Append
+         * that position-preserving completion only for the matching shop
+         * return, after all scene/NPC objects have been delivered.
          */
         if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos, &objectCount,
-                                                        currentScene, false, true))
+                                                         currentScene, false, true))
         {
             return 0;
         }
@@ -43561,16 +43680,30 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         {
             return 0;
         }
+        if (shopReturnReload)
+        {
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                             &objectStart))
+                return 0;
+            if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2,
+                                                           currentScene))
+                return 0;
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u\n",
+        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u shop_return=%u completion=%s\n",
                currentScene,
                objectCount,
                pos,
-               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
-        vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=resource-followup-no-30/1 age=%u\n",
-                         currentScene,
-                         objectCount,
-                         g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+               g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
+               shopReturnReload ? 1u : 0u,
+               shopReturnReload ? "30/2-no-posinfo" : "none");
+        vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
+                          currentScene,
+                          objectCount,
+                          shopReturnReload ? "resource-followup+30/2-no-posinfo" : "resource-followup-no-30/1",
+                          g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
         return pos;
     }
     hasActorOtherRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "Type", &actorOtherRequestType);
