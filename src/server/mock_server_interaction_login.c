@@ -583,6 +583,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     const char *currentScene = NULL;
     bool startupSceneAlreadyEntered = false;
     bool recentCompletedScene = false;
+    bool currentSceneReload = false;
+    bool sceneShellAlreadyEntered = false;
     bool shopReturnReload = false;
     bool completeTeleportResourceEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
@@ -664,6 +666,19 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         vm_net_mock_is_recent_completed_scene_name(currentScene, 90);
+    /*
+     * current-scene-reload has already sent its 30/1.  Its next WT 12/1 is
+     * therefore the first parser-safe point to deliver 27/11: the new mmGame
+     * scene shell exists, while sending another position-bearing enter would
+     * restart loading.  This provenance must not be inferred from the scene
+     * name or from the old completed target, because both can refer to the
+     * shell that was just discarded.
+     */
+    currentSceneReload =
+        !g_vm_net_mock_last_scene_change_target_valid &&
+        currentScene != NULL &&
+        vm_net_mock_is_recent_current_scene_reload(currentScene, 90);
+    sceneShellAlreadyEntered = startupSceneAlreadyEntered || currentSceneReload;
     /*
      * This is session-scoped provenance from the actual shop-open request.
      * Unlike the generic completed-scene reuse guard, it remains valid until
@@ -830,7 +845,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     timingStartMs = scheduler_get_tick_ms();
     if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos, &objectCount,
                                                     currentScene,
-                                                    startupSceneAlreadyEntered,
+                                                    sceneShellAlreadyEntered,
                                                     !g_vm_net_mock_last_scene_change_target_valid))
     {
         return 0;
@@ -847,7 +862,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     appendSceneRoomNpcAfterEnter = !keepBusinessGate &&
                                    vm_net_mock_scene_room_npc_seed_count(currentScene) > 0 &&
                                    vm_net_mock_env_u8("CBE_SCENE_FOLLOWUP_ROOM_NPC", 0) != 0;
-    if (keepBusinessGate || startupSceneAlreadyEntered)
+    if (keepBusinessGate || sceneShellAlreadyEntered)
     {
         u32 objectStart = 0;
         /*
@@ -941,6 +956,13 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     timingReadyMs = scheduler_get_tick_ms();
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (currentSceneReload)
+    {
+        vm_net_mock_consume_current_scene_reload(currentScene);
+        printf("[info][network] mock_scene_current_reload_npc_seed scene=%s catalog=%u completion=30/2-no-posinfo evidence=JianghuOL.CBE:0x01037998+0x01039770\n",
+               currentScene ? currentScene : "-",
+               g_vm_net_mock_scene_moveinfo_npc_seeded ? 1u : 0u);
+    }
     if (startupSceneAlreadyEntered)
         vm_net_mock_complete_startup_scene_followup(currentScene,
                                                     "scene-resource-followup",

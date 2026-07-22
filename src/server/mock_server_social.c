@@ -704,6 +704,18 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
     }
 
     /*
+     * This request is deliberately distinct from the short same-target retry:
+     * its detector rejects a recently completed arrival, so the client has
+     * opened a new local scene shell and is asking for the full 27/12 +
+     * 27/11 + 27/4 completion family.  The catalog guard used to be keyed only
+     * by scene name, causing this fresh shell to receive an empty 27/11 when
+     * the previous shell had the same map.  27/11 is the client parser path
+     * which creates the NPC nodes (JianghuOL.CBE:0x01037998); rearm exactly at
+     * this shell boundary, not on the ordinary repeat ack below.
+     */
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+
+    /*
      * Direct startup into saved `_03` already has the local scene shell on
      * screen before this same-target WT 2/3 completion arrives. The client
      * still wants the 27/12 + 27/11 + 27/4 + 7/42 completion family, but a
@@ -1389,6 +1401,15 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     {
         vm_net_mock_remember_scene_change_target(&target);
     }
+
+    /*
+     * The non-repeat post-enter contract is the other local-shell completion
+     * path.  It has no preceding 30/1 helper to arm the catalog, and may land
+     * on the same scene name as the old shell.  Make its 27/11 payload a fresh
+     * one-shot catalog before task prompts are rebuilt.  The recent-completed
+     * branch above remains untouched and continues to return an empty 27/11.
+     */
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
 
     /*
      * Evidence:

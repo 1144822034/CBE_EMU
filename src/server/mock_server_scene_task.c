@@ -2385,6 +2385,23 @@ static void vm_net_mock_mark_current_scene_reload(const char *scene)
     g_vm_net_mock_last_current_scene_reload_tick = g_schedulerTick;
 }
 
+/* The 30/1 current-scene reload arms a single subsequent 12/1 resource
+ * follow-up.  Once that follow-up has emitted its catalog and no-posinfo ack,
+ * leave no reload provenance behind for ordinary scene refresh requests. */
+static void vm_net_mock_consume_current_scene_reload(const char *scene)
+{
+    if (scene == NULL ||
+        !g_vm_net_mock_last_current_scene_reload_valid ||
+        !vm_net_mock_scene_names_equal_loose(scene,
+                                             g_vm_net_mock_last_current_scene_reload_scene))
+    {
+        return;
+    }
+    g_vm_net_mock_last_current_scene_reload_valid = false;
+    g_vm_net_mock_last_current_scene_reload_scene[0] = 0;
+    g_vm_net_mock_last_current_scene_reload_tick = 0;
+}
+
 static bool vm_net_mock_scene_runtime_pending_without_target(void)
 {
 #ifdef CBE_SERVER_ONLY
