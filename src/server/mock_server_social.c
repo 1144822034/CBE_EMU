@@ -568,6 +568,7 @@ static bool vm_net_mock_is_current_scene_completion_request(const u8 *request, u
 {
     vm_net_mock_scene_change_target target;
     const char *currentScene = NULL;
+    bool directTongquetaiCompletion = false;
 
     if (!vm_net_mock_is_scene_change_request(request, requestLen))
         return false;
@@ -583,8 +584,28 @@ static bool vm_net_mock_is_current_scene_completion_request(const u8 *request, u
         return false;
 
     currentScene = vm_net_mock_current_scene_name();
+    /*
+     * The map-stone route delivers WT30/1 from the delayed scene-channel
+     * event.  By the subsequent WT2/3 the client has already constructed the
+     * Tongquetai scene shell, so this is its current-scene completion contract
+     * rather than a fresh generic scene-change request.  Keeping it in the
+     * generic path defers the no-posinfo WT30/2 until a later WT6/1 and leaves
+     * this particular shell on the loading overlay.
+     *
+     * Keep the exception deliberately narrow: it requires the live direct
+     * teleport provenance and the exact pending target.  Other c00_01 traffic
+     * continues through its existing detector/response family.
+     */
+    directTongquetaiCompletion =
+        currentScene != NULL &&
+        vm_net_mock_scene_is_penglai01(currentScene) &&
+        g_vm_net_mock_teleport_stone_direct_enter_pending &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        vm_net_mock_scene_names_equal_loose(
+            target.scene, g_vm_net_mock_last_scene_change_target.scene);
     return currentScene != NULL &&
-           vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
+           (vm_net_mock_scene_uses_current_scene_completion(currentScene) ||
+            directTongquetaiCompletion) &&
            vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
            !vm_net_mock_is_recent_completed_scene_change_target(&target);
 }
