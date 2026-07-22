@@ -48,11 +48,16 @@ requests with documented `type` values `3` or `4`.
 ## Occupied-slot replacement contract
 
 The wooden broad sword repro does not follow the `7/8 type=3` path: the
-starter weapon already occupies its weapon slot.  Runtime recorded the exact
-two-object request as `WT 7/9 len=45`, with:
+starter weapon already occupies its weapon slot.  Runtime recorded two valid
+encodings of the same exchange:
 
-- `1/7/9`, payload length 21: `body:u16`, `bag:u16`;
-- followed by `1/2/10`, payload length 10.
+- standalone `WT 7/9 len=30`: `1/7/9`, payload length 21;
+- compound `WT 7/9 len=45`: the same `1/7/9` followed by `1/2/10`, payload
+  length 10.
+
+The `1/7/9` payload is `body:u16`, `bag:u16`.  `1/2/10` is an optional actor
+transport companion, not an equipment field and not a requirement for the
+completion response.
 
 `JianghuOL.CBE:0x010328D4 BuildGameEventPacket` writes `body` and `bag` when
 the event subtype is 9.  The calling UI selects the current equipment row for
@@ -71,13 +76,13 @@ wait layer.  Therefore the response must be precisely:
 The server mirrors the same atomic sequence-preserving replacement before it
 sends success.  It does not model this as consume-plus-append, because append
 would assign the old item a new backpack sequence and diverge from the client.
-The `1/2/10` companion is checked as part of the detector but needs no response
-object for the item-operation completion.
+When present, the `1/2/10` companion is checked as an exact optional trailing
+object but needs no response object for the item-operation completion.
 
 Expected trace:
 
 ```text
-mock_item_equip_swap body=<slot+1> bag=<backpack-seq> item=<new-id> old=<old-id> slot=<slot> result=1 reason=ok resp=7/9
+mock_item_equip_swap body=<slot+1> bag=<backpack-seq> companion_2_10=<0|1> item=<new-id> old=<old-id> slot=<slot> result=1 reason=ok resp=7/9
 ```
 
 ## Response Contract

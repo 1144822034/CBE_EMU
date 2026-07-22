@@ -7127,6 +7127,7 @@ typedef struct
 {
     u16 bodySeq;
     u16 backpackSeq;
+    bool hasActorOtherCompanion;
 } vm_net_mock_item_equip_swap_request;
 
 typedef struct
@@ -7443,15 +7444,22 @@ static bool vm_net_mock_parse_item_equip_swap_request(
         return false;
     }
 
-    /* The observed client packet is a deliberate 7/9 + 2/10 transaction.
-     * Keeping the companion in the detector prevents this handler from
-     * consuming an unrelated future 7/9 request. */
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &companionObject) ||
-        companionObject.major != 1 || companionObject.kind != 2 ||
-        companionObject.subtype != 10 || companionObject.payloadLen != 10 ||
-        offset != requestLen)
+    /* Some UI paths flush 2/10 in the same WT send, while the ordinary
+     * equipment panel sends the valid 7/9 exchange by itself.  The 7/9 parser
+     * consumes only body+bag, so 2/10 is an optional transport companion, not
+     * part of the equipment-operation contract.  Any *other* trailing object
+     * remains a separate feature-specific combo. */
+    if (offset != requestLen)
     {
-        return false;
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                             &companionObject) ||
+            companionObject.major != 1 || companionObject.kind != 2 ||
+            companionObject.subtype != 10 || companionObject.payloadLen != 10 ||
+            offset != requestLen)
+        {
+            return false;
+        }
+        parsed.hasActorOtherCompanion = true;
     }
 
     if (parsedOut)
@@ -13930,11 +13938,13 @@ static u32 vm_net_mock_build_item_equip_swap_response(const u8 *request,
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    printf("[info][network] mock_item_equip_swap body=%u bag=%u item=%u old=%u slot=%u result=%u reason=%s resp=7/9 evidence=JianghuOL.CBE:0x010328D4+0x01033544\n",
-           parsed.bodySeq, parsed.backpackSeq, itemId, oldItemId, slot, result,
+    printf("[info][network] mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s resp=7/9 evidence=JianghuOL.CBE:0x010328D4+0x01033544\n",
+           parsed.bodySeq, parsed.backpackSeq,
+           parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot, result,
            reason ? reason : "-");
-    vm_autotest_note("mock_item_equip_swap body=%u bag=%u item=%u old=%u slot=%u result=%u reason=%s response=7/9 evidence=JianghuOL.CBE:0x010328D4(body-bag)+0x01033544(result-only)\n",
-                     parsed.bodySeq, parsed.backpackSeq, itemId, oldItemId, slot,
+    vm_autotest_note("mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s response=7/9 evidence=JianghuOL.CBE:0x010328D4(body-bag)+0x01033544(result-only)\n",
+                     parsed.bodySeq, parsed.backpackSeq,
+                     parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot,
                      result, reason ? reason : "-");
     return pos;
 }
@@ -46469,7 +46479,15 @@ static u32 vm_net_mock_build_game_type_response(const u8 *request, u32 requestLe
     return pos;
 }
 
-static bool vm_net_mock_object_is_split_safe(const vm_net_mock_request_object *object)
+/*
+ * Only request objects listed here may be decomposed by the generic compound
+ * dispatcher.  This is deliberately an explicit protocol capability list, not
+ * a fallback for arbitrary WT objects: feature-specific packets whose object
+ * order forms one transaction must be handled by their own combo builder
+ * before the generic dispatcher runs.
+ */
+static bool vm_net_mock_object_is_independent_combo_candidate(
+    const vm_net_mock_request_object *object)
 {
     if (object == NULL || object->major != 1)
         return false;
@@ -46481,7 +46499,8 @@ static bool vm_net_mock_object_is_split_safe(const vm_net_mock_request_object *o
     if (object->kind == 4 && object->subtype == 1)
         return true;
     if (object->kind == 7 &&
-        (object->subtype == 1 || object->subtype == 7 || object->subtype == 18))
+        (object->subtype == 1 || object->subtype == 7 || object->subtype == 18 ||
+         object->subtype == 42))
         return true;
     if (object->kind == 0x19 && object->subtype == 5)
         return true;
@@ -46522,32 +46541,70 @@ static u32 vm_net_mock_build_single_object_request(const vm_net_mock_request_obj
     return len;
 }
 
-static bool vm_net_mock_append_response_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
-                                                const u8 *response, u32 responseLen)
+static bool vm_net_mock_validate_response_packet(const u8 *response,
+                                                  u32 responseLen,
+                                                  u8 *objectCountOut)
 {
     u32 offset = 5;
-    if (out == NULL || pos == NULL || objectCount == NULL ||
-        response == NULL || responseLen < 5 || response[0] != 'W' || response[1] != 'T')
+    u8 expectedCount = 0;
+    u8 parsedCount = 0;
+
+    if (objectCountOut)
+        *objectCountOut = 0;
+    if (response == NULL || responseLen < 5 ||
+        response[0] != 'W' || response[1] != 'T' ||
+        (((u32)response[2] << 8) | (u32)response[3]) != responseLen)
     {
         return false;
     }
 
-    while (offset + 6 <= responseLen)
+    expectedCount = response[4];
+    while (parsedCount < expectedCount)
     {
-        u32 objectLen = ((u32)response[offset + 4] << 8) | (u32)response[offset + 5];
-        if (objectLen < 6 || offset + objectLen > responseLen)
+        u32 objectLen = 0;
+
+        if (offset + 6 > responseLen)
             return false;
-        if (*objectCount == 0xff || *pos + objectLen > outCap)
+        objectLen = ((u32)response[offset + 4] << 8) |
+                    (u32)response[offset + 5];
+        if (objectLen < 6 || objectLen > responseLen - offset)
             return false;
-        memcpy(out + *pos, response + offset, objectLen);
-        *pos += objectLen;
-        *objectCount += 1;
         offset += objectLen;
+        ++parsedCount;
     }
-    return offset == responseLen;
+
+    if (offset != responseLen)
+        return false;
+    if (objectCountOut)
+        *objectCountOut = parsedCount;
+    return true;
 }
 
-static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+static bool vm_net_mock_append_response_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
+                                                const u8 *response, u32 responseLen)
+{
+    u8 appendedCount = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL ||
+        !vm_net_mock_validate_response_packet(response, responseLen, &appendedCount) ||
+        appendedCount > 0xffu - *objectCount ||
+        *pos > outCap ||
+        responseLen - 5 > 0xffffu - *pos ||
+        responseLen - 5 > outCap - *pos)
+    {
+        return false;
+    }
+
+    if (responseLen > 5)
+        memcpy(out + *pos, response + 5, responseLen - 5);
+    *pos += responseLen - 5;
+    *objectCount = (u8)(*objectCount + appendedCount);
+    return true;
+}
+
+static u32 vm_net_mock_build_independent_combo_response(const u8 *request,
+                                                        u32 requestLen,
+                                                        u8 *out, u32 outCap)
 {
     u32 offset = 4;
     u32 validationOffset = 4;
@@ -46564,14 +46621,14 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
     if (request[0] != 'W' || request[1] != 'T')
         return 0;
 
-    /* Validate the complete object set before invoking any state-changing
-     * single-object builder.  Small-horn world chat is emitted as
-     * 3/1 + 2/10 + 7/1 + 2/10; the previous one-pass splitter persisted the
-     * chat and then abandoned the packet when it reached 7/1. */
+    /* Validate the complete object set before invoking any single-object
+     * builder.  Small-horn world chat is emitted as
+     * 3/1 + 2/10 + 7/1 + 2/10; the old one-pass splitter persisted the chat
+     * and then abandoned the packet when it reached an unsupported object. */
     while (vm_net_mock_next_request_object(request, requestLen,
                                            &validationOffset, &object))
     {
-        if (!vm_net_mock_object_is_split_safe(&object))
+        if (!vm_net_mock_object_is_independent_combo_candidate(&object))
             return 0;
         ++validatedCount;
     }
@@ -46582,7 +46639,7 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
     {
         u32 subRequestLen = 0;
         u32 subResponseLen = 0;
-        if (!vm_net_mock_object_is_split_safe(&object))
+        if (!vm_net_mock_object_is_independent_combo_candidate(&object))
             return 0;
         subRequestLen = vm_net_mock_build_single_object_request(&object, subRequest, sizeof(subRequest));
         if (subRequestLen == 0)
@@ -46601,10 +46658,14 @@ static u32 vm_net_mock_build_split_safe_combo_response(const u8 *request, u32 re
         return 0;
     if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
                                                            &objectCount,
-                                                           "split-safe-combo",
+                                                           "independent-combo",
                                                            false))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_independent_combo request_objects=%u response_objects=%u resp=%u evidence=JianghuOL.CBE:0x01012E4C(entry-loop)\n",
+           validatedCount, objectCount, pos);
+    vm_autotest_note("mock_independent_combo request_objects=%u response_objects=%u response=%u evidence=JianghuOL.CBE:0x01012E4C(entry-loop)\n",
+                     validatedCount, objectCount, pos);
     return pos;
 }
 
@@ -46657,11 +46718,11 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
         if (!g_netMockSplitProbe)
         {
-            hookedLen = vm_net_mock_build_split_safe_combo_response(request, requestLen,
-                                                                    out, outCap);
+            hookedLen = vm_net_mock_build_independent_combo_response(request, requestLen,
+                                                                      out, outCap);
             if (hookedLen)
             {
-                vm_net_log_handled_packet("builtin-chat-message-combo", request,
+                vm_net_log_handled_packet("builtin-chat-message-independent-combo", request,
                                           requestLen, hookedLen);
                 return hookedLen;
             }
@@ -47619,10 +47680,12 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             return hookedLen;
         }
     }
-    hookedLen = vm_net_mock_build_split_safe_combo_response(request, requestLen, out, outCap);
+    hookedLen = vm_net_mock_build_independent_combo_response(request, requestLen,
+                                                              out, outCap);
     if (hookedLen)
     {
-        vm_net_log_handled_packet("builtin-split-safe-combo", request, requestLen, hookedLen);
+        vm_net_log_handled_packet("builtin-independent-combo", request,
+                                  requestLen, hookedLen);
         return hookedLen;
     }
     if (requestKind == 4 && requestSubtype == 2)
