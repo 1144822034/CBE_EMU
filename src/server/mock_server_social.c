@@ -2480,7 +2480,8 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
     return true;
 }
 
-static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
+                                                     u32 autoRecoverHp, u32 autoRecoverMp);
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(
     u8 *out,

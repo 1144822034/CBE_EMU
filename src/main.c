@@ -417,7 +417,8 @@ static bool vm_host_file_exists(const char *path);
 static bool vm_net_mock_current_screen_is_battle(void);
 static void vm_autotest_note_role_attr_page_pc(u32 pc);
 static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
-static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
+                                                     u32 autoRecoverHp, u32 autoRecoverMp);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);
