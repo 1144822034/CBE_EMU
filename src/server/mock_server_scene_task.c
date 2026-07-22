@@ -3251,10 +3251,19 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
     return true;
 }
 
+static const char *vm_net_mock_teleport_stone_display_label(void)
+{
+    /* GBK: 蓬莱-铜雀台.  This is the display name of c00蓬莱仙岛_01.sce,
+     * which is also the default target selected by the existing builder. */
+    static const char defaultLabel[] =
+        "\xc5\xee\xc0\xb3-\xcd\xad\xc8\xb8\xcc\xa8";
+    return vm_net_mock_env_str("CBE_TELEPORT_STONE_LABEL", defaultLabel);
+}
+
 static bool vm_net_mock_build_teleport_stone_exitinfo_blob(u8 *out, u32 outCap, u32 *blobLenOut)
 {
     u32 pos = 0;
-    const char *label = vm_net_mock_env_str("CBE_TELEPORT_STONE_LABEL", "Penglai Home");
+    const char *label = vm_net_mock_teleport_stone_display_label();
     u32 exitId = vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID", VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID);
 
     if (out == NULL || blobLenOut == NULL)
@@ -3285,6 +3294,13 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     u32 objectStart = 0;
     u8 exitInfo[128];
     u32 exitInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_backpack_item_state *teleportStone =
+        role ? vm_net_mock_role_find_backpack_item(
+                   role, VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID, 0)
+             : NULL;
+    u32 teleportStoneCount = teleportStone ? teleportStone->count : 0;
+    u32 wcoin = vm_net_mock_role_wcoin_balance(role);
 
     if (outCap < pos)
         return 0;
@@ -3302,7 +3318,18 @@ static u32 vm_net_mock_build_teleport_stone_list_response(u8 *out, u32 outCap)
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_vm_net_mock_last_teleport_stone_list_tick = g_schedulerTick;
 
-    vm_autotest_note("mock_teleport_stone_list entries=1 exitinfo_len=%u evidence=mmGame:0x11CE\n",
+    printf("[info][network] mock_teleport_stone_list entries=1 exit=%u label=%s role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
+           vm_net_mock_env_u32("CBE_TELEPORT_STONE_EXIT_ID",
+                               VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID),
+           vm_net_mock_teleport_stone_display_label(),
+           role ? role->roleId : 0,
+           teleportStoneCount,
+           wcoin,
+           exitInfoLen);
+    vm_autotest_note("mock_teleport_stone_list entries=1 role=%u item800=%u wcoin=%u exitinfo_len=%u evidence=mmGame:0x11CE\n",
+                     role ? role->roleId : 0,
+                     teleportStoneCount,
+                     wcoin,
                      exitInfoLen);
     return pos;
 }

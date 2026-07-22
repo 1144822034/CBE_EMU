@@ -1435,6 +1435,8 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     u32 secretRows = 0;
     u32 secretItemInfoLen = 0;
     u32 actorInfoLen = 0;
+    vm_net_mock_role_state *activeRole = NULL;
+    u32 wcoin = 0;
     char page5Ids[160];
     char secretIds[160];
     vm_net_mock_request_object object;
@@ -1458,6 +1460,9 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
         return 0;
     if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorId", &actorId))
         return 0;
+
+    activeRole = vm_net_mock_active_role();
+    wcoin = vm_net_mock_role_wcoin_balance(activeRole);
 
     if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
         return 0;
@@ -1488,8 +1493,10 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
-    printf("[info][network] mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s\n",
+    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s\n",
            actorId,
+           activeRole ? activeRole->roleId : 0,
+           wcoin,
            page5Index,
            totalItems,
            pageRows,
@@ -1500,8 +1507,10 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
            actorInfoLen,
            page5Ids,
            secretIds);
-    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last page5=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
+    vm_autotest_note("mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
                      actorId,
+                     activeRole ? activeRole->roleId : 0,
+                     wcoin,
                      page5Index,
                      totalItems,
                      pageRows,
@@ -3313,6 +3322,14 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
     if (object->kind == 7 &&
         (object->subtype == 1 || object->subtype == 7 || object->subtype == 18 ||
          object->subtype == 42))
+        return true;
+    /* The teleport-stone destination query is read-only: mmGame consumes only
+     * its 16/1.exitinfo payload to finish the list-loading phase.  A retry
+     * after cancelling the later local confirmation can be flushed alongside
+     * an otherwise independent scene-refresh object, so preserve this object
+     * when the explicit compound dispatcher splits that packet.  Do not add
+     * 16/2..16/4 here: those form the confirmation/transfer transaction. */
+    if (object->kind == 0x10 && object->subtype == 1)
         return true;
     if (object->kind == 0x19 && object->subtype == 5)
         return true;
