@@ -542,7 +542,9 @@ static bool vm_mock_service_account_db_load_legacy(void)
     return true;
 }
 
-static bool vm_mock_service_account_db_save(const char *reason)
+/* Legacy import is the only snapshot operation.  Normal registration and
+ * password changes must write just the record that changed. */
+static bool vm_mock_service_account_db_save_all(const char *reason)
 {
     if (!g_vm_mock_service_account_db_valid)
         return false;
@@ -551,11 +553,15 @@ static bool vm_mock_service_account_db_save(const char *reason)
     if (g_vm_mock_service_account_db.accountCount > VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
         g_vm_mock_service_account_db.accountCount = VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS;
 
-    if (!vm_mysql_exec("START TRANSACTION") || !vm_mysql_exec("DELETE FROM accounts"))
+    /*
+     * accounts is a parent of persisted recharge orders.  Saving the in-memory
+     * legacy snapshot by deleting the whole table breaks that foreign-key
+     * contract, so even the import path must preserve existing parent rows.
+     */
+    if (!vm_mysql_exec("START TRANSACTION"))
     {
         char mysql_error[512];
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
-        vm_mysql_exec("ROLLBACK");
         vm_autotest_note("mock_account_db_mysql_save_failed reason=%s error=%s\n",
                          reason ? reason : "state", mysql_error);
         return false;
@@ -579,7 +585,9 @@ static bool vm_mock_service_account_db_save(const char *reason)
             return false;
         }
         snprintf(query, sizeof(query),
-                 "INSERT INTO accounts(account_id,password_value) VALUES(CAST(X'%s' AS CHAR),X'%s')",
+                 "INSERT INTO accounts(account_id,password_value) "
+                 "VALUES(CAST(X'%s' AS CHAR),X'%s') "
+                 "ON DUPLICATE KEY UPDATE password_value=VALUES(password_value)",
                  username_hex, password_hex);
         if (!vm_mysql_exec(query))
         {
@@ -599,6 +607,53 @@ static bool vm_mock_service_account_db_save(const char *reason)
     vm_autotest_note("mock_account_db_mysql_save reason=%s count=%u\n",
                      reason ? reason : "state",
                      g_vm_mock_service_account_db.accountCount);
+    return true;
+}
+
+static bool vm_mock_service_account_db_write_record(const vm_mock_service_account_record *record,
+                                                    bool create,
+                                                    const char *reason)
+{
+    char username_hex[sizeof(record->username) * 2 + 1];
+    char password_hex[sizeof(record->password) * 2 + 1];
+    char query[768];
+    size_t username_len;
+    size_t password_len;
+
+    if (!g_vm_mock_service_account_db_valid || record == NULL)
+        return false;
+    username_len = vm_mock_mysql_bounded_strlen(record->username, sizeof(record->username));
+    password_len = vm_mock_mysql_bounded_strlen(record->password, sizeof(record->password));
+    if (username_len == 0 || username_len >= sizeof(record->username) ||
+        password_len >= sizeof(record->password) ||
+        vm_mysql_hex_encode(record->username, username_len, username_hex, sizeof(username_hex)) == 0 ||
+        vm_mysql_hex_encode(record->password, password_len, password_hex, sizeof(password_hex)) == 0)
+    {
+        vm_autotest_note("mock_account_db_mysql_write_failed reason=%s operation=%s error=invalid-account-record\n",
+                         reason ? reason : "state", create ? "insert" : "update");
+        return false;
+    }
+    if (create)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO accounts(account_id,password_value) VALUES(CAST(X'%s' AS CHAR),X'%s')",
+                 username_hex, password_hex);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE accounts SET password_value=X'%s' WHERE account_id=CAST(X'%s' AS CHAR)",
+                 password_hex, username_hex);
+    }
+    if (!vm_mysql_exec(query))
+    {
+        vm_autotest_note("mock_account_db_mysql_write_failed reason=%s operation=%s error=%s\n",
+                         reason ? reason : "state", create ? "insert" : "update",
+                         vm_mysql_last_error());
+        return false;
+    }
+    vm_autotest_note("mock_account_db_mysql_write reason=%s operation=%s\n",
+                     reason ? reason : "state", create ? "insert" : "update");
     return true;
 }
 
@@ -655,7 +710,7 @@ static void vm_mock_service_account_db_load(void)
         {
             vm_autotest_note("mock_account_db_legacy_migrate count=%u\n",
                              g_vm_mock_service_account_db.accountCount);
-            if (!vm_mock_service_account_db_save("legacy-migrate"))
+            if (!vm_mock_service_account_db_save_all("legacy-migrate"))
             {
                 g_vm_mock_service_account_db_valid = false;
                 return;
@@ -673,7 +728,9 @@ static void vm_mock_service_friend_db_path(char *path, size_t pathSize)
     snprintf(path, pathSize, "nvram/mock_service_friends.bin");
 }
 
-static bool vm_mock_service_friend_db_save(const char *reason)
+/* Full friendship snapshots are only used for legacy import or startup
+ * normalization.  Accepted invitations use the two-row transactional path. */
+static bool vm_mock_service_friend_db_save_all(const char *reason)
 {
     if (!g_vm_mock_service_friend_db_valid)
         return false;
@@ -739,6 +796,69 @@ static bool vm_mock_service_friend_db_save(const char *reason)
                      reason ? reason : "state",
                      g_vm_mock_service_friend_db.recordCount);
     return true;
+}
+
+static bool vm_mock_service_friend_db_write_pair(
+    const vm_mock_service_friend_record *forward,
+    const vm_mock_service_friend_record *reverse,
+    const char *reason)
+{
+    const vm_mock_service_friend_record *records[2] = { forward, reverse };
+    char queries[2][1536];
+    char mysql_error[512];
+    bool transaction_started = false;
+
+    if (!g_vm_mock_service_friend_db_valid || forward == NULL || reverse == NULL)
+        return false;
+    for (u32 i = 0; i < 2; ++i)
+    {
+        const vm_mock_service_friend_record *record = records[i];
+        char owner_hex[sizeof(record->ownerAccountId) * 2 + 1];
+        char target_hex[sizeof(record->targetAccountId) * 2 + 1];
+        char name_hex[sizeof(record->targetRoleName) * 2 + 1];
+        size_t owner_len = vm_mock_mysql_bounded_strlen(record->ownerAccountId, sizeof(record->ownerAccountId));
+        size_t target_len = vm_mock_mysql_bounded_strlen(record->targetAccountId, sizeof(record->targetAccountId));
+        size_t name_len = vm_mock_mysql_bounded_strlen(record->targetRoleName, sizeof(record->targetRoleName));
+
+        if (owner_len == 0 || owner_len >= sizeof(record->ownerAccountId) ||
+            target_len == 0 || target_len >= sizeof(record->targetAccountId) ||
+            name_len >= sizeof(record->targetRoleName) ||
+            vm_mysql_hex_encode(record->ownerAccountId, owner_len, owner_hex, sizeof(owner_hex)) == 0 ||
+            vm_mysql_hex_encode(record->targetAccountId, target_len, target_hex, sizeof(target_hex)) == 0 ||
+            (name_len != 0 && vm_mysql_hex_encode(record->targetRoleName, name_len, name_hex, sizeof(name_hex)) == 0))
+        {
+            vm_autotest_note("mock_friend_db_mysql_pair_failed reason=%s error=invalid-friend-record index=%u\n",
+                             reason ? reason : "state", i);
+            return false;
+        }
+        if (name_len == 0)
+            name_hex[0] = 0;
+        snprintf(queries[i], sizeof(queries[i]),
+                 "INSERT INTO friendships(owner_account_id,owner_role_id,target_account_id,target_role_id,target_role_name,friend_degree,target_level,target_job,target_sex) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,CAST(X'%s' AS CHAR),%u,X'%s',%u,%u,%u,%u) "
+                 "ON DUPLICATE KEY UPDATE target_role_name=VALUES(target_role_name),friend_degree=VALUES(friend_degree),target_level=VALUES(target_level),target_job=VALUES(target_job),target_sex=VALUES(target_sex)",
+                 owner_hex, record->ownerRoleId, target_hex, record->targetRoleId, name_hex,
+                 record->friendDegree, record->targetLevel, record->targetJob, record->targetSex);
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transaction_started = true;
+    if (!vm_mysql_exec(queries[0]) || !vm_mysql_exec(queries[1]) ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    vm_autotest_note("mock_friend_db_mysql_pair reason=%s records=2\n",
+                     reason ? reason : "state");
+    return true;
+
+failed:
+    snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+    if (transaction_started)
+        vm_mysql_exec("ROLLBACK");
+    vm_autotest_note("mock_friend_db_mysql_pair_failed reason=%s error=%s\n",
+                     reason ? reason : "state", mysql_error);
+    return false;
 }
 
 typedef struct
@@ -898,7 +1018,7 @@ static void vm_mock_service_friend_db_load(void)
         memcpy(g_vm_mock_service_friend_db.records, compact,
                compactCount * sizeof(compact[0]));
     if (needsSave &&
-        !vm_mock_service_friend_db_save(loadedFromFile ? "legacy-migrate" : "normalize"))
+        !vm_mock_service_friend_db_save_all(loadedFromFile ? "legacy-migrate" : "normalize"))
     {
         g_vm_mock_service_friend_db_valid = false;
         return;
@@ -907,19 +1027,19 @@ static void vm_mock_service_friend_db_load(void)
                      g_vm_mock_service_friend_db.recordCount);
 }
 
-static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
+static vm_mock_service_friend_record *vm_mock_service_friend_db_find_in(
+    vm_mock_service_friend_db_file *database,
     const char *ownerAccountId, u32 ownerRoleId,
     const char *targetAccountId, u32 targetRoleId)
 {
-    vm_mock_service_friend_db_load();
-    if (!g_vm_mock_service_friend_db_valid || ownerAccountId == NULL ||
+    if (database == NULL || ownerAccountId == NULL ||
         targetAccountId == NULL || ownerRoleId == 0 || targetRoleId == 0)
     {
         return NULL;
     }
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
+    for (u32 i = 0; i < database->recordCount; ++i)
     {
-        vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
+        vm_mock_service_friend_record *record = &database->records[i];
         if (record->ownerRoleId == ownerRoleId &&
             record->targetRoleId == targetRoleId &&
             strcmp(record->ownerAccountId, ownerAccountId) == 0 &&
@@ -931,7 +1051,20 @@ static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
     return NULL;
 }
 
+static vm_mock_service_friend_record *vm_mock_service_friend_db_find(
+    const char *ownerAccountId, u32 ownerRoleId,
+    const char *targetAccountId, u32 targetRoleId)
+{
+    vm_mock_service_friend_db_load();
+    if (!g_vm_mock_service_friend_db_valid)
+        return NULL;
+    return vm_mock_service_friend_db_find_in(&g_vm_mock_service_friend_db,
+                                             ownerAccountId, ownerRoleId,
+                                             targetAccountId, targetRoleId);
+}
+
 static bool vm_mock_service_friend_db_upsert_one(
+    vm_mock_service_friend_db_file *database,
     const char *ownerAccountId, u32 ownerRoleId,
     const char *targetAccountId, u32 targetRoleId,
     const char *targetRoleName, u32 targetLevel, u8 targetJob, u8 targetSex,
@@ -945,13 +1078,15 @@ static bool vm_mock_service_friend_db_upsert_one(
         *createdOut = false;
     if (changedOut)
         *changedOut = false;
-    record = vm_mock_service_friend_db_find(ownerAccountId, ownerRoleId,
-                                            targetAccountId, targetRoleId);
+    if (database == NULL)
+        return false;
+    record = vm_mock_service_friend_db_find_in(database, ownerAccountId, ownerRoleId,
+                                               targetAccountId, targetRoleId);
     if (record == NULL)
     {
-        if (g_vm_mock_service_friend_db.recordCount >= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
+        if (database->recordCount >= VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS)
             return false;
-        record = &g_vm_mock_service_friend_db.records[g_vm_mock_service_friend_db.recordCount++];
+        record = &database->records[database->recordCount++];
         memset(record, 0, sizeof(*record));
         snprintf(record->ownerAccountId, sizeof(record->ownerAccountId), "%s", ownerAccountId);
         record->ownerRoleId = ownerRoleId;
@@ -1009,7 +1144,9 @@ static bool vm_mock_service_friend_db_add_pair(
     bool forwardChanged = false;
     bool reverseChanged = false;
     u32 missing = 0;
-    vm_mock_service_friend_db_file before;
+    vm_mock_service_friend_db_file candidate;
+    const vm_mock_service_friend_record *forwardRecord;
+    const vm_mock_service_friend_record *reverseRecord;
 
     if (createdOut)
         *createdOut = false;
@@ -1030,27 +1167,37 @@ static bool vm_mock_service_friend_db_add_pair(
     {
         return false;
     }
-    before = g_vm_mock_service_friend_db;
-    if (!vm_mock_service_friend_db_upsert_one(ownerAccountId, ownerRoleId,
-                                              targetAccountId, targetRoleId,
-                                              targetRoleName, targetLevel, targetJob, targetSex,
-                                              &forwardCreated, &forwardChanged) ||
-        !vm_mock_service_friend_db_upsert_one(targetAccountId, targetRoleId,
-                                              ownerAccountId, ownerRoleId,
-                                              ownerRoleName, ownerLevel, ownerJob, ownerSex,
-                                              &reverseCreated, &reverseChanged))
+    candidate = g_vm_mock_service_friend_db;
+    if (!vm_mock_service_friend_db_upsert_one(&candidate, ownerAccountId, ownerRoleId,
+                                               targetAccountId, targetRoleId,
+                                               targetRoleName, targetLevel, targetJob, targetSex,
+                                               &forwardCreated, &forwardChanged) ||
+        !vm_mock_service_friend_db_upsert_one(&candidate, targetAccountId, targetRoleId,
+                                               ownerAccountId, ownerRoleId,
+                                               ownerRoleName, ownerLevel, ownerJob, ownerSex,
+                                               &reverseCreated, &reverseChanged))
     {
         return false;
     }
-    if ((forwardChanged || reverseChanged) &&
-        !vm_mock_service_friend_db_save("friend-invite-accepted"))
+    if (forwardChanged || reverseChanged)
     {
-        g_vm_mock_service_friend_db = before;
-        printf("[error][mock-service] friend_pair_persist_failed owner=%s/%u target=%s/%u error=%s\n",
-               ownerAccountId, ownerRoleId, targetAccountId, targetRoleId,
-               vm_mysql_last_error());
-        return false;
+        forwardRecord = vm_mock_service_friend_db_find_in(&candidate,
+                                                           ownerAccountId, ownerRoleId,
+                                                           targetAccountId, targetRoleId);
+        reverseRecord = vm_mock_service_friend_db_find_in(&candidate,
+                                                           targetAccountId, targetRoleId,
+                                                           ownerAccountId, ownerRoleId);
+        if (forwardRecord == NULL || reverseRecord == NULL ||
+            !vm_mock_service_friend_db_write_pair(forwardRecord, reverseRecord,
+                                                  "friend-invite-accepted"))
+        {
+            printf("[error][mock-service] friend_pair_persist_failed owner=%s/%u target=%s/%u error=%s\n",
+                   ownerAccountId, ownerRoleId, targetAccountId, targetRoleId,
+                   vm_mysql_last_error());
+            return false;
+        }
     }
+    g_vm_mock_service_friend_db = candidate;
     if (createdOut)
         *createdOut = forwardCreated || reverseCreated;
     return true;
@@ -1122,21 +1269,21 @@ static bool vm_mock_service_account_create_record(const char *username,
             *messageOut = "account db full";
         return false;
     }
-    u32 record_index = g_vm_mock_service_account_db.accountCount;
-    vm_mock_service_account_record *record =
-        &g_vm_mock_service_account_db.accounts[record_index];
-    memset(record, 0, sizeof(*record));
-    snprintf(record->username, sizeof(record->username), "%s", username);
-    snprintf(record->password, sizeof(record->password), "%s", password);
-    g_vm_mock_service_account_db.accountCount = record_index + 1;
-    if (!vm_mock_service_account_db_save("create"))
+    vm_mock_service_account_record pending;
+    memset(&pending, 0, sizeof(pending));
+    snprintf(pending.username, sizeof(pending.username), "%s", username);
+    snprintf(pending.password, sizeof(pending.password), "%s", password);
+    if (!vm_mock_service_account_db_write_record(&pending, true, "create"))
     {
-        g_vm_mock_service_account_db.accountCount = record_index;
-        memset(record, 0, sizeof(*record));
         if (messageOut)
             *messageOut = "account persistence failed";
         return false;
     }
+    u32 record_index = g_vm_mock_service_account_db.accountCount;
+    vm_mock_service_account_record *record =
+        &g_vm_mock_service_account_db.accounts[record_index];
+    *record = pending;
+    g_vm_mock_service_account_db.accountCount = record_index + 1;
     return true;
 }
 
@@ -1159,16 +1306,15 @@ static bool vm_mock_service_account_set_password(const char *username,
             *messageOut = "password cannot be empty";
         return false;
     }
-    char previous_password[sizeof(record->password)];
-    memcpy(previous_password, record->password, sizeof(previous_password));
-    snprintf(record->password, sizeof(record->password), "%s", password);
-    if (!vm_mock_service_account_db_save("passwd"))
+    vm_mock_service_account_record pending = *record;
+    snprintf(pending.password, sizeof(pending.password), "%s", password);
+    if (!vm_mock_service_account_db_write_record(&pending, false, "passwd"))
     {
-        memcpy(record->password, previous_password, sizeof(record->password));
         if (messageOut)
             *messageOut = "account persistence failed";
         return false;
     }
+    *record = pending;
     return true;
 }
 
@@ -3706,7 +3852,8 @@ static void vm_net_mock_apply_role_id_migration_to_friend_cache(const char *acco
 static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  const u32 *old_ids,
                                                  const u32 *new_ids,
-                                                 u32 mapping_count)
+                                                 u32 mapping_count,
+                                                 bool full_snapshot)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -3715,6 +3862,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     char *bulk_query = NULL;
     size_t bulk_capacity = 131072;
     bool transaction_started = false;
+    u32 scoped_role_id = 0;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -3725,6 +3873,26 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         g_vm_net_mock_role_db.roleCount = VM_NET_MOCK_ROLE_DB_MAX_ROLES;
     if (g_vm_net_mock_role_db.roleCount == 0)
         g_vm_net_mock_role_db.activeRoleId = 0;
+    if (!full_snapshot)
+    {
+        if (g_vm_net_mock_role_db.roleCount == 0 ||
+            g_vm_net_mock_role_db.activeRoleId == 0)
+        {
+            return false;
+        }
+        scoped_role_id = g_vm_net_mock_role_db.activeRoleId;
+        bool found = false;
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            if (g_vm_net_mock_role_db.roles[i].roleId == scoped_role_id)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
 
     bulk_query = (char *)malloc(bulk_capacity);
     if (bulk_query == NULL)
@@ -3746,20 +3914,20 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
         goto failed;
     }
-    /* Keep existing role rows alive while saving normal role state.  Guilds,
+    /* Keep existing role rows alive while reconciling a full role snapshot. Guilds,
      * guild_members and guild_applications intentionally reference these rows
      * with ON DELETE CASCADE, so the former delete-and-reinsert save erased a
      * role's guild every time role-select/position/battle state was persisted.
      * Delete only roles that really disappeared from the account, move the
      * surviving role_index values out of the live range to avoid unique-index
      * collisions, then upsert them in their current order. */
-    if (g_vm_net_mock_role_db.roleCount == 0)
+    if (full_snapshot && g_vm_net_mock_role_db.roleCount == 0)
     {
         snprintf(query, sizeof(query),
                  "DELETE FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR)",
                  account_hex);
     }
-    else
+    else if (full_snapshot)
     {
         size_t query_len = (size_t)snprintf(
             query, sizeof(query),
@@ -3785,12 +3953,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         query[query_len++] = ')';
         query[query_len] = 0;
     }
-    if (!vm_mysql_exec(query))
+    if (full_snapshot && !vm_mysql_exec(query))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
         goto failed;
     }
-    if (g_vm_net_mock_role_db.roleCount != 0)
+    if (full_snapshot && g_vm_net_mock_role_db.roleCount != 0)
     {
         snprintf(query, sizeof(query),
                  "UPDATE account_roles SET role_index=role_index+128 "
@@ -3801,17 +3969,35 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             goto failed;
         }
     }
-    snprintf(query, sizeof(query),
-             "DELETE FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR)",
-             account_hex);
+    if (full_snapshot)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_equipment WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                 account_hex, scoped_role_id);
+    }
     if (!vm_mysql_exec(query))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
         goto failed;
     }
-    snprintf(query, sizeof(query),
-             "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR)",
-             account_hex);
+    if (full_snapshot)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                 account_hex, scoped_role_id);
+    }
     if (!vm_mysql_exec(query))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -3821,6 +4007,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
         const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        if (!full_snapshot && role->roleId != scoped_role_id)
+            continue;
         char name_hex[sizeof(role->name) * 2 + 1];
         char scene_hex[sizeof(role->scene) * 2 + 1];
         size_t name_len = vm_mock_mysql_bounded_strlen(role->name, sizeof(role->name));
@@ -3865,6 +4053,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
         const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        if (!full_snapshot && role->roleId != scoped_role_id)
+            continue;
         for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
         {
             if (role->equippedItemIds[slot] == 0)
@@ -3895,6 +4085,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
         const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        if (!full_snapshot && role->roleId != scoped_role_id)
+            continue;
         for (u32 slot = 0; slot < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++slot)
         {
             const vm_net_mock_backpack_item_state *item = &role->backpackItems[slot];
@@ -3948,9 +4140,10 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     }
     free(bulk_query);
     g_vm_net_mock_role_position_dirty = false;
-    vm_autotest_note("mock_role_db_mysql_save account=%s reason=%s roles=%u active=%u storage=relational\n",
+    vm_autotest_note("mock_role_db_mysql_save account=%s reason=%s roles=%u active=%u scope=%s storage=relational\n",
                      account_id ? account_id : "-", reason ? reason : "state",
-                     g_vm_net_mock_role_db.roleCount, g_vm_net_mock_role_db.activeRoleId);
+                     g_vm_net_mock_role_db.roleCount, g_vm_net_mock_role_db.activeRoleId,
+                     full_snapshot ? "full" : "active");
     return true;
 
 failed:
@@ -3965,7 +4158,7 @@ failed:
 
 static bool vm_net_mock_role_db_save(const char *reason)
 {
-    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0);
+    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false);
 }
 
 static void vm_net_mock_role_db_load(void)
@@ -4232,7 +4425,7 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount))
+                                                 migratedIdCount, true))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -4488,7 +4681,7 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
-    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0))
+    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -4558,7 +4751,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     }
 
-    if (!vm_net_mock_role_db_save("role-delete"))
+    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)
