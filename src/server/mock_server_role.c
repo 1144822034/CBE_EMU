@@ -2945,6 +2945,160 @@ static bool vm_net_mock_mysql_account_hex(char account_hex[129])
            vm_mysql_hex_encode(account_id, account_len, account_hex, 129) != 0;
 }
 
+/*
+ * Timed special effects have a different lifecycle from the role snapshot:
+ * an item can expire while the character is offline, and an old binary role
+ * file must not be reinterpreted as an active effect after a restart.  Keep
+ * the record relational and keyed by the same account/role identity as the
+ * backpack row it was consumed from.
+ */
+typedef struct
+{
+    vm_net_mock_role_item_effect effect;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_role_item_effect_context;
+
+static bool g_vm_net_mock_role_item_effect_schema_prepared = false;
+
+static bool vm_net_mock_role_item_effect_is_valid(
+    const vm_net_mock_role_item_effect *effect)
+{
+    if (effect == NULL || effect->itemId == 0 || effect->expiresUnix == 0)
+        return false;
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD)
+    {
+        return (effect->itemId == 809 && effect->multiplier == 2) ||
+               (effect->itemId == 810 && effect->multiplier == 4) ||
+               (effect->itemId == 811 && effect->multiplier == 10);
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
+    {
+        /* item.dsh proves the duration but contains no numeric stat modifier. */
+        return (effect->itemId == 829 || effect->itemId == 830) &&
+               effect->multiplier == 0;
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT)
+    {
+        return effect->itemId == 828 && effect->multiplier == 20;
+    }
+    return false;
+}
+
+static bool vm_net_mock_role_prepare_item_effect_schema(void)
+{
+    if (g_vm_net_mock_role_item_effect_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_item_effects ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "effect_kind TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,"
+            "multiplier TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "expires_unix INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id,effect_kind),"
+            "KEY idx_account_role_item_effects_expiry(expires_unix),"
+            "CONSTRAINT fk_account_role_item_effects_role FOREIGN KEY(account_id,role_id) "
+            "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] item_effect_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_role_item_effect_schema_prepared = true;
+    return true;
+}
+
+static bool vm_mock_mysql_role_item_effect_row(void *context_value,
+                                                unsigned int column_count,
+                                                const char *const *values,
+                                                const size_t *lengths)
+{
+    vm_mock_mysql_role_item_effect_context *context =
+        (vm_mock_mysql_role_item_effect_context *)context_value;
+    u32 item_id = 0;
+    u32 multiplier = 0;
+    u32 expires_unix = 0;
+
+    if (context == NULL || context->found || column_count != 3 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &item_id) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &multiplier) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &expires_unix) ||
+        multiplier > 255)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->effect.itemId = item_id;
+    context->effect.multiplier = multiplier;
+    context->effect.expiresUnix = expires_unix;
+    context->found = true;
+    return true;
+}
+
+/* Returns false only for a storage or contract error.  A zero expiresUnix in
+ * effectOut means that no currently active record exists. */
+static bool vm_net_mock_role_get_active_timed_item_effect(
+    const vm_net_mock_role_state *role, u8 effect_kind,
+    vm_net_mock_role_item_effect *effectOut)
+{
+    char account_hex[129];
+    char query[768];
+    vm_mock_mysql_role_item_effect_context context;
+    u32 now = (u32)time(NULL);
+
+    if (effectOut)
+        memset(effectOut, 0, sizeof(*effectOut));
+    if (role == NULL || role->roleId == 0 || effect_kind == 0 ||
+        !vm_net_mock_mysql_account_hex(account_hex) ||
+        !vm_net_mock_role_prepare_item_effect_schema())
+    {
+        return false;
+    }
+
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT item_id,multiplier,expires_unix FROM account_role_item_effects "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND effect_kind=%u",
+             account_hex, role->roleId, effect_kind);
+    if (!vm_mysql_query(query, vm_mock_mysql_role_item_effect_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (!context.found)
+        return true;
+
+    context.effect.kind = effect_kind;
+    if (context.effect.expiresUnix <= now)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_item_effects WHERE "
+                 "account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND effect_kind=%u "
+                 "AND expires_unix<=%u",
+                 account_hex, role->roleId, effect_kind, now);
+        if (!vm_mysql_exec(query))
+            return false;
+        return true;
+    }
+    if (!vm_net_mock_role_item_effect_is_valid(&context.effect))
+    {
+        printf("[error][mock-service] item_effect_invalid account=%s role=%u kind=%u item=%u multiplier=%u expires=%u\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role->roleId, effect_kind, context.effect.itemId,
+               context.effect.multiplier, context.effect.expiresUnix);
+        return false;
+    }
+    if (effectOut)
+        *effectOut = context.effect;
+    return true;
+}
+
 typedef struct
 {
     vm_net_mock_guild_record *rows;
@@ -3853,7 +4007,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  const u32 *old_ids,
                                                  const u32 *new_ids,
                                                  u32 mapping_count,
-                                                 bool full_snapshot)
+                                                 bool full_snapshot,
+                                                 const vm_net_mock_role_item_effect *timed_effect)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -3867,6 +4022,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
         return false;
+    if (timed_effect != NULL &&
+        (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
+         !vm_net_mock_role_prepare_item_effect_schema()))
+    {
+        return false;
+    }
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
     g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
     if (g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
@@ -4046,6 +4207,28 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         }
     }
 
+    if (timed_effect != NULL)
+    {
+        if (full_snapshot || scoped_role_id == 0)
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "timed effect requires active role scope");
+            goto failed;
+        }
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_item_effects(account_id,role_id,effect_kind,item_id,multiplier,expires_unix) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u) "
+                 "ON DUPLICATE KEY UPDATE item_id=VALUES(item_id),multiplier=VALUES(multiplier),"
+                 "expires_unix=VALUES(expires_unix)",
+                 account_hex, scoped_role_id, timed_effect->kind,
+                 timed_effect->itemId, timed_effect->multiplier,
+                 timed_effect->expiresUnix);
+        if (!vm_mysql_exec(query))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+            goto failed;
+        }
+    }
+
     size_t bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
         "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id) VALUES");
@@ -4158,7 +4341,98 @@ failed:
 
 static bool vm_net_mock_role_db_save(const char *reason)
 {
-    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false);
+    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL);
+}
+
+static u32 vm_net_mock_role_active_exp_card_multiplier(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD, &effect))
+    {
+        printf("[error][mock-service] exp_card_state_read_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0, vm_mysql_last_error());
+        return 1;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 1;
+}
+
+static u8 vm_net_mock_role_active_exp_card_flag(void)
+{
+    return vm_net_mock_role_active_exp_card_multiplier(vm_net_mock_active_role()) > 1 ? 1 : 0;
+}
+
+/* item.dsh describes 战斗心得 as a one-hour, +20% experience status. Its
+ * multiplier column therefore denotes an additive percentage for this kind,
+ * unlike the factor stored for experience cards. */
+static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT, &effect))
+    {
+        printf("[error][mock-service] battle_insight_state_read_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0, vm_mysql_last_error());
+        return 0;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 0;
+}
+
+/* The backpack decrement and the timed effect belong to one durable action.
+ * The row is only changed in memory before the relational transaction has
+ * committed; on any failure restore the exact previous role state so a retry
+ * cannot lose an item or create an unbacked effect. */
+static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq,
+    const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
+    const char *reason)
+{
+    vm_net_mock_role_item_effect active;
+    vm_net_mock_role_state before;
+    u32 remaining = 0;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (role == NULL || effect == NULL || effect->itemId != itemId ||
+        !vm_net_mock_role_item_effect_is_valid(effect))
+    {
+        return false;
+    }
+    memset(&active, 0, sizeof(active));
+    if (!vm_net_mock_role_get_active_timed_item_effect(role, effect->kind, &active))
+        return false;
+    if (active.expiresUnix != 0)
+    {
+        printf("[info][network] mock_special_item_rejected_active account=%s role=%u kind=%u active_item=%u active_until=%u requested_item=%u\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role->roleId, effect->kind, active.itemId, active.expiresUnix,
+               itemId);
+        return false;
+    }
+
+    before = *role;
+    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
+        return false;
+    if (!vm_net_mock_role_db_save_relational(
+            reason ? reason : "special-item-use", NULL, NULL, 0, false, effect))
+    {
+        *role = before;
+        printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               before.roleId, itemId, seq, effect->kind, vm_mysql_last_error());
+        return false;
+    }
+    if (remainingOut)
+        *remainingOut = remaining;
+    return true;
 }
 
 static void vm_net_mock_role_db_load(void)
@@ -4425,7 +4699,7 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount, true))
+                                                 migratedIdCount, true, NULL))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -4681,7 +4955,7 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
-    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true))
+    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true, NULL))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -4751,7 +5025,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     }
 
-    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true))
+    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true, NULL))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)

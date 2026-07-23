@@ -830,6 +830,33 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_exp_card_status_response(request, requestLen,
+                                                           out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-exp-card-status", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_timed_special_item_use_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-special-timed-item-use", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_unresolved_special_item_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-special-item-unresolved", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_item_use_response(request, requestLen, out, outCap);
     if (hookedLen)
     {

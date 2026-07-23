@@ -188,7 +188,8 @@ static bool vm_net_mock_append_misc_player_type_object(u8 *out, u32 outCap, u32 
     }
     else if (subtype == 32)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
+                                       vm_net_mock_role_active_exp_card_flag()))
             return false;
     }
     else
