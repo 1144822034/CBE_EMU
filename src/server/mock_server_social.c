@@ -4864,13 +4864,49 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         moveinfoFieldKind = "entry";
     }
     timingFieldMs = scheduler_get_tick_ms();
+    scene = (role != NULL && vm_net_mock_scene_name_is_safe(role->scene)) ?
+            role->scene : vm_net_mock_current_scene_name();
+    /*
+     * A 30/1 scene transition has already moved the durable role target, but
+     * the previous scene can still flush its ten-frame 2/1 queue.  That
+     * upload is not a target-scene completion signal.  In particular it must
+     * not enter vm_mock_service_session_update_move_position(), whose normal
+     * ready transition would make this source visible to target-scene pollers
+     * before the client has completed its own resource/task follow-up.
+     *
+     * Preserve the established empty 2/1 ACK so the client can retire the
+     * queued upload; discard only its server-side movement effects while the
+     * scene lifecycle is pending.  The existing scene follow-up completion
+     * remains the sole authority for sceneVisibleReady.
+     */
+    if (activeSession == NULL || !activeSession->sceneVisibleReady ||
+        activeSession->sceneVisiblePending ||
+        !vm_net_mock_scene_name_is_safe(activeSession->sceneVisibleScene) ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_names_equal_loose(activeSession->sceneVisibleScene, scene))
+    {
+        if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][mock-service] scene_lifecycle_moveinfo_ack client=%08x "
+               "ready=%u pending=%u visible_scene=%s move_scene=%s field=%s len=%u "
+               "action=ack-without-ready-or-position resp=%u\n",
+               activeSession ? activeSession->clientId : 0,
+               activeSession && activeSession->sceneVisibleReady ? 1u : 0u,
+               activeSession && activeSession->sceneVisiblePending ? 1u : 0u,
+               activeSession && activeSession->sceneVisibleScene[0] ?
+                   activeSession->sceneVisibleScene : "-",
+               scene ? scene : "-",
+               moveinfoFieldKind,
+               (u32)moveInfoLen,
+               pos);
+        return pos;
+    }
     parsedUploadedPos = vm_net_mock_parse_actor_moveinfo_pos(moveInfo, moveInfoLen,
                                                              &uploadedX, &uploadedY);
-    if (parsedUploadedPos &&
-        role != NULL &&
-        vm_net_mock_scene_name_is_safe(role->scene))
+    if (parsedUploadedPos)
     {
-        scene = role->scene;
         gridX = uploadedX;
         gridY = uploadedY;
         vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-packet");
@@ -4880,8 +4916,6 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     }
     else
     {
-        scene = (role != NULL && vm_net_mock_scene_name_is_safe(role->scene)) ?
-                role->scene : vm_net_mock_current_scene_name();
         if (vm_net_mock_is_actor_moveinfo_timeline(moveInfo, moveInfoLen))
         {
             if (activeSession != NULL &&

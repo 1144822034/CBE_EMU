@@ -3528,7 +3528,18 @@ static void vm_mock_service_session_update_move_position(vm_mock_service_client_
         !vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
         !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene))
     {
-        vm_mock_service_session_mark_scene_ready(session, scene, x, y, "moveinfo-upload");
+        /* A movement upload has no scene-enter completion semantics.  Only
+         * the target scene's own follow-up may transition pending/not-ready
+         * sessions to visible; otherwise a stale source-scene queue can leak
+         * its actor into the destination scene. */
+        printf("[warn][mock-service] scene_move_position_reject client=%08x "
+               "visible_ready=%u visible_pending=%u visible_scene=%s "
+               "move_scene=%s action=no-ready-promotion\n",
+               session->clientId,
+               session->sceneVisibleReady ? 1u : 0u,
+               session->sceneVisiblePending ? 1u : 0u,
+               session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-",
+               scene);
         return;
     }
     session->sceneVisibleX = x;
