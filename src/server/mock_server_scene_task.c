@@ -1899,6 +1899,16 @@ static bool vm_net_mock_pending_local_scene_change_matches(const char *requested
                                                            size_t pendingSceneCap,
                                                            u8 *pendingOut)
 {
+#ifdef CBE_SERVER_ONLY
+    /* A pending local CBE transition is not observable by the service.  The
+     * matching service-session transition is resolved below by its own state. */
+    (void)requestedTargetScene;
+    if (pendingSceneOut != NULL && pendingSceneCap != 0)
+        pendingSceneOut[0] = 0;
+    if (pendingOut != NULL)
+        *pendingOut = 0;
+    return false;
+#else
     u32 sceneObj = 0;
     u8 pending = 0;
     char pendingScene[64];
@@ -1923,6 +1933,7 @@ static bool vm_net_mock_pending_local_scene_change_matches(const char *requested
     if (pendingOut != NULL)
         *pendingOut = pending;
     return true;
+#endif
 }
 
 static bool vm_net_mock_try_scene_change_source_portal(const char *sourceKind,

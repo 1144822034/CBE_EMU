@@ -4462,6 +4462,13 @@ static bool vm_net_mock_scene_name_is_safe(const char *scene)
 
 static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
 {
+#ifdef CBE_SERVER_ONLY
+    /* The authoritative service never owns an emulated scene object.  Session
+     * and role state are the only scene authority on this side of CBMS. */
+    if (out != NULL && outCap != 0)
+        out[0] = 0;
+    return false;
+#else
     u32 sceneObj = 0;
 
     if (out == NULL || outCap == 0)
@@ -4476,6 +4483,7 @@ static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
     }
     return vm_net_read_guest_raw_cstr(sceneObj + 0x475, out, outCap) &&
            vm_net_mock_scene_name_is_safe(out);
+#endif
 }
 
 static const char *vm_net_mock_normalize_scene_name_for_enter(const char *scene)

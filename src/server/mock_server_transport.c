@@ -1,5 +1,9 @@
 static u32 vm_net_mock_sync_response_to_vm(void)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Only an emulator-side transport can allocate a guest response buffer. */
+    return 0;
+#else
     if (g_netMockResponseLen == 0)
         return 0;
 
@@ -14,6 +18,7 @@ static u32 vm_net_mock_sync_response_to_vm(void)
         return 0;
     uc_mem_write(MTK, g_netMockResponseVmPtr, g_netMockResponse, g_netMockResponseLen);
     return g_netMockResponseVmPtr;
+#endif
 }
 
 static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
@@ -163,6 +168,11 @@ static void vm_net_mock_format_moveinfo_timeline(const u8 *moveInfo, u16 moveInf
 
 static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
 {
+#ifdef CBE_SERVER_ONLY
+    (void)buffer;
+    (void)bufferLen;
+    return 0;
+#else
     u32 responsePtr = 0;
     if (buffer == NULL || bufferLen == 0)
         return 0;
@@ -171,6 +181,7 @@ static u32 vm_net_mock_sync_buffer_to_vm(const u8 *buffer, u32 bufferLen)
         return 0;
     uc_mem_write(MTK, responsePtr, buffer, bufferLen);
     return responsePtr;
+#endif
 }
 
 static void vm_mock_service_write_le32(u8 *dst, u32 value)
@@ -1332,6 +1343,15 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         workerStartMs = scheduler_get_tick_ms();
         queueWaitMs = workerStartMs >= job.acceptedMs ?
                           workerStartMs - job.acceptedMs : 0;
+        if (job.sequence <= 8)
+        {
+            printf("[info][mock-service] connection_dispatch worker=%u sequence=%u kind=%u socket=%llu\n",
+                   worker->workerId,
+                   job.sequence,
+                   (u32)job.kind,
+                   (unsigned long long)job.socket);
+            fflush(stdout);
+        }
         if (job.kind == VM_MOCK_SERVICE_CONNECTION_GAME)
         {
             ok = vm_net_mock_service_handle_client(job.socket,
@@ -1479,6 +1499,8 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     vm_mock_service_socket adminSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
     struct sockaddr_in addr;
     const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
+    u32 acceptedGameLogCount = 0;
+    u32 acceptedAdminLogCount = 0;
 
     if (!vm_net_mock_service_ensure_resource_root())
     {
@@ -1628,6 +1650,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                     printf("[warn][mock-service] connection_rejected kind=game reason=queue-full\n");
                     vm_mock_service_socket_close(client);
                 }
+                else if (acceptedGameLogCount++ < 8)
+                {
+                    printf("[info][mock-service] connection_accept kind=game sequence=%u socket=%llu\n",
+                           sequence, (unsigned long long)client);
+                    fflush(stdout);
+                }
             }
         }
         if (adminSocket != VM_MOCK_SERVICE_INVALID_SOCKET && FD_ISSET(adminSocket, &readSet))
@@ -1645,6 +1673,12 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                 {
                     printf("[warn][mock-admin] connection_rejected reason=queue-full\n");
                     vm_mock_service_socket_close(adminClient);
+                }
+                else if (acceptedAdminLogCount++ < 8)
+                {
+                    printf("[info][mock-service] connection_accept kind=admin sequence=%u socket=%llu\n",
+                           sequence, (unsigned long long)adminClient);
+                    fflush(stdout);
                 }
             }
         }
@@ -2548,6 +2582,13 @@ static void vm_net_mock_async_shutdown(void)
 
 static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Service ingress starts with a CBMS socket frame, not a guest pointer. */
+    (void)connectId;
+    (void)dataPtr;
+    (void)dataLen;
+    return;
+#else
     u8 request[VM_NET_MOCK_ASYNC_REQUEST_MAX];
     u32 readLen = 0;
     static u32 queueFullLogCount = 0;
@@ -2571,6 +2612,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
         return;
     }
     g_netUpLinkData += dataLen;
+#endif
 }
 
 static void vm_net_mock_poll_push_if_due(void)
@@ -2619,6 +2661,11 @@ static void vm_net_mock_poll_push_if_due(void)
 
 static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
 {
+#ifdef CBE_SERVER_ONLY
+    (void)dst;
+    (void)dstLen;
+    return 0;
+#else
     static u32 s_netReadObserveCount = 0;
     if (dst == 0 || dstLen == 0 || g_netMockResponseOffset >= g_netMockResponseLen)
     {
@@ -2655,4 +2702,5 @@ static u32 vm_net_mock_read_data(u32 dst, u32 dstLen)
                          dst, dstLen, copyLen, g_netMockResponseOffset, g_netMockResponseLen);
     }
     return vm_set_call_result(copyLen);
+#endif
 }

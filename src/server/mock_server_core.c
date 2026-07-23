@@ -1394,6 +1394,12 @@ static bool vm_net_mock_is_login_validation_request(const u8 *request, u32 reque
 
 static void vm_net_ensure_business_callback(const char *reason)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Network callbacks live in the CBE process.  A remote service sends the
+     * completed WT frame; the client transport schedules that callback. */
+    (void)reason;
+    return;
+#else
     if (g_netCurrentObject == 0)
         return;
 
@@ -1408,6 +1414,7 @@ static void vm_net_ensure_business_callback(const char *reason)
 
     callback = VM_GAME_NET_BUSINESS_CALLBACK;
     uc_mem_write(MTK, callbackAddr, &callback, 4);
+#endif
 }
 
 static u32 vm_net_mock_copy_response(const u8 *response, u32 responseLen, u8 *out, u32 outCap)
@@ -2382,11 +2389,17 @@ static bool vm_host_file_exists(const char *path)
 
 static u32 vm_alloc_host_string(const char *text)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Server-side packet construction uses byte buffers, never guest strings. */
+    (void)text;
+    return 0;
+#else
     u32 len = (u32)strlen(text) + 1;
     u32 ptr = vm_malloc(len);
     if (ptr)
         uc_mem_write(MTK, ptr, text, len);
     return ptr;
+#endif
 }
 
 static bool vm_net_mock_has_installed_update(void)
@@ -2426,10 +2439,14 @@ static u32 vm_net_mock_signed_byte_sum(const u8 *data, u32 len)
 
 static u32 vm_net_mock_read_download_checksum(void)
 {
+#ifdef CBE_SERVER_ONLY
+    return 0;
+#else
     u32 value = 0;
     if (Global_R9)
         uc_mem_read(MTK, Global_R9 + 0x9584, &value, sizeof(value));
     return value;
+#endif
 }
 
 static u32 vm_net_mock_load_update_payload(u8 *out, u32 outCap)

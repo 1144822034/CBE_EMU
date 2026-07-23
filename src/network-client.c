@@ -7,11 +7,20 @@
  * the emulated client.
  */
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET vm_client_socket;
+#define VM_CLIENT_INVALID_SOCKET INVALID_SOCKET
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+typedef int vm_client_socket;
+#define VM_CLIENT_INVALID_SOCKET (-1)
+#endif
 
 enum
 {
@@ -253,18 +262,37 @@ static void vm_client_encode_header(u8 *header, u32 flags, u32 bodyLen, u32 meta
     vm_client_write_le32(header + 16, metaLen);
 }
 
-static void vm_client_close_socket(int sock)
+static bool vm_client_socket_init(void)
 {
-    if (sock >= 0)
-        close(sock);
+#ifdef _WIN32
+    static int initialized = -1;
+    WSADATA wsaData;
+
+    if (initialized >= 0)
+        return initialized != 0;
+    initialized = WSAStartup(MAKEWORD(2, 2), &wsaData) == 0 ? 1 : 0;
+    return initialized != 0;
+#else
+    return true;
+#endif
 }
 
-static bool vm_client_send_all(int sock, const u8 *data, u32 len)
+static void vm_client_close_socket(vm_client_socket sock)
+{
+    if (sock != VM_CLIENT_INVALID_SOCKET)
+#ifdef _WIN32
+        closesocket(sock);
+#else
+        close(sock);
+#endif
+}
+
+static bool vm_client_send_all(vm_client_socket sock, const u8 *data, u32 len)
 {
     u32 sent = 0;
     while (sent < len)
     {
-        ssize_t rc = send(sock, data + sent, len - sent, 0);
+        int rc = send(sock, (const char *)(data + sent), (int)(len - sent), 0);
         if (rc <= 0)
             return false;
         sent += (u32)rc;
@@ -272,12 +300,12 @@ static bool vm_client_send_all(int sock, const u8 *data, u32 len)
     return true;
 }
 
-static bool vm_client_recv_all(int sock, u8 *data, u32 len)
+static bool vm_client_recv_all(vm_client_socket sock, u8 *data, u32 len)
 {
     u32 received = 0;
     while (received < len)
     {
-        ssize_t rc = recv(sock, data + received, len - received, 0);
+        int rc = recv(sock, (char *)(data + received), (int)(len - received), 0);
         if (rc <= 0)
             return false;
         received += (u32)rc;
@@ -285,36 +313,53 @@ static bool vm_client_recv_all(int sock, u8 *data, u32 len)
     return true;
 }
 
-static int vm_client_connect(void)
+static vm_client_socket vm_client_connect(void)
 {
     struct addrinfo hints;
     struct addrinfo *addresses = NULL;
     struct addrinfo *address;
+#ifndef _WIN32
     struct timeval timeout;
+#endif
     char port[16];
-    int sock = -1;
+    vm_client_socket sock = VM_CLIENT_INVALID_SOCKET;
 
+    if (!vm_client_socket_init())
+        return VM_CLIENT_INVALID_SOCKET;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     snprintf(port, sizeof(port), "%u", g_mockServicePort);
     if (getaddrinfo(g_mockServiceHost, port, &hints, &addresses) != 0)
-        return -1;
+        return VM_CLIENT_INVALID_SOCKET;
 
+#ifdef _WIN32
+    {
+        int timeout = VM_CLIENT_SOCKET_TIMEOUT_MS;
+#else
     timeout.tv_sec = VM_CLIENT_SOCKET_TIMEOUT_MS / 1000;
     timeout.tv_usec = (VM_CLIENT_SOCKET_TIMEOUT_MS % 1000) * 1000;
+#endif
     for (address = addresses; address != NULL; address = address->ai_next)
     {
         sock = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-        if (sock < 0)
+        if (sock == VM_CLIENT_INVALID_SOCKET)
             continue;
+#ifdef _WIN32
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
+#else
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
         if (connect(sock, address->ai_addr, address->ai_addrlen) == 0)
             break;
         vm_client_close_socket(sock);
-        sock = -1;
+        sock = VM_CLIENT_INVALID_SOCKET;
     }
+#ifdef _WIN32
+    }
+#endif
     freeaddrinfo(addresses);
     return sock;
 }
@@ -327,7 +372,7 @@ static u32 vm_client_encode_meta(u8 *meta, u32 cap)
     return 4;
 }
 
-static bool vm_client_read_response(int sock, u8 *response, u32 responseCap,
+static bool vm_client_read_response(vm_client_socket sock, u8 *response, u32 responseCap,
                                     u32 *responseLen, u32 *eventType,
                                     bool *closeAfterData)
 {
@@ -362,7 +407,7 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
     u8 header[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
     u32 metaLen = vm_client_encode_meta(meta, sizeof(meta));
-    int sock;
+    vm_client_socket sock;
     bool ok;
 
     if (responseLen != NULL)
@@ -377,7 +422,7 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
         return false;
 
     sock = vm_client_connect();
-    if (sock < 0)
+    if (sock == VM_CLIENT_INVALID_SOCKET)
         return false;
     vm_client_encode_header(header, 0, requestLen + metaLen, metaLen);
     ok = vm_client_send_all(sock, header, sizeof(header)) &&
@@ -401,7 +446,7 @@ static bool vm_client_remote_poll(u8 *response, u32 responseCap,
     u8 header[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
     u32 metaLen = vm_client_encode_meta(meta, sizeof(meta));
-    int sock;
+    vm_client_socket sock;
     bool ok;
     if (responseLen != NULL)
         *responseLen = 0;
@@ -410,7 +455,7 @@ static bool vm_client_remote_poll(u8 *response, u32 responseCap,
     if (response == NULL || metaLen == 0)
         return false;
     sock = vm_client_connect();
-    if (sock < 0)
+    if (sock == VM_CLIENT_INVALID_SOCKET)
         return false;
     vm_client_encode_header(header, VM_CLIENT_REQUEST_FLAG_SCENE_SYNC_POLL,
                             metaLen, metaLen);
@@ -428,13 +473,13 @@ static void vm_net_mock_service_notify_disconnect(const char *reason)
     u8 responseHeader[VM_CLIENT_FRAME_SIZE];
     u8 meta[16];
     u32 metaLen;
-    int sock;
+    vm_client_socket sock;
     bool ok;
     if (g_mockServiceClientId == 0)
         return;
     metaLen = vm_client_encode_meta(meta, sizeof(meta));
     sock = vm_client_connect();
-    if (sock < 0)
+    if (sock == VM_CLIENT_INVALID_SOCKET)
         return;
     vm_client_encode_header(header, VM_CLIENT_REQUEST_FLAG_DISCONNECT,
                             metaLen, metaLen);

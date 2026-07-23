@@ -300,6 +300,19 @@ static u32 vm_net_mock_normalize_battle_enemy_id(u32 requestedId)
 
 static u32 vm_net_mock_resolve_battle_enemy_id(u32 requestedId, u32 *tableBaseOut, u32 tableIds[4])
 {
+#ifdef CBE_SERVER_ONLY
+    /* The battle CBM/template table belongs to the remote CBE client.  The
+     * service must never inspect it: the collision WT request is normalized
+     * against server monster data and that authoritative id is returned on the
+     * wire.  A client whose resources lack that template must request a
+     * resource update through the normal protocol, not borrow a template from
+     * a locally embedded emulator. */
+    if (tableBaseOut)
+        *tableBaseOut = 0;
+    if (tableIds)
+        memset(tableIds, 0, sizeof(u32) * 4);
+    return requestedId;
+#else
     u32 loaderR9 = vm_screen_stack_lookup_module_base(vmAddedScreen);
     u32 battleBase = 0;
     u32 enemyTable = 0;
@@ -342,6 +355,7 @@ static u32 vm_net_mock_resolve_battle_enemy_id(u32 requestedId, u32 *tableBaseOu
     if (requestedId != 0 && vm_net_mock_env_u32("CBE_BATTLE_FORCE_REQUEST_ENEMY_ID", 0) != 0)
         return requestedId;
     return firstNonzero ? firstNonzero : requestedId;
+#endif
 }
 
 static bool vm_net_mock_is_battle_operate_request(const u8 *request, u32 requestLen)
@@ -418,6 +432,12 @@ static bool vm_net_mock_is_battle_operate_request_relaxed(const u8 *request, u32
 
 static bool vm_net_mock_current_screen_is_battle(void)
 {
+#ifdef CBE_SERVER_ONLY
+    /* Battle ownership is recorded by the authoritative service session.  A
+     * remote request must not probe an emulator screen stack that belongs to
+     * neither this process nor the requesting client. */
+    return false;
+#else
     u32 inferredCodeBase = 0;
     u32 inferredModuleR9 = 0;
 
@@ -431,6 +451,7 @@ static bool vm_net_mock_current_screen_is_battle(void)
             return true;
     }
     return false;
+#endif
 }
 
 static bool vm_net_mock_battle_operate_is_skill(u32 operate)

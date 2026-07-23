@@ -854,11 +854,22 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
 
 static int vm_file_try_resolve_jhonline_dsh_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
 {
+#ifdef CBE_CLIENT_ONLY
+    /* The emulator owns only its local cache.  A cache miss must continue to
+     * vm_file_try_download_named_resource() and be supplied by WT18/7; reading
+     * web/fs here would make a co-located client silently consume service
+     * files and hide a broken resource-update contract. */
+    static const char *pathFormats[] = {
+        "JHOnlineData/%s"
+    };
+#else
+    /* The headless service owns its deployed resource catalog. */
     static const char *pathFormats[] = {
         "JHOnlineData/%s",
         "../web/fs/JHOnlineData/%s",
         "web/fs/JHOnlineData/%s"
     };
+#endif
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
     if (!vm_file_is_read_only_mode(mode) || !vm_file_is_bare_dsh_resource(normalizedName))
