@@ -1362,15 +1362,28 @@ static void vm_net_mock_mark_pending_scene_pos_save(const char *scene, u16 x, u1
 
 static const char *vm_net_mock_current_scene_name(void)
 {
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     const char *overrideName = vm_net_mock_env_str("CBE_SCENE_KEY", "");
     static char runtimeScene[64];
-    if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
-        return vm_net_mock_normalize_scene_name_for_enter(runtimeScene);
-    if (overrideName != NULL && overrideName[0] != 0)
-        return overrideName;
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    /*
+     * This helper is used while serving a network request.  Global_R9 is the
+     * scene of the emulator process hosting the mock service, not necessarily
+     * the scene of the remote client that issued that request.  In particular,
+     * the settings "unstuck" flow persists the returned scene immediately.
+     * Reading Global_R9 first therefore lets one client's (often initial-map)
+     * scene overwrite another authenticated role's location.
+     *
+     * The selected role is the request-scoped authority once one exists.  The
+     * environment key and local runtime scene remain useful only before a
+     * request has selected a role (local/offline diagnostics).
+     */
     if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
         return vm_net_mock_normalize_scene_name_for_enter(role->scene);
+    if (overrideName != NULL && overrideName[0] != 0)
+        return overrideName;
+    if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
+        return vm_net_mock_normalize_scene_name_for_enter(runtimeScene);
     return vm_net_mock_default_scene_name();
 }
 

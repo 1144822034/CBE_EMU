@@ -3938,21 +3938,59 @@ static bool vm_net_mock_is_settings_unstuck_request(const u8 *request, u32 reque
 
 static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_change_target *target)
 {
-    const char *scene = vm_net_mock_current_scene_name();
-    u16 fromX = vm_net_mock_scene_spawn_x();
-    u16 fromY = vm_net_mock_scene_spawn_y();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
+    const char *scene = NULL;
+    u16 fromX = 0;
+    u16 fromY = 0;
     u16 entryX = 0;
     u16 entryY = 0;
     u16 entryId = 0xffff;
     const char *targetSource = "current-pos";
+    const char *sceneSource = "role-db";
     const char *fromSource = "role-pos";
 
     memset(target, 0, sizeof(*target));
+    /*
+     * 12/3 belongs to the authenticated service session.  The role's scene
+     * and position are durable request-scoped state; the host CBE runtime grid
+     * is only a local-emulator fallback and must never supersede them.
+     */
+    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+    {
+        scene = role->scene;
+        fromX = role->x;
+        fromY = role->y;
+        if (session != NULL &&
+            session->sceneVisibleReady && !session->sceneVisiblePending &&
+            vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+            vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene) &&
+            session->sceneVisibleX != 0 && session->sceneVisibleY != 0)
+        {
+            fromX = session->sceneVisibleX;
+            fromY = session->sceneVisibleY;
+            fromSource = "session-visible";
+        }
+    }
+    else
+    {
+        scene = vm_net_mock_current_scene_name();
+        fromX = vm_net_mock_scene_spawn_x();
+        fromY = vm_net_mock_scene_spawn_y();
+        sceneSource = "runtime-fallback";
+        if (vm_net_mock_read_current_player_grid(NULL, NULL, &fromX, &fromY, NULL, NULL))
+            fromSource = "runtime-grid";
+    }
     if (!vm_net_mock_scene_name_is_safe(scene))
+    {
         scene = vm_net_mock_default_scene_name();
+        sceneSource = "default-fallback";
+    }
+    if (fromX == 0)
+        fromX = vm_net_mock_scene_spawn_x();
+    if (fromY == 0)
+        fromY = vm_net_mock_scene_spawn_y();
     snprintf(target->scene, sizeof(target->scene), "%s", scene);
-    if (vm_net_mock_read_current_player_grid(NULL, NULL, &fromX, &fromY, NULL, NULL))
-        fromSource = "runtime-grid";
 
     if (vm_net_mock_get_scene_nearest_entry_spawn_from_sce(target->scene,
                                                            fromX,
@@ -3981,8 +4019,9 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
-    printf("[info][network] mock_unstuck_target scene=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
+    printf("[info][network] mock_unstuck_target scene=%s scene_source=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
            target->scene,
+           sceneSource,
            fromX,
            fromY,
            fromSource,
