@@ -10,6 +10,16 @@
 #include "mock_server_core.c"
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
+
+/* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
+ * the destination is derived from the sMap/wMap topology and SCE resources in
+ * mock_server_scene_task.c.  Keep this narrow declaration here so both pieces
+ * remain in their proper business module despite the single aggregation unit. */
+static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
+    const char *fromScene, char *sceneOut, size_t sceneOutCap,
+    u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
+    u32 *distanceOut, const char **routeOut);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"

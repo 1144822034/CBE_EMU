@@ -4298,6 +4298,81 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
     return vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, pos, 0);
 }
 
+/*
+ * A resurrection-stone confirmation happens after the battle-side HP has
+ * already reached zero.  Scene 30/1 only changes the map/position; it does
+ * not replace the Battle.cbm character cache which still owns the displayed
+ * HP bar.  Reuse the established battle-terminal object family, but keep the
+ * status object isolated from victory rewards and automatic flask effects.
+ *
+ * HandleBattleSettleMsg(0x743C) treats hp/mp as pending changes.  Therefore
+ * hpRecovery is the full current max HP for a dead player (0 + max -> max),
+ * while MP recovery remains zero because item.dsh row 801 has no MP effect.
+ */
+static bool vm_net_mock_append_battle_revival_status7_object(u8 *out, u32 outCap,
+                                                             u32 *pos,
+                                                             u32 hpRecovery)
+{
+    u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 totalExp = role ? role->exp : 0;
+    u32 lastExp = vm_net_mock_role_last_level_exp(totalExp);
+    u32 nextExp = vm_net_mock_role_next_level_start_exp(totalExp);
+    u32 percentExp = vm_net_mock_role_exp_percent(totalExp);
+    u32 gold = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 level = role ? role->level : 1;
+
+    if (role == NULL || hpRecovery == 0)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "exp", totalExp) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "lastexp", lastExp) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "curexp", nextExp) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "persentexp", percentExp) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "energy", 100) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", 100) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "gold", gold) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "level", level) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "bagstatus", 0) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "hp", hpRecovery) ||
+        !vm_net_mock_put_object_u32(out, outCap, pos, "mp", 0) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_battle_revival_stone_completion_response(u8 *out,
+                                                                       u32 outCap)
+{
+    u32 pos = 5;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 hpRecovery = role ? role->hp : 0;
+
+    if (out == NULL || outCap < pos || role == NULL || hpRecovery == 0)
+        return 0;
+    if (!vm_net_mock_append_battle_revival_status7_object(out, outCap, &pos,
+                                                           hpRecovery) ||
+        !vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos) ||
+        !vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
+        !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 4);
+    printf("[info][network] mock_battle_revival_terminal hp_recovery=%u mp_recovery=0 role=%u response=4/7+4/8+4/11+4/9 resp=%u evidence=mmBattle:0x743C+0x7DF6+0x2C50\n",
+           hpRecovery, role->roleId, pos);
+    vm_autotest_note("mock_battle_revival_terminal hp_recovery=%u mp_recovery=0 role=%u response=4/7+4/8+4/11+4/9 evidence=mmBattle:0x743C/0x7DF6/0x2C50\n",
+                     hpRecovery, role->roleId);
+    return pos;
+}
+
 static u32 vm_mock_service_duel_damage(vm_mock_service_duel *duel,
                                        int sourceIndex,
                                        u32 operate,
@@ -5322,13 +5397,23 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         roleMaxMp = roleMaxMpDefault;
     if (roleHp == 0)
     {
-        u32 revivedHp = vm_net_mock_role_revive_floor_after_death("hangup-battle-start-zero-hp-floor");
-        if (revivedHp != 0)
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
+            !vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
+                                                          "您已经死亡，请先使用复活石"))
         {
-            roleHp = revivedHp;
-            if (role != NULL && role->hpMax > roleMaxHp)
-                roleMaxHp = role->hpMax;
+            return 0;
         }
+        objectCount += 2;
+        if (moveResponseLen != 0 &&
+            !vm_net_mock_append_response_objects(out, outCap, &pos, &objectCount,
+                                                 moveResponse, moveResponseLen))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][network] mock_hangup_battle_start roleid=%u action=reject-dead rolehp=0 response=2/10+25/11%s\n",
+               roleId, moveResponseLen != 0 ? "+2/1" : "");
+        return pos;
     }
     if (roleHp > roleMaxHp)
         roleHp = roleMaxHp;
@@ -5519,17 +5604,16 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         roleMaxMp = roleMaxMpDefault;
     if (roleHp == 0)
     {
-        u32 revivedHp = vm_net_mock_role_revive_floor_after_death("battle-start-zero-hp-floor");
-        if (revivedHp != 0)
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
+            !vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
+                                                          "您已经死亡，请先使用复活石"))
         {
-            roleHp = revivedHp;
-            if (role != NULL && role->hpMax > roleMaxHp)
-                roleMaxHp = role->hpMax;
-            printf("[warn][network] mock_battle_start_zero_hp_floor roleid=%u hp=%u/%u action=revive-floor\n",
-                   roleId, roleHp, roleMaxHp);
-            vm_autotest_note("mock_battle_start_zero_hp_floor roleid=%u hp=%u/%u action=revive-floor\n",
-                             roleId, roleHp, roleMaxHp);
+            return 0;
         }
+        vm_net_mock_finish_wt_packet(out, pos, 2);
+        printf("[info][network] mock_challenge_battle_start roleid=%u action=reject-dead rolehp=0 response=2/10+25/11\n",
+               roleId);
+        return pos;
     }
     if (roleHp > roleMaxHp)
         roleHp = roleMaxHp;

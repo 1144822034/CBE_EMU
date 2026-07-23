@@ -1923,6 +1923,61 @@ static bool vm_net_mock_is_scene_task_subset_followup_request(const u8 *request,
     return typeValue == 101;
 }
 
+/*
+ * A post-enter scene callback can coalesce the default-event callback with the
+ * ordinary 6/1 task subset.  The client keeps the default event first, then
+ * asks for 6/1, 6/13, 6/14, 2/10 Type=101 and an explicit 27/11 gate object:
+ *
+ *   25/5, 6/1, 6/13, 6/14, 2/10 {Type=101}, 27/11   (44 bytes)
+ *
+ * This is not the older 25/5 + 27/11 + 27/4 + 7/42 type-27 follow-up.  It is
+ * a combined scene-runtime request, but it still requires a 27/11 response.
+ * In particular, the NPC catalog may already have been consumed by the
+ * preceding same-target 2/3 completion; silently omitting 27/11 then leaves
+ * the 25/5 callback open even though no NPC row should be replayed.
+ */
+static bool vm_net_mock_is_primary_scene_task_subset_with_fb11_request(
+    const u8 *request, u32 requestLen)
+{
+    vm_net_mock_request_object object[6];
+    u32 offset = 4;
+    u8 typeValue = 0;
+
+    if (request == NULL || requestLen != 44 ||
+        request[0] != 'W' || request[1] != 'T')
+    {
+        return false;
+    }
+    for (u32 i = 0; i < 6; ++i)
+    {
+        if (!vm_net_mock_next_request_object(request, requestLen, &offset,
+                                              &object[i]))
+        {
+            return false;
+        }
+    }
+    if (offset != requestLen ||
+        object[0].major != 1 || object[0].kind != 0x19 ||
+        object[0].subtype != 5 || object[0].payloadLen != 0 ||
+        object[1].major != 1 || object[1].kind != 6 ||
+        object[1].subtype != 1 || object[1].payloadLen != 0 ||
+        object[2].major != 1 || object[2].kind != 6 ||
+        object[2].subtype != 13 || object[2].payloadLen != 0 ||
+        object[3].major != 1 || object[3].kind != 6 ||
+        object[3].subtype != 14 || object[3].payloadLen != 0 ||
+        object[4].major != 1 || object[4].kind != 2 ||
+        object[4].subtype != 10 ||
+        object[5].major != 1 || object[5].kind != 0x1b ||
+        object[5].subtype != 11 || object[5].payloadLen != 0 ||
+        !vm_net_mock_get_object_u8_field(object[4].payload,
+                                         object[4].payloadLen,
+                                         "Type", &typeValue))
+    {
+        return false;
+    }
+    return typeValue == 101;
+}
+
 static bool vm_net_mock_append_taskinfo_empty1_object(u8 *out, u32 outCap, u32 *pos,
                                                        const char *sceneOverride)
 {

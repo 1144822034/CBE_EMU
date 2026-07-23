@@ -2964,6 +2964,391 @@ static bool vm_net_mock_find_teleport_stone_smap_scene_dsh(const char *path,
     return false;
 }
 
+/* Ordinary death recovery needs a real return point, not the character's
+ * bootstrap map.  `n_telestone` is the authored scene actor used by the
+ * client resources; sMap supplies local-scene topology and wMap joins the
+ * otherwise separate local-map groups.  The sMap X/Y values are world-map UI
+ * markers, so they are deliberately never used as actor coordinates here. */
+enum
+{
+    VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX = 192,
+    VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX = 64
+};
+
+typedef struct
+{
+    u32 rowId;
+    u32 parentWorldId;
+    u32 neighbors[4];
+    char scene[64];
+} vm_net_mock_death_respawn_smap_node;
+
+typedef struct
+{
+    u32 worldId;
+    u32 neighbors[4];
+} vm_net_mock_death_respawn_wmap_node;
+
+static int vm_net_mock_death_respawn_find_smap_node(
+    const vm_net_mock_death_respawn_smap_node *nodes, u32 count, u32 rowId)
+{
+    if (nodes == NULL || rowId == 0)
+        return -1;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (nodes[i].rowId == rowId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int vm_net_mock_death_respawn_find_wmap_node(
+    const vm_net_mock_death_respawn_wmap_node *nodes, u32 count, u32 worldId)
+{
+    if (nodes == NULL || worldId == 0)
+        return -1;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (nodes[i].worldId == worldId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static bool vm_net_mock_death_respawn_scene_has_teleport_stone(const char *scene)
+{
+    static const char marker[] = "n_telestone";
+    u8 data[16384];
+    u32 len = 0;
+
+    if (!vm_net_mock_scene_name_is_download_key(scene))
+        return false;
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    if (len < sizeof(marker) - 1)
+        return false;
+    for (u32 offset = 0; offset + sizeof(marker) - 1 <= len; ++offset)
+    {
+        if (memcmp(data + offset, marker, sizeof(marker) - 1) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_death_respawn_load_smap_topology(
+    vm_net_mock_death_respawn_smap_node *nodes, u32 nodeCap, u32 *nodeCountOut)
+{
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+    u32 nodeCount = 0;
+
+    if (nodeCountOut)
+        *nodeCountOut = 0;
+    if (nodes == NULL || nodeCap == 0 ||
+        !vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 12 || columnCount > 64 || rowCount > nodeCap ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        vm_net_mock_death_respawn_smap_node node;
+        bool valid = true;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        memset(&node, 0, sizeof(node));
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+            {
+                valid = false;
+                break;
+            }
+            if (col == 0)
+                node.rowId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 1)
+                valid = vm_net_mock_copy_dsh_string_field(node.scene,
+                                                           sizeof(node.scene),
+                                                           value, valueLen) && valid;
+            else if (col >= 7 && col <= 10)
+                node.neighbors[col - 7] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col == 11)
+                node.parentWorldId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            rowPos += valueLen;
+        }
+        if (valid && node.rowId != 0 && node.parentWorldId != 0 &&
+            vm_net_mock_scene_name_is_download_key(node.scene))
+        {
+            nodes[nodeCount++] = node;
+        }
+        pos = rowEnd;
+    }
+    if (nodeCountOut)
+        *nodeCountOut = nodeCount;
+    return nodeCount != 0;
+}
+
+static bool vm_net_mock_death_respawn_load_wmap_topology(
+    vm_net_mock_death_respawn_wmap_node *nodes, u32 nodeCap, u32 *nodeCountOut)
+{
+    char path[256];
+    u8 data[4096];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+    u32 nodeCount = 0;
+
+    if (nodeCountOut)
+        *nodeCountOut = 0;
+    if (nodes == NULL || nodeCap == 0 ||
+        !vm_net_mock_open_server_data_resource("wMap.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 12 || columnCount > 64 || rowCount > nodeCap ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+        vm_net_mock_death_respawn_wmap_node node;
+        bool valid = true;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        memset(&node, 0, sizeof(node));
+        for (u32 col = 0; col < columnCount && rowPos < rowEnd; ++col)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (rowPos + valueLen > rowEnd)
+            {
+                valid = false;
+                break;
+            }
+            if (col == 0)
+                node.worldId = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            else if (col >= 8 && col <= 11)
+                node.neighbors[col - 8] = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+            rowPos += valueLen;
+        }
+        if (valid && node.worldId != 0)
+            nodes[nodeCount++] = node;
+        pos = rowEnd;
+    }
+    if (nodeCountOut)
+        *nodeCountOut = nodeCount;
+    return nodeCount != 0;
+}
+
+static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
+    const char *fromScene, char *sceneOut, size_t sceneOutCap,
+    u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
+    u32 *distanceOut, const char **routeOut)
+{
+    vm_net_mock_death_respawn_smap_node smap[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    vm_net_mock_death_respawn_wmap_node wmap[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+    bool smapVisited[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    u32 smapQueue[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    u32 smapDistance[VM_NET_MOCK_DEATH_RESPAWN_SMAP_MAX];
+    u32 wmapQueue[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+    u32 wmapDistance[VM_NET_MOCK_DEATH_RESPAWN_WMAP_MAX];
+    u32 smapCount = 0;
+    u32 wmapCount = 0;
+    u32 sourceIndex = 0;
+    u32 targetIndex = 0;
+    u32 sourceWorldId = 0;
+    u32 bestDistance = 0xffffffffu;
+    u32 queueHead = 0;
+    u32 queueTail = 0;
+    const char *route = "-";
+    u16 landingX = 0;
+    u16 landingY = 0;
+
+    if (sceneOut != NULL && sceneOutCap != 0)
+        sceneOut[0] = 0;
+    if (xOut)
+        *xOut = 0;
+    if (yOut)
+        *yOut = 0;
+    if (sourceSmapRowOut)
+        *sourceSmapRowOut = 0;
+    if (targetSmapRowOut)
+        *targetSmapRowOut = 0;
+    if (distanceOut)
+        *distanceOut = 0;
+    if (routeOut)
+        *routeOut = "unresolved";
+    if (!vm_net_mock_scene_name_is_safe(fromScene) || sceneOut == NULL || sceneOutCap == 0 ||
+        !vm_net_mock_death_respawn_load_smap_topology(smap, sizeof(smap) / sizeof(smap[0]),
+                                                       &smapCount))
+    {
+        return false;
+    }
+    for (; sourceIndex < smapCount; ++sourceIndex)
+    {
+        if (vm_net_mock_scene_names_equal_loose(fromScene, smap[sourceIndex].scene))
+            break;
+    }
+    if (sourceIndex == smapCount)
+        return false;
+    sourceWorldId = smap[sourceIndex].parentWorldId;
+    if (sourceSmapRowOut)
+        *sourceSmapRowOut = smap[sourceIndex].rowId;
+
+    /* Prefer an actually connected local scene.  This preserves the shortest
+     * scene-edge route and avoids treating world-map UI coordinates as space. */
+    memset(smapVisited, 0, sizeof(smapVisited));
+    smapQueue[queueTail++] = sourceIndex;
+    smapVisited[sourceIndex] = true;
+    smapDistance[sourceIndex] = 0;
+    while (queueHead < queueTail)
+    {
+        u32 index = smapQueue[queueHead++];
+
+        if (vm_net_mock_death_respawn_scene_has_teleport_stone(smap[index].scene))
+        {
+            targetIndex = index;
+            bestDistance = smapDistance[index];
+            route = "smap-neighbor";
+            goto resolved_target;
+        }
+        for (u32 edge = 0; edge < 4; ++edge)
+        {
+            int neighbor = vm_net_mock_death_respawn_find_smap_node(
+                smap, smapCount, smap[index].neighbors[edge]);
+            if (neighbor >= 0 && !smapVisited[neighbor] && queueTail < smapCount)
+            {
+                smapVisited[neighbor] = true;
+                smapDistance[neighbor] = smapDistance[index] + 1;
+                smapQueue[queueTail++] = (u32)neighbor;
+            }
+        }
+    }
+
+    /* Local sMap components do not cross world-map groups.  If none of their
+     * scenes contains an authored stone, select the nearest world-map group
+     * whose child scene does, using only wMap adjacency. */
+    if (sourceWorldId == 0 ||
+        !vm_net_mock_death_respawn_load_wmap_topology(wmap, sizeof(wmap) / sizeof(wmap[0]),
+                                                       &wmapCount))
+    {
+        return false;
+    }
+    {
+        int sourceWorldIndex = vm_net_mock_death_respawn_find_wmap_node(
+            wmap, wmapCount, sourceWorldId);
+        if (sourceWorldIndex < 0)
+            return false;
+        for (u32 i = 0; i < wmapCount; ++i)
+            wmapDistance[i] = 0xffffffffu;
+        queueHead = 0;
+        queueTail = 0;
+        wmapQueue[queueTail++] = (u32)sourceWorldIndex;
+        wmapDistance[sourceWorldIndex] = 0;
+        while (queueHead < queueTail)
+        {
+            u32 index = wmapQueue[queueHead++];
+            for (u32 edge = 0; edge < 4; ++edge)
+            {
+                int neighbor = vm_net_mock_death_respawn_find_wmap_node(
+                    wmap, wmapCount, wmap[index].neighbors[edge]);
+                if (neighbor >= 0 && wmapDistance[neighbor] == 0xffffffffu &&
+                    queueTail < wmapCount)
+                {
+                    wmapDistance[neighbor] = wmapDistance[index] + 1;
+                    wmapQueue[queueTail++] = (u32)neighbor;
+                }
+            }
+        }
+    }
+    for (u32 i = 0; i < smapCount; ++i)
+    {
+        int worldIndex = vm_net_mock_death_respawn_find_wmap_node(
+            wmap, wmapCount, smap[i].parentWorldId);
+        u32 worldDistance = worldIndex >= 0 ? wmapDistance[worldIndex] : 0xffffffffu;
+
+        if (worldDistance == 0xffffffffu ||
+            !vm_net_mock_death_respawn_scene_has_teleport_stone(smap[i].scene))
+        {
+            continue;
+        }
+        if (worldDistance < bestDistance ||
+            (worldDistance == bestDistance && smap[i].rowId < smap[targetIndex].rowId))
+        {
+            targetIndex = i;
+            bestDistance = worldDistance;
+        }
+    }
+    if (bestDistance == 0xffffffffu)
+        return false;
+    route = "wmap-neighbor";
+
+resolved_target:
+    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(smap[targetIndex].scene,
+                                                          &landingX, &landingY, NULL))
+    {
+        return false;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(smap[targetIndex].scene, &landingX, &landingY);
+    snprintf(sceneOut, sceneOutCap, "%s", smap[targetIndex].scene);
+    if (xOut)
+        *xOut = landingX;
+    if (yOut)
+        *yOut = landingY;
+    if (targetSmapRowOut)
+        *targetSmapRowOut = smap[targetIndex].rowId;
+    if (distanceOut)
+        *distanceOut = bestDistance;
+    if (routeOut)
+        *routeOut = route;
+    printf("[info][network] mock_death_respawn_nearest_telestone source_scene=%s source_smap=%u target_scene=%s target_smap=%u route=%s hops=%u landing=(%u,%u) evidence=sMap.dsh+wMap.dsh+SCE:n_telestone\n",
+           fromScene, smap[sourceIndex].rowId, smap[targetIndex].scene,
+           smap[targetIndex].rowId, route, bestDistance, landingX, landingY);
+    vm_autotest_note("mock_death_respawn_nearest_telestone source_scene=%s source_smap=%u target_scene=%s target_smap=%u route=%s hops=%u landing=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
+                     fromScene, smap[sourceIndex].rowId, smap[targetIndex].scene,
+                     smap[targetIndex].rowId, route, bestDistance, landingX, landingY);
+    return true;
+}
+
 static bool vm_net_mock_find_teleport_stone_scene_by_dsh(u32 objId,
                                                          u32 curId,
                                                          char *out,

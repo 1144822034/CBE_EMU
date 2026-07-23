@@ -1072,6 +1072,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     bool seedSubsetNpcActorInfo = false;
     bool startupNearbyInRequestedObject = false;
     bool includeSkillBooks = false;
+    bool primaryTaskSubsetNeedsFb11Ack = false;
+    bool sceneNpcLifecycleAppended = false;
     u32 subsetNpcActorInfoLen = 0;
     u32 subsetNpcActorId = 0;
     u32 nearbyRoleCount = 0;
@@ -1080,6 +1082,10 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     char missingResource[64];
     if (outCap < pos || !vm_net_mock_is_scene_task_subset_followup_request(request, requestLen))
         return 0;
+
+    primaryTaskSubsetNeedsFb11Ack =
+        vm_net_mock_is_primary_scene_task_subset_with_fb11_request(request,
+                                                                     requestLen);
 
     /*
      * This post-scene-change request is the WT49 task/other/banner subset
@@ -1132,12 +1138,31 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     /* scene_runtime_init_and_sync(0x01012FB4) issues this subset only after
      * rebuilding the 25-node scene table. Put 27/11 before 6/1 and 6/14 so
      * their prompt refresh sees the freshly created NPC nodes. */
-    if (!vm_net_mock_append_scene_npc_lifecycle_seed(
-            out, outCap, &pos, &objectCount, currentScene,
-            startupSceneAlreadyEntered && !completeDeferredScene,
-            !completeDeferredScene))
     {
-        return 0;
+        u8 objectCountBeforeLifecycle = objectCount;
+
+        if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+                out, outCap, &pos, &objectCount, currentScene,
+                startupSceneAlreadyEntered && !completeDeferredScene,
+                !completeDeferredScene))
+        {
+            return 0;
+        }
+        sceneNpcLifecycleAppended = objectCount != objectCountBeforeLifecycle;
+    }
+    if (primaryTaskSubsetNeedsFb11Ack && !sceneNpcLifecycleAppended)
+    {
+        /*
+         * The preceding 2/3 already delivered the one-shot NPC directory for
+         * this scene shell.  A second non-empty catalog would recreate those
+         * nodes, but the explicit 27/11 request still needs its parser-safe
+         * acknowledgement before the coalesced 25/5 callback can complete.
+         */
+        if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        printf("[info][network] mock_scene_task_subset_fb11_ack scene=%s request=25/5+6/1+6/13+6/14+2/10+27/11 response=empty-27/11 reason=npc-catalog-already-delivered\n",
+               currentScene ? currentScene : "-");
     }
     seedSubsetNpcOther = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
                          vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_OTHERINFO", 0) != 0;
@@ -1343,7 +1368,7 @@ static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
 static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen, u8 kind, u8 subtype);
 
 static bool vm_net_mock_is_battle_death_prompt_choice_request(const u8 *request, u32 requestLen,
-                                                              u32 *choiceOut)
+                                                               u32 *choiceOut)
 {
     u32 offset = 4;
     u32 choice = 0;
@@ -1369,8 +1394,30 @@ static bool vm_net_mock_is_battle_death_prompt_choice_request(const u8 *request,
     return true;
 }
 
+static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 outCap,
+                                                                 const char *info)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 20, 1, &objectStart))
+        return 0;
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+        return 0;
+    if (!vm_net_mock_put_object_string(out, outCap, &pos,
+                                       "info", info ? info : "复活石不可用"))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
 static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *request, u32 requestLen,
-                                                                   u8 *out, u32 outCap)
+                                                                    u8 *out, u32 outCap)
 {
     u32 choice = 0;
     u32 reviveHp = 0;
@@ -1382,39 +1429,110 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
     char respawnScene[64];
     u16 respawnX = 0;
     u16 respawnY = 0;
+    u16 consumedStoneSeq = 0;
+    u32 remainingStoneCount = 0;
+    vm_net_mock_role_state *role = NULL;
     vm_net_mock_scene_change_target respawnTarget;
 
     /*
      * Latest confirmed runtime:
      * - subtype-6 attack now reaches Battle.cbm action parser at tick 216.
      * - the client then shows the prompt "您已经死亡，是否进入商城购买复活石?".
-     * - after the user clicks the prompt, the client emits a short one-object
-     *   request `WT len=21 objs=1/7/14(result=2)`.
+     * - confirmation after a locally found 801 resurrection stone emits the
+     *   same one-object request with `result=1` (mmBattle:0x2F10);
+     * - declining the stone/shop route emits `result=2`.
      *
      * Echoing the request back is invalid: the main business dispatcher first
      * runs event_packet_init(..., 10, 19), and a request-shaped 7/14 packet
      * trips the generic unpack-error branch before any handler can use it.
-     * For the confirmed "no" branch, return a main-business simple-result
+     * For either completed death branch, return a main-business simple-result
      * object. net_handle_simple_result_info(kind=20/subtype=1) clears the
      * scene/network wait flag at JianghuOL.CBE:0x101145C. An empty WT packet
      * avoids the unpack error but leaves the loading progress active. Append a
-     * normal scene-channel enter object so the client reloads at the server-side
-     * respawn point instead of staying at the death position.
+     * normal scene-channel enter object so the client reloads through its
+     * normal scene state machine instead of staying in the battle death state.
      */
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_battle_death_prompt_choice_request(request, requestLen, &choice))
         return 0;
-    if (choice != 2)
-        return 0;
-
-    reviveHp = vm_net_mock_role_apply_death_penalty("battle-death-prompt-no",
-                                                    &expPenalty,
-                                                    &moneyPenalty,
-                                                    &reviveMp,
-                                                    respawnScene,
-                                                    sizeof(respawnScene),
-                                                    &respawnX,
-                                                    &respawnY);
+    if (choice == 1)
+    {
+        role = vm_net_mock_active_role();
+        if (!vm_net_mock_role_apply_revival_stone(&consumedStoneSeq,
+                                                  &remainingStoneCount) ||
+            role == NULL)
+        {
+            printf("[warn][network] mock_battle_death_prompt_choice result=1 action=reject-revival-stone role=%u hp=%u reason=missing-stone-or-not-dead\n",
+                   role ? role->roleId : 0,
+                   role ? role->hp : 0);
+            return vm_net_mock_build_battle_death_prompt_error_response(
+                out, outCap, "复活石不可用");
+        }
+        reviveHp = role->hp;
+        reviveMp = role->mp;
+        /*
+         * The client still has an active Battle.cbm character with HP=0 at
+         * this point.  A main-scene 20/1 + 30/1 response re-enters the map but
+         * never feeds that cache the HP recovery, so the map UI remains dead.
+         * Use the same 4/7 -> 4/8 terminal path as a completed battle: 4/7
+         * carries the full HP delta, and 4/8 applies it before the battle
+         * screen returns to the already-current scene.  Do not add 30/1 here;
+         * that would race a second scene lifecycle against the terminal one.
+         */
+        pos = vm_net_mock_build_battle_revival_stone_completion_response(out, outCap);
+        if (pos == 0)
+        {
+            printf("[error][network] mock_battle_death_prompt_choice result=1 action=revival-terminal-build-failed role=%u hp=%u mp=%u\n",
+                   role->roleId, reviveHp, reviveMp);
+            return 0;
+        }
+        g_mockBattleOperateSessionArmed = 0;
+        g_mockBattleOperateSessionFinished = 0;
+        g_mockBattlePendingEnemyTurn = 0;
+        g_mockBattleAwaitingSettlement = 0;
+        printf("[info][network] mock_battle_death_prompt_choice result=1 action=revival-stone stone_seq=%u stone_remaining=%u exp_penalty=0 money_penalty=0 revive=%u/%u scene=%s pos=(%u,%u) response=4/7-battle-status+4/8-terminal+4/11+4/9 resp=%u evidence=item.dsh:801,mmBattle:0x743C+0x7DF6+0x2C50\n",
+               consumedStoneSeq,
+               remainingStoneCount,
+               reviveHp,
+               reviveMp,
+               role->scene,
+               role->x,
+               role->y,
+               pos);
+        vm_autotest_note("mock_battle_death_prompt_choice result=1 action=revival-stone stone_seq=%u stone_remaining=%u revive=%u/%u scene=%s pos=(%u,%u) response=4/7+4/8+4/11+4/9 evidence=item.dsh:801 mmBattle:0x743C/0x7DF6/0x2C50\n",
+                         consumedStoneSeq,
+                         remainingStoneCount,
+                         reviveHp,
+                         reviveMp,
+                         role->scene,
+                         role->x,
+                         role->y);
+        return pos;
+    }
+    else if (choice == 2)
+    {
+        reviveHp = vm_net_mock_role_apply_death_penalty("battle-death-prompt-no",
+                                                        &expPenalty,
+                                                        &moneyPenalty,
+                                                        &reviveMp,
+                                                        respawnScene,
+                                                        sizeof(respawnScene),
+                                                        &respawnX,
+                                                        &respawnY);
+        if (reviveHp == 0)
+        {
+            printf("[warn][network] mock_battle_death_prompt_choice result=2 action=reject-ordinary-respawn reason=not-dead-or-state-unavailable\n");
+            return vm_net_mock_build_battle_death_prompt_error_response(
+                out, outCap, "当前无需复活");
+        }
+    }
+    else
+    {
+        printf("[warn][network] mock_battle_death_prompt_choice result=%u action=reject-unknown-choice\n",
+               choice);
+        return vm_net_mock_build_battle_death_prompt_error_response(
+            out, outCap, "复活请求无效");
+    }
     g_mockBattleOperateSessionArmed = 0;
     g_mockBattleOperateSessionFinished = 0;
     g_mockBattlePendingEnemyTurn = 0;
@@ -1449,7 +1567,7 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
     g_vm_net_mock_last_scene_change_fb4_type = 1;
 
-    printf("[info][network] mock_battle_death_prompt_choice result=%u exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1-simple-result+30/1-respawn resp=%u evidence=IDA:JianghuOL.CBE:0x1011434 clears-wait,0x010396D6 scene-enter negative=echo-unpack-error,empty-wt-spinner\n",
+    printf("[info][network] mock_battle_death_prompt_choice result=%u action=ordinary-respawn exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1-simple-result+30/1-respawn resp=%u evidence=JianghuOL.CBE:0x1011434+0x010396D6\n",
            choice,
            expPenalty,
            moneyPenalty,
@@ -1459,7 +1577,7 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
            respawnTarget.x,
            respawnTarget.y,
            pos);
-    vm_autotest_note("mock_battle_death_prompt_choice result=%u exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1+30/1-respawn evidence=IDA:JianghuOL.CBE:0x1011434/0x010396D6 negative=echo-unpack-error,empty-wt-spinner\n",
+    vm_autotest_note("mock_battle_death_prompt_choice result=%u action=ordinary-respawn exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1+30/1-respawn evidence=JianghuOL.CBE:0x1011434/0x010396D6\n",
                      choice,
                      expPenalty,
                      moneyPenalty,
@@ -1788,6 +1906,7 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     bool directExpand = false;
     bool directExpandRejectedCount = false;
     bool insufficientFunds = false;
+    bool revivalStoneConfirmPending = false;
     u32 directExpandApplied = 0;
     vm_net_mock_role_state *role = NULL;
 
@@ -1862,6 +1981,12 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
         }
     }
 
+    /* Shop success only makes 801 available locally.  The battle module must
+     * subsequently confirm consumption with 1/7/14(result=1); never revive
+     * merely because the purchase response was delivered. */
+    revivalStoneConfirmPending = result == 1 && itemId == 801 &&
+        role != NULL && role->hp == 0;
+
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
         return 0;
     if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", seq))
@@ -1871,18 +1996,20 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
-    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
+    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
            type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter, seq,
            result, knownItem ? 1 : 0, directExpand ? 1 : 0, directExpandApplied,
            directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+           revivalStoneConfirmPending ? 1 : 0,
            capacityBefore, capacityAfter,
            g_netMockShop17ListPending,
            g_netMockBackpackPreferRoleListAfterShopBuy,
            result ? 1 : 0);
-    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
+    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
                      type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
                      seq, result, directExpand ? 1 : 0, directExpandApplied,
                      directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+                     revivalStoneConfirmPending ? 1 : 0,
                      capacityBefore, capacityAfter,
                      g_netMockShop17ListPending,
                      g_netMockBackpackPreferRoleListAfterShopBuy,

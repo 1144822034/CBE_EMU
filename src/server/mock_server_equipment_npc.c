@@ -1116,26 +1116,55 @@ static void vm_net_mock_battle_save_completed_current_role_state(const char *rea
         vm_net_mock_role_service_apply_battle_wear(role);
 }
 
-static u32 vm_net_mock_role_revive_floor_after_death(const char *reason)
+/* item.dsh row 801: "使用后原地满血复活，免除死亡经验惩罚。"
+ *
+ * The battle client sends its explicit 1/7/14(result=1) confirmation only
+ * after it has found this category-14 item locally.  Keep the authoritative
+ * consumption and the persistent HP transition together here; the matching
+ * response builder owns the client-facing scene re-entry packet. */
+static bool vm_net_mock_role_apply_revival_stone(u16 *consumedSeqOut,
+                                                 u32 *remainingOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 reviveHp = 1;
+    vm_net_mock_backpack_item_state *stone = NULL;
+    u16 stoneSeq = 0;
+    u32 remaining = 0;
 
+    if (consumedSeqOut)
+        *consumedSeqOut = 0;
+    if (remainingOut)
+        *remainingOut = 0;
     if (role == NULL)
-        return 0;
+        return false;
+
     vm_net_mock_role_sync_derived_vitals(role);
-    if (role->hpMax == 0)
-        role->hpMax = VM_NET_MOCK_ROLE_DEFAULT_HP;
-    if (reviveHp > role->hpMax)
-        reviveHp = role->hpMax;
-    if (role->hp == 0)
+    if (role->hp != 0)
+        return false;
+    stone = vm_net_mock_role_find_backpack_item(role, 801, 0);
+    if (stone == NULL || stone->seq == 0 || stone->count == 0)
+        return false;
+
+    stoneSeq = stone->seq;
+    if (!vm_net_mock_role_consume_backpack_item(role, 801, stoneSeq, 1,
+                                                &remaining))
     {
-        role->hp = reviveHp;
-        vm_net_mock_role_db_save(reason ? reason : "death-revive-floor");
+        return false;
     }
+
+    /* 801 restores HP only.  Its DSH MP effect is zero, so preserve current
+     * MP instead of turning the shop purchase into an undocumented full heal. */
+    role->hp = role->hpMax;
     g_mockBattleRoleHpCurrent = role->hp;
     g_mockBattleRoleHpMax = role->hpMax;
-    return role->hp;
+    g_mockBattleRoleMpCurrent = role->mp;
+    g_mockBattleRoleMpMax = role->mpMax;
+    vm_net_mock_role_db_save("battle-revival-stone");
+
+    if (consumedSeqOut)
+        *consumedSeqOut = stoneSeq;
+    if (remainingOut)
+        *remainingOut = remaining;
+    return true;
 }
 
 static u32 vm_net_mock_percent_ceil_u32(u32 value, u32 percent)
@@ -1162,11 +1191,19 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
                                                 u16 *yOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    const char *respawnScene = vm_net_mock_role_initial_scene_name();
+    char sourceScene[64];
+    char nearestStoneScene[64];
+    const char *respawnScene = NULL;
+    const char *respawnRoute = "unresolved";
     u16 respawnX = VM_NET_MOCK_ROLE_INITIAL_X;
     u16 respawnY = VM_NET_MOCK_ROLE_INITIAL_Y;
-    u32 levelStartExp = 0;
-    u32 levelProgressExp = 0;
+    u32 sourceSmapRow = 0;
+    u32 targetSmapRow = 0;
+    u32 respawnDistance = 0;
+    u32 expBefore = 0;
+    u32 levelBefore = 1;
+    u32 levelAfter = 1;
+    u32 targetExp = 0;
     u32 expPenalty = 0;
     u32 moneyPenalty = 0;
     u32 reviveHp = 0;
@@ -1184,18 +1221,58 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
         *xOut = 0;
     if (yOut)
         *yOut = 0;
-    if (role == NULL)
+    if (role == NULL || role->hp != 0)
         return 0;
 
+    memset(sourceScene, 0, sizeof(sourceScene));
+    memset(nearestStoneScene, 0, sizeof(nearestStoneScene));
+    if (vm_net_mock_scene_name_is_safe(role->scene))
+        snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
+
+    /* The ordinary death choice must return the player to an authored
+     * teleport-stone scene.  Keep an unresolved source explicit and retain the
+     * current valid scene rather than silently turning a data failure into a
+     * bootstrap-map respawn. */
+    if (sourceScene[0] != 0 && vm_net_mock_resolve_nearest_teleport_stone_respawn(
+            sourceScene, nearestStoneScene, sizeof(nearestStoneScene),
+            &respawnX, &respawnY, &sourceSmapRow, &targetSmapRow,
+            &respawnDistance, &respawnRoute))
+    {
+        respawnScene = nearestStoneScene;
+    }
+    else if (vm_net_mock_scene_name_is_safe(sourceScene))
+    {
+        respawnScene = sourceScene;
+        respawnRoute = "unresolved-keep-current-scene";
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(respawnScene,
+                                                              &respawnX,
+                                                              &respawnY,
+                                                              NULL);
+        vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
+        printf("[error][network] mock_death_respawn_nearest_telestone_unresolved source_scene=%s action=keep-current-scene reason=sMap-wMap-or-SCE-data\n",
+               sourceScene);
+    }
+    else
+    {
+        respawnScene = vm_net_mock_role_initial_scene_name();
+        respawnRoute = "unresolved-invalid-source-initial-scene";
+        (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(respawnScene,
+                                                              &respawnX,
+                                                              &respawnY,
+                                                              NULL);
+        vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
+        printf("[error][network] mock_death_respawn_nearest_telestone_unresolved source_scene=- action=initial-scene reason=invalid-role-scene\n");
+    }
+
     vm_net_mock_role_sync_derived_vitals(role);
-    levelStartExp = vm_net_mock_role_last_level_exp(role->exp);
-    if (role->exp > levelStartExp)
-        levelProgressExp = role->exp - levelStartExp;
-    expPenalty = vm_net_mock_percent_ceil_u32(levelProgressExp,
-                                             VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT);
-    if (expPenalty > levelProgressExp)
-        expPenalty = levelProgressExp;
-    role->exp -= expPenalty;
+    expBefore = role->exp;
+    levelBefore = vm_net_mock_role_level_from_exp(expBefore);
+    levelAfter = levelBefore > 2 ? levelBefore - 2 : 1;
+    targetExp = vm_net_mock_role_level_start_exp(levelAfter);
+    if (targetExp == 0xffffffffu || targetExp > expBefore)
+        targetExp = 0;
+    expPenalty = expBefore - targetExp;
+    role->exp = targetExp;
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     moneyPenalty = vm_net_mock_percent_ceil_u32(role->money,
                                                VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT);
@@ -1213,13 +1290,6 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     role->hp = vm_net_mock_min_u32(reviveHp, role->hpMax);
     role->mp = vm_net_mock_min_u32(reviveMp, role->mpMax);
 
-    if (!vm_net_mock_scene_name_is_safe(respawnScene))
-        respawnScene = vm_net_mock_default_scene_name();
-    (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(respawnScene,
-                                                          &respawnX,
-                                                          &respawnY,
-                                                          NULL);
-    vm_net_mock_adjust_safe_player_pos_for_scene(respawnScene, &respawnX, &respawnY);
     snprintf(role->scene, sizeof(role->scene), "%s", respawnScene);
     role->x = respawnX;
     role->y = respawnY;
@@ -1230,6 +1300,17 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     g_mockBattleRoleHpMax = role->hpMax;
     g_mockBattleRoleMpCurrent = role->mp;
     g_mockBattleRoleMpMax = role->mpMax;
+
+    printf("[info][network] mock_death_penalty reason=%s level=%u->%u exp=%u->%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u)\n",
+           reason ? reason : "battle-death", levelBefore, role->level,
+           expBefore, role->exp, expPenalty, moneyPenalty, role->scene,
+           sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
+           respawnDistance, role->x, role->y);
+    vm_autotest_note("mock_death_penalty reason=%s level=%u->%u exp=%u->%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
+                     reason ? reason : "battle-death", levelBefore, role->level,
+                     expBefore, role->exp, expPenalty, moneyPenalty, role->scene,
+                     sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
+                     respawnDistance, role->x, role->y);
 
     if (expPenaltyOut)
         *expPenaltyOut = expPenalty;
