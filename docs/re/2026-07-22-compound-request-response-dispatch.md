@@ -40,9 +40,10 @@ response-composition boundary.
 - Responses use `WT + objectCount + object...`, and
   `vm_net_mock_append_response_objects` extracts response objects beginning at
   byte 5.
-- The old splitter recursively constructs one-object requests, but first
-  rejects every object not in a static safe list and accepts a subresponse
-  without checking its declared WT length or declared response-object count.
+- The historical splitter recursively constructed one-object requests, but
+  accepted a subresponse without checking its declared WT length or declared
+  response-object count.  The current composer retains the explicit safe list
+  and validates every nested response before merging it.
 - Certain request combinations are deliberately atomic and must remain outside
   generic splitting.  For example, occupied-slot equipment replacement is
   `1/7/9 {body,bag}`, optionally followed by `1/2/10`; both encodings receive
@@ -102,3 +103,115 @@ unhandled for feature-specific protocol investigation.
   generic composer does not steal its atomic transaction.
 - Verify malformed nested subresponses are rejected before their bytes reach a
   client event.
+
+## 2026-07-23 Object-stream dispatch follow-up
+
+Status: implemented and server-only validated
+
+### Current limitation
+
+The existing `vm_net_mock_build_independent_combo_response` already performs
+structural splitting, recursively invokes the one-object route, and merges
+valid response objects.  It is intentionally all-or-nothing: every request
+object has to be in a narrow capability whitelist.  This prevents partial
+side effects, but a harmless order change or an additional independently
+serviceable object makes the complete packet miss the generic path.
+
+The reported scene direct-enter repro exposed a second form of the same issue.
+The live 44-byte request was:
+
+```text
+1/16/3 { exitID: typed-u32(current X), type: typed-u8(0) }
+1/27/11 {}
+1/7/42  {}
+```
+
+The original direct-enter handler required this exact packet length and exact
+object order.  A shorter synthetic single-object test passed, but did not
+represent the live request.  The full packet was then misrouted to the broad
+teleport-stone detector until the exact 44-byte contract was added.
+
+### Why a blanket splitter is not valid
+
+The following are confirmed atomic request families; their objects share one
+server-side state transition or one response contract and must not be sent to
+unrelated one-object handlers:
+
+| request family | evidence | reason it stays atomic |
+| --- | --- | --- |
+| `16/2 + 16/3 + optional item object` teleport confirmation | `mock_teleport_stone_confirmed_exit_combo` runtime logs | `16/2` establishes the confirmed exit; `16/3` consumes the same exit and defers exactly one scene entry. |
+| `7/9 {body,bag} + optional 2/10` occupied-slot equipment replacement | `parse_item_equip_swap_request` | `2/10` is a permitted companion; the replacement result is one `7/9` contract. |
+| `6/3 + 6/6` task progress/state submit | `mock_task_progress_state_combo` | both task IDs are validated before either persistent mutation is applied. |
+| `16/3(type=0) + 27/11 + 7/42` direct scene-runtime follow-up | `江湖OL.CBE:0x01012FB4`, `0x01037998` | the runtime ACK establishes scene context; `27/11` must use that fresh scene shell and `7/42` is its immediately requested catalog. |
+
+Conversely, IDA evidence from `江湖OL.CBE`
+`net_business_response_dispatch(0x01012E4C)` shows that a normal event-7
+response can contain multiple response objects: it parses an entry list and
+dispatches every entry in wire order.  Therefore the valid generalization is
+**object-stream composition**, not “one incoming packet always equals one
+independent transaction.”
+
+### Implementation contract
+
+1. Every incoming WT will be structurally iterated as a request-object stream;
+   request objects use their five-byte header and have no object-count byte.
+2. Dedicated atomic builders retain priority and own only the objects whose
+   relationship is documented above.
+3. The generic composer may recursively route only objects that explicitly
+   declare independent-composition support.  It applies mutations in request
+   order and appends only fully validated subresponses in that same order.
+4. Scene direct-enter will become a context-aware stream handler: it recognizes
+   the `16/3 type=0` primary object, responds to whichever of `27/11` and
+   `7/42` are actually present, and may append registered independent
+   companions.  It must never infer a teleport exit from the runtime X value.
+5. A stream containing an unknown or atomic companion remains explicitly
+   unresolved and reaches its feature-specific investigation path.  It is not
+   partially executed and no empty “success” response is invented.
+
+### Planned validation
+
+- Existing exact 44-byte direct-enter request.
+- The same three objects with `27/11` and `7/42` reversed.
+- The primary `16/3` with only one documented catalog request.
+- The existing teleport-confirm and equipment-swap atomic regressions to prove
+  that object-stream routing does not steal those packets.
+- `make -j2`, `make boundary-check`, and response framing validation.
+
+### Implementation (2026-07-23)
+
+- Added `vm_net_mock_append_independent_single_object_response` as the single
+  implementation of “build a one-object request, recursively route it, validate
+  the complete nested response, then append its response objects.”  The generic
+  all-independent composer now uses this helper rather than maintaining a
+  second copy of the recursive framing logic.
+- Replaced the fixed 44-byte / fixed-order direct-enter matcher with
+  `mock_scene_runtime_direct_enter_object_stream`.  It first validates the
+  `16/3 type=0` runtime-ACK object, then preflights the entire remaining stream.
+  It accepts one empty `27/11`, one empty `7/42`, and only explicitly
+  independent companions.  It executes the catalog and independent objects in
+  request order and merges their valid response objects in that same order.
+- Added the runtime-ACK object predicate to the broad teleport-stone detector.
+  Therefore a direct-runtime stream containing a future unknown companion is
+  left unresolved rather than treating current X as a teleport exit and
+  persisting a false destination.
+- The client-visible source is now
+  `builtin-scene-runtime-direct-enter-object-stream`; its trace reports request
+  count, independent companion count, and response count.  It never changes
+  scene target or stored role coordinates.
+
+### Validation (2026-07-23)
+
+- `php tmp/unstuck-current-scene-authority-regression.php
+  run-direct-runtime-ack 19094`: passed; a standalone runtime ACK remains an
+  empty WT response and preserves `01桃花岛_02.sce`.
+- `run-direct-runtime-compound-followup 19094`: passed; live 44-byte shape
+  returns `27/11 + 7/42` and does not become a `16/3` scene transfer.
+- `run-direct-runtime-stream-variants 19094`: passed four variants: original
+  order, reversed catalogs, `27/11` only, and `7/42` only.  Each response
+  preserved the request object's parser order.
+- `php tmp/teleport-stone-cancel-retry-regression.php 19094`: passed, including
+  the atomic `16/2 + 16/3` confirmation path and the independent `16/1 +
+  2/10` retry frame.
+- `php tmp/npc-purchase-equipment-swap-regression.php run 19094`: passed;
+  occupied-slot `7/9` replacement remains its dedicated atomic contract.
+- `make -j2` and `make boundary-check`: passed.

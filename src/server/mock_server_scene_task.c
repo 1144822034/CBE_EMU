@@ -2717,6 +2717,8 @@ static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u3
 {
     u8 kind = 0;
     u8 subtype = 0;
+    u32 offset = 4;
+    vm_net_mock_request_object firstObject;
 
     if (subtypeOut)
         *subtypeOut = 0;
@@ -2726,6 +2728,16 @@ static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u3
         return false;
     if (kind != 0x10 || (subtype != 2 && subtype != 3))
         return false;
+    /* The direct-scene runtime ACK shares 16/3 and an `exitID` field with a
+     * teleport selection, but its typed type=0 object carries current X, not
+     * a scene exit.  Reject it here even if later stream companions are not
+     * implemented yet; it must remain an explicit unresolved runtime stream
+     * rather than mutate scene authority through this broad detector. */
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &firstObject) &&
+        vm_net_mock_is_scene_runtime_position_ack_16_3_object(&firstObject, NULL))
+    {
+        return false;
+    }
     if (!vm_net_mock_request_contains(request, requestLen, "exitID") &&
         !vm_net_mock_request_contains(request, requestLen, "type"))
     {
@@ -4130,54 +4142,51 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
 
 /*
  * A direct mmGame 16/2 scene entry reaches JianghuOL.CBE's scene-runtime
- * initializer with parser state 2 or 3.  That initializer then sends exactly
- * one 16/3 object whose `exitID` is the current X coordinate encoded as an
- * i16 and whose `type` is zero (JianghuOL.CBE:0x0101359C).  It is a runtime
+ * initializer with parser state 2 or 3.  That initializer then sends a 16/3
+ * object whose `exitID` is the current X coordinate (seen as both typed-i16
+ * and typed-u32 encodings) and whose `type` is zero
+ * (JianghuOL.CBE:0x0101359C).  It is a runtime
  * synchronization acknowledgement, not a teleport-stone selection: treating
  * its coordinate as an sMap exit id makes the generic 16/3 handler invent and
  * persist the default teleport scene.
  */
-static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
-    const u8 *request, u32 requestLen, u16 *positionXOut)
+static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
+    const vm_net_mock_request_object *object, u16 *positionXOut)
 {
-    u32 offset = 4;
-    vm_net_mock_request_object object;
     u32 fieldPos = 0;
     u16 positionX = 0;
     u8 type = 0;
     bool havePositionX = false;
     bool haveType = false;
 
-    if (positionXOut)
+    if (positionXOut != NULL)
         *positionXOut = 0;
-    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
-        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        offset != requestLen || object.major != 1 || object.kind != 0x10 ||
-        object.subtype != 3)
+    if (object == NULL || object->major != 1 || object->kind != 0x10 ||
+        object->subtype != 3)
     {
         return false;
     }
 
-    while (fieldPos < object.payloadLen)
+    while (fieldPos < object->payloadLen)
     {
         u8 nameLen = 0;
         u16 valueLen = 0;
         const u8 *name = NULL;
         const u8 *value = NULL;
 
-        if (fieldPos + 3 > object.payloadLen)
+        if (fieldPos + 3 > object->payloadLen)
             return false;
-        nameLen = object.payload[fieldPos++];
-        if (fieldPos + nameLen + 2 > object.payloadLen)
+        nameLen = object->payload[fieldPos++];
+        if (fieldPos + nameLen + 2 > object->payloadLen)
             return false;
-        name = object.payload + fieldPos;
+        name = object->payload + fieldPos;
         fieldPos += nameLen;
-        valueLen = (u16)(((u16)object.payload[fieldPos] << 8) |
-                         object.payload[fieldPos + 1]);
+        valueLen = (u16)(((u16)object->payload[fieldPos] << 8) |
+                         object->payload[fieldPos + 1]);
         fieldPos += 2;
-        if (fieldPos + valueLen > object.payloadLen)
+        if (fieldPos + valueLen > object->payloadLen)
             return false;
-        value = object.payload + fieldPos;
+        value = object->payload + fieldPos;
         fieldPos += valueLen;
 
         if (nameLen == 6 && memcmp(name, "exitID", 6) == 0)
@@ -4191,6 +4200,16 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
             else if (valueLen == 4 && value[0] == 0 && value[1] == 2)
             {
                 positionX = (u16)(((u16)value[2] << 8) | value[3]);
+            }
+            /* scene_runtime_init_and_sync(0x0101324C) writes exitID through
+             * an i16 setter.  The wire layer may preserve it in a typed-u32
+             * field as either zero-extended or sign-extended i16.  The value
+             * is observational runtime state, never a teleport exit. */
+            else if (valueLen == 6 && value[0] == 0 && value[1] == 4 &&
+                     ((value[2] == 0 && value[3] == 0) ||
+                      (value[2] == 0xff && value[3] == 0xff)))
+            {
+                positionX = (u16)(((u16)value[4] << 8) | value[5]);
             }
             else
             {
@@ -4223,6 +4242,24 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
     if (positionXOut)
         *positionXOut = positionX;
     return true;
+}
+
+static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
+    const u8 *request, u32 requestLen, u16 *positionXOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (positionXOut != NULL)
+        *positionXOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen)
+    {
+        return false;
+    }
+    return vm_net_mock_is_scene_runtime_position_ack_16_3_object(&object,
+                                                                   positionXOut);
 }
 
 static u32 vm_net_mock_build_scene_runtime_position_ack_16_3_response(
@@ -4262,108 +4299,66 @@ static u32 vm_net_mock_build_scene_runtime_position_ack_16_3_response(
  * enter has created the scene shell.  This is distinct from a teleport-stone
  * selection even though both start with 16/3 and contain exitID.  In
  * particular, the typed-u32 value is the current X coordinate, not an exit
- * ID.  Keep this detector exact so real teleport-stone requests retain their
- * dedicated confirmation path.
+ * ID.  Request frames have no object-count byte and may be batched differently
+ * by the transport, so this handler reads a validated object stream instead
+ * of matching one total packet length or one fixed trailing-object order.
  */
-static bool vm_net_mock_is_scene_runtime_direct_enter_followup_request(
-    const u8 *request, u32 requestLen, u16 *positionXOut)
-{
-    u32 offset = 4;
-    vm_net_mock_request_object object;
-    u32 fieldPos = 0;
-    u16 positionX = 0;
-    bool havePositionX = false;
-    bool haveType = false;
-
-    if (positionXOut != NULL)
-        *positionXOut = 0;
-    if (request == NULL || requestLen != 44 || request[0] != 'W' ||
-        request[1] != 'T' ||
-        (u16)(((u16)request[2] << 8) | request[3]) != requestLen ||
-        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        object.major != 1 || object.kind != 0x10 || object.subtype != 3 ||
-        object.payloadLen == 0)
-    {
-        return false;
-    }
-
-    while (fieldPos < object.payloadLen)
-    {
-        u8 nameLen = 0;
-        u16 valueLen = 0;
-        const u8 *name = NULL;
-        const u8 *value = NULL;
-
-        if (fieldPos + 3 > object.payloadLen)
-            return false;
-        nameLen = object.payload[fieldPos++];
-        if (fieldPos + nameLen + 2 > object.payloadLen)
-            return false;
-        name = object.payload + fieldPos;
-        fieldPos += nameLen;
-        valueLen = (u16)(((u16)object.payload[fieldPos] << 8) |
-                         object.payload[fieldPos + 1]);
-        fieldPos += 2;
-        if (fieldPos + valueLen > object.payloadLen)
-            return false;
-        value = object.payload + fieldPos;
-        fieldPos += valueLen;
-
-        if (nameLen == 6 && memcmp(name, "exitID", 6) == 0)
-        {
-            u32 positionX32 = 0;
-
-            if (havePositionX || valueLen != 6 || value[0] != 0 || value[1] != 4)
-                return false;
-            positionX32 = ((u32)value[2] << 24) | ((u32)value[3] << 16) |
-                          ((u32)value[4] << 8) | value[5];
-            if (positionX32 > 0xffffu)
-                return false;
-            positionX = (u16)positionX32;
-            havePositionX = true;
-        }
-        else if (nameLen == 4 && memcmp(name, "type", 4) == 0)
-        {
-            if (haveType || valueLen != 3 || value[0] != 0 || value[1] != 1 ||
-                value[2] != 0)
-            {
-                return false;
-            }
-            haveType = true;
-        }
-        else
-        {
-            return false;
-        }
-    }
-
-    if (!havePositionX || !haveType ||
-        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        object.major != 1 || object.kind != 0x1b || object.subtype != 11 ||
-        object.payloadLen != 0 ||
-        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        object.major != 1 || object.kind != 7 || object.subtype != 42 ||
-        object.payloadLen != 0 || offset != requestLen)
-    {
-        return false;
-    }
-
-    if (positionXOut != NULL)
-        *positionXOut = positionX;
-    return true;
-}
-
 static u32 vm_net_mock_build_scene_runtime_direct_enter_followup_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     const char *scene = NULL;
     u16 positionX = 0;
+    u32 offset = 4;
+    u32 validationOffset = 4;
     u32 pos = 5;
     u8 objectCount = 0;
+    u32 requestObjectCount = 0;
+    u32 independentObjectCount = 0;
+    bool haveNpcCatalog = false;
+    bool haveBooksCatalog = false;
+    vm_net_mock_request_object object;
 
-    if (out == NULL || outCap < pos ||
-        !vm_net_mock_is_scene_runtime_direct_enter_followup_request(
-            request, requestLen, &positionX))
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        (u16)(((u16)request[2] << 8) | request[3]) != requestLen ||
+        !vm_net_mock_next_request_object(request, requestLen, &validationOffset, &object) ||
+        !vm_net_mock_is_scene_runtime_position_ack_16_3_object(&object, &positionX))
+    {
+        return 0;
+    }
+
+    /* Preflight every object before changing catalog state or dispatching an
+     * independently composable companion.  A packet with an unknown or an
+     * atomic companion remains unresolved as one whole request. */
+    ++requestObjectCount;
+    while (vm_net_mock_next_request_object(request, requestLen, &validationOffset, &object))
+    {
+        ++requestObjectCount;
+        if (object.major == 1 && object.kind == 0x1b && object.subtype == 11 &&
+            object.payloadLen == 0)
+        {
+            if (haveNpcCatalog)
+                return 0;
+            haveNpcCatalog = true;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 42 &&
+                 object.payloadLen == 0)
+        {
+            if (haveBooksCatalog)
+                return 0;
+            haveBooksCatalog = true;
+        }
+        else if (vm_net_mock_object_is_independent_combo_candidate(&object))
+        {
+            ++independentObjectCount;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    if (validationOffset != requestLen ||
+        (!haveNpcCatalog && !haveBooksCatalog && independentObjectCount == 0))
     {
         return 0;
     }
@@ -4380,28 +4375,47 @@ static u32 vm_net_mock_build_scene_runtime_direct_enter_followup_response(
         return pos;
     }
 
-    /* 27/11 is the client's NPC-node creation parser (0x01037998).  The
-     * direct 16/2 branch creates a fresh scene shell without a preceding 30/1,
-     * so explicitly arm this one-shot catalog before satisfying the client's
-     * immediately coalesced 27/11 request. */
-    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(scene);
-    if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos, scene,
-                                                       "direct-enter-runtime-followup"))
+    /* Execute recognized objects in their request order.  The ACK itself has
+     * no response object; 27/11 and 7/42 retain their own client parser
+     * contracts even if the client reverses the two catalog pulls. */
+    if (haveNpcCatalog)
+        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(scene);
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
     {
-        return 0;
+        if (vm_net_mock_is_scene_runtime_position_ack_16_3_object(&object, NULL))
+            continue;
+        if (object.major == 1 && object.kind == 0x1b && object.subtype == 11 &&
+            object.payloadLen == 0)
+        {
+            if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos, scene,
+                                                               "direct-enter-runtime-stream"))
+            {
+                return 0;
+            }
+            ++objectCount;
+        }
+        else if (object.major == 1 && object.kind == 7 && object.subtype == 42 &&
+                 object.payloadLen == 0)
+        {
+            if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+                return 0;
+            ++objectCount;
+        }
+        else if (!vm_net_mock_append_independent_single_object_response(
+                     &object, out, outCap, &pos, &objectCount))
+        {
+            return 0;
+        }
     }
-    objectCount += 1;
-    if (!vm_net_mock_append_books42_object(out, outCap, &pos))
-        return 0;
-    objectCount += 1;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     /* No scene target, position, or persistent role fields are changed here.
      * `exitID` is observational current-X data from the client runtime. */
-    printf("[info][network] mock_scene_runtime_direct_enter_followup scene=%s posx=%u response=27/11+7/42 objects=%u action=no-scene-target-or-position-save evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
-           scene, positionX, (u32)objectCount);
-    vm_autotest_note("mock_scene_runtime_direct_enter_followup scene=%s posx=%u response=27/11+7/42 action=no-scene-target-or-position-save evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
-                     scene, positionX);
+    printf("[info][network] mock_scene_runtime_direct_enter_object_stream scene=%s posx=%u request_objects=%u independent=%u response_objects=%u action=no-scene-target-or-position-save evidence=JianghuOL.CBE:0x01012FB4+0x01012E4C+0x01037998\n",
+           scene, positionX, requestObjectCount, independentObjectCount, (u32)objectCount);
+    vm_autotest_note("mock_scene_runtime_direct_enter_object_stream scene=%s posx=%u request_objects=%u independent=%u response_objects=%u action=no-scene-target-or-position-save evidence=JianghuOL.CBE:0x01012FB4+0x01012E4C+0x01037998\n",
+                     scene, positionX, requestObjectCount, independentObjectCount,
+                     (u32)objectCount);
     return pos;
 }
 

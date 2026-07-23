@@ -8,6 +8,21 @@
  */
 
 #include "mock_server_core.c"
+
+/* The scene-runtime stream owns its 16/3 context and catalog objects, but an
+ * explicitly independent companion can still use the generic one-object
+ * dispatcher.  The implementation appears after the feature handlers in the
+ * dispatch fragment; keep this narrow declaration at the aggregation
+ * boundary so the scene fragment cannot accidentally invoke arbitrary packet
+ * handling. */
+static bool vm_net_mock_append_independent_single_object_response(
+    const vm_net_mock_request_object *object, u8 *out, u32 outCap,
+    u32 *pos, u8 *objectCount);
+static bool vm_net_mock_object_is_independent_combo_candidate(
+    const vm_net_mock_request_object *object);
+static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
+    const vm_net_mock_request_object *object, u16 *positionXOut);
+
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
 

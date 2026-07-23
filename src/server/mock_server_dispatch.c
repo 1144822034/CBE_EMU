@@ -91,6 +91,48 @@ static bool vm_net_mock_append_response_objects(u8 *out, u32 outCap, u32 *pos, u
     return true;
 }
 
+/*
+ * Route one request object through the normal single-object dispatcher and
+ * append its complete response-object sequence to an already open response.
+ *
+ * This is deliberately available only to stream handlers that have already
+ * classified the object as independently composable.  It is not a generic
+ * "try every unknown object on its own" fallback: stateful request families
+ * (teleport confirmation, equipment replacement, task submission, ...) own
+ * their complete transaction before this helper is reached.
+ */
+static bool vm_net_mock_append_independent_single_object_response(
+    const vm_net_mock_request_object *object, u8 *out, u32 outCap,
+    u32 *pos, u8 *objectCount)
+{
+    u8 subRequest[512];
+    u8 subResponse[8192];
+    u32 subRequestLen = 0;
+    u32 subResponseLen = 0;
+    bool previousSplitProbe = g_netMockSplitProbe;
+
+    if (object == NULL || out == NULL || pos == NULL || objectCount == NULL ||
+        !vm_net_mock_object_is_independent_combo_candidate(object))
+    {
+        return false;
+    }
+
+    subRequestLen = vm_net_mock_build_single_object_request(object, subRequest,
+                                                            sizeof(subRequest));
+    if (subRequestLen == 0)
+        return false;
+
+    g_netMockSplitProbe = true;
+    subResponseLen = vm_net_mock_build_response(subRequest, subRequestLen,
+                                                subResponse, sizeof(subResponse));
+    g_netMockSplitProbe = previousSplitProbe;
+    if (subResponseLen == 0)
+        return false;
+
+    return vm_net_mock_append_response_objects(out, outCap, pos, objectCount,
+                                               subResponse, subResponseLen);
+}
+
 static u32 vm_net_mock_build_independent_combo_response(const u8 *request,
                                                         u32 requestLen,
                                                         u8 *out, u32 outCap)
@@ -102,8 +144,6 @@ static u32 vm_net_mock_build_independent_combo_response(const u8 *request,
     u32 subCount = 0;
     u32 validatedCount = 0;
     vm_net_mock_request_object object;
-    u8 subRequest[512];
-    u8 subResponse[8192];
 
     if (g_netMockSplitProbe || request == NULL || requestLen < 9 || outCap < pos)
         return 0;
@@ -126,19 +166,10 @@ static u32 vm_net_mock_build_independent_combo_response(const u8 *request,
 
     while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
     {
-        u32 subRequestLen = 0;
-        u32 subResponseLen = 0;
         if (!vm_net_mock_object_is_independent_combo_candidate(&object))
             return 0;
-        subRequestLen = vm_net_mock_build_single_object_request(&object, subRequest, sizeof(subRequest));
-        if (subRequestLen == 0)
-            return 0;
-        g_netMockSplitProbe = true;
-        subResponseLen = vm_net_mock_build_response(subRequest, subRequestLen, subResponse, sizeof(subResponse));
-        g_netMockSplitProbe = false;
-        if (subResponseLen == 0)
-            return 0;
-        if (!vm_net_mock_append_response_objects(out, outCap, &pos, &objectCount, subResponse, subResponseLen))
+        if (!vm_net_mock_append_independent_single_object_response(&object, out, outCap,
+                                                                    &pos, &objectCount))
             return 0;
         ++subCount;
     }
@@ -879,7 +910,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         request, requestLen, out, outCap);
     if (hookedLen)
     {
-        vm_net_log_handled_packet("builtin-scene-runtime-direct-enter-followup-16-3-27-11-7-42",
+        vm_net_log_handled_packet("builtin-scene-runtime-direct-enter-object-stream",
                                   request, requestLen, hookedLen);
         return hookedLen;
     }

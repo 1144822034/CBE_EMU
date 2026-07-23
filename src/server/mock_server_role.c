@@ -4799,27 +4799,80 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
     }
 }
 
-static void vm_net_mock_role_set_timeline_position(const char *scene,
+/* A 2/1 direction timeline is already an acknowledged movement boundary for
+ * the remote client.  Do not defer its durability to a best-effort disconnect:
+ * Android force-stop cannot emit CBMS CLIENT_DISCONNECT.  This intentionally
+ * updates only the active role row rather than calling role_db_save(), whose
+ * complete snapshot reconciliation deletes/reinserts backpack and equipment
+ * rows and is not a valid per-movement transaction. */
+static bool vm_net_mock_role_commit_timeline_position(const vm_net_mock_role_state *role,
+                                                       const char *reason)
+{
+    char accountHex[129];
+    char sceneHex[sizeof(role->scene) * 2 + 1];
+    char query[512];
+    size_t sceneLen = 0;
+
+    if (role == NULL || role->roleId == 0 ||
+        !vm_net_mock_scene_name_is_safe(role->scene) ||
+        role->x == 0 || role->y == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex))
+    {
+        return false;
+    }
+    sceneLen = vm_mock_mysql_bounded_strlen(role->scene, sizeof(role->scene));
+    if (sceneLen == 0 || sceneLen >= sizeof(role->scene) ||
+        vm_mysql_hex_encode(role->scene, sceneLen, sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET scene=X'%s',pos_x=%u,pos_y=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             sceneHex, role->x, role->y, accountHex, role->roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] role_timeline_position_persist_failed "
+               "account=%s role=%u scene=%s pos=(%u,%u) reason=%s error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role->roleId, role->scene, role->x, role->y,
+               reason ? reason : "moveinfo-timeline", vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_role_position_dirty = false;
+    return true;
+}
+
+static bool vm_net_mock_role_set_timeline_position(const char *scene,
                                                    u16 x,
                                                    u16 y,
                                                    const char *reason)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_role_state before;
+    bool dirtyBefore = g_vm_net_mock_role_position_dirty;
 
     if (role == NULL || !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
-        return;
+        return false;
     /*
      * A movement timeline starts from the session's already validated scene
      * position and applies only the client's exact 4-pixel direction steps.
      * Re-running SCE landing/portal normalization here is both semantically
      * wrong (this is not a scene landing) and expensive on every upload.
      */
+    before = *role;
     snprintf(role->scene, sizeof(role->scene), "%s", scene);
     (void)vm_net_mock_role_canonicalize_initial_scene(role);
     role->x = x;
     role->y = y;
     g_vm_net_mock_role_position_dirty = true;
-    (void)reason;
+    if (!vm_net_mock_role_commit_timeline_position(role, reason))
+    {
+        *role = before;
+        g_vm_net_mock_role_position_dirty = dirtyBefore;
+        return false;
+    }
+    return true;
 }
 
 static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,

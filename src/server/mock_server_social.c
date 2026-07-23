@@ -4851,6 +4851,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     u16 timelineStartY = 0;
     char timelineText[64];
     const char *moveinfoFieldKind = "missing";
+    const char *positionPersistence = "not-applicable";
 
     if (outCap < pos || !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
         return 0;
@@ -4946,15 +4947,40 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
             vm_net_mock_format_moveinfo_timeline(moveInfo, moveInfoLen, timelineText, sizeof(timelineText));
             if (snappedPos)
             {
-                vm_net_mock_role_set_timeline_position(scene, gridX, gridY, "moveinfo-upload-timeline");
-                vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-timeline");
-                vm_mock_service_session_store_pending_timeline(activeSession,
-                                                               moveInfo,
-                                                               moveInfoLen,
-                                                               timelineStartX,
-                                                               timelineStartY,
-                                                               gridX,
-                                                               gridY);
+                if (vm_net_mock_role_set_timeline_position(scene, gridX, gridY,
+                                                            "moveinfo-upload-timeline"))
+                {
+                    positionPersistence = "timeline-committed";
+                    vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-timeline");
+                    vm_mock_service_session_store_pending_timeline(activeSession,
+                                                                   moveInfo,
+                                                                   moveInfoLen,
+                                                                   timelineStartX,
+                                                                   timelineStartY,
+                                                                   gridX,
+                                                                   gridY);
+                }
+                else
+                {
+                    /* 2/1 has no reversed client failure object.  Retire its
+                     * upload queue as required by the client, but do not
+                     * advertise a position that failed its server authority
+                     * commit.  The next valid upload restarts from the last
+                     * committed session coordinate. */
+                    printf("[error][mock-service] actor_moveinfo_timeline_rejected "
+                           "account=%s scene=%s start=(%u,%u) requested_end=(%u,%u) "
+                           "action=ack-without-uncommitted-position\n",
+                           g_vm_mock_service_active_account_id ?
+                               g_vm_mock_service_active_account_id : "-",
+                           scene ? scene : "-", timelineStartX, timelineStartY,
+                           gridX, gridY);
+                    gridX = timelineStartX;
+                    gridY = timelineStartY;
+                    snappedPos = false;
+                    usedTimeline = false;
+                    posSource = "timeline-persist-failed";
+                    positionPersistence = "timeline-failed-rolled-back";
+                }
             }
         }
         else if (vm_net_mock_read_current_player_grid(NULL, NULL, &gridX, &gridY, NULL, NULL))
@@ -5049,12 +5075,13 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
         return 0;
     objectCount += 1;
-    printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
+    printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u persistence=%s steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
            posSource,
            moveinfoFieldKind,
            (u32)moveInfoLen,
            parsedUploadedPos ? 1u : 0u,
            usedTimeline ? 1u : 0u,
+           positionPersistence,
            timelineText[0] ? timelineText : "-",
            gridX,
            gridY,

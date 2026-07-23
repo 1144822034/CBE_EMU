@@ -2,7 +2,9 @@
 
 ## 状态
 
-已修复并以服务端协议回归验证。此记录补充
+复发调查中（2026-07-23）。此前修复已覆盖一条捕获到的 runtime
+follow-up 编码，但最新跨场景现场日志证明仍存在另一条 `16/3` 复合形状。
+此记录补充
 [2026-06-27-unstuck-current-scene-reload.md](2026-06-27-unstuck-current-scene-reload.md)：
 `12/3 + 16/3` 的客户端契约没有改变，修复的是该契约中目标场景的权威来源。
 
@@ -154,3 +156,85 @@ unstuck authority regression passed scene=01桃花岛_02.sce landing=160,342 res
 `action=no-scene-target-or-position-save`；该测试日志中没有任何
 `mock_teleport_stone_transfer` 或 `teleport-stone-target` 写入。`make -j2` 与
 `make boundary-check` 均通过。
+
+## 2026-07-23 第二次跨场景复发调查
+
+Status: ready-to-implement.  已取得现场原始字节并与客户端 i16 写入点
+交叉确认；本节的临时取证日志将在窄修复后删除。
+
+### 最小复现与运行时证据
+
+用户在非出生场景 `09泰山_01.sce` 使用“脱离卡死”后，最新本机服务日志
+`tmp/mock-service-19090.20260723-190018.stdout.log` 显示：
+
+```text
+mock_unstuck_target scene=09泰山_01.sce scene_source=role-db ...
+mock_settings_unstuck_16_2 scene=09泰山_01.sce ... resp=77
+net_send ... wt=16/2 ... source=builtin-settings-unstuck-16-2
+
+scene_pending ... scene=c00蓬莱仙岛_01 pos=(223,370)
+net_send ... wt=16/3 len=44 source=builtin-teleport-stone-transfer resp=53
+scene_ready ... scene=c00蓬莱仙岛_01 pos=(223,370)
+```
+
+因此 `0/12/3 -> 12/3 + 16/3` 的初始目标已经正确地使用角色数据库中的泰山场景；
+第一次偏离发生在随后一个 44 字节的 `1/16/3` 请求被宽泛传送石 detector 接走并
+写入出生场景。此前同一日志里，`00蓬莱仙岛_02.sce` 的相邻脱离流程命中新的
+`builtin-scene-runtime-direct-enter-object-stream`，说明不是角色场景权威来源退化，
+而是当前 runtime ACK 的 wire shape 未被该 stream predicate 识别。
+
+### IDA 证据与已排除假设
+
+按 binary name 选择 IDA 实例后复核：
+
+| binary | function/address | finding |
+| --- | --- | --- |
+| `mmGameMstarWqvga.cbm` | `sub_5BCA(0x5BCA)`, `sub_11CE(0x11CE)`, `sub_BCC(0x0BCC)` | 设置菜单流程仍以响应 `16/3.scene/posinfo/exitid` 驱动场景进入；不是客户端坐标强制写入问题。 |
+| `江湖OL.CBE` | `scene_runtime_init_and_sync(0x01012FB4)`，尤其 `0x01013238..0x01013256` | parser state 2/3 必定构造 `1/16/3`，以 i16 API 写 `exitID`，并写 `type=0`；随后请求 `27/11`。 |
+| `江湖OL.CBE` | `net_business_response_dispatch(0x01012E4C)` | event 7 按 wire order 派发响应对象，复合响应本身不是问题。 |
+
+已排除：从数据库选择泰山场景、`12/3` ACK、以及目录对象的顺序。最新现场的
+受限取证日志给出了完整请求：
+
+```text
+WT 00 2C
+1/16/3:
+  exitID = 00 04 FF FF AD 3C
+  type   = 00 01 00
+1/27/11 {}
+1/7/42  {}
+```
+
+该请求与已知 runtime stream 的对象序列和 `type=0` 完全一致；区别只在
+`exitID`。`0x0101324C` 把该值以 **i16** API 写入，而负 i16 `0xAD3C` 在线上封包中
+被符号扩展为 typed-u32 `0xFFFFAD3C`。旧 predicate 只接受 typed-u32 的高 16 位为
+零，错误排除了该合法 i16 编码，随后宽泛 `16/3` detector 将其作为 teleport exit
+`4294946108` 写入出生场景。这就是最新复现的首个错误状态。
+
+### 取证计划与准入条件
+
+本轮只会修改 runtime-ACK object predicate：对 `exitID` 的 typed-u32 表示同时接受
+零扩展 `0x0000xxxx` 与符号扩展 `0xFFFFxxxx`，并继续要求 `type=0` 和已验证的
+`27/11` / `7/42` context。不会扩大真实传送石 `16/3` 的匹配范围。回归将新增
+`0xFFFFAD3C` 变体，并断言它不触发 `teleport-stone-target` 持久化。
+
+### 实现与验证
+
+- `vm_net_mock_is_scene_runtime_position_ack_16_3_object()` 现在把
+  typed-u32 `exitID` 的高 16 位限定为 **全零或全一**，并只取低 16 位作为客户端
+  i16 的原始位模式。混合高位、非零/非全一扩展及 `type != 0` 仍然不会被归为
+  runtime ACK。
+- 这不是传送 detector 的放宽：只有首对象是上述 `1/16/3` runtime ACK，且整个
+  请求流随后只含已验证目录/独立对象时，才会走
+  `builtin-scene-runtime-direct-enter-object-stream`。真实传送确认继续使用
+  `type=3` 的原子 `16/2 + 16/3` 路径。
+- 已删除临时 `unresolved_scene_runtime_16_3_stream` 原始包日志；其唯一所需的现场
+  字节已记录在本文件，避免在正常传送中保留额外日志。
+- `tmp/unstuck-current-scene-authority-regression.php
+  run-direct-runtime-stream-variants 19094` 通过 5 个变体，包括现场原始
+  `exitID=typed-u32(0xFFFFAD3C), type=0, 27/11, 7/42`。断言该响应只含目录对象、
+  不含场景传送对象，并保持 `01桃花岛_02.sce` 的数据库场景。
+- `run-direct-runtime-ack`、`run-direct-runtime-compound-followup` 和完整的
+  `12/3` 脱离回归均通过；`teleport-stone-cancel-retry-regression.php 19094`
+  通过，确认 `type=3` 传送确认仍返回空 ACK。
+- `make -j2`、`make boundary-check` 与 PHP 测试脚本语法检查均通过。
