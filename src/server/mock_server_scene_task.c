@@ -4128,6 +4128,126 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
     return pos;
 }
 
+/*
+ * A direct mmGame 16/2 scene entry reaches JianghuOL.CBE's scene-runtime
+ * initializer with parser state 2 or 3.  That initializer then sends exactly
+ * one 16/3 object whose `exitID` is the current X coordinate encoded as an
+ * i16 and whose `type` is zero (JianghuOL.CBE:0x0101359C).  It is a runtime
+ * synchronization acknowledgement, not a teleport-stone selection: treating
+ * its coordinate as an sMap exit id makes the generic 16/3 handler invent and
+ * persist the default teleport scene.
+ */
+static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
+    const u8 *request, u32 requestLen, u16 *positionXOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+    u32 fieldPos = 0;
+    u16 positionX = 0;
+    u8 type = 0;
+    bool havePositionX = false;
+    bool haveType = false;
+
+    if (positionXOut)
+        *positionXOut = 0;
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 0x10 ||
+        object.subtype != 3)
+    {
+        return false;
+    }
+
+    while (fieldPos < object.payloadLen)
+    {
+        u8 nameLen = 0;
+        u16 valueLen = 0;
+        const u8 *name = NULL;
+        const u8 *value = NULL;
+
+        if (fieldPos + 3 > object.payloadLen)
+            return false;
+        nameLen = object.payload[fieldPos++];
+        if (fieldPos + nameLen + 2 > object.payloadLen)
+            return false;
+        name = object.payload + fieldPos;
+        fieldPos += nameLen;
+        valueLen = (u16)(((u16)object.payload[fieldPos] << 8) |
+                         object.payload[fieldPos + 1]);
+        fieldPos += 2;
+        if (fieldPos + valueLen > object.payloadLen)
+            return false;
+        value = object.payload + fieldPos;
+        fieldPos += valueLen;
+
+        if (nameLen == 6 && memcmp(name, "exitID", 6) == 0)
+        {
+            if (havePositionX)
+                return false;
+            if (valueLen == 2)
+            {
+                positionX = (u16)(((u16)value[0] << 8) | value[1]);
+            }
+            else if (valueLen == 4 && value[0] == 0 && value[1] == 2)
+            {
+                positionX = (u16)(((u16)value[2] << 8) | value[3]);
+            }
+            else
+            {
+                return false;
+            }
+            havePositionX = true;
+        }
+        else if (nameLen == 4 && memcmp(name, "type", 4) == 0)
+        {
+            if (haveType)
+                return false;
+            if (valueLen == 1)
+            {
+                type = value[0];
+            }
+            else if (valueLen == 3 && value[0] == 0 && value[1] == 1)
+            {
+                type = value[2];
+            }
+            else
+            {
+                return false;
+            }
+            haveType = true;
+        }
+    }
+
+    if (!havePositionX || !haveType || type != 0)
+        return false;
+    if (positionXOut)
+        *positionXOut = positionX;
+    return true;
+}
+
+static u32 vm_net_mock_build_scene_runtime_position_ack_16_3_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u16 positionX = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_scene_runtime_position_ack_16_3_request(request, requestLen,
+                                                                 &positionX))
+    {
+        return 0;
+    }
+
+    /* This request only closes the scene-runtime send.  In particular do not
+     * remember a new scene target or persist `positionX` as a teleport exit. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_scene_runtime_position_ack_16_3 posx=%u response=empty-wt action=no-scene-target-or-position-save evidence=JianghuOL.CBE:0x0101359C(parserState2or3)\n",
+           positionX);
+    vm_autotest_note("mock_scene_runtime_position_ack_16_3 posx=%u response=empty-wt evidence=JianghuOL.CBE:0x0101359C\n",
+                     positionX);
+    return pos;
+}
+
 static u32 vm_net_mock_build_teleport_stone_transfer_response(const u8 *request, u32 requestLen,
                                                               u8 subtype, u8 *out, u32 outCap)
 {

@@ -80,3 +80,73 @@ PC 处。
 `mock_unstuck_target ... scene_source=role-db ... source=sce-nearest-entry`，并确认
 `builtin-settings-unstuck` 返回 `12/3 + 16/3`。因此既验证了原始请求分支，也验证了
 错误宿主场景不会再写入角色。
+
+## 2026-07-23 回归：`16/2` 误判后的第二次出生场景进入
+
+Status: fixed and verified in an isolated mock-service process.
+
+### 触发与运行时证据
+
+用户在非出生场景执行“脱离卡死”后仍会卡住，随后角色回到出生场景。最新
+`mock-service-19090.20260723-173710.stdout.log` 中，同一远端会话的首次偏离已可见：
+
+```text
+mock_unstuck_target scene=00蓬莱仙岛_02.sce ... pos=(128,57) ...
+mock_settings_unstuck_16_2 scene=00蓬莱仙岛_02.sce ... response=16/2-direct-enter
+mock_teleport_stone_transfer subtype=3 exit=0 scene=c00蓬莱仙岛_01 ...
+```
+
+第一条目标仍来自当前会话/角色；出生场景不是它产生的。紧随其后的 `16/3`
+却被 `builtin-teleport-stone-transfer` 接管，
+`vm_net_mock_get_teleport_stone_target()` 在没有已确认传送石目标时初始化为
+`vm_net_mock_default_scene_name()`，而该 builder 又立即保存该目标。故第一次把角色
+写成出生场景的是 **第二个错误路由的 `16/3` 响应**，不是原有
+`12/3` 脱离目标的场景来源。
+
+### IDA 复核
+
+按 binary name 选择 `mmGameMstarWqvga.cbm` 后复核：
+
+- `0x5BCA` 的“脱离卡死”确认路径构造的是 `WT 0/12/3 { id }`，不是 `16/2`。
+- `0x11CE` 对 `16/2`：`result==2` 进入传送确认；其他值会调用 `0x0BCC`。
+- `0x0BCC` 读取 `scene`、`posinfo`、`exitid` 并直接进入场景。
+- `0x11CE` 对 `16/3`：仅 `result==2` 才调用 `0x0BCC`。
+
+再按 binary name 选择 `江湖OL.CBE`，复核
+`scene_runtime_init_and_sync(0x0101359C)`。该函数在 scene switch 后：
+
+```text
+parserState 2 or 3:
+  alloc_outgoing_game_event(2, 1, 16, 3)
+  put_i16("exitID", currentPosX)
+  put_u8("type", 0)
+  copy current target coordinates to the active node
+```
+
+也就是说，direct-enter 后出现的单对象 `16/3` 是客户端的场景 runtime 同步/确认
+事件。它的 `exitID` 是当前位置的 i16，不是传送石条目；该编码亦解释了服务端
+`get_object_u32_field("exitID")` 读出零、日志显示 `exit=0` 的现象。
+
+此前实现缺的是这个 direct-enter 后的 `16/3` 分流，而不是场景坐标来源。泛化的
+传送石 detector 仅按 `16/3 + (exitID|type)` 命中，未区分 `type=0` 的 runtime 同步；
+它把当前位置 i16 当成传送石 `exitID`，又在没有可用确认 target 时调用
+`vm_net_mock_get_teleport_stone_target()`，将默认出生场景写进角色状态。
+
+### 修复与验证
+
+- 在传送石 detector 之前，精确识别单对象
+  `1/16/3 { exitID=i16, type=u8(0) }` 的 scene-runtime 同步事件，返回零对象 WT
+  ACK，不创建 scene target、不保存位置、不触发场景进入。
+- 传送石 `16/2/16/3` 确认链仍要求其记录的确认 target，且其 `type` 不是此 runtime
+  同步值；不会改变已有传送石语义。
+- `tmp/unstuck-current-scene-authority-regression.php` 补充了
+  `type-only 16/2 direct-enter -> type=0 16/3` 回归：断言第二个响应是空 WT
+  (`WT`, packetLength `5`, objectCount `0`)，而 MySQL 中角色场景仍是原非出生场景。
+
+2026-07-23 隔离服务实测：新回归输出
+`unstuck direct runtime ack regression passed scene=01桃花岛_02.sce response=5`；既有
+`0/12/3` 回归同样输出
+`unstuck authority regression passed scene=01桃花岛_02.sce landing=160,342 response=106`。
+服务端日志分别命中 `builtin-scene-runtime-position-ack-16-3` 和
+`builtin-settings-unstuck`，没有再由该 `type=0` 请求调用传送石 target/resolver。
+同时 `make -j2` 与 `make boundary-check` 均通过。
