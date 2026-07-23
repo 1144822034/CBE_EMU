@@ -2605,7 +2605,8 @@ static bool vm_net_mock_append_login_success_object(u8 *out,
             return false;
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "pcimg", 0))
             return false;
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
+                                       vm_net_mock_role_active_exp_card_flag()))
             return false;
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "expbook", 0))
             return false;
@@ -3439,7 +3440,8 @@ static bool vm_net_mock_append_game_type_response_object(
     }
     else if (requestType == 3)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
+                                       vm_net_mock_role_active_exp_card_flag()))
             return false;
     }
 

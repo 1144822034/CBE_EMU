@@ -831,6 +831,9 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u32 dropItemIdDefault = stats.dropItemId;
     u32 rolledDropCount = 0;
     u32 taskMaterialRemaining = 0;
+    u32 baseRewardExp = 0;
+    u32 expCardMultiplier = 1;
+    u32 battleInsightBonusPercent = 0;
     bool dropIsTaskMaterial = false;
     bool dropPolicyOk = true;
     bool dropEligible = false;
@@ -861,10 +864,35 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         return 0;
     }
 
-    rewardExp = vm_net_mock_mul_capped_u32(
+    baseRewardExp = vm_net_mock_mul_capped_u32(
         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
                                    vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
         enemyCount);
+    rewardExp = baseRewardExp;
+    if (rewardExp != 0 && role != NULL)
+    {
+        expCardMultiplier = vm_net_mock_role_active_exp_card_multiplier(role);
+        if (expCardMultiplier > 1)
+            rewardExp = vm_net_mock_mul_capped_u32(rewardExp, expCardMultiplier);
+        /* 战斗心得's resource wording is "experience +20%", not another
+         * multiplier. Apply its bonus to the unmodified monster reward so it
+         * remains a separately auditable base-reward increment when an
+         * experience card is also active. */
+        battleInsightBonusPercent = vm_net_mock_role_active_battle_exp_bonus_percent(role);
+        if (battleInsightBonusPercent != 0)
+        {
+            uint64_t bonus = ((uint64_t)baseRewardExp * battleInsightBonusPercent) / 100u;
+            rewardExp = vm_net_mock_add_capped_u32(
+                rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
+        }
+    }
+    if (rewardExp != baseRewardExp)
+    {
+        printf("[info][network] mock_battle_exp_modifier enemy=%u role=%u base_exp=%u card_multiplier=%u insight_bonus_percent=%u reward_exp=%u\n",
+               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
+               baseRewardExp, expCardMultiplier, battleInsightBonusPercent,
+               rewardExp);
+    }
     if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
     {
         dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_DROP_RATE", dropRate);
@@ -1857,6 +1885,16 @@ typedef struct vm_mock_service_client_session
     u8 pendingDirQueueBlob[32];
     u32 pendingDirQueueTick;
     u32 pendingDirQueueSerial;
+    /* Server-time movement authority.  The client produces one direction
+     * frame per 100 ms, but a sped-up client can upload those frames faster.
+     * Credits are milliseconds rather than client ticks so only the service
+     * clock can authorize spatial progress. */
+    bool movementRateActive;
+    u32 movementRateAnchorMs;
+    u32 movementRateCreditMs;
+    u32 movementRateViolationCount;
+    u32 movementRateDeniedSteps;
+    u32 movementRateLastViolationMs;
     vm_mock_service_social_notice socialNotices[VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX];
     vm_mock_service_chat_notice chatNotices[VM_MOCK_SERVICE_CHAT_NOTICE_MAX];
     u8 chatNoticeHead;
@@ -3321,6 +3359,119 @@ static void vm_mock_service_session_clear_moveinfo(vm_mock_service_client_sessio
     }
 }
 
+/* Client evidence in scene_runtime_tick(0x01014EE0) shows ten 100ms frames
+ * per 2/1 direction-timeline upload.  Keep at most two seconds of server-time
+ * credit so normal packet jitter can recover without allowing an idle client
+ * to bank unlimited travel. */
+#define VM_MOCK_SERVICE_MOVE_STEP_MS 100u
+#define VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS 2000u
+
+static void vm_mock_service_session_reset_movement_rate(vm_mock_service_client_session *session,
+                                                        const char *reason)
+{
+    if (session == NULL)
+        return;
+    session->movementRateActive = true;
+    session->movementRateAnchorMs = scheduler_get_tick_ms();
+    session->movementRateCreditMs = 0;
+    session->movementRateViolationCount = 0;
+    session->movementRateDeniedSteps = 0;
+    session->movementRateLastViolationMs = 0;
+    printf("[debug][mock-service] movement_rate_reset client=%08x reason=%s\n",
+           session->clientId, reason ? reason : "-");
+}
+
+/* Copy only the server-time-authorized prefix of an already validated 2/1
+ * direction timeline.  The caller keeps the ordinary empty ACK contract: a
+ * rate rejection changes server authority, not the client packet parser. */
+static u16 vm_mock_service_session_limit_timeline_by_rate(
+    vm_mock_service_client_session *session, const u8 *moveInfo, u16 moveInfoLen,
+    u8 *acceptedOut, u16 acceptedCap, u16 *requestedStepsOut,
+    u16 *acceptedStepsOut, u16 *deniedStepsOut, u32 *elapsedMsOut,
+    u32 *creditBeforeMsOut, u32 *creditAfterMsOut)
+{
+    u32 nowMs = scheduler_get_tick_ms();
+    u32 elapsedMs = 0;
+    u32 creditBeforeMs = 0;
+    u16 requestedSteps = 0;
+    u16 acceptedSteps = 0;
+    u16 acceptedLen = 0;
+
+    if (requestedStepsOut)
+        *requestedStepsOut = 0;
+    if (acceptedStepsOut)
+        *acceptedStepsOut = 0;
+    if (deniedStepsOut)
+        *deniedStepsOut = 0;
+    if (elapsedMsOut)
+        *elapsedMsOut = 0;
+    if (creditBeforeMsOut)
+        *creditBeforeMsOut = 0;
+    if (creditAfterMsOut)
+        *creditAfterMsOut = 0;
+    if (session == NULL || moveInfo == NULL || moveInfoLen == 0 ||
+        acceptedOut == NULL || acceptedCap < moveInfoLen)
+    {
+        return 0;
+    }
+    for (u16 i = 0; i < moveInfoLen; ++i)
+    {
+        if (moveInfo[i] != 0)
+            ++requestedSteps;
+    }
+    if (!session->movementRateActive)
+    {
+        /* A 2/1 before scene-ready is discarded by the caller.  This branch
+         * only covers an old/incomplete session lifecycle and starts with no
+         * free movement credit. */
+        session->movementRateActive = true;
+        session->movementRateAnchorMs = nowMs;
+        session->movementRateCreditMs = 0;
+    }
+    else
+    {
+        elapsedMs = nowMs - session->movementRateAnchorMs;
+        if (elapsedMs >= VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS ||
+            session->movementRateCreditMs >= VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS - elapsedMs)
+        {
+            session->movementRateCreditMs = VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS;
+        }
+        else
+        {
+            session->movementRateCreditMs += elapsedMs;
+        }
+        session->movementRateAnchorMs = nowMs;
+    }
+    creditBeforeMs = session->movementRateCreditMs;
+    for (u16 i = 0; i < moveInfoLen; ++i)
+    {
+        if (moveInfo[i] != 0 && session->movementRateCreditMs < VM_MOCK_SERVICE_MOVE_STEP_MS)
+            break;
+        acceptedOut[acceptedLen++] = moveInfo[i];
+        if (moveInfo[i] != 0)
+        {
+            session->movementRateCreditMs -= VM_MOCK_SERVICE_MOVE_STEP_MS;
+            ++acceptedSteps;
+        }
+    }
+    /* A zero-only prefix has no movement or valid timeline semantics. */
+    if (acceptedSteps == 0)
+        acceptedLen = 0;
+    if (requestedStepsOut)
+        *requestedStepsOut = requestedSteps;
+    if (acceptedStepsOut)
+        *acceptedStepsOut = acceptedSteps;
+    if (deniedStepsOut)
+        *deniedStepsOut = requestedSteps - acceptedSteps;
+    if (elapsedMsOut)
+        *elapsedMsOut = elapsedMs;
+    if (creditBeforeMsOut)
+        *creditBeforeMsOut = creditBeforeMs;
+    if (creditAfterMsOut)
+        *creditAfterMsOut = session->movementRateCreditMs;
+    return acceptedLen;
+}
+
 static void vm_mock_service_session_store_pending_timeline(vm_mock_service_client_session *session,
                                                            const u8 *moveInfo,
                                                            u16 moveInfoLen,
@@ -3435,6 +3586,7 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     session->sceneVisiblePending = true;
     session->sceneVisibleTick = g_schedulerTick;
     vm_mock_service_session_clear_moveinfo(session, "scene-pending");
+    vm_mock_service_session_reset_movement_rate(session, "scene-pending");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
     if (scene != NULL)
@@ -3477,6 +3629,8 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     session->sceneVisibleY = y;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    if (changed)
+        vm_mock_service_session_reset_movement_rate(session, "scene-ready");
     becameOnline = !session->roleOnline;
     session->roleOnline = true;
     if (becameOnline)
@@ -3626,6 +3780,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->instanceChallengeTick = 0;
     session->instanceChallengeScene[0] = 0;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
+    vm_mock_service_session_reset_movement_rate(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
 }

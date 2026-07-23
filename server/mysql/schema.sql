@@ -207,6 +207,27 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- Timed special items are separate from the durable role snapshot because
+-- expiry continues while the character is offline.  The item id and
+-- multiplier preserve the server-authoritative effect rather than trusting a
+-- client-side icon or countdown.
+CREATE TABLE IF NOT EXISTS `account_role_item_effects` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `effect_kind` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `multiplier` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `expires_unix` INT UNSIGNED NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`, `effect_kind`),
+  KEY `idx_account_role_item_effects_expiry` (`expires_unix`),
+  CONSTRAINT `fk_account_role_item_effects_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `account_role_tasks` (
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `role_id` INT UNSIGNED NOT NULL,
