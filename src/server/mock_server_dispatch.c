@@ -875,6 +875,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_scene_runtime_direct_enter_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-scene-runtime-direct-enter-followup-16-3-27-11-7-42",
+                                  request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_scene_runtime_position_ack_16_3_response(
         request, requestLen, out, outCap);
     if (hookedLen)
