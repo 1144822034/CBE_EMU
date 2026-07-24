@@ -9,6 +9,8 @@
  *
  * The fixture starts completed (state 3). A forged 6/11 must be rejected;
  * only a 26/1 dialog from the repeatable binding may reopen it as state 1.
+ * It also validates the native 25/5 + 6/4 submit response's taskdes string
+ * encoding, because case 4 reads that field through the WT string accessor.
  */
 
 function entry($name, $value) { return chr(strlen($name)) . $name . pack('n', strlen($value)) . $value; }
@@ -205,8 +207,26 @@ try {
         (int)$state['progress1'] !== 0 || (int)$state['progress2'] !== 0) {
         throw new RuntimeException('repeatable NPC offer did not atomically reopen the task as state 1');
     }
+
+    /* This fixture has no requirements, so state 2 is the persisted condition
+     * immediately before the client sends its native 25/5 + 6/4 submit pair. */
+    $pdo->prepare('UPDATE account_role_tasks SET task_state=2 WHERE account_id=? AND role_id=? AND task_id=?')
+        ->execute([$account, $roleId, $taskId]);
+    $submitted = call_service($port, $clientId, wt_packet(
+        object_record(1, 0x19, 5),
+        object_record(1, 6, 4, f_u32('taskid', $taskId))));
+    $expectedTaskdes = "\xc8\xce\xce\xf1\xcc\xe1\xbd\xbb\xb3\xc9\xb9\xa6\xa3\xa1"; /* 任务提交成功！ */
+    $taskdes = response_field($submitted, 6, 4, 'taskdes');
+    $submitState = task_state($pdo, $account, $roleId, $taskId);
+    if (tagged_u8(response_field($submitted, 6, 4, 'result')) !== 1 ||
+        !is_string($taskdes) || strlen($taskdes) < 2 ||
+        unpack('n', substr($taskdes, 0, 2))[1] !== strlen($expectedTaskdes) ||
+        substr($taskdes, 2) !== $expectedTaskdes ||
+        $submitState === null || (int)$submitState['task_state'] !== 3) {
+        throw new RuntimeException('task submit response did not carry a valid taskdes string blob');
+    }
     call_service($port, $clientId, '', 4);
-    echo "repeatable NPC task regression passed actor=$actorId task=$taskId state=3->1\n";
+    echo "repeatable NPC task regression passed actor=$actorId task=$taskId state=3->1->3\n";
 } finally {
     try { call_service($port, $clientId, '', 4); } catch (Throwable $ignored) {}
 }

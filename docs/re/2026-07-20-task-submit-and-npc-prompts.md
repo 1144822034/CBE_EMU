@@ -23,7 +23,7 @@ IDA 实例通过 `binary_name=江湖OL.CBE` 动态选择，未在实现或文档
    `HandleLevelUpResponse(0x01046EDA)` 读取
    `exp/level/lastexp/curexp/persentexp`。
 3. 读取 `seqnum/iteminfo` 和可选 `awardinfo`。
-4. 读取原始字段 `taskdes`，移除活动任务并调用
+4. 通过 WT 字符串访问器读取 `taskdes`，移除活动任务并调用
    `scene_refresh_interact_prompt_types`。
 
 地址 `0x0104722C` 的字节为 `65 78 70 00`，确认字段名是 `exp`；
@@ -33,7 +33,8 @@ IDA 实例通过 `binary_name=江湖OL.CBE` 动态选择，未在实现或文档
 ## 服务端修正
 
 - 提交成功响应改为 `6/4 {result=1}`，下发当前经验、等级、活力、经验区间、
-  `seqnum=0`、安全的空 `iteminfo`、奖励金额流和 `taskdes=任务提交成功！`。
+  `seqnum=0`、安全的空 `iteminfo`、奖励金额流和带内层长度的 WT 字符串
+  `taskdes=任务提交成功！`。
 - 动态 NPC 绑定任务后，活动任务记录会先查当前场景是否存在原始交付人；若不存在，
   则把该任务实际绑定的动态 NPC 显示名写入活动任务交付人槽。这样候选、进行中和
   已完成三阶段都能与同一个场景节点名称匹配。
@@ -53,4 +54,3 @@ IDA 实例通过 `binary_name=江湖OL.CBE` 动态选择，未在实现或文档
 - `php tmp/task-abandon-regression.php 19090` 通过。
 - 所有 MySQL 测试任务状态在 `finally` 中恢复；正式日志
   `tmp/mock-service-19090.task-prompts.20260720-145704.stderr.log` 为 0 字节。
-
