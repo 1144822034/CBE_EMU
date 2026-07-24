@@ -2220,9 +2220,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 actorGap09C0 = vm_net_mock_env_u32("CBE_ACTOR_GAP09C0",
                                            role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY);
     u32 actorSummaryStatus = 0;
-    u8 actorBackpackCapacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
-                                                   role ? role->backpackCapacity :
-                                                   VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
+    u8 actorBackpackCapacity = vm_net_mock_backpack_client_capacity(
+        vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
+                           role ? role->backpackCapacity :
+                           VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY));
     u8 actorStateByte1 = vm_net_mock_env_u8("CBE_ACTOR_STATE_BYTE1", 0);
     u8 actorTargetX = 12;
     u8 actorTargetY = 10;
