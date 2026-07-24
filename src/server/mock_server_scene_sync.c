@@ -4669,9 +4669,14 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", NULL, 0) ||
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "awardinfo",
                                             awardInfo, (u16)awardInfoLen) ||
-                !vm_net_mock_put_object_raw(out, outCap, &pos, "taskdes",
-                                            (const u8 *)submitSuccessText,
-                                            (u16)strlen(submitSuccessText)))
+                /* case 4 reads taskdes through the WT string accessor
+                 * (a2+64/a2+84), unlike iteminfo/awardinfo which are raw
+                 * stream blobs.  The inner BE length is therefore part of
+                 * this field's contract; a raw GBK payload makes its first
+                 * two glyph bytes look like a huge length and overruns the
+                 * client's fixed submit-message buffer. */
+                !vm_net_mock_put_object_string(out, outCap, &pos, "taskdes",
+                                               submitSuccessText))
             {
                 return 0;
             }
