@@ -10,7 +10,8 @@
  * The fixture starts completed (state 3). A forged 6/11 must be rejected;
  * only a 26/1 dialog from the repeatable binding may reopen it as state 1.
  * It also validates the native 25/5 + 6/4 submit response's taskdes string
- * encoding, because case 4 reads that field through the WT string accessor.
+ * encoding and awardinfo item-add stream, because case 4 reads taskdes through
+ * the WT string accessor and updates the live backpack through awardinfo.
  */
 
 function entry($name, $value) { return chr(strlen($name)) . $name . pack('n', strlen($value)) . $value; }
@@ -118,6 +119,49 @@ function task_state($pdo, $account, $roleId, $taskId) {
     $statement->execute([$account, $roleId, $taskId]);
     return $statement->fetch(PDO::FETCH_ASSOC) ?: null;
 }
+function backpack_item($pdo, $account, $roleId, $itemId) {
+    $statement = $pdo->prepare('SELECT item_seq,item_count,enhance_level FROM account_role_backpack WHERE account_id=? AND role_id=? AND item_id=?');
+    $statement->execute([$account, $roleId, $itemId]);
+    return $statement->fetch(PDO::FETCH_ASSOC) ?: null;
+}
+function task_awardinfo_read($blob, &$offset, $byteLength) {
+    if ($offset + 2 + $byteLength > strlen($blob) ||
+        $blob[$offset] !== "\x00" || ord($blob[$offset + 1]) !== $byteLength) return null;
+    $data = substr($blob, $offset + 2, $byteLength);
+    $offset += 2 + $byteLength;
+    return $data;
+}
+function task_awardinfo($blob) {
+    if (!is_string($blob)) return null;
+    $offset = 0;
+    $exp = task_awardinfo_read($blob, $offset, 4);
+    $money = task_awardinfo_read($blob, $offset, 4);
+    $itemCount = task_awardinfo_read($blob, $offset, 1);
+    if ($exp === null || $money === null || $itemCount === null) return null;
+    $header = [
+        'exp' => unpack('N', $exp)[1],
+        'money' => unpack('N', $money)[1],
+        'item_count' => ord($itemCount),
+    ];
+    if ($header['item_count'] === 0) return $offset === strlen($blob) ? $header : null;
+    $seq = task_awardinfo_read($blob, $offset, 2);
+    $itemId = task_awardinfo_read($blob, $offset, 4);
+    $count = task_awardinfo_read($blob, $offset, 4);
+    $stackRuntime = task_awardinfo_read($blob, $offset, 2);
+    $enhanceLevel = task_awardinfo_read($blob, $offset, 2);
+    $attrCount = task_awardinfo_read($blob, $offset, 1);
+    if ($header['item_count'] !== 1 || $seq === null || $itemId === null ||
+        $count === null || $stackRuntime === null || $enhanceLevel === null ||
+        $attrCount === null || $offset !== strlen($blob)) return null;
+    return $header + [
+        'seq' => unpack('n', $seq)[1],
+        'item_id' => unpack('N', $itemId)[1],
+        'count' => unpack('N', $count)[1],
+        'stack_runtime' => unpack('n', $stackRuntime)[1],
+        'enhance_level' => unpack('n', $enhanceLevel)[1],
+        'attr_count' => ord($attrCount),
+    ];
+}
 function cleanup($pdo, $account, $roleId, $scene, $actorId, $nonRepeatableActorId, $taskId) {
     $pdo->prepare('DELETE FROM server_dynamic_npcs WHERE scene=? AND actor_id IN (?,?)')->execute([$scene, $actorId, $nonRepeatableActorId]);
     $pdo->prepare('DELETE FROM server_tasks WHERE task_id=?')->execute([$taskId]);
@@ -146,7 +190,7 @@ if ($mode === 'setup') {
         $pdo->prepare('INSERT INTO accounts(account_id,password_value) VALUES(?,?)')->execute([$account, $password]);
         $pdo->prepare('INSERT INTO account_role_state(account_id,format_version,active_role_id,role_count) VALUES(?,5,?,1)')->execute([$account, $roleId]);
         $pdo->prepare('INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) VALUES(?,?,0,?,1,1,20,5,1250,100,120,41,100,654,1000,?,338,125,0,0,1)')->execute([$account, $roleId, 'RepeatableTask', $scene]);
-        $pdo->prepare('INSERT INTO server_tasks(task_id,enabled,level,difficulty,classification,requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,prerequisite_task_id,given_item_id,given_item_count,reward_exp,reward_money,reward_item_id,reward_item_count,reward_item_type,name,giver,receiver,goal,reward_text,offer_dialog,active_dialog,completed_dialog) VALUES(?,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,?,?,?,?,?,?,?,?)')->execute([$taskId, 'RepeatableTask', 'RepeatableNpc', 'RepeatableNpc', 'Talk again', '', 'Accept again', '', 'Completed']);
+        $pdo->prepare('INSERT INTO server_tasks(task_id,enabled,level,difficulty,classification,requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,prerequisite_task_id,given_item_id,given_item_count,reward_exp,reward_money,reward_item_id,reward_item_count,reward_item_type,name,giver,receiver,goal,reward_text,offer_dialog,active_dialog,completed_dialog) VALUES(?,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,901,3,23,?,?,?,?,?,?,?,?)')->execute([$taskId, 'RepeatableTask', 'RepeatableNpc', 'RepeatableNpc', 'Talk again', '', 'Accept again', '', 'Completed']);
         $pdo->prepare('INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) VALUES(?,?,?,?,0,0,?,?,?,1)')->execute([$scene, $actorId, 336, 124, 'n_man1.actor', 'RepeatableNpc', '']);
         $pdo->prepare('INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) VALUES(?,?,?,1)')->execute([$scene, $actorId, $taskId]);
         $pdo->prepare('INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) VALUES(?,?,?,?,0,0,?,?,?,1)')->execute([$scene, $nonRepeatableActorId, 368, 124, 'n_man1.actor', 'OneShotNpc', '']);
@@ -217,13 +261,21 @@ try {
         object_record(1, 6, 4, f_u32('taskid', $taskId))));
     $expectedTaskdes = "\xc8\xce\xce\xf1\xcc\xe1\xbd\xbb\xb3\xc9\xb9\xa6\xa3\xa1"; /* 任务提交成功！ */
     $taskdes = response_field($submitted, 6, 4, 'taskdes');
+    $award = task_awardinfo(response_field($submitted, 6, 4, 'awardinfo'));
+    $rewardRow = backpack_item($pdo, $account, $roleId, 901);
     $submitState = task_state($pdo, $account, $roleId, $taskId);
     if (tagged_u8(response_field($submitted, 6, 4, 'result')) !== 1 ||
         !is_string($taskdes) || strlen($taskdes) < 2 ||
         unpack('n', substr($taskdes, 0, 2))[1] !== strlen($expectedTaskdes) ||
         substr($taskdes, 2) !== $expectedTaskdes ||
-        $submitState === null || (int)$submitState['task_state'] !== 3) {
-        throw new RuntimeException('task submit response did not carry a valid taskdes string blob');
+        $submitState === null || (int)$submitState['task_state'] !== 3 ||
+        $rewardRow === null || (int)$rewardRow['item_count'] !== 3 ||
+        $award === null || (int)$award['item_count'] !== 1 ||
+        (int)$award['item_id'] !== 901 || (int)$award['count'] !== 3 ||
+        (int)$award['seq'] !== (int)$rewardRow['item_seq'] ||
+        (int)$award['stack_runtime'] !== 3 ||
+        (int)$award['enhance_level'] !== 0 || (int)$award['attr_count'] !== 0) {
+        throw new RuntimeException('task submit response did not carry a valid taskdes and awardinfo item-add blob');
     }
     call_service($port, $clientId, '', 4);
     echo "repeatable NPC task regression passed actor=$actorId task=$taskId state=3->1->3\n";
