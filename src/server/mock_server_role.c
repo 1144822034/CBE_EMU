@@ -2773,27 +2773,6 @@ static const char *vm_net_mock_role_initial_scene_name(void)
     return vm_net_mock_default_scene_name();
 }
 
-static bool vm_net_mock_role_canonicalize_initial_scene(vm_net_mock_role_state *role)
-{
-    static const char legacyInitialScene[] =
-        "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31"; /* 00_蓬莱仙岛01 */
-    static const char legacyInitialSceneWithSuffix[] =
-        "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31\x2e\x73\x63\x65"; /* 00_蓬莱仙岛01.sce */
-    static const char canonicalInitialSceneWithoutSuffix[] =
-        "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31"; /* c00蓬莱仙岛_01 */
-
-    if (role == NULL ||
-        (strcmp(role->scene, legacyInitialScene) != 0 &&
-         strcmp(role->scene, legacyInitialSceneWithSuffix) != 0 &&
-         strcmp(role->scene, canonicalInitialSceneWithoutSuffix) != 0))
-    {
-        return false;
-    }
-    snprintf(role->scene, sizeof(role->scene), "%s",
-             vm_net_mock_role_initial_scene_name());
-    return true;
-}
-
 static u32 vm_net_mock_role_default_weapon_for_job(u32 job)
 {
     switch (job)
@@ -3057,8 +3036,7 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
-    if (!vm_net_mock_scene_name_is_safe(role->scene))
+    if (!vm_net_mock_scene_name_is_persistable(role->scene))
         snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     if (role->x == 0 || role->y == 0)
     {
@@ -4786,16 +4764,7 @@ static void vm_net_mock_role_db_load(void)
         needsSave = true;
     }
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-    {
-        if (vm_net_mock_role_canonicalize_initial_scene(&g_vm_net_mock_role_db.roles[i]))
-        {
-            needsSave = true;
-            vm_autotest_note("mock_role_initial_scene_migrate account=%s role=%u scene=c00-penglai-01.sce\n",
-                             g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
-                             g_vm_net_mock_role_db.roles[i].roleId);
-        }
         vm_net_mock_role_normalize(&g_vm_net_mock_role_db.roles[i]);
-    }
     if (g_vm_net_mock_role_db.roleCount == 1 &&
         vm_net_mock_role_is_pristine_bootstrap_default(&g_vm_net_mock_role_db.roles[0]))
     {
@@ -5221,7 +5190,7 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
      * round trips while the protocol state lock is held, delaying the very
      * response that contains the first NPC catalog and welcome message. */
     if (role->x == x && role->y == y &&
-        vm_net_mock_scene_name_is_safe(role->scene) &&
+        vm_net_mock_scene_name_is_persistable(role->scene) &&
         vm_net_mock_scene_names_equal_loose(role->scene, scene))
     {
         printf("[debug][mock-service] role_position_save_skip role=%u scene=%s pos=(%u,%u) reason=%s unchanged=1\n",
@@ -5230,7 +5199,6 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
     }
     before = *role;
     snprintf(role->scene, sizeof(role->scene), "%s", scene);
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
     role->x = x;
     role->y = y;
     vm_net_mock_role_normalize(role);
@@ -5257,7 +5225,7 @@ static bool vm_net_mock_role_commit_timeline_position(const vm_net_mock_role_sta
     size_t sceneLen = 0;
 
     if (role == NULL || role->roleId == 0 ||
-        !vm_net_mock_scene_name_is_safe(role->scene) ||
+        !vm_net_mock_scene_name_is_persistable(role->scene) ||
         role->x == 0 || role->y == 0 ||
         !vm_net_mock_mysql_account_hex(accountHex))
     {
@@ -5295,7 +5263,7 @@ static bool vm_net_mock_role_set_timeline_position(const char *scene,
     vm_net_mock_role_state before;
     bool dirtyBefore = g_vm_net_mock_role_position_dirty;
 
-    if (role == NULL || !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
+    if (role == NULL || !vm_net_mock_scene_name_is_persistable(scene) || x == 0 || y == 0)
         return false;
     /*
      * A movement timeline starts from the session's already validated scene
@@ -5305,7 +5273,6 @@ static bool vm_net_mock_role_set_timeline_position(const char *scene,
      */
     before = *role;
     snprintf(role->scene, sizeof(role->scene), "%s", scene);
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
     role->x = x;
     role->y = y;
     g_vm_net_mock_role_position_dirty = true;

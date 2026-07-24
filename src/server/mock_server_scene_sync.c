@@ -1574,7 +1574,7 @@ static bool vm_net_mock_validate_xse_task_resources(void)
              strcmp(copperStageSeeds[i].displayName,
                     "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") == 0); /* 大侠郭靖 */
     }
-    printf("[info][network] mock_scene_npc_alias_validate scene=%s rows=%u total=%u guojing=%u policy=guojing-only source=00_legacy-sce evidence=runtime-empty-c00+SCE2\n",
+    printf("[info][network] mock_scene_npc_exact_validate scene=%s rows=%u total=%u guojing=%u policy=exact-scene-only\n",
            copperStageScene, copperStageCount, copperStageTotal,
            foundGuoJing ? 1u : 0u);
     memset(swordValleySeeds, 0, sizeof(swordValleySeeds));
@@ -1593,7 +1593,6 @@ static bool vm_net_mock_validate_xse_task_resources(void)
            foundBlacksmith ? 1u : 0u, foundMonkey ? 1u : 0u,
            foundTestTaskNpc ? 1u : 0u);
     if (loadedCount != sizeof(scripts) / sizeof(scripts[0]) ||
-        copperStageCount < 1 || copperStageTotal < 1 || !foundGuoJing ||
         swordValleyCount < 2 || swordValleyTotal < 2 ||
         !foundBlacksmith || !foundMonkey || foundTestTaskNpc)
     {
@@ -1607,7 +1606,6 @@ static bool vm_net_mock_validate_xse_task_resources(void)
                foundTestTaskNpc ? 1u : 0u);
     }
     return loadedCount == sizeof(scripts) / sizeof(scripts[0]) &&
-           copperStageCount >= 1 && copperStageTotal >= 1 && foundGuoJing &&
            swordValleyCount >= 2 && swordValleyTotal >= 2 &&
            foundBlacksmith && foundMonkey && !foundTestTaskNpc;
 }
@@ -4822,12 +4820,6 @@ typedef struct
     u16 y;
 } vm_net_mock_task_transport_target;
 
-static bool vm_net_mock_task_transport_legacy_scene_key(
-    const char *scene, char *out, size_t outCap)
-{
-    return vm_net_mock_scene_resource_legacy_alias(scene, out, outCap);
-}
-
 static bool vm_net_mock_task_transport_read_smap_row(
     const u8 *data, u32 len, u32 columnCount, u32 *pos,
     char *scene, size_t sceneCap,
@@ -5002,7 +4994,6 @@ static bool vm_net_mock_task_transport_resolve_catalog(
             else
             {
                 vm_net_mock_scene_npcinfo_seed seeds[16];
-                char legacyScene[64];
                 u32 seedCount = vm_net_mock_collect_scene_npcinfo_seeds(
                     scene, seeds, 16, NULL, NULL);
                 bool receiverFound = false;
@@ -5023,31 +5014,6 @@ static bool vm_net_mock_task_transport_resolve_catalog(
                         scene, task->receiver))
                 {
                     receiverFound = true;
-                }
-                if (!receiverFound &&
-                    vm_net_mock_task_transport_legacy_scene_key(
-                        scene, legacyScene, sizeof(legacyScene)))
-                {
-                    seedCount = vm_net_mock_collect_scene_npcinfo_seeds(
-                        legacyScene, seeds, 16, NULL, NULL);
-                    for (u32 seedIndex = 0; seedIndex < seedCount; ++seedIndex)
-                    {
-                        if (task->receiver[0] != 0 &&
-                            strcmp(seeds[seedIndex].displayName,
-                                   task->receiver) == 0)
-                        {
-                            receiverFound = true;
-                            x = seeds[seedIndex].x;
-                            y = seeds[seedIndex].y;
-                            break;
-                        }
-                    }
-                    if (!receiverFound &&
-                        vm_net_mock_task_transport_scene_contains_npc(
-                            legacyScene, task->receiver))
-                    {
-                        receiverFound = true;
-                    }
                 }
                 if (!receiverFound)
                     continue;

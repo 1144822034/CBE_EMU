@@ -280,67 +280,52 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
                                                  u32 *posyOut)
 {
     u8 data[8192];
-    char resourceScene[64];
-    char legacyScene[64];
+    u32 len = 0;
+    u32 start = 0;
+    u32 spawnIndex = 0;
 
     if (scene == NULL || scene[0] == 0 || actorId == 0)
         return false;
 
-    snprintf(resourceScene, sizeof(resourceScene), "%s", scene);
-    legacyScene[0] = 0;
-    for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len != 0 && start != 0)
     {
-        u32 len = vm_net_mock_load_scene_resource(resourceScene, data, sizeof(data));
-        u32 start = vm_net_mock_scene_payload_start(data, len);
-        u32 spawnIndex = 0;
-
-        if (len != 0 && start != 0)
+        for (u32 off = start; off + 14 <= len; ++off)
         {
-            for (u32 off = start; off + 14 <= len; ++off)
+            vm_net_mock_sce_combat_spawn spawn;
+            u32 end = 0;
+
+            if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
+                                                       &spawn, &end))
             {
-                vm_net_mock_sce_combat_spawn spawn;
-                u32 end = 0;
-
-                if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
-                                                           &spawn, &end))
-                {
-                    continue;
-                }
-                /* Scene actor slot zero is reserved by the runtime; recovered
-                 * combat spawns occupy subsequent slots in SCE record order.
-                 * Autonomous battle creation has no client-selected node, so
-                 * it uses the same SCE record catalog that originally creates
-                 * the live scene nodes.  Normal collision challenges must not
-                 * use this selector: their request already identifies the
-                 * exact live node selected by the client. */
-                ++spawnIndex;
-                if (spawn.actorId == actorId)
-                {
-                    if (indexOut)
-                        *indexOut = spawnIndex;
-                    if (posxOut)
-                        *posxOut = spawn.x;
-                    if (posyOut)
-                        *posyOut = spawn.y;
-                    printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u index=%u pos=(%u,%u) name=%s actor_resource=%s source=SCE2-combat-spawn\n",
-                           scene, resourceScene, actorId, spawnIndex,
-                           spawn.x, spawn.y, spawn.displayName,
-                           spawn.actorResource);
-                    return true;
-                }
-                if (end > off)
-                    off = end - 1;
+                continue;
             }
+            /* Scene actor slot zero is reserved by the runtime; recovered
+             * combat spawns occupy subsequent slots in SCE record order.
+             * Autonomous battle creation has no client-selected node, so
+             * it uses the same SCE record catalog that originally creates
+             * the live scene nodes.  Normal collision challenges must not
+             * use this selector: their request already identifies the
+             * exact live node selected by the client. */
+            ++spawnIndex;
+            if (spawn.actorId == actorId)
+            {
+                if (indexOut)
+                    *indexOut = spawnIndex;
+                if (posxOut)
+                    *posxOut = spawn.x;
+                if (posyOut)
+                    *posyOut = spawn.y;
+                printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u index=%u pos=(%u,%u) name=%s actor_resource=%s source=SCE2-combat-spawn\n",
+                       scene, scene, actorId, spawnIndex,
+                       spawn.x, spawn.y, spawn.displayName,
+                       spawn.actorResource);
+                return true;
+            }
+            if (end > off)
+                off = end - 1;
         }
-
-        if (resourcePass != 0 ||
-            !vm_net_mock_scene_resource_legacy_alias(scene, legacyScene,
-                                                     sizeof(legacyScene)) ||
-            strcmp(resourceScene, legacyScene) == 0)
-        {
-            break;
-        }
-        snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
     }
     return false;
 }
@@ -373,11 +358,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
         const vm_net_mock_auto_monster_catalog_item *catalog =
             &g_vm_net_mock_auto_monster_catalog[catalogIndex];
         u8 data[8192];
-        char resourceScene[64];
-        char legacyScene[64];
 
-        snprintf(resourceScene, sizeof(resourceScene), "%s", catalog->scene);
-        legacyScene[0] = 0;
         for (u32 idIndex = 0; idIndex < 3; ++idIndex)
         {
             int monsterIndex = vm_net_mock_monster_catalog_index(
@@ -394,9 +375,8 @@ static void vm_net_mock_monster_resource_labels_load(void)
             }
         }
 
-        for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
         {
-            u32 len = vm_net_mock_load_scene_resource(resourceScene, data,
+            u32 len = vm_net_mock_load_scene_resource(catalog->scene, data,
                                                        sizeof(data));
             u32 start = vm_net_mock_scene_payload_start(data, len);
 
@@ -428,14 +408,6 @@ static void vm_net_mock_monster_resource_labels_load(void)
                         off = end - 1;
                 }
             }
-            if (resourcePass != 0 ||
-                !vm_net_mock_scene_resource_legacy_alias(
-                    catalog->scene, legacyScene, sizeof(legacyScene)) ||
-                strcmp(resourceScene, legacyScene) == 0)
-            {
-                break;
-            }
-            snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
         }
     }
 }
@@ -1191,13 +1163,10 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                                                    u32 *dynamicOut)
 {
     u8 data[8192];
-    char resourceScene[64];
-    char legacyScene[64];
     u32 len = 0;
     u32 start = 0;
     u32 count = 0;
     u32 total = 0;
-    u32 serviceCount = 0;
 
     if (totalOut)
         *totalOut = 0;
@@ -1210,7 +1179,6 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
     memset(seeds, 0, sizeof(*seeds) * seedCap);
     count = vm_net_mock_append_service_scene_npcinfo_seeds(scene, seeds, seedCap);
     total = count;
-    serviceCount = count;
     if (dynamicOut)
         *dynamicOut = count;
     /* The _02 resource was audited separately and has no actor/xse records.
@@ -1232,91 +1200,75 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
             *totalOut = total;
         return count;
     }
-    snprintf(resourceScene, sizeof(resourceScene), "%s", scene);
-    legacyScene[0] = 0;
-    for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len != 0 && start != 0)
     {
-        len = vm_net_mock_load_scene_resource(resourceScene, data, sizeof(data));
-        start = vm_net_mock_scene_payload_start(data, len);
-        if (len != 0 && start != 0)
+        for (u32 off = start; off + 8 <= len; ++off)
         {
-            for (u32 off = start; off + 8 <= len; ++off)
-            {
-                vm_net_mock_scene_npcinfo_seed seed;
-                u32 end = 0;
-                bool duplicate = false;
+            vm_net_mock_scene_npcinfo_seed seed;
+            u32 end = 0;
+            bool duplicate = false;
 
-                if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
-                                                              &seed, &end))
-                {
-                    continue;
-                }
-                /* The authoritative Tongquetai catalog contains only 大侠郭靖.
-                 * The legacy SCE also carries 郭芙蓉/task2.xse, but that row
-                 * belongs to old content and must not be restored merely because
-                 * the current c00 resource has an empty embedded actor catalog. */
-                if (vm_net_mock_scene_is_penglai01(scene) &&
-                    (strcmp(seed.scriptName, "task0.xse") != 0 ||
-                     strcmp(seed.displayName,
-                            "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
-                {
-                    printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
-                           scene, seed.displayName, seed.scriptName);
-                    if (end > off)
-                        off = end - 1;
-                    continue;
-                }
-                for (u32 i = 0; i < count; ++i)
-                {
-                    if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
-                        strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
-                        strcmp(seeds[i].displayName, seed.displayName) == 0)
-                    {
-                        duplicate = true;
-                        break;
-                    }
-                }
-                if (duplicate)
-                    continue;
-                total += 1;
-                if (count < seedCap)
-                {
-                    u32 candidate = 20000u +
-                        (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
-                    bool collision = true;
-                    while (collision)
-                    {
-                        collision = false;
-                        for (u32 i = 0; i < count; ++i)
-                        {
-                            if (seeds[i].actorId == candidate)
-                            {
-                                candidate = candidate == 59999u
-                                                ? 20000u
-                                                : candidate + 1u;
-                                collision = true;
-                                break;
-                            }
-                        }
-                    }
-                    seed.actorId = candidate;
-                    seeds[count++] = seed;
-                }
+            if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
+                                                          &seed, &end))
+            {
+                continue;
+            }
+            /* The authoritative Tongquetai catalog contains only 大侠郭靖.
+             * The legacy SCE also carries 郭芙蓉/task2.xse, but that row
+             * belongs to old content and must not be restored merely because
+             * the current c00 resource has an empty embedded actor catalog. */
+            if (vm_net_mock_scene_is_penglai01(scene) &&
+                (strcmp(seed.scriptName, "task0.xse") != 0 ||
+                 strcmp(seed.displayName,
+                        "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
+            {
+                printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
+                       scene, seed.displayName, seed.scriptName);
                 if (end > off)
                     off = end - 1;
+                continue;
             }
+            for (u32 i = 0; i < count; ++i)
+            {
+                if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
+                    strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
+                    strcmp(seeds[i].displayName, seed.displayName) == 0)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+            total += 1;
+            if (count < seedCap)
+            {
+                u32 candidate = 20000u +
+                    (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
+                bool collision = true;
+                while (collision)
+                {
+                    collision = false;
+                    for (u32 i = 0; i < count; ++i)
+                    {
+                        if (seeds[i].actorId == candidate)
+                        {
+                            candidate = candidate == 59999u
+                                            ? 20000u
+                                            : candidate + 1u;
+                            collision = true;
+                            break;
+                        }
+                    }
+                }
+                seed.actorId = candidate;
+                seeds[count++] = seed;
+            }
+            if (end > off)
+                off = end - 1;
         }
-
-        if (total > serviceCount || resourcePass != 0 ||
-            !vm_net_mock_scene_resource_legacy_alias(scene, legacyScene,
-                                                     sizeof(legacyScene)) ||
-            strcmp(resourceScene, legacyScene) == 0)
-        {
-            break;
-        }
-        printf("[info][network] mock_scene_npc_resource_alias scene=%s exact=%s legacy=%s reason=exact-catalog-empty\n",
-               scene, resourceScene, legacyScene);
-        snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
     }
     if (totalOut)
         *totalOut = total;
@@ -2645,8 +2597,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         target->x = 223;
         target->y = 382;
     }
-    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0 ||
-             strcmp(mapId, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0)
+    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0)
     {
         if (currentScene != NULL && vm_net_mock_scene_is_penglai02(currentScene))
         {
@@ -3981,7 +3932,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
      * and position are durable request-scoped state; the host CBE runtime grid
      * is only a local-emulator fallback and must never supersede them.
      */
-    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
     {
         scene = role->scene;
         fromX = role->x;
@@ -4006,7 +3957,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         if (vm_net_mock_read_current_player_grid(NULL, NULL, &fromX, &fromY, NULL, NULL))
             fromSource = "runtime-grid";
     }
-    if (!vm_net_mock_scene_name_is_safe(scene))
+    if (!vm_net_mock_scene_name_is_persistable(scene))
     {
         scene = vm_net_mock_default_scene_name();
         sceneSource = "default-fallback";
@@ -4044,6 +3995,11 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
+    if (!vm_net_mock_scene_resource_exists(target->scene))
+    {
+        printf("[warn][network] mock_unstuck_target_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found\n",
+               target->scene);
+    }
     printf("[info][network] mock_unstuck_target scene=%s scene_source=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
            target->scene,
            sceneSource,

@@ -4728,57 +4728,6 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
     return false;
 }
 
-static bool vm_net_mock_scene_resource_legacy_alias(const char *scene,
-                                                    char *out,
-                                                    size_t outCap)
-{
-    const char *base = scene;
-    const char *suffix = NULL;
-    const char *end = NULL;
-    size_t baseLen = 0;
-    size_t stemLen = 0;
-
-    if (out == NULL || outCap == 0)
-        return false;
-    out[0] = 0;
-    if (scene == NULL || scene[0] == 0 ||
-        vm_net_mock_scene_name_has_path_separator(scene))
-    {
-        return false;
-    }
-    if (base[0] == 'c')
-        ++base;
-    baseLen = strlen(base);
-    end = base + baseLen;
-    if (baseLen >= 4 && strcmp(end - 4, ".sce") == 0)
-        end -= 4;
-    if (end <= base + 5 ||
-        base[0] < '0' || base[0] > '9' ||
-        base[1] < '0' || base[1] > '9')
-    {
-        return false;
-    }
-    suffix = end - 3;
-    if (suffix[0] != '_' ||
-        suffix[1] < '0' || suffix[1] > '9' ||
-        suffix[2] < '0' || suffix[2] > '9' ||
-        suffix <= base + 2)
-    {
-        return false;
-    }
-    stemLen = (size_t)(suffix - (base + 2));
-    if (3u + stemLen + 2u + 4u + 1u > outCap)
-        return false;
-    out[0] = base[0];
-    out[1] = base[1];
-    out[2] = '_';
-    memcpy(out + 3, base + 2, stemLen);
-    out[3 + stemLen] = suffix[1];
-    out[4 + stemLen] = suffix[2];
-    memcpy(out + 5 + stemLen, ".sce", 5);
-    return strcmp(out, scene) != 0;
-}
-
 static bool vm_net_mock_open_server_data_resource(const char *name,
                                                   const char *requiredSuffix,
                                                   FILE **fpOut,
@@ -4848,17 +4797,12 @@ static bool vm_net_mock_client_data_resource_exists(const char *name,
 static bool vm_net_mock_scene_resource_exists(const char *scene)
 {
     FILE *fp = NULL;
-    char legacyScene[64];
 
+    /* Scene identity is byte-for-byte, except that open_server_scene_resource
+     * itself may add the optional .sce suffix to the same key.  In particular,
+     * c00蓬莱仙岛_02.sce, 00蓬莱仙岛_02.sce and 00_蓬莱仙岛02.sce are not aliases. */
     if (!vm_net_mock_open_server_scene_resource(scene, &fp, NULL, 0))
-    {
-        if (!vm_net_mock_scene_resource_legacy_alias(scene, legacyScene,
-                                                     sizeof(legacyScene)) ||
-            !vm_net_mock_open_server_scene_resource(legacyScene, &fp, NULL, 0))
-        {
-            return false;
-        }
-    }
+        return false;
     fclose(fp);
     return true;
 }
@@ -4944,6 +4888,14 @@ static bool vm_net_mock_scene_name_is_safe(const char *scene)
     return vm_net_mock_scene_resource_exists(scene);
 }
 
+/* A durable scene reference comes from a server/client scene-transition
+ * contract.  It may name a resource still pending WT18/7, so persistence must
+ * not reinterpret local lookup failure as permission to replace its key. */
+static bool vm_net_mock_scene_name_is_persistable(const char *scene)
+{
+    return vm_net_mock_scene_name_is_download_key(scene);
+}
+
 static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
 {
 #ifdef CBE_SERVER_ONLY
@@ -4973,7 +4925,7 @@ static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
 static const char *vm_net_mock_normalize_scene_name_for_enter(const char *scene)
 {
     static char normalized[64];
-    if (!vm_net_mock_scene_name_is_safe(scene))
+    if (!vm_net_mock_scene_name_is_persistable(scene))
         return vm_net_mock_default_scene_name();
 
     /*
