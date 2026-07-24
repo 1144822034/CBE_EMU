@@ -4178,6 +4178,11 @@ static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 
 enum
 {
     VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY = 20,
+    /* JianghuOL.CBE scene bootstrap calls InitTimerControl(64, 74): 64
+     * logical backpack records backed by 74 physical slots.  Persistent
+     * storage may retain more rows for a future migration, but no client
+     * packet may advertise a larger usable grid. */
+    VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
     VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
     VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,

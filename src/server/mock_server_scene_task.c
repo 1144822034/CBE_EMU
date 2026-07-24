@@ -410,14 +410,23 @@ static void vm_net_mock_monster_resource_labels_load(void)
                     vm_net_mock_sce_combat_spawn spawn;
                     u32 end = 0;
                     int monsterIndex = -1;
+                    bool declaredByAutoMonsterRow = false;
 
                     if (!vm_net_mock_parse_sce_combat_spawn_at(
                             data, len, off, &spawn, &end))
                     {
                         continue;
                     }
+                    for (u32 idIndex = 0; idIndex < 3; ++idIndex)
+                    {
+                        if (catalog->monsterIds[idIndex] == spawn.actorId)
+                        {
+                            declaredByAutoMonsterRow = true;
+                            break;
+                        }
+                    }
                     monsterIndex = vm_net_mock_monster_catalog_index(spawn.actorId);
-                    if (monsterIndex >= 0 &&
+                    if (declaredByAutoMonsterRow && monsterIndex >= 0 &&
                         g_vm_net_mock_monster_resource_labels[monsterIndex]
                             .displayName[0] == 0)
                     {
@@ -434,8 +443,10 @@ static void vm_net_mock_monster_resource_labels_load(void)
         }
     }
 
-    /* SCE labels win whenever a task target later gains an authored spawn.
-     * Only unresolved task-only entries retain the explicit task.dsh source. */
+    /* A name read from SCE is valid only when the same automonster.dsh row
+     * declares that actor ID.  Task-only targets otherwise keep their exact
+     * task.dsh label and provenance, rather than inheriting an unrelated
+     * combat actor found while scanning the same scene. */
     for (u32 i = 0;
          i < sizeof(g_vm_net_mock_monster_task_only_labels) /
                  sizeof(g_vm_net_mock_monster_task_only_labels[0]);
