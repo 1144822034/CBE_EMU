@@ -62,7 +62,10 @@ typedef struct
     u32 itemId;
     u8 slot;
     u8 levelRequired;
-    u16 reserved0;
+    /* equip.dsh column 19 (`耐久`) is the client-visible maximum.  The
+     * wire payload only carries the current value, so the server must use this
+     * same source whenever it creates or repairs durable equipment. */
+    u16 durabilityMax;
     vm_net_mock_equipment_bonus bonus;
 } vm_net_mock_equipment_catalog_item;
 
@@ -158,6 +161,7 @@ static bool g_vm_net_mock_role_service_tables_valid = false;
 static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
                                     u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
+static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -750,8 +754,8 @@ static bool vm_net_mock_role_service_tables_ensure(void)
             "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
             "role_id INT UNSIGNED NOT NULL,slot_index TINYINT UNSIGNED NOT NULL,"
             "item_id INT UNSIGNED NOT NULL DEFAULT 0,"
-            "durability SMALLINT UNSIGNED NOT NULL DEFAULT 100,"
-            "durability_max SMALLINT UNSIGNED NOT NULL DEFAULT 100,"
+            "durability SMALLINT UNSIGNED NOT NULL,"
+            "durability_max SMALLINT UNSIGNED NOT NULL,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(account_id,role_id,slot_index)) ENGINE=InnoDB") &&
         vm_mysql_exec(
@@ -888,12 +892,61 @@ static void vm_net_mock_role_service_sync_equipment(
         return;
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        if (state->equipmentItemIds[slot] == role->equippedItemIds[slot])
+        u32 itemId = role->equippedItemIds[slot];
+        u16 durabilityMax = vm_net_mock_equipment_durability_max_for_item(itemId);
+        bool itemChanged = state->equipmentItemIds[slot] != itemId;
+        bool maximumChanged = state->durabilityMax[slot] != durabilityMax;
+
+        /* Empty slots have no durability state. */
+        if (itemId == 0)
+        {
+            if (itemChanged)
+            {
+                state->equipmentItemIds[slot] = 0;
+                state->durability[slot] = 0;
+                /* The schema predates empty-slot durability and requires a
+                 * positive max.  Retain the former item's valid max; the
+                 * zero item id makes the row non-durable to every consumer. */
+                if (state->durabilityMax[slot] == 0)
+                    state->durabilityMax[slot] = 1;
+                if (!vm_net_mock_role_service_persist_durability(state, slot))
+                {
+                    printf("[error][network] mock_role_durability_sync_store role=%u slot=%u item=0 error=%s\n",
+                           state->roleId, slot, vm_mysql_last_error());
+                }
+            }
             continue;
-        state->equipmentItemIds[slot] = role->equippedItemIds[slot];
-        state->durabilityMax[slot] = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
-        state->durability[slot] = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
-        (void)vm_net_mock_role_service_persist_durability(state, slot);
+        }
+        /* Do not replace persisted data with a fabricated max if the exact
+         * local equip.dsh record is unavailable.  Non-zero equipment is only
+         * usable after this catalog lookup succeeds. */
+        if (durabilityMax == 0)
+        {
+            printf("[warn][network] mock_role_durability_sync_unresolved role=%u slot=%u item=%u source=equip.dsh\n",
+                   state->roleId, slot, itemId);
+            continue;
+        }
+        if (!itemChanged && !maximumChanged &&
+            state->durability[slot] <= durabilityMax)
+        {
+            continue;
+        }
+
+        /* A new item starts full.  For a legacy row for the same item, retain
+         * its current value only while it is valid under equip.dsh; otherwise
+         * clamp it to the real max before any quote or repair is calculated. */
+        state->equipmentItemIds[slot] = itemId;
+        state->durabilityMax[slot] = durabilityMax;
+        if (itemChanged)
+            state->durability[slot] = durabilityMax;
+        else if (state->durability[slot] > durabilityMax)
+            state->durability[slot] = durabilityMax;
+        if (!vm_net_mock_role_service_persist_durability(state, slot))
+        {
+            printf("[error][network] mock_role_durability_sync_store role=%u slot=%u item=%u durability=%u max=%u error=%s\n",
+                   state->roleId, slot, itemId, state->durability[slot],
+                   state->durabilityMax[slot], vm_mysql_last_error());
+        }
     }
 }
 
@@ -938,12 +991,6 @@ static vm_net_mock_role_service_state *vm_net_mock_role_service_state_get(
     state->used = true;
     state->roleId = role->roleId;
     snprintf(state->accountId, sizeof(state->accountId), "%s", accountId);
-    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
-    {
-        state->equipmentItemIds[slot] = role->equippedItemIds[slot];
-        state->durability[slot] = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
-        state->durabilityMax[slot] = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
-    }
     memset(&context, 0, sizeof(context));
     context.state = state;
     if (vm_net_mock_role_service_tables_ensure() &&
@@ -1491,13 +1538,14 @@ static u8 vm_net_mock_equipment_slot_for_category(u32 category)
 }
 
 static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired,
-                                                   u32 category,
+                                                   u32 category, u32 durabilityMax,
                                                    const vm_net_mock_equipment_bonus *bonus)
 {
     vm_net_mock_equipment_catalog_item *item = NULL;
     u8 slot = vm_net_mock_equipment_slot_for_category(category);
 
-    if (itemId == 0 || bonus == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+    if (itemId == 0 || durabilityMax == 0 || durabilityMax > 0xffffu ||
+        bonus == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
         g_vm_net_mock_equipment_catalog_count >= VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS)
     {
         return false;
@@ -1508,6 +1556,7 @@ static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired
     item->itemId = itemId;
     item->slot = slot;
     item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
+    item->durabilityMax = (u16)durabilityMax;
     item->bonus = *bonus;
     return true;
 }
@@ -1547,6 +1596,7 @@ static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
         u32 itemId = 0;
         u32 levelRequired = 1;
         u32 category = 0xffffffffu;
+        u32 durabilityMax = 0;
         vm_net_mock_equipment_bonus bonus;
 
         memset(&bonus, 0, sizeof(bonus));
@@ -1606,13 +1656,17 @@ static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
             case 18:
                 bonus.resist = parsed;
                 break;
+            case 19:
+                durabilityMax = parsed;
+                break;
             default:
                 break;
             }
             rowPos += valueLen;
         }
 
-        if (vm_net_mock_add_equipment_catalog_item(itemId, levelRequired, category, &bonus))
+        if (vm_net_mock_add_equipment_catalog_item(itemId, levelRequired, category,
+                                                   durabilityMax, &bonus))
             ++added;
         pos = rowEnd;
     }
@@ -1657,6 +1711,14 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
             return &g_vm_net_mock_equipment_catalog[i];
     }
     return NULL;
+}
+
+static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId)
+{
+    const vm_net_mock_equipment_catalog_item *item =
+        vm_net_mock_find_equipment_catalog_item(itemId);
+
+    return item != NULL ? item->durabilityMax : 0;
 }
 
 static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
@@ -3164,13 +3226,14 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
     for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
         u32 itemId = role->equippedItemIds[slot];
-        u32 durability = VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX;
+        u32 durability = vm_net_mock_equipment_durability_max_for_item(itemId);
 
         /* mmGameMstarWqvga.cbm:sub_D04 reads every 7/7 row as
          * seq(u16), itemId(u32), current-count(u32), and the common equipment
          * attributes.  For item ids >= 1000 it writes current-count to the
          * equipment current-durability field at item+272. */
-        if (itemId == 0 || vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+        if (itemId == 0 || durability == 0 ||
+            vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
             continue;
         if (serviceState != NULL &&
             serviceState->equipmentItemIds[slot] == itemId &&

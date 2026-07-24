@@ -187,8 +187,8 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment_durability` (
   `role_id` INT UNSIGNED NOT NULL,
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
-  `durability` SMALLINT UNSIGNED NOT NULL DEFAULT 100,
-  `durability_max` SMALLINT UNSIGNED NOT NULL DEFAULT 100,
+  `durability` SMALLINT UNSIGNED NOT NULL,
+  `durability_max` SMALLINT UNSIGNED NOT NULL,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_durability_role`

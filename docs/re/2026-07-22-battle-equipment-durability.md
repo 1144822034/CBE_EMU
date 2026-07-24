@@ -46,9 +46,11 @@ account_role_equipment_durability，且同一场战斗的重复请求或重复�
   type、repairnum、coolmoney 并显示确认框；GBK 文本为“您身上有 N 件装备
   需要修理，花费 M 币”或“修理该装备需花费 M 币”。它是报价/确认阶段，
   不是战后耐久结算或已修复装备的刷新包。
-- 固件中没有可用的“每战扣多少、哪些装备扣、逃跑或死亡是否扣、耐久上限”
-  常量或分支。100 上限及“每场每槽减 1”来自 mock 的玩法设定，不能标记为
-  原版服务器规则。
+- 固件中没有可用的“每战扣多少、哪些装备扣、逃跑或死亡是否扣”的常量或
+  分支。每场每槽减 1 来自 mock 的玩法设定，不能标记为原版服务器规则。
+- `equip.dsh` 列 19（`耐久`）是客户端本地显示的单件装备上限；例如 1001
+  木制宽剑为 50，1101 桃木宽剑为 80。它不是战斗规则的直接证据，却是服务端
+  创建、校正和修理 `currentCount` 时必须遵守的数据契约，不能以统一 100 代替。
 
 结论：当前实现符合本任务给出的玩法要求，但不能称为“已还原原服耐久规则”。
 尤其“成功逃跑/角色死亡也扣一次”的选择在逻辑上符合“战斗结束”，却仍缺少
@@ -85,23 +87,21 @@ vm_net_mock_role_service_apply_battle_wear，而它只会在胜利
 
 ## 回归
 
-tmp/battle-equipment-durability-regression.php 在隔离端口创建一件耐久 100 的
-武器，验证：
+tmp/battle-equipment-durability-regression.php 是此前的临时回归脚本；它的
+100/100 固定夹具不再适用于真实 equip.dsh 上限。新的持久回归在
+scripts/equipment-durability-max-regression.php 中建立 1001=50、1101=80 的
+真实装备上限，并验证修理不会超过它们。
 
-1. 一次击败怪物后为 99；
-2. 第二场成功逃跑后为 98；
-3. 每个结算响应均使用原有 4/7（胜利）或 4/4 result=1（逃跑）契约。
-4. 失败逃跑仍在同一场战斗内，保持原耐久。
+1. 旧 44/100、70/100 记录在原生装备 bootstrap 前归一为 44/50、70/80；
+2. `26/1 {type=2,id=0xe3000001}` 修理后分别为 50/50、80/80；
+3. 铜钱只按真实缺口 6+10 扣除。
 
-角色死亡分支与这两个路径使用相同的 lastBattleWearSerial 防重助手，并由
-源代码分支审查覆盖；后续可在有稳定强制死亡怪物数据时补充黑盒回归。
+战斗结算路径仍使用同一 `lastBattleWearSerial` 防重助手；后续需要以真实
+DSH 上限夹具补充胜利、逃跑和死亡的黑盒回归。
 
 运行结果（隔离服务）：
 
-    mock_equipment_durability_wear role=59224 battle=1 amount=1
-    mock_equipment_durability_wear role=59224 battle=2 amount=1
-    battle equipment durability regression passed victory=99/99 escape=98/98
-    battle equipment durability regression passed failed-escape=100/100
+    equipment durability max regression passed repaired=50/50,80/80 money=984
 
-失败逃跑只返回原有 4/4 result=0 和敌方行动，未出现
-mock_equipment_durability_wear，证明未把进行中的战斗误结算。
+修理回归不向 26/1 对话响应附加未经验证的装备替换对象；客户端仍会通过既有
+1/7/7 type=2 装备 bootstrap 消费当前耐久。
