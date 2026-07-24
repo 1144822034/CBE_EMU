@@ -1405,14 +1405,22 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
     if (x == 0 || y == 0)
         return;
 
-    if (!vm_net_mock_scene_name_is_safe(scene))
+    /* A scene transition can name an SCE that the server has not yet resolved
+     * locally.  Its exact key remains authoritative for this durable position;
+     * substituting a runtime/default scene here changes the next 16/2 target. */
+    if (!vm_net_mock_scene_name_is_persistable(scene))
     {
         if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
             scene = runtimeScene;
-        else if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+        else if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
             scene = role->scene;
         else
             scene = vm_net_mock_default_scene_name();
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene))
+    {
+        printf("[warn][network] mock_scene_position_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found save_reason=%s\n",
+               scene ? scene : "-", reason ? reason : "position");
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
     vm_net_mock_role_set_position(scene, x, y, reason);
@@ -1449,7 +1457,7 @@ static const char *vm_net_mock_current_scene_name(void)
      * environment key and local runtime scene remain useful only before a
      * request has selected a role (local/offline diagnostics).
      */
-    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
         return vm_net_mock_normalize_scene_name_for_enter(role->scene);
     if (overrideName != NULL && overrideName[0] != 0)
         return overrideName;
