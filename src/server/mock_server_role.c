@@ -1936,6 +1936,7 @@ typedef enum
 } vm_net_mock_monster_family;
 
 #define VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX 0x7fffffffu
+#define VM_NET_MOCK_MONSTER_DROP_MAX 8u
 
 typedef struct
 {
@@ -1948,6 +1949,12 @@ typedef struct
 
 typedef struct
 {
+    u32 itemId;
+    u8 ratePercent;
+} vm_net_mock_monster_drop;
+
+typedef struct
+{
     u32 enemyId;
     u32 level;
     u32 hp;
@@ -1956,15 +1963,15 @@ typedef struct
     u32 defense;
     u32 exp;
     u32 gold;
-    u32 dropItemId;
-    u32 dropRatePercent;
 } vm_net_mock_monster_stats;
 
 typedef struct
 {
     bool used;
     u8 family;
+    u8 dropCount;
     vm_net_mock_monster_stats stats;
+    vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
 } vm_net_mock_monster_override;
 
 typedef struct
@@ -1977,8 +1984,8 @@ typedef struct
     u32 defense;
     u32 exp;
     u32 gold;
-    u32 dropItemId;
-    u32 dropRatePercent;
+    u8 dropCount;
+    vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
     u8 family;
     bool overridden;
     char displayName[32];
@@ -1996,6 +2003,8 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     { 18, 38, VM_NET_MOCK_MONSTER_ELEMENTAL, 36, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 19, 28, VM_NET_MOCK_MONSTER_BOSS, 37, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 22, 12, VM_NET_MOCK_MONSTER_SPIRIT, 53, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    /* task.dsh type-2 kill target: 冥火麒麟【燎天】 (task 5004). */
+    { 23, 40, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 25,  4, VM_NET_MOCK_MONSTER_UNDEAD, 43, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 28,  7, VM_NET_MOCK_MONSTER_FLYING, 45, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 29,  8, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
@@ -2004,9 +2013,13 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     { 32, 10, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     { 34, 11, VM_NET_MOCK_MONSTER_UNDEAD, 51, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 36, 14, VM_NET_MOCK_MONSTER_STONE, 52, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    /* task.dsh type-2 kill target: 火凤凰 (task 112). */
+    { 38, 30, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
     { 40, 20, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 41, 20, VM_NET_MOCK_MONSTER_SLIME, 55, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 42, 22, VM_NET_MOCK_MONSTER_ELEMENTAL, 56, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
+    /* task.dsh type-2 kill target: 火蝮蛇 (task 407). */
+    { 44, 40, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
     { 45, 22, VM_NET_MOCK_MONSTER_SPIRIT, 58, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 47, 27, VM_NET_MOCK_MONSTER_HUMANOID, 63, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 48, 28, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
@@ -2125,8 +2138,6 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
-    stats.dropItemId = entry.dropItemId;
-    stats.dropRatePercent = entry.dropRatePercent;
 
     switch ((vm_net_mock_monster_family)entry.family)
     {
@@ -2269,6 +2280,8 @@ typedef struct
 {
     u32 loaded;
     u32 skipped;
+    u32 dropsLoaded;
+    u32 dropsSkipped;
 } vm_net_mock_monster_db_load_context;
 
 static bool vm_net_mock_monster_db_row(void *contextValue,
@@ -2278,14 +2291,14 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
 {
     vm_net_mock_monster_db_load_context *context =
         (vm_net_mock_monster_db_load_context *)contextValue;
-    u32 number[11];
+    u32 number[9];
     int index = -1;
     vm_net_mock_monster_override *override = NULL;
 
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 11)
+    if (context == NULL || columnCount != 9)
         return false;
-    for (u32 i = 0; i < 11; ++i)
+    for (u32 i = 0; i < 9; ++i)
     {
         if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
         {
@@ -2302,9 +2315,7 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
         number[5] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         number[6] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         number[7] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        number[8] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        number[10] > 100u ||
-        ((number[9] == 0) != (number[10] == 0)))
+        number[8] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX)
     {
         ++context->skipped;
         return true;
@@ -2322,9 +2333,52 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
     override->stats.defense = number[6];
     override->stats.exp = number[7];
     override->stats.gold = number[8];
-    override->stats.dropItemId = number[9];
-    override->stats.dropRatePercent = number[10];
     ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_monster_db_drop_row(void *contextValue,
+                                            unsigned int columnCount,
+                                            const char *const *values,
+                                            const size_t *lengths)
+{
+    vm_net_mock_monster_db_load_context *context =
+        (vm_net_mock_monster_db_load_context *)contextValue;
+    u32 number[4];
+    int index = -1;
+    vm_net_mock_monster_override *override = NULL;
+
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 4)
+        return false;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            ++context->dropsSkipped;
+            return true;
+        }
+    }
+    index = vm_net_mock_monster_catalog_index(number[0]);
+    if (index < 0 || number[1] == 0 ||
+        number[1] > VM_NET_MOCK_MONSTER_DROP_MAX || number[2] == 0 ||
+        number[3] == 0 || number[3] > 100u ||
+        vm_net_mock_find_shop_catalog_item(number[2]) == NULL)
+    {
+        ++context->dropsSkipped;
+        return true;
+    }
+    override = &g_vm_net_mock_monster_overrides[index];
+    if (!override->used ||
+        override->dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
+    {
+        ++context->dropsSkipped;
+        return true;
+    }
+    override->drops[override->dropCount].itemId = number[2];
+    override->drops[override->dropCount].ratePercent = (u8)number[3];
+    ++override->dropCount;
+    ++context->dropsLoaded;
     return true;
 }
 
@@ -2351,19 +2405,42 @@ static bool vm_net_mock_monster_db_load(void)
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(monster_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_monster_drops ("
+            "monster_id SMALLINT UNSIGNED NOT NULL,"
+            "drop_slot TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,"
+            "drop_rate_percent TINYINT UNSIGNED NOT NULL,"
+            "PRIMARY KEY(monster_id,drop_slot),"
+            "CONSTRAINT fk_server_monster_drops_monster "
+            "FOREIGN KEY(monster_id) REFERENCES server_monsters(monster_id) "
+            "ON DELETE CASCADE) ENGINE=InnoDB") ||
+        /* Old single-drop rows are a one-way compatibility source.  New
+         * saves clear those legacy columns, so a later zero-drop edit cannot
+         * be silently recreated on the next service restart. */
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_monster_drops("
+            "monster_id,drop_slot,item_id,drop_rate_percent) "
+            "SELECT monster_id,1,drop_item_id,drop_rate_percent "
+            "FROM server_monsters WHERE drop_item_id<>0 AND drop_rate_percent<>0") ||
         !vm_mysql_query(
             "SELECT monster_id,level,family,hp,mp,attack_value,defense_value,"
-            "reward_exp,reward_money,drop_item_id,drop_rate_percent "
+            "reward_exp,reward_money "
             "FROM server_monsters ORDER BY monster_id",
-            vm_net_mock_monster_db_row, &context))
+            vm_net_mock_monster_db_row, &context) ||
+        !vm_mysql_query(
+            "SELECT monster_id,drop_slot,item_id,drop_rate_percent "
+            "FROM server_monster_drops ORDER BY monster_id,drop_slot",
+            vm_net_mock_monster_db_drop_row, &context))
     {
         printf("[error][mock-admin] monster_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
     g_vm_net_mock_monster_db_valid = true;
-    printf("[info][mock-admin] monster_db_load rows=%u skipped=%u\n",
-           context.loaded, context.skipped);
+    printf("[info][mock-admin] monster_db_load rows=%u skipped=%u drops=%u drops_skipped=%u\n",
+           context.loaded, context.skipped, context.dropsLoaded,
+           context.dropsSkipped);
     return true;
 }
 
@@ -2377,12 +2454,51 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
     return vm_net_mock_monster_base_stats_for_enemy(enemyId);
 }
 
+/* The source catalog predates backend editing and stores one legacy drop per
+ * monster.  MySQL overrides deliberately own the complete list, including an
+ * explicitly empty list, so an administrator can remove a built-in material
+ * drop without it reappearing after reload. */
+static u8 vm_net_mock_monster_drops_for_enemy(
+    u32 enemyId, vm_net_mock_monster_drop *drops, u8 dropCap)
+{
+    int index = vm_net_mock_monster_catalog_index(enemyId);
+    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    u8 total = 0;
+
+    (void)vm_net_mock_monster_db_load();
+    if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
+    {
+        total = g_vm_net_mock_monster_overrides[index].dropCount;
+        if (total > VM_NET_MOCK_MONSTER_DROP_MAX)
+            total = VM_NET_MOCK_MONSTER_DROP_MAX;
+        if (drops != NULL && dropCap != 0)
+        {
+            u8 copied = total < dropCap ? total : dropCap;
+            memcpy(drops, g_vm_net_mock_monster_overrides[index].drops,
+                   sizeof(*drops) * copied);
+        }
+        return total;
+    }
+    if (entry.dropItemId != 0 && entry.dropRatePercent != 0)
+    {
+        total = 1;
+        if (drops != NULL && dropCap != 0)
+        {
+            drops[0].itemId = entry.dropItemId;
+            drops[0].ratePercent = entry.dropRatePercent;
+        }
+    }
+    return total;
+}
+
 static bool vm_net_mock_monster_admin_save(
     const vm_net_mock_monster_admin_row *row, const char **errorOut)
 {
     char query[1024];
+    char mysqlError[512];
     int index = -1;
     vm_net_mock_monster_override *override = NULL;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "怪物属性无效";
@@ -2395,8 +2511,7 @@ static bool vm_net_mock_monster_admin_save(
         row->defense > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         row->exp > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         row->gold > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        row->dropRatePercent > 100u ||
-        ((row->dropItemId == 0) != (row->dropRatePercent == 0)))
+        row->dropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
     {
         return false;
     }
@@ -2407,12 +2522,25 @@ static bool vm_net_mock_monster_admin_save(
             *errorOut = "怪物目录中不存在该 ID";
         return false;
     }
-    if (row->dropItemId != 0 &&
-        vm_net_mock_find_shop_catalog_item(row->dropItemId) == NULL)
+    for (u8 i = 0; i < row->dropCount; ++i)
     {
-        if (errorOut)
-            *errorOut = "掉落物品 ID 不在物品目录中";
-        return false;
+        if (row->drops[i].itemId == 0 || row->drops[i].ratePercent == 0 ||
+            row->drops[i].ratePercent > 100u ||
+            vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
+        {
+            if (errorOut)
+                *errorOut = "掉落物品 ID 或概率无效";
+            return false;
+        }
+        for (u8 previous = 0; previous < i; ++previous)
+        {
+            if (row->drops[previous].itemId == row->drops[i].itemId)
+            {
+                if (errorOut)
+                    *errorOut = "同一怪物不能重复配置相同掉落物品";
+                return false;
+            }
+        }
     }
     if (!g_vm_net_mock_monster_db_valid)
     {
@@ -2429,20 +2557,37 @@ static bool vm_net_mock_monster_admin_save(
         query, sizeof(query),
         "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
         "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
-        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,0,0) ON DUPLICATE KEY UPDATE "
         "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
         "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
         "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
-        "drop_item_id=VALUES(drop_item_id),drop_rate_percent=VALUES(drop_rate_percent)",
+        "drop_item_id=0,drop_rate_percent=0",
         row->enemyId, row->level, row->family, row->hp, row->mp,
-        row->attack, row->defense, row->exp, row->gold,
-        row->dropItemId, row->dropRatePercent);
+        row->attack, row->defense, row->exp, row->gold);
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
     if (!vm_mysql_exec(query))
+        goto mysql_failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_monster_drops WHERE monster_id=%u",
+             row->enemyId);
+    if (!vm_mysql_exec(query))
+        goto mysql_failed;
+    for (u8 i = 0; i < row->dropCount; ++i)
     {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_monster_drops("
+                 "monster_id,drop_slot,item_id,drop_rate_percent) "
+                 "VALUES(%u,%u,%u,%u)",
+                 row->enemyId, (u32)i + 1u, row->drops[i].itemId,
+                 row->drops[i].ratePercent);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
     }
+    if (!vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
 
     override = &g_vm_net_mock_monster_overrides[index];
     memset(override, 0, sizeof(*override));
@@ -2456,22 +2601,38 @@ static bool vm_net_mock_monster_admin_save(
     override->stats.defense = row->defense;
     override->stats.exp = row->exp;
     override->stats.gold = row->gold;
-    override->stats.dropItemId = row->dropItemId;
-    override->stats.dropRatePercent = row->dropRatePercent;
+    override->dropCount = row->dropCount;
+    if (row->dropCount != 0)
+    {
+        memcpy(override->drops, row->drops,
+               sizeof(override->drops[0]) * row->dropCount);
+    }
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] monster_save id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u drop=%u rate=%u\n",
+    printf("[info][mock-admin] monster_save id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u drops=%u\n",
            row->enemyId, row->level, row->family, row->hp, row->mp,
            row->attack, row->defense, row->exp, row->gold,
-           row->dropItemId, row->dropRatePercent);
+           row->dropCount);
     return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_save_failed id=%u drops=%u error=%s\n",
+           row->enemyId, row->dropCount, mysqlError);
+    if (errorOut)
+        *errorOut = "怪物配置保存失败，请检查服务端 MySQL 日志";
+    return false;
 }
 
 static bool vm_net_mock_monster_admin_reset(u32 enemyId,
                                             const char **errorOut)
 {
     char query[256];
+    char mysqlError[512];
     int index = vm_net_mock_monster_catalog_index(enemyId);
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "怪物目录中不存在该 ID";
@@ -2487,14 +2648,18 @@ static bool vm_net_mock_monster_admin_reset(u32 enemyId,
             return false;
         }
     }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_monster_drops WHERE monster_id=%u", enemyId);
+    if (!vm_mysql_exec(query))
+        goto mysql_failed;
     snprintf(query, sizeof(query),
              "DELETE FROM server_monsters WHERE monster_id=%u", enemyId);
-    if (!vm_mysql_exec(query))
-    {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
-    }
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
     memset(&g_vm_net_mock_monster_overrides[index], 0,
            sizeof(g_vm_net_mock_monster_overrides[index]));
     if (errorOut)
@@ -2502,6 +2667,16 @@ static bool vm_net_mock_monster_admin_reset(u32 enemyId,
     printf("[info][mock-admin] monster_reset id=%u source=server-default\n",
            enemyId);
     return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_reset_failed id=%u error=%s\n",
+           enemyId, mysqlError);
+    if (errorOut)
+        *errorOut = "恢复怪物默认失败，请检查服务端 MySQL 日志";
+    return false;
 }
 
 static u32 vm_net_mock_battle_role_attack_default(void)
@@ -2602,27 +2777,6 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
 static const char *vm_net_mock_role_initial_scene_name(void)
 {
     return vm_net_mock_default_scene_name();
-}
-
-static bool vm_net_mock_role_canonicalize_initial_scene(vm_net_mock_role_state *role)
-{
-    static const char legacyInitialScene[] =
-        "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31"; /* 00_蓬莱仙岛01 */
-    static const char legacyInitialSceneWithSuffix[] =
-        "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31\x2e\x73\x63\x65"; /* 00_蓬莱仙岛01.sce */
-    static const char canonicalInitialSceneWithoutSuffix[] =
-        "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31"; /* c00蓬莱仙岛_01 */
-
-    if (role == NULL ||
-        (strcmp(role->scene, legacyInitialScene) != 0 &&
-         strcmp(role->scene, legacyInitialSceneWithSuffix) != 0 &&
-         strcmp(role->scene, canonicalInitialSceneWithoutSuffix) != 0))
-    {
-        return false;
-    }
-    snprintf(role->scene, sizeof(role->scene), "%s",
-             vm_net_mock_role_initial_scene_name());
-    return true;
 }
 
 static u32 vm_net_mock_role_default_weapon_for_job(u32 job)
@@ -2888,8 +3042,7 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
-    if (!vm_net_mock_scene_name_is_safe(role->scene))
+    if (!vm_net_mock_scene_name_is_persistable(role->scene))
         snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
     if (role->x == 0 || role->y == 0)
     {
@@ -2943,6 +3096,160 @@ static bool vm_net_mock_mysql_account_hex(char account_hex[129])
     size_t account_len = vm_mock_mysql_bounded_strlen(account_id, 64);
     return account_id != NULL && account_len > 0 && account_len < 64 &&
            vm_mysql_hex_encode(account_id, account_len, account_hex, 129) != 0;
+}
+
+/*
+ * Timed special effects have a different lifecycle from the role snapshot:
+ * an item can expire while the character is offline, and an old binary role
+ * file must not be reinterpreted as an active effect after a restart.  Keep
+ * the record relational and keyed by the same account/role identity as the
+ * backpack row it was consumed from.
+ */
+typedef struct
+{
+    vm_net_mock_role_item_effect effect;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_role_item_effect_context;
+
+static bool g_vm_net_mock_role_item_effect_schema_prepared = false;
+
+static bool vm_net_mock_role_item_effect_is_valid(
+    const vm_net_mock_role_item_effect *effect)
+{
+    if (effect == NULL || effect->itemId == 0 || effect->expiresUnix == 0)
+        return false;
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD)
+    {
+        return (effect->itemId == 809 && effect->multiplier == 2) ||
+               (effect->itemId == 810 && effect->multiplier == 4) ||
+               (effect->itemId == 811 && effect->multiplier == 10);
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
+    {
+        /* item.dsh proves the duration but contains no numeric stat modifier. */
+        return (effect->itemId == 829 || effect->itemId == 830) &&
+               effect->multiplier == 0;
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT)
+    {
+        return effect->itemId == 828 && effect->multiplier == 20;
+    }
+    return false;
+}
+
+static bool vm_net_mock_role_prepare_item_effect_schema(void)
+{
+    if (g_vm_net_mock_role_item_effect_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_item_effects ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "effect_kind TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,"
+            "multiplier TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "expires_unix INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id,effect_kind),"
+            "KEY idx_account_role_item_effects_expiry(expires_unix),"
+            "CONSTRAINT fk_account_role_item_effects_role FOREIGN KEY(account_id,role_id) "
+            "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] item_effect_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_role_item_effect_schema_prepared = true;
+    return true;
+}
+
+static bool vm_mock_mysql_role_item_effect_row(void *context_value,
+                                                unsigned int column_count,
+                                                const char *const *values,
+                                                const size_t *lengths)
+{
+    vm_mock_mysql_role_item_effect_context *context =
+        (vm_mock_mysql_role_item_effect_context *)context_value;
+    u32 item_id = 0;
+    u32 multiplier = 0;
+    u32 expires_unix = 0;
+
+    if (context == NULL || context->found || column_count != 3 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &item_id) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &multiplier) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &expires_unix) ||
+        multiplier > 255)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->effect.itemId = item_id;
+    context->effect.multiplier = multiplier;
+    context->effect.expiresUnix = expires_unix;
+    context->found = true;
+    return true;
+}
+
+/* Returns false only for a storage or contract error.  A zero expiresUnix in
+ * effectOut means that no currently active record exists. */
+static bool vm_net_mock_role_get_active_timed_item_effect(
+    const vm_net_mock_role_state *role, u8 effect_kind,
+    vm_net_mock_role_item_effect *effectOut)
+{
+    char account_hex[129];
+    char query[768];
+    vm_mock_mysql_role_item_effect_context context;
+    u32 now = (u32)time(NULL);
+
+    if (effectOut)
+        memset(effectOut, 0, sizeof(*effectOut));
+    if (role == NULL || role->roleId == 0 || effect_kind == 0 ||
+        !vm_net_mock_mysql_account_hex(account_hex) ||
+        !vm_net_mock_role_prepare_item_effect_schema())
+    {
+        return false;
+    }
+
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT item_id,multiplier,expires_unix FROM account_role_item_effects "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND effect_kind=%u",
+             account_hex, role->roleId, effect_kind);
+    if (!vm_mysql_query(query, vm_mock_mysql_role_item_effect_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (!context.found)
+        return true;
+
+    context.effect.kind = effect_kind;
+    if (context.effect.expiresUnix <= now)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_item_effects WHERE "
+                 "account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND effect_kind=%u "
+                 "AND expires_unix<=%u",
+                 account_hex, role->roleId, effect_kind, now);
+        if (!vm_mysql_exec(query))
+            return false;
+        return true;
+    }
+    if (!vm_net_mock_role_item_effect_is_valid(&context.effect))
+    {
+        printf("[error][mock-service] item_effect_invalid account=%s role=%u kind=%u item=%u multiplier=%u expires=%u\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role->roleId, effect_kind, context.effect.itemId,
+               context.effect.multiplier, context.effect.expiresUnix);
+        return false;
+    }
+    if (effectOut)
+        *effectOut = context.effect;
+    return true;
 }
 
 typedef struct
@@ -3853,7 +4160,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  const u32 *old_ids,
                                                  const u32 *new_ids,
                                                  u32 mapping_count,
-                                                 bool full_snapshot)
+                                                 bool full_snapshot,
+                                                 const vm_net_mock_role_item_effect *timed_effect)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -3867,6 +4175,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
         return false;
+    if (timed_effect != NULL &&
+        (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
+         !vm_net_mock_role_prepare_item_effect_schema()))
+    {
+        return false;
+    }
     memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
     g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
     if (g_vm_net_mock_role_db.roleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
@@ -4046,6 +4360,28 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         }
     }
 
+    if (timed_effect != NULL)
+    {
+        if (full_snapshot || scoped_role_id == 0)
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "timed effect requires active role scope");
+            goto failed;
+        }
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_item_effects(account_id,role_id,effect_kind,item_id,multiplier,expires_unix) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u) "
+                 "ON DUPLICATE KEY UPDATE item_id=VALUES(item_id),multiplier=VALUES(multiplier),"
+                 "expires_unix=VALUES(expires_unix)",
+                 account_hex, scoped_role_id, timed_effect->kind,
+                 timed_effect->itemId, timed_effect->multiplier,
+                 timed_effect->expiresUnix);
+        if (!vm_mysql_exec(query))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+            goto failed;
+        }
+    }
+
     size_t bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
         "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id) VALUES");
@@ -4158,7 +4494,98 @@ failed:
 
 static bool vm_net_mock_role_db_save(const char *reason)
 {
-    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false);
+    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL);
+}
+
+static u32 vm_net_mock_role_active_exp_card_multiplier(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD, &effect))
+    {
+        printf("[error][mock-service] exp_card_state_read_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0, vm_mysql_last_error());
+        return 1;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 1;
+}
+
+static u8 vm_net_mock_role_active_exp_card_flag(void)
+{
+    return vm_net_mock_role_active_exp_card_multiplier(vm_net_mock_active_role()) > 1 ? 1 : 0;
+}
+
+/* item.dsh describes 战斗心得 as a one-hour, +20% experience status. Its
+ * multiplier column therefore denotes an additive percentage for this kind,
+ * unlike the factor stored for experience cards. */
+static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT, &effect))
+    {
+        printf("[error][mock-service] battle_insight_state_read_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0, vm_mysql_last_error());
+        return 0;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 0;
+}
+
+/* The backpack decrement and the timed effect belong to one durable action.
+ * The row is only changed in memory before the relational transaction has
+ * committed; on any failure restore the exact previous role state so a retry
+ * cannot lose an item or create an unbacked effect. */
+static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq,
+    const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
+    const char *reason)
+{
+    vm_net_mock_role_item_effect active;
+    vm_net_mock_role_state before;
+    u32 remaining = 0;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (role == NULL || effect == NULL || effect->itemId != itemId ||
+        !vm_net_mock_role_item_effect_is_valid(effect))
+    {
+        return false;
+    }
+    memset(&active, 0, sizeof(active));
+    if (!vm_net_mock_role_get_active_timed_item_effect(role, effect->kind, &active))
+        return false;
+    if (active.expiresUnix != 0)
+    {
+        printf("[info][network] mock_special_item_rejected_active account=%s role=%u kind=%u active_item=%u active_until=%u requested_item=%u\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role->roleId, effect->kind, active.itemId, active.expiresUnix,
+               itemId);
+        return false;
+    }
+
+    before = *role;
+    if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
+        return false;
+    if (!vm_net_mock_role_db_save_relational(
+            reason ? reason : "special-item-use", NULL, NULL, 0, false, effect))
+    {
+        *role = before;
+        printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               before.roleId, itemId, seq, effect->kind, vm_mysql_last_error());
+        return false;
+    }
+    if (remainingOut)
+        *remainingOut = remaining;
+    return true;
 }
 
 static void vm_net_mock_role_db_load(void)
@@ -4343,16 +4770,7 @@ static void vm_net_mock_role_db_load(void)
         needsSave = true;
     }
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-    {
-        if (vm_net_mock_role_canonicalize_initial_scene(&g_vm_net_mock_role_db.roles[i]))
-        {
-            needsSave = true;
-            vm_autotest_note("mock_role_initial_scene_migrate account=%s role=%u scene=c00-penglai-01.sce\n",
-                             g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
-                             g_vm_net_mock_role_db.roles[i].roleId);
-        }
         vm_net_mock_role_normalize(&g_vm_net_mock_role_db.roles[i]);
-    }
     if (g_vm_net_mock_role_db.roleCount == 1 &&
         vm_net_mock_role_is_pristine_bootstrap_default(&g_vm_net_mock_role_db.roles[0]))
     {
@@ -4425,7 +4843,7 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount, true))
+                                                 migratedIdCount, true, NULL))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -4681,7 +5099,7 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
-    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true))
+    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true, NULL))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -4751,7 +5169,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     }
 
-    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true))
+    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true, NULL))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)
@@ -4778,7 +5196,7 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
      * round trips while the protocol state lock is held, delaying the very
      * response that contains the first NPC catalog and welcome message. */
     if (role->x == x && role->y == y &&
-        vm_net_mock_scene_name_is_safe(role->scene) &&
+        vm_net_mock_scene_name_is_persistable(role->scene) &&
         vm_net_mock_scene_names_equal_loose(role->scene, scene))
     {
         printf("[debug][mock-service] role_position_save_skip role=%u scene=%s pos=(%u,%u) reason=%s unchanged=1\n",
@@ -4787,7 +5205,6 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
     }
     before = *role;
     snprintf(role->scene, sizeof(role->scene), "%s", scene);
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
     role->x = x;
     role->y = y;
     vm_net_mock_role_normalize(role);
@@ -4814,7 +5231,7 @@ static bool vm_net_mock_role_commit_timeline_position(const vm_net_mock_role_sta
     size_t sceneLen = 0;
 
     if (role == NULL || role->roleId == 0 ||
-        !vm_net_mock_scene_name_is_safe(role->scene) ||
+        !vm_net_mock_scene_name_is_persistable(role->scene) ||
         role->x == 0 || role->y == 0 ||
         !vm_net_mock_mysql_account_hex(accountHex))
     {
@@ -4852,7 +5269,7 @@ static bool vm_net_mock_role_set_timeline_position(const char *scene,
     vm_net_mock_role_state before;
     bool dirtyBefore = g_vm_net_mock_role_position_dirty;
 
-    if (role == NULL || !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
+    if (role == NULL || !vm_net_mock_scene_name_is_persistable(scene) || x == 0 || y == 0)
         return false;
     /*
      * A movement timeline starts from the session's already validated scene
@@ -4862,7 +5279,6 @@ static bool vm_net_mock_role_set_timeline_position(const char *scene,
      */
     before = *role;
     snprintf(role->scene, sizeof(role->scene), "%s", scene);
-    (void)vm_net_mock_role_canonicalize_initial_scene(role);
     role->x = x;
     role->y = y;
     g_vm_net_mock_role_position_dirty = true;

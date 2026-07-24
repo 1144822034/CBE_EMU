@@ -214,8 +214,6 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     if (request == NULL || requestLen < 9 || outCap < 5)
         return 0;
 
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 leadId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     bool hasGroup10 = false;
     bool hasType1 = false;
     bool enableMiscSync8 = vm_net_mock_env_u8("CBE_GROUP_TYPE1_MISC_SYNC8", 0) != 0;
@@ -246,7 +244,6 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         if (object.kind == 5 && object.subtype == 10)
         {
             hasGroup10 = true;
-            vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &leadId);
         }
         else if (object.kind == 7 && object.subtype == 7)
         {
@@ -263,7 +260,7 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
     vm_mock_service_team *team = session ? vm_mock_service_team_find_for_client(session->clientId) : NULL;
     if ((team != NULL && !vm_net_mock_append_team_group_info_object(out, outCap, &pos, team, session, 10)) ||
-        (team == NULL && !vm_net_mock_append_group_info_object(out, outCap, &pos, leadId)))
+        (team == NULL && !vm_net_mock_append_group_info_object(out, outCap, &pos, session)))
         return 0;
     objectCount += 1;
     if (hasType1 && !vm_net_mock_append_type1_object(out, outCap, &pos, sceneNpcNum))
@@ -935,27 +932,19 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
          *
          * That locally-created screen is nevertheless a fresh scene shell.  The
          * normal 30/1 path rearms the one-shot 27/11 NPC catalog, but this 30/2
-         * completion deliberately bypasses 30/1.  Rearm it explicitly here and,
-         * once target resources are ready, seed the catalog before task rows so
-         * task prompt icons are rebuilt against the newly-created NPC nodes.
+         * completion deliberately bypasses 30/1.  Arm the catalog here, but do
+         * not consume it in this 2/3 response: the client follows the position
+         * completion with its explicit 25/5 + 2/3 + 27/11 + 7/42 post-enter
+         * request.  That is the first response whose 27/11 parser runs against
+         * the completed destination shell.  Consuming it before 30/2 leaves that
+         * real request with an empty catalog and the return screen without NPCs.
          */
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
         targetNpcCount = vm_net_mock_scene_room_npc_seed_count(target.scene);
-        if (resourcesReady && targetNpcCount > 0)
-        {
-            if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                               target.scene,
-                                                               "scene-change-full-bootstrap"))
-            {
-                return 0;
-            }
-            objectCount += 1;
-        }
-        printf("[info][network] mock_scene_npc_rearm scene=%s trigger=scene-change-full-bootstrap resources_ready=%u npcnum=%u immediate=%u evidence=JianghuOL.CBE:0x01037998+0x01039770\n",
+        printf("[info][network] mock_scene_npc_rearm scene=%s trigger=scene-change-full-bootstrap resources_ready=%u npcnum=%u immediate=0 next=scene-change-post-enter-followup evidence=JianghuOL.CBE:0x01037998+0x01039770\n",
                target.scene,
                resourcesReady ? 1u : 0u,
-               (u32)targetNpcCount,
-               (resourcesReady && targetNpcCount > 0) ? 1u : 0u);
+               (u32)targetNpcCount);
         if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                                target.scene,
                                                                true, true, true, true, false, false, false))
@@ -2141,7 +2130,8 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
             }
             if (!duplicate &&
                 vm_net_mock_task_definition_available(boundTask, activeRole,
-                                                       states, stateCount))
+                                                       states, stateCount,
+                                                       seeds[seedIndex].taskRepeatable))
             {
                 if (!vm_net_mock_append_catalog_task_candidate_record(
                         taskInfo, sizeof(taskInfo), &taskInfoLen,
@@ -2182,7 +2172,7 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
                 continue;
             task = vm_net_mock_task_catalog_find_by_id(ref->taskId);
             if (!vm_net_mock_task_definition_available(task, activeRole,
-                                                       states, stateCount))
+                                                       states, stateCount, false))
             {
                 continue;
             }
@@ -2345,19 +2335,13 @@ static bool vm_net_mock_scene_is_penglai01(const char *scene)
 {
     return scene != NULL &&
            (strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31") == 0 ||
-            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0 ||
-            strcmp(scene, "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31") == 0 ||
-            strcmp(scene, "\x30\x30\x5f\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x30\x31\x2e\x73\x63\x65") == 0 ||
-            strcmp(scene, "c00PenglaiXiandao_01") == 0 ||
-            strcmp(scene, "c00PenglaiXiandao_01.sce") == 0);
+            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0);
 }
 
 static bool vm_net_mock_scene_is_penglai03(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33") == 0 ||
-            strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0 ||
-            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33") == 0 ||
+           (strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33") == 0 ||
             strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0);
 }
 
@@ -2536,7 +2520,8 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
 }
 
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
-                                                     u32 autoRecoverHp, u32 autoRecoverMp);
+                                                     u32 autoRecoverHp, u32 autoRecoverMp,
+                                                     bool forceTeamVictory);
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(
     u8 *out,
@@ -3949,41 +3934,36 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             vm_mock_service_team_find_for_client(observer->clientId);
         u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
                                   : notice->sourceRoleId;
-        int appendedObjects = notice->result == 1 ? 2 : 1;
+        u8 result = notice->result;
 
-        /* Subtype 4 only reports the target's answer; it never inserts roster
-         * rows.  Friend-list invites start from an empty local roster, so a
-         * lone subtype 5 would add only the remote member and leave the local
-         * count at one.  The team UI requires a count greater than one.  Send
-         * the authoritative subtype-10 roster to the inviter, while existing
-         * third-party members continue to receive the subtype-5 delta. */
+        /* The login 5/10 response establishes the inviter's local row.  The
+         * native result path is therefore 5/4 now, followed by the queued
+         * subtype-5 new-member delta on the next scene poll.  5/3 and 5/10
+         * only append in the client; injecting a full roster here duplicates
+         * that local row instead of refreshing it. */
+        if (result == 1 &&
+            (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+             team == NULL || !team->active))
+        {
+            result = 0;
+        }
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4, &objectStart) ||
             sourceWireId == 0 ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
-            !vm_net_mock_put_object_u8(out, outCap, pos, "result", notice->result) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result", result) ||
             !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
         {
             return -1;
         }
         vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        if (notice->result == 1)
-        {
-            if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
-                team == NULL ||
-                !vm_net_mock_append_team_group_info_object(out, outCap, pos,
-                                                           team, observer, 10))
-            {
-                return -1;
-            }
-        }
         printf("[info][mock-service] team_result_deliver observer=%08x result=%u roster_update=%s members=%u\n",
-               observer->clientId, notice->result,
-               notice->result == 1 ? "5/10-full" : "none",
+               observer->clientId, result,
+               result == 1 ? "5/4-then-queued-5/5" : "none",
                team ? team->memberCount : 0);
         memset(notice, 0, sizeof(*notice));
         if (noticeTypeOut)
             *noticeTypeOut = noticeType;
-        return appendedObjects;
+        return 1;
     }
 
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN:
@@ -4852,6 +4832,16 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     char timelineText[64];
     const char *moveinfoFieldKind = "missing";
     const char *positionPersistence = "not-applicable";
+    const u8 *committedMoveInfo = NULL;
+    u16 committedMoveInfoLen = 0;
+    u8 acceptedTimeline[32];
+    u16 requestedTimelineSteps = 0;
+    u16 acceptedTimelineSteps = 0;
+    u16 deniedTimelineSteps = 0;
+    u16 acceptedTimelineLen = 0;
+    u32 movementRateElapsedMs = 0;
+    u32 movementRateCreditBeforeMs = 0;
+    u32 movementRateCreditAfterMs = 0;
 
     if (outCap < pos || !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
         return 0;
@@ -4914,6 +4904,8 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         vm_net_mock_save_player_pos_state(scene, gridX, gridY, "moveinfo-upload-packet");
         snappedPos = true;
         posSource = "packet";
+        committedMoveInfo = moveInfo;
+        committedMoveInfoLen = moveInfoLen;
     }
     else
     {
@@ -4940,21 +4932,75 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
             }
             timelineStartX = gridX;
             timelineStartY = gridY;
-            vm_net_mock_apply_actor_moveinfo_timeline(&gridX, &gridY, moveInfo, moveInfoLen);
-            snappedPos = vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0;
-            posSource = "timeline";
-            usedTimeline = snappedPos;
-            vm_net_mock_format_moveinfo_timeline(moveInfo, moveInfoLen, timelineText, sizeof(timelineText));
+            acceptedTimelineLen = vm_mock_service_session_limit_timeline_by_rate(
+                activeSession, moveInfo, moveInfoLen, acceptedTimeline,
+                sizeof(acceptedTimeline), &requestedTimelineSteps,
+                &acceptedTimelineSteps, &deniedTimelineSteps,
+                &movementRateElapsedMs, &movementRateCreditBeforeMs,
+                &movementRateCreditAfterMs);
+            if (deniedTimelineSteps > 0 && activeSession != NULL)
+            {
+                u32 nowMs = scheduler_get_tick_ms();
+                ++activeSession->movementRateViolationCount;
+                activeSession->movementRateDeniedSteps += deniedTimelineSteps;
+                if (activeSession->movementRateViolationCount == 1 ||
+                    nowMs - activeSession->movementRateLastViolationMs >= 1000)
+                {
+                    printf("[warn][mock-service] movement_rate_limited client=%08x account=%s "
+                           "scene=%s elapsed_ms=%u credit_before_ms=%u credit_after_ms=%u "
+                           "requested_steps=%u accepted_steps=%u denied_steps=%u "
+                           "violations=%u denied_total=%u action=server-position-prefix-only\n",
+                           activeSession->clientId,
+                           activeSession->accountId[0] ? activeSession->accountId : "-",
+                           scene ? scene : "-", movementRateElapsedMs,
+                           movementRateCreditBeforeMs, movementRateCreditAfterMs,
+                           requestedTimelineSteps, acceptedTimelineSteps,
+                           deniedTimelineSteps, activeSession->movementRateViolationCount,
+                           activeSession->movementRateDeniedSteps);
+                    activeSession->movementRateLastViolationMs = nowMs;
+                }
+            }
+            if (acceptedTimelineLen == 0)
+            {
+                /* Keep the authoritative position at the prior committed
+                 * point. The normal empty 2/1 ACK below retires the local
+                 * upload but must not turn a speed burst into a peer update. */
+                snappedPos = false;
+                usedTimeline = false;
+                posSource = "timeline-rate-limited";
+                positionPersistence = "timeline-rate-limited";
+                vm_net_mock_format_moveinfo_timeline(moveInfo, moveInfoLen,
+                                                      timelineText, sizeof(timelineText));
+            }
+            else
+            {
+                vm_net_mock_apply_actor_moveinfo_timeline(&gridX, &gridY,
+                                                           acceptedTimeline, acceptedTimelineLen);
+                snappedPos = vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0;
+                posSource = deniedTimelineSteps > 0 ? "timeline-rate-limited" : "timeline";
+                usedTimeline = snappedPos;
+                vm_net_mock_format_moveinfo_timeline(acceptedTimeline, acceptedTimelineLen,
+                                                      timelineText, sizeof(timelineText));
+            }
             if (snappedPos)
             {
                 if (vm_net_mock_role_set_timeline_position(scene, gridX, gridY,
-                                                            "moveinfo-upload-timeline"))
+                                                            deniedTimelineSteps > 0 ?
+                                                                "moveinfo-upload-timeline-rate-limited" :
+                                                                "moveinfo-upload-timeline"))
                 {
-                    positionPersistence = "timeline-committed";
-                    vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-timeline");
+                    positionPersistence = deniedTimelineSteps > 0 ?
+                                              "timeline-rate-limited-committed" :
+                                              "timeline-committed";
+                    committedMoveInfo = acceptedTimeline;
+                    committedMoveInfoLen = acceptedTimelineLen;
+                    vm_net_mock_remember_moveinfo_source_pos(
+                        scene, gridX, gridY,
+                        deniedTimelineSteps > 0 ? "moveinfo-upload-timeline-rate-limited" :
+                                                  "moveinfo-upload-timeline");
                     vm_mock_service_session_store_pending_timeline(activeSession,
-                                                                   moveInfo,
-                                                                   moveInfoLen,
+                                                                   acceptedTimeline,
+                                                                   acceptedTimelineLen,
                                                                    timelineStartX,
                                                                    timelineStartY,
                                                                    gridX,
@@ -4978,6 +5024,8 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
                     gridY = timelineStartY;
                     snappedPos = false;
                     usedTimeline = false;
+                    committedMoveInfo = NULL;
+                    committedMoveInfoLen = 0;
                     posSource = "timeline-persist-failed";
                     positionPersistence = "timeline-failed-rolled-back";
                 }
@@ -4987,6 +5035,8 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         {
             snappedPos = true;
             posSource = "runtime-grid";
+            committedMoveInfo = moveInfo;
+            committedMoveInfoLen = moveInfoLen;
             if (vm_net_mock_scene_name_is_safe(scene))
             {
                 vm_net_mock_save_player_pos_state(scene, gridX, gridY, "moveinfo-upload-runtime-grid");
@@ -5005,6 +5055,8 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
             gridY = activeSession->sceneVisibleY;
             snappedPos = true;
             posSource = "session-visible";
+            committedMoveInfo = moveInfo;
+            committedMoveInfoLen = moveInfoLen;
             vm_net_mock_save_player_pos_state(scene, gridX, gridY, "moveinfo-upload-session-visible");
             vm_net_mock_remember_moveinfo_source_pos(scene, gridX, gridY, "moveinfo-upload-session-visible");
         }
@@ -5014,6 +5066,8 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
             gridY = vm_net_mock_scene_spawn_y();
             snappedPos = vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0;
             posSource = "spawn";
+            committedMoveInfo = moveInfo;
+            committedMoveInfoLen = moveInfoLen;
             if (snappedPos)
             {
                 vm_net_mock_save_player_pos_state(scene, gridX, gridY, "moveinfo-upload-runtime-spawn");
@@ -5026,13 +5080,16 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     if (vm_net_mock_scene_name_is_safe(scene) && gridX != 0 && gridY != 0)
     {
         vm_mock_service_session_update_move_position(activeSession, scene, gridX, gridY);
-        vm_mock_service_session_store_moveinfo(activeSession,
-                                               scene,
-                                               moveInfo,
-                                               moveInfoLen,
-                                               gridX,
-                                               gridY,
-                                               posSource);
+        if (committedMoveInfo != NULL && committedMoveInfoLen > 0)
+        {
+            vm_mock_service_session_store_moveinfo(activeSession,
+                                                   scene,
+                                                   committedMoveInfo,
+                                                   committedMoveInfoLen,
+                                                   gridX,
+                                                   gridY,
+                                                   posSource);
+        }
     }
     timingSessionMs = scheduler_get_tick_ms();
 
@@ -5075,13 +5132,16 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
         return 0;
     objectCount += 1;
-    printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u persistence=%s steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
+    printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u persistence=%s requested_steps=%u accepted_steps=%u denied_steps=%u steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
            posSource,
            moveinfoFieldKind,
            (u32)moveInfoLen,
            parsedUploadedPos ? 1u : 0u,
            usedTimeline ? 1u : 0u,
            positionPersistence,
+           requestedTimelineSteps,
+           acceptedTimelineSteps,
+           deniedTimelineSteps,
            timelineText[0] ? timelineText : "-",
            gridX,
            gridY,

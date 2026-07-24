@@ -365,7 +365,7 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
         return false;
     }
     rowSize = parsed->occultInfoLen / parsed->materialRows;
-    if (rowSize != 9 && rowSize != 5)
+    if (rowSize != 9)
         return false;
     for (u32 i = 0; i < parsed->materialRows; ++i)
     {
@@ -373,23 +373,14 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
         u32 itemId = 0;
         u8 count = 0;
 
-        if (rowSize == 9)
+        if (row[0] != 0 || row[1] != 4 ||
+            row[6] != 0 || row[7] != 1)
         {
-            if (row[0] != 0 || row[1] != 4 ||
-                row[6] != 0 || row[7] != 1)
-            {
-                return false;
-            }
-            itemId = ((u32)row[2] << 24) | ((u32)row[3] << 16) |
-                     ((u32)row[4] << 8) | (u32)row[5];
-            count = row[8];
+            return false;
         }
-        else
-        {
-            itemId = ((u32)row[0] << 24) | ((u32)row[1] << 16) |
-                     ((u32)row[2] << 8) | (u32)row[3];
-            count = row[4];
-        }
+        itemId = ((u32)row[2] << 24) | ((u32)row[3] << 16) |
+                 ((u32)row[4] << 8) | (u32)row[5];
+        count = row[8];
         if (itemId < VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
             itemId > VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST || count == 0)
         {
@@ -825,15 +816,14 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
-    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(g_vm_net_mock_battle_enemy_id_current);
     u32 enemyCount = vm_net_mock_battle_enemy_count_current();
-    u32 dropRate = stats.dropRatePercent;
-    u32 dropItemIdDefault = stats.dropItemId;
-    u32 rolledDropCount = 0;
-    u32 taskMaterialRemaining = 0;
-    bool dropIsTaskMaterial = false;
-    bool dropPolicyOk = true;
-    bool dropEligible = false;
+    vm_net_mock_monster_drop configuredDrops[VM_NET_MOCK_MONSTER_DROP_MAX];
+    vm_net_mock_battle_drop_result results[VM_NET_MOCK_BATTLE_DROP_RESULT_MAX];
+    u8 configuredDropCount = 0;
+    u8 resultCount = 0;
+    u32 baseRewardExp = 0;
+    u32 expCardMultiplier = 1;
+    u32 battleInsightBonusPercent = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     if (dropItemIdOut)
@@ -850,84 +840,156 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
 
     if (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
     {
-        if (dropItemIdOut)
-            *dropItemIdOut = g_vm_net_mock_battle_rewarded_drop_item;
-        if (dropSeqOut)
-            *dropSeqOut = g_vm_net_mock_battle_rewarded_drop_seq;
-        if (dropCountOut)
-            *dropCountOut = g_vm_net_mock_battle_rewarded_drop_count;
-        if (dropGrantedOut)
-            *dropGrantedOut = g_vm_net_mock_battle_rewarded_drop_item != 0;
+        if (g_vm_net_mock_battle_rewarded_drop_result_count != 0)
+        {
+            if (dropItemIdOut)
+                *dropItemIdOut = g_vm_net_mock_battle_rewarded_drops[0].itemId;
+            if (dropSeqOut)
+                *dropSeqOut = g_vm_net_mock_battle_rewarded_drops[0].seq;
+            if (dropCountOut)
+                *dropCountOut = g_vm_net_mock_battle_rewarded_drops[0].count;
+            if (dropGrantedOut)
+                *dropGrantedOut = true;
+        }
         return 0;
     }
 
-    rewardExp = vm_net_mock_mul_capped_u32(
+    baseRewardExp = vm_net_mock_mul_capped_u32(
         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
                                    vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
         enemyCount);
-    if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+    rewardExp = baseRewardExp;
+    if (rewardExp != 0 && role != NULL)
     {
-        dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_DROP_RATE", dropRate);
-        dropItemIdDefault = vm_net_mock_env_u32_if_set("CBE_BATTLE_CHANGMING_SAN_ITEM_ID",
-                                                       dropItemIdDefault);
-    }
-    dropRate = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_RATE", dropRate);
-    dropItemIdDefault = vm_net_mock_env_u32_if_set("CBE_BATTLE_DROP_ITEM_ID", dropItemIdDefault);
-    if (dropItemIdDefault != 0 && role != NULL)
-    {
-        dropPolicyOk = vm_net_mock_task_material_drop_policy(
-            role->roleId, dropItemIdDefault, &dropIsTaskMaterial,
-            &taskMaterialRemaining);
-        dropEligible = dropPolicyOk &&
-                       (!dropIsTaskMaterial || taskMaterialRemaining != 0);
-    }
-    if (dropEligible)
-    {
-        for (u32 i = 0; i < enemyCount; ++i)
+        expCardMultiplier = vm_net_mock_role_active_exp_card_multiplier(role);
+        if (expCardMultiplier > 1)
+            rewardExp = vm_net_mock_mul_capped_u32(rewardExp, expCardMultiplier);
+        /* 战斗心得's resource wording is "experience +20%", not another
+         * multiplier. Apply its bonus to the unmodified monster reward so it
+         * remains a separately auditable base-reward increment when an
+         * experience card is also active. */
+        battleInsightBonusPercent = vm_net_mock_role_active_battle_exp_bonus_percent(role);
+        if (battleInsightBonusPercent != 0)
         {
-            if (vm_net_mock_battle_roll_percent(dropRate))
-                ++dropCount;
+            uint64_t bonus = ((uint64_t)baseRewardExp * battleInsightBonusPercent) / 100u;
+            rewardExp = vm_net_mock_add_capped_u32(
+                rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
         }
-        rolledDropCount = dropCount;
-        /* The task-progress writer clamps each matching task independently.
-         * A material grant must therefore be capped to the largest remaining
-         * matching requirement rather than adding surplus items once every
-         * accepted task is already complete. */
-        if (dropIsTaskMaterial && dropCount > taskMaterialRemaining)
-            dropCount = taskMaterialRemaining;
     }
-    if (dropItemIdDefault != 0)
+    if (rewardExp != baseRewardExp)
     {
-        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u item=%u rate=%u "
+        printf("[info][network] mock_battle_exp_modifier enemy=%u role=%u base_exp=%u card_multiplier=%u insight_bonus_percent=%u reward_exp=%u\n",
+               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
+               baseRewardExp, expCardMultiplier, battleInsightBonusPercent,
+               rewardExp);
+    }
+    memset(configuredDrops, 0, sizeof(configuredDrops));
+    memset(results, 0, sizeof(results));
+    configuredDropCount = vm_net_mock_monster_drops_for_enemy(
+        g_vm_net_mock_battle_enemy_id_current, configuredDrops,
+        VM_NET_MOCK_MONSTER_DROP_MAX);
+    if (configuredDropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
+        configuredDropCount = VM_NET_MOCK_MONSTER_DROP_MAX;
+
+    /* These environment variables predate the editable table and are kept as
+     * a narrow single-row test override.  They replace the configured list
+     * rather than partially modifying an arbitrary multi-drop configuration. */
+    if (getenv("CBE_BATTLE_DROP_ITEM_ID") != NULL ||
+        getenv("CBE_BATTLE_DROP_RATE") != NULL ||
+        (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID &&
+         (getenv("CBE_BATTLE_CHANGMING_SAN_ITEM_ID") != NULL ||
+          getenv("CBE_BATTLE_CHANGMING_SAN_DROP_RATE") != NULL)))
+    {
+        vm_net_mock_monster_drop overrideDrop;
+
+        memset(&overrideDrop, 0, sizeof(overrideDrop));
+        if (configuredDropCount != 0)
+            overrideDrop = configuredDrops[0];
+        if (g_vm_net_mock_battle_enemy_id_current == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+        {
+            overrideDrop.itemId = vm_net_mock_env_u32_if_set(
+                "CBE_BATTLE_CHANGMING_SAN_ITEM_ID", overrideDrop.itemId);
+            overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
+                "CBE_BATTLE_CHANGMING_SAN_DROP_RATE", overrideDrop.ratePercent);
+        }
+        overrideDrop.itemId = vm_net_mock_env_u32_if_set(
+            "CBE_BATTLE_DROP_ITEM_ID", overrideDrop.itemId);
+        overrideDrop.ratePercent = (u8)vm_net_mock_env_u32_if_set(
+            "CBE_BATTLE_DROP_RATE", overrideDrop.ratePercent);
+        configuredDrops[0] = overrideDrop;
+        configuredDropCount = overrideDrop.itemId != 0 &&
+                              overrideDrop.ratePercent != 0 ? 1 : 0;
+    }
+
+    for (u8 dropIndex = 0;
+         dropIndex < configuredDropCount &&
+         resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
+         ++dropIndex)
+    {
+        const vm_net_mock_monster_drop *configured =
+            &configuredDrops[dropIndex];
+        u32 rolledDropCount = 0;
+        u32 grantedCount = 0;
+        u32 taskMaterialRemaining = 0;
+        u16 grantedSeq = 0;
+        bool dropIsTaskMaterial = false;
+        bool dropPolicyOk = false;
+        bool dropEligible = false;
+
+        if (configured->itemId != 0 && configured->ratePercent != 0 &&
+            configured->ratePercent <= 100u && role != NULL)
+        {
+            dropPolicyOk = vm_net_mock_task_material_drop_policy(
+                role->roleId, configured->itemId, &dropIsTaskMaterial,
+                &taskMaterialRemaining);
+            dropEligible = dropPolicyOk &&
+                           (!dropIsTaskMaterial || taskMaterialRemaining != 0);
+        }
+        if (dropEligible)
+        {
+            for (u32 enemy = 0; enemy < enemyCount; ++enemy)
+            {
+                if (vm_net_mock_battle_roll_percent(configured->ratePercent))
+                    ++grantedCount;
+            }
+            rolledDropCount = grantedCount;
+            if (dropIsTaskMaterial && grantedCount > taskMaterialRemaining)
+                grantedCount = taskMaterialRemaining;
+        }
+        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u slot=%u item=%u rate=%u "
                "task_material=%u remaining=%u policy=%s eligible=%u rolled=%u grant=%u\n",
-               g_vm_net_mock_battle_enemy_id_current,
-               role ? role->roleId : 0,
-               dropItemIdDefault, dropRate,
+               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
+               (u32)dropIndex + 1u, configured->itemId, configured->ratePercent,
                dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
-               dropPolicyOk ? "ok" : "unavailable",
-               dropEligible ? 1u : 0u, rolledDropCount, dropCount);
-    }
-    if (dropItemIdDefault != 0 && dropCount != 0)
-    {
-        dropItemId = dropItemIdDefault;
-        dropGranted = vm_net_mock_role_add_backpack_item(dropItemId, dropCount, &dropSeq);
-        if (!dropGranted)
+               dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
+               rolledDropCount, grantedCount);
+        if (grantedCount == 0 ||
+            !vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
+                                                &grantedSeq))
         {
-            dropItemId = 0;
-            dropSeq = 0;
-            dropCount = 0;
+            continue;
         }
+        results[resultCount].itemId = configured->itemId;
+        results[resultCount].seq = grantedSeq;
+        results[resultCount].count = grantedCount;
+        ++resultCount;
+        vm_net_mock_task_progress_after_battle(
+            g_vm_net_mock_battle_enemy_id_current, enemyCount,
+            configured->itemId, grantedCount);
     }
 
     g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = rewardExp;
-    g_vm_net_mock_battle_rewarded_drop_item = dropItemId;
-    g_vm_net_mock_battle_rewarded_drop_seq = dropSeq;
-    g_vm_net_mock_battle_rewarded_drop_count = dropCount;
-    vm_net_mock_task_progress_after_battle(g_vm_net_mock_battle_enemy_id_current,
-                                           enemyCount,
-                                           dropItemId,
-                                           dropCount);
+    memcpy(g_vm_net_mock_battle_rewarded_drops, results, sizeof(results));
+    g_vm_net_mock_battle_rewarded_drop_result_count = resultCount;
+
+    if (resultCount != 0)
+    {
+        dropItemId = results[0].itemId;
+        dropSeq = results[0].seq;
+        dropCount = results[0].count;
+        dropGranted = true;
+    }
 
     if (dropItemIdOut)
         *dropItemIdOut = dropItemId;
@@ -1018,7 +1080,8 @@ static u32 vm_net_mock_role_current_hp_for_battle(void)
     return hp;
 }
 
-static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
+static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
+                                                        bool forceTeamVictory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent :
@@ -1035,7 +1098,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
-    bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+    /* A shared party victory is not invalidated because this particular
+     * observer was knocked out earlier in the same battle.  Preserve its
+     * actual zero HP, but settle the victory/reward once under its own role
+     * state.  Solo callers keep the normal living-player requirement. */
+    bool victory = g_mockBattleEnemyHpCurrent == 0 &&
+                   (forceTeamVictory || roleHp > 0);
     bool rewardAlreadyGranted = false;
     u32 recoverMp = vm_net_mock_battle_recover_mp_value();
     bool mpRecoveryApplied = false;
@@ -1066,11 +1134,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
      * completed-state helper below.  The durable-state serial guard makes a
      * repeated terminal response harmless. */
     vm_net_mock_role_service_apply_battle_wear(role);
-    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
                      vm_net_mock_battle_enemy_count_current(),
                      victory ? 1 : 0,
+                     forceTeamVictory ? 1 : 0,
                      rewardExp,
                      statusGold,
                      role->exp,
@@ -1334,14 +1403,22 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
     if (x == 0 || y == 0)
         return;
 
-    if (!vm_net_mock_scene_name_is_safe(scene))
+    /* A scene transition can name an SCE that the server has not yet resolved
+     * locally.  Its exact key remains authoritative for this durable position;
+     * substituting a runtime/default scene here changes the next 16/2 target. */
+    if (!vm_net_mock_scene_name_is_persistable(scene))
     {
         if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
             scene = runtimeScene;
-        else if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+        else if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
             scene = role->scene;
         else
             scene = vm_net_mock_default_scene_name();
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene))
+    {
+        printf("[warn][network] mock_scene_position_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found save_reason=%s\n",
+               scene ? scene : "-", reason ? reason : "position");
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
     vm_net_mock_role_set_position(scene, x, y, reason);
@@ -1378,7 +1455,7 @@ static const char *vm_net_mock_current_scene_name(void)
      * environment key and local runtime scene remain useful only before a
      * request has selected a role (local/offline diagnostics).
      */
-    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
         return vm_net_mock_normalize_scene_name_for_enter(role->scene);
     if (overrideName != NULL && overrideName[0] != 0)
         return overrideName;
@@ -1602,9 +1679,9 @@ typedef struct vm_mock_service_account_state
 
     u32 battleRewardedSerial;
     u32 battleRewardedExp;
-    u32 battleRewardedDropItem;
-    u16 battleRewardedDropSeq;
-    u32 battleRewardedDropCount;
+    vm_net_mock_battle_drop_result
+        battleRewardedDrops[VM_NET_MOCK_BATTLE_DROP_RESULT_MAX];
+    u8 battleRewardedDropResultCount;
     u32 battleEnemyIdCurrent;
     u32 battleRoleIdCurrent;
     u32 battleRewardRng;
@@ -1811,6 +1888,20 @@ typedef struct
     vm_mock_service_trade_offer receipts[2];
 } vm_mock_service_trade;
 
+enum
+{
+    VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX = 10
+};
+
+typedef struct
+{
+    u32 roleId;
+    u32 taskId;
+    u32 actorId;
+    bool repeatable;
+    char scene[64];
+} vm_mock_service_task_offer_context;
+
 typedef struct vm_mock_service_client_session
 {
     u32 clientId;
@@ -1857,6 +1948,16 @@ typedef struct vm_mock_service_client_session
     u8 pendingDirQueueBlob[32];
     u32 pendingDirQueueTick;
     u32 pendingDirQueueSerial;
+    /* Server-time movement authority.  The client produces one direction
+     * frame per 100 ms, but a sped-up client can upload those frames faster.
+     * Credits are milliseconds rather than client ticks so only the service
+     * clock can authorize spatial progress. */
+    bool movementRateActive;
+    u32 movementRateAnchorMs;
+    u32 movementRateCreditMs;
+    u32 movementRateViolationCount;
+    u32 movementRateDeniedSteps;
+    u32 movementRateLastViolationMs;
     vm_mock_service_social_notice socialNotices[VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX];
     vm_mock_service_chat_notice chatNotices[VM_MOCK_SERVICE_CHAT_NOTICE_MAX];
     u8 chatNoticeHead;
@@ -1891,6 +1992,11 @@ typedef struct vm_mock_service_client_session
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
     char instanceChallengeScene[64];
+    /* The native action=4 task path carries only task_id after the NPC dialog.
+     * Retain the server-observed offer source so a completed task cannot be
+     * reaccepted by forging the later 6/11 request. */
+    vm_mock_service_task_offer_context
+        taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -2050,9 +2156,10 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
 
     state->battleRewardedSerial = g_vm_net_mock_battle_rewarded_serial;
     state->battleRewardedExp = g_vm_net_mock_battle_rewarded_exp;
-    state->battleRewardedDropItem = g_vm_net_mock_battle_rewarded_drop_item;
-    state->battleRewardedDropSeq = g_vm_net_mock_battle_rewarded_drop_seq;
-    state->battleRewardedDropCount = g_vm_net_mock_battle_rewarded_drop_count;
+    memcpy(state->battleRewardedDrops, g_vm_net_mock_battle_rewarded_drops,
+           sizeof(state->battleRewardedDrops));
+    state->battleRewardedDropResultCount =
+        g_vm_net_mock_battle_rewarded_drop_result_count;
     state->battleEnemyIdCurrent = g_vm_net_mock_battle_enemy_id_current;
     state->battleRoleIdCurrent = g_vm_net_mock_battle_role_id_current;
     state->battleRewardRng = g_vm_net_mock_battle_reward_rng;
@@ -2155,9 +2262,10 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
 
     g_vm_net_mock_battle_rewarded_serial = state->battleRewardedSerial;
     g_vm_net_mock_battle_rewarded_exp = state->battleRewardedExp;
-    g_vm_net_mock_battle_rewarded_drop_item = state->battleRewardedDropItem;
-    g_vm_net_mock_battle_rewarded_drop_seq = state->battleRewardedDropSeq;
-    g_vm_net_mock_battle_rewarded_drop_count = state->battleRewardedDropCount;
+    memcpy(g_vm_net_mock_battle_rewarded_drops, state->battleRewardedDrops,
+           sizeof(g_vm_net_mock_battle_rewarded_drops));
+    g_vm_net_mock_battle_rewarded_drop_result_count =
+        state->battleRewardedDropResultCount;
     g_vm_net_mock_battle_enemy_id_current = state->battleEnemyIdCurrent;
     g_vm_net_mock_battle_role_id_current = state->battleRoleIdCurrent;
     g_vm_net_mock_battle_reward_rng = state->battleRewardRng;
@@ -3321,6 +3429,119 @@ static void vm_mock_service_session_clear_moveinfo(vm_mock_service_client_sessio
     }
 }
 
+/* Client evidence in scene_runtime_tick(0x01014EE0) shows ten 100ms frames
+ * per 2/1 direction-timeline upload.  Keep at most two seconds of server-time
+ * credit so normal packet jitter can recover without allowing an idle client
+ * to bank unlimited travel. */
+#define VM_MOCK_SERVICE_MOVE_STEP_MS 100u
+#define VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS 2000u
+
+static void vm_mock_service_session_reset_movement_rate(vm_mock_service_client_session *session,
+                                                        const char *reason)
+{
+    if (session == NULL)
+        return;
+    session->movementRateActive = true;
+    session->movementRateAnchorMs = scheduler_get_tick_ms();
+    session->movementRateCreditMs = 0;
+    session->movementRateViolationCount = 0;
+    session->movementRateDeniedSteps = 0;
+    session->movementRateLastViolationMs = 0;
+    printf("[debug][mock-service] movement_rate_reset client=%08x reason=%s\n",
+           session->clientId, reason ? reason : "-");
+}
+
+/* Copy only the server-time-authorized prefix of an already validated 2/1
+ * direction timeline.  The caller keeps the ordinary empty ACK contract: a
+ * rate rejection changes server authority, not the client packet parser. */
+static u16 vm_mock_service_session_limit_timeline_by_rate(
+    vm_mock_service_client_session *session, const u8 *moveInfo, u16 moveInfoLen,
+    u8 *acceptedOut, u16 acceptedCap, u16 *requestedStepsOut,
+    u16 *acceptedStepsOut, u16 *deniedStepsOut, u32 *elapsedMsOut,
+    u32 *creditBeforeMsOut, u32 *creditAfterMsOut)
+{
+    u32 nowMs = scheduler_get_tick_ms();
+    u32 elapsedMs = 0;
+    u32 creditBeforeMs = 0;
+    u16 requestedSteps = 0;
+    u16 acceptedSteps = 0;
+    u16 acceptedLen = 0;
+
+    if (requestedStepsOut)
+        *requestedStepsOut = 0;
+    if (acceptedStepsOut)
+        *acceptedStepsOut = 0;
+    if (deniedStepsOut)
+        *deniedStepsOut = 0;
+    if (elapsedMsOut)
+        *elapsedMsOut = 0;
+    if (creditBeforeMsOut)
+        *creditBeforeMsOut = 0;
+    if (creditAfterMsOut)
+        *creditAfterMsOut = 0;
+    if (session == NULL || moveInfo == NULL || moveInfoLen == 0 ||
+        acceptedOut == NULL || acceptedCap < moveInfoLen)
+    {
+        return 0;
+    }
+    for (u16 i = 0; i < moveInfoLen; ++i)
+    {
+        if (moveInfo[i] != 0)
+            ++requestedSteps;
+    }
+    if (!session->movementRateActive)
+    {
+        /* A 2/1 before scene-ready is discarded by the caller.  This branch
+         * only covers an old/incomplete session lifecycle and starts with no
+         * free movement credit. */
+        session->movementRateActive = true;
+        session->movementRateAnchorMs = nowMs;
+        session->movementRateCreditMs = 0;
+    }
+    else
+    {
+        elapsedMs = nowMs - session->movementRateAnchorMs;
+        if (elapsedMs >= VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS ||
+            session->movementRateCreditMs >= VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS - elapsedMs)
+        {
+            session->movementRateCreditMs = VM_MOCK_SERVICE_MOVE_MAX_CREDIT_MS;
+        }
+        else
+        {
+            session->movementRateCreditMs += elapsedMs;
+        }
+        session->movementRateAnchorMs = nowMs;
+    }
+    creditBeforeMs = session->movementRateCreditMs;
+    for (u16 i = 0; i < moveInfoLen; ++i)
+    {
+        if (moveInfo[i] != 0 && session->movementRateCreditMs < VM_MOCK_SERVICE_MOVE_STEP_MS)
+            break;
+        acceptedOut[acceptedLen++] = moveInfo[i];
+        if (moveInfo[i] != 0)
+        {
+            session->movementRateCreditMs -= VM_MOCK_SERVICE_MOVE_STEP_MS;
+            ++acceptedSteps;
+        }
+    }
+    /* A zero-only prefix has no movement or valid timeline semantics. */
+    if (acceptedSteps == 0)
+        acceptedLen = 0;
+    if (requestedStepsOut)
+        *requestedStepsOut = requestedSteps;
+    if (acceptedStepsOut)
+        *acceptedStepsOut = acceptedSteps;
+    if (deniedStepsOut)
+        *deniedStepsOut = requestedSteps - acceptedSteps;
+    if (elapsedMsOut)
+        *elapsedMsOut = elapsedMs;
+    if (creditBeforeMsOut)
+        *creditBeforeMsOut = creditBeforeMs;
+    if (creditAfterMsOut)
+        *creditAfterMsOut = session->movementRateCreditMs;
+    return acceptedLen;
+}
+
 static void vm_mock_service_session_store_pending_timeline(vm_mock_service_client_session *session,
                                                            const u8 *moveInfo,
                                                            u16 moveInfoLen,
@@ -3435,6 +3656,7 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     session->sceneVisiblePending = true;
     session->sceneVisibleTick = g_schedulerTick;
     vm_mock_service_session_clear_moveinfo(session, "scene-pending");
+    vm_mock_service_session_reset_movement_rate(session, "scene-pending");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
     if (scene != NULL)
@@ -3477,6 +3699,8 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     session->sceneVisibleY = y;
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
+    if (changed)
+        vm_mock_service_session_reset_movement_rate(session, "scene-ready");
     becameOnline = !session->roleOnline;
     session->roleOnline = true;
     if (becameOnline)
@@ -3626,6 +3850,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->instanceChallengeTick = 0;
     session->instanceChallengeScene[0] = 0;
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
+    vm_mock_service_session_reset_movement_rate(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
 }
@@ -4382,6 +4607,10 @@ typedef struct
     /* Optional server-managed task binding.  SCE/XSE actors keep this zero
      * and continue to discover their tasks from the script resource. */
     u32 taskId;
+    /* This is a property of the dynamic NPC binding, not a client-side task
+     * flag.  It authorizes replacing a persisted completed (state 3) row only
+     * after this NPC has actually offered the task to the active session. */
+    bool taskRepeatable;
     u32 challengeEnemyId;
     u16 x;
     u16 y;

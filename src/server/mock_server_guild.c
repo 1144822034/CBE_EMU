@@ -1203,6 +1203,7 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     u8 result = 0;
     bool accepted = false;
     bool sourceNotified = false;
+    bool sourceMemberJoinQueued = false;
 
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_team_invite_reply_request(request, requestLen, &sourceWireId, &result))
@@ -1244,19 +1245,25 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
         sourceNotified = vm_mock_service_session_enqueue_social_notice(
             source, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT, accepted ? 1 : 0,
             responder, responderRole, g_vm_mock_service_active_account_id);
+        if (accepted)
+        {
+            sourceMemberJoinQueued = vm_mock_service_session_enqueue_social_notice(
+                source, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
+                responder, responderRole, g_vm_mock_service_active_account_id);
+        }
     }
     responder->teamInviteReplyActive = false;
     responder->teamInviteSourceClientId = 0;
     responder->teamInviteSourceWireId = 0;
 
-    /* net_handle_group_info(0x01011F3A) cases 3/10 share the full-roster
-     * parser.  For subtype 3, result=1 falls straight through to num and
-     * groupinfo; returning result alone is therefore a truncated success and
-     * cannot create the party UI.  A refused/failed reply has no roster. */
+    /* The joiner already has its self roster row from the login 5/10 request.
+     * A successful subtype 3 still requires a complete parser payload, but it
+     * contributes exactly the leader row.  The first subtype-3 row is the
+     * native leader assignment, so do not duplicate the joiner in this list. */
     if (accepted && team != NULL)
     {
-        if (!vm_net_mock_append_team_group_info_object(out, outCap, &pos,
-                                                       team, responder, 3))
+        if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
+                                                                 responder, source))
         {
             return 0;
         }
@@ -1272,11 +1279,12 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     }
     objectCount = 1;
     vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
-    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-full)\n",
+    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-leader-delta)\n",
            source ? source->clientId : 0, sourceWireId,
            responder->clientId, responderRole->roleId,
            result, accepted ? 1u : 0u, sourceNotified ? 1u : 0u,
-           accepted ? "inline-5/3" : "none",
+           sourceMemberJoinQueued ? 1u : 0u,
+           accepted ? "inline-5/3-leader-delta" : "none",
            team ? team->memberCount : 0, pos);
     return pos;
 }

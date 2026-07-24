@@ -280,67 +280,52 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
                                                  u32 *posyOut)
 {
     u8 data[8192];
-    char resourceScene[64];
-    char legacyScene[64];
+    u32 len = 0;
+    u32 start = 0;
+    u32 spawnIndex = 0;
 
     if (scene == NULL || scene[0] == 0 || actorId == 0)
         return false;
 
-    snprintf(resourceScene, sizeof(resourceScene), "%s", scene);
-    legacyScene[0] = 0;
-    for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len != 0 && start != 0)
     {
-        u32 len = vm_net_mock_load_scene_resource(resourceScene, data, sizeof(data));
-        u32 start = vm_net_mock_scene_payload_start(data, len);
-        u32 spawnIndex = 0;
-
-        if (len != 0 && start != 0)
+        for (u32 off = start; off + 14 <= len; ++off)
         {
-            for (u32 off = start; off + 14 <= len; ++off)
+            vm_net_mock_sce_combat_spawn spawn;
+            u32 end = 0;
+
+            if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
+                                                       &spawn, &end))
             {
-                vm_net_mock_sce_combat_spawn spawn;
-                u32 end = 0;
-
-                if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
-                                                           &spawn, &end))
-                {
-                    continue;
-                }
-                /* Scene actor slot zero is reserved by the runtime; recovered
-                 * combat spawns occupy subsequent slots in SCE record order.
-                 * Autonomous battle creation has no client-selected node, so
-                 * it uses the same SCE record catalog that originally creates
-                 * the live scene nodes.  Normal collision challenges must not
-                 * use this selector: their request already identifies the
-                 * exact live node selected by the client. */
-                ++spawnIndex;
-                if (spawn.actorId == actorId)
-                {
-                    if (indexOut)
-                        *indexOut = spawnIndex;
-                    if (posxOut)
-                        *posxOut = spawn.x;
-                    if (posyOut)
-                        *posyOut = spawn.y;
-                    printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u index=%u pos=(%u,%u) name=%s actor_resource=%s source=SCE2-combat-spawn\n",
-                           scene, resourceScene, actorId, spawnIndex,
-                           spawn.x, spawn.y, spawn.displayName,
-                           spawn.actorResource);
-                    return true;
-                }
-                if (end > off)
-                    off = end - 1;
+                continue;
             }
+            /* Scene actor slot zero is reserved by the runtime; recovered
+             * combat spawns occupy subsequent slots in SCE record order.
+             * Autonomous battle creation has no client-selected node, so
+             * it uses the same SCE record catalog that originally creates
+             * the live scene nodes.  Normal collision challenges must not
+             * use this selector: their request already identifies the
+             * exact live node selected by the client. */
+            ++spawnIndex;
+            if (spawn.actorId == actorId)
+            {
+                if (indexOut)
+                    *indexOut = spawnIndex;
+                if (posxOut)
+                    *posxOut = spawn.x;
+                if (posyOut)
+                    *posyOut = spawn.y;
+                printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u index=%u pos=(%u,%u) name=%s actor_resource=%s source=SCE2-combat-spawn\n",
+                       scene, scene, actorId, spawnIndex,
+                       spawn.x, spawn.y, spawn.displayName,
+                       spawn.actorResource);
+                return true;
+            }
+            if (end > off)
+                off = end - 1;
         }
-
-        if (resourcePass != 0 ||
-            !vm_net_mock_scene_resource_legacy_alias(scene, legacyScene,
-                                                     sizeof(legacyScene)) ||
-            strcmp(resourceScene, legacyScene) == 0)
-        {
-            break;
-        }
-        snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
     }
     return false;
 }
@@ -357,6 +342,28 @@ static vm_net_mock_monster_resource_label
         sizeof(g_vm_net_mock_monster_entries[0])];
 static bool g_vm_net_mock_monster_resource_labels_loaded = false;
 
+/* These targets are present as structured task.dsh kill requirements but do
+ * not occur in automonster.dsh.  If the normal SCE2 scan cannot identify
+ * them, retain their task names and provenance instead of showing anonymous
+ * editable monsters. */
+typedef struct
+{
+    u16 enemyId;
+    const char *displayName;
+    const char *source;
+} vm_net_mock_monster_task_only_label;
+
+static const vm_net_mock_monster_task_only_label
+    g_vm_net_mock_monster_task_only_labels[] = {
+        { 15, "\xB1\xCC\xD6\xF1\xBE\xDE\xC9\xDF", "task.dsh#709" }, /* 碧竹巨蛇 */
+        { 23, "\xDA\xA4\xBB\xF0\xF7\xE8\xF7\xEB", "task.dsh#5004" }, /* 冥火麒麟 */
+        { 38, "\xBB\xF0\xB7\xEF\xBB\xCB", "task.dsh#112" }, /* 火凤凰 */
+        { 44, "\xBB\xF0\xF2\xF3\xC9\xDF", "task.dsh#407" }, /* 火蝮蛇 */
+        { 63, "\xC7\xE0\xC1\xFA\xCD\xF5", "task.dsh#5007" }, /* 青龙王 */
+        { 65, "\xB6\xAB\xB7\xBD\xB2\xBB\xB0\xDC", "task.dsh#5009" }, /* 东方不败 */
+        {300, "\xC1\xB6\xD3\xFC\xC4\xA7\xCD\xB7", "task.dsh#5010" }  /* 炼狱魔头 */
+    };
+
 static void vm_net_mock_monster_resource_labels_load(void)
 {
     u32 catalogCount = 0;
@@ -366,6 +373,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
     g_vm_net_mock_monster_resource_labels_loaded = true;
     memset(g_vm_net_mock_monster_resource_labels, 0,
            sizeof(g_vm_net_mock_monster_resource_labels));
+
     catalogCount = vm_net_mock_load_auto_monster_catalog();
 
     for (u32 catalogIndex = 0; catalogIndex < catalogCount; ++catalogIndex)
@@ -373,11 +381,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
         const vm_net_mock_auto_monster_catalog_item *catalog =
             &g_vm_net_mock_auto_monster_catalog[catalogIndex];
         u8 data[8192];
-        char resourceScene[64];
-        char legacyScene[64];
 
-        snprintf(resourceScene, sizeof(resourceScene), "%s", catalog->scene);
-        legacyScene[0] = 0;
         for (u32 idIndex = 0; idIndex < 3; ++idIndex)
         {
             int monsterIndex = vm_net_mock_monster_catalog_index(
@@ -394,9 +398,8 @@ static void vm_net_mock_monster_resource_labels_load(void)
             }
         }
 
-        for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
         {
-            u32 len = vm_net_mock_load_scene_resource(resourceScene, data,
+            u32 len = vm_net_mock_load_scene_resource(catalog->scene, data,
                                                        sizeof(data));
             u32 start = vm_net_mock_scene_payload_start(data, len);
 
@@ -428,14 +431,35 @@ static void vm_net_mock_monster_resource_labels_load(void)
                         off = end - 1;
                 }
             }
-            if (resourcePass != 0 ||
-                !vm_net_mock_scene_resource_legacy_alias(
-                    catalog->scene, legacyScene, sizeof(legacyScene)) ||
-                strcmp(resourceScene, legacyScene) == 0)
-            {
-                break;
-            }
-            snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
+        }
+    }
+
+    /* SCE labels win whenever a task target later gains an authored spawn.
+     * Only unresolved task-only entries retain the explicit task.dsh source. */
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_monster_task_only_labels) /
+                 sizeof(g_vm_net_mock_monster_task_only_labels[0]);
+         ++i)
+    {
+        const vm_net_mock_monster_task_only_label *label =
+            &g_vm_net_mock_monster_task_only_labels[i];
+        int monsterIndex = vm_net_mock_monster_catalog_index(label->enemyId);
+
+        if (monsterIndex < 0)
+            continue;
+        if (g_vm_net_mock_monster_resource_labels[monsterIndex].displayName[0] == 0)
+        {
+            snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex].displayName,
+                     sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                .displayName),
+                     "%s", label->displayName);
+        }
+        if (g_vm_net_mock_monster_resource_labels[monsterIndex].firstScene[0] == 0)
+        {
+            snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex].firstScene,
+                     sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                .firstScene),
+                     "%s", label->source);
         }
     }
 }
@@ -471,8 +495,10 @@ static u32 vm_net_mock_monster_admin_list(
         rows[i].defense = stats.defense;
         rows[i].exp = stats.exp;
         rows[i].gold = stats.gold;
-        rows[i].dropItemId = stats.dropItemId;
-        rows[i].dropRatePercent = stats.dropRatePercent;
+        rows[i].dropCount = vm_net_mock_monster_drops_for_enemy(
+            entry->enemyId, rows[i].drops, VM_NET_MOCK_MONSTER_DROP_MAX);
+        if (rows[i].dropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
+            rows[i].dropCount = VM_NET_MOCK_MONSTER_DROP_MAX;
         rows[i].overridden = override->used;
         snprintf(rows[i].displayName, sizeof(rows[i].displayName), "%s",
                  g_vm_net_mock_monster_resource_labels[i].displayName);
@@ -550,6 +576,13 @@ typedef struct
     u32 quarantined;
 } vm_net_mock_dynamic_npc_load_context;
 
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 count;
+} vm_net_mock_dynamic_npc_column_context;
+
 static vm_net_mock_dynamic_npc_override
     g_vm_net_mock_dynamic_npc_overrides[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
 static u32 g_vm_net_mock_dynamic_npc_override_count = 0;
@@ -571,6 +604,54 @@ static bool vm_net_mock_dynamic_npc_decode_hex(const char *value, size_t valueLe
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_column_count_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_dynamic_npc_column_context *context =
+        (vm_net_mock_dynamic_npc_column_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->count))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* CREATE TABLE IF NOT EXISTS cannot add a column to an existing production
+ * table.  Query INFORMATION_SCHEMA first so this automatic compatibility
+ * migration is portable to the older MySQL versions used by existing setups. */
+static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_tasks' "
+            "AND COLUMN_NAME='repeatable'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "ADD COLUMN repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER task_id"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_task_schema migration=repeatable-column action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                        unsigned int columnCount,
                                        const char *const *values,
@@ -579,11 +660,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[11];
+    u32 number[12];
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 16 ||
+    if (context == NULL || columnCount != 17 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -601,13 +682,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             row.seed.scriptName, sizeof(row.seed.scriptName)) ||
         !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
         !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]) ||
-        !vm_net_mock_dynamic_npc_decode_hex(values[11], lengths[11],
+        !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[7]) || number[7] > 1u ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[12], lengths[12],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[7]) || number[7] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[8]) || number[8] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffu)
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[11]) || number[11] > 0xffu)
     {
         if (context != NULL)
             ++context->skipped;
@@ -621,10 +703,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
     row.seed.taskId = number[6];
-    row.seed.instanceX = (u16)number[7];
-    row.seed.instanceY = (u16)number[8];
-    row.seed.challengeEnemyId = number[9];
-    row.seed.instanceMinLevel = (u16)number[10];
+    row.seed.taskRepeatable = number[7] != 0;
+    row.seed.instanceX = (u16)number[8];
+    row.seed.instanceY = (u16)number[9];
+    row.seed.challengeEnemyId = number[10];
+    row.seed.instanceMinLevel = (u16)number[11];
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -689,12 +772,13 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_tasks ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
-            "task_id INT UNSIGNED NOT NULL,"
+            "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
             "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
+        !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -712,6 +796,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
             "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
             "COALESCE(server_dynamic_npc_tasks.task_id,0),"
+            "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
             "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
             "COALESCE(server_dynamic_npc_instances.target_x,0),"
             "COALESCE(server_dynamic_npc_instances.target_y,0),"
@@ -891,9 +976,11 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (seed->taskId != 0)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id) "
-                 "VALUES(X'%s',%u,%u) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)",
-                 sceneHex, seed->actorId, seed->taskId);
+                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) "
+                 "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable)",
+                 sceneHex, seed->actorId, seed->taskId,
+                 seed->taskRepeatable ? 1u : 0u);
     }
     else
     {
@@ -917,9 +1004,9 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
-           seed->taskId, seed->x, seed->y,
+           seed->taskId, seed->taskRepeatable ? 1u : 0u, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
            seed->instanceMinLevel, seed->actorResource,
@@ -1189,13 +1276,10 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                                                    u32 *dynamicOut)
 {
     u8 data[8192];
-    char resourceScene[64];
-    char legacyScene[64];
     u32 len = 0;
     u32 start = 0;
     u32 count = 0;
     u32 total = 0;
-    u32 serviceCount = 0;
 
     if (totalOut)
         *totalOut = 0;
@@ -1208,7 +1292,6 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
     memset(seeds, 0, sizeof(*seeds) * seedCap);
     count = vm_net_mock_append_service_scene_npcinfo_seeds(scene, seeds, seedCap);
     total = count;
-    serviceCount = count;
     if (dynamicOut)
         *dynamicOut = count;
     /* The _02 resource was audited separately and has no actor/xse records.
@@ -1230,91 +1313,75 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
             *totalOut = total;
         return count;
     }
-    snprintf(resourceScene, sizeof(resourceScene), "%s", scene);
-    legacyScene[0] = 0;
-    for (u32 resourcePass = 0; resourcePass < 2; ++resourcePass)
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len != 0 && start != 0)
     {
-        len = vm_net_mock_load_scene_resource(resourceScene, data, sizeof(data));
-        start = vm_net_mock_scene_payload_start(data, len);
-        if (len != 0 && start != 0)
+        for (u32 off = start; off + 8 <= len; ++off)
         {
-            for (u32 off = start; off + 8 <= len; ++off)
-            {
-                vm_net_mock_scene_npcinfo_seed seed;
-                u32 end = 0;
-                bool duplicate = false;
+            vm_net_mock_scene_npcinfo_seed seed;
+            u32 end = 0;
+            bool duplicate = false;
 
-                if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
-                                                              &seed, &end))
-                {
-                    continue;
-                }
-                /* The authoritative Tongquetai catalog contains only 大侠郭靖.
-                 * The legacy SCE also carries 郭芙蓉/task2.xse, but that row
-                 * belongs to old content and must not be restored merely because
-                 * the current c00 resource has an empty embedded actor catalog. */
-                if (vm_net_mock_scene_is_penglai01(scene) &&
-                    (strcmp(seed.scriptName, "task0.xse") != 0 ||
-                     strcmp(seed.displayName,
-                            "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
-                {
-                    printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
-                           scene, seed.displayName, seed.scriptName);
-                    if (end > off)
-                        off = end - 1;
-                    continue;
-                }
-                for (u32 i = 0; i < count; ++i)
-                {
-                    if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
-                        strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
-                        strcmp(seeds[i].displayName, seed.displayName) == 0)
-                    {
-                        duplicate = true;
-                        break;
-                    }
-                }
-                if (duplicate)
-                    continue;
-                total += 1;
-                if (count < seedCap)
-                {
-                    u32 candidate = 20000u +
-                        (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
-                    bool collision = true;
-                    while (collision)
-                    {
-                        collision = false;
-                        for (u32 i = 0; i < count; ++i)
-                        {
-                            if (seeds[i].actorId == candidate)
-                            {
-                                candidate = candidate == 59999u
-                                                ? 20000u
-                                                : candidate + 1u;
-                                collision = true;
-                                break;
-                            }
-                        }
-                    }
-                    seed.actorId = candidate;
-                    seeds[count++] = seed;
-                }
+            if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
+                                                          &seed, &end))
+            {
+                continue;
+            }
+            /* The authoritative Tongquetai catalog contains only 大侠郭靖.
+             * The legacy SCE also carries 郭芙蓉/task2.xse, but that row
+             * belongs to old content and must not be restored merely because
+             * the current c00 resource has an empty embedded actor catalog. */
+            if (vm_net_mock_scene_is_penglai01(scene) &&
+                (strcmp(seed.scriptName, "task0.xse") != 0 ||
+                 strcmp(seed.displayName,
+                        "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0)) /* 大侠郭靖 */
+            {
+                printf("[info][network] mock_scene_npc_catalog_skip scene=%s npc=%s script=%s reason=tongquetai-authoritative-guojing-only\n",
+                       scene, seed.displayName, seed.scriptName);
                 if (end > off)
                     off = end - 1;
+                continue;
             }
+            for (u32 i = 0; i < count; ++i)
+            {
+                if (seeds[i].x == seed.x && seeds[i].y == seed.y &&
+                    strcmp(seeds[i].scriptName, seed.scriptName) == 0 &&
+                    strcmp(seeds[i].displayName, seed.displayName) == 0)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+            total += 1;
+            if (count < seedCap)
+            {
+                u32 candidate = 20000u +
+                    (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
+                bool collision = true;
+                while (collision)
+                {
+                    collision = false;
+                    for (u32 i = 0; i < count; ++i)
+                    {
+                        if (seeds[i].actorId == candidate)
+                        {
+                            candidate = candidate == 59999u
+                                            ? 20000u
+                                            : candidate + 1u;
+                            collision = true;
+                            break;
+                        }
+                    }
+                }
+                seed.actorId = candidate;
+                seeds[count++] = seed;
+            }
+            if (end > off)
+                off = end - 1;
         }
-
-        if (total > serviceCount || resourcePass != 0 ||
-            !vm_net_mock_scene_resource_legacy_alias(scene, legacyScene,
-                                                     sizeof(legacyScene)) ||
-            strcmp(resourceScene, legacyScene) == 0)
-        {
-            break;
-        }
-        printf("[info][network] mock_scene_npc_resource_alias scene=%s exact=%s legacy=%s reason=exact-catalog-empty\n",
-               scene, resourceScene, legacyScene);
-        snprintf(resourceScene, sizeof(resourceScene), "%s", legacyScene);
     }
     if (totalOut)
         *totalOut = total;
@@ -2643,8 +2710,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         target->x = 223;
         target->y = 382;
     }
-    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0 ||
-             strcmp(mapId, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0)
+    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0)
     {
         if (currentScene != NULL && vm_net_mock_scene_is_penglai02(currentScene))
         {
@@ -3979,7 +4045,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
      * and position are durable request-scoped state; the host CBE runtime grid
      * is only a local-emulator fallback and must never supersede them.
      */
-    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
     {
         scene = role->scene;
         fromX = role->x;
@@ -4004,7 +4070,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         if (vm_net_mock_read_current_player_grid(NULL, NULL, &fromX, &fromY, NULL, NULL))
             fromSource = "runtime-grid";
     }
-    if (!vm_net_mock_scene_name_is_safe(scene))
+    if (!vm_net_mock_scene_name_is_persistable(scene))
     {
         scene = vm_net_mock_default_scene_name();
         sceneSource = "default-fallback";
@@ -4042,6 +4108,11 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
+    if (!vm_net_mock_scene_resource_exists(target->scene))
+    {
+        printf("[warn][network] mock_unstuck_target_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found\n",
+               target->scene);
+    }
     printf("[info][network] mock_unstuck_target scene=%s scene_source=%s from=(%u,%u) from_source=%s pos=(%u,%u) source=%s entry=%u\n",
            target->scene,
            sceneSource,
@@ -4994,62 +5065,51 @@ static u32 vm_net_mock_build_teleport_stone_post_enter_combo_response(const u8 *
     return pos;
 }
 
-static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, u32 leadId)
+static bool vm_net_mock_append_team_member_full_row(
+    u8 *groupInfo, u32 groupInfoCap, u32 *groupInfoLen,
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member, bool firstRowInBlob);
+static u32 vm_mock_service_team_member_wire_id(
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member);
+
+/* A 5/10 group-status request is also the client's roster bootstrap.  The
+ * solo response must establish the local member, rather than returning an
+ * empty synthetic/template list.  The scene HUD deliberately skips the local
+ * id, so this node is state for the later 5/4 -> 5/5 invite lifecycle, not an
+ * extra self portrait. */
+static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos,
+                                                 const vm_mock_service_client_session *session)
 {
     u8 groupInfo[128];
     u32 groupInfoLen = 0;
-    u32 templateId = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_ID", 105);
-    u32 templateHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_HP", 20);
-    u32 templateMaxHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_HP", templateHp);
-    u32 templateMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MP", 20);
-    u32 templateMaxMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_MP", templateMp);
-    u8 templateByte0 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE0", 1);
-    u8 templateByte1 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE1", 0);
-    u8 templateByte2 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE2", 0);
-    const char *templateName = vm_net_mock_env_str("CBE_GROUPINFO_TEMPLATE_NAME", "Monster");
-    bool seedTemplate = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_SEED", 0) != 0 &&
-                        templateId != 0;
-    u8 num = 0;
+    u32 leadId = 0;
     u32 objectStart = 0;
 
-    /* vm_net_mock_put_object_blob prepends a len16 value to the bytes returned
-     * by the client's blob accessor.  stream_read_i32_be_tagged consumes that
-     * len16 as the first row's tag header, so the first id inside the blob is
-     * raw BE32.  All later u32 values remain explicitly tagged. */
-    if (seedTemplate)
+    if (session == NULL || session->onlineRoleId == 0 ||
+        !vm_net_mock_append_team_member_full_row(groupInfo, sizeof(groupInfo),
+                                                 &groupInfoLen, session, session, true))
     {
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
-            return false;
-        if (!vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, templateName))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte0))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte1))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte2))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
-            return false;
-        num = 1;
+        return false;
     }
+    leadId = vm_mock_service_team_member_wire_id(session, session);
+    if (leadId == 0)
+        return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 10, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", num))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", 1))
         return false;
     if (!vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "leadid", leadId))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_solo_groupinfo observer=%08x role=%u "
+           "groupinfo_len=%u lifecycle=login-self-roster\n",
+           session->clientId, leadId, groupInfoLen);
     return true;
 }
 
@@ -5140,11 +5200,15 @@ static bool vm_net_mock_append_team_member_full_row(u8 *groupInfo, u32 groupInfo
     if (encoded)
     {
         printf("[info][network] mock_team_member_row observer=%08x member=%08x/%u "
-               "wire=%u hp=%u/%u mp=%u/%u wire_order=hp-mp-hpmax-mpmax\n",
+               "wire=%u sex_group=%u job_index=%u online=%u hp=%u/%u mp=%u/%u "
+               "wire_order=hp-mp-hpmax-mpmax\n",
                observer ? observer->clientId : 0,
                member->clientId,
                member->onlineRoleId,
                wireId,
+               vm_mock_service_team_member_sex_code(member),
+               vm_mock_service_team_member_job_code(member),
+               member->roleOnline ? 1u : 0u,
                hp, hpMax, mp, mpMax);
     }
     return encoded;
@@ -5202,6 +5266,45 @@ static bool vm_net_mock_append_team_group_info_object(u8 *out, u32 outCap, u32 *
            memberCount,
            groupInfoLen,
            leaderRoleId);
+    return true;
+}
+
+/* The invitee already owns the self row established by login 5/10.  Its
+ * successful 5/3 therefore contributes only the inviter/leader row; subtype
+ * 3 uses that first row as the leader id.  Sending the full two-member table
+ * here would append a second self row because the client has no replace-list
+ * operation in the subtype-3/10 parser. */
+static bool vm_net_mock_append_team_joiner_leader_roster_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_client_session *joiner,
+    const vm_mock_service_client_session *leader)
+{
+    u8 groupInfo[256];
+    u32 groupInfoLen = 0;
+    u32 objectStart = 0;
+    u32 leaderWireId = 0;
+
+    if (out == NULL || pos == NULL || joiner == NULL || leader == NULL ||
+        leader->onlineRoleId == 0 ||
+        !vm_net_mock_append_team_member_full_row(groupInfo, sizeof(groupInfo),
+                                                 &groupInfoLen, joiner, leader, true))
+    {
+        return false;
+    }
+    leaderWireId = vm_mock_service_team_member_wire_id(joiner, leader);
+    if (leaderWireId == 0 ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 3, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "num", 1) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_joiner_leader_roster joiner=%08x leader=%08x/%u "
+           "wire=%u groupinfo_len=%u lifecycle=5/3-leader-delta\n",
+           joiner->clientId, leader->clientId, leader->onlineRoleId,
+           leaderWireId, groupInfoLen);
     return true;
 }
 

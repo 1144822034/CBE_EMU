@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS `server_data_migrations` (
   PRIMARY KEY (`migration_name`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_login_servers` (
+  `server_id` INT UNSIGNED NOT NULL,
+  `display_name` VARBINARY(31) NOT NULL,
+  `status_label` VARBINARY(31) NOT NULL,
+  `display_color` MEDIUMINT UNSIGNED NOT NULL DEFAULT 16777215,
+  `sort_order` INT UNSIGNED NOT NULL DEFAULT 0,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`server_id`),
+  KEY `idx_server_login_servers_visible` (`enabled`, `sort_order`, `server_id`)
+) ENGINE=InnoDB;
+
+-- GBK: 江湖一区 / 推荐. This is bootstrap data, not a mock packet fallback.
+INSERT IGNORE INTO `server_login_servers`
+  (`server_id`, `display_name`, `status_label`, `display_color`, `sort_order`, `enabled`)
+VALUES
+  (1, X'BDADBAFED2BBC7F8', X'CDC6BCF6', 16777215, 0, 1);
+
 CREATE TABLE IF NOT EXISTS `world_chat_messages` (
   `message_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -168,8 +187,8 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment_durability` (
   `role_id` INT UNSIGNED NOT NULL,
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
-  `durability` SMALLINT UNSIGNED NOT NULL DEFAULT 100,
-  `durability_max` SMALLINT UNSIGNED NOT NULL DEFAULT 100,
+  `durability` SMALLINT UNSIGNED NOT NULL,
+  `durability_max` SMALLINT UNSIGNED NOT NULL,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_durability_role`
@@ -202,6 +221,27 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_backpack_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Timed special items are separate from the durable role snapshot because
+-- expiry continues while the character is offline.  The item id and
+-- multiplier preserve the server-authoritative effect rather than trusting a
+-- client-side icon or countdown.
+CREATE TABLE IF NOT EXISTS `account_role_item_effects` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `effect_kind` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `multiplier` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `expires_unix` INT UNSIGNED NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`, `effect_kind`),
+  KEY `idx_account_role_item_effects_expiry` (`expires_unix`),
+  CONSTRAINT `fk_account_role_item_effects_role`
     FOREIGN KEY (`account_id`, `role_id`)
     REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
@@ -285,6 +325,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_tasks` (
   `scene` VARBINARY(64) NOT NULL,
   `actor_id` INT UNSIGNED NOT NULL,
   `task_id` INT UNSIGNED NOT NULL,
+  `repeatable` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=不可重复,1=完成后可重新接取',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`scene`, `actor_id`),
@@ -327,6 +368,20 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`monster_id`)
+) ENGINE=InnoDB;
+
+-- One independent probability row per monster drop.  The two legacy drop_*
+-- columns above remain only as a compatibility import source for old installs;
+-- new backend saves write this table and clear the legacy columns.
+CREATE TABLE IF NOT EXISTS `server_monster_drops` (
+  `monster_id` SMALLINT UNSIGNED NOT NULL,
+  `drop_slot` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `drop_rate_percent` TINYINT UNSIGNED NOT NULL,
+  PRIMARY KEY (`monster_id`, `drop_slot`),
+  CONSTRAINT `fk_server_monster_drops_monster`
+    FOREIGN KEY (`monster_id`) REFERENCES `server_monsters` (`monster_id`)
+    ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS `server_shop_items` (
