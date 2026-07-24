@@ -5013,62 +5013,51 @@ static u32 vm_net_mock_build_teleport_stone_post_enter_combo_response(const u8 *
     return pos;
 }
 
-static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos, u32 leadId)
+static bool vm_net_mock_append_team_member_full_row(
+    u8 *groupInfo, u32 groupInfoCap, u32 *groupInfoLen,
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member, bool firstRowInBlob);
+static u32 vm_mock_service_team_member_wire_id(
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *member);
+
+/* A 5/10 group-status request is also the client's roster bootstrap.  The
+ * solo response must establish the local member, rather than returning an
+ * empty synthetic/template list.  The scene HUD deliberately skips the local
+ * id, so this node is state for the later 5/4 -> 5/5 invite lifecycle, not an
+ * extra self portrait. */
+static bool vm_net_mock_append_group_info_object(u8 *out, u32 outCap, u32 *pos,
+                                                 const vm_mock_service_client_session *session)
 {
     u8 groupInfo[128];
     u32 groupInfoLen = 0;
-    u32 templateId = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_ID", 105);
-    u32 templateHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_HP", 20);
-    u32 templateMaxHp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_HP", templateHp);
-    u32 templateMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MP", 20);
-    u32 templateMaxMp = vm_net_mock_env_u32("CBE_GROUPINFO_TEMPLATE_MAX_MP", templateMp);
-    u8 templateByte0 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE0", 1);
-    u8 templateByte1 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE1", 0);
-    u8 templateByte2 = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_BYTE2", 0);
-    const char *templateName = vm_net_mock_env_str("CBE_GROUPINFO_TEMPLATE_NAME", "Monster");
-    bool seedTemplate = vm_net_mock_env_u8("CBE_GROUPINFO_TEMPLATE_SEED", 0) != 0 &&
-                        templateId != 0;
-    u8 num = 0;
+    u32 leadId = 0;
     u32 objectStart = 0;
 
-    /* vm_net_mock_put_object_blob prepends a len16 value to the bytes returned
-     * by the client's blob accessor.  stream_read_i32_be_tagged consumes that
-     * len16 as the first row's tag header, so the first id inside the blob is
-     * raw BE32.  All later u32 values remain explicitly tagged. */
-    if (seedTemplate)
+    if (session == NULL || session->onlineRoleId == 0 ||
+        !vm_net_mock_append_team_member_full_row(groupInfo, sizeof(groupInfo),
+                                                 &groupInfoLen, session, session, true))
     {
-        if (!vm_net_mock_put_be32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateId))
-            return false;
-        if (!vm_net_mock_seq_put_string(groupInfo, sizeof(groupInfo), &groupInfoLen, templateName))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte0))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte1))
-            return false;
-        if (!vm_net_mock_seq_put_u8(groupInfo, sizeof(groupInfo), &groupInfoLen, templateByte2))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateHp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxHp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMp))
-            return false;
-        if (!vm_net_mock_seq_put_u32(groupInfo, sizeof(groupInfo), &groupInfoLen, templateMaxMp))
-            return false;
-        num = 1;
+        return false;
     }
+    leadId = vm_mock_service_team_member_wire_id(session, session);
+    if (leadId == 0)
+        return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 10, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", num))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "num", 1))
         return false;
     if (!vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "leadid", leadId))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_solo_groupinfo observer=%08x role=%u "
+           "groupinfo_len=%u lifecycle=login-self-roster\n",
+           session->clientId, leadId, groupInfoLen);
     return true;
 }
 
@@ -5159,11 +5148,15 @@ static bool vm_net_mock_append_team_member_full_row(u8 *groupInfo, u32 groupInfo
     if (encoded)
     {
         printf("[info][network] mock_team_member_row observer=%08x member=%08x/%u "
-               "wire=%u hp=%u/%u mp=%u/%u wire_order=hp-mp-hpmax-mpmax\n",
+               "wire=%u sex_group=%u job_index=%u online=%u hp=%u/%u mp=%u/%u "
+               "wire_order=hp-mp-hpmax-mpmax\n",
                observer ? observer->clientId : 0,
                member->clientId,
                member->onlineRoleId,
                wireId,
+               vm_mock_service_team_member_sex_code(member),
+               vm_mock_service_team_member_job_code(member),
+               member->roleOnline ? 1u : 0u,
                hp, hpMax, mp, mpMax);
     }
     return encoded;
@@ -5221,6 +5214,45 @@ static bool vm_net_mock_append_team_group_info_object(u8 *out, u32 outCap, u32 *
            memberCount,
            groupInfoLen,
            leaderRoleId);
+    return true;
+}
+
+/* The invitee already owns the self row established by login 5/10.  Its
+ * successful 5/3 therefore contributes only the inviter/leader row; subtype
+ * 3 uses that first row as the leader id.  Sending the full two-member table
+ * here would append a second self row because the client has no replace-list
+ * operation in the subtype-3/10 parser. */
+static bool vm_net_mock_append_team_joiner_leader_roster_object(
+    u8 *out, u32 outCap, u32 *pos,
+    const vm_mock_service_client_session *joiner,
+    const vm_mock_service_client_session *leader)
+{
+    u8 groupInfo[256];
+    u32 groupInfoLen = 0;
+    u32 objectStart = 0;
+    u32 leaderWireId = 0;
+
+    if (out == NULL || pos == NULL || joiner == NULL || leader == NULL ||
+        leader->onlineRoleId == 0 ||
+        !vm_net_mock_append_team_member_full_row(groupInfo, sizeof(groupInfo),
+                                                 &groupInfoLen, joiner, leader, true))
+    {
+        return false;
+    }
+    leaderWireId = vm_mock_service_team_member_wire_id(joiner, leader);
+    if (leaderWireId == 0 ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 3, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "num", 1) ||
+        !vm_net_mock_put_object_blob(out, outCap, pos, "groupinfo", groupInfo, groupInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_team_joiner_leader_roster joiner=%08x leader=%08x/%u "
+           "wire=%u groupinfo_len=%u lifecycle=5/3-leader-delta\n",
+           joiner->clientId, leader->clientId, leader->onlineRoleId,
+           leaderWireId, groupInfoLen);
     return true;
 }
 

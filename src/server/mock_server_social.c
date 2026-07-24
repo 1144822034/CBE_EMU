@@ -214,8 +214,6 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     if (request == NULL || requestLen < 9 || outCap < 5)
         return 0;
 
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 leadId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     bool hasGroup10 = false;
     bool hasType1 = false;
     bool enableMiscSync8 = vm_net_mock_env_u8("CBE_GROUP_TYPE1_MISC_SYNC8", 0) != 0;
@@ -246,7 +244,6 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         if (object.kind == 5 && object.subtype == 10)
         {
             hasGroup10 = true;
-            vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "id", &leadId);
         }
         else if (object.kind == 7 && object.subtype == 7)
         {
@@ -263,7 +260,7 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
     vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
     vm_mock_service_team *team = session ? vm_mock_service_team_find_for_client(session->clientId) : NULL;
     if ((team != NULL && !vm_net_mock_append_team_group_info_object(out, outCap, &pos, team, session, 10)) ||
-        (team == NULL && !vm_net_mock_append_group_info_object(out, outCap, &pos, leadId)))
+        (team == NULL && !vm_net_mock_append_group_info_object(out, outCap, &pos, session)))
         return 0;
     objectCount += 1;
     if (hasType1 && !vm_net_mock_append_type1_object(out, outCap, &pos, sceneNpcNum))
@@ -2523,7 +2520,8 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
 }
 
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
-                                                     u32 autoRecoverHp, u32 autoRecoverMp);
+                                                     u32 autoRecoverHp, u32 autoRecoverMp,
+                                                     bool forceTeamVictory);
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(
     u8 *out,
@@ -3936,41 +3934,36 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             vm_mock_service_team_find_for_client(observer->clientId);
         u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
                                   : notice->sourceRoleId;
-        int appendedObjects = notice->result == 1 ? 2 : 1;
+        u8 result = notice->result;
 
-        /* Subtype 4 only reports the target's answer; it never inserts roster
-         * rows.  Friend-list invites start from an empty local roster, so a
-         * lone subtype 5 would add only the remote member and leave the local
-         * count at one.  The team UI requires a count greater than one.  Send
-         * the authoritative subtype-10 roster to the inviter, while existing
-         * third-party members continue to receive the subtype-5 delta. */
+        /* The login 5/10 response establishes the inviter's local row.  The
+         * native result path is therefore 5/4 now, followed by the queued
+         * subtype-5 new-member delta on the next scene poll.  5/3 and 5/10
+         * only append in the client; injecting a full roster here duplicates
+         * that local row instead of refreshing it. */
+        if (result == 1 &&
+            (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+             team == NULL || !team->active))
+        {
+            result = 0;
+        }
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4, &objectStart) ||
             sourceWireId == 0 ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
-            !vm_net_mock_put_object_u8(out, outCap, pos, "result", notice->result) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "result", result) ||
             !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
         {
             return -1;
         }
         vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        if (notice->result == 1)
-        {
-            if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
-                team == NULL ||
-                !vm_net_mock_append_team_group_info_object(out, outCap, pos,
-                                                           team, observer, 10))
-            {
-                return -1;
-            }
-        }
         printf("[info][mock-service] team_result_deliver observer=%08x result=%u roster_update=%s members=%u\n",
-               observer->clientId, notice->result,
-               notice->result == 1 ? "5/10-full" : "none",
+               observer->clientId, result,
+               result == 1 ? "5/4-then-queued-5/5" : "none",
                team ? team->memberCount : 0);
         memset(notice, 0, sizeof(*notice));
         if (noticeTypeOut)
             *noticeTypeOut = noticeType;
-        return appendedObjects;
+        return 1;
     }
 
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN:
