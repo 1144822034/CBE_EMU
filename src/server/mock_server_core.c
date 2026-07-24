@@ -4247,7 +4247,6 @@ enum
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
-    VM_NET_MOCK_EQUIPMENT_DURABILITY_MAX = 100,
     VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7
 };
 
@@ -4306,6 +4305,25 @@ typedef struct
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
+
+/* Timed special-item effects are intentionally kept outside the binary role
+ * snapshot.  They have independent expiry semantics and must survive a
+ * process restart without changing the compatibility version of the legacy
+ * role structure. */
+enum
+{
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD = 1,
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL = 2,
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3
+};
+
+typedef struct
+{
+    u8 kind;
+    u32 itemId;
+    u32 multiplier;
+    u32 expiresUnix;
+} vm_net_mock_role_item_effect;
 
 typedef struct
 {
@@ -4637,6 +4655,22 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
                                                    u16 seq,
                                                    u32 count,
                                                    u32 *remainingOut);
+static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq,
+    const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
+    const char *reason);
+static u32 vm_net_mock_role_active_exp_card_multiplier(
+    const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
+    const vm_net_mock_role_state *role);
+static u8 vm_net_mock_role_active_exp_card_flag(void);
+static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
+                                                      u32 requestLen,
+                                                      u8 *out, u32 outCap);
+static u32 vm_net_mock_build_timed_special_item_use_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_unresolved_special_item_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role);
 static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp);
 static void vm_net_mock_task_progress_after_battle(u32 enemyId,

@@ -476,35 +476,17 @@ static const char g_vm_mock_admin_script[] =
     "restore();box.addEventListener('scroll',save,{passive:true});"
     "box.addEventListener('click',save);window.addEventListener('load',restore,{once:true});};"
     "const setupItemPicker=()=>{"
-    "const form=document.querySelector('.grant-form');const category=document.querySelector('#item-category');"
-    "const item=document.querySelector('#item-select');const open=document.querySelector('#item-picker-open');"
-    "const modal=document.querySelector('#item-picker-modal');const close=document.querySelector('#item-picker-close');"
-    "const search=document.querySelector('#item-search');const list=document.querySelector('#item-picker-list');"
-    "const empty=document.querySelector('#item-picker-empty');const count=document.querySelector('#item-result-count');"
-    "const selected=document.querySelector('#item-selected-name');const error=document.querySelector('#item-picker-error');"
-    "if(!form||!category||!item||!open||!modal||!close||!search||!list||!empty||!count||!selected||!error)return;"
-    "const labels=new Map(Array.from(category.options,o=>[o.value,o.textContent]));const choices=[];"
-    "for(const option of item.options){if(!option.value)continue;const button=document.createElement('button');"
-    "button.type='button';button.className='item-choice';button.dataset.itemId=option.value;"
-    "button.dataset.category=option.dataset.category||'';button.dataset.search=option.textContent.toLowerCase();"
-    "const title=document.createElement('strong');title.textContent=option.textContent;"
-    "const meta=document.createElement('span');meta.textContent=labels.get(button.dataset.category)||'未分类';"
-    "button.append(title,meta);button.addEventListener('click',()=>{item.value=option.value;"
-    "selected.textContent=option.textContent;error.textContent='';"
-    "for(const choice of choices)choice.classList.toggle('selected',choice===button);hide();});"
-    "choices.push(button);list.appendChild(button);}"
-    "const apply=()=>{const wanted=category.value;const keyword=search.value.trim().toLowerCase();let shown=0;"
-    "for(const choice of choices){const visible=(wanted==='all'||choice.dataset.category===wanted)&&"
-    "(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}"
-    "count.textContent=`找到 ${shown} 件物品`;empty.hidden=shown!==0;};"
-    "const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');apply();search.focus();};"
-    "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');open.focus();}"
-    "open.addEventListener('click',show);close.addEventListener('click',hide);"
-    "modal.addEventListener('click',event=>{if(event.target===modal)hide();});"
-    "document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});"
-    "category.addEventListener('change',apply);search.addEventListener('input',apply);"
-    "form.addEventListener('submit',event=>{if(item.value)return;event.preventDefault();"
-    "error.textContent='请先选择物品';show();});apply();};"
+    "const source=document.querySelector('#item-picker-options'),category=document.querySelector('#item-category'),modal=document.querySelector('#item-picker-modal'),close=document.querySelector('#item-picker-close'),clear=document.querySelector('#item-picker-clear'),search=document.querySelector('#item-search'),list=document.querySelector('#item-picker-list'),empty=document.querySelector('#item-picker-empty'),count=document.querySelector('#item-result-count'),error=document.querySelector('#item-picker-error');"
+    "const inputs=[...document.querySelectorAll('[data-item-picker-input]')];if(!source||!category||!modal||!close||!clear||!search||!list||!empty||!count||!error||!inputs.length)return;"
+    "const inputById=new Map(inputs.map(input=>[input.id,input]));const labels=new Map([...category.options].map(option=>[option.value,option.textContent]));const optionByValue=new Map([...source.options].filter(option=>option.value&&option.value!=='0').map(option=>[option.value,option]));let activeId='';const choices=[];"
+    "const update=input=>{if(!input)return;const option=optionByValue.get(input.value);const text=option?option.textContent:(input.value&&input.value!=='0'?`未知物品 #${input.value}`:'未选择物品');for(const label of document.querySelectorAll('[data-item-picker-label]'))if(label.dataset.itemPickerLabel===input.id)label.textContent=text;};"
+    "for(const input of inputs)update(input);window.addEventListener('cbe-item-picker-sync',event=>update(inputById.get(event.detail&&event.detail.id)));"
+    "for(const option of source.options){if(!option.value||option.value==='0')continue;const button=document.createElement('button');button.type='button';button.className='item-choice';button.dataset.itemId=option.value;button.dataset.category=option.dataset.category||'';button.dataset.search=option.textContent.toLowerCase();const title=document.createElement('strong');title.textContent=option.textContent;const meta=document.createElement('span');meta.textContent=labels.get(button.dataset.category)||'未分类';button.append(title,meta);button.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value=option.value;update(input);error.textContent='';hide();});choices.push(button);list.appendChild(button);}"
+    "const apply=()=>{const wanted=category.value,keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=(wanted==='all'||choice.dataset.category===wanted)&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 件物品`;empty.hidden=shown!==0;};"
+    "const show=id=>{if(!inputById.has(id))return;activeId=id;modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};"
+    "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=document.querySelector(`[data-item-picker-open=\"${activeId}\"]`);if(trigger)trigger.focus();}"
+    "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',apply);search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});apply();};"
+    "const setupMonsterDrops=()=>{const box=document.querySelector('#monster-drop-list'),add=document.querySelector('#monster-drop-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-drop-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-drop-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-drop-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),rate=row.querySelector('[data-drop-rate]');if(input)input.value='0';if(rate)rate.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
     "const setupUpdateFilter=()=>{"
     "const input=document.querySelector('#update-resource-filter');"
     "const select=document.querySelector('#update-resource-select');if(!input||!select)return;"
@@ -524,7 +506,7 @@ static const char g_vm_mock_admin_script[] =
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
-    "setupItemPicker();setupUpdateFilter();setupNpcKinds();});"
+    "setupItemPicker();setupMonsterDrops();setupUpdateFilter();setupNpcKinds();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -3287,7 +3269,8 @@ static void vm_mock_admin_render_content_page(char *response,
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\">",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
@@ -3590,7 +3573,9 @@ static void vm_mock_admin_render_content_page(char *response,
             "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
         vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
         vm_mock_admin_text_appendf(&page,
-            "</label>");
+            "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\"%s>完成后不可再次接取</option><option value=\"1\"%s>完成后允许再次接取</option></select></label>",
+            row->seed.taskRepeatable ? "" : " selected",
+            row->seed.taskRepeatable ? " selected" : "");
         vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount,
                                              &row->seed);
         vm_mock_admin_text_appendf(&page,
@@ -3645,7 +3630,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
     vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
-        "</label>");
+        "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\" selected>完成后不可再次接取</option><option value=\"1\">完成后允许再次接取</option></select></label>");
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
@@ -3711,19 +3696,77 @@ static const char *vm_mock_admin_item_category_name(bool equipment, u8 category)
     }
 }
 
-static void vm_mock_admin_render_item_grant_form(
-    vm_mock_admin_text *page, const char *account,
-    const u32 *roleIds, char roleNames[][128], u32 roleCount)
+static void vm_mock_admin_render_item_picker_field(
+    vm_mock_admin_text *page, const char *pickerId, const char *fieldName,
+    const char *label, u32 itemId, bool required)
+{
+    const vm_net_mock_shop_catalog_item *item =
+        itemId != 0 ? vm_net_mock_find_shop_catalog_item(itemId) : NULL;
+    char itemNameUtf8[128];
+
+    if (page == NULL || pickerId == NULL || pickerId[0] == 0 ||
+        fieldName == NULL || fieldName[0] == 0 || label == NULL)
+    {
+        return;
+    }
+    memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+    if (item != NULL)
+        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                      sizeof(itemNameUtf8));
+    vm_mock_admin_text_appendf(
+        page, "<div class=\"item-field\"><span>");
+    vm_mock_admin_text_append_html(page, label);
+    vm_mock_admin_text_appendf(
+        page,
+        "</span><input id=\"%s\" type=\"hidden\" name=\"%s\" value=\"%u\" data-item-picker-input%s>"
+        "<button class=\"item-picker-trigger\" type=\"button\" data-item-picker-open=\"%s\" aria-haspopup=\"dialog\" aria-controls=\"item-picker-modal\">"
+        "<span data-item-picker-label=\"%s\">",
+        pickerId, fieldName, itemId,
+        required ? " data-item-picker-required" : "", pickerId, pickerId);
+    if (itemNameUtf8[0] != 0)
+    {
+        vm_mock_admin_text_appendf(page, "[%u] ", itemId);
+        vm_mock_admin_text_append_html(page, itemNameUtf8);
+    }
+    else if (itemId != 0)
+    {
+        vm_mock_admin_text_appendf(page, "未知物品 #%u", itemId);
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(page, "未选择物品");
+    }
+    vm_mock_admin_text_appendf(
+        page, "</span><small>分类搜索</small></button></div>");
+}
+
+/* Requirement IDs are polymorphic (item or monster).  Keep their numeric
+ * field editable for monster requirements, but attach the same item chooser
+ * when the administrator is configuring a collect-item requirement. */
+static void vm_mock_admin_render_item_picker_button(
+    vm_mock_admin_text *page, const char *targetId, const char *label)
+{
+    if (page == NULL || targetId == NULL || targetId[0] == 0 || label == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<button class=\"item-picker-trigger compact\" type=\"button\" data-item-picker-open=\"%s\" aria-haspopup=\"dialog\" aria-controls=\"item-picker-modal\">"
+        "<span>", targetId);
+    vm_mock_admin_text_append_html(page, label);
+    vm_mock_admin_text_appendf(
+        page,
+        "</span><small data-item-picker-label=\"%s\">从物品目录选择</small></button>",
+        targetId);
+}
+
+static void vm_mock_admin_render_item_picker_modal(vm_mock_admin_text *page)
 {
     bool equipmentCategories[256];
     bool itemCategories[256];
     u32 itemCount = vm_net_mock_load_shop_catalog();
 
-    if (page == NULL || account == NULL || account[0] == 0 ||
-        roleIds == NULL || roleNames == NULL || roleCount == 0)
-    {
+    if (page == NULL)
         return;
-    }
     memset(equipmentCategories, 0, sizeof(equipmentCategories));
     memset(itemCategories, 0, sizeof(itemCategories));
     for (u32 i = 0; i < itemCount; ++i)
@@ -3734,35 +3777,15 @@ static void vm_mock_admin_render_item_grant_form(
         else
             itemCategories[item->category] = true;
     }
-
     vm_mock_admin_text_appendf(
         page,
-        "<div class=\"item-grant\"><h2>给予物品</h2>"
-        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
-        "<input type=\"hidden\" name=\"action\" value=\"grant-item\">"
-        "<input type=\"hidden\" name=\"account\" value=\"");
-    vm_mock_admin_text_append_html(page, account);
-    vm_mock_admin_text_appendf(
-        page,
-        "\"><label><span>角色</span><select name=\"role\" required>");
-    for (u32 i = 0; i < roleCount; ++i)
-    {
-        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", roleIds[i]);
-        vm_mock_admin_text_append_html(page, roleNames[i]);
-        vm_mock_admin_text_appendf(page, "（ID %u）</option>", roleIds[i]);
-    }
-    vm_mock_admin_text_appendf(
-        page,
-        "</select></label><div class=\"item-field\"><span>物品</span>"
-        "<button class=\"item-picker-trigger\" id=\"item-picker-open\" type=\"button\" aria-haspopup=\"dialog\" aria-controls=\"item-picker-modal\">"
-        "<span id=\"item-selected-name\">请选择物品</span><small>点击打开分类搜索</small></button>"
-        "<select id=\"item-select\" name=\"item\" hidden>"
-        "<option value=\"\" selected disabled>请选择物品</option>");
+        "<select id=\"item-picker-options\" hidden>");
     for (u32 i = 0; i < itemCount; ++i)
     {
         const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
         char itemNameUtf8[128];
 
+        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
         vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
                                       sizeof(itemNameUtf8));
         vm_mock_admin_text_appendf(
@@ -3774,12 +3797,9 @@ static void vm_mock_admin_render_item_grant_form(
     }
     vm_mock_admin_text_appendf(
         page,
-        "</select></div><label><span>数量</span>"
-        "<input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required>"
-        "</label><button type=\"submit\">给予物品</button>"
-        "<div class=\"item-modal\" id=\"item-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"item-picker-title\" hidden>"
+        "</select><div class=\"item-modal\" id=\"item-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"item-picker-title\" hidden>"
         "<section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"item-picker-title\">选择物品</h3>"
-        "<p>按分类或名称、物品 ID 快速查找</p></div><button class=\"item-picker-close\" id=\"item-picker-close\" type=\"button\" aria-label=\"关闭物品选择\">×</button></div>"
+        "<p>按分类、名称或物品 ID 快速查找</p></div><div class=\"item-picker-head-actions\"><button id=\"item-picker-clear\" type=\"button\">清空选择</button><button class=\"item-picker-close\" id=\"item-picker-close\" type=\"button\" aria-label=\"关闭物品选择\">×</button></div></div>"
         "<div class=\"item-picker-tools\"><label><span>物品分类</span><select id=\"item-category\"><option value=\"all\">全部分类</option>");
     for (u32 category = 0; category < 256; ++category)
     {
@@ -3804,8 +3824,42 @@ static void vm_mock_admin_render_item_grant_form(
         "</select></label><label><span>搜索</span><input id=\"item-search\" type=\"search\" placeholder=\"输入名称或物品 ID\" autocomplete=\"off\"></label></div>"
         "<div class=\"item-result-bar\"><span id=\"item-result-count\"></span><span class=\"item-picker-error\" id=\"item-picker-error\"></span></div>"
         "<div class=\"item-picker-list\" id=\"item-picker-list\"></div><p class=\"item-picker-empty\" id=\"item-picker-empty\" hidden>没有符合条件的物品</p>"
-        "</section></div></form>"
+        "</section></div>");
+}
+
+static void vm_mock_admin_render_item_grant_form(
+    vm_mock_admin_text *page, const char *account,
+    const u32 *roleIds, char roleNames[][128], u32 roleCount)
+{
+    if (page == NULL || account == NULL || account[0] == 0 ||
+        roleIds == NULL || roleNames == NULL || roleCount == 0)
+    {
+        return;
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-grant\"><h2>给予物品</h2>"
+        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"grant-item\">"
+        "<input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(page,
+        "\"><label><span>角色</span><select name=\"role\" required>");
+    for (u32 i = 0; i < roleCount; ++i)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", roleIds[i]);
+        vm_mock_admin_text_append_html(page, roleNames[i]);
+        vm_mock_admin_text_appendf(page, "（ID %u）</option>", roleIds[i]);
+    }
+    vm_mock_admin_text_appendf(page, "</select></label>");
+    vm_mock_admin_render_item_picker_field(page, "grant-item", "item",
+                                           "物品", 0, true);
+    vm_mock_admin_text_appendf(
+        page,
+        "<label><span>数量</span><input type=\"number\" name=\"amount\" min=\"1\" max=\"255\" value=\"1\" required></label>"
+        "<button type=\"submit\">给予物品</button></form>"
         "<p class=\"muted grant-note\">相同物品会叠加；新物品需要背包存在空位。装备也遵循现有背包存储规则。</p></div>");
+    vm_mock_admin_render_item_picker_modal(page);
 }
 
 static bool vm_mock_admin_shop_category_filter(const char *filter,
@@ -4010,7 +4064,8 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab on\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
         "<section class=\"card shop-card\">");
     if (status[0] != 0 && message[0] != 0)
     {
@@ -4187,7 +4242,8 @@ static void vm_mock_admin_render_update_page(char *response,
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>");
+        "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>");
     if (message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -4364,9 +4420,9 @@ static void vm_mock_admin_render_task_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>江湖OL 任务管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.list{height:100%%;overflow:auto;display:flex;flex-direction:column;gap:4px}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
-        "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}}</style></head><body><main class=\"wrap\">"
+        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
         "<div class=\"grid\"><aside class=\"card list\"><a class=\"button\" href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2>",
         taskCount);
     for (u32 i = 0; i < taskCount; ++i)
@@ -4405,10 +4461,11 @@ static void vm_mock_admin_render_task_page(char *response,
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>要求等级</span><input type=\"number\" name=\"level\" min=\"0\" max=\"255\" value=\"%u\" required></label><label class=\"field\"><span>前置任务 ID</span><input type=\"number\" name=\"prerequisite_task_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>", edit.level, edit.prerequisiteTaskId);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>难度</span><input type=\"number\" name=\"difficulty\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>分类</span><input type=\"number\" name=\"classification\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.difficulty, edit.classification);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>任务名称（最多31字节）</span><input name=\"name\" maxlength=\"31\" value=\""); vm_mock_admin_text_append_html(&page, nameUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>发布者（最多15字节）</span><input name=\"giver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, giverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>交付者（最多15字节）</span><input name=\"receiver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, receiverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label>");
-    vm_mock_admin_text_appendf(&page, "</div><div class=\"group\"><h2>任务目标</h2><div class=\"fields\"><label class=\"field\"><span>条件一类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type1", edit.requirementType1); vm_mock_admin_text_appendf(&page, "</label><label class=\"field\"><span>条件一目标 ID</span><input type=\"number\" name=\"requirement_id1\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>条件一数量</span><input type=\"number\" name=\"requirement_count1\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.requirementId1, edit.requirementCount1);
-    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>条件二类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type2", edit.requirementType2); vm_mock_admin_text_appendf(&page, "</label><label class=\"field\"><span>条件二目标 ID</span><input type=\"number\" name=\"requirement_id2\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>条件二数量</span><input type=\"number\" name=\"requirement_count2\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field wide\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">", edit.requirementId2, edit.requirementCount2); vm_mock_admin_text_append_html(&page, goalUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div>");
-    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\"><label class=\"field\"><span>接取给予物品 ID</span><input type=\"number\" name=\"given_item_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品 ID</span><input type=\"number\" name=\"reward_item_id\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品数量</span><input type=\"number\" name=\"reward_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品类型</span><input type=\"number\" name=\"reward_item_type\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.givenItemId, edit.givenItemCount, edit.rewardExp, edit.rewardMoney, edit.rewardItemId, edit.rewardItemCount, edit.rewardItemType); vm_mock_admin_text_append_html(&page, rewardUtf8); vm_mock_admin_text_appendf(&page, "\"></label></div></div>");
-    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品、2 为击败怪物；两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
+    vm_mock_admin_text_appendf(&page, "</div><div class=\"group\"><h2>任务目标</h2><div class=\"fields\"><label class=\"field\"><span>条件一类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type1", edit.requirementType1); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件一目标 ID</span><input id=\"task-requirement-1\" type=\"number\" name=\"requirement_id1\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId1); vm_mock_admin_render_item_picker_button(&page, "task-requirement-1", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件一数量</span><input type=\"number\" name=\"requirement_count1\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.requirementCount1);
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>条件二类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type2", edit.requirementType2); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件二目标 ID</span><input id=\"task-requirement-2\" type=\"number\" name=\"requirement_id2\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId2); vm_mock_admin_render_item_picker_button(&page, "task-requirement-2", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件二数量</span><input type=\"number\" name=\"requirement_count2\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field wide\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">", edit.requirementCount2); vm_mock_admin_text_append_html(&page, goalUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\">"); vm_mock_admin_render_item_picker_field(&page, "task-given-item", "given_item_id", "接取给予物品", edit.givenItemId, false); vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>", edit.givenItemCount, edit.rewardExp, edit.rewardMoney); vm_mock_admin_render_item_picker_field(&page, "task-reward-item", "reward_item_id", "奖励物品", edit.rewardItemId, false); vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>奖励物品数量</span><input type=\"number\" name=\"reward_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品类型</span><input type=\"number\" name=\"reward_item_type\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.rewardItemCount, edit.rewardItemType); vm_mock_admin_text_append_html(&page, rewardUtf8); vm_mock_admin_text_appendf(&page, "\"></label></div></div>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品、2 为击败怪物；只有“收集物品”条件应使用目录选择器。两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
+    vm_mock_admin_render_item_picker_modal(&page);
     if (!createNew && edit.overridden)
     {
         vm_mock_admin_text_appendf(&page, "<form class=\"actions\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"delete-task-override\"><input type=\"hidden\" name=\"task_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">%s</button></form>", edit.taskId, edit.builtin ? "恢复 task.dsh 默认" : "删除自定义任务");
@@ -4419,6 +4476,104 @@ static void vm_mock_admin_render_task_page(char *response,
 }
 
 #include "web_admin_monsters.inc.c"
+
+static void vm_mock_admin_render_servers_page(char *response,
+                                              size_t responseCap,
+                                              const char *query)
+{
+    vm_mock_admin_text page;
+    vm_net_mock_login_server rows[VM_NET_MOCK_LOGIN_SERVER_MAX];
+    char status[16];
+    char message[256];
+    u32 rowCount = 0;
+    u32 enabledCount = 0;
+
+    memset(rows, 0, sizeof(rows));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    rowCount = vm_net_mock_login_server_admin_list(
+        rows, VM_NET_MOCK_LOGIN_SERVER_MAX);
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled)
+            ++enabledCount;
+    }
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(
+        &page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 服务器列表管理</title><style>"
+        "*{box-sizing:border-box}html,body{min-height:100%%}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.off{background:#fef3f2;color:#b42318}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.server-list{display:grid;gap:12px}.server{border:1px solid #e4e7ec;border-radius:9px;padding:13px}.server-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.server-head h3{font-size:16px;margin:0}.state{font-size:12px;font-weight:650}.state.on{color:#027a48}.state.off{color:#b42318}.fields{display:grid;grid-template-columns:110px minmax(160px,1.3fr) minmax(130px,1fr) 130px 110px 110px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.actions{display:flex;gap:8px;align-items:end}.create-fields{display:grid;grid-template-columns:120px minmax(170px,1.3fr) minmax(130px,1fr) 140px 110px 110px auto;gap:10px;align-items:end}.hint{margin:11px 0 0;color:#667085;font-size:12px;line-height:1.65}@media(max-width:940px){.fields,.create-fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:620px){.wrap{padding:16px 10px}.fields,.create-fields{grid-template-columns:1fr}.actions{display:grid;grid-template-columns:1fr 1fr}}</style>"
+        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">标题服务器列表 · 保存后影响下一次登录</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a></nav>"
+        "<section class=\"card\"><div class=\"summary\"><span class=\"badge\">已配置 %u / %u</span><span class=\"badge\">已启用 %u</span><span class=\"badge off\">已停用 %u</span></div>",
+        rowCount, VM_NET_MOCK_LOGIN_SERVER_MAX, enabledCount,
+        rowCount >= enabledCount ? rowCount - enabledCount : 0);
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (rowCount == 0)
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<p class=\"muted\">服务器目录无法从 MySQL 读取；登录响应不会使用本地硬编码替代。</p>");
+    }
+    vm_mock_admin_text_appendf(&page, "<div class=\"server-list\">");
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        char nameUtf8[128];
+        char labelUtf8[128];
+
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        memset(labelUtf8, 0, sizeof(labelUtf8));
+        vm_net_mock_gbk_label_to_utf8(rows[i].displayName, nameUtf8,
+                                      sizeof(nameUtf8));
+        vm_net_mock_gbk_label_to_utf8(rows[i].label, labelUtf8,
+                                      sizeof(labelUtf8));
+        vm_mock_admin_text_appendf(
+            &page,
+            "<article class=\"server\"><div class=\"server-head\"><h3>服务器 #%u</h3><span class=\"state %s\">%s</span></div>"
+            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-login-server\"><div class=\"fields\">"
+            "<label class=\"field\"><span>服务器 ID</span><input name=\"server_id\" type=\"number\" value=\"%u\" readonly></label>"
+            "<label class=\"field\"><span>显示名称（GBK ≤31字节）</span><input name=\"display_name\" maxlength=\"31\" value=\"",
+            rows[i].serverId, rows[i].enabled ? "on" : "off",
+            rows[i].enabled ? "已启用" : "已停用", rows[i].serverId);
+        vm_mock_admin_text_append_html(&page, nameUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\" required></label><label class=\"field\"><span>状态标签（GBK ≤31字节）</span><input name=\"status_label\" maxlength=\"31\" value=\"");
+        vm_mock_admin_text_append_html(&page, labelUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\" required></label><label class=\"field\"><span>颜色（0-16777215）</span><input name=\"display_color\" type=\"number\" min=\"0\" max=\"16777215\" value=\"%u\" required></label>"
+            "<label class=\"field\"><span>排序</span><input name=\"sort_order\" type=\"number\" min=\"0\" max=\"4294967295\" value=\"%u\" required></label>"
+            "<label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>启用</option><option value=\"0\"%s>停用</option></select></label>"
+            "<div class=\"actions\"><button type=\"submit\">保存</button></div></div></form>"
+            "<form class=\"actions\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"delete-login-server\"><input type=\"hidden\" name=\"server_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">删除</button></form></article>",
+            rows[i].displayColor, rows[i].sortOrder,
+            rows[i].enabled ? " selected" : "",
+            rows[i].enabled ? "" : " selected", rows[i].serverId);
+    }
+    vm_mock_admin_text_appendf(&page,
+        "</div></section><section class=\"card\"><h2>新增服务器</h2><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"create-login-server\"><div class=\"create-fields\">"
+        "<label class=\"field\"><span>服务器 ID</span><input name=\"server_id\" type=\"number\" min=\"1\" max=\"4294967295\" required></label>"
+        "<label class=\"field\"><span>显示名称</span><input name=\"display_name\" maxlength=\"31\" required></label>"
+        "<label class=\"field\"><span>状态标签</span><input name=\"status_label\" maxlength=\"31\" value=\"推荐\" required></label>"
+        "<label class=\"field\"><span>颜色（白色 16777215）</span><input name=\"display_color\" type=\"number\" min=\"0\" max=\"16777215\" value=\"16777215\" required></label>"
+        "<label class=\"field\"><span>排序</span><input name=\"sort_order\" type=\"number\" min=\"0\" max=\"4294967295\" value=\"0\" required></label>"
+        "<label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\">启用</option><option value=\"0\">停用</option></select></label><div class=\"actions\"><button type=\"submit\">新增服务器</button></div></div></form>"
+        "<p class=\"hint\">客户端确认的字段只有名称、状态标签、服务器 ID 和 24 位显示颜色；选择服务器后仍使用当前已连接的游戏服务，不会根据此页面配置切换 CBMS 主机或端口。最多配置 8 项，至少保留一个启用项。</p></section></main></body></html>");
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><p>服务器列表管理页面超过大小限制。</p>");
+    }
+}
 
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
@@ -4467,6 +4622,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_shop_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "servers") == 0)
+    {
+        vm_mock_admin_render_servers_page(response, responseCap, query);
+        return;
+    }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
@@ -4492,7 +4652,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
         ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
-        "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}"
+        "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
@@ -4503,7 +4663,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=tasks\">任务管理</a>"
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
-        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav><div class=\"grid\">"
+        "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><div class=\"accounts\">",
         g_vm_mock_service_account_db.accountCount);
 
@@ -4763,6 +4924,25 @@ static void vm_mock_admin_redirect_monster(vm_mock_service_socket client,
     vm_mock_admin_send_location(client, location, NULL);
 }
 
+static void vm_mock_admin_redirect_servers(vm_mock_service_socket client,
+                                           const char *status,
+                                           const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=servers&status=%s&message=%s",
+             statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
 static bool vm_mock_admin_form_u32(const char *body, const char *field,
                                    u32 maximum, u32 *valueOut)
 {
@@ -4946,6 +5126,20 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
             "任务文本无法转换为 GBK，或超过客户端安全字节长度");
         return;
     }
+    if ((task.givenItemId != 0 &&
+         vm_net_mock_find_shop_catalog_item(task.givenItemId) == NULL) ||
+        (task.rewardItemId != 0 &&
+         vm_net_mock_find_shop_catalog_item(task.rewardItemId) == NULL) ||
+        (task.requirementType1 == 1 && task.requirementId1 != 0 &&
+         vm_net_mock_find_shop_catalog_item(task.requirementId1) == NULL) ||
+        (task.requirementType2 == 1 && task.requirementId2 != 0 &&
+         vm_net_mock_find_shop_catalog_item(task.requirementId2) == NULL))
+    {
+        vm_mock_admin_redirect_tasks(
+            client, taskId, "error",
+            "任务中的物品 ID 不在物品目录中");
+        return;
+    }
     if (!vm_net_mock_task_admin_save(&task, &error))
     {
         vm_mock_admin_redirect_tasks(client, taskId, "error",
@@ -4999,17 +5193,42 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "exp", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
                                 &row.exp) ||
         !vm_mock_admin_form_u32(body, "gold", VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX,
-                                &row.gold) ||
-        !vm_mock_admin_form_u32(body, "drop_item_id", 0xffffffffu,
-                                &row.dropItemId) ||
-        !vm_mock_admin_form_u32(body, "drop_rate", 100u,
-                                &row.dropRatePercent))
+                                &row.gold))
     {
         vm_mock_admin_redirect_monster(client, row.enemyId, "error",
                                        "怪物表单字段不完整或数值越界");
         return;
     }
     row.family = (u8)family;
+    for (u8 slot = 0; slot < VM_NET_MOCK_MONSTER_DROP_MAX; ++slot)
+    {
+        char itemField[48];
+        char rateField[48];
+        u32 itemId = 0;
+        u32 rate = 0;
+
+        snprintf(itemField, sizeof(itemField), "drop_item_id_%u", (u32)slot);
+        snprintf(rateField, sizeof(rateField), "drop_rate_%u", (u32)slot);
+        if (!vm_mock_admin_form_u32(body, itemField, 0xffffffffu, &itemId) ||
+            !vm_mock_admin_form_u32(body, rateField, 100u, &rate))
+        {
+            vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                           "掉落表单字段不完整或数值越界");
+            return;
+        }
+        if (itemId == 0 && rate == 0)
+            continue;
+        if (itemId == 0 || rate == 0 ||
+            row.dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
+        {
+            vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                           "每条掉落都必须同时选择物品和概率");
+            return;
+        }
+        row.drops[row.dropCount].itemId = itemId;
+        row.drops[row.dropCount].ratePercent = (u8)rate;
+        ++row.dropCount;
+    }
     if (!vm_net_mock_monster_admin_save(&row, &error))
     {
         vm_mock_admin_redirect_monster(
@@ -5122,6 +5341,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 y = 0;
     u32 kind = 0;
     u32 taskId = 0;
+    u32 taskRepeatable = 0;
     u32 orientation = 0;
     u32 actorImageCount = 0;
     u32 instanceX = 0;
@@ -5222,6 +5442,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
         !vm_mock_admin_form_u32(body, "kind", VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
         !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
+        !vm_mock_admin_form_u32(body, "task_repeatable", 1, &taskRepeatable) ||
         !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
@@ -5238,6 +5459,12 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "绑定任务不存在或已停用");
+        return;
+    }
+    if (taskId == 0 && taskRepeatable != 0)
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "只有绑定任务的 NPC 才能设置重复接取");
         return;
     }
     if (kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
@@ -5353,6 +5580,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.y = (u16)y;
     seed.kind = (u16)kind;
     seed.taskId = taskId;
+    seed.taskRepeatable = taskRepeatable != 0;
     seed.orientation = (u16)orientation;
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;
@@ -5521,6 +5749,76 @@ static void vm_mock_admin_handle_shop_action(vm_mock_service_socket client,
         enabled ? "商品价格已保存并上架" : "商品价格已保存并下架");
 }
 
+static void vm_mock_admin_handle_login_server_action(
+    vm_mock_service_socket client, const char *action, const char *body)
+{
+    vm_net_mock_login_server row;
+    char displayUtf8[128];
+    char labelUtf8[128];
+    char enabledText[8];
+    const char *error = NULL;
+    u32 value = 0;
+
+    memset(&row, 0, sizeof(row));
+    memset(displayUtf8, 0, sizeof(displayUtf8));
+    memset(labelUtf8, 0, sizeof(labelUtf8));
+    memset(enabledText, 0, sizeof(enabledText));
+    if (!vm_mock_admin_form_u32(body, "server_id", 0xffffffffu,
+                                &row.serverId) || row.serverId == 0)
+    {
+        vm_mock_admin_redirect_servers(client, "error", "服务器 ID 无效");
+        return;
+    }
+    if (strcmp(action, "delete-login-server") == 0)
+    {
+        if (!vm_net_mock_login_server_admin_delete(row.serverId, &error))
+        {
+            vm_mock_admin_redirect_servers(
+                client, "error", error ? error : "服务器删除失败");
+            return;
+        }
+        vm_mock_admin_redirect_servers(client, "ok", "服务器已删除");
+        return;
+    }
+    if ((strcmp(action, "save-login-server") != 0 &&
+         strcmp(action, "create-login-server") != 0) ||
+        !vm_mock_admin_form_value(body, "display_name", displayUtf8,
+                                  sizeof(displayUtf8)) ||
+        !vm_mock_admin_form_value(body, "status_label", labelUtf8,
+                                  sizeof(labelUtf8)) ||
+        !vm_mock_admin_utf8_to_gbk_text(displayUtf8, row.displayName,
+                                        sizeof(row.displayName), false) ||
+        !vm_mock_admin_utf8_to_gbk_text(labelUtf8, row.label,
+                                        sizeof(row.label), false) ||
+        strlen(row.displayName) >= sizeof(row.displayName) ||
+        strlen(row.label) >= sizeof(row.label) ||
+        !vm_mock_admin_form_u32(body, "display_color", 0x00ffffffu,
+                                &row.displayColor) ||
+        !vm_mock_admin_form_u32(body, "sort_order", 0xffffffffu,
+                                &row.sortOrder) ||
+        !vm_mock_admin_form_value(body, "enabled", enabledText,
+                                  sizeof(enabledText)) ||
+        (strcmp(enabledText, "0") != 0 && strcmp(enabledText, "1") != 0))
+    {
+        vm_mock_admin_redirect_servers(
+            client, "error", "服务器名称、标签、颜色、排序或状态无效");
+        return;
+    }
+    value = strcmp(enabledText, "1") == 0 ? 1u : 0u;
+    row.enabled = value != 0;
+    if (!vm_net_mock_login_server_admin_save(&row, &error))
+    {
+        vm_mock_admin_redirect_servers(
+            client, "error", error ? error : "服务器保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_servers(
+        client, "ok",
+        strcmp(action, "create-login-server") == 0 ?
+            "服务器已新增；下次登录会收到该列表" :
+            "服务器配置已保存；下次登录会收到最新列表");
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
@@ -5576,6 +5874,13 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     if (strcmp(action, "save-shop-item") == 0)
     {
         vm_mock_admin_handle_shop_action(client, body);
+        return;
+    }
+    if (strcmp(action, "save-login-server") == 0 ||
+        strcmp(action, "create-login-server") == 0 ||
+        strcmp(action, "delete-login-server") == 0)
+    {
+        vm_mock_admin_handle_login_server_action(client, action, body);
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))

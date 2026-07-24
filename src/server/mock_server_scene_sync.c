@@ -188,7 +188,8 @@ static bool vm_net_mock_append_misc_player_type_object(u8 *out, u32 outCap, u32 
     }
     else if (subtype == 32)
     {
-        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard", 0))
+        if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
+                                       vm_net_mock_role_active_exp_card_flag()))
             return false;
     }
     else
@@ -1573,7 +1574,7 @@ static bool vm_net_mock_validate_xse_task_resources(void)
              strcmp(copperStageSeeds[i].displayName,
                     "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") == 0); /* 大侠郭靖 */
     }
-    printf("[info][network] mock_scene_npc_alias_validate scene=%s rows=%u total=%u guojing=%u policy=guojing-only source=00_legacy-sce evidence=runtime-empty-c00+SCE2\n",
+    printf("[info][network] mock_scene_npc_exact_validate scene=%s rows=%u total=%u guojing=%u policy=exact-scene-only\n",
            copperStageScene, copperStageCount, copperStageTotal,
            foundGuoJing ? 1u : 0u);
     memset(swordValleySeeds, 0, sizeof(swordValleySeeds));
@@ -1592,7 +1593,6 @@ static bool vm_net_mock_validate_xse_task_resources(void)
            foundBlacksmith ? 1u : 0u, foundMonkey ? 1u : 0u,
            foundTestTaskNpc ? 1u : 0u);
     if (loadedCount != sizeof(scripts) / sizeof(scripts[0]) ||
-        copperStageCount < 1 || copperStageTotal < 1 || !foundGuoJing ||
         swordValleyCount < 2 || swordValleyTotal < 2 ||
         !foundBlacksmith || !foundMonkey || foundTestTaskNpc)
     {
@@ -1606,7 +1606,6 @@ static bool vm_net_mock_validate_xse_task_resources(void)
                foundTestTaskNpc ? 1u : 0u);
     }
     return loadedCount == sizeof(scripts) / sizeof(scripts[0]) &&
-           copperStageCount >= 1 && copperStageTotal >= 1 && foundGuoJing &&
            swordValleyCount >= 2 && swordValleyTotal >= 2 &&
            foundBlacksmith && foundMonkey && !foundTestTaskNpc;
 }
@@ -1948,12 +1947,19 @@ static bool vm_net_mock_task_definition_available(
     const vm_net_mock_task_definition *task,
     const vm_net_mock_role_state *role,
     const vm_net_mock_task_state_list_row *states,
-    u32 stateCount)
+    u32 stateCount,
+    bool allowCompletedRepeat)
 {
+    const vm_net_mock_task_state_list_row *persisted = NULL;
     const vm_net_mock_task_state_list_row *prerequisite = NULL;
 
-    if (task == NULL || role == NULL || role->level < task->level ||
-        vm_net_mock_task_state_list_find(states, stateCount, task->taskId) != NULL)
+    if (task == NULL || role == NULL || role->level < task->level)
+    {
+        return false;
+    }
+    persisted = vm_net_mock_task_state_list_find(states, stateCount, task->taskId);
+    if (persisted != NULL &&
+        !(allowCompletedRepeat && persisted->state == 3))
     {
         return false;
     }
@@ -1962,6 +1968,89 @@ static bool vm_net_mock_task_definition_available(
     prerequisite = vm_net_mock_task_state_list_find(states, stateCount,
                                                     task->prerequisiteTaskId);
     return prerequisite != NULL && prerequisite->state == 3;
+}
+
+/* The CBE action=4 follow-up (6/10 then 6/11) only identifies a task.  Record
+ * the offer that generated it on the service session, so repeatability remains
+ * scoped to its NPC binding rather than becoming a global task-id bypass. */
+static void vm_net_mock_task_offer_context_reset(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session != NULL)
+    {
+        memset(session->taskOfferContexts, 0,
+               sizeof(session->taskOfferContexts));
+    }
+}
+
+static void vm_net_mock_task_offer_context_record(u32 taskId, u32 actorId,
+                                                   bool repeatable,
+                                                   const char *scene)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_task_offer_context *slot = NULL;
+
+    if (session == NULL || role == NULL || taskId == 0 || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX; ++i)
+    {
+        vm_mock_service_task_offer_context *candidate =
+            &session->taskOfferContexts[i];
+        if (candidate->taskId == taskId && candidate->roleId == role->roleId)
+        {
+            slot = candidate;
+            break;
+        }
+        if (slot == NULL && candidate->taskId == 0)
+            slot = candidate;
+    }
+    if (slot == NULL)
+        return;
+    memset(slot, 0, sizeof(*slot));
+    slot->roleId = role->roleId;
+    slot->taskId = taskId;
+    slot->actorId = actorId;
+    slot->repeatable = repeatable;
+    snprintf(slot->scene, sizeof(slot->scene), "%s", scene);
+}
+
+static bool vm_net_mock_task_offer_context_consume(u32 taskId,
+                                                    bool *repeatableOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *scene = vm_net_mock_current_scene_name();
+
+    if (repeatableOut != NULL)
+        *repeatableOut = false;
+    if (session == NULL || role == NULL || taskId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX; ++i)
+    {
+        vm_mock_service_task_offer_context *context =
+            &session->taskOfferContexts[i];
+        if (context->taskId != taskId || context->roleId != role->roleId ||
+            strcmp(context->scene, scene) != 0)
+        {
+            continue;
+        }
+        if (repeatableOut != NULL)
+            *repeatableOut = context->repeatable;
+        memset(context, 0, sizeof(*context));
+        return true;
+    }
+    return false;
 }
 
 static u32 vm_net_mock_scene_npc_seed_priority(
@@ -1987,8 +2076,8 @@ static u32 vm_net_mock_scene_npc_seed_priority(
             return 500;
         if (persisted != NULL && persisted->state == 1)
             return 400;
-        if (persisted == NULL &&
-            vm_net_mock_task_definition_available(task, role, states, stateCount))
+        if (vm_net_mock_task_definition_available(task, role, states, stateCount,
+                                                  seed->taskRepeatable))
         {
             return 300;
         }
@@ -2030,7 +2119,8 @@ static u32 vm_net_mock_scene_npc_seed_priority(
                 priority = 350;
         }
         else if (persisted == NULL && ref->offer &&
-                 vm_net_mock_task_definition_available(task, role, states, stateCount))
+                 vm_net_mock_task_definition_available(task, role, states,
+                                                       stateCount, false))
         {
             if (priority < 300)
                 priority = 300;
@@ -2168,19 +2258,42 @@ static u32 vm_net_mock_select_scene_npcinfo_seeds(
     return copyCount;
 }
 
-static bool vm_net_mock_task_accept(u32 roleId, u32 taskId)
+static bool vm_net_mock_task_accept(u32 roleId, u32 taskId,
+                                    bool replaceCompletedState)
 {
     char accountHex[129];
     char query[768];
+    bool transactionStarted = false;
 
     if (roleId == 0 || taskId == 0 || !vm_net_mock_mysql_account_hex(accountHex))
         return false;
+    if (replaceCompletedState)
+    {
+        if (!vm_mysql_exec("START TRANSACTION"))
+            return false;
+        transactionStarted = true;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_tasks "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u "
+                 "AND task_state=3",
+                 accountHex, roleId, taskId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_tasks"
              "(account_id,role_id,task_id,task_state,progress1,progress2) "
              "VALUES(CAST(X'%s' AS CHAR),%u,%u,1,0,0)",
              accountHex, roleId, taskId);
-    return vm_mysql_exec(query);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    if (!transactionStarted || vm_mysql_exec("COMMIT"))
+        return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    return false;
 }
 
 static bool vm_net_mock_task_state_store(u32 roleId, u32 taskId, u8 state)
@@ -2194,6 +2307,25 @@ static bool vm_net_mock_task_state_store(u32 roleId, u32 taskId, u8 state)
              "UPDATE account_role_tasks SET task_state=%u "
              "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
              state, accountHex, roleId, taskId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_task_state_restore(
+    u32 roleId, const vm_net_mock_task_state_list_row *state)
+{
+    char accountHex[129];
+    char query[768];
+
+    if (roleId == 0 || state == NULL || state->taskId == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_tasks SET task_state=%u,progress1=%u,progress2=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
+             state->state, state->progress1, state->progress2,
+             accountHex, roleId, state->taskId);
     return vm_mysql_exec(query);
 }
 
@@ -2784,6 +2916,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             break;
         }
     }
+    if (matchedSeed != NULL)
+        vm_net_mock_task_offer_context_reset();
     dialogText = vm_net_mock_npc_dialog_text(actorId);
     memset(&taskState, 0, sizeof(taskState));
     memset(&xseSummary, 0, sizeof(xseSummary));
@@ -2879,7 +3013,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             if (state == 0 && ref->offer &&
                 vm_net_mock_task_definition_available(task, activeRole,
                                                       allTaskStates,
-                                                      allTaskStateCount) &&
+                                                      allTaskStateCount, false) &&
                 optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
             {
                 optionTasks[optionCount] = task;
@@ -2949,14 +3083,19 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
         if (task != NULL && !duplicate && optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
         {
-            if (state == 0 &&
+            if ((state == 0 ||
+                 (state == 3 && matchedSeed->taskRepeatable)) &&
                 vm_net_mock_task_definition_available(task, activeRole,
                                                       allTaskStates,
-                                                      allTaskStateCount))
+                                                      allTaskStateCount,
+                                                      matchedSeed->taskRepeatable))
             {
                 optionTasks[optionCount] = task;
                 optionSubmits[optionCount] = false;
                 optionCount += 1;
+                vm_net_mock_task_offer_context_record(
+                    task->taskId, matchedSeed->actorId,
+                    matchedSeed->taskRepeatable, scene);
             }
             else if (state == 2)
             {
@@ -2967,7 +3106,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
         if (task != NULL)
         {
-            if (state == 0)
+            if (state == 0 || (state == 3 && matchedSeed->taskRepeatable))
                 dialogText = task->offerDialog[0] != 0
                                  ? task->offerDialog
                                  : "\xce\xd2\xd5\xe2\xc0\xef\xd3\xd0\xd2\xbb\xcf\xee\xc8\xce\xce\xf1\xa3\xac\xc4\xe3\xd4\xb8\xd2\xe2\xb0\xef\xc3\xa6\xc2\xf0\xa3\xbf";
@@ -4530,9 +4669,14 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", NULL, 0) ||
                 !vm_net_mock_put_object_raw(out, outCap, &pos, "awardinfo",
                                             awardInfo, (u16)awardInfoLen) ||
-                !vm_net_mock_put_object_raw(out, outCap, &pos, "taskdes",
-                                            (const u8 *)submitSuccessText,
-                                            (u16)strlen(submitSuccessText)))
+                /* case 4 reads taskdes through the WT string accessor
+                 * (a2+64/a2+84), unlike iteminfo/awardinfo which are raw
+                 * stream blobs.  The inner BE length is therefore part of
+                 * this field's contract; a raw GBK payload makes its first
+                 * two glyph bytes look like a huge length and overruns the
+                 * client's fixed submit-message buffer. */
+                !vm_net_mock_put_object_string(out, outCap, &pos, "taskdes",
+                                               submitSuccessText))
             {
                 return 0;
             }
@@ -4688,17 +4832,35 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (object.subtype == 11)
         {
             vm_net_mock_task_state_list_row allStates[VM_NET_MOCK_TASK_CATALOG_MAX];
+            const vm_net_mock_task_state_list_row *previousState = NULL;
             u32 allStateCount = 0;
             bool canAccept = false;
+            bool offeredByNpc = false;
+            bool repeatableOffer = false;
+            bool replacingCompletedState = false;
 
             responseSubtype = 11;
             if (taskDefinition != NULL)
             {
+                offeredByNpc = vm_net_mock_task_offer_context_consume(
+                    taskId, &repeatableOffer);
                 canAccept = vm_net_mock_task_state_list_load(
-                                activeRole->roleId, false, allStates,
-                                VM_NET_MOCK_TASK_CATALOG_MAX, &allStateCount) &&
-                            vm_net_mock_task_definition_available(
-                                taskDefinition, activeRole, allStates, allStateCount);
+                    activeRole->roleId, false, allStates,
+                    VM_NET_MOCK_TASK_CATALOG_MAX, &allStateCount);
+                if (canAccept)
+                {
+                    previousState = vm_net_mock_task_state_list_find(
+                        allStates, allStateCount, taskId);
+                    replacingCompletedState = offeredByNpc && repeatableOffer &&
+                                              previousState != NULL &&
+                                              previousState->state == 3;
+                    canAccept = vm_net_mock_task_definition_available(
+                        taskDefinition, activeRole, allStates, allStateCount,
+                        replacingCompletedState) &&
+                                vm_net_mock_task_backpack_can_receive(
+                                    activeRole, taskDefinition->givenItemId,
+                                    taskDefinition->givenItemCount, NULL);
+                }
             }
             else
             {
@@ -4706,18 +4868,23 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                                                         taskId, &taskState) &&
                             !taskState.found;
             }
-            result = canAccept && vm_net_mock_task_accept(activeRole->roleId, taskId)
+            result = canAccept && vm_net_mock_task_accept(activeRole->roleId, taskId,
+                                                           replacingCompletedState)
                          ? 0
                          : 1;
             if (result == 0 && taskDefinition != NULL &&
                 !vm_net_mock_task_grant_accept_item(activeRole, taskDefinition))
             {
-                (void)vm_net_mock_task_delete(activeRole->roleId, taskId);
+                if (replacingCompletedState)
+                    (void)vm_net_mock_task_state_restore(activeRole->roleId,
+                                                         previousState);
+                else
+                    (void)vm_net_mock_task_delete(activeRole->roleId, taskId);
                 result = 1;
             }
             if (result == 0 &&
                 (!vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) ||
-                 !taskState.found))
+                 !taskState.found || taskState.state != 1))
             {
                 result = 1;
             }
@@ -4820,12 +4987,6 @@ typedef struct
     u16 x;
     u16 y;
 } vm_net_mock_task_transport_target;
-
-static bool vm_net_mock_task_transport_legacy_scene_key(
-    const char *scene, char *out, size_t outCap)
-{
-    return vm_net_mock_scene_resource_legacy_alias(scene, out, outCap);
-}
 
 static bool vm_net_mock_task_transport_read_smap_row(
     const u8 *data, u32 len, u32 columnCount, u32 *pos,
@@ -5001,7 +5162,6 @@ static bool vm_net_mock_task_transport_resolve_catalog(
             else
             {
                 vm_net_mock_scene_npcinfo_seed seeds[16];
-                char legacyScene[64];
                 u32 seedCount = vm_net_mock_collect_scene_npcinfo_seeds(
                     scene, seeds, 16, NULL, NULL);
                 bool receiverFound = false;
@@ -5022,31 +5182,6 @@ static bool vm_net_mock_task_transport_resolve_catalog(
                         scene, task->receiver))
                 {
                     receiverFound = true;
-                }
-                if (!receiverFound &&
-                    vm_net_mock_task_transport_legacy_scene_key(
-                        scene, legacyScene, sizeof(legacyScene)))
-                {
-                    seedCount = vm_net_mock_collect_scene_npcinfo_seeds(
-                        legacyScene, seeds, 16, NULL, NULL);
-                    for (u32 seedIndex = 0; seedIndex < seedCount; ++seedIndex)
-                    {
-                        if (task->receiver[0] != 0 &&
-                            strcmp(seeds[seedIndex].displayName,
-                                   task->receiver) == 0)
-                        {
-                            receiverFound = true;
-                            x = seeds[seedIndex].x;
-                            y = seeds[seedIndex].y;
-                            break;
-                        }
-                    }
-                    if (!receiverFound &&
-                        vm_net_mock_task_transport_scene_contains_npc(
-                            legacyScene, task->receiver))
-                    {
-                        receiverFound = true;
-                    }
                 }
                 if (!receiverFound)
                     continue;
