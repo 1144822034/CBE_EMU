@@ -342,6 +342,28 @@ static vm_net_mock_monster_resource_label
         sizeof(g_vm_net_mock_monster_entries[0])];
 static bool g_vm_net_mock_monster_resource_labels_loaded = false;
 
+/* These targets are present as structured task.dsh kill requirements but do
+ * not occur in automonster.dsh.  If the normal SCE2 scan cannot identify
+ * them, retain their task names and provenance instead of showing anonymous
+ * editable monsters. */
+typedef struct
+{
+    u16 enemyId;
+    const char *displayName;
+    const char *source;
+} vm_net_mock_monster_task_only_label;
+
+static const vm_net_mock_monster_task_only_label
+    g_vm_net_mock_monster_task_only_labels[] = {
+        { 15, "\xB1\xCC\xD6\xF1\xBE\xDE\xC9\xDF", "task.dsh#709" }, /* 碧竹巨蛇 */
+        { 23, "\xDA\xA4\xBB\xF0\xF7\xE8\xF7\xEB", "task.dsh#5004" }, /* 冥火麒麟 */
+        { 38, "\xBB\xF0\xB7\xEF\xBB\xCB", "task.dsh#112" }, /* 火凤凰 */
+        { 44, "\xBB\xF0\xF2\xF3\xC9\xDF", "task.dsh#407" }, /* 火蝮蛇 */
+        { 63, "\xC7\xE0\xC1\xFA\xCD\xF5", "task.dsh#5007" }, /* 青龙王 */
+        { 65, "\xB6\xAB\xB7\xBD\xB2\xBB\xB0\xDC", "task.dsh#5009" }, /* 东方不败 */
+        {300, "\xC1\xB6\xD3\xFC\xC4\xA7\xCD\xB7", "task.dsh#5010" }  /* 炼狱魔头 */
+    };
+
 static void vm_net_mock_monster_resource_labels_load(void)
 {
     u32 catalogCount = 0;
@@ -351,6 +373,7 @@ static void vm_net_mock_monster_resource_labels_load(void)
     g_vm_net_mock_monster_resource_labels_loaded = true;
     memset(g_vm_net_mock_monster_resource_labels, 0,
            sizeof(g_vm_net_mock_monster_resource_labels));
+
     catalogCount = vm_net_mock_load_auto_monster_catalog();
 
     for (u32 catalogIndex = 0; catalogIndex < catalogCount; ++catalogIndex)
@@ -408,6 +431,35 @@ static void vm_net_mock_monster_resource_labels_load(void)
                         off = end - 1;
                 }
             }
+        }
+    }
+
+    /* SCE labels win whenever a task target later gains an authored spawn.
+     * Only unresolved task-only entries retain the explicit task.dsh source. */
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_monster_task_only_labels) /
+                 sizeof(g_vm_net_mock_monster_task_only_labels[0]);
+         ++i)
+    {
+        const vm_net_mock_monster_task_only_label *label =
+            &g_vm_net_mock_monster_task_only_labels[i];
+        int monsterIndex = vm_net_mock_monster_catalog_index(label->enemyId);
+
+        if (monsterIndex < 0)
+            continue;
+        if (g_vm_net_mock_monster_resource_labels[monsterIndex].displayName[0] == 0)
+        {
+            snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex].displayName,
+                     sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                .displayName),
+                     "%s", label->displayName);
+        }
+        if (g_vm_net_mock_monster_resource_labels[monsterIndex].firstScene[0] == 0)
+        {
+            snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex].firstScene,
+                     sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                .firstScene),
+                     "%s", label->source);
         }
     }
 }
