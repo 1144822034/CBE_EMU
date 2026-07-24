@@ -935,27 +935,19 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
          *
          * That locally-created screen is nevertheless a fresh scene shell.  The
          * normal 30/1 path rearms the one-shot 27/11 NPC catalog, but this 30/2
-         * completion deliberately bypasses 30/1.  Rearm it explicitly here and,
-         * once target resources are ready, seed the catalog before task rows so
-         * task prompt icons are rebuilt against the newly-created NPC nodes.
+         * completion deliberately bypasses 30/1.  Arm the catalog here, but do
+         * not consume it in this 2/3 response: the client follows the position
+         * completion with its explicit 25/5 + 2/3 + 27/11 + 7/42 post-enter
+         * request.  That is the first response whose 27/11 parser runs against
+         * the completed destination shell.  Consuming it before 30/2 leaves that
+         * real request with an empty catalog and the return screen without NPCs.
          */
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
         targetNpcCount = vm_net_mock_scene_room_npc_seed_count(target.scene);
-        if (resourcesReady && targetNpcCount > 0)
-        {
-            if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                               target.scene,
-                                                               "scene-change-full-bootstrap"))
-            {
-                return 0;
-            }
-            objectCount += 1;
-        }
-        printf("[info][network] mock_scene_npc_rearm scene=%s trigger=scene-change-full-bootstrap resources_ready=%u npcnum=%u immediate=%u evidence=JianghuOL.CBE:0x01037998+0x01039770\n",
+        printf("[info][network] mock_scene_npc_rearm scene=%s trigger=scene-change-full-bootstrap resources_ready=%u npcnum=%u immediate=0 next=scene-change-post-enter-followup evidence=JianghuOL.CBE:0x01037998+0x01039770\n",
                target.scene,
                resourcesReady ? 1u : 0u,
-               (u32)targetNpcCount,
-               (resourcesReady && targetNpcCount > 0) ? 1u : 0u);
+               (u32)targetNpcCount);
         if (!vm_net_mock_append_scene_resource_followup_objects(out, outCap, &pos, &objectCount,
                                                                target.scene,
                                                                true, true, true, true, false, false, false))
