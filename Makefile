@@ -49,12 +49,9 @@ CLIENT_CPPFLAGS := -DNETWORK_SUPPORT -DCBE_CLIENT_ONLY
 SERVER_CPPFLAGS := -DNETWORK_SUPPORT -DCBE_SERVER_ONLY
 CFLAGS += -g -O2 -std=gnu11 -ffunction-sections -fdata-sections -w
 LDFLAGS += -Wl,--gc-sections
-<<<<<<< HEAD
 # The service is linked from multiple translation units.  `-fwhole-program`
 # lets GCC internalize externally referenced helpers (for example GBK/UTF-8
 # conversion in mystd.c), which makes a clean server build fail at link time.
-=======
->>>>>>> 8c1e049853d684987d5ab47dc44534f562f5c697
 SERVER_CFLAGS := $(CFLAGS)
 UNICORN_LIB := Lib/unicorn-2.1.4/unicorn-import.lib
 SDL2_DIR := Lib/sdl2-2.0.10
@@ -109,11 +106,8 @@ SERVER_OBJS := $(patsubst src/%.c,$(SERVER_OBJDIR)/%.o,$(SERVER_SOURCES))
 SERVER_CPPFLAGS := -DNETWORK_SUPPORT -DCBE_SERVER_ONLY
 CFLAGS += -g -O2 -std=gnu11 -ffunction-sections -fdata-sections -w
 LDFLAGS += -Wl,--gc-sections
-<<<<<<< HEAD
 # Keep external helper symbols visible across the separately compiled service
 # objects; see the Windows target above for the clean-build rationale.
-=======
->>>>>>> 8c1e049853d684987d5ab47dc44534f562f5c697
 SERVER_CFLAGS := $(CFLAGS)
 SERVER_LDLIBS := -lpthread -lm
 
