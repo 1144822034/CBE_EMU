@@ -2133,7 +2133,8 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
             }
             if (!duplicate &&
                 vm_net_mock_task_definition_available(boundTask, activeRole,
-                                                       states, stateCount))
+                                                       states, stateCount,
+                                                       seeds[seedIndex].taskRepeatable))
             {
                 if (!vm_net_mock_append_catalog_task_candidate_record(
                         taskInfo, sizeof(taskInfo), &taskInfoLen,
@@ -2174,7 +2175,7 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
                 continue;
             task = vm_net_mock_task_catalog_find_by_id(ref->taskId);
             if (!vm_net_mock_task_definition_available(task, activeRole,
-                                                       states, stateCount))
+                                                       states, stateCount, false))
             {
                 continue;
             }

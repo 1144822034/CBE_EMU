@@ -524,6 +524,13 @@ typedef struct
     u32 quarantined;
 } vm_net_mock_dynamic_npc_load_context;
 
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 count;
+} vm_net_mock_dynamic_npc_column_context;
+
 static vm_net_mock_dynamic_npc_override
     g_vm_net_mock_dynamic_npc_overrides[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
 static u32 g_vm_net_mock_dynamic_npc_override_count = 0;
@@ -545,6 +552,54 @@ static bool vm_net_mock_dynamic_npc_decode_hex(const char *value, size_t valueLe
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_column_count_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_dynamic_npc_column_context *context =
+        (vm_net_mock_dynamic_npc_column_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->count))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* CREATE TABLE IF NOT EXISTS cannot add a column to an existing production
+ * table.  Query INFORMATION_SCHEMA first so this automatic compatibility
+ * migration is portable to the older MySQL versions used by existing setups. */
+static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_tasks' "
+            "AND COLUMN_NAME='repeatable'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "ADD COLUMN repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER task_id"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_task_schema migration=repeatable-column action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                        unsigned int columnCount,
                                        const char *const *values,
@@ -553,11 +608,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[11];
+    u32 number[12];
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 16 ||
+    if (context == NULL || columnCount != 17 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -575,13 +630,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             row.seed.scriptName, sizeof(row.seed.scriptName)) ||
         !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
         !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]) ||
-        !vm_net_mock_dynamic_npc_decode_hex(values[11], lengths[11],
+        !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[7]) || number[7] > 1u ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[12], lengths[12],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[7]) || number[7] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[8]) || number[8] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffu)
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[11]) || number[11] > 0xffu)
     {
         if (context != NULL)
             ++context->skipped;
@@ -595,10 +651,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
     row.seed.taskId = number[6];
-    row.seed.instanceX = (u16)number[7];
-    row.seed.instanceY = (u16)number[8];
-    row.seed.challengeEnemyId = number[9];
-    row.seed.instanceMinLevel = (u16)number[10];
+    row.seed.taskRepeatable = number[7] != 0;
+    row.seed.instanceX = (u16)number[8];
+    row.seed.instanceY = (u16)number[9];
+    row.seed.challengeEnemyId = number[10];
+    row.seed.instanceMinLevel = (u16)number[11];
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -663,12 +720,13 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_tasks ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
-            "task_id INT UNSIGNED NOT NULL,"
+            "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
             "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
+        !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -686,6 +744,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
             "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
             "COALESCE(server_dynamic_npc_tasks.task_id,0),"
+            "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
             "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
             "COALESCE(server_dynamic_npc_instances.target_x,0),"
             "COALESCE(server_dynamic_npc_instances.target_y,0),"
@@ -865,9 +924,11 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (seed->taskId != 0)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id) "
-                 "VALUES(X'%s',%u,%u) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)",
-                 sceneHex, seed->actorId, seed->taskId);
+                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) "
+                 "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable)",
+                 sceneHex, seed->actorId, seed->taskId,
+                 seed->taskRepeatable ? 1u : 0u);
     }
     else
     {
@@ -891,9 +952,9 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
-           seed->taskId, seed->x, seed->y,
+           seed->taskId, seed->taskRepeatable ? 1u : 0u, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
            seed->instanceMinLevel, seed->actorResource,
