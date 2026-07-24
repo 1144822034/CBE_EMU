@@ -259,9 +259,9 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
            sizeof(g_vm_net_mock_battle_active_modifier_current));
     ++g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = 0;
-    g_vm_net_mock_battle_rewarded_drop_item = 0;
-    g_vm_net_mock_battle_rewarded_drop_seq = 0;
-    g_vm_net_mock_battle_rewarded_drop_count = 0;
+    memset(g_vm_net_mock_battle_rewarded_drops, 0,
+           sizeof(g_vm_net_mock_battle_rewarded_drops));
+    g_vm_net_mock_battle_rewarded_drop_result_count = 0;
     g_vm_net_mock_battle_settlement_sent_serial = 0;
     g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
     g_vm_net_mock_battle_recovered_serial = 0;
@@ -4207,19 +4207,16 @@ static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCa
                                                               bool allowActiveSession)
 {
     u32 objectStart = 0;
-    u32 dropItemId = g_vm_net_mock_battle_rewarded_drop_item;
-    u16 dropSeq = g_vm_net_mock_battle_rewarded_drop_seq;
-    u32 dropDelta = g_vm_net_mock_battle_rewarded_drop_count;
-    u8 itemInfo[64];
+    u8 dropRowCount = g_vm_net_mock_battle_rewarded_drop_result_count;
+    u8 itemInfo[512];
     u32 itemInfoLen = 0;
 
     if (g_mockBattleOperateSessionSerial == 0 ||
         g_vm_net_mock_battle_rewarded_serial != g_mockBattleOperateSessionSerial ||
         g_vm_net_mock_battle_settlement_sent_serial != g_mockBattleOperateSessionSerial ||
         (!allowActiveSession && g_mockBattleOperateSessionArmed != 0) ||
-        dropItemId == 0 ||
-        dropSeq == 0 ||
-        dropDelta == 0 ||
+        dropRowCount == 0 ||
+        dropRowCount > VM_NET_MOCK_BATTLE_DROP_RESULT_MAX ||
         g_vm_net_mock_battle_drop_refresh_sent_serial == g_mockBattleOperateSessionSerial)
     {
         return true;
@@ -4227,9 +4224,10 @@ static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCa
     if (objectCount != NULL && *objectCount == 0xff)
         return false;
 
-    if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
-                                                  dropSeq, dropItemId, dropDelta,
-                                                  &itemInfoLen))
+    if (!vm_net_mock_build_item_use_iteminfo_rows_blob(
+            itemInfo, sizeof(itemInfo), g_vm_net_mock_battle_rewarded_drops,
+            dropRowCount, &itemInfoLen) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
         return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart))
@@ -4249,16 +4247,18 @@ static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCa
     g_vm_net_mock_battle_drop_refresh_sent_serial = g_mockBattleOperateSessionSerial;
     if (objectCount)
         *objectCount = (u8)(*objectCount + 1);
-    printf("[info][network] mock_battle_drop_refresh item=%u seq=%u delta=%u iteminfo_len=%u phase=%s response=7/7-type1 evidence=mmGame:0x0D04\n",
-           dropItemId,
-           dropSeq,
-           dropDelta,
+    printf("[info][network] mock_battle_drop_refresh rows=%u first_item=%u first_seq=%u first_delta=%u iteminfo_len=%u phase=%s response=7/7-type1 evidence=mmGame:0x0D04\n",
+           dropRowCount,
+           g_vm_net_mock_battle_rewarded_drops[0].itemId,
+           g_vm_net_mock_battle_rewarded_drops[0].seq,
+           g_vm_net_mock_battle_rewarded_drops[0].count,
            itemInfoLen,
            phase ? phase : "-");
-    vm_autotest_note("mock_battle_drop_refresh item=%u seq=%u delta=%u phase=%s response=7/7-type1 evidence=mmGame:0x0D04\n",
-                     dropItemId,
-                     dropSeq,
-                     dropDelta,
+    vm_autotest_note("mock_battle_drop_refresh rows=%u first_item=%u first_seq=%u first_delta=%u phase=%s response=7/7-type1 evidence=mmGame:0x0D04\n",
+                     dropRowCount,
+                     g_vm_net_mock_battle_rewarded_drops[0].itemId,
+                     g_vm_net_mock_battle_rewarded_drops[0].seq,
+                     g_vm_net_mock_battle_rewarded_drops[0].count,
                      phase ? phase : "-");
     return true;
 }
@@ -5493,9 +5493,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
            sizeof(g_vm_net_mock_battle_active_modifier_current));
     ++g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = 0;
-    g_vm_net_mock_battle_rewarded_drop_item = 0;
-    g_vm_net_mock_battle_rewarded_drop_seq = 0;
-    g_vm_net_mock_battle_rewarded_drop_count = 0;
+    memset(g_vm_net_mock_battle_rewarded_drops, 0,
+           sizeof(g_vm_net_mock_battle_rewarded_drops));
+    g_vm_net_mock_battle_rewarded_drop_result_count = 0;
     g_vm_net_mock_battle_settlement_sent_serial = 0;
     g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
     g_vm_net_mock_battle_recovered_serial = 0;
@@ -5792,9 +5792,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
            sizeof(g_vm_net_mock_battle_active_modifier_current));
     ++g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = 0;
-    g_vm_net_mock_battle_rewarded_drop_item = 0;
-    g_vm_net_mock_battle_rewarded_drop_seq = 0;
-    g_vm_net_mock_battle_rewarded_drop_count = 0;
+    memset(g_vm_net_mock_battle_rewarded_drops, 0,
+           sizeof(g_vm_net_mock_battle_rewarded_drops));
+    g_vm_net_mock_battle_rewarded_drop_result_count = 0;
     g_vm_net_mock_battle_settlement_sent_serial = 0;
     g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
     g_vm_net_mock_battle_recovered_serial = 0;

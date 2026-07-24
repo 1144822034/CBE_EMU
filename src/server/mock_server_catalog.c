@@ -3026,6 +3026,53 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     return true;
 }
 
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u32 count;
+} vm_net_mock_battle_drop_result;
+
+#define VM_NET_MOCK_BATTLE_DROP_RESULT_MAX 8u
+
+/* The client-side 7/7 type=1 stream starts with a row count and can safely
+ * consume several normal additive item rows.  Keep this builder shared so
+ * battle rewards and ordinary single-item operations use the exact same
+ * common-extra representation. */
+static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
+    u8 *out, u32 outCap, const vm_net_mock_battle_drop_result *rows,
+    u8 rowCount, u32 *blobLenOut)
+{
+    u32 pos = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || rows == NULL || blobLenOut == NULL || rowCount == 0 ||
+        rowCount > VM_NET_MOCK_BATTLE_DROP_RESULT_MAX)
+    {
+        return false;
+    }
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
+        return false;
+    for (u8 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].seq == 0 || rows[i].itemId == 0 || rows[i].count == 0 ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, rows[i].seq) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos,
+                vm_net_mock_backpack_item_id_uses_reservoir_count(rows[i].itemId)
+                    ? 1 : (rows[i].count > 255 ? 255 : (u8)rows[i].count),
+                0))
+        {
+            return false;
+        }
+    }
+    *blobLenOut = pos;
+    return true;
+}
+
 /*
  * mmGameMstarWqvga.cbm:sub_11CE consumes 1/7/7 before it reaches the
  * ordinary scene business dispatcher.  With type=1, sub_D04 builds the one
@@ -4513,9 +4560,9 @@ static bool g_vm_net_mock_role_db_valid = false;
 static bool g_vm_net_mock_role_position_dirty = false;
 static u32 g_vm_net_mock_battle_rewarded_serial = 0;
 static u32 g_vm_net_mock_battle_rewarded_exp = 0;
-static u32 g_vm_net_mock_battle_rewarded_drop_item = 0;
-static u16 g_vm_net_mock_battle_rewarded_drop_seq = 0;
-static u32 g_vm_net_mock_battle_rewarded_drop_count = 0;
+static vm_net_mock_battle_drop_result
+    g_vm_net_mock_battle_rewarded_drops[VM_NET_MOCK_BATTLE_DROP_RESULT_MAX];
+static u8 g_vm_net_mock_battle_rewarded_drop_result_count = 0;
 static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
 static u32 g_vm_net_mock_battle_role_id_current = VM_NET_MOCK_ROLE_DEFAULT_ID;
 static u32 g_vm_net_mock_battle_reward_rng = 0;

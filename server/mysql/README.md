@@ -83,6 +83,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_wcoin
 `callback_base_url` 应填写外网能够访问账号中心的地址；留空时会使用支付后台配置
 的回调地址，并由订单状态查询返回的签名数据提供兜底确认。
 
+已有数据库增加标题服务器列表管理时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_login_servers.sql
+```
+
+脚本新增 `server_login_servers`，只写入空库所需的“江湖一区 / 推荐”初始行；
+已有行绝不会被覆盖。后台入口 `/admin-418yz6/?tab=servers` 可编辑服务器 ID、
+显示名称、状态标签、24 位颜色、排序和启用状态。该配置驱动标题登录响应中的
+服务器列表，不配置 CBMS 主机或端口，也不会让已建立的游戏连接切换到其他地址。
+
 已有数据库升级到商品管理功能时执行：
 
 ```powershell
@@ -100,6 +111,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monst
 
 脚本只新增怪物属性覆盖表。没有覆盖记录的怪物继续使用服务端目录中的
 等级、类型和统一属性公式；服务启动时也会自动创建该表。
+
+已有怪物管理升级为多物品掉落时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_monster_multi_drops.sql
+```
+
+脚本把旧 `server_monsters.drop_item_id/drop_rate_percent` 的单条配置复制到
+`server_monster_drops` 的第 1 槽，不会覆盖已经存在的多掉落配置。之后应在
+后台“怪物管理”中保存一次该怪物；新保存会以多掉落表为唯一来源，并清空旧列，
+避免已删除的旧掉落在重启后被重新导入。
 
 已有数据库升级到装备强化功能时，停止 mock-service 后执行：
 
@@ -154,6 +176,9 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `server_payment_config`：支付接口地址、通讯密钥、公开回调地址和 W 币兑换比例。
 - `wcoin_recharge_orders`：充值订单、支付确认及幂等入账状态。
 - `server_data_migrations`：记录一次性数据语义迁移，防止重复换算。
+- `server_login_servers`：标题登录页显示的服务器 ID、名称、状态、颜色、排序和启用状态。
+- `server_monsters`：怪物属性覆盖；旧版单掉落列仅保留用于升级导入。
+- `server_monster_drops`：怪物的有序多掉落配置；每一行独立按配置概率投掷。
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
