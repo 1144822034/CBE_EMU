@@ -1080,7 +1080,8 @@ static u32 vm_net_mock_role_current_hp_for_battle(void)
     return hp;
 }
 
-static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
+static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
+                                                        bool forceTeamVictory)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent :
@@ -1097,7 +1098,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
-    bool victory = g_mockBattleEnemyHpCurrent == 0 && roleHp > 0;
+    /* A shared party victory is not invalidated because this particular
+     * observer was knocked out earlier in the same battle.  Preserve its
+     * actual zero HP, but settle the victory/reward once under its own role
+     * state.  Solo callers keep the normal living-player requirement. */
+    bool victory = g_mockBattleEnemyHpCurrent == 0 &&
+                   (forceTeamVictory || roleHp > 0);
     bool rewardAlreadyGranted = false;
     u32 recoverMp = vm_net_mock_battle_recover_mp_value();
     bool mpRecoveryApplied = false;
@@ -1128,11 +1134,12 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason)
      * completed-state helper below.  The durable-state serial guard makes a
      * repeated terminal response harmless. */
     vm_net_mock_role_service_apply_battle_wear(role);
-    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
                      vm_net_mock_battle_enemy_count_current(),
                      victory ? 1 : 0,
+                     forceTeamVictory ? 1 : 0,
                      rewardExp,
                      statusGold,
                      role->exp,
