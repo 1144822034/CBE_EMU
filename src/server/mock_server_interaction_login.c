@@ -624,10 +624,19 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * 30/2 so ResetDownloadState runs without a second scene-position
          * entry.
          */
+        /*
+         * `append_scene_enter_object_for_scene()` armed this exact target's
+         * pending one-shot directory with the preceding 30/1.  This WT6/1 is
+         * the first parser-safe request after the resource queue completed,
+         * so it must be allowed to consume that pending seed before 30/2
+         * closes the scene transition.  Passing false here silently omitted
+         * 27/11 for every resource-download teleport, leaving the fresh scene
+         * shell without NPC nodes.
+         */
         if (!vm_net_mock_append_scene_npc_lifecycle_seed(out, outCap, &pos,
                                                          &objectCount,
                                                          target.scene,
-                                                         false, true))
+                                                         true, true))
             return 0;
         if (!vm_net_mock_append_scene_resource_followup_objects(
                 out, outCap, &pos, &objectCount, target.scene,
