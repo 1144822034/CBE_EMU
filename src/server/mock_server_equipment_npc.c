@@ -365,7 +365,7 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
         return false;
     }
     rowSize = parsed->occultInfoLen / parsed->materialRows;
-    if (rowSize != 9 && rowSize != 5)
+    if (rowSize != 9)
         return false;
     for (u32 i = 0; i < parsed->materialRows; ++i)
     {
@@ -373,23 +373,14 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
         u32 itemId = 0;
         u8 count = 0;
 
-        if (rowSize == 9)
+        if (row[0] != 0 || row[1] != 4 ||
+            row[6] != 0 || row[7] != 1)
         {
-            if (row[0] != 0 || row[1] != 4 ||
-                row[6] != 0 || row[7] != 1)
-            {
-                return false;
-            }
-            itemId = ((u32)row[2] << 24) | ((u32)row[3] << 16) |
-                     ((u32)row[4] << 8) | (u32)row[5];
-            count = row[8];
+            return false;
         }
-        else
-        {
-            itemId = ((u32)row[0] << 24) | ((u32)row[1] << 16) |
-                     ((u32)row[2] << 8) | (u32)row[3];
-            count = row[4];
-        }
+        itemId = ((u32)row[2] << 24) | ((u32)row[3] << 16) |
+                 ((u32)row[4] << 8) | (u32)row[5];
+        count = row[8];
         if (itemId < VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
             itemId > VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST || count == 0)
         {

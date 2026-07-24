@@ -2766,6 +2766,52 @@ static bool vm_net_mock_get_object_number_field(const u8 *payload, u32 payloadLe
     return false;
 }
 
+/* SendEquipSequenceReq (0x0101DD1E) writes `equipseq` as an ordinary object
+ * entry whose value is `00 02 <u16>`.  The entry itself is length-prefixed as
+ * `00 04`; the older scanner mistakes that outer length for an i32 tag and
+ * reads sequence 26 as 0x0002001A.  Keep this exact accessor local to the
+ * enhancement request contract. */
+static bool vm_net_mock_get_object_tagged_number_entry(
+    const u8 *payload, u32 payloadLen, const char *field, u32 *valueOut)
+{
+    const u8 *entry = NULL;
+    u16 entryLen = 0;
+    u32 value = 0;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (!vm_net_mock_get_object_entry_bytes(payload, payloadLen, field, &entry,
+                                            &entryLen) ||
+        entry == NULL || entryLen < 3 || entry[0] != 0)
+    {
+        return false;
+    }
+    switch (entry[1])
+    {
+    case 1:
+        if (entryLen != 3)
+            return false;
+        value = entry[2];
+        break;
+    case 2:
+        if (entryLen != 4)
+            return false;
+        value = ((u32)entry[2] << 8) | entry[3];
+        break;
+    case 4:
+        if (entryLen != 6)
+            return false;
+        value = ((u32)entry[2] << 24) | ((u32)entry[3] << 16) |
+                ((u32)entry[4] << 8) | entry[5];
+        break;
+    default:
+        return false;
+    }
+    if (valueOut)
+        *valueOut = value;
+    return true;
+}
+
 static bool vm_net_mock_item_id_is_active_backpack_row(u32 itemId)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -4897,8 +4943,12 @@ static bool vm_net_mock_parse_equipment_enhance_request(
 
     parsed.subtype = object.subtype;
     seqField = parsed.subtype == 1 ? "seq" : "equipseq";
-    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
-                                             seqField, &seqValue) ||
+    if (!(parsed.subtype == 1
+              ? vm_net_mock_get_object_number_field(object.payload,
+                                                     object.payloadLen,
+                                                     seqField, &seqValue)
+              : vm_net_mock_get_object_tagged_number_entry(
+                    object.payload, object.payloadLen, seqField, &seqValue)) ||
         seqValue == 0 || seqValue > 0xffffu)
     {
         return false;
@@ -4906,37 +4956,23 @@ static bool vm_net_mock_parse_equipment_enhance_request(
     parsed.equipSeq = (u16)seqValue;
     if (parsed.subtype != 1)
     {
-        if (!vm_net_mock_get_object_blob_field(
-                object.payload, object.payloadLen, "occultinfo",
-                &parsed.occultInfo, &parsed.occultInfoLen))
-        {
-            if (!vm_net_mock_get_object_entry_bytes(
-                    object.payload, object.payloadLen, "occultinfo",
-                    &rawValue, &rawValueLen))
-            {
-                return false;
-            }
-            if (rawValueLen >= 2 &&
-                (u16)((((u16)rawValue[0] << 8) | rawValue[1]) + 2u) ==
-                    rawValueLen)
-            {
-                parsed.occultInfo = rawValue + 2;
-                parsed.occultInfoLen = (u16)(rawValueLen - 2);
-            }
-            else
-            {
-                parsed.occultInfo = rawValue;
-                parsed.occultInfoLen = rawValueLen;
-            }
-        }
-        if (parsed.occultInfoLen == 0 ||
-            ((parsed.occultInfoLen % 9 != 0 || parsed.occultInfoLen > 45) &&
-             (parsed.occultInfoLen % 5 != 0 || parsed.occultInfoLen > 25)))
+        /* The client flushes its tagged material stream directly into the
+         * occultinfo entry.  Request fields therefore have no nested blob
+         * length, unlike server response raw fields. */
+        if (!vm_net_mock_get_object_entry_bytes(
+                object.payload, object.payloadLen, "occultinfo", &rawValue,
+                &rawValueLen))
         {
             return false;
         }
-        parsed.materialRows = (u8)(parsed.occultInfoLen /
-                                   (parsed.occultInfoLen % 9 == 0 ? 9 : 5));
+        parsed.occultInfo = rawValue;
+        parsed.occultInfoLen = rawValueLen;
+        if (parsed.occultInfoLen == 0 || parsed.occultInfoLen > 45 ||
+            parsed.occultInfoLen % 9 != 0)
+        {
+            return false;
+        }
+        parsed.materialRows = (u8)(parsed.occultInfoLen / 9);
     }
 
     if (parsedOut)
