@@ -11,6 +11,56 @@ static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
     return (u8)count;
 }
 
+static u8 vm_net_mock_backpack_client_capacity(u32 capacity)
+{
+    if (capacity > VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
+        return VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY;
+    return (u8)capacity;
+}
+
+static bool vm_net_mock_backpack_item_is_client_grid_item(
+    const vm_net_mock_backpack_item_state *item)
+{
+    if (item == NULL || item->itemId == 0 || item->count == 0)
+        return false;
+
+    /*
+     * mmShopMstarWqvga.cbm:sub_9DE intentionally does not insert these
+     * direct-store values into the generic main-item manager after purchase.
+     * In particular, item.dsh gives 808 a zero stack limit; the generic
+     * TimerControl path normalizes that to one and expands its stored amount
+     * into one physical record per unit.  They must therefore not be sent in
+     * 30/21 or 17/1 as ordinary backpack rows.
+     */
+    switch (item->itemId)
+    {
+    case 808:
+    case 817:
+    case 818:
+    case 819:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static u8 vm_net_mock_role_backpack_client_grid_count(
+    const vm_net_mock_role_state *role)
+{
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u8 gridCount = 0;
+
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (vm_net_mock_backpack_item_is_client_grid_item(
+                &role->backpackItems[i]))
+        {
+            ++gridCount;
+        }
+    }
+    return gridCount;
+}
+
 static bool vm_net_mock_backpack_item_id_uses_reservoir_count(u32 itemId)
 {
     /*
@@ -2005,9 +2055,10 @@ static u32 vm_net_mock_shop_page_item_limit(u8 subtype)
 static u32 vm_net_mock_shop_client_backpack_expand_price(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 capacity = vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
-                                      role ? role->backpackCapacity :
-                                      VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
+    u32 capacity = vm_net_mock_backpack_client_capacity(
+        vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
+                           role ? role->backpackCapacity :
+                           VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY));
 
     /*
      * mmShopMstarWqvga.cbm:sub_74E overrides item 806's visible row price by
@@ -2241,16 +2292,19 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
 {
     u32 pos = 0;
     u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u8 rowCount = vm_net_mock_role_backpack_client_grid_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
     if (rowCountOut)
         *rowCountOut = 0;
 
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, itemCount))
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
         return false;
     for (u32 i = 0; i < itemCount; ++i)
     {
         const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (!vm_net_mock_backpack_item_is_client_grid_item(item))
+            continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
         if (!vm_net_mock_seq_put_item_common_extra(
@@ -2263,7 +2317,7 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
     }
     *blobLenOut = pos;
     if (rowCountOut)
-        *rowCountOut = itemCount;
+        *rowCountOut = rowCount;
     return true;
 }
 
@@ -2375,6 +2429,7 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
 {
     u32 pos = 0;
     u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u8 gridCount = vm_net_mock_role_backpack_client_grid_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
     if (gridCountOut)
@@ -2383,6 +2438,8 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
     for (u32 i = 0; i < itemCount; ++i)
     {
         const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (!vm_net_mock_backpack_item_is_client_grid_item(item))
+            continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
         if (!vm_net_mock_seq_put_i16(out, outCap, &pos, item->seq))
@@ -2398,7 +2455,7 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
     }
     *blobLenOut = pos;
     if (gridCountOut)
-        *gridCountOut = itemCount;
+        *gridCountOut = gridCount;
     return true;
 }
 
@@ -3402,9 +3459,9 @@ static u32 vm_net_mock_role_backpack_expand_usable_count(const vm_net_mock_role_
     current = role->backpackCapacity;
     if (current < VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY)
         current = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
-    if (current >= VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
+    if (current >= VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
         return 0;
-    room = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT - current;
+    room = VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY - current;
     usable = room / VM_NET_MOCK_BACKPACK_EXPAND_STEP;
     if (room % VM_NET_MOCK_BACKPACK_EXPAND_STEP)
         usable += 1;
@@ -3423,8 +3480,8 @@ static u32 vm_net_mock_role_expand_backpack_capacity(vm_net_mock_role_state *rol
         return 0;
     newCapacity = (u32)role->backpackCapacity +
                   vm_net_mock_mul_capped_u32(VM_NET_MOCK_BACKPACK_EXPAND_STEP, applied);
-    if (newCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
-        newCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+    if (newCapacity > VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
+        newCapacity = VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY;
     role->backpackCapacity = (u8)newCapacity;
     return applied;
 }
@@ -4266,7 +4323,8 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
     u32 itemInfoLen = 0;
     u32 rowCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u16 capacity = role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
+    u16 capacity = vm_net_mock_backpack_client_capacity(
+        role ? role->backpackCapacity : VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY);
 
     if (out == NULL || pos == NULL)
         return false;
@@ -4285,15 +4343,17 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    printf("[info][network] mock_backpack_items role=%u capacity=%u rows=%u iteminfo_len=%u\n",
+    printf("[info][network] mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u\n",
            role ? role->roleId : 0,
            capacity,
            rowCount,
+           vm_net_mock_role_backpack_count(role),
            itemInfoLen);
-    vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u iteminfo_len=%u evidence=mmGame:0x418C\n",
+    vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u evidence=mmGame:0x418C+mmShop:sub_9DE\n",
                      role ? role->roleId : 0,
                      capacity,
                      rowCount,
+                     vm_net_mock_role_backpack_count(role),
                      itemInfoLen);
     return true;
 }
@@ -4358,13 +4418,15 @@ static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *po
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    printf("[info][network] mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u iteminfo_len=%u\n",
+    printf("[info][network] mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u\n",
            role ? role->roleId : 0,
            gridCount,
+           vm_net_mock_role_backpack_count(role),
            itemInfoLen);
-    vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u iteminfo_len=%u evidence=JianghuOL:0x1039952\n",
+    vm_autotest_note("mock_backpack_grid role=%u kind=30 subtype=21 gridnum=%u stored_rows=%u iteminfo_len=%u evidence=JianghuOL:0x1039952+mmShop:sub_9DE\n",
                      role ? role->roleId : 0,
                      gridCount,
+                     vm_net_mock_role_backpack_count(role),
                      itemInfoLen);
     return true;
 }
@@ -4470,7 +4532,7 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
         bool appendedReservoirCounts = false;
         u8 equipmentRows = 0;
 
-        if (vm_net_mock_role_backpack_count(role) != 0)
+        if (vm_net_mock_role_backpack_client_grid_count(role) != 0)
         {
             if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
                 return false;
