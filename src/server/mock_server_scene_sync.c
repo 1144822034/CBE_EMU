@@ -2437,13 +2437,17 @@ static bool vm_net_mock_task_grant_accept_item(
 }
 
 static bool vm_net_mock_task_commit_reward(
-    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task)
+    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
+    u16 *rewardSeqOut)
 {
     u32 consumedIds[2] = {0, 0};
     u32 consumedCounts[2] = {0, 0};
     u32 consumedSlots = 0;
+    u16 rewardSeq = 0;
     bool rewardAdded = false;
 
+    if (rewardSeqOut != NULL)
+        *rewardSeqOut = 0;
     if (role == NULL || task == NULL)
         return false;
     if (!vm_net_mock_task_role_has_required_items(role, task) ||
@@ -2488,7 +2492,8 @@ static bool vm_net_mock_task_commit_reward(
     }
     rewardAdded = task->rewardItemId == 0 || task->rewardItemCount == 0 ||
                   vm_net_mock_role_add_backpack_item(task->rewardItemId,
-                                                     task->rewardItemCount, NULL);
+                                                     task->rewardItemCount,
+                                                     &rewardSeq);
     if (!rewardAdded)
     {
         for (u32 i = 0; i < consumedSlots; ++i)
@@ -2504,10 +2509,90 @@ static bool vm_net_mock_task_commit_reward(
                       : role->money + task->rewardMoney;
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_db_save("task-commit");
+    if (rewardSeqOut != NULL)
+        *rewardSeqOut = rewardSeq;
     printf("[info][network] mock_task_reward task=%u role=%u exp=%u money=%u item=%u item_type=%u count=%u consumed=%u\n",
            task->taskId, role->roleId, task->rewardExp, task->rewardMoney,
            task->rewardItemId, task->rewardItemType, task->rewardItemCount,
            consumedSlots);
+    return true;
+}
+
+/* JianghuOL.CBE:net_handle_task_response_dispatch(0x0104726C), case 4,
+ * consumes awardinfo directly as a one-shot item-add stream after the reward
+ * EXP/money fields.  This is intentionally not a 17/1 backpack page: the
+ * task callback, rather than the backpack screen, owns this parser. */
+static bool vm_net_mock_build_task_awardinfo(
+    u8 *out, u32 outCap, u32 *blobLenOut,
+    vm_net_mock_role_state *role,
+    const vm_net_mock_task_definition *task, u16 rewardSeq)
+{
+    const vm_net_mock_backpack_item_state *rewardItem = NULL;
+    u32 pos = 0;
+    u32 rewardExp = task != NULL ? task->rewardExp : 0;
+    u32 rewardMoney = task != NULL ? task->rewardMoney : 0;
+    u32 incrementalCount = 0;
+    bool isReservoir = false;
+
+    if (blobLenOut != NULL)
+        *blobLenOut = 0;
+    if (out == NULL || blobLenOut == NULL || role == NULL)
+        return false;
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, rewardExp) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, rewardMoney))
+    {
+        return false;
+    }
+
+    if (task == NULL || task->rewardItemId == 0 ||
+        task->rewardItemCount == 0)
+    {
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 0))
+            return false;
+        *blobLenOut = pos;
+        return true;
+    }
+
+    rewardItem = vm_net_mock_role_find_backpack_item(
+        role, task->rewardItemId, rewardSeq);
+    if (rewardSeq == 0 || rewardItem == NULL || rewardItem->count == 0)
+    {
+        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u row=%p row_count=%u reason=missing-reward-row\n",
+               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
+               (const void *)rewardItem, rewardItem ? rewardItem->count : 0);
+        return false;
+    }
+
+    isReservoir =
+        vm_net_mock_backpack_item_id_uses_reservoir_count(task->rewardItemId);
+    /* Ordinary rows are merged client-side by the amount just awarded.  The
+     * two flask rows are non-stackable reservoirs, so the new row must carry
+     * its initialized HP/MP pool while its visible stack remains one. */
+    incrementalCount = isReservoir ? rewardItem->count : task->rewardItemCount;
+    if (incrementalCount == 0 || incrementalCount > 0x7fffffffu)
+    {
+        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u row_count=%u incremental=%u reason=unsupported-count\n",
+               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
+               rewardItem->count, incrementalCount);
+        return false;
+    }
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1) ||
+        !vm_net_mock_seq_put_i16(out, outCap, &pos, rewardSeq) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, task->rewardItemId) ||
+        !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
+        !vm_net_mock_seq_put_item_common_extra(
+            out, outCap, &pos,
+            isReservoir ? 1 : (incrementalCount > 255 ? 255 :
+                                              (u8)incrementalCount),
+            (u8)SDL_min(rewardItem->enhanceLevel,
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+    {
+        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u incremental=%u pos=%u cap=%u reason=serialize\n",
+               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
+               incrementalCount, pos, outCap);
+        return false;
+    }
+    *blobLenOut = pos;
     return true;
 }
 
@@ -4362,8 +4447,9 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u8 reportedProgress2 = 0;
     u8 taskInfo[512];
     u32 taskInfoLen = 0;
-    u8 awardInfo[32];
+    u8 awardInfo[64];
     u32 awardInfoLen = 0;
+    u16 committedRewardSeq = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 1;
@@ -4624,7 +4710,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
             taskState.found && taskState.state == 2 &&
             ((taskDefinition != NULL &&
-              vm_net_mock_task_commit_reward(activeRole, taskDefinition)) ||
+              vm_net_mock_task_commit_reward(activeRole, taskDefinition,
+                                             &committedRewardSeq)) ||
              (taskDefinition == NULL &&
               vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
         {
@@ -4646,15 +4733,9 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (result == 1)
         {
             u32 totalExp = activeRole->exp;
-            u32 rewardExp = taskDefinition ? taskDefinition->rewardExp : 0;
-            u32 rewardMoney = taskDefinition ? taskDefinition->rewardMoney : 0;
-
-            if (!vm_net_mock_seq_put_u32(awardInfo, sizeof(awardInfo),
-                                         &awardInfoLen, rewardExp) ||
-                !vm_net_mock_seq_put_u32(awardInfo, sizeof(awardInfo),
-                                         &awardInfoLen, rewardMoney) ||
-                !vm_net_mock_seq_put_u8(awardInfo, sizeof(awardInfo),
-                                        &awardInfoLen, 0) ||
+            if (!vm_net_mock_build_task_awardinfo(
+                    awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
+                    taskDefinition, committedRewardSeq) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", 100) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", 100) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", totalExp) ||
