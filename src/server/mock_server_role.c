@@ -1936,6 +1936,7 @@ typedef enum
 } vm_net_mock_monster_family;
 
 #define VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX 0x7fffffffu
+#define VM_NET_MOCK_MONSTER_DROP_MAX 8u
 
 typedef struct
 {
@@ -1948,6 +1949,12 @@ typedef struct
 
 typedef struct
 {
+    u32 itemId;
+    u8 ratePercent;
+} vm_net_mock_monster_drop;
+
+typedef struct
+{
     u32 enemyId;
     u32 level;
     u32 hp;
@@ -1956,15 +1963,15 @@ typedef struct
     u32 defense;
     u32 exp;
     u32 gold;
-    u32 dropItemId;
-    u32 dropRatePercent;
 } vm_net_mock_monster_stats;
 
 typedef struct
 {
     bool used;
     u8 family;
+    u8 dropCount;
     vm_net_mock_monster_stats stats;
+    vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
 } vm_net_mock_monster_override;
 
 typedef struct
@@ -1977,8 +1984,8 @@ typedef struct
     u32 defense;
     u32 exp;
     u32 gold;
-    u32 dropItemId;
-    u32 dropRatePercent;
+    u8 dropCount;
+    vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
     u8 family;
     bool overridden;
     char displayName[32];
@@ -2125,8 +2132,6 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
-    stats.dropItemId = entry.dropItemId;
-    stats.dropRatePercent = entry.dropRatePercent;
 
     switch ((vm_net_mock_monster_family)entry.family)
     {
@@ -2269,6 +2274,8 @@ typedef struct
 {
     u32 loaded;
     u32 skipped;
+    u32 dropsLoaded;
+    u32 dropsSkipped;
 } vm_net_mock_monster_db_load_context;
 
 static bool vm_net_mock_monster_db_row(void *contextValue,
@@ -2278,14 +2285,14 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
 {
     vm_net_mock_monster_db_load_context *context =
         (vm_net_mock_monster_db_load_context *)contextValue;
-    u32 number[11];
+    u32 number[9];
     int index = -1;
     vm_net_mock_monster_override *override = NULL;
 
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 11)
+    if (context == NULL || columnCount != 9)
         return false;
-    for (u32 i = 0; i < 11; ++i)
+    for (u32 i = 0; i < 9; ++i)
     {
         if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
         {
@@ -2302,9 +2309,7 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
         number[5] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         number[6] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         number[7] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        number[8] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        number[10] > 100u ||
-        ((number[9] == 0) != (number[10] == 0)))
+        number[8] > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX)
     {
         ++context->skipped;
         return true;
@@ -2322,9 +2327,52 @@ static bool vm_net_mock_monster_db_row(void *contextValue,
     override->stats.defense = number[6];
     override->stats.exp = number[7];
     override->stats.gold = number[8];
-    override->stats.dropItemId = number[9];
-    override->stats.dropRatePercent = number[10];
     ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_monster_db_drop_row(void *contextValue,
+                                            unsigned int columnCount,
+                                            const char *const *values,
+                                            const size_t *lengths)
+{
+    vm_net_mock_monster_db_load_context *context =
+        (vm_net_mock_monster_db_load_context *)contextValue;
+    u32 number[4];
+    int index = -1;
+    vm_net_mock_monster_override *override = NULL;
+
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 4)
+        return false;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            ++context->dropsSkipped;
+            return true;
+        }
+    }
+    index = vm_net_mock_monster_catalog_index(number[0]);
+    if (index < 0 || number[1] == 0 ||
+        number[1] > VM_NET_MOCK_MONSTER_DROP_MAX || number[2] == 0 ||
+        number[3] == 0 || number[3] > 100u ||
+        vm_net_mock_find_shop_catalog_item(number[2]) == NULL)
+    {
+        ++context->dropsSkipped;
+        return true;
+    }
+    override = &g_vm_net_mock_monster_overrides[index];
+    if (!override->used ||
+        override->dropCount >= VM_NET_MOCK_MONSTER_DROP_MAX)
+    {
+        ++context->dropsSkipped;
+        return true;
+    }
+    override->drops[override->dropCount].itemId = number[2];
+    override->drops[override->dropCount].ratePercent = (u8)number[3];
+    ++override->dropCount;
+    ++context->dropsLoaded;
     return true;
 }
 
@@ -2351,19 +2399,42 @@ static bool vm_net_mock_monster_db_load(void)
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(monster_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_monster_drops ("
+            "monster_id SMALLINT UNSIGNED NOT NULL,"
+            "drop_slot TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,"
+            "drop_rate_percent TINYINT UNSIGNED NOT NULL,"
+            "PRIMARY KEY(monster_id,drop_slot),"
+            "CONSTRAINT fk_server_monster_drops_monster "
+            "FOREIGN KEY(monster_id) REFERENCES server_monsters(monster_id) "
+            "ON DELETE CASCADE) ENGINE=InnoDB") ||
+        /* Old single-drop rows are a one-way compatibility source.  New
+         * saves clear those legacy columns, so a later zero-drop edit cannot
+         * be silently recreated on the next service restart. */
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_monster_drops("
+            "monster_id,drop_slot,item_id,drop_rate_percent) "
+            "SELECT monster_id,1,drop_item_id,drop_rate_percent "
+            "FROM server_monsters WHERE drop_item_id<>0 AND drop_rate_percent<>0") ||
         !vm_mysql_query(
             "SELECT monster_id,level,family,hp,mp,attack_value,defense_value,"
-            "reward_exp,reward_money,drop_item_id,drop_rate_percent "
+            "reward_exp,reward_money "
             "FROM server_monsters ORDER BY monster_id",
-            vm_net_mock_monster_db_row, &context))
+            vm_net_mock_monster_db_row, &context) ||
+        !vm_mysql_query(
+            "SELECT monster_id,drop_slot,item_id,drop_rate_percent "
+            "FROM server_monster_drops ORDER BY monster_id,drop_slot",
+            vm_net_mock_monster_db_drop_row, &context))
     {
         printf("[error][mock-admin] monster_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
     g_vm_net_mock_monster_db_valid = true;
-    printf("[info][mock-admin] monster_db_load rows=%u skipped=%u\n",
-           context.loaded, context.skipped);
+    printf("[info][mock-admin] monster_db_load rows=%u skipped=%u drops=%u drops_skipped=%u\n",
+           context.loaded, context.skipped, context.dropsLoaded,
+           context.dropsSkipped);
     return true;
 }
 
@@ -2377,12 +2448,51 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
     return vm_net_mock_monster_base_stats_for_enemy(enemyId);
 }
 
+/* The source catalog predates backend editing and stores one legacy drop per
+ * monster.  MySQL overrides deliberately own the complete list, including an
+ * explicitly empty list, so an administrator can remove a built-in material
+ * drop without it reappearing after reload. */
+static u8 vm_net_mock_monster_drops_for_enemy(
+    u32 enemyId, vm_net_mock_monster_drop *drops, u8 dropCap)
+{
+    int index = vm_net_mock_monster_catalog_index(enemyId);
+    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    u8 total = 0;
+
+    (void)vm_net_mock_monster_db_load();
+    if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
+    {
+        total = g_vm_net_mock_monster_overrides[index].dropCount;
+        if (total > VM_NET_MOCK_MONSTER_DROP_MAX)
+            total = VM_NET_MOCK_MONSTER_DROP_MAX;
+        if (drops != NULL && dropCap != 0)
+        {
+            u8 copied = total < dropCap ? total : dropCap;
+            memcpy(drops, g_vm_net_mock_monster_overrides[index].drops,
+                   sizeof(*drops) * copied);
+        }
+        return total;
+    }
+    if (entry.dropItemId != 0 && entry.dropRatePercent != 0)
+    {
+        total = 1;
+        if (drops != NULL && dropCap != 0)
+        {
+            drops[0].itemId = entry.dropItemId;
+            drops[0].ratePercent = entry.dropRatePercent;
+        }
+    }
+    return total;
+}
+
 static bool vm_net_mock_monster_admin_save(
     const vm_net_mock_monster_admin_row *row, const char **errorOut)
 {
     char query[1024];
+    char mysqlError[512];
     int index = -1;
     vm_net_mock_monster_override *override = NULL;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "怪物属性无效";
@@ -2395,8 +2505,7 @@ static bool vm_net_mock_monster_admin_save(
         row->defense > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         row->exp > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
         row->gold > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX ||
-        row->dropRatePercent > 100u ||
-        ((row->dropItemId == 0) != (row->dropRatePercent == 0)))
+        row->dropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
     {
         return false;
     }
@@ -2407,12 +2516,25 @@ static bool vm_net_mock_monster_admin_save(
             *errorOut = "怪物目录中不存在该 ID";
         return false;
     }
-    if (row->dropItemId != 0 &&
-        vm_net_mock_find_shop_catalog_item(row->dropItemId) == NULL)
+    for (u8 i = 0; i < row->dropCount; ++i)
     {
-        if (errorOut)
-            *errorOut = "掉落物品 ID 不在物品目录中";
-        return false;
+        if (row->drops[i].itemId == 0 || row->drops[i].ratePercent == 0 ||
+            row->drops[i].ratePercent > 100u ||
+            vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
+        {
+            if (errorOut)
+                *errorOut = "掉落物品 ID 或概率无效";
+            return false;
+        }
+        for (u8 previous = 0; previous < i; ++previous)
+        {
+            if (row->drops[previous].itemId == row->drops[i].itemId)
+            {
+                if (errorOut)
+                    *errorOut = "同一怪物不能重复配置相同掉落物品";
+                return false;
+            }
+        }
     }
     if (!g_vm_net_mock_monster_db_valid)
     {
@@ -2429,20 +2551,37 @@ static bool vm_net_mock_monster_admin_save(
         query, sizeof(query),
         "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
         "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
-        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,0,0) ON DUPLICATE KEY UPDATE "
         "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
         "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
         "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
-        "drop_item_id=VALUES(drop_item_id),drop_rate_percent=VALUES(drop_rate_percent)",
+        "drop_item_id=0,drop_rate_percent=0",
         row->enemyId, row->level, row->family, row->hp, row->mp,
-        row->attack, row->defense, row->exp, row->gold,
-        row->dropItemId, row->dropRatePercent);
+        row->attack, row->defense, row->exp, row->gold);
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
     if (!vm_mysql_exec(query))
+        goto mysql_failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_monster_drops WHERE monster_id=%u",
+             row->enemyId);
+    if (!vm_mysql_exec(query))
+        goto mysql_failed;
+    for (u8 i = 0; i < row->dropCount; ++i)
     {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_monster_drops("
+                 "monster_id,drop_slot,item_id,drop_rate_percent) "
+                 "VALUES(%u,%u,%u,%u)",
+                 row->enemyId, (u32)i + 1u, row->drops[i].itemId,
+                 row->drops[i].ratePercent);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
     }
+    if (!vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
 
     override = &g_vm_net_mock_monster_overrides[index];
     memset(override, 0, sizeof(*override));
@@ -2456,22 +2595,38 @@ static bool vm_net_mock_monster_admin_save(
     override->stats.defense = row->defense;
     override->stats.exp = row->exp;
     override->stats.gold = row->gold;
-    override->stats.dropItemId = row->dropItemId;
-    override->stats.dropRatePercent = row->dropRatePercent;
+    override->dropCount = row->dropCount;
+    if (row->dropCount != 0)
+    {
+        memcpy(override->drops, row->drops,
+               sizeof(override->drops[0]) * row->dropCount);
+    }
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] monster_save id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u drop=%u rate=%u\n",
+    printf("[info][mock-admin] monster_save id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u drops=%u\n",
            row->enemyId, row->level, row->family, row->hp, row->mp,
            row->attack, row->defense, row->exp, row->gold,
-           row->dropItemId, row->dropRatePercent);
+           row->dropCount);
     return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_save_failed id=%u drops=%u error=%s\n",
+           row->enemyId, row->dropCount, mysqlError);
+    if (errorOut)
+        *errorOut = "怪物配置保存失败，请检查服务端 MySQL 日志";
+    return false;
 }
 
 static bool vm_net_mock_monster_admin_reset(u32 enemyId,
                                             const char **errorOut)
 {
     char query[256];
+    char mysqlError[512];
     int index = vm_net_mock_monster_catalog_index(enemyId);
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "怪物目录中不存在该 ID";
@@ -2487,14 +2642,18 @@ static bool vm_net_mock_monster_admin_reset(u32 enemyId,
             return false;
         }
     }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_monster_drops WHERE monster_id=%u", enemyId);
+    if (!vm_mysql_exec(query))
+        goto mysql_failed;
     snprintf(query, sizeof(query),
              "DELETE FROM server_monsters WHERE monster_id=%u", enemyId);
-    if (!vm_mysql_exec(query))
-    {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
-    }
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
     memset(&g_vm_net_mock_monster_overrides[index], 0,
            sizeof(g_vm_net_mock_monster_overrides[index]));
     if (errorOut)
@@ -2502,6 +2661,16 @@ static bool vm_net_mock_monster_admin_reset(u32 enemyId,
     printf("[info][mock-admin] monster_reset id=%u source=server-default\n",
            enemyId);
     return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_reset_failed id=%u error=%s\n",
+           enemyId, mysqlError);
+    if (errorOut)
+        *errorOut = "恢复怪物默认失败，请检查服务端 MySQL 日志";
+    return false;
 }
 
 static u32 vm_net_mock_battle_role_attack_default(void)

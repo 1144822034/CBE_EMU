@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS `server_data_migrations` (
   PRIMARY KEY (`migration_name`)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS `server_login_servers` (
+  `server_id` INT UNSIGNED NOT NULL,
+  `display_name` VARBINARY(31) NOT NULL,
+  `status_label` VARBINARY(31) NOT NULL,
+  `display_color` MEDIUMINT UNSIGNED NOT NULL DEFAULT 16777215,
+  `sort_order` INT UNSIGNED NOT NULL DEFAULT 0,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`server_id`),
+  KEY `idx_server_login_servers_visible` (`enabled`, `sort_order`, `server_id`)
+) ENGINE=InnoDB;
+
+-- GBK: 江湖一区 / 推荐. This is bootstrap data, not a mock packet fallback.
+INSERT IGNORE INTO `server_login_servers`
+  (`server_id`, `display_name`, `status_label`, `display_color`, `sort_order`, `enabled`)
+VALUES
+  (1, X'BDADBAFED2BBC7F8', X'CDC6BCF6', 16777215, 0, 1);
+
 CREATE TABLE IF NOT EXISTS `world_chat_messages` (
   `message_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -348,6 +367,20 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`monster_id`)
+) ENGINE=InnoDB;
+
+-- One independent probability row per monster drop.  The two legacy drop_*
+-- columns above remain only as a compatibility import source for old installs;
+-- new backend saves write this table and clear the legacy columns.
+CREATE TABLE IF NOT EXISTS `server_monster_drops` (
+  `monster_id` SMALLINT UNSIGNED NOT NULL,
+  `drop_slot` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `drop_rate_percent` TINYINT UNSIGNED NOT NULL,
+  PRIMARY KEY (`monster_id`, `drop_slot`),
+  CONSTRAINT `fk_server_monster_drops_monster`
+    FOREIGN KEY (`monster_id`) REFERENCES `server_monsters` (`monster_id`)
+    ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS `server_shop_items` (

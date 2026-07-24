@@ -2500,54 +2500,408 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
     return pos;
 }
 
-static u32 vm_net_mock_build_login_serverinfo_blob(u8 *out, u32 outCap)
+#define VM_NET_MOCK_LOGIN_SERVER_MAX 8
+#define VM_NET_MOCK_LOGIN_SERVER_NAME_CAP 32
+#define VM_NET_MOCK_LOGIN_SERVER_LABEL_CAP 32
+#define VM_NET_MOCK_LOGIN_SERVERINFO_CAP 1024
+
+/*
+ * The working one-row `serverinfo` contract is
+ *   name:string, label:string, serverID:u32, color:u24.
+ * `servernum` is the title parser's u16 count field.  Serialising that proven
+ * row shape once per enabled row is the bounded multi-row extension used here;
+ * its real-title verification steps are recorded in
+ * docs/re/2026-07-24-configurable-login-server-list.md.
+ *
+ * The original mock had one literal record for "测试一区" and hard-coded
+ * `servernum=1`, so the client could never exercise its real list path.  Keep
+ * this catalog at the protocol boundary: it contains only fields the title
+ * parser actually receives and deliberately does not pretend that choosing a
+ * row changes the already-established CBMS endpoint.
+ */
+typedef struct
+{
+    u32 serverId;
+    char displayName[VM_NET_MOCK_LOGIN_SERVER_NAME_CAP];
+    char label[VM_NET_MOCK_LOGIN_SERVER_LABEL_CAP];
+    u32 displayColor;
+    u32 sortOrder;
+    bool enabled;
+} vm_net_mock_login_server;
+
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+} vm_net_mock_login_server_load_context;
+
+static vm_net_mock_login_server g_vm_net_mock_login_servers[VM_NET_MOCK_LOGIN_SERVER_MAX];
+static u32 g_vm_net_mock_login_server_count = 0;
+static bool g_vm_net_mock_login_server_db_loaded = false;
+static bool g_vm_net_mock_login_server_db_valid = false;
+
+static void vm_net_mock_login_server_sort(void)
+{
+    for (u32 i = 1; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        vm_net_mock_login_server value = g_vm_net_mock_login_servers[i];
+        u32 j = i;
+
+        while (j > 0)
+        {
+            const vm_net_mock_login_server *previous =
+                &g_vm_net_mock_login_servers[j - 1];
+            if (previous->sortOrder < value.sortOrder ||
+                (previous->sortOrder == value.sortOrder &&
+                 previous->serverId <= value.serverId))
+            {
+                break;
+            }
+            g_vm_net_mock_login_servers[j] = *previous;
+            --j;
+        }
+        g_vm_net_mock_login_servers[j] = value;
+    }
+}
+
+static bool vm_net_mock_login_server_db_row(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_net_mock_login_server_load_context *context =
+        (vm_net_mock_login_server_load_context *)contextValue;
+    vm_net_mock_login_server row;
+    u32 number[4];
+    size_t nameLen = 0;
+    size_t labelLen = 0;
+
+    memset(&row, 0, sizeof(row));
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 6 ||
+        g_vm_net_mock_login_server_count >= VM_NET_MOCK_LOGIN_SERVER_MAX ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &number[0]) ||
+        number[0] == 0 ||
+        !vm_mysql_hex_decode(values[1], lengths[1], row.displayName,
+                             sizeof(row.displayName) - 1, &nameLen) ||
+        !vm_mysql_hex_decode(values[2], lengths[2], row.label,
+                             sizeof(row.label) - 1, &labelLen) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &number[1]) ||
+        number[1] > 0x00ffffffu ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &number[2]) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &number[3]) ||
+        number[3] > 1 || nameLen == 0 || labelLen == 0)
+    {
+        if (context != NULL)
+            ++context->skipped;
+        return true;
+    }
+    row.displayName[nameLen] = 0;
+    row.label[labelLen] = 0;
+    row.serverId = number[0];
+    row.displayColor = number[1];
+    row.sortOrder = number[2];
+    row.enabled = number[3] != 0;
+    g_vm_net_mock_login_servers[g_vm_net_mock_login_server_count++] = row;
+    ++context->loaded;
+    return true;
+}
+
+static u32 vm_net_mock_login_server_enabled_count(void)
+{
+    u32 count = 0;
+
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        if (g_vm_net_mock_login_servers[i].enabled)
+            ++count;
+    }
+    return count;
+}
+
+static bool vm_net_mock_login_server_db_load(void)
+{
+    vm_net_mock_login_server_load_context context;
+
+    if (g_vm_net_mock_login_server_db_loaded)
+        return g_vm_net_mock_login_server_db_valid;
+    g_vm_net_mock_login_server_db_loaded = true;
+    g_vm_net_mock_login_server_db_valid = false;
+    g_vm_net_mock_login_server_count = 0;
+    memset(g_vm_net_mock_login_servers, 0,
+           sizeof(g_vm_net_mock_login_servers));
+    memset(&context, 0, sizeof(context));
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_login_servers ("
+            "server_id INT UNSIGNED NOT NULL,"
+            "display_name VARBINARY(31) NOT NULL,"
+            "status_label VARBINARY(31) NOT NULL,"
+            "display_color MEDIUMINT UNSIGNED NOT NULL DEFAULT 16777215,"
+            "sort_order INT UNSIGNED NOT NULL DEFAULT 0,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(server_id),KEY idx_server_login_servers_visible(enabled,sort_order,server_id)) ENGINE=InnoDB") ||
+        /* The seed is database data, not a packet fallback.  The admin cannot
+         * delete/disable the final visible row, so a normally administered
+         * service always has a parser-safe title list after an upgrade. */
+        !vm_mysql_exec(
+            "INSERT IGNORE INTO server_login_servers("
+            "server_id,display_name,status_label,display_color,sort_order,enabled) VALUES("
+            "1,X'BDADBAFED2BBC7F8',X'CDC6BCF6',16777215,0,1)") ||
+        !vm_mysql_query(
+            "SELECT server_id,HEX(display_name),HEX(status_label),display_color,sort_order,enabled "
+            "FROM server_login_servers ORDER BY sort_order,server_id",
+            vm_net_mock_login_server_db_row, &context))
+    {
+        printf("[error][network] login_server_catalog_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    vm_net_mock_login_server_sort();
+    if (vm_net_mock_login_server_enabled_count() == 0)
+    {
+        printf("[error][network] login_server_catalog_load rejected reason=no-enabled-server rows=%u skipped=%u\n",
+               context.loaded, context.skipped);
+        return false;
+    }
+    g_vm_net_mock_login_server_db_valid = true;
+    printf("[info][network] login_server_catalog_load rows=%u enabled=%u skipped=%u source=mysql\n",
+           g_vm_net_mock_login_server_count,
+           vm_net_mock_login_server_enabled_count(), context.skipped);
+    return true;
+}
+
+static const vm_net_mock_login_server *vm_net_mock_login_server_find(
+    u32 serverId, bool enabledOnly)
+{
+    if (!vm_net_mock_login_server_db_load())
+        return NULL;
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        const vm_net_mock_login_server *row = &g_vm_net_mock_login_servers[i];
+        if (row->serverId == serverId && (!enabledOnly || row->enabled))
+            return row;
+    }
+    return NULL;
+}
+
+static u32 vm_net_mock_login_server_admin_list(
+    vm_net_mock_login_server *rows, u32 rowCap)
+{
+    u32 count = 0;
+
+    if (rows == NULL || rowCap == 0 || !vm_net_mock_login_server_db_load())
+        return 0;
+    count = g_vm_net_mock_login_server_count;
+    if (count > rowCap)
+        count = rowCap;
+    memcpy(rows, g_vm_net_mock_login_servers, count * sizeof(*rows));
+    return count;
+}
+
+static bool vm_net_mock_login_server_admin_save(
+    const vm_net_mock_login_server *row, const char **errorOut)
+{
+    char nameHex[VM_NET_MOCK_LOGIN_SERVER_NAME_CAP * 2 + 1];
+    char labelHex[VM_NET_MOCK_LOGIN_SERVER_LABEL_CAP * 2 + 1];
+    char query[768];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "服务器参数无效";
+    if (row == NULL || row->serverId == 0 || row->displayName[0] == 0 ||
+        row->label[0] == 0 || row->displayColor > 0x00ffffffu ||
+        strlen(row->displayName) >= sizeof(row->displayName) ||
+        strlen(row->label) >= sizeof(row->label))
+    {
+        return false;
+    }
+    if (!vm_net_mock_login_server_db_load())
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        if (g_vm_net_mock_login_servers[i].serverId == row->serverId)
+        {
+            existing = (int)i;
+            break;
+        }
+    }
+    if (existing < 0 &&
+        g_vm_net_mock_login_server_count >= VM_NET_MOCK_LOGIN_SERVER_MAX)
+    {
+        if (errorOut)
+            *errorOut = "客户端标题协议最多支持 8 个服务器";
+        return false;
+    }
+    if (existing >= 0 && g_vm_net_mock_login_servers[existing].enabled &&
+        !row->enabled && vm_net_mock_login_server_enabled_count() <= 1)
+    {
+        if (errorOut)
+            *errorOut = "至少保留一个启用的服务器";
+        return false;
+    }
+    if (vm_mysql_hex_encode(row->displayName, strlen(row->displayName),
+                            nameHex, sizeof(nameHex)) == 0 ||
+        vm_mysql_hex_encode(row->label, strlen(row->label),
+                            labelHex, sizeof(labelHex)) == 0)
+    {
+        if (errorOut)
+            *errorOut = "服务器文本编码失败";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_login_servers(server_id,display_name,status_label,display_color,sort_order,enabled) "
+             "VALUES(%u,X'%s',X'%s',%u,%u,%u) "
+             "ON DUPLICATE KEY UPDATE display_name=VALUES(display_name),status_label=VALUES(status_label),"
+             "display_color=VALUES(display_color),sort_order=VALUES(sort_order),enabled=VALUES(enabled)",
+             row->serverId, nameHex, labelHex, row->displayColor,
+             row->sortOrder, row->enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (existing >= 0)
+        g_vm_net_mock_login_servers[existing] = *row;
+    else
+        g_vm_net_mock_login_servers[g_vm_net_mock_login_server_count++] = *row;
+    vm_net_mock_login_server_sort();
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] login_server_save id=%u enabled=%u order=%u color=%u\n",
+           row->serverId, row->enabled ? 1u : 0u, row->sortOrder,
+           row->displayColor);
+    return true;
+}
+
+static bool vm_net_mock_login_server_admin_delete(u32 serverId,
+                                                  const char **errorOut)
+{
+    char query[192];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "服务器不存在";
+    if (serverId == 0 || !vm_net_mock_login_server_db_load())
+        return false;
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        if (g_vm_net_mock_login_servers[i].serverId == serverId)
+        {
+            existing = (int)i;
+            break;
+        }
+    }
+    if (existing < 0)
+        return false;
+    if (g_vm_net_mock_login_server_count <= 1 ||
+        (g_vm_net_mock_login_servers[existing].enabled &&
+         vm_net_mock_login_server_enabled_count() <= 1))
+    {
+        if (errorOut)
+            *errorOut = "至少保留一个启用的服务器";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_login_servers WHERE server_id=%u", serverId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if ((u32)existing + 1 < g_vm_net_mock_login_server_count)
+    {
+        memmove(&g_vm_net_mock_login_servers[existing],
+                &g_vm_net_mock_login_servers[existing + 1],
+                (g_vm_net_mock_login_server_count - (u32)existing - 1) *
+                    sizeof(g_vm_net_mock_login_servers[0]));
+    }
+    --g_vm_net_mock_login_server_count;
+    memset(&g_vm_net_mock_login_servers[g_vm_net_mock_login_server_count], 0,
+           sizeof(g_vm_net_mock_login_servers[0]));
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] login_server_delete id=%u\n", serverId);
+    return true;
+}
+
+static u32 vm_net_mock_build_login_serverinfo_blob(u8 *out, u32 outCap,
+                                                   u16 *serverCountOut)
 {
     u32 pos = 0;
-    const char serverName[] = "\xb2\xe2\xca\xd4\xd2\xbb\xc7\xf8"; /* GBK: ce shi yi qu */
-    const char serverLabel[] = "\xcd\xc6\xbc\xf6"; /* GBK: tui jian */
+    u16 count = 0;
 
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, serverName))
+    if (serverCountOut)
+        *serverCountOut = 0;
+    if (out == NULL || !vm_net_mock_login_server_db_load())
         return 0;
-    if (!vm_net_mock_seq_put_string(out, outCap, &pos, serverLabel))
-        return 0;
-    /* Keep the runtime-stable serverinfo shape: the title parser consumes the
-     * first server attribute as a 32-bit field, but the trailing display color
-     * is a 24-bit value. Using a visible color here avoids an "empty" looking
-     * list when the server row is present but rendered with black-on-black. */
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, 1))
-        return 0;
-    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
-        return 0;
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        const vm_net_mock_login_server *row = &g_vm_net_mock_login_servers[i];
 
+        if (!row->enabled)
+            continue;
+        if (!vm_net_mock_seq_put_string(out, outCap, &pos, row->displayName) ||
+            !vm_net_mock_seq_put_string(out, outCap, &pos, row->label) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, row->serverId) ||
+            !vm_net_mock_seq_put_u24(out, outCap, &pos, row->displayColor))
+        {
+            return 0;
+        }
+        ++count;
+    }
+    if (count == 0)
+        return 0;
+    if (serverCountOut)
+        *serverCountOut = count;
     return pos;
 }
 
-static u32 vm_net_mock_build_title_servconf_blob(u8 *out, u32 outCap)
+static u32 vm_net_mock_build_title_servconf_blob(u8 *out, u32 outCap,
+                                                 u32 serverId)
 {
+    const vm_net_mock_login_server *row =
+        vm_net_mock_login_server_find(serverId, true);
     u32 pos = 0;
 
-    /*
-     * mmTitleMstarWqvga.cbm sub_3544() reads servconf through sub_1490(),
-     * which consumes a 5-byte tagged blob and copies bytes 2..4 into the
-     * server-selection state. Reuse the same compact color-shape encoding here.
-     */
-    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
+    if (row == NULL)
         return 0;
-
+    /* mmTitleMstarWqvga.cbm sub_3544() consumes this tagged 24-bit color
+     * blob after its 1/1/4 server selection. */
+    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, row->displayColor))
+        return 0;
     return pos;
 }
 
 static u32 vm_net_mock_build_login_color_blob(u8 *out, u32 outCap)
 {
+    const vm_net_mock_login_server *row = NULL;
     u32 pos = 0;
 
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+    if (!vm_net_mock_login_server_db_load())
         return 0;
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
+    for (u32 i = 0; i < g_vm_net_mock_login_server_count; ++i)
+    {
+        if (g_vm_net_mock_login_servers[i].enabled)
+        {
+            row = &g_vm_net_mock_login_servers[i];
+            break;
+        }
+    }
+    if (row == NULL ||
+        !vm_net_mock_seq_put_u8(out, outCap, &pos, 1) ||
+        !vm_net_mock_seq_put_u8(out, outCap, &pos, 1) ||
+        !vm_net_mock_seq_put_u24(out, outCap, &pos, row->displayColor))
+    {
         return 0;
-    if (!vm_net_mock_seq_put_u24(out, outCap, &pos, 0x00FFFFFF))
-        return 0;
-
+    }
     return pos;
 }
 
@@ -2640,17 +2994,19 @@ static u32 vm_net_mock_build_login_primary_validation_response(u8 *out, u32 outC
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 serverInfo[128];
+    u8 serverInfo[VM_NET_MOCK_LOGIN_SERVERINFO_CAP];
     u32 serverInfoLen = 0;
     u8 colorBlob[16];
     u32 colorBlobLen = 0;
+    u16 serverCount = 0;
 
     if (outCap < pos)
         return 0;
 
     memset(serverInfo, 0, sizeof(serverInfo));
     memset(colorBlob, 0, sizeof(colorBlob));
-    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
+    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(
+        serverInfo, sizeof(serverInfo), &serverCount);
     if (serverInfoLen == 0)
         return 0;
     colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
@@ -2672,7 +3028,7 @@ static u32 vm_net_mock_build_login_primary_validation_response(u8 *out, u32 outC
      * the client still left serverCount==0 while result/newVer parsed. Use a
      * u16 field here as the next narrow contract probe for accessor[18].
      */
-    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", serverCount))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
         return 0;
@@ -2708,17 +3064,19 @@ static u32 vm_net_mock_build_login_primary_wait_server_response(u8 *out, u32 out
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 serverInfo[128];
+    u8 serverInfo[VM_NET_MOCK_LOGIN_SERVERINFO_CAP];
     u32 serverInfoLen = 0;
     u8 colorBlob[16];
     u32 colorBlobLen = 0;
+    u16 serverCount = 0;
 
     if (outCap < pos)
         return 0;
 
     memset(serverInfo, 0, sizeof(serverInfo));
     memset(colorBlob, 0, sizeof(colorBlob));
-    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
+    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(
+        serverInfo, sizeof(serverInfo), &serverCount);
     if (serverInfoLen == 0)
         return 0;
     colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
@@ -2738,7 +3096,7 @@ static u32 vm_net_mock_build_login_primary_wait_server_response(u8 *out, u32 out
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "color", colorBlob, (u16)colorBlobLen))
         return 0;
-    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", serverCount))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
         return 0;
@@ -2832,9 +3190,14 @@ static u32 vm_net_mock_build_title_server_select_response(const u8 *request, u32
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "serverID", &serverId);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "moneytype", &moneyType);
     memset(servConf, 0, sizeof(servConf));
-    servConfLen = vm_net_mock_build_title_servconf_blob(servConf, sizeof(servConf));
+    servConfLen = vm_net_mock_build_title_servconf_blob(
+        servConf, sizeof(servConf), serverId);
     if (servConfLen == 0)
+    {
+        printf("[error][network] mock_title_server_select unresolved server_id=%u reason=not-enabled-in-current-catalog\n",
+               serverId);
         return 0;
+    }
     actorInfoLen = vm_net_mock_build_title_role_list_actorinfo(actorInfo, sizeof(actorInfo));
     if (actorInfoLen == 0)
         return 0;
@@ -3077,10 +3440,11 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 serverInfo[128];
+    u8 serverInfo[VM_NET_MOCK_LOGIN_SERVERINFO_CAP];
     u32 serverInfoLen = 0;
     u8 colorBlob[16];
     u32 colorBlobLen = 0;
+    u16 serverCount = 0;
     char userName[64];
     char password[64];
     char informationUtf8[160];
@@ -3101,7 +3465,8 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     memset(password, 0, sizeof(password));
     memset(informationUtf8, 0, sizeof(informationUtf8));
     memset(informationBuf, 0, sizeof(informationBuf));
-    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(serverInfo, sizeof(serverInfo));
+    serverInfoLen = vm_net_mock_build_login_serverinfo_blob(
+        serverInfo, sizeof(serverInfo), &serverCount);
     if (serverInfoLen == 0)
         return 0;
     colorBlobLen = vm_net_mock_build_login_color_blob(colorBlob, sizeof(colorBlob));
@@ -3148,7 +3513,7 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "color", colorBlob, (u16)colorBlobLen))
         return 0;
-    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", 1))
+    if (!vm_net_mock_put_object_u16(out, outCap, &pos, "servernum", serverCount))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "newVer", 0))
         return 0;
@@ -3164,8 +3529,9 @@ static u32 vm_net_mock_build_login_alt12_server_list_response(const u8 *request,
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_mock_title_login_phase_mark_server_list();
-    printf("[info][network] mock_login_alt12_server_list result=%u servernum=1 issued=%u user=%s resp=%u\n",
+    printf("[info][network] mock_login_alt12_server_list result=%u servernum=%u issued=%u user=%s resp=%u\n",
            resultCode,
+           serverCount,
            issuedGuestCredentials ? 1 : 0,
            issuedGuestCredentials ? userName : "-",
            pos);

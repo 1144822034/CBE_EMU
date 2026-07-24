@@ -471,8 +471,10 @@ static u32 vm_net_mock_monster_admin_list(
         rows[i].defense = stats.defense;
         rows[i].exp = stats.exp;
         rows[i].gold = stats.gold;
-        rows[i].dropItemId = stats.dropItemId;
-        rows[i].dropRatePercent = stats.dropRatePercent;
+        rows[i].dropCount = vm_net_mock_monster_drops_for_enemy(
+            entry->enemyId, rows[i].drops, VM_NET_MOCK_MONSTER_DROP_MAX);
+        if (rows[i].dropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
+            rows[i].dropCount = VM_NET_MOCK_MONSTER_DROP_MAX;
         rows[i].overridden = override->used;
         snprintf(rows[i].displayName, sizeof(rows[i].displayName), "%s",
                  g_vm_net_mock_monster_resource_labels[i].displayName);
