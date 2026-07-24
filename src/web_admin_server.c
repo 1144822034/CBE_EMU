@@ -3573,7 +3573,9 @@ static void vm_mock_admin_render_content_page(char *response,
             "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
         vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
         vm_mock_admin_text_appendf(&page,
-            "</label>");
+            "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\"%s>完成后不可再次接取</option><option value=\"1\"%s>完成后允许再次接取</option></select></label>",
+            row->seed.taskRepeatable ? "" : " selected",
+            row->seed.taskRepeatable ? " selected" : "");
         vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount,
                                              &row->seed);
         vm_mock_admin_text_appendf(&page,
@@ -3628,7 +3630,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
     vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
-        "</label>");
+        "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\" selected>完成后不可再次接取</option><option value=\"1\">完成后允许再次接取</option></select></label>");
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
@@ -5339,6 +5341,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 y = 0;
     u32 kind = 0;
     u32 taskId = 0;
+    u32 taskRepeatable = 0;
     u32 orientation = 0;
     u32 actorImageCount = 0;
     u32 instanceX = 0;
@@ -5439,6 +5442,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
         !vm_mock_admin_form_u32(body, "kind", VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
         !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
+        !vm_mock_admin_form_u32(body, "task_repeatable", 1, &taskRepeatable) ||
         !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
@@ -5455,6 +5459,12 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "绑定任务不存在或已停用");
+        return;
+    }
+    if (taskId == 0 && taskRepeatable != 0)
+    {
+        vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                       "只有绑定任务的 NPC 才能设置重复接取");
         return;
     }
     if (kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
@@ -5570,6 +5580,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.y = (u16)y;
     seed.kind = (u16)kind;
     seed.taskId = taskId;
+    seed.taskRepeatable = taskRepeatable != 0;
     seed.orientation = (u16)orientation;
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;

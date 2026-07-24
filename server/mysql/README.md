@@ -47,6 +47,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_task_
 不会导入或改写；后台只保存编辑覆盖项和新增任务。服务启动时也会自动执行同等的
 `CREATE TABLE IF NOT EXISTS`。
 
+已有动态 NPC 任务绑定增加“完成后可重复接取”开关时，先停止 mock-service，且仅在
+`server_dynamic_npc_tasks` 尚无 `repeatable` 列时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_dynamic_npc_task_repeatable.sql
+```
+
+服务启动也会检查并补充该列；开关默认关闭，因此已有任务的完成后不可再次接取行为不会改变。
+
 已有数据库升级到用户账号中心和数据库后台密码时执行：
 
 ```powershell
@@ -188,7 +197,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
-- `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系。
+- `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。

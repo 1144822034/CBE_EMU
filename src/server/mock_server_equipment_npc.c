@@ -1890,6 +1890,20 @@ typedef struct
     vm_mock_service_trade_offer receipts[2];
 } vm_mock_service_trade;
 
+enum
+{
+    VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX = 10
+};
+
+typedef struct
+{
+    u32 roleId;
+    u32 taskId;
+    u32 actorId;
+    bool repeatable;
+    char scene[64];
+} vm_mock_service_task_offer_context;
+
 typedef struct vm_mock_service_client_session
 {
     u32 clientId;
@@ -1980,6 +1994,11 @@ typedef struct vm_mock_service_client_session
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
     char instanceChallengeScene[64];
+    /* The native action=4 task path carries only task_id after the NPC dialog.
+     * Retain the server-observed offer source so a completed task cannot be
+     * reaccepted by forging the later 6/11 request. */
+    vm_mock_service_task_offer_context
+        taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -4590,6 +4609,10 @@ typedef struct
     /* Optional server-managed task binding.  SCE/XSE actors keep this zero
      * and continue to discover their tasks from the script resource. */
     u32 taskId;
+    /* This is a property of the dynamic NPC binding, not a client-side task
+     * flag.  It authorizes replacing a persisted completed (state 3) row only
+     * after this NPC has actually offered the task to the active session. */
+    bool taskRepeatable;
     u32 challengeEnemyId;
     u16 x;
     u16 y;
