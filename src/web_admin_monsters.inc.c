@@ -179,7 +179,7 @@ static void vm_mock_admin_render_monster_page(char *response,
     else
         vm_mock_admin_text_appendf(&page, "未命名怪物");
     vm_mock_admin_text_appendf(
-        &page, " <span class=\"badge%s\">%s</span></h2><div class=\"summary\"><span class=\"chip\">首次场景：",
+        &page, " <span class=\"badge%s\">%s</span></h2><div class=\"summary\"><span class=\"chip\">出现位置／来源：",
         edit->overridden ? " override" : "",
         edit->overridden ? "MySQL 覆盖" : "服务端默认");
     if (sceneUtf8[0] != 0)
