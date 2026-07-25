@@ -78,6 +78,10 @@ static u8 g_vm_net_mock_team_battle_group_hp_changed_mask = 0;
 static vm_net_mock_battle_stat_modifier
     g_vm_net_mock_team_battle_member_modifiers_current[3];
 static u8 g_vm_net_mock_team_battle_group_modifier_changed_mask = 0;
+/* Set only by explicit MP-restore paths (item/flask).  finish_operation rejects
+ * unexplained current-MP increases so a stale role->mpMax cannot refill the
+ * shared team battle snapshot and the next teaminfo row. */
+static u8 g_vm_net_mock_battle_mp_increase_allowed = 0;
 /* The role currently evaluating a battle action reads this copy.  In a solo
  * battle it is the durable-in-session copy below; team prepare_operation
  * replaces it with the acting member's shared snapshot. */

@@ -2194,6 +2194,7 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
         if (item == NULL || item->itemId == 0 || item->count < offer->items[i].count)
             return false;
         offer->items[i].itemId = item->itemId;
+        offer->items[i].enhanceLevel = item->enhanceLevel;
     }
     return true;
 }
@@ -2226,8 +2227,11 @@ static bool vm_net_mock_append_trade_offer_object(
             (item->itemId < 1000 &&
              !vm_net_mock_seq_put_string(itemInfo, sizeof(itemInfo),
                                          &itemInfoLen, "")) ||
-            !vm_net_mock_seq_put_item_common_extra(itemInfo, sizeof(itemInfo),
-                                                   &itemInfoLen, 0, 0))
+            !vm_net_mock_seq_put_item_common_extra(
+                itemInfo, sizeof(itemInfo), &itemInfoLen,
+                (u8)SDL_min(item->count, 0xffu),
+                (u8)SDL_min(item->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
         {
             return false;
         }
@@ -2273,7 +2277,12 @@ static bool vm_net_mock_append_trade_terminal_object(
                 !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                          item->itemId) ||
                 !vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
-                                         (u16)SDL_min(item->count, 0xffffu)))
+                                         (u16)SDL_min(item->count, 0xffffu)) ||
+                !vm_net_mock_seq_put_item_common_extra(
+                    itemInfo, sizeof(itemInfo), &itemInfoLen,
+                    (u8)SDL_min(item->count, 0xffu),
+                    (u8)SDL_min(item->enhanceLevel,
+                                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
             {
                 return false;
             }
@@ -2418,6 +2427,7 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             if (!vm_mock_service_trade_role_add_item(
                     &roles[side], incoming->items[i].itemId,
                     incoming->items[i].count,
+                    incoming->items[i].enhanceLevel,
                     &receipt->items[i].destinationSeq))
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;

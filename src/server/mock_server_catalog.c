@@ -1959,6 +1959,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
 {
     switch (itemId)
     {
+    case 801: /* revival stone: battle 1/7/14 or map shop-return consume only */
     case 809:
     case 810:
     case 811:
@@ -2624,6 +2625,61 @@ static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u3
     if (actorInfoLenOut)
         *actorInfoLenOut = actorInfoLen;
     return true;
+}
+
+static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
+                                                       u16 seq, u32 count,
+                                                       u32 *blobLenOut);
+
+/* In-scene actorinfo refresh after map/battle revival.
+ * Prefer 1/1/14 (same object mmShop:0x9DE / parse_actorinfo_response consumes
+ * for live actor-state updates).  Login-shaped 1/1/1 is easy to ignore on the
+ * scene-sync poll path while mmGame already owns the map HUD. */
+static u32 vm_net_mock_build_map_actor_vitals_sync_response_ex(
+    u8 *out,
+    u32 outCap,
+    u16 bagClearSeq,
+    u32 bagClearRemaining)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 actorInfoLen = 0;
+    u8 countInfo[16];
+    u32 countInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos,
+                                                      &actorInfoLen))
+    {
+        return 0;
+    }
+    objectCount += 1;
+
+    if (bagClearSeq != 0)
+    {
+        if (!vm_net_mock_build_item_use_count_info_blob(
+                countInfo, sizeof(countInfo), bagClearSeq, bagClearRemaining,
+                &countInfoLen) ||
+            !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo,
+                                        (u16)countInfoLen))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    return pos;
+}
+
+static u32 vm_net_mock_build_map_actor_vitals_sync_response(u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_map_actor_vitals_sync_response_ex(out, outCap, 0, 0);
 }
 
 static bool vm_net_mock_append_shop_empty_page14_object(u8 *out, u32 outCap, u32 *pos, u8 subtype)
@@ -3787,10 +3843,31 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
         }
         if (isCombatPill)
         {
-            /* The category-21 client contract is known, but item.dsh contains
-             * no attack/defence value for 829/830. Do not consume an item and
-             * claim success until that missing authority is supplied. */
-            info = "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xB9\xA5\xB7\xC0\xCA\xFD\xD6\xB5\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
+            /*
+             * item.dsh only says "明显/巨幅提升" with zero ATK/DEF columns.
+             * Persist a documented percent interpretation in multiplier and
+             * apply it on battle attack while the timed effect is active.
+             * 829 大力丸 -> +30% ATK; 830 神力丸 -> +60% ATK.
+             */
+            if (item->itemId == 829)
+                effect.multiplier = 30;
+            else if (item->itemId == 830)
+                effect.multiplier = 60;
+            if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds &&
+                effect.multiplier != 0)
+            {
+                effect.expiresUnix = now + durationSeconds;
+                success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
+                    role, item->itemId, requestedSeq, &effect, NULL,
+                    "combat-pill-use");
+                info = success
+                           ? "\xB4\xF3\xC1\xA6\xCD\xE2\xB9\xA5\xD2\xD1\xC9\xFA\xD0\xA7\xA1\xA3"
+                           : "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+            }
+            else
+            {
+                info = "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xB9\xA5\xB7\xC0\xCA\xFD\xD6\xB5\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
+            }
         }
         else if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
         {
@@ -4256,6 +4333,15 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
             discardCount = parsed.count ? parsed.count : item->count;
             if (discardCount == 0)
                 discardCount = item->count;
+            /*
+             * Equipment rows must never discard the whole same-name pile when
+             * the client omits count: one confirm removes one instance.
+             */
+            if (parsed.count == 0 &&
+                vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL)
+            {
+                discardCount = 1;
+            }
             consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
                                                               discardCount, &remaining);
             if (consumed)

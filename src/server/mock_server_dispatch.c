@@ -200,6 +200,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u32 hookedLen = 0;
 
     /*
+     * After battle revival, mmGame may still show HP=0 until it consumes an
+     * in-scene actorinfo refresh.  Prefer delivering that on the next real WT
+     * request (move / hangup / etc.) so it is not stuck behind sceneVisibleReady.
+     */
+    hookedLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
+        out, outCap, "wt-dispatch");
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-map-actor-vitals-sync", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    /*
      * This is a high-frequency, single-object request with a narrow signature.
      * Dispatch it before unrelated shop/resource/scene detectors; several of
      * those consult real game resources and previously added hundreds of

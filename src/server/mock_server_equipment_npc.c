@@ -963,8 +963,39 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
                dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
                rolledDropCount, grantedCount);
-        if (grantedCount == 0 ||
-            !vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
+        if (grantedCount == 0)
+            continue;
+        if (vm_net_mock_find_equipment_catalog_item(configured->itemId) != NULL)
+        {
+            u32 grantedEquipUnits = 0;
+
+            for (u32 unit = 0;
+                 unit < grantedCount &&
+                 resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
+                 ++unit)
+            {
+                u16 oneSeq = 0;
+
+                if (!vm_net_mock_role_add_backpack_item(configured->itemId, 1,
+                                                        &oneSeq))
+                {
+                    break;
+                }
+                results[resultCount].itemId = configured->itemId;
+                results[resultCount].seq = oneSeq;
+                results[resultCount].count = 1;
+                ++resultCount;
+                ++grantedEquipUnits;
+            }
+            if (grantedEquipUnits != 0)
+            {
+                vm_net_mock_task_progress_after_battle(
+                    g_vm_net_mock_battle_enemy_id_current, enemyCount,
+                    configured->itemId, grantedEquipUnits);
+            }
+            continue;
+        }
+        if (!vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
                                                 &grantedSeq))
         {
             continue;
@@ -1086,7 +1117,9 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleHp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent :
                  (role ? role->hp : VM_NET_MOCK_ROLE_DEFAULT_HP);
-    u32 roleMp = role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP;
+    /* Same contract as status7: durable role->mp is not the battle bar. */
+    u32 roleMp = g_mockBattleRoleMpMax != 0 ? g_mockBattleRoleMpCurrent :
+                 (role ? role->mp : VM_NET_MOCK_ROLE_DEFAULT_MP);
     u32 rewardExp = 0;
     u32 rewardGold = 0;
     u32 statusLastExp = 0;
@@ -1220,9 +1253,11 @@ static bool vm_net_mock_role_apply_revival_stone(u16 *consumedSeqOut,
         return false;
     }
 
-    /* 801 restores HP only.  Its DSH MP effect is zero, so preserve current
-     * MP instead of turning the shop purchase into an undocumented full heal. */
+    /* 801 restores full combat readiness.  item.dsh text is "原地满血复活";
+     * runtime expects both bars full after revival or the map HUD stays empty
+     * while the next battle start reseeds from durable vitals. */
     role->hp = role->hpMax;
+    role->mp = role->mpMax;
     g_mockBattleRoleHpCurrent = role->hp;
     g_mockBattleRoleHpMax = role->hpMax;
     g_mockBattleRoleMpCurrent = role->mp;
@@ -1644,6 +1679,7 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleOperateSessionSerial;
     u32 mockBattleOperateTurnCounter;
     u8 mockBattleOperateSessionArmed;
+    u8 mockBattleAwaitsRevivalConfirm;
     u8 mockBattleOperateSessionFinished;
     u8 mockBattlePendingEnemyTurn;
     u8 mockBattleAwaitingSettlement;
@@ -1863,6 +1899,7 @@ typedef struct
     u16 sourceSeq;
     u16 destinationSeq;
     u32 count;
+    u16 enhanceLevel;
 } vm_mock_service_trade_item;
 
 typedef struct
@@ -1932,6 +1969,26 @@ typedef struct vm_mock_service_client_session
     u32 sceneVisibleTick;
     bool shopSceneNpcReseedPending;
     char shopSceneNpcReseedScene[64];
+    /* After map-side revival outside the shop-return WT6/1 object budget,
+     * deliver one login-shaped actorinfo on the next scene poll. */
+    bool pendingMapActorVitalsSync;
+    /* Battle.cbm still owns the screen for several ticks after 4/8.  A poll
+     * that fires too early can clear this flag while mmGame never applies
+     * the 1/1/1, leaving the map HUD at HP=0. */
+    u32 pendingMapActorVitalsSyncEarliestTick;
+    u8 pendingMapActorVitalsSyncRemaining;
+    /*
+     * Battle death confirm may consume 801 inside a kind-4 terminal packet
+     * that Battle.cbm tears down before kind-7 count sync runs.  Defer the
+     * authoritative 7/11 remaining update to the next mmGame scene poll.
+     */
+    u16 pendingRevivalBagClearSeq;
+    u32 pendingRevivalBagClearRemaining;
+    /*
+     * Battle.cbm death UI still owes 1/7/14 after the operate session is
+     * disarmed on HP=0.  Keep this per-session until confirm or map revive.
+     */
+    bool awaitsBattleRevivalConfirm;
     bool taskPromptRefreshPending;
     char taskPromptRefreshScene[64];
     bool lastMoveinfoValid;
@@ -2041,6 +2098,10 @@ typedef struct
     vm_net_mock_battle_stat_modifier
         battleMemberModifiers[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     u8 battleRoundActedMask;
+    /* Members who successfully fled (or otherwise left) while the party fight
+     * continues.  They stay in the frozen battleMember* roster for teaminfo
+     * row count, but must not block the alive-mask turn barrier. */
+    u8 battleMemberLeftMask;
     u32 battleRoundSerial;
     bool battleRoundTerminalPending;
     u32 battleRoundActionSerial;
@@ -2124,6 +2185,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleOperateSessionSerial = g_mockBattleOperateSessionSerial;
     state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
     state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
+    state->mockBattleAwaitsRevivalConfirm = g_mockBattleAwaitsRevivalConfirm;
     state->mockBattleOperateSessionFinished = g_mockBattleOperateSessionFinished;
     state->mockBattlePendingEnemyTurn = g_mockBattlePendingEnemyTurn;
     state->mockBattleAwaitingSettlement = g_mockBattleAwaitingSettlement;
@@ -2229,6 +2291,7 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_mockBattleOperateSessionSerial = state->mockBattleOperateSessionSerial;
     g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
     g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
+    g_mockBattleAwaitsRevivalConfirm = state->mockBattleAwaitsRevivalConfirm;
     g_mockBattleOperateSessionFinished = state->mockBattleOperateSessionFinished;
     g_mockBattlePendingEnemyTurn = state->mockBattlePendingEnemyTurn;
     g_mockBattleAwaitingSettlement = state->mockBattleAwaitingSettlement;
@@ -2652,9 +2715,11 @@ static vm_net_mock_role_state *vm_mock_service_trade_role_for_session(
 static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
                                                 u32 itemId,
                                                 u32 count,
+                                                u16 enhanceLevel,
                                                 u16 *destinationSeqOut)
 {
     u8 itemCount = 0;
+    bool isEquipment = false;
 
     if (destinationSeqOut)
         *destinationSeqOut = 0;
@@ -2662,16 +2727,49 @@ static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
         return false;
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
-    for (u32 i = 0; i < itemCount; ++i)
+    isEquipment = vm_net_mock_find_equipment_catalog_item(itemId) != NULL;
+    if (!isEquipment)
     {
-        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
-        if (item->itemId != itemId)
-            continue;
-        if (0xffffffffu - item->count < count)
+        for (u32 i = 0; i < itemCount; ++i)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+            if (item->itemId != itemId)
+                continue;
+            if (0xffffffffu - item->count < count)
+                return false;
+            item->count += count;
+            if (destinationSeqOut)
+                *destinationSeqOut = item->seq;
+            return true;
+        }
+    }
+    if (isEquipment)
+    {
+        u32 freeSlots = role->backpackCapacity > itemCount
+                            ? (u32)role->backpackCapacity - itemCount
+                            : 0;
+        u16 firstSeq = 0;
+
+        if (count > freeSlots ||
+            count > (u32)(VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount))
             return false;
-        item->count += count;
+        for (u32 unit = 0; unit < count; ++unit)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
+            memset(item, 0, sizeof(*item));
+            item->itemId = itemId;
+            item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+            item->count = 1;
+            item->enhanceLevel = enhanceLevel;
+            if (firstSeq == 0)
+                firstSeq = item->seq;
+            role->nextBackpackSeq = (u16)(item->seq + 1);
+            if (role->nextBackpackSeq == 0)
+                role->nextBackpackSeq = 1;
+        }
+        role->backpackItemCount = (u8)(itemCount + count);
         if (destinationSeqOut)
-            *destinationSeqOut = item->seq;
+            *destinationSeqOut = firstSeq;
         return true;
     }
     if (itemCount >= role->backpackCapacity ||
@@ -2679,17 +2777,20 @@ static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
     {
         return false;
     }
-    vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
-    memset(item, 0, sizeof(*item));
-    item->itemId = itemId;
-    item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
-    item->count = count;
-    role->backpackItemCount = (u8)(itemCount + 1);
-    role->nextBackpackSeq = (u16)(item->seq + 1);
-    if (role->nextBackpackSeq == 0)
-        role->nextBackpackSeq = 1;
-    if (destinationSeqOut)
-        *destinationSeqOut = item->seq;
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
+        memset(item, 0, sizeof(*item));
+        item->itemId = itemId;
+        item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+        item->count = count;
+        item->enhanceLevel = enhanceLevel;
+        role->backpackItemCount = (u8)(itemCount + 1);
+        role->nextBackpackSeq = (u16)(item->seq + 1);
+        if (role->nextBackpackSeq == 0)
+            role->nextBackpackSeq = 1;
+        if (destinationSeqOut)
+            *destinationSeqOut = item->seq;
+    }
     return true;
 }
 
@@ -3740,6 +3841,120 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     }
 }
 
+static void vm_mock_service_session_arm_map_actor_vitals_sync(
+    vm_mock_service_client_session *session,
+    u16 bagClearSeq,
+    u32 bagClearRemaining)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 delayTicks = vm_net_mock_env_u32("CBE_MAP_VITALS_SYNC_DELAY_TICKS", 3);
+
+    if (session == NULL)
+        return;
+    if (delayTicks == 0)
+        delayTicks = 1;
+    session->pendingMapActorVitalsSync = true;
+    session->pendingMapActorVitalsSyncEarliestTick = g_schedulerTick + delayTicks;
+    /*
+     * Deliver twice: first after Battle teardown, second a few ticks later in
+     * case mmGame was still reconstructing on the first 1/1/1.
+     */
+    session->pendingMapActorVitalsSyncRemaining = 2;
+    if (bagClearSeq != 0)
+    {
+        session->pendingRevivalBagClearSeq = bagClearSeq;
+        session->pendingRevivalBagClearRemaining = bagClearRemaining;
+    }
+    if (role != NULL &&
+        vm_net_mock_scene_name_is_safe(role->scene) &&
+        role->x != 0 && role->y != 0 &&
+        (!session->sceneVisibleReady || session->sceneVisiblePending))
+    {
+        vm_mock_service_session_mark_scene_ready(session,
+                                                 role->scene,
+                                                 role->x,
+                                                 role->y,
+                                                 "revival-map-vitals-arm");
+    }
+    printf("[info][mock-service] map_actor_vitals_sync_arm client=%08x role=%u "
+           "hp=%u/%u mp=%u/%u bag_clear_seq=%u earliest_tick=%u remaining=%u\n",
+           session->clientId,
+           session->onlineRoleId,
+           session->onlineHp,
+           session->onlineHpMax,
+           session->onlineMp,
+           session->onlineMpMax,
+           bagClearSeq,
+           session->pendingMapActorVitalsSyncEarliestTick,
+           session->pendingMapActorVitalsSyncRemaining);
+}
+
+static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
+    u8 *out,
+    u32 outCap,
+    const char *via)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    u16 bagClearSeq = 0;
+    u32 bagClearRemaining = 0;
+    u32 responseLen = 0;
+    u32 gapTicks = 0;
+
+    if (out == NULL || outCap == 0 || session == NULL ||
+        !session->pendingMapActorVitalsSync ||
+        g_schedulerTick < session->pendingMapActorVitalsSyncEarliestTick)
+    {
+        return 0;
+    }
+    bagClearSeq = session->pendingRevivalBagClearSeq;
+    bagClearRemaining = session->pendingRevivalBagClearRemaining;
+    responseLen = vm_net_mock_build_map_actor_vitals_sync_response_ex(
+        out, outCap, bagClearSeq, bagClearRemaining);
+    if (responseLen == 0)
+    {
+        printf("[warn][mock-service] map_actor_vitals_sync_build_failed "
+               "client=%08x role=%u keep_pending=1 via=%s\n",
+               session->clientId,
+               session->onlineRoleId,
+               via ? via : "-");
+        return 0;
+    }
+    if (session->pendingMapActorVitalsSyncRemaining > 1)
+    {
+        session->pendingMapActorVitalsSyncRemaining -= 1;
+        gapTicks = vm_net_mock_env_u32("CBE_MAP_VITALS_SYNC_REPEAT_TICKS", 5);
+        if (gapTicks == 0)
+            gapTicks = 1;
+        session->pendingMapActorVitalsSyncEarliestTick =
+            g_schedulerTick + gapTicks;
+        session->pendingRevivalBagClearSeq = 0;
+        session->pendingRevivalBagClearRemaining = 0;
+    }
+    else
+    {
+        session->pendingMapActorVitalsSync = false;
+        session->pendingMapActorVitalsSyncRemaining = 0;
+        session->pendingMapActorVitalsSyncEarliestTick = 0;
+        session->pendingRevivalBagClearSeq = 0;
+        session->pendingRevivalBagClearRemaining = 0;
+    }
+    printf("[info][mock-service] map_actor_vitals_sync client=%08x "
+           "role=%u hp=%u/%u mp=%u/%u bag_clear_seq=%u remaining=%u via=%s "
+           "resp=%u\n",
+           session->clientId,
+           session->onlineRoleId,
+           session->onlineHp,
+           session->onlineHpMax,
+           session->onlineMp,
+           session->onlineMpMax,
+           bagClearSeq,
+           session->pendingMapActorVitalsSyncRemaining,
+           via ? via : "-",
+           responseLen);
+    return responseLen;
+}
+
 static void vm_mock_service_session_update_move_position(vm_mock_service_client_session *session,
                                                          const char *scene,
                                                          u16 x,
@@ -3816,6 +4031,12 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->scenePendingScene[0] = 0;
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedScene[0] = 0;
+    session->pendingMapActorVitalsSync = false;
+    session->pendingMapActorVitalsSyncEarliestTick = 0;
+    session->pendingMapActorVitalsSyncRemaining = 0;
+    session->pendingRevivalBagClearSeq = 0;
+    session->pendingRevivalBagClearRemaining = 0;
+    session->awaitsBattleRevivalConfirm = false;
     session->taskPromptRefreshPending = false;
     session->taskPromptRefreshScene[0] = 0;
     memset(session->socialNotices, 0, sizeof(session->socialNotices));
@@ -3984,6 +4205,64 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     y = role->y;
     vm_net_mock_role_default_vitals(role, &hp, &hpMax, &mp, &mpMax);
     /*
+     * During a shared team battle the service-local battleMember* snapshot is
+     * authoritative.  Presence capture previously rebuilt vitals from the
+     * durable role row / per-account battle globals, which could still hold
+     * pre-skill max MP and let the next teaminfo row refill the caster bar.
+     */
+    {
+        vm_mock_service_team *team =
+            vm_mock_service_team_find_for_client(session->clientId);
+        int memberIndex = -1;
+
+        if (team != NULL && team->battleActive && session->clientId != 0)
+        {
+            for (u8 i = 0; i < team->battleMemberCount; ++i)
+            {
+                if (team->battleMemberClientIds[i] == session->clientId)
+                {
+                    memberIndex = (int)i;
+                    break;
+                }
+            }
+        }
+        if (memberIndex >= 0 && memberIndex < team->battleMemberCount)
+        {
+            u8 memberBit = (u8)(1u << memberIndex);
+
+            /*
+             * Revival/escape exit keeps battleMemberHp at 0 on purpose.  That
+             * snapshot must not replace durable presence HP or the next
+             * team_begin_battle seeds the seat as dead.
+             */
+            if ((team->battleMemberLeftMask & memberBit) == 0)
+            {
+                hpMax = team->battleMemberHpMax[memberIndex]
+                            ? team->battleMemberHpMax[memberIndex]
+                            : hpMax;
+                hp = vm_net_mock_min_u32(team->battleMemberHp[memberIndex], hpMax);
+                mpMax = team->battleMemberMpMax[memberIndex]
+                            ? team->battleMemberMpMax[memberIndex]
+                            : mpMax;
+                mp = vm_net_mock_min_u32(team->battleMemberMp[memberIndex], mpMax);
+            }
+        }
+        else if (g_mockBattleOperateSessionArmed != 0 &&
+                 g_mockBattleSceneMonsterStartActive != 0)
+        {
+            if (g_mockBattleRoleHpMax != 0)
+            {
+                hpMax = g_mockBattleRoleHpMax;
+                hp = vm_net_mock_min_u32(g_mockBattleRoleHpCurrent, hpMax);
+            }
+            if (g_mockBattleRoleMpMax != 0)
+            {
+                mpMax = g_mockBattleRoleMpMax;
+                mp = vm_net_mock_min_u32(g_mockBattleRoleMpCurrent, mpMax);
+            }
+        }
+    }
+    /*
      * Nearby-player visibility is per client session. A single global
      * last-moveinfo source is still useful for local scene-transition
      * heuristics, but reusing it here cross-contaminates positions between
@@ -4131,6 +4410,31 @@ static bool vm_mock_service_session_scene_is_visible(const vm_mock_service_clien
     return vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene);
 }
 
+static bool vm_mock_service_team_member_has_nonzero_battle_hp(
+    vm_mock_service_client_session *member)
+{
+    vm_net_mock_role_state *role = NULL;
+    u32 seedHp = 0;
+    u32 seedHpMax = 0;
+    u32 seedMp = 0;
+    u32 seedMpMax = 0;
+
+    if (member == NULL)
+        return false;
+    /*
+     * Mirror team_begin_battle seeding: durable role wins when online presence
+     * was wiped to 0 after a prior revival/escape exit; a truly dead seat has
+     * both online and durable HP at 0 and must not be pulled into Battle.cbm.
+     */
+    role = vm_mock_service_trade_role_for_session(member, NULL);
+    if (role != NULL)
+        vm_net_mock_role_default_vitals(role, &seedHp, &seedHpMax, &seedMp,
+                                        &seedMpMax);
+    if (member->onlineHp != 0)
+        return true;
+    return seedHp != 0;
+}
+
 static u8 vm_mock_service_team_collect_battle_members(
     const vm_mock_service_team *team,
     const char *scene,
@@ -4151,6 +4455,18 @@ static u8 vm_mock_service_team_collect_battle_members(
             vm_mock_service_find_client_session(team->memberClientIds[i]);
         if (!vm_mock_service_session_scene_is_visible(member, scene))
             continue;
+        if (!vm_mock_service_team_member_has_nonzero_battle_hp(member))
+        {
+            printf("[info][mock-service] team_battle_skip_dead_member "
+                   "leader=%08x member=%08x/%u scene=%s online_hp=%u "
+                   "reason=map-dead-not-pulled-into-battle\n",
+                   team->leaderClientId,
+                   member ? member->clientId : 0,
+                   member ? member->onlineRoleId : 0,
+                   scene,
+                   member ? member->onlineHp : 0);
+            continue;
+        }
         memberClientIds[count++] = member->clientId;
     }
     return count;
@@ -4242,6 +4558,7 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     team->battleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
     team->battleEnemyHpMax = g_mockBattleEnemyHpMax;
     team->battleRoundActedMask = 0;
+    team->battleMemberLeftMask = 0;
     team->battleRoundSerial = 1;
     team->battleRoundTerminalPending = false;
     team->battleRoundActionSerial = 0;
@@ -4259,14 +4576,44 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     {
         vm_mock_service_client_session *member =
             vm_mock_service_find_client_session(participantIds[i]);
+        vm_net_mock_role_state *memberRole = NULL;
+        u32 seedHp = 0;
+        u32 seedHpMax = 0;
+        u32 seedMp = 0;
+        u32 seedMpMax = 0;
+
         if (member == NULL)
             continue;
-        team->battleMemberHpMax[i] = member->onlineHpMax ? member->onlineHpMax : 1;
-        team->battleMemberHp[i] = vm_net_mock_min_u32(member->onlineHp,
-                                                      team->battleMemberHpMax[i]);
-        team->battleMemberMpMax[i] = member->onlineMpMax;
-        team->battleMemberMp[i] = vm_net_mock_min_u32(member->onlineMp,
-                                                      team->battleMemberMpMax[i]);
+        memberRole = vm_mock_service_trade_role_for_session(member, NULL);
+        if (memberRole != NULL)
+            vm_net_mock_role_default_vitals(memberRole, &seedHp, &seedHpMax,
+                                            &seedMp, &seedMpMax);
+        if (seedHpMax == 0)
+            seedHpMax = member->onlineHpMax ? member->onlineHpMax : 1;
+        if (seedMpMax == 0)
+            seedMpMax = member->onlineMpMax;
+        /*
+         * Prefer durable role vitals when online presence was wiped to 0 by a
+         * prior shared-battle seat that had already revived/fled out.
+         */
+        if (member->onlineHp != 0)
+            seedHp = vm_net_mock_min_u32(member->onlineHp, seedHpMax ? seedHpMax : member->onlineHp);
+        if (member->onlineMp != 0 || memberRole == NULL)
+            seedMp = vm_net_mock_min_u32(member->onlineMp, seedMpMax ? seedMpMax : member->onlineMp);
+        if (member->onlineHpMax != 0)
+            seedHpMax = member->onlineHpMax;
+        if (member->onlineMpMax != 0)
+            seedMpMax = member->onlineMpMax;
+        team->battleMemberHpMax[i] = seedHpMax ? seedHpMax : 1;
+        team->battleMemberHp[i] = vm_net_mock_min_u32(seedHp, team->battleMemberHpMax[i]);
+        team->battleMemberMpMax[i] = seedMpMax;
+        team->battleMemberMp[i] = vm_net_mock_min_u32(seedMp, team->battleMemberMpMax[i]
+                                                                  ? team->battleMemberMpMax[i]
+                                                                  : seedMp);
+        member->onlineHp = team->battleMemberHp[i];
+        member->onlineHpMax = team->battleMemberHpMax[i];
+        member->onlineMp = team->battleMemberMp[i];
+        member->onlineMpMax = team->battleMemberMpMax[i];
     }
 
     for (u8 i = 0; i < participantCount; ++i)

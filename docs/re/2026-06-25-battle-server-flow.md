@@ -244,14 +244,22 @@ The required mask is recomputed from frozen members whose shared HP is nonzero:
 
 ```text
 on member action:
-  reject if member is dead or its bit is already set
-  resolve_monsters = (acted_mask | member_bit) == alive_mask
+  reject if member is dead/fled or its bit is already set
+  resolve_monsters = ((acted_mask | member_bit) & alive_mask) == alive_mask
   build the normal 4/6 with monster actions enabled only when resolve_monsters
   for a non-final member, commit server state but retain its actioninfo by submit order
   return a zero-object WT acknowledgement (never an empty 4/6 action list)
   on the final member, concatenate every retained player action before its
     player-plus-monster actioninfo and publish one combined 4/6 to all members
+  that combined 4/6 must carry one overlapped teaminfo row per frozen member
+    (id/hp/currentMp, with casters at post-cost MP); a single caster-only row
+    leaves earlier skill users' unit+1344 at 0 so type-1 playback restores MP
+    to 0
+  peer delivery rewrites every teaminfo row through the observer wire-id map
   reset acted_mask and the retained action list only after publishing that round
+  successful flee sets battleMemberLeftMask and must not remain in alive_mask;
+    if remaining living members have already acted, orphan-flush the pending
+    round so deferred peers are not stranded waiting for the fleer
 ```
 
 The first implementation only suppressed monster records in non-final responses.

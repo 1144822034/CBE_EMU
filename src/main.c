@@ -398,6 +398,7 @@ static u32 g_battleSubtype8InfoDstWriteLimitCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 u8 g_mockBattleOperateSessionArmed = 0;
+u8 g_mockBattleAwaitsRevivalConfirm = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;

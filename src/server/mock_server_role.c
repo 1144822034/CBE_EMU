@@ -1681,6 +1681,42 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
     dst->resist += src->resist;
 }
 
+/* #region agent log */
+static void agent_dbg_hp_log(const char *hypothesisId,
+                             const char *location,
+                             const char *message,
+                             const char *dataJson)
+{
+    static const char *paths[] = {
+        "D:/works/my/jianghu/CBE_EMU_pay/debug-1afcef.log",
+        "../debug-1afcef.log",
+        "debug-1afcef.log",
+        NULL
+    };
+    FILE *fp = NULL;
+    long long ts = (long long)time(NULL) * 1000LL;
+    u32 i = 0;
+
+    for (i = 0; paths[i] != NULL; ++i)
+    {
+        fp = fopen(paths[i], "a");
+        if (fp != NULL)
+            break;
+    }
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"1afcef\",\"runId\":\"post-fix\",\"hypothesisId\":\"%s\","
+            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId != NULL ? hypothesisId : "?",
+            location != NULL ? location : "?",
+            message != NULL ? message : "?",
+            dataJson != NULL ? dataJson : "{}",
+            ts);
+    fclose(fp);
+}
+/* #endregion */
+
 static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
                                                      u32 level,
                                                      vm_net_mock_equipment_bonus *bonus)
@@ -2697,13 +2733,26 @@ static u32 vm_net_mock_battle_role_defense_default(void)
     return stats.defense;
 }
 
+static u32 vm_net_mock_role_active_combat_pill_attack_bonus_percent(
+    const vm_net_mock_role_state *role);
+
 static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
                                             vm_net_mock_battle_role_attack_default());
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
-    u32 damage = vm_net_mock_damage_after_defense(attack, defense);
+    u32 pillBonusPercent =
+        vm_net_mock_role_active_combat_pill_attack_bonus_percent(role);
+    u32 damage = 0;
+
+    if (pillBonusPercent != 0)
+    {
+        uint64_t boosted = (uint64_t)attack * (100ull + pillBonusPercent) / 100ull;
+        attack = boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
+    }
+    damage = vm_net_mock_damage_after_defense(attack, defense);
 
     if (enemyHpCurrent == 0)
         return 0;
@@ -2735,7 +2784,15 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     if (enemyHpCurrent == 0)
         return 0;
     if (skill == NULL || baseDamage == 0)
+    {
+        /* Support skills (heal/buff/status) must never fall back to ATK. */
+        if (skill != NULL &&
+            (skill->targetDirection <= 2 || skill->hpChange >= 0))
+        {
+            return 0;
+        }
         return vm_net_mock_battle_player_damage_to_enemy(enemyId, enemyHpCurrent);
+    }
 
     vm_net_mock_role_build_player_stats(role, &playerStats);
     vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
@@ -2747,6 +2804,17 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
         rawDamage = 0xffffffffu;
     else
         rawDamage = baseDamage + (u32)coeffDamage;
+
+    {
+        u32 pillBonusPercent =
+            vm_net_mock_role_active_combat_pill_attack_bonus_percent(role);
+        if (pillBonusPercent != 0)
+        {
+            uint64_t boosted =
+                (uint64_t)rawDamage * (100ull + pillBonusPercent) / 100ull;
+            rawDamage = boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
+        }
+    }
 
     defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_DEFENSE",
                                          monsterStats.defense);
@@ -3127,9 +3195,10 @@ static bool vm_net_mock_role_item_effect_is_valid(
     }
     if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
     {
-        /* item.dsh proves the duration but contains no numeric stat modifier. */
-        return (effect->itemId == 829 || effect->itemId == 830) &&
-               effect->multiplier == 0;
+        /* Duration from item.dsh; ATK percent is the documented interpretation
+         * of "明显/巨幅提升" stored in multiplier (829=30, 830=60). */
+        return (effect->itemId == 829 && effect->multiplier == 30) ||
+               (effect->itemId == 830 && effect->multiplier == 60);
     }
     if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT)
     {
@@ -4539,6 +4608,20 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
+static u32 vm_net_mock_role_active_combat_pill_attack_bonus_percent(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL, &effect))
+    {
+        return 0;
+    }
+    return effect.expiresUnix != 0 ? effect.multiplier : 0;
+}
+
 /* The backpack decrement and the timed effect belong to one durable action.
  * The row is only changed in memory before the relational transaction has
  * committed; on any failure restore the exact previous role state so a retry
@@ -5355,6 +5438,49 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         }
         return true;
     }
+
+    /*
+     * Equipment instances are never merged by itemId.  Stacking them made
+     * trade/drop look like multi-copy grants, made discard wipe every same-name
+     * piece, and zeroed enhance on the surviving row.
+     */
+    if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
+    {
+        u32 freeSlots = role->backpackCapacity > itemCount
+                            ? (u32)role->backpackCapacity - itemCount
+                            : 0;
+        u16 firstSeq = 0;
+
+        if (count > freeSlots || count > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
+            return false;
+        for (u32 unit = 0; unit < count; ++unit)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
+            memset(item, 0, sizeof(*item));
+            item->itemId = itemId;
+            item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+            item->count = 1;
+            item->enhanceLevel = 0;
+            if (firstSeq == 0)
+                firstSeq = item->seq;
+            role->nextBackpackSeq = (u16)(item->seq + 1);
+            if (role->nextBackpackSeq == 0)
+                role->nextBackpackSeq = 1;
+        }
+        role->backpackItemCount = (u8)(itemCount + count);
+        if (seqOut)
+            *seqOut = firstSeq;
+        vm_net_mock_role_normalize_backpack(role);
+        if (!vm_net_mock_role_db_save(reason ? reason : "backpack-add-equipment"))
+        {
+            *role = before;
+            if (seqOut)
+                *seqOut = 0;
+            return false;
+        }
+        return true;
+    }
+
     for (u32 i = 0; i < itemCount; ++i)
     {
         vm_net_mock_backpack_item_state *item = &role->backpackItems[i];

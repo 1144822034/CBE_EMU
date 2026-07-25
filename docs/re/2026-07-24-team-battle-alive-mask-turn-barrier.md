@@ -17,6 +17,10 @@ team_battle_round_release ... actions=4 ...
 队长的 bit。`vm_mock_service_team_battle_alive_mask()` 明确按
 `battleMemberHp[i] != 0` 建立要求行动的掩码。
 
+> 2026-07-25：地图死亡队员不应再被收编进开战名单，见
+> `docs/re/2026-07-25-team-battle-map-dead-member-stall.md`。本文件仅解释
+> “已在场内的 HP=0 不参与回合等待”的屏障语义。
+
 ## 结论
 
 本次不是回合屏障提前释放。对仅剩一个存活成员的场景，队长一次行动即完成该回合
@@ -37,3 +41,13 @@ team_battle_round_defer ... resp=5
 
 只有第二名存活成员提交操作后，才允许记录 `resolve=1`、合并并下发 `1/4/6`。
 若在 `alive=03` 仍出现队长直接 `round_release`，再以该日志为新的根因调查起点。
+
+## 2026-07-25 补充：中途死亡/逃跑
+
+`alive_mask` 仍按非零 HP，但释放条件必须是
+`((acted_mask | member_bit) & alive_mask) == alive_mask`。
+本回合已出手后死亡的成员会留在 `acted_mask` 里；若继续要求
+`(acted | bit) == alive`，存活队友会永久卡住。
+
+成功逃跑另见 `docs/re/2026-07-25-team-battle-member-exit-stall.md`
+（`battleMemberLeftMask` + orphan flush）。

@@ -561,6 +561,12 @@ static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
     return appended;
 }
 
+/*
+ * Map-side death cannot emit battle 1/7/14.  Fresh mmGame after mmShop must not
+ * re-enter with durable HP=0 when Battle.cbm is already gone; consume 801 then,
+ * else ordinary death-penalty respawn.  Never inject login 1/1/1 actorinfo into
+ * the crowded shop-return WT6/1 packet (10-object dispatch window).
+ */
 static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request, u32 requestLen,
                                                               u8 *out, u32 outCap)
 {
@@ -720,6 +726,174 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         (recentCompletedScene || shopReturnReload))
     {
         u32 objectStart = 0;
+        vm_net_mock_role_state *shopReturnRole = NULL;
+        u16 mapRevivalStoneSeq = 0;
+        u32 mapRevivalStoneRemaining = 0;
+        bool mapRevived = false;
+
+        /*
+         * Runtime: backpack refuses category-14 801 ("不能直接使用"), and
+         * Battle.cbm is already gone after a map-side HP wipe, so 1/7/14 never
+         * arrives.  Shop return is then the first packet-driven chance to clear
+         * the death state before mmGame reconstructs around HP=0.
+         *
+         * Do NOT run this while Battle.cbm still owns death confirm (armed
+         * operate session / unfinished team seat).  That path buys 801 into the
+         * backpack and must keep it for 1/7/14; consuming here plus injecting
+         * extra objects into the shop-return WT6/1 packet crashes the leader.
+         */
+        if (shopReturnReload)
+        {
+            vm_mock_service_client_session *shopReturnSession =
+                vm_mock_service_get_active_client_session();
+            bool awaitsBattleRevival =
+                vm_mock_service_session_awaits_battle_revival_confirm(
+                    shopReturnSession);
+
+            shopReturnRole = vm_net_mock_active_role();
+            if (awaitsBattleRevival)
+            {
+                printf("[info][network] mock_shop_return_skip_map_revival "
+                       "role=%u hp=%u reason=awaiting-battle-1/7/14-confirm "
+                       "armed=%u\n",
+                       shopReturnRole ? shopReturnRole->roleId : 0,
+                       shopReturnRole ? shopReturnRole->hp : 0,
+                       g_mockBattleOperateSessionArmed ? 1u : 0u);
+            }
+            else if (shopReturnRole != NULL && shopReturnRole->hp == 0)
+            {
+                if (vm_net_mock_role_apply_revival_stone(&mapRevivalStoneSeq,
+                                                         &mapRevivalStoneRemaining))
+                {
+                    if (shopReturnSession != NULL)
+                    {
+                        shopReturnSession->onlineHp = shopReturnRole->hp;
+                        shopReturnSession->onlineHpMax =
+                            shopReturnRole->hpMax ? shopReturnRole->hpMax
+                                                  : shopReturnRole->hp;
+                        shopReturnSession->onlineMp = shopReturnRole->mp;
+                        shopReturnSession->onlineMpMax =
+                            shopReturnRole->mpMax ? shopReturnRole->mpMax
+                                                  : shopReturnRole->mp;
+                        if (shopReturnSession->roleOnline)
+                            vm_mock_service_team_enqueue_hsp_for_members(
+                                shopReturnSession);
+                    }
+                    g_mockBattleOperateSessionArmed = 0;
+                    g_mockBattleOperateSessionFinished = 0;
+                    g_mockBattlePendingEnemyTurn = 0;
+                    g_mockBattleAwaitingSettlement = 0;
+                    vm_mock_service_team_battle_note_revival_exit(shopReturnSession);
+                    vm_mock_service_session_clear_battle_revival_confirm(
+                        shopReturnSession);
+                    g_netMockBackpackGridSeededRoleId = 0;
+                    vm_mock_service_session_arm_map_actor_vitals_sync(
+                        shopReturnSession, 0, 0);
+                    mapRevived = true;
+                    printf("[info][network] mock_shop_return_map_revival role=%u hp=%u/%u mp=%u stone_seq=%u remaining=%u scene=%s\n",
+                           shopReturnRole->roleId,
+                           shopReturnRole->hp,
+                           shopReturnRole->hpMax,
+                           shopReturnRole->mp,
+                           mapRevivalStoneSeq,
+                           mapRevivalStoneRemaining,
+                           currentScene);
+                    vm_autotest_note("mock_shop_return_map_revival role=%u hp=%u/%u stone_seq=%u remaining=%u scene=%s evidence=item.dsh:801+mmShop-return-WT6/1\n",
+                                     shopReturnRole->roleId,
+                                     shopReturnRole->hp,
+                                     shopReturnRole->hpMax,
+                                     mapRevivalStoneSeq,
+                                     mapRevivalStoneRemaining,
+                                     currentScene);
+                }
+                else
+                {
+                    u32 reviveHp = 0;
+                    u32 reviveMp = 0;
+                    u32 expPenalty = 0;
+                    u32 moneyPenalty = 0;
+                    char respawnScene[64];
+                    u16 respawnX = 0;
+                    u16 respawnY = 0;
+                    vm_net_mock_scene_change_target respawnTarget;
+
+                    reviveHp = vm_net_mock_role_apply_death_penalty(
+                        "shop-return-dead-no-stone",
+                        &expPenalty,
+                        &moneyPenalty,
+                        &reviveMp,
+                        respawnScene,
+                        sizeof(respawnScene),
+                        &respawnX,
+                        &respawnY);
+                    if (reviveHp == 0)
+                    {
+                        printf("[warn][network] mock_shop_return_dead_no_stone action=reject-ordinary-respawn role=%u reason=not-dead-or-state-unavailable\n",
+                               shopReturnRole->roleId);
+                    }
+                    else
+                    {
+                        g_mockBattleOperateSessionArmed = 0;
+                        g_mockBattleOperateSessionFinished = 0;
+                        g_mockBattlePendingEnemyTurn = 0;
+                        g_mockBattleAwaitingSettlement = 0;
+                        vm_mock_service_team_battle_note_revival_exit(
+                            shopReturnSession);
+                        memset(&respawnTarget, 0, sizeof(respawnTarget));
+                        snprintf(respawnTarget.scene, sizeof(respawnTarget.scene), "%s",
+                                 respawnScene[0] ? respawnScene
+                                                 : vm_net_mock_role_initial_scene_name());
+                        respawnTarget.x = respawnX ? respawnX : VM_NET_MOCK_ROLE_INITIAL_X;
+                        respawnTarget.y = respawnY ? respawnY : VM_NET_MOCK_ROLE_INITIAL_Y;
+                        respawnTarget.exitId = 0;
+                        respawnTarget.mapType = 2;
+                        respawnTarget.hasSceEntry = true;
+                        respawnTarget.needsSceneDownload = false;
+                        {
+                            u32 deathObjectStart = 0;
+
+                            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 20, 1,
+                                                             &deathObjectStart))
+                                return 0;
+                            if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+                                return 0;
+                            vm_net_mock_finish_wt_object(out, deathObjectStart, pos);
+                            objectCount += 1;
+                        }
+                        if (!vm_net_mock_append_scene_enter_object_for_scene(
+                                out, outCap, &pos,
+                                respawnTarget.scene,
+                                respawnTarget.x,
+                                respawnTarget.y))
+                            return 0;
+                        objectCount += 1;
+                        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+                        vm_net_mock_mark_direct_scene_enter_completed(
+                            &respawnTarget, "shop-return-dead-no-stone");
+                        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+                        g_vm_net_mock_last_scene_change_fb4_type = 1;
+                        printf("[info][network] mock_shop_return_dead_no_stone action=ordinary-respawn role=%u exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1+30/1 resp=%u\n",
+                               shopReturnRole->roleId,
+                               expPenalty,
+                               moneyPenalty,
+                               reviveHp,
+                               reviveMp,
+                               respawnTarget.scene,
+                               respawnTarget.x,
+                               respawnTarget.y,
+                               pos);
+                        vm_autotest_note("mock_shop_return_dead_no_stone action=ordinary-respawn role=%u revive=%u/%u scene=%s pos=(%u,%u) response=20/1+30/1\n",
+                                         shopReturnRole->roleId,
+                                         reviveHp,
+                                         reviveMp,
+                                         respawnTarget.scene,
+                                         respawnTarget.x,
+                                         respawnTarget.y);
+                        return pos;
+                    }
+                }
+            }
+        }
 
         /*
          * Runtime repeat after visible scene entry:
@@ -777,19 +951,21 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
             objectCount += 1;
         }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u completion=%s\n",
+        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u map_revived=%u completion=%s\n",
                currentScene,
                objectCount,
                pos,
                g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
                recentCompletedScene ? 1u : 0u,
                shopReturnReload ? 1u : 0u,
+               mapRevived ? 1u : 0u,
                shopReturnReload ? "30/2-no-posinfo" : "none");
-        vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
+        vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u map_revived=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
                           currentScene,
                           objectCount,
                           shopReturnReload ? "resource-followup+30/2-no-posinfo" : "resource-followup-no-30/1",
-                          g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
+                          g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
+                          mapRevived ? 1u : 0u);
         return pos;
     }
     hasActorOtherRequestType = vm_net_mock_get_object_u8_field(request, requestLen, "Type", &actorOtherRequestType);
@@ -1408,6 +1584,17 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
 {
     u32 pos = 5;
     u32 objectStart = 0;
+    /* Client string fields are GBK; UTF-8 here shows as garbled banners. */
+    static const char revivalUnavailableGbk[] =
+        "\xb8\xb4\xbb\xee\xca\xaf\xb2\xbb\xbf\xc9\xd3\xc3"; /* 复活石不可用 */
+    const char *infoBytes = info;
+
+    if (info == NULL || strcmp(info, "复活石不可用") == 0)
+        infoBytes = revivalUnavailableGbk;
+    else if (strcmp(info, "当前无需复活") == 0)
+        infoBytes = "\xb5\xb1\xc7\xb0\xce\xde\xd0\xe8\xb8\xb4\xbb\xee"; /* 当前无需复活 */
+    else if (strcmp(info, "复活请求无效") == 0)
+        infoBytes = "\xb8\xb4\xbb\xee\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7"; /* 复活请求无效 */
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -1415,11 +1602,8 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
         return 0;
-    if (!vm_net_mock_put_object_string(out, outCap, &pos,
-                                       "info", info ? info : "复活石不可用"))
-    {
+    if (!vm_net_mock_put_object_string(out, outCap, &pos, "info", infoBytes))
         return 0;
-    }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     return pos;
@@ -1466,40 +1650,137 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
         return 0;
     if (choice == 1)
     {
+        vm_mock_service_client_session *confirmSession =
+            vm_mock_service_get_active_client_session();
+        bool usedStone = false;
+        const char *reviveAction = "revival-stone";
+        u32 battleMpBefore = g_mockBattleRoleMpCurrent;
+        u32 mpRecovery = 0;
+
         role = vm_net_mock_active_role();
-        if (!vm_net_mock_role_apply_revival_stone(&consumedStoneSeq,
-                                                  &remainingStoneCount) ||
-            role == NULL)
+        if (role == NULL)
         {
-            printf("[warn][network] mock_battle_death_prompt_choice result=1 action=reject-revival-stone role=%u hp=%u reason=missing-stone-or-not-dead\n",
-                   role ? role->roleId : 0,
-                   role ? role->hp : 0);
+            printf("[warn][network] mock_battle_death_prompt_choice result=1 "
+                   "action=reject reason=no-active-role\n");
             return vm_net_mock_build_battle_death_prompt_error_response(
-                out, outCap, "复活石不可用");
+                out, outCap, "复活请求无效");
+        }
+        /*
+         * Client result=1 means "use revival stone now".  apply_revival_stone
+         * rejects when durable HP != 0; a prior misclassified map-buy heal or
+         * presence publish can leave HP full while Battle.cbm still shows the
+         * stone dialog.  If an authoritative 801 exists, force death alignment
+         * so the consume path can run.
+         */
+        {
+            vm_net_mock_backpack_item_state *pendingStone =
+                vm_net_mock_role_find_backpack_item(role, 801, 0);
+            bool pendingConfirm =
+                vm_mock_service_session_awaits_battle_revival_confirm(confirmSession);
+
+            if (role->hp != 0 &&
+                (pendingStone != NULL || pendingConfirm ||
+                 g_mockBattleRoleHpCurrent == 0 ||
+                 (confirmSession != NULL && confirmSession->onlineHp == 0) ||
+                 g_mockBattleOperateSessionArmed != 0))
+            {
+                printf("[warn][network] mock_battle_death_prompt_choice result=1 "
+                       "action=align-durable-death role=%u durable_hp=%u "
+                       "battle_hp=%u online_hp=%u armed=%u pending=%u has_stone=%u\n",
+                       role->roleId,
+                       role->hp,
+                       g_mockBattleRoleHpCurrent,
+                       confirmSession ? confirmSession->onlineHp : 0,
+                       g_mockBattleOperateSessionArmed ? 1u : 0u,
+                       pendingConfirm ? 1u : 0u,
+                       pendingStone != NULL ? 1u : 0u);
+                role->hp = 0;
+            }
+        }
+        usedStone = vm_net_mock_role_apply_revival_stone(&consumedStoneSeq,
+                                                         &remainingStoneCount);
+        if (!usedStone)
+        {
+            /*
+             * Client local 801 / server backpack desync (ghost stone) or a prior
+             * map consume left no authoritative row.  result=1 must still leave
+             * Battle.cbm through 4/7+4/8.  Always restore durable HP here even
+             * when a mis-heal already set hp!=0; otherwise confirm is a no-op.
+             */
+            vm_net_mock_role_sync_derived_vitals(role);
+            role->hp = role->hpMax ? role->hpMax : role->hp;
+            if (role->hp == 0)
+                role->hp = 1;
+            role->mp = role->mpMax ? role->mpMax : role->mp;
+            g_mockBattleRoleHpCurrent = role->hp;
+            g_mockBattleRoleHpMax = role->hpMax ? role->hpMax : role->hp;
+            g_mockBattleRoleMpCurrent = role->mp;
+            g_mockBattleRoleMpMax = role->mpMax ? role->mpMax : role->mp;
+            vm_net_mock_role_db_save("battle-revival-desync-no-stone");
+            reviveAction = "revival-desync-no-stone";
+            printf("[warn][network] mock_battle_death_prompt_choice result=1 "
+                   "action=%s role=%u revive=%u/%u reason=client-local-stone-or-backpack-desync\n",
+                   reviveAction,
+                   role->roleId,
+                   role->hp,
+                   role->mp);
         }
         reviveHp = role->hp;
         reviveMp = role->mp;
+        if (reviveMp > battleMpBefore)
+            mpRecovery = reviveMp - battleMpBefore;
         /*
-         * The client still has an active Battle.cbm character with HP=0 at
-         * this point.  A main-scene 20/1 + 30/1 response re-enters the map but
-         * never feeds that cache the HP recovery, so the map UI remains dead.
-         * Use the same 4/7 -> 4/8 terminal path as a completed battle: 4/7
-         * carries the full HP delta, and 4/8 applies it before the battle
-         * screen returns to the already-current scene.  Do not add 30/1 here;
-         * that would race a second scene lifecycle against the terminal one.
+         * Battle.cbm still owns the character cache at HP=0.  Only 4/7 (HP
+         * delta) + 4/8 (autorevive settle) applies recovery and exits; do not
+         * add 30/1 here.  When 801 was consumed, append 7/11 remaining so the
+         * local bag row disappears; also defer a post-battle 7/11 in case the
+         * kind-4 terminal tears down before kind-7 sync runs.
          */
-        pos = vm_net_mock_build_battle_revival_stone_completion_response(out, outCap);
+        pos = vm_net_mock_build_battle_revival_stone_completion_response(
+            out, outCap, consumedStoneSeq, remainingStoneCount, mpRecovery);
         if (pos == 0)
         {
-            printf("[error][network] mock_battle_death_prompt_choice result=1 action=revival-terminal-build-failed role=%u hp=%u mp=%u\n",
-                   role->roleId, reviveHp, reviveMp);
-            return 0;
+            printf("[error][network] mock_battle_death_prompt_choice result=1 "
+                   "action=revival-terminal-build-failed role=%u hp=%u mp=%u "
+                   "used_stone=%u\n",
+                   role->roleId, reviveHp, reviveMp, usedStone ? 1u : 0u);
+            return vm_net_mock_build_battle_death_prompt_error_response(
+                out, outCap, "复活石不可用");
         }
         g_mockBattleOperateSessionArmed = 0;
         g_mockBattleOperateSessionFinished = 0;
         g_mockBattlePendingEnemyTurn = 0;
         g_mockBattleAwaitingSettlement = 0;
-        printf("[info][network] mock_battle_death_prompt_choice result=1 action=revival-stone stone_seq=%u stone_remaining=%u exp_penalty=0 money_penalty=0 revive=%u/%u scene=%s pos=(%u,%u) response=4/7-battle-status+4/8-terminal+4/11+4/9 resp=%u evidence=item.dsh:801,mmBattle:0x743C+0x7DF6+0x2C50\n",
+        vm_mock_service_team_battle_note_revival_exit(confirmSession);
+        vm_mock_service_session_clear_battle_revival_confirm(confirmSession);
+        vm_net_mock_battle_restore_role_vitals_to_globals();
+        if (confirmSession != NULL)
+        {
+            confirmSession->onlineHp = role->hp;
+            confirmSession->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+            confirmSession->onlineMp = role->mp;
+            confirmSession->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+            /*
+             * 4/7+4/8 updates Battle.cbm only.  mmGame map HUD still holds the
+             * pre-death actor cache until a deferred login-shaped 1/1/1 arrives
+             * after Battle teardown.
+             */
+            vm_mock_service_session_arm_map_actor_vitals_sync(
+                confirmSession,
+                (usedStone && consumedStoneSeq != 0) ? consumedStoneSeq : 0,
+                remainingStoneCount);
+            if (confirmSession->roleOnline)
+                vm_mock_service_team_enqueue_hsp_for_members(confirmSession);
+        }
+        g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+        g_netMockBackpackGridSeededRoleId = 0;
+        printf("[info][network] mock_battle_death_prompt_choice result=1 action=%s "
+               "stone_seq=%u stone_remaining=%u exp_penalty=0 money_penalty=0 "
+               "revive=%u/%u scene=%s pos=(%u,%u) "
+               "response=4/7%s+4/8-terminal+4/11+4/9 resp=%u "
+               "evidence=item.dsh:801,mmBattle:0x743C+0x7DF6+0x2C50,"
+               "JianghuOL.CBE:0x1033544\n",
+               reviveAction,
                consumedStoneSeq,
                remainingStoneCount,
                reviveHp,
@@ -1507,19 +1788,29 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
                role->scene,
                role->x,
                role->y,
+               usedStone ? "+7/11" : "",
                pos);
-        vm_autotest_note("mock_battle_death_prompt_choice result=1 action=revival-stone stone_seq=%u stone_remaining=%u revive=%u/%u scene=%s pos=(%u,%u) response=4/7+4/8+4/11+4/9 evidence=item.dsh:801 mmBattle:0x743C/0x7DF6/0x2C50\n",
+        vm_autotest_note("mock_battle_death_prompt_choice result=1 action=%s "
+                         "stone_seq=%u stone_remaining=%u revive=%u/%u scene=%s "
+                         "pos=(%u,%u) response=4/7%s+4/8+4/11+4/9 "
+                         "evidence=item.dsh:801 mmBattle:0x743C/0x7DF6/0x2C50 "
+                         "JianghuOL.CBE:0x1033544\n",
+                         reviveAction,
                          consumedStoneSeq,
                          remainingStoneCount,
                          reviveHp,
                          reviveMp,
                          role->scene,
                          role->x,
-                         role->y);
+                         role->y,
+                         usedStone ? "+7/11" : "");
         return pos;
     }
-    else if (choice == 2)
+    if (choice == 2)
     {
+        vm_mock_service_client_session *confirmSession =
+            vm_mock_service_get_active_client_session();
+
         reviveHp = vm_net_mock_role_apply_death_penalty("battle-death-prompt-no",
                                                         &expPenalty,
                                                         &moneyPenalty,
@@ -1530,9 +1821,72 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
                                                         &respawnY);
         if (reviveHp == 0)
         {
-            printf("[warn][network] mock_battle_death_prompt_choice result=2 action=reject-ordinary-respawn reason=not-dead-or-state-unavailable\n");
-            return vm_net_mock_build_battle_death_prompt_error_response(
-                out, outCap, "当前无需复活");
+            /*
+             * Shop buy may already have restored HP while Battle.cbm still
+             * emits result=2.  Never answer with 20/1 result=1 "当前无需复活":
+             * that dialog's confirm crashes.  Exit Battle via the settle chain.
+             */
+            role = vm_net_mock_active_role();
+            if (role == NULL)
+            {
+                printf("[warn][network] mock_battle_death_prompt_choice result=2 "
+                       "action=reject reason=no-active-role\n");
+                return vm_net_mock_build_battle_death_prompt_error_response(
+                    out, outCap, "复活请求无效");
+            }
+            vm_net_mock_role_sync_derived_vitals(role);
+            if (role->hp == 0)
+            {
+                role->hp = role->hpMax ? role->hpMax : 1;
+                g_mockBattleRoleHpCurrent = role->hp;
+                g_mockBattleRoleHpMax = role->hpMax ? role->hpMax : role->hp;
+            }
+            if (role->mpMax != 0 && role->mp < role->mpMax)
+            {
+                role->mp = role->mpMax;
+                g_mockBattleRoleMpCurrent = role->mp;
+                g_mockBattleRoleMpMax = role->mpMax;
+            }
+            vm_net_mock_role_db_save("battle-death-prompt-already-alive-heal");
+            {
+                u32 battleMpBefore = g_mockBattleRoleMpCurrent;
+                u32 mpRecovery = 0;
+
+                if (role->mp > battleMpBefore)
+                    mpRecovery = role->mp - battleMpBefore;
+                pos = vm_net_mock_build_battle_revival_stone_completion_response(
+                    out, outCap, 0, 0, mpRecovery);
+            }
+            if (pos == 0)
+            {
+                printf("[error][network] mock_battle_death_prompt_choice result=2 "
+                       "action=already-alive-terminal-build-failed role=%u hp=%u\n",
+                       role->roleId, role->hp);
+                return 0;
+            }
+            g_mockBattleOperateSessionArmed = 0;
+            g_mockBattleOperateSessionFinished = 0;
+            g_mockBattlePendingEnemyTurn = 0;
+            g_mockBattleAwaitingSettlement = 0;
+            vm_mock_service_team_battle_note_revival_exit(confirmSession);
+            vm_mock_service_session_clear_battle_revival_confirm(confirmSession);
+            vm_net_mock_battle_restore_role_vitals_to_globals();
+            if (confirmSession != NULL)
+            {
+                confirmSession->onlineHp = role->hp;
+                confirmSession->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+                confirmSession->onlineMp = role->mp;
+                confirmSession->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+                vm_mock_service_session_arm_map_actor_vitals_sync(
+                    confirmSession, 0, 0);
+                if (confirmSession->roleOnline)
+                    vm_mock_service_team_enqueue_hsp_for_members(confirmSession);
+            }
+            printf("[info][network] mock_battle_death_prompt_choice result=2 "
+                   "action=already-alive-battle-exit revive=%u/%u "
+                   "response=4/7+4/8+4/11+4/9 resp=%u\n",
+                   role->hp, role->mp, pos);
+            return pos;
         }
     }
     else
@@ -1546,6 +1900,11 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
     g_mockBattleOperateSessionFinished = 0;
     g_mockBattlePendingEnemyTurn = 0;
     g_mockBattleAwaitingSettlement = 0;
+    /* Ordinary respawn also leaves the shared party fight UI. */
+    vm_mock_service_team_battle_note_revival_exit(
+        vm_mock_service_get_active_client_session());
+    vm_mock_service_session_clear_battle_revival_confirm(
+        vm_mock_service_get_active_client_session());
     memset(&respawnTarget, 0, sizeof(respawnTarget));
     snprintf(respawnTarget.scene, sizeof(respawnTarget.scene), "%s",
              respawnScene[0] ? respawnScene : vm_net_mock_role_initial_scene_name());
@@ -1916,8 +2275,13 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     bool directExpandRejectedCount = false;
     bool insufficientFunds = false;
     bool revivalStoneConfirmPending = false;
+    bool mapRevivedOnBuy = false;
+    u32 mapRevivalActorInfoLen = 0;
+    u8 objectCount = 1;
     u32 directExpandApplied = 0;
     vm_net_mock_role_state *role = NULL;
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -1974,6 +2338,47 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
                 result = vm_net_mock_shop_buy14_failure_result(type);
             }
         }
+        else if (itemId == 801 && role->hp == 0 &&
+                 !vm_mock_service_session_awaits_battle_revival_confirm(session))
+        {
+            /*
+             * Map-side death has no 1/7/14 confirm.  Treat the mall purchase as
+             * the revive itself: charge W-coin, restore HP, do not insert a
+             * backpack 801.  Inserting then consuming left a client-local
+             * ghost stone so the next battle death confirm sent result=1 with
+             * nothing authoritative to consume and the dialog stalled.
+             */
+            role->wcoin = wcoinBefore - cost;
+            wcoinAfter = role->wcoin;
+            vm_net_mock_role_sync_derived_vitals(role);
+            role->hp = role->hpMax ? role->hpMax : role->hp;
+            g_mockBattleRoleHpCurrent = role->hp;
+            g_mockBattleRoleHpMax = role->hpMax;
+            g_mockBattleRoleMpCurrent = role->mp;
+            g_mockBattleRoleMpMax = role->mpMax;
+            if (session != NULL)
+            {
+                session->onlineHp = role->hp;
+                session->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+                session->onlineMp = role->mp;
+                session->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+                if (session->roleOnline)
+                    vm_mock_service_team_enqueue_hsp_for_members(session);
+            }
+            g_mockBattleOperateSessionArmed = 0;
+            g_mockBattleOperateSessionFinished = 0;
+            g_mockBattlePendingEnemyTurn = 0;
+            g_mockBattleAwaitingSettlement = 0;
+            vm_mock_service_team_battle_note_revival_exit(session);
+            vm_mock_service_session_clear_battle_revival_confirm(session);
+            g_netMockShop17ListPending = 0;
+            g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+            g_netMockBackpackGridSeededRoleId = 0;
+            seq = 0;
+            result = 1;
+            mapRevivedOnBuy = true;
+            vm_net_mock_role_db_save("shop-buy14-map-revive");
+        }
         else if (vm_net_mock_role_add_backpack_item(itemId, count, &seq))
         {
             role->wcoin = wcoinBefore - cost;
@@ -1990,11 +2395,8 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
         }
     }
 
-    /* Shop success only makes 801 available locally.  The battle module must
-     * subsequently confirm consumption with 1/7/14(result=1); never revive
-     * merely because the purchase response was delivered. */
     revivalStoneConfirmPending = result == 1 && itemId == 801 &&
-        role != NULL && role->hp == 0;
+        role != NULL && role->hp == 0 && !mapRevivedOnBuy;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 14, 3, &objectStart))
         return 0;
@@ -2003,26 +2405,31 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    if (mapRevivedOnBuy)
+    {
+        if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos,
+                                                          &mapRevivalActorInfoLen))
+            return 0;
+        objectCount = 2;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
+    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u map_revived=%u actorinfo_len=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=%s\n",
            type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter, seq,
            result, knownItem ? 1 : 0, directExpand ? 1 : 0, directExpandApplied,
            directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
            revivalStoneConfirmPending ? 1 : 0,
+           mapRevivedOnBuy ? 1 : 0,
+           mapRevivalActorInfoLen,
            capacityBefore, capacityAfter,
            g_netMockShop17ListPending,
            g_netMockBackpackPreferRoleListAfterShopBuy,
-           result ? 1 : 0);
-    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
+           result ? 1 : 0,
+           mapRevivedOnBuy ? "14/3+1/1/14" : "14/3");
+    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u map_revived=%u response=%s evidence=mmShop:0x2F6C/0x9DE\n",
                      type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
-                     seq, result, directExpand ? 1 : 0, directExpandApplied,
-                     directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
-                     revivalStoneConfirmPending ? 1 : 0,
-                     capacityBefore, capacityAfter,
-                     g_netMockShop17ListPending,
-                     g_netMockBackpackPreferRoleListAfterShopBuy,
-                     result ? 1 : 0);
+                     seq, result, mapRevivedOnBuy ? 1 : 0,
+                     mapRevivedOnBuy ? "14/3+1/1/14" : "14/3");
     return pos;
 }
 
@@ -2254,14 +2661,38 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
                                     &roleMaxHpDefault,
                                     &roleMpDefault,
                                     &roleMaxMpDefault);
-    primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
-                                         vm_net_mock_env_u32("CBE_ACTOR_HP", roleHpDefault));
-    primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", roleMaxHpDefault);
-    secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
-                                           vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
-    secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", roleMaxMpDefault);
-    primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
-    secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
+    /*
+     * primaryBaseMax / secondaryBaseMax are the bare pools without equipment
+     * HP/MP column bonuses.  primaryDisplayMax / secondaryDisplayMax keep the
+     * full totals that already include equip.dsh 生命/法力变化.
+     *
+     * Runtime: battle start already seeds the full total (e.g. 426 = 386+40).
+     * After battle the client property page was observed at 466 (=426+40), i.e.
+     * it re-applies local equipment bonuses on top of a value that already
+     * included them.  Keeping the wire "base" field bare stops that second add
+     * from double-counting while the display field and battleinfo stay full.
+     */
+    {
+        u32 bareHpMax = (playerStats.maxHp > playerStats.equipment.hp)
+                            ? (playerStats.maxHp - playerStats.equipment.hp)
+                            : playerStats.maxHp;
+        u32 bareMpMax = (playerStats.maxMp > playerStats.equipment.mp)
+                            ? (playerStats.maxMp - playerStats.equipment.mp)
+                            : playerStats.maxMp;
+
+        primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
+                                             vm_net_mock_env_u32("CBE_ACTOR_HP", roleHpDefault));
+        primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", bareHpMax);
+        secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
+                                               vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
+        secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", bareMpMax);
+        primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX",
+                                                playerStats.maxHp ? playerStats.maxHp
+                                                                  : roleMaxHpDefault);
+        secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX",
+                                                   playerStats.maxMp ? playerStats.maxMp
+                                                                    : roleMaxMpDefault);
+    }
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -2272,14 +2703,41 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         primaryBaseMax = 120;
     if (secondaryBaseMax == 0)
         secondaryBaseMax = 100;
-    if (primaryCurrent > primaryBaseMax)
-        primaryCurrent = primaryBaseMax;
-    if (secondaryCurrent > secondaryBaseMax)
-        secondaryCurrent = secondaryBaseMax;
     if (primaryDisplayMax == 0)
         primaryDisplayMax = primaryBaseMax;
     if (secondaryDisplayMax == 0)
         secondaryDisplayMax = secondaryBaseMax;
+    /* Current HP/MP live against the full (equipment-inclusive) pool. */
+    if (primaryCurrent > primaryDisplayMax)
+        primaryCurrent = primaryDisplayMax;
+    if (secondaryCurrent > secondaryDisplayMax)
+        secondaryCurrent = secondaryDisplayMax;
+
+    /* #region agent log */
+    {
+        char data[384];
+        snprintf(data, sizeof(data),
+                 "{\"roleId\":%u,\"statsMaxHp\":%u,\"statsMaxMp\":%u,"
+                 "\"primaryBaseMax\":%u,\"primaryDisplayMax\":%u,"
+                 "\"secondaryBaseMax\":%u,\"secondaryDisplayMax\":%u,"
+                 "\"equipHp\":%u,\"equipMp\":%u,"
+                 "\"eq\":[%u,%u,%u,%u,%u,%u,%u,%u]}",
+                 role ? role->roleId : 0u, playerStats.maxHp, playerStats.maxMp,
+                 primaryBaseMax, primaryDisplayMax,
+                 secondaryBaseMax, secondaryDisplayMax,
+                 playerStats.equipment.hp, playerStats.equipment.mp,
+                 role ? role->equippedItemIds[0] : 0u,
+                 role ? role->equippedItemIds[1] : 0u,
+                 role ? role->equippedItemIds[2] : 0u,
+                 role ? role->equippedItemIds[3] : 0u,
+                 role ? role->equippedItemIds[4] : 0u,
+                 role ? role->equippedItemIds[5] : 0u,
+                 role ? role->equippedItemIds[6] : 0u,
+                 role ? role->equippedItemIds[7] : 0u);
+        agent_dbg_hp_log("A", "mock_server_interaction_login.c:build_actor_info",
+                         "actorinfo-hp-mp-wire", data);
+    }
+    /* #endregion */
 
     actorStrength = (u16)vm_net_mock_cap_u32(playerStats.strength, 999);
     actorAgility = (u16)vm_net_mock_cap_u32(playerStats.agility, 999);

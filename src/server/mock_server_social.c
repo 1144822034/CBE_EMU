@@ -4184,6 +4184,15 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * scene remains pollable during the item/confirmation phase. */
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
+    /*
+     * Revival map HUD sync must not wait on sceneVisibleReady.  After battle
+     * or shop return the session can still be pending/not-ready while the
+     * client is already on mmGame with a stale HP=0 actor cache.
+     */
+    teamBattleResponseLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
+        out, outCap, "scene-poll");
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     if (!observer->sceneVisibleReady || observer->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(observer->sceneVisibleScene))
     {
@@ -5255,6 +5264,21 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
         roleHp = roleMaxHp;
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
+
+    /* #region agent log */
+    {
+        char data[320];
+        snprintf(data, sizeof(data),
+                 "{\"path\":\"non-scene-subtype10\",\"roleId\":%u,"
+                 "\"roleHp\":%u,\"roleMaxHp\":%u,\"roleMp\":%u,\"roleMaxMp\":%u,"
+                 "\"vitalsDefaultMaxHp\":%u,\"vitalsDefaultMaxMp\":%u,\"enemyId\":%u}",
+                 roleId, roleHp, roleMaxHp, roleMp, roleMaxMp,
+                 roleMaxHpDefault, roleMaxMpDefault, enemyId);
+        agent_dbg_hp_log("A", "mock_server_social.c:battle_start_blob",
+                         "battle-wire-hp-mp", data);
+    }
+    /* #endregion */
+
     if (enemyId == 0)
         enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
     enemyStats = vm_net_mock_monster_stats_for_enemy(enemyId);
