@@ -226,6 +226,27 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- item.dsh declares 921（修炼天书）as a non-stackable, sequence-owned
+-- instance. Its static description is intentionally empty: the client reads
+-- this durable per-instance record through 7/38 and 7/40.
+CREATE TABLE IF NOT EXISTS `account_role_training_books` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `item_seq` SMALLINT UNSIGNED NOT NULL,
+  `title` VARBINARY(48) NOT NULL,
+  `book_description` VARBINARY(200) NOT NULL,
+  `book_info` VARBINARY(200) NOT NULL,
+  `book_level` SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+  `book_experience` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`, `item_seq`),
+  CONSTRAINT `fk_account_role_training_books_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Timed special items are separate from the durable role snapshot because
 -- expiry continues while the character is offline.  The item id and
 -- multiplier preserve the server-authoritative effect rather than trusting a

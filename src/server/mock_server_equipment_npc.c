@@ -2332,7 +2332,8 @@ static vm_mock_service_account_state *vm_mock_service_account_find_or_create(con
     vm_mock_service_account_state_init(state, resolvedId);
     state->next = g_vm_mock_service_accounts;
     g_vm_mock_service_accounts = state;
-    printf("[info][mock-service] account_init id=%s\n", state->accountId);
+    if (vm_net_mock_verbose_logging_enabled())
+        printf("[info][mock-service] account_init id=%s\n", state->accountId);
     return state;
 }
 
@@ -3628,14 +3629,17 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
         memset(session->pendingDirQueueBlob, 0, sizeof(session->pendingDirQueueBlob));
         session->pendingDirQueueTick = g_schedulerTick;
     }
-    printf("[info][mock-service] moveinfo_store client=%08x kind=%s len=%u pos=(%u,%u) reason=%s scene=%s\n",
-           session->clientId,
-           formatText,
-           (u32)moveInfoLen,
-           x,
-           y,
-           reason ? reason : "-",
-           scene ? scene : "-");
+    if (vm_net_mock_verbose_logging_enabled())
+    {
+        printf("[info][mock-service] moveinfo_store client=%08x kind=%s len=%u pos=(%u,%u) reason=%s scene=%s\n",
+               session->clientId,
+               formatText,
+               (u32)moveInfoLen,
+               x,
+               y,
+               reason ? reason : "-",
+               scene ? scene : "-");
+    }
 }
 
 static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_session *session,

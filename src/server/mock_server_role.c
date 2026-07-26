@@ -2990,22 +2990,76 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
     if (role->backpackItemCount > role->backpackCapacity)
         role->backpackItemCount = role->backpackCapacity;
 
+    /* First establish the high-water sequence across the persisted rows.  A
+     * historical 921 row may have been incorrectly stacked; splitting it
+     * below must never reuse a sequence held by a later ordinary item. */
+    for (u32 i = 0; i < role->backpackItemCount; ++i)
+    {
+        if (role->backpackItems[i].seq > maxSeq)
+            maxSeq = role->backpackItems[i].seq;
+    }
+
     for (u32 i = 0; i < role->backpackItemCount; ++i)
     {
         vm_net_mock_backpack_item_state item = role->backpackItems[i];
+        u32 instanceCount = 1;
         if (item.itemId == 0 || item.count == 0)
             continue;
         if (item.enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             item.enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (item.seq == 0)
-            item.seq = (u16)(maxSeq + 1);
-        if (item.seq > maxSeq)
-            maxSeq = item.seq;
-        compact[compactCount++] = item;
-        if (compactCount >= role->backpackCapacity ||
-            compactCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
         {
-            break;
+            item.seq = (u16)(maxSeq + 1);
+            if (item.seq == 0)
+                item.seq = 1;
+            maxSeq = item.seq;
+        }
+        if (item.itemId == 921)
+        {
+            instanceCount = item.count;
+            if (instanceCount > 1 &&
+                (compactCount + instanceCount > role->backpackCapacity ||
+                 compactCount + instanceCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS))
+            {
+                /* There is room for this persisted row but not for all its
+                 * invalid historical instances. Keep the source row intact,
+                 * report the violated storage contract, and defer migration
+                 * until the player has enough slots. Never write beyond the
+                 * compact buffer or silently drop a book. */
+                if (compactCount < role->backpackCapacity &&
+                    compactCount < VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                {
+                    compact[compactCount++] = item;
+                }
+                printf("[error][mock-service] training_book_stack_unresolved role=%u seq=%u count=%u capacity=%u reason=insufficient-slots\n",
+                       role->roleId, item.seq, item.count, role->backpackCapacity);
+                continue;
+            }
+        }
+        for (u32 instance = 0; instance < instanceCount; ++instance)
+        {
+            vm_net_mock_backpack_item_state instanceItem = item;
+            if (instance != 0)
+            {
+                instanceItem.seq = (u16)(maxSeq + 1);
+                if (instanceItem.seq == 0)
+                    instanceItem.seq = 1;
+                maxSeq = instanceItem.seq;
+            }
+            if (item.itemId == 921)
+                instanceItem.count = 1;
+            if (compactCount >= role->backpackCapacity ||
+                compactCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+            {
+                /* This branch is only reachable for ordinary capacity
+                 * saturation; 921 expansion is preflight-checked above. */
+                printf("[error][mock-service] backpack_normalize_capacity role=%u item=%u seq=%u count=%u capacity=%u\n",
+                       role->roleId, item.itemId, item.seq, item.count,
+                       role->backpackCapacity);
+                instance = instanceCount;
+                break;
+            }
+            compact[compactCount++] = instanceItem;
         }
     }
     memset(role->backpackItems, 0, sizeof(role->backpackItems));
@@ -4171,6 +4225,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     size_t bulk_capacity = 131072;
     bool transaction_started = false;
     u32 scoped_role_id = 0;
+    bool training_books_in_scope = false;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -4207,6 +4262,20 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         if (!found)
             return false;
     }
+
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        if ((!full_snapshot && role->roleId != scoped_role_id) ||
+            !vm_net_mock_training_book_role_has_instances(role))
+        {
+            continue;
+        }
+        training_books_in_scope = true;
+        break;
+    }
+    if (training_books_in_scope && !vm_net_mock_training_book_schema_prepare())
+        return false;
 
     bulk_query = (char *)malloc(bulk_capacity);
     if (bulk_query == NULL)
@@ -4443,6 +4512,19 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         }
     }
     if (bulk_rows && !vm_mysql_exec(bulk_query))
+    {
+        snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+        goto failed;
+    }
+
+    /* The book table references the just-written backpack identity. This must
+     * run after the replacement of account_role_backpack, not after its
+     * delete: otherwise orphan cleanup would erase every live instance before
+     * it can be matched to its 921 row. */
+    if (training_books_in_scope &&
+        !vm_net_mock_training_book_sync_role_records(&g_vm_net_mock_role_db,
+                                                      account_hex, full_snapshot,
+                                                      scoped_role_id))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
         goto failed;
@@ -5312,7 +5394,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     itemCount = vm_net_mock_role_backpack_count(role);
     effect = vm_net_mock_find_item_effect_catalog_item(itemId);
     reservoirCapacity = vm_net_mock_item_effect_reservoir_capacity(effect);
-    if (reservoirCapacity != 0)
+    if (reservoirCapacity != 0 || itemId == 921)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -5335,7 +5417,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             item->seq = role->nextBackpackSeq;
             if (item->seq == 0)
                 item->seq = 1;
-            item->count = reservoirCapacity;
+            item->count = reservoirCapacity != 0 ? reservoirCapacity : 1;
             if (firstSeq == 0)
                 firstSeq = item->seq;
             role->nextBackpackSeq = (u16)(item->seq + 1);
@@ -5346,7 +5428,9 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         if (seqOut)
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
-        if (!vm_net_mock_role_db_save(reason ? reason : "backpack-add-reservoir-item"))
+        if (!vm_net_mock_role_db_save(reason ? reason :
+                                      (itemId == 921 ? "backpack-add-training-book" :
+                                                       "backpack-add-reservoir-item")))
         {
             *role = before;
             if (seqOut)

@@ -3692,6 +3692,16 @@ static u8 vm_net_mock_env_u8(const char *name, u8 fallback)
     return (u8)parsed;
 }
 
+/*
+ * Per-request protocol traces are useful while reversing a packet flow, but
+ * are deliberately opt-in during normal service operation.  Errors, rejected
+ * requests, and persistent state transitions keep their normal log level.
+ */
+static bool vm_net_mock_verbose_logging_enabled(void)
+{
+    return vm_net_mock_env_u8("CBE_MOCK_VERBOSE_LOG", 0) != 0;
+}
+
 static u32 vm_net_mock_env_u32(const char *name, u32 fallback)
 {
     const char *spec = getenv(name);
@@ -4183,6 +4193,13 @@ enum
      * storage may retain more rows for a future migration, but no client
      * packet may advertise a larger usable grid. */
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
+    /* 30/21 encodes each ordinary backpack row as u32 item id, i16 sequence,
+     * u32 quantity and the 11-byte common item-extra block.  The same
+     * client-visible 64-row bound also covers the shorter 17/1 list rows. */
+    VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES = 27,
+    VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
+        VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
     VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
     VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,
@@ -4642,6 +4659,12 @@ static bool vm_net_mock_role_db_save(const char *reason);
 static bool vm_mock_service_mysql_authority_prepare(void);
 static bool vm_mock_service_mysql_authority_seal(void);
 static bool vm_mock_service_mysql_authority_is_sealed(void);
+static bool vm_net_mock_training_book_schema_prepare(void);
+static bool vm_net_mock_training_book_role_has_instances(const vm_net_mock_role_state *role);
+static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_db_file *database,
+                                                        const char *accountHex,
+                                                        bool fullSnapshot,
+                                                        u32 scopedRoleId);
 static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
                                                         u32 itemId,
                                                         u32 count,

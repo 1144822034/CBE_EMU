@@ -354,8 +354,6 @@ static bool vm_net_mock_append_role_skills_object(u8 *out, u32 outCap, u32 *pos)
 
 static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32 *pos, u8 *addedCount)
 {
-    u32 objectStart = 0;
-
     if (addedCount == NULL)
         return false;
     *addedCount = 0;
@@ -363,13 +361,8 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
         return false;
     *addedCount = (u8)(*addedCount + 1);
 
-    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 42, &objectStart))
+    if (!vm_net_mock_append_books42_object(out, outCap, pos))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "booknum", 0))
-        return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "booksinfo", NULL, 0))
-        return false;
-    vm_net_mock_finish_wt_object(out, objectStart, *pos);
     *addedCount = (u8)(*addedCount + 1);
 
     if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
@@ -381,13 +374,31 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
+    u8 booksInfo[VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
+                 VM_NET_MOCK_TRAINING_BOOK_LIST_ENTRY_MAX_BYTES];
+    u8 bookCount = 0;
+    u32 booksInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (!vm_net_mock_build_training_book_list_blob(role, booksInfo, sizeof(booksInfo),
+                                                   &bookCount, &booksInfoLen))
+    {
+        return false;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 42, &objectStart))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "booknum", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "booknum", bookCount))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "booksinfo", NULL, 0))
+    if (!vm_net_mock_put_object_blob(out, outCap, pos, "booksinfo",
+                                     booksInfoLen ? booksInfo : NULL,
+                                     (u16)booksInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    if (bookCount != 0)
+    {
+        printf("[info][network] mock_training_book_list role=%u books=%u bytes=%u source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8\n",
+               role ? role->roleId : 0, bookCount, booksInfoLen);
+    }
     return true;
 }
 
@@ -3292,15 +3303,18 @@ static bool vm_net_mock_build_scene_player_moveinfo_blob(u8 *out, u32 outCap,
                                                     catchupQueue,
                                                     catchupLen))
                     return false;
-                printf("[info][mock-service] scene_move_catchup source=%08x frames=%u directions=%u sent=%u start=(%u,%u) end=(%u,%u)\n",
-                       seed->session->clientId,
-                       seed->session->pendingDirQueueLen,
-                       directionCount,
-                       catchupLen,
-                       catchupX,
-                       catchupY,
-                       seed->session->pendingDirQueueEndX,
-                       seed->session->pendingDirQueueEndY);
+                if (vm_net_mock_verbose_logging_enabled())
+                {
+                    printf("[info][mock-service] scene_move_catchup source=%08x frames=%u directions=%u sent=%u start=(%u,%u) end=(%u,%u)\n",
+                           seed->session->clientId,
+                           seed->session->pendingDirQueueLen,
+                           directionCount,
+                           catchupLen,
+                           catchupX,
+                           catchupY,
+                           seed->session->pendingDirQueueEndX,
+                           seed->session->pendingDirQueueEndY);
+                }
                 if (deliveredMoveSerialOut)
                     *deliveredMoveSerialOut = seed->session->pendingDirQueueSerial;
                 *blobLenOut = pos;
@@ -4323,17 +4337,20 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         if (socialAppend > 0)
             objectCount = (u8)(objectCount + socialAppend);
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u npc=%u task_prompt=%u chat=%d trade=%u social=%s resp=%u evidence=IDA:0x01037998/0x01012958/0x01012A76/0x010126C6\n",
-               observer->clientId,
-               scene,
-               nearbyRoleCount,
-               nearbyMoveinfoCount,
-               npcCatalogAppended ? 1u : 0u,
-               taskPromptRefreshAppended ? 1u : 0u,
-               chatAppend,
-               tradeSubtype,
-               vm_mock_service_social_notice_name(socialNoticeType),
-               pos);
+        if (vm_net_mock_verbose_logging_enabled())
+        {
+            printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u npc=%u task_prompt=%u chat=%d trade=%u social=%s resp=%u evidence=IDA:0x01037998/0x01012958/0x01012A76/0x010126C6\n",
+                   observer->clientId,
+                   scene,
+                   nearbyRoleCount,
+                   nearbyMoveinfoCount,
+                   npcCatalogAppended ? 1u : 0u,
+                   taskPromptRefreshAppended ? 1u : 0u,
+                   chatAppend,
+                   tradeSubtype,
+                   vm_mock_service_social_notice_name(socialNoticeType),
+                   pos);
+        }
         return pos;
     }
 
@@ -4410,19 +4427,22 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (objectCount == 0)
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u npc=%u task_prompt=%u chat=%d trade=%u social=%s queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01037998/0x01012A76/0x010126C6\n",
-           observer->clientId,
-           scene,
-           objectCount,
-           movementObjectCount,
-           npcCatalogAppended ? 1u : 0u,
-           taskPromptRefreshAppended ? 1u : 0u,
-           chatAppend,
-           tradeSubtype,
-           vm_mock_service_social_notice_name(socialNoticeType),
-           maxMovementAgeTicks,
-           maxMovementAgeTicks * VM_SCHED_FRAME_MS,
-           pos);
+    if (vm_net_mock_verbose_logging_enabled())
+    {
+        printf("[info][mock-service] scene_sync_poll delta observer=%08x scene=%s objects=%u movement=%u npc=%u task_prompt=%u chat=%d trade=%u social=%s queue_age_ticks=%u queue_age_ms=%u resp=%u evidence=IDA:0x01037998/0x01012A76/0x010126C6\n",
+               observer->clientId,
+               scene,
+               objectCount,
+               movementObjectCount,
+               npcCatalogAppended ? 1u : 0u,
+               taskPromptRefreshAppended ? 1u : 0u,
+               chatAppend,
+               tradeSubtype,
+               vm_mock_service_social_notice_name(socialNoticeType),
+               maxMovementAgeTicks,
+               maxMovementAgeTicks * VM_SCHED_FRAME_MS,
+               pos);
+    }
     return pos;
 }
 
@@ -5132,21 +5152,24 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
     if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
         return 0;
     objectCount += 1;
-    printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u persistence=%s requested_steps=%u accepted_steps=%u denied_steps=%u steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
-           posSource,
-           moveinfoFieldKind,
-           (u32)moveInfoLen,
-           parsedUploadedPos ? 1u : 0u,
-           usedTimeline ? 1u : 0u,
-           positionPersistence,
-           requestedTimelineSteps,
-           acceptedTimelineSteps,
-           deniedTimelineSteps,
-           timelineText[0] ? timelineText : "-",
-           gridX,
-           gridY,
-           pos,
-           scene ? scene : "-");
+    if (vm_net_mock_verbose_logging_enabled())
+    {
+        printf("[info][network] mock_actor_moveinfo_ack source=%s field=%s len=%u uploaded=%u timeline=%u persistence=%s requested_steps=%u accepted_steps=%u denied_steps=%u steps=%s pos=(%u,%u) nearby_delivery=scene-sync-poll resp=%u scene=%s\n",
+               posSource,
+               moveinfoFieldKind,
+               (u32)moveInfoLen,
+               parsedUploadedPos ? 1u : 0u,
+               usedTimeline ? 1u : 0u,
+               positionPersistence,
+               requestedTimelineSteps,
+               acceptedTimelineSteps,
+               deniedTimelineSteps,
+               timelineText[0] ? timelineText : "-",
+               gridX,
+               gridY,
+               pos,
+               scene ? scene : "-");
+    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     {
         u32 timingEndMs = scheduler_get_tick_ms();

@@ -831,6 +831,348 @@ static bool vm_net_mock_role_service_account_hex(const char *accountId,
            vm_mysql_hex_encode(accountId, accountLen, out, 129) != 0;
 }
 
+/* `item.dsh` intentionally leaves item 921's static description empty.  The
+ * client asks for its per-instance text through 7/38 and 7/40, so the record
+ * belongs to the same account/role/sequence identity as the backpack row. */
+typedef struct
+{
+    bool found;
+    bool invalid;
+    char title[49];
+    char description[201];
+    char bookInfo[201];
+    u32 level;
+    u32 experience;
+} vm_net_mock_training_book_record;
+
+static bool g_vm_net_mock_training_book_schema_checked = false;
+static bool g_vm_net_mock_training_book_schema_valid = false;
+
+static const char g_vm_net_mock_training_book_default_title[] =
+    "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9"; /* 修炼天书 */
+static const char g_vm_net_mock_training_book_default_description[] =
+    "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\n"
+    "\xB4\xCB\xCA\xE9\xBC\xC7\xC2\xBC\xC1\xCB\xC7\xB0\xB1\xB2\xB5\xC4\xD0\xDE\xD0\xD0\xD0\xC4\xB5\xC3\xA1\xA3\n"
+    "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xA3\xBA" "1\n"
+    "\xCB\xF9\xBA\xAC\xBE\xAD\xD1\xE9\xA3\xBA" "0";
+
+static bool vm_net_mock_training_book_schema_prepare(void)
+{
+    if (g_vm_net_mock_training_book_schema_checked)
+        return g_vm_net_mock_training_book_schema_valid;
+    g_vm_net_mock_training_book_schema_checked = true;
+    g_vm_net_mock_training_book_schema_valid = vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS account_role_training_books ("
+        "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "role_id INT UNSIGNED NOT NULL,item_seq SMALLINT UNSIGNED NOT NULL,"
+        "title VARBINARY(48) NOT NULL,book_description VARBINARY(200) NOT NULL,"
+        "book_info VARBINARY(200) NOT NULL,book_level SMALLINT UNSIGNED NOT NULL DEFAULT 1,"
+        "book_experience INT UNSIGNED NOT NULL DEFAULT 0,"
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(account_id,role_id,item_seq),"
+        "CONSTRAINT fk_account_role_training_books_role FOREIGN KEY(account_id,role_id) "
+        "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+        ") ENGINE=InnoDB");
+    if (!g_vm_net_mock_training_book_schema_valid)
+    {
+        printf("[error][network] mock_training_book_schema error=%s\n",
+               vm_mysql_last_error());
+    }
+    return g_vm_net_mock_training_book_schema_valid;
+}
+
+static bool vm_net_mock_training_book_role_has_instances(const vm_net_mock_role_state *role)
+{
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
+
+    for (u32 index = 0; index < itemCount; ++index)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[index];
+        if (item->itemId == 921 && item->seq != 0 && item->count != 0)
+            return true;
+    }
+    return false;
+}
+
+/* Called inside the role/backpack transaction, after account_role_backpack has
+ * been written.  Existing rows are retained so future book progress is never
+ * reset by an unrelated position, combat, or equipment save; only orphan rows
+ * are removed and missing rows receive the durable default instance data. */
+static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_db_file *database,
+                                                        const char *accountHex,
+                                                        bool fullSnapshot,
+                                                        u32 scopedRoleId)
+{
+    char query[1024];
+    char titleHex[sizeof(g_vm_net_mock_training_book_default_title) * 2 + 1];
+    char descriptionHex[sizeof(g_vm_net_mock_training_book_default_description) * 2 + 1];
+    size_t titleLen = sizeof(g_vm_net_mock_training_book_default_title) - 1;
+    size_t descriptionLen = sizeof(g_vm_net_mock_training_book_default_description) - 1;
+    bool hasInstances = false;
+
+    if (database == NULL || accountHex == NULL || accountHex[0] == 0 ||
+        !vm_net_mock_training_book_schema_prepare() ||
+        vm_mysql_hex_encode(g_vm_net_mock_training_book_default_title, titleLen,
+                            titleHex, sizeof(titleHex)) == 0 ||
+        vm_mysql_hex_encode(g_vm_net_mock_training_book_default_description, descriptionLen,
+                            descriptionHex, sizeof(descriptionHex)) == 0)
+    {
+        return false;
+    }
+
+    for (u32 roleIndex = 0; roleIndex < database->roleCount; ++roleIndex)
+    {
+        const vm_net_mock_role_state *role = &database->roles[roleIndex];
+        if (!fullSnapshot && role->roleId != scopedRoleId)
+            continue;
+        if (vm_net_mock_training_book_role_has_instances(role))
+        {
+            hasInstances = true;
+            break;
+        }
+    }
+    if (!hasInstances)
+        return true;
+
+    if (fullSnapshot)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE books FROM account_role_training_books AS books "
+                 "LEFT JOIN account_role_backpack AS bag ON "
+                 "bag.account_id=books.account_id AND bag.role_id=books.role_id "
+                 "AND bag.item_seq=books.item_seq AND bag.item_id=921 "
+                 "WHERE books.account_id=CAST(X'%s' AS CHAR) AND bag.item_seq IS NULL",
+                 accountHex);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE books FROM account_role_training_books AS books "
+                 "LEFT JOIN account_role_backpack AS bag ON "
+                 "bag.account_id=books.account_id AND bag.role_id=books.role_id "
+                 "AND bag.item_seq=books.item_seq AND bag.item_id=921 "
+                 "WHERE books.account_id=CAST(X'%s' AS CHAR) AND books.role_id=%u "
+                 "AND bag.item_seq IS NULL",
+                 accountHex, scopedRoleId);
+    }
+    if (!vm_mysql_exec(query))
+        return false;
+
+    for (u32 roleIndex = 0; roleIndex < database->roleCount; ++roleIndex)
+    {
+        const vm_net_mock_role_state *role = &database->roles[roleIndex];
+        u8 itemCount = 0;
+
+        if (!fullSnapshot && role->roleId != scopedRoleId)
+            continue;
+        itemCount = vm_net_mock_role_backpack_count(role);
+        for (u32 itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+        {
+            const vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+            if (item->itemId != 921 || item->seq == 0 || item->count != 1)
+                continue;
+            snprintf(query, sizeof(query),
+                     "INSERT IGNORE INTO account_role_training_books("
+                     "account_id,role_id,item_seq,title,book_description,book_info,book_level,book_experience) "
+                     "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',X'%s',X'%s',1,0)",
+                     accountHex, role->roleId, item->seq, titleHex,
+                     descriptionHex, descriptionHex);
+            if (!vm_mysql_exec(query))
+                return false;
+        }
+    }
+    return true;
+}
+
+typedef struct
+{
+    vm_net_mock_training_book_record *record;
+} vm_net_mock_training_book_load_context;
+
+static bool vm_net_mock_training_book_load_row(void *contextValue,
+                                                unsigned int columnCount,
+                                                const char *const *values,
+                                                const size_t *lengths)
+{
+    vm_net_mock_training_book_load_context *context =
+        (vm_net_mock_training_book_load_context *)contextValue;
+    vm_net_mock_training_book_record *record = context ? context->record : NULL;
+
+    if (record == NULL || record->found || columnCount != 5 || values[0] == NULL ||
+        values[1] == NULL || values[2] == NULL ||
+        lengths[0] == 0 || lengths[0] >= sizeof(record->title) ||
+        lengths[1] == 0 || lengths[1] >= sizeof(record->description) ||
+        lengths[2] == 0 || lengths[2] >= sizeof(record->bookInfo) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &record->level) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &record->experience))
+    {
+        if (record != NULL)
+            record->invalid = true;
+        return true;
+    }
+    memcpy(record->title, values[0], lengths[0]);
+    record->title[lengths[0]] = 0;
+    memcpy(record->description, values[1], lengths[1]);
+    record->description[lengths[1]] = 0;
+    memcpy(record->bookInfo, values[2], lengths[2]);
+    record->bookInfo[lengths[2]] = 0;
+    record->found = true;
+    return true;
+}
+
+static bool vm_net_mock_training_book_load_active_instance(
+    vm_net_mock_role_state *role, u16 itemSeq, vm_net_mock_training_book_record *recordOut)
+{
+    char accountHex[129];
+    char query[768];
+    vm_net_mock_training_book_load_context context;
+    vm_net_mock_backpack_item_state *item = NULL;
+
+    if (recordOut == NULL || role == NULL || itemSeq == 0 ||
+        !vm_net_mock_training_book_schema_prepare() ||
+        !vm_net_mock_role_service_account_hex(g_vm_mock_service_active_account_id,
+                                              accountHex))
+    {
+        return false;
+    }
+    item = vm_net_mock_role_find_backpack_item(role, 921, itemSeq);
+    if (item == NULL || item->itemId != 921 || item->count != 1)
+        return false;
+
+    memset(recordOut, 0, sizeof(*recordOut));
+    context.record = recordOut;
+    snprintf(query, sizeof(query),
+             "SELECT title,book_description,book_info,book_level,book_experience "
+             "FROM account_role_training_books WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u AND item_seq=%u",
+             accountHex, role->roleId, itemSeq);
+    if (!vm_mysql_query(query, vm_net_mock_training_book_load_row, &context) ||
+        recordOut->invalid)
+    {
+        return false;
+    }
+    if (recordOut->found)
+        return true;
+
+    /* Records created before this schema existed are repaired by the same
+     * transactional role-save path used by new grants, then read back. */
+    if (!vm_net_mock_role_db_save("training-book-instance-backfill"))
+        return false;
+    memset(recordOut, 0, sizeof(*recordOut));
+    context.record = recordOut;
+    if (!vm_mysql_query(query, vm_net_mock_training_book_load_row, &context) ||
+        recordOut->invalid || !recordOut->found)
+    {
+        return false;
+    }
+    return true;
+}
+
+/* JianghuOL.CBE:0x0100FD30 reads 7/42.booksinfo as one entry per 921 book:
+ *   seq:i16-tagged, title:cstr-len16.
+ * It copies the title into an 18-byte record whose last two bytes already
+ * hold seq, leaving exactly 16 bytes for the NUL-terminated GBK label.  The
+ * backpack renderer at mmGame:0x3AA8 then replaces item 921's local DSH name
+ * with this per-instance label.  Do not put a longer title on this wire path:
+ * the client has no bounds check before that copy. */
+enum
+{
+    VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_BYTES = 16,
+    VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_TEXT_BYTES =
+        VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_BYTES - 1,
+    VM_NET_MOCK_TRAINING_BOOK_LIST_ENTRY_MAX_BYTES =
+        4 + 2 + VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_BYTES
+};
+
+static bool vm_net_mock_training_book_copy_list_title(
+    const char *source,
+    char destination[VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_BYTES],
+    bool *truncatedOut)
+{
+    size_t sourcePos = 0;
+    size_t destinationPos = 0;
+    bool truncated = false;
+
+    if (source == NULL || destination == NULL)
+        return false;
+    while (source[sourcePos] != 0)
+    {
+        unsigned char first = (unsigned char)source[sourcePos];
+        size_t charLen = 1;
+
+        if (first >= 0x80)
+        {
+            unsigned char second = (unsigned char)source[sourcePos + 1];
+            if (first < 0x81 || second < 0x40 || second == 0x7f || second > 0xfe)
+                return false;
+            charLen = 2;
+        }
+        if (destinationPos + charLen > VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_TEXT_BYTES)
+        {
+            truncated = true;
+            break;
+        }
+        memcpy(destination + destinationPos, source + sourcePos, charLen);
+        destinationPos += charLen;
+        sourcePos += charLen;
+    }
+    if (destinationPos == 0)
+        return false;
+    destination[destinationPos] = 0;
+    if (truncatedOut != NULL)
+        *truncatedOut = truncated;
+    return true;
+}
+
+static bool vm_net_mock_build_training_book_list_blob(
+    vm_net_mock_role_state *role, u8 *out, u32 outCap, u8 *bookCountOut,
+    u32 *blobLenOut)
+{
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u8 bookCount = 0;
+    u32 pos = 0;
+
+    if (out == NULL || bookCountOut == NULL || blobLenOut == NULL)
+        return false;
+    *bookCountOut = 0;
+    *blobLenOut = 0;
+    for (u32 itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+        vm_net_mock_training_book_record record;
+        char title[VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_BYTES];
+        bool truncated = false;
+
+        if (!vm_net_mock_backpack_item_is_client_grid_item(item) ||
+            item->itemId != 921)
+        {
+            continue;
+        }
+        if (item->seq == 0 || item->count != 1 ||
+            !vm_net_mock_training_book_load_active_instance(role, item->seq, &record) ||
+            !vm_net_mock_training_book_copy_list_title(record.title, title, &truncated) ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, item->seq) ||
+            !vm_net_mock_seq_put_string(out, outCap, &pos, title))
+        {
+            printf("[error][network] mock_training_book_list invalid role=%u seq=%u count=%u action=reject-7/42 evidence=JianghuOL.CBE:0x0100FD30\n",
+                   role ? role->roleId : 0, item ? item->seq : 0,
+                   item ? item->count : 0);
+            return false;
+        }
+        if (truncated)
+        {
+            printf("[warn][network] mock_training_book_list title_truncated role=%u seq=%u max_bytes=%u\n",
+                   role->roleId, item->seq,
+                   (unsigned int)VM_NET_MOCK_TRAINING_BOOK_LIST_TITLE_TEXT_BYTES);
+        }
+        ++bookCount;
+    }
+    *bookCountOut = bookCount;
+    *blobLenOut = pos;
+    return true;
+}
+
 static bool vm_net_mock_role_service_durability_row(
     void *contextValue, unsigned int columnCount,
     const char *const *values, const size_t *lengths)
@@ -3867,6 +4209,9 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
         "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xD7\xB4\xCC\xAC\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
     const char *bookInfo =
         "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xD7\xCA\xC1\xCF\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_training_book_record trainingBook;
+    bool trainingBookLoaded = false;
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -3898,6 +4243,28 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
     else
     {
         return 0;
+    }
+
+    /* 921 is a non-stackable, sequence-owned instance.  Unlike 920 its DSH
+     * description is intentionally empty, so return only its persisted
+     * per-instance fields through the client-proven 7/38 and 7/40 contracts. */
+    if (subtype == 38 || subtype == 40)
+    {
+        role = vm_net_mock_active_role();
+        memset(&trainingBook, 0, sizeof(trainingBook));
+        if (vm_net_mock_training_book_load_active_instance(role, requestedSeq,
+                                                           &trainingBook))
+        {
+            bookInfo = subtype == 38 ? trainingBook.description : trainingBook.bookInfo;
+            trainingBookLoaded = true;
+        }
+    }
+    else if (subtype == 35)
+    {
+        /* Static 920 retains its ordinary, resource-provided book text and
+         * remains non-consuming until the experience-transfer operation has
+         * its own authoritative gameplay implementation. */
+        bookInfo = g_vm_net_mock_training_book_default_description;
     }
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, subtype, &objectStart))
@@ -3935,8 +4302,16 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[warn][network] mock_special_item_unresolved request=7/%u seq=%u action=not-consumed response=%u evidence=JianghuOL.CBE:0x01025AE6\n",
-           subtype, requestedSeq, pos);
+    if (trainingBookLoaded)
+    {
+        printf("[info][network] mock_training_book_instance_read request=7/%u seq=%u role=%u action=not-consumed response=%u evidence=JianghuOL.CBE:0x010238B6+0x01025AE6\n",
+               subtype, requestedSeq, role ? role->roleId : 0, pos);
+    }
+    else
+    {
+        printf("[warn][network] mock_special_item_unresolved request=7/%u seq=%u action=not-consumed response=%u evidence=JianghuOL.CBE:0x01025AE6\n",
+               subtype, requestedSeq, pos);
+    }
     return pos;
 }
 
@@ -4319,7 +4694,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u8 itemInfo[1024];
+    u8 itemInfo[VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u32 rowCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -4394,7 +4769,7 @@ static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos
 static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u8 itemInfo[1024];
+    u8 itemInfo[VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u32 gridCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();

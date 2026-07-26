@@ -555,11 +555,7 @@ static u32 vm_net_mock_process_request_bytes(u32 connectId,
                          connectId, requestWtKind, requestWtSubtype, requestLen,
                          source,
                          responseLen);
-        if (responseLen ||
-            strstr(source, "settings") != NULL ||
-            strstr(source, "teleport") != NULL ||
-            strstr(source, "scene") != NULL ||
-            strstr(source, "mmgame") != NULL)
+        if (vm_net_mock_verbose_logging_enabled())
         {
             printf("[info][network] net_send connect=%u wt=%u/%u len=%u source=%s resp=%u\n",
                    connectId, requestWtKind, requestWtSubtype, requestLen, source, responseLen);
@@ -571,7 +567,7 @@ static u32 vm_net_mock_process_request_bytes(u32 connectId,
                          connectId, requestLen,
                          source,
                          responseLen);
-        if (responseLen)
+        if (responseLen && vm_net_mock_verbose_logging_enabled())
             printf("[info][network] net_send connect=%u malformed len=%u source=%s resp=%u\n",
                    connectId, requestLen, source, responseLen);
     }
@@ -958,7 +954,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             return 0;
         if (responseLen > 0 && !vm_mock_service_send_all(client, responseBuffer, responseLen))
             return 0;
-        if (responseLen > 0)
+        if (responseLen > 0 && vm_net_mock_verbose_logging_enabled())
         {
             printf("[info][mock-service] account=%s scene_sync_poll client=%08x response=%u event=7 queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u\n",
                    logAccountId,
@@ -1148,7 +1144,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         return 0;
     }
 
-    if (handledValid &&
+    if (vm_net_mock_verbose_logging_enabled() && handledValid &&
         strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0)
     {
         u32 nowMs = scheduler_get_tick_ms();
@@ -1159,15 +1155,18 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                nowMs >= requestReceivedMs ? nowMs - requestReceivedMs : 0);
     }
 
-    printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u source=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u process_ms=%u\n",
-           logAccountId,
-           payloadLen, responseLen, responseEventType, responseFlags,
-           handledValid ? handledSource : "-",
-           workerQueueWaitMs,
-           protocolWaitMs,
-           protocolHoldMs,
-           requestProcessEndMs >= requestProcessStartMs ?
-               requestProcessEndMs - requestProcessStartMs : 0);
+    if (vm_net_mock_verbose_logging_enabled())
+    {
+        printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u source=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u process_ms=%u\n",
+               logAccountId,
+               payloadLen, responseLen, responseEventType, responseFlags,
+               handledValid ? handledSource : "-",
+               workerQueueWaitMs,
+               protocolWaitMs,
+               protocolHoldMs,
+               requestProcessEndMs >= requestProcessStartMs ?
+                   requestProcessEndMs - requestProcessStartMs : 0);
+    }
     /* Response bytes are already on the client socket and the protocol lock
      * has been released.  Flush the service-only batch here so diagnostics
      * remain current without putting disk latency on the request critical
@@ -1343,7 +1342,7 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         workerStartMs = scheduler_get_tick_ms();
         queueWaitMs = workerStartMs >= job.acceptedMs ?
                           workerStartMs - job.acceptedMs : 0;
-        if (job.sequence <= 8)
+        if (vm_net_mock_verbose_logging_enabled() && job.sequence <= 8)
         {
             printf("[info][mock-service] connection_dispatch worker=%u sequence=%u kind=%u socket=%llu\n",
                    worker->workerId,
@@ -1650,7 +1649,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                     printf("[warn][mock-service] connection_rejected kind=game reason=queue-full\n");
                     vm_mock_service_socket_close(client);
                 }
-                else if (acceptedGameLogCount++ < 8)
+                else if (vm_net_mock_verbose_logging_enabled() && acceptedGameLogCount++ < 8)
                 {
                     printf("[info][mock-service] connection_accept kind=game sequence=%u socket=%llu\n",
                            sequence, (unsigned long long)client);
@@ -1674,7 +1673,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                     printf("[warn][mock-admin] connection_rejected reason=queue-full\n");
                     vm_mock_service_socket_close(adminClient);
                 }
-                else if (acceptedAdminLogCount++ < 8)
+                else if (vm_net_mock_verbose_logging_enabled() && acceptedAdminLogCount++ < 8)
                 {
                     printf("[info][mock-service] connection_accept kind=admin sequence=%u socket=%llu\n",
                            sequence, (unsigned long long)adminClient);
@@ -2473,15 +2472,18 @@ static void vm_net_mock_async_drain_completions(void)
         nowMs = SDL_GetTicks();
         if (completion->kind == VM_NET_MOCK_ASYNC_JOB_SCENE_POLL)
         {
-            printf("[info][network] net_queue_scene_sync_poll connect=%u event=%u resp=%u cb=%08x ctx=%08x async_queue_ms=%u network_ms=%u deliver_ms=%u evidence=service-poll\n",
-                   channel->connectId,
-                   completion->responseEventType,
-                   completion->responseLen,
-                   channel->callback,
-                   channel->context,
-                   completion->workerStartMs - completion->enqueueMs,
-                   completion->workerDoneMs - completion->workerStartMs,
-                   nowMs - completion->workerDoneMs);
+            if (vm_net_mock_verbose_logging_enabled())
+            {
+                printf("[info][network] net_queue_scene_sync_poll connect=%u event=%u resp=%u cb=%08x ctx=%08x async_queue_ms=%u network_ms=%u deliver_ms=%u evidence=service-poll\n",
+                       channel->connectId,
+                       completion->responseEventType,
+                       completion->responseLen,
+                       channel->callback,
+                       channel->context,
+                       completion->workerStartMs - completion->enqueueMs,
+                       completion->workerDoneMs - completion->workerStartMs,
+                       nowMs - completion->workerDoneMs);
+            }
         }
         else
         {
@@ -2490,17 +2492,20 @@ static void vm_net_mock_async_drain_completions(void)
             g_netLastHandledSummary[0] = 0;
             g_netLastHandledResponseLen = completion->responseLen;
             g_netLastHandledValid = 1;
-            printf("[info][network] net_queue_data connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u async_queue_ms=%u network_ms=%u deliver_ms=%u\n",
-                   completion->connectId,
-                   completion->responseEventType,
-                   completion->responseLen,
-                   g_netLastHandledSource,
-                   channel->callback,
-                   channel->context,
-                   g_netTaskDispatchDepth,
-                   completion->workerStartMs - completion->enqueueMs,
-                   completion->workerDoneMs - completion->workerStartMs,
-                   nowMs - completion->workerDoneMs);
+            if (vm_net_mock_verbose_logging_enabled())
+            {
+                printf("[info][network] net_queue_data connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u async_queue_ms=%u network_ms=%u deliver_ms=%u\n",
+                       completion->connectId,
+                       completion->responseEventType,
+                       completion->responseLen,
+                       g_netLastHandledSource,
+                       channel->callback,
+                       channel->context,
+                       g_netTaskDispatchDepth,
+                       completion->workerStartMs - completion->enqueueMs,
+                       completion->workerDoneMs - completion->workerStartMs,
+                       nowMs - completion->workerDoneMs);
+            }
         }
         if (completion->followupLen != 0 && completion->followup != NULL)
         {
@@ -2514,14 +2519,17 @@ static void vm_net_mock_async_drain_completions(void)
                                           completion->followupLen,
                                           channel->callback,
                                           channel->context);
-                printf("[info][network] net_queue_followup connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u async=1\n",
-                       completion->connectId,
-                       completion->followupEventType,
-                       completion->followupLen,
-                       g_netLastHandledSource,
-                       channel->callback,
-                       channel->context,
-                       g_netTaskDispatchDepth);
+                if (vm_net_mock_verbose_logging_enabled())
+                {
+                    printf("[info][network] net_queue_followup connect=%u event=%u resp=%u source=%s cb=%08x ctx=%08x depth=%u async=1\n",
+                           completion->connectId,
+                           completion->followupEventType,
+                           completion->followupLen,
+                           g_netLastHandledSource,
+                           channel->callback,
+                           channel->context,
+                           g_netTaskDispatchDepth);
+                }
             }
         }
         if (completion->closeAfterData)
