@@ -3087,6 +3087,7 @@ static u32 vm_net_mock_build_guild_page_response(const u8 *request, u32 requestL
     vm_net_mock_guild_record membership;
     u8 faction[8192];
     char tail[96];
+    char memberCountText[32];
     u32 index = 0;
     u32 pageSize = 0;
     u32 offset = 0;
@@ -3103,6 +3104,7 @@ static u32 vm_net_mock_build_guild_page_response(const u8 *request, u32 requestL
     memset(&membership, 0, sizeof(membership));
     memset(faction, 0, sizeof(faction));
     memset(tail, 0, sizeof(tail));
+    memset(memberCountText, 0, sizeof(memberCountText));
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_guild_page_request(request, requestLen, &index, &pageSize,
                                            &requestSubtype))
@@ -3132,21 +3134,32 @@ static u32 vm_net_mock_build_guild_page_response(const u8 *request, u32 requestL
     for (u32 i = 0; i < rowCount; ++i)
     {
         const vm_net_mock_guild_record *guild = &rows[i];
+        u32 listRank = offset + i + 1u;
+        int memberCountTextLen = snprintf(memberCountText, sizeof(memberCountText),
+                                          "%u/%u", guild->memberCount, guild->memberLimit);
         /* The object blob accessor leaves its leading len16 in front of the
          * stream.  The first i32 reader consumes that len16 as its tag, so the
-         * first row id must be raw BE32.  Later row ids remain tagged. */
+         * first row id must be raw BE32.  Later row ids remain tagged.
+         *
+         * HandleFactionMemberListResponse stores and renders the remaining
+         * fields at x=5, 50, 160 and 205 respectively.  The client binary's
+         * contiguous header strings are 排名、帮派名、等级、人数.  Its type
+         * readers are u32, string, u32, string, so this is list rank rather
+         * than guild level, followed by the persistent level and a formatted
+         * member-count text; leaderName is not a column in this screen. */
         bool wroteGuildId = i == 0 ?
                             vm_net_mock_put_be32(faction, sizeof(faction), &factionLen,
                                                  guild->guildId) :
                             vm_net_mock_seq_put_u32(faction, sizeof(faction), &factionLen,
                                                     guild->guildId);
-        if (!wroteGuildId ||
+        if (memberCountTextLen < 0 || (u32)memberCountTextLen >= sizeof(memberCountText) ||
+            !wroteGuildId ||
             !vm_net_mock_seq_put_u32(faction, sizeof(faction), &factionLen,
-                                     guild->guildLevel) ||
+                                     listRank) ||
             !vm_net_mock_seq_put_string(faction, sizeof(faction), &factionLen, guild->guildName) ||
             !vm_net_mock_seq_put_u32(faction, sizeof(faction), &factionLen,
-                                     guild->memberCount) ||
-            !vm_net_mock_seq_put_string(faction, sizeof(faction), &factionLen, guild->leaderName))
+                                     guild->guildLevel) ||
+            !vm_net_mock_seq_put_string(faction, sizeof(faction), &factionLen, memberCountText))
         {
             return 0;
         }
@@ -3165,7 +3178,8 @@ static u32 vm_net_mock_build_guild_page_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     printf("[info][network] mock_guild_page request=10/%u index=%u page_size=%u "
-           "fid=%u total=%u rows=%u allpgs=%u faction_len=%u row_numbers=u32 "
+           "fid=%u total=%u rows=%u allpgs=%u faction_len=%u "
+           "row_layout=id,rank,name,level,member_count_text "
            "response=10/21 resp=%u "
            "evidence=JianghuOL.CBE:0x010414DC+0x0103F566\n",
            requestSubtype, index, pageSize, currentGuildId,

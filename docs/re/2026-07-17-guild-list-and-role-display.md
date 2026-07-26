@@ -57,10 +57,10 @@ faction:blob
 repeat num:
   first row: raw-be32 guildId
   later rows: tagged-u32 guildId
-  tagged-u32 guildLevel
+  tagged-u32 listRank
   string guildName
-  tagged-u32 memberCount
-  string leaderName
+  tagged-u32 guildLevel
+  string memberCountText       // 例如 1/20
 ```
 
 `faction` 字段访问器保留 blob 的 `len16` 前缀，第一个 i32 reader 会消费该前缀，
@@ -76,7 +76,7 @@ repeat num:
 `10/20`，首次进入请求会落入 `unhandled`，界面便会一直显示进度条。响应中的 `fid`
 来自当前角色真实帮派 ID，未入帮时为 0。
 
-2026-07-17 的第二次运行验证还确认，行内 `guildLevel` 和 `memberCount` 虽然最终写入
+2026-07-17 的第二次运行验证还确认，行内 `listRank` 和 `guildLevel` 虽然最终写入
 客户端 16 位显示槽，但 `HandleFactionMemberListResponse(0x0103F566)` 在
 `0x0103F7C4`、`0x0103F860` 都通过 `stream_read_i32_be_tagged` 读取，线上编码必须是
 `00 04 + BE32`。旧响应错误地使用 `00 02 + BE16`：等级读取会继续吞掉名称的
