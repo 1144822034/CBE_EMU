@@ -170,6 +170,15 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 并通过 `server_data_migrations` 保证脚本重复执行时不会再次放大容量。新获得的
 神仙壶保存剩余 HP，逍遥壶保存剩余 MP；只在剩余值归零时删除背包行。
 
+已有数据库升级修炼天书实例说明时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_training_books.sql
+```
+
+脚本只新增 `account_role_training_books`。服务会在角色首次读取 921
+“修炼天书”时，按背包的 `item_seq` 自动补齐已有实例；不会重置已有角色或背包。
+
 密码由命令行交互输入。服务运行时的默认密码与本机开发环境一致，也可以通过以下环境变量覆盖，避免修改源代码：
 
 - `CBE_MYSQL_HOST`
@@ -195,6 +204,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `account_role_equipment_durability`：按装备槽和当前物品保存耐久度。
 - `account_role_skills`：按角色保存已学习技能和技能等级。
 - `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
+- `account_role_training_books`：921 修炼天书的按账号、角色、背包序号持久化的标题、说明、等级与经验实例数据。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
 - `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。

@@ -5294,6 +5294,8 @@ static bool vm_net_mock_append_info_banner_text11_object(u8 *out, u32 outCap,
 {
     u32 objectStart = 0;
 
+    /* mmGame renders 25/11.info as GBK. Callers may pass ASCII or explicit
+     * GBK bytes, but must never forward a UTF-8 source literal unchanged. */
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x19, 11, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 8))
@@ -5427,7 +5429,7 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     {
         if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
             !vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
-                                                          "您已经死亡，请先使用复活石"))
+                                                          "\xC4\xFA\xD2\xD1\xBE\xAD\xCB\xC0\xCD\xF6\xA3\xAC\xC7\xEB\xCF\xC8\xCA\xB9\xD3\xC3\xB8\xB4\xBB\xEE\xCA\xAF")) /* 您已经死亡，请先使用复活石 */
         {
             return 0;
         }
@@ -5634,7 +5636,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     {
         if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
             !vm_net_mock_append_info_banner_text11_object(out, outCap, &pos,
-                                                          "您已经死亡，请先使用复活石"))
+                                                          "\xC4\xFA\xD2\xD1\xBE\xAD\xCB\xC0\xCD\xF6\xA3\xAC\xC7\xEB\xCF\xC8\xCA\xB9\xD3\xC3\xB8\xB4\xBB\xEE\xCA\xAF")) /* 您已经死亡，请先使用复活石 */
         {
             return 0;
         }

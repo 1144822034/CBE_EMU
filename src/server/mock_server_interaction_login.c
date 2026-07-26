@@ -1408,6 +1408,10 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
 {
     u32 pos = 5;
     u32 objectStart = 0;
+    /* 20/1.info is consumed by the same CBE text renderer as other game
+     * notices, therefore both the fallback and all callers use GBK bytes. */
+    static const char revivalStoneUnavailableGbk[] =
+        "\xB8\xB4\xBB\xEE\xCA\xAF\xB2\xBB\xBF\xC9\xD3\xC3"; /* 复活石不可用 */
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -1416,7 +1420,7 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
         return 0;
     if (!vm_net_mock_put_object_string(out, outCap, &pos,
-                                       "info", info ? info : "复活石不可用"))
+                                       "info", info ? info : revivalStoneUnavailableGbk))
     {
         return 0;
     }
@@ -1475,7 +1479,7 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
                    role ? role->roleId : 0,
                    role ? role->hp : 0);
             return vm_net_mock_build_battle_death_prompt_error_response(
-                out, outCap, "复活石不可用");
+                out, outCap, "\xB8\xB4\xBB\xEE\xCA\xAF\xB2\xBB\xBF\xC9\xD3\xC3"); /* 复活石不可用 */
         }
         reviveHp = role->hp;
         reviveMp = role->mp;
@@ -1532,7 +1536,7 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
         {
             printf("[warn][network] mock_battle_death_prompt_choice result=2 action=reject-ordinary-respawn reason=not-dead-or-state-unavailable\n");
             return vm_net_mock_build_battle_death_prompt_error_response(
-                out, outCap, "当前无需复活");
+                out, outCap, "\xB5\xB1\xC7\xB0\xCE\xDE\xD0\xE8\xB8\xB4\xBB\xEE"); /* 当前无需复活 */
         }
     }
     else
@@ -1540,7 +1544,7 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
         printf("[warn][network] mock_battle_death_prompt_choice result=%u action=reject-unknown-choice\n",
                choice);
         return vm_net_mock_build_battle_death_prompt_error_response(
-            out, outCap, "复活请求无效");
+            out, outCap, "\xB8\xB4\xBB\xEE\xC7\xEB\xC7\xF3\xCE\xDE\xD0\xA7"); /* 复活请求无效 */
     }
     g_mockBattleOperateSessionArmed = 0;
     g_mockBattleOperateSessionFinished = 0;
