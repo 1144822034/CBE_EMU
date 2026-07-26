@@ -389,9 +389,18 @@ static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos)
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "booknum", bookCount))
         return false;
-    if (!vm_net_mock_put_object_blob(out, outCap, pos, "booksinfo",
-                                     booksInfoLen ? booksInfo : NULL,
-                                     (u16)booksInfoLen))
+    /*
+     * ParseBookInfoData(0x0100FD30) passes the field value directly to
+     * stream_reader_init_from_blob().  The reader's first operation is a
+     * tagged i16 read, so booksinfo must begin with the first entry's
+     * ``00 02 <seq>``.  Unlike a textual field, this is not a blob-wrapped
+     * value: adding put_object_blob()'s inner BE16 length shifts the stream
+     * by two bytes, makes the parser read the wrapper length as the sequence,
+     * and prevents mmGame from matching the 921 grid item by its real seq.
+     */
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "booksinfo",
+                                    booksInfoLen ? booksInfo : NULL,
+                                    (u16)booksInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     if (bookCount != 0)
