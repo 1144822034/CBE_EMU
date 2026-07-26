@@ -1461,11 +1461,18 @@ static void vm_mock_admin_render_actor_select(
     u32 actorCount, const char *currentActor)
 {
     bool currentFound = false;
+    u32 selectableCount = 0;
 
     if (page == NULL)
         return;
     for (u32 i = 0; i < actorCount; ++i)
     {
+        if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
+                actorFiles[i].name))
+        {
+            continue;
+        }
+        ++selectableCount;
         if (currentActor != NULL && strcmp(actorFiles[i].name, currentActor) == 0)
         {
             currentFound = true;
@@ -1478,12 +1485,22 @@ static void vm_mock_admin_render_actor_select(
     {
         vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>");
         vm_mock_admin_text_append_html(page, currentActor);
-        vm_mock_admin_text_appendf(page, "（资源不存在，请重新选择）</option>");
+        vm_mock_admin_text_appendf(
+            page,
+            "%s</option>",
+            vm_net_mock_dynamic_npc_actor_resource_is_supported(currentActor)
+                ? "（资源不存在，请重新选择）"
+                : "（不支持动态 NPC，请改选 n_woman1.actor）");
     }
-    if ((currentActor == NULL || currentActor[0] == 0) && actorCount != 0)
+    if ((currentActor == NULL || currentActor[0] == 0) && selectableCount != 0)
         vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>请选择 Actor 资源</option>");
     for (u32 i = 0; i < actorCount; ++i)
     {
+        if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
+                actorFiles[i].name))
+        {
+            continue;
+        }
         bool selected = currentFound &&
                         strcmp(actorFiles[i].name, currentActor) == 0;
         vm_mock_admin_text_appendf(page, "<option value=\"");
@@ -1492,7 +1509,7 @@ static void vm_mock_admin_render_actor_select(
         vm_mock_admin_text_append_html(page, actorFiles[i].name);
         vm_mock_admin_text_appendf(page, "</option>");
     }
-    if (actorCount == 0)
+    if (selectableCount == 0)
         vm_mock_admin_text_appendf(page, "<option value=\"\" disabled>未找到 Actor 资源</option>");
     vm_mock_admin_text_appendf(page, "</select>");
 }
@@ -5411,6 +5428,15 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
             }
         }
         if (found && enabled &&
+            !vm_net_mock_dynamic_npc_actor_resource_is_supported(
+                seed.actorResource))
+        {
+            vm_mock_admin_redirect_content(
+                client, sceneUtf8, "error",
+                "该 Actor 不支持动态 NPC；请编辑后改选 n_woman1.actor");
+            return;
+        }
+        if (found && enabled &&
             (!vm_mock_admin_actor_resource_inspect(
                  seed.actorResource, actorImageNames, &actorImageCount) ||
              !vm_mock_admin_publish_actor_resource(
@@ -5547,6 +5573,13 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "Actor 资源名格式无效或名称过长");
+        return;
+    }
+    if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(actorResource))
+    {
+        vm_mock_admin_redirect_content(
+            client, sceneUtf8, "error",
+            "n_girl.actor 不支持动态 NPC；请改选 n_woman1.actor");
         return;
     }
     if (!vm_mock_admin_actor_resource_inspect(
