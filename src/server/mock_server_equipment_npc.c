@@ -1862,6 +1862,10 @@ typedef struct
     u32 itemId;
     u16 sourceSeq;
     u16 destinationSeq;
+    /* Equipment is an individual backpack instance.  Its enhancement level
+     * belongs to that instance and must follow it through trade instead of
+     * being inferred from an item-id match in the recipient's bag. */
+    u16 enhanceLevel;
     u32 count;
 } vm_mock_service_trade_item;
 
@@ -2650,30 +2654,44 @@ static vm_net_mock_role_state *vm_mock_service_trade_role_for_session(
     return NULL;
 }
 
-static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
-                                                u32 itemId,
-                                                u32 count,
-                                                u16 *destinationSeqOut)
+static bool vm_mock_service_trade_role_add_item(
+    vm_net_mock_role_state *role,
+    const vm_mock_service_trade_item *incoming,
+    u16 *destinationSeqOut)
 {
     u8 itemCount = 0;
+    bool isEquipment = false;
 
     if (destinationSeqOut)
         *destinationSeqOut = 0;
-    if (role == NULL || itemId == 0 || count == 0)
+    if (role == NULL || incoming == NULL || incoming->itemId == 0 ||
+        incoming->count == 0)
+    {
+        return false;
+    }
+    isEquipment = vm_net_mock_find_equipment_catalog_item(incoming->itemId) != NULL;
+
+    /* The client receipt (WT21/8) identifies one incoming row by one
+     * destination sequence.  An equipment row is therefore one indivisible
+     * instance; accepting a stack here would lose its per-instance state. */
+    if (isEquipment && incoming->count != 1)
         return false;
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
-    for (u32 i = 0; i < itemCount; ++i)
+    if (!isEquipment)
     {
-        vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
-        if (item->itemId != itemId)
-            continue;
-        if (0xffffffffu - item->count < count)
-            return false;
-        item->count += count;
-        if (destinationSeqOut)
-            *destinationSeqOut = item->seq;
-        return true;
+        for (u32 i = 0; i < itemCount; ++i)
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+            if (item->itemId != incoming->itemId)
+                continue;
+            if (0xffffffffu - item->count < incoming->count)
+                return false;
+            item->count += incoming->count;
+            if (destinationSeqOut)
+                *destinationSeqOut = item->seq;
+            return true;
+        }
     }
     if (itemCount >= role->backpackCapacity ||
         itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
@@ -2682,9 +2700,14 @@ static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
     }
     vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
     memset(item, 0, sizeof(*item));
-    item->itemId = itemId;
+    item->itemId = incoming->itemId;
     item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
-    item->count = count;
+    item->count = incoming->count;
+    if (isEquipment)
+    {
+        item->enhanceLevel = (u16)SDL_min(
+            incoming->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    }
     role->backpackItemCount = (u8)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
     if (role->nextBackpackSeq == 0)
