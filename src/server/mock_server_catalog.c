@@ -3096,6 +3096,7 @@ typedef struct
     u32 count;
     u8 type;
     bool haveItemSelector;
+    bool haveCount;
 } vm_net_mock_item_discard_request;
 
 typedef struct
@@ -3363,6 +3364,7 @@ static bool vm_net_mock_parse_item_discard_request(const u8 *request, u32 reques
         vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &value))
     {
         parsed.count = value;
+        parsed.haveCount = true;
     }
 
     if (!parsed.haveItemSelector)
@@ -4628,9 +4630,14 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
         {
             itemId = item->itemId;
             seq = item->seq;
-            discardCount = parsed.count ? parsed.count : item->count;
-            if (discardCount == 0)
-                discardCount = item->count;
+            /*
+             * The normal backpack discard action identifies one selected
+             * entry but has no count field.  It means "discard one", not
+             * "discard this row's entire stack".  A batch caller must state
+             * a positive count explicitly; zero then reaches the normal
+             * consume validation and returns result=2.
+             */
+            discardCount = parsed.haveCount ? parsed.count : 1;
             consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq,
                                                               discardCount, &remaining);
             if (consumed)
@@ -4682,11 +4689,11 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_item_discard item=%u seq=%u count=%u remaining=%u result=%u refresh=%s resp=%u\n",
-           itemId, seq, discardCount, remaining, result,
+    printf("[info][network] mock_item_discard item=%u seq=%u count=%u request_count=%s remaining=%u result=%u refresh=%s resp=%u\n",
+           itemId, seq, discardCount, parsed.haveCount ? "explicit" : "default-one", remaining, result,
            consumed ? "7/4+17/1+7/42+7/11" : "7/4-fail", pos);
-    vm_autotest_note("mock_item_discard item=%u seq=%u count=%u remaining=%u result=%u response=%s evidence=runtime:wt7/4 JianghuOL.CBE:0x1033544 mmGame:0x418C\n",
-                     itemId, seq, discardCount, remaining, result,
+    vm_autotest_note("mock_item_discard item=%u seq=%u count=%u request_count=%s remaining=%u result=%u response=%s evidence=runtime:wt7/4 JianghuOL.CBE:0x1033544 mmGame:0x418C\n",
+                     itemId, seq, discardCount, parsed.haveCount ? "explicit" : "default-one", remaining, result,
                      consumed ? "7/4+17/1+7/42+7/11" : "7/4-fail");
     return pos;
 }
