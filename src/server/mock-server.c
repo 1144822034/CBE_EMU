@@ -25,6 +25,7 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
+#include "mock_server_ranking.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while
  * the destination is derived from the sMap/wMap topology and SCE resources in

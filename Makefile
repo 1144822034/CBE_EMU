@@ -9,6 +9,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_core.c \
 	src/server/mock_server_catalog.c \
 	src/server/mock_server_role.c \
+	src/server/mock_server_ranking.c \
 	src/server/mock_server_equipment_npc.c \
 	src/server/mock_server_scene_task.c \
 	src/server/mock_server_scene_sync.c \

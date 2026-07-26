@@ -3892,6 +3892,11 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
         return true;
     if (object->kind == 0x19 && object->subtype == 5)
         return true;
+    /* WT 23/7 has no stateful companion: HandleRankingList consumes precisely
+     * this page object, so it is safe to split when the client flushes it with
+     * another independently composable request. */
+    if (object->kind == 23 && object->subtype == 7)
+        return true;
     if (object->kind == 0x63 && object->subtype == 1)
         return true;
     return false;

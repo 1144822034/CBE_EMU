@@ -2193,7 +2193,14 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             role, 0, offer->items[i].sourceSeq);
         if (item == NULL || item->itemId == 0 || item->count < offer->items[i].count)
             return false;
+        if (vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL &&
+            offer->items[i].count != 1)
+        {
+            return false;
+        }
         offer->items[i].itemId = item->itemId;
+        offer->items[i].enhanceLevel = (u16)SDL_min(
+            item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
     }
     return true;
 }
@@ -2227,7 +2234,10 @@ static bool vm_net_mock_append_trade_offer_object(
              !vm_net_mock_seq_put_string(itemInfo, sizeof(itemInfo),
                                          &itemInfoLen, "")) ||
             !vm_net_mock_seq_put_item_common_extra(itemInfo, sizeof(itemInfo),
-                                                   &itemInfoLen, 0, 0))
+                                                   &itemInfoLen, 0,
+                                                   (u8)SDL_min(
+                                                       item->enhanceLevel,
+                                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
         {
             return false;
         }
@@ -2416,12 +2426,20 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
         {
             receipt->items[i] = incoming->items[i];
             if (!vm_mock_service_trade_role_add_item(
-                    &roles[side], incoming->items[i].itemId,
-                    incoming->items[i].count,
+                    &roles[side], &incoming->items[i],
                     &receipt->items[i].destinationSeq))
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;
             }
+            printf("[info][mock-service] trade_item_transfer receiver_role=%u source_role=%u item=%u source_seq=%u destination_seq=%u count=%u enhance=%u equipment=%u evidence=WT21/5+21/6+21/8\n",
+                   roles[side].roleId, roles[1 - side].roleId,
+                   incoming->items[i].itemId,
+                   incoming->items[i].sourceSeq,
+                   receipt->items[i].destinationSeq,
+                   incoming->items[i].count,
+                   incoming->items[i].enhanceLevel,
+                   vm_net_mock_find_equipment_catalog_item(
+                       incoming->items[i].itemId) != NULL ? 1u : 0u);
         }
         vm_net_mock_role_normalize_backpack(&roles[side]);
         trade->finalMoney[side] = roles[side].money;

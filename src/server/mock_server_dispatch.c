@@ -359,6 +359,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_ranking_page_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-ranking-page", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (g_netMockBackpackPreferRoleListAfterShopBuy)
     {
         hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
