@@ -150,6 +150,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_npc_s
 脚本新增角色装备耐久和已学技能关系表，不修改现有角色 payload、背包或
 装备槽。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
 
+已有动态 NPC 配置使用过旧 `n_girl.actor` 时，停止 mock-service 后执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_normalize_dynamic_npc_actors.sql
+```
+
+该迁移仅把动态 NPC 的 Actor 设置更新为兼容的 `n_woman1.actor`，不会删除 NPC、
+坐标、XSE、任务或副本绑定。后台此后不会再提供 `n_girl.actor` 作为动态 NPC 的
+可选模型；未迁移的旧行会被运行时停用并提示管理员修正，而不会下发给客户端。
+
 将旧版蓬莱初始场景别名统一为 `c00蓬莱仙岛_01.sce` 时，停止
 mock-service 后执行：
 

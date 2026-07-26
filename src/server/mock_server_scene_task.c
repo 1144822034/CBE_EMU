@@ -72,6 +72,36 @@ static bool vm_net_mock_read_sce_scalar_token(const u8 *data, u32 len, u32 *pos,
     return true;
 }
 
+/* This is a dynamic-NPC configuration rule, not an Actor file-format rule.
+ * n_girl.actor is structurally valid, but cannot be sent as a dynamic 27/11
+ * Actor during the current CBE scene lifecycle.  Existing rows are migrated
+ * to n_woman1.actor; an unmigrated row remains visible in admin as disabled
+ * instead of reaching the client. */
+static bool vm_net_mock_dynamic_npc_actor_resource_is_supported(
+    const char *actorResource)
+{
+    return actorResource != NULL &&
+           strcmp(actorResource, "n_girl.actor") != 0;
+}
+
+/* SCE resources are source data rather than dynamic-NPC settings.  Validate
+ * their Actor against the server authority, but do not rewrite their name. */
+static bool vm_net_mock_scene_npc_validate_actor_resource(
+    vm_net_mock_scene_npcinfo_seed *seed, const char *source)
+{
+    if (seed == NULL || seed->actorResource[0] == 0)
+        return false;
+    if (!vm_net_mock_open_server_data_resource(seed->actorResource, ".actor", NULL,
+                                               NULL, 0))
+    {
+        printf("[error][network] mock_scene_npc_actor_resource_missing source=%s actor=%u npc=%s resource=%s action=skip-row\n",
+               source ? source : "-", seed->actorId, seed->displayName,
+               seed->actorResource);
+        return false;
+    }
+    return true;
+}
+
 static bool vm_net_mock_parse_sce_interactive_npc_at(const u8 *data, u32 len, u32 off,
                                                      vm_net_mock_scene_npcinfo_seed *seedOut,
                                                      u32 *endOut)
@@ -168,37 +198,10 @@ static bool vm_net_mock_parse_sce_interactive_npc_at(const u8 *data, u32 len, u3
         return false;
     }
 
-    /* bin/JHOnlineData is a writable client cache and may be empty before the
-     * service starts. SCE rows therefore validate against the clean server
-     * download source. Keep the proven n_girl.actor compatibility mapping
-     * explicit: that legacy visual crashed in the current renderer, while
-     * n_woman1.actor is its compatible current equivalent. */
-    {
-        const char *replacement = NULL;
-
-        if (strcmp(seed.actorResource, "n_girl.actor") == 0)
-            replacement = "n_woman1.actor";
-        if (replacement != NULL)
-        {
-            if (!vm_net_mock_open_server_data_resource(replacement, ".actor",
-                                                       NULL, NULL, 0))
-            {
-                printf("[error][network] mock_scene_npc_actor_resource_missing npc=%s actor=%s script=%s action=skip-row\n",
-                       seed.displayName, replacement, seed.scriptName);
-                return false;
-            }
-            printf("[info][network] mock_scene_npc_actor_resource_alias npc=%s legacy=%s current=%s script=%s evidence=compatible-server-resource\n",
-                   seed.displayName, seed.actorResource, replacement, seed.scriptName);
-            snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", replacement);
-        }
-        else if (!vm_net_mock_open_server_data_resource(seed.actorResource, ".actor",
-                                                        NULL, NULL, 0))
-        {
-            printf("[error][network] mock_scene_npc_actor_resource_missing npc=%s actor=%s script=%s action=skip-row\n",
-                   seed.displayName, seed.actorResource, seed.scriptName);
-            return false;
-        }
-    }
+    /* Validate against the clean server download source rather than the
+     * writable client cache. */
+    if (!vm_net_mock_scene_npc_validate_actor_resource(&seed, "sce-catalog"))
+        return false;
     *seedOut = seed;
     if (endOut)
         *endOut = pos;
@@ -719,6 +722,17 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceMinLevel = (u16)number[11];
+    if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
+            row.seed.actorResource))
+    {
+        if (row.enabled)
+        {
+            row.enabled = false;
+            ++context->quarantined;
+            printf("[error][mock-admin] dynamic_npc_unsupported_actor scene=%s actor=%u resource=%s action=runtime-disable required_resource=n_woman1.actor\n",
+                   row.scene, row.seed.actorId, row.seed.actorResource);
+        }
+    }
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -737,8 +751,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
           (row.seed.challengeEnemyId != 0 &&
            !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId)) ||
           row.seed.instanceMinLevel == 0)) ||
-        !vm_net_mock_open_server_data_resource(row.seed.actorResource, ".actor",
-                                               NULL, NULL, 0) ||
+        !vm_net_mock_scene_npc_validate_actor_resource(&row.seed,
+                                                        "dynamic-npc-db") ||
         (row.seed.scriptName[0] != 0 &&
          !vm_net_mock_open_server_data_resource(row.seed.scriptName, ".xse",
                                                 NULL, NULL, 0)))
@@ -875,16 +889,29 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     char query[2048];
     int existing = -1;
     vm_net_mock_dynamic_npc_override row;
+    vm_net_mock_scene_npcinfo_seed normalizedSeed;
+    const char *publishError = NULL;
 
     if (errorOut)
         *errorOut = "invalid dynamic npc";
+    if (seed == NULL)
+        return false;
+    normalizedSeed = *seed;
+    seed = &normalizedSeed;
     if (!vm_net_mock_dynamic_npc_db_load())
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
         return false;
     }
-    if (!vm_net_mock_scene_name_is_safe(scene) || seed == NULL ||
+    if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
+            seed->actorResource))
+    {
+        if (errorOut)
+            *errorOut = "n_girl.actor 不能作为动态 NPC 使用；请改选 n_woman1.actor";
+        return false;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene) ||
         seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
         seed->kind > VM_NET_MOCK_NPC_KIND_MAX ||
         seed->displayName[0] == 0 || strlen(seed->displayName) >= 30 ||
@@ -904,14 +931,21 @@ static bool vm_net_mock_dynamic_npc_admin_save(
           seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
           seed->challengeEnemyId > 0xffffu ||
           seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||
-        !vm_net_mock_open_server_data_resource(seed->actorResource, ".actor",
-                                               NULL, NULL, 0) ||
+        !vm_net_mock_scene_npc_validate_actor_resource(&normalizedSeed,
+                                                        "dynamic-npc-admin-save") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_open_server_data_resource(seed->scriptName, ".xse",
                                                 NULL, NULL, 0)))
     {
         if (errorOut)
             *errorOut = "NPC fields are invalid or the server Actor/XSE resource is unavailable";
+        return false;
+    }
+    if (!vm_net_mock_ensure_actor_resource_published(seed->actorResource,
+                                                      &publishError))
+    {
+        if (errorOut)
+            *errorOut = publishError ? publishError : "Actor resource could not be published";
         return false;
     }
     existing = vm_net_mock_dynamic_npc_find_override(scene, seed->actorId);
