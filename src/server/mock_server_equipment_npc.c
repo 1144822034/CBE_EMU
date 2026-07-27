@@ -14,6 +14,8 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     u8 slot = 0xff;
     u8 itemCount = 0;
     vm_net_mock_role_state before;
+    vm_net_mock_equipped_item_state newInstance;
+    vm_net_mock_equipped_item_state oldInstance;
 
     if (equippedItemIdOut)
         *equippedItemIdOut = 0;
@@ -66,8 +68,15 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         return false;
     }
 
+    memset(&newInstance, 0, sizeof(newInstance));
+    newInstance.itemId = backpackItem->itemId;
+    newInstance.enhanceLevel = backpackItem->enhanceLevel;
+    newInstance.durability = backpackItem->durability;
+    newInstance.durabilityMax = backpackItem->durabilityMax;
+
     slot = newEquip->slot;
-    oldItemId = role->equippedItemIds[slot];
+    oldInstance = role->equippedItems[slot];
+    oldItemId = oldInstance.itemId;
     /* Equipment list rows are encoded as seq=slot+1; accepting any other
      * body value would make the persistent swap disagree with the client's
      * pending equipped-item pointer. */
@@ -89,10 +98,12 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
      * that exact replacement in the saved role instead of consume+append:
      * append would allocate a different sequence and make the next operation
      * target the wrong item. */
-    backpackItem->itemId = oldItemId;
+    backpackItem->itemId = oldInstance.itemId;
     backpackItem->count = 1;
-    backpackItem->enhanceLevel = 0;
-    role->equippedItemIds[slot] = newItemId;
+    backpackItem->enhanceLevel = oldInstance.enhanceLevel;
+    backpackItem->durability = oldInstance.durability;
+    backpackItem->durabilityMax = oldInstance.durabilityMax;
+    role->equippedItems[slot] = newInstance;
     vm_net_mock_role_sync_derived_vitals(role);
     if (!vm_net_mock_role_db_save("item-equip-swap"))
     {
@@ -123,6 +134,8 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     u32 itemId = 0;
     u16 seq = 0;
     const vm_net_mock_equipment_catalog_item *equip = NULL;
+    vm_net_mock_equipped_item_state instance;
+    vm_net_mock_role_state before;
 
     if (unequippedItemIdOut)
         *unequippedItemIdOut = 0;
@@ -144,7 +157,7 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     {
         for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
         {
-            if (role->equippedItemIds[i] == requestedItemId)
+            if (role->equippedItems[i].itemId == requestedItemId)
             {
                 slot = i;
                 itemId = requestedItemId;
@@ -157,10 +170,10 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     {
         equip = vm_net_mock_find_equipment_catalog_item(requestedItemId);
         if (equip != NULL && equip->slot < VM_NET_MOCK_EQUIP_SLOT_COUNT &&
-            role->equippedItemIds[equip->slot] != 0)
+            role->equippedItems[equip->slot].itemId != 0)
         {
             slot = equip->slot;
-            itemId = role->equippedItemIds[slot];
+            itemId = role->equippedItems[slot].itemId;
         }
     }
 
@@ -174,7 +187,7 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         u8 foundSlot = 0xff;
         for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
         {
-            if (role->equippedItemIds[i] == 0)
+            if (role->equippedItems[i].itemId == 0)
                 continue;
             if (foundSlot != 0xff)
             {
@@ -187,7 +200,7 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         if (foundSlot != 0xff)
         {
             slot = foundSlot;
-            itemId = role->equippedItemIds[slot];
+            itemId = role->equippedItems[slot].itemId;
         }
     }
 
@@ -198,16 +211,24 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         return false;
     }
 
-    if (!vm_net_mock_role_add_backpack_item(itemId, 1, &seq))
+    before = *role;
+    instance = role->equippedItems[slot];
+    if (!vm_net_mock_role_append_backpack_equipment_instance(role, &instance, &seq))
     {
         if (reasonOut)
             *reasonOut = "bag-full";
         return false;
     }
 
-    role->equippedItemIds[slot] = 0;
+    memset(&role->equippedItems[slot], 0, sizeof(role->equippedItems[slot]));
     vm_net_mock_role_sync_derived_vitals(role);
-    vm_net_mock_role_db_save("item-unequip");
+    if (!vm_net_mock_role_db_save("item-unequip"))
+    {
+        *role = before;
+        if (reasonOut)
+            *reasonOut = "persistence-failed";
+        return false;
+    }
 
     if (unequippedItemIdOut)
         *unequippedItemIdOut = itemId;
@@ -1935,6 +1956,8 @@ typedef struct
      * belongs to that instance and must follow it through trade instead of
      * being inferred from an item-id match in the recipient's bag. */
     u16 enhanceLevel;
+    u16 durability;
+    u16 durabilityMax;
     u32 count;
 } vm_mock_service_trade_item;
 
@@ -2730,6 +2753,7 @@ static bool vm_mock_service_trade_role_add_item(
 {
     u8 itemCount = 0;
     bool isEquipment = false;
+    u16 equipmentDurabilityMax = 0;
 
     if (destinationSeqOut)
         *destinationSeqOut = 0;
@@ -2745,6 +2769,13 @@ static bool vm_mock_service_trade_role_add_item(
      * instance; accepting a stack here would lose its per-instance state. */
     if (isEquipment && incoming->count != 1)
         return false;
+    if (isEquipment)
+    {
+        equipmentDurabilityMax = vm_net_mock_equipment_durability_max_for_item(
+            incoming->itemId);
+        if (equipmentDurabilityMax == 0)
+            return false;
+    }
     vm_net_mock_role_normalize_backpack(role);
     itemCount = vm_net_mock_role_backpack_count(role);
     if (!isEquipment)
@@ -2776,6 +2807,9 @@ static bool vm_mock_service_trade_role_add_item(
     {
         item->enhanceLevel = (u16)SDL_min(
             incoming->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        item->durabilityMax = equipmentDurabilityMax;
+        item->durability = incoming->durability > item->durabilityMax
+                               ? item->durabilityMax : incoming->durability;
     }
     role->backpackItemCount = (u8)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
@@ -2847,7 +2881,7 @@ static bool vm_mock_service_trade_persist_pair(
     }
     bulkLen = (size_t)snprintf(
         bulkQuery, bulkCapacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,durability,durability_max) VALUES");
     for (u32 side = 0; side < 2; ++side)
     {
         u8 count = vm_net_mock_role_backpack_count(&roles[side]);
@@ -2859,10 +2893,10 @@ static bool vm_mock_service_trade_persist_pair(
                 continue;
             written = snprintf(
                 bulkQuery + bulkLen, bulkCapacity - bulkLen,
-                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u)",
+                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,%u)",
                 bulkRows ? "," : "", accountHex[side], roles[side].roleId,
                 slot, item->itemId, item->seq, item->count,
-                item->enhanceLevel);
+                item->enhanceLevel, item->durability, item->durabilityMax);
             if (written < 0 || (size_t)written >= bulkCapacity - bulkLen)
                 goto done;
             bulkLen += (size_t)written;
@@ -4115,8 +4149,8 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineJob = role->job;
     session->onlineSex = role->sex;
     session->onlineLevel = (u16)(role->level ? role->level : 1);
-    memcpy(session->onlineEquippedItemIds, role->equippedItemIds,
-           sizeof(session->onlineEquippedItemIds));
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+        session->onlineEquippedItemIds[slot] = role->equippedItems[slot].itemId;
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;
     session->onlineMp = mp;

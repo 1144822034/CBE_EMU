@@ -2201,6 +2201,8 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = (u16)SDL_min(
             item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        offer->items[i].durability = item->durability;
+        offer->items[i].durabilityMax = item->durabilityMax;
     }
     return true;
 }
@@ -2431,13 +2433,15 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;
             }
-            printf("[info][mock-service] trade_item_transfer receiver_role=%u source_role=%u item=%u source_seq=%u destination_seq=%u count=%u enhance=%u equipment=%u evidence=WT21/5+21/6+21/8\n",
+            printf("[info][mock-service] trade_item_transfer receiver_role=%u source_role=%u item=%u source_seq=%u destination_seq=%u count=%u enhance=%u durability=%u/%u equipment=%u evidence=WT21/5+21/6+21/8\n",
                    roles[side].roleId, roles[1 - side].roleId,
                    incoming->items[i].itemId,
                    incoming->items[i].sourceSeq,
                    receipt->items[i].destinationSeq,
                    incoming->items[i].count,
                    incoming->items[i].enhanceLevel,
+                   incoming->items[i].durability,
+                   incoming->items[i].durabilityMax,
                    vm_net_mock_find_equipment_catalog_item(
                        incoming->items[i].itemId) != NULL ? 1u : 0u);
         }
