@@ -1897,11 +1897,25 @@ static void vm_net_mock_role_build_player_stats_impl(
      * start from the same base. */
     stats->maxHp = vm_net_mock_role_base_vital_max(level, job, true) + equipment.hp;
     stats->maxMp = vm_net_mock_role_base_vital_max(level, job, false) + equipment.mp;
-    stats->attack = 6 + level * 2 + stats->strength / 2 + equipment.attack / 3;
-    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor / 5;
+    /* The two base combat columns in equip.dsh are not balancing hints.  The
+     * client loads them into an equipped item and
+     * CalcEquipStatBonus(0x01028B34) first adds the exact base value, then
+     * applies enhancement-specific percentage additions.  Dividing attack by
+     * 3 or armor by 5 here was an old mock-only curve and made a correctly
+     * displayed item contribute a different server-side base value.  Keep the
+     * still-unrecovered role-derived part separate, but carry each confirmed
+     * DSH equipment value at full strength into authoritative combat. */
+    stats->attack = 6 + level * 2 + stats->strength / 2 + equipment.attack;
+    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor;
     stats->hit = 75 + level + stats->agility * 2 + equipment.hit;
-    stats->dodge = 3 + level / 2 + stats->agility / 2 + equipment.dodge / 2;
-    stats->crit = 1 + stats->agility / 3 + stats->wisdom / 5 + equipment.crit / 2;
+    /* `scene_rebuild_status_meter_node(0x0100FED8)` passes the DSH combat
+     * fields to AddActorStatBonus(0x0100FE2C), which adds each supplied field
+     * directly to the matching client status slot.  As with attack/armor,
+     * the old `/2` factors below were only mock balancing and gave a durable
+     * equipped instance a different authoritative base from its client-side
+     * stat contribution. */
+    stats->dodge = 3 + level / 2 + stats->agility / 2 + equipment.dodge;
+    stats->crit = 1 + stats->agility / 3 + stats->wisdom / 5 + equipment.crit;
     stats->resist = stats->wisdom / 2 + stats->endurance / 3 + equipment.resist;
 
     stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 9999);
