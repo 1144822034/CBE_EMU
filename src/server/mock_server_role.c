@@ -1751,9 +1751,14 @@ static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
         {7, 9, 15, 7, 5},
     };
     static const u16 gain[3][5] = {
-        {3, 2, 1, 3, 1},
-        {2, 3, 2, 2, 1},
-        {1, 2, 4, 2, 1},
+        /* JianghuOL.CBE: scene_apply_levelup_status_growth (0x01017F1C)
+         * proves the first three per-level growth values for visualVariant
+         * 0..2 (login job 1..3): strength, agility, wisdom.  The last two
+         * legacy mock values remain intentionally unchanged until their
+         * ActorInfo ownership/growth has matching client or server evidence. */
+        {12, 4, 6, 3, 1},
+        {6, 10, 3, 2, 1},
+        {3, 6, 12, 2, 1},
     };
     u32 jobIndex = (job == 0 || job > 3) ? 0 : job - 1;
     u32 value = 0;
@@ -2998,7 +3003,7 @@ static void vm_net_mock_role_init_default_backpack(vm_net_mock_role_state *role)
     memset(role->backpackItems, 0, sizeof(role->backpackItems));
     role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     role->backpackItemCount = 0;
-    role->nextBackpackSeq = 1;
+    role->nextBackpackSeq = VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST;
 }
 
 static bool vm_net_mock_role_has_default_name(const vm_net_mock_role_state *role)
@@ -3264,11 +3269,99 @@ static void vm_net_mock_role_normalize_equipment_instances(
     }
 }
 
+static bool vm_net_mock_backpack_sequence_present(
+    const vm_net_mock_backpack_item_state *items,
+    u32 itemCount,
+    u16 sequence)
+{
+    if (items == NULL || sequence == 0)
+        return false;
+    if (itemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        itemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (items[i].itemId != 0 && items[i].count != 0 &&
+            items[i].seq == sequence)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static u32 vm_net_mock_role_count_reserved_backpack_sequences(
+    const vm_net_mock_role_state *role)
+{
+    u32 count = 0;
+    u32 itemCount = 0;
+
+    if (role == NULL)
+        return 0;
+    itemCount = role->backpackItemCount;
+    if (itemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        itemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        if (item->itemId != 0 && item->count != 0 &&
+            item->seq < VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* The client allocates worn records with seq=slot+1 and its 29/3 enhancement
+ * completion path updates the first globally matching seq.  Allocate every
+ * backpack identity outside 1..8, including on legacy-data normalization. */
+static bool vm_net_mock_role_allocate_backpack_sequence(
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_backpack_item_state *pendingItems,
+    u32 pendingCount,
+    u32 preferredSequence,
+    u16 *sequenceOut)
+{
+    u32 rawCount = 0;
+    u32 candidate = preferredSequence;
+
+    if (sequenceOut != NULL)
+        *sequenceOut = 0;
+    if (role == NULL || sequenceOut == NULL)
+        return false;
+    rawCount = role->backpackItemCount;
+    if (rawCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        rawCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    if (pendingCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        pendingCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    if (candidate < VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST || candidate > 0xffffu)
+        candidate = VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST;
+
+    for (u32 tried = 0;
+         tried <= 0xffffu - VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST;
+         ++tried)
+    {
+        u16 sequence = (u16)candidate;
+        if (!vm_net_mock_backpack_sequence_present(role->backpackItems, rawCount,
+                                                    sequence) &&
+            !vm_net_mock_backpack_sequence_present(pendingItems, pendingCount,
+                                                    sequence))
+        {
+            *sequenceOut = sequence;
+            return true;
+        }
+        ++candidate;
+        if (candidate > 0xffffu)
+            candidate = VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST;
+    }
+    return false;
+}
+
 static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
 {
     vm_net_mock_backpack_item_state compact[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
     u32 compactCount = 0;
-    u16 maxSeq = 0;
+    u16 maxSeq = VM_NET_MOCK_EQUIP_SLOT_COUNT;
 
     if (role == NULL)
         return;
@@ -3301,12 +3394,18 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
             continue;
         if (item.enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             item.enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
-        if (item.seq == 0)
+        if (item.seq < VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST ||
+            vm_net_mock_backpack_sequence_present(compact, compactCount, item.seq))
         {
-            item.seq = (u16)(maxSeq + 1);
-            if (item.seq == 0)
-                item.seq = 1;
-            maxSeq = item.seq;
+            if (!vm_net_mock_role_allocate_backpack_sequence(
+                    role, compact, compactCount, (u32)maxSeq + 1, &item.seq))
+            {
+                printf("[error][mock-service] backpack_sequence_namespace_unresolved role=%u item=%u reason=no-free-sequence\n",
+                       role->roleId, item.itemId);
+                return;
+            }
+            if (item.seq > maxSeq)
+                maxSeq = item.seq;
         }
         equipment = vm_net_mock_find_equipment_catalog_item(item.itemId);
         expectedMax = vm_net_mock_equipment_durability_max_for_item(item.itemId);
@@ -3369,10 +3468,16 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
             vm_net_mock_backpack_item_state instanceItem = item;
             if (instance != 0)
             {
-                instanceItem.seq = (u16)(maxSeq + 1);
-                if (instanceItem.seq == 0)
-                    instanceItem.seq = 1;
-                maxSeq = instanceItem.seq;
+                if (!vm_net_mock_role_allocate_backpack_sequence(
+                        role, compact, compactCount, (u32)maxSeq + 1,
+                        &instanceItem.seq))
+                {
+                    printf("[error][mock-service] backpack_sequence_namespace_unresolved role=%u item=%u reason=no-free-split-sequence\n",
+                           role->roleId, item.itemId);
+                    return;
+                }
+                if (instanceItem.seq > maxSeq)
+                    maxSeq = instanceItem.seq;
             }
             if (equipment != NULL && expectedMax != 0)
                 instanceItem.count = 1;
@@ -3396,10 +3501,13 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
     if (compactCount > 0)
         memcpy(role->backpackItems, compact, sizeof(compact[0]) * compactCount);
     role->backpackItemCount = (u8)compactCount;
-    if (role->nextBackpackSeq == 0 || role->nextBackpackSeq <= maxSeq)
-        role->nextBackpackSeq = (u16)(maxSeq + 1);
-    if (role->nextBackpackSeq == 0)
-        role->nextBackpackSeq = 1;
+    if (!vm_net_mock_role_allocate_backpack_sequence(
+            role, NULL, 0, (u32)maxSeq + 1, &role->nextBackpackSeq))
+    {
+        printf("[error][mock-service] backpack_sequence_namespace_unresolved role=%u reason=no-next-sequence\n",
+               role->roleId);
+        role->nextBackpackSeq = 0;
+    }
 }
 
 static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
@@ -5330,6 +5438,8 @@ static void vm_net_mock_role_db_load(void)
     u32 migratedOldIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     u32 migratedNewIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     u32 migratedIdCount = 0;
+    u32 backpackNamespaceMigratedRoles = 0;
+    u32 backpackNamespaceRemappedRows = 0;
 
     if (g_vm_net_mock_role_db_loaded)
         return;
@@ -5530,7 +5640,28 @@ static void vm_net_mock_role_db_load(void)
         needsSave = true;
     }
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-        vm_net_mock_role_normalize(&g_vm_net_mock_role_db.roles[i]);
+    {
+        vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+        u32 reservedSequenceCount =
+            vm_net_mock_role_count_reserved_backpack_sequences(role);
+
+        vm_net_mock_role_normalize(role);
+        if (reservedSequenceCount != 0)
+        {
+            /* Persist this exact namespace repair now.  Leaving it only in
+             * memory would reintroduce the client-side sequence collision on
+             * the next server process and makes the 29/3 update ambiguous. */
+            needsSave = true;
+            ++backpackNamespaceMigratedRoles;
+            backpackNamespaceRemappedRows += reservedSequenceCount;
+        }
+    }
+    if (backpackNamespaceMigratedRoles != 0)
+    {
+        printf("[info][mock-service] backpack_sequence_namespace_migrate roles=%u remapped=%u reserved=1..%u\n",
+               backpackNamespaceMigratedRoles, backpackNamespaceRemappedRows,
+               VM_NET_MOCK_EQUIP_SLOT_COUNT);
+    }
     if (g_vm_net_mock_role_db.roleCount == 1 &&
         vm_net_mock_role_is_pristine_bootstrap_default(&g_vm_net_mock_role_db.roles[0]))
     {
@@ -6079,7 +6210,11 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     item = &role->backpackItems[itemCount];
     memset(item, 0, sizeof(*item));
     item->itemId = instance->itemId;
-    item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+    if (!vm_net_mock_role_allocate_backpack_sequence(
+            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+    {
+        return false;
+    }
     item->enhanceLevel = (u16)SDL_min(instance->enhanceLevel,
                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
     item->durabilityMax = expectedMax;
@@ -6088,8 +6223,6 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     item->count = 1;
     role->backpackItemCount = (u8)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
-    if (role->nextBackpackSeq == 0)
-        role->nextBackpackSeq = 1;
     if (seqOut)
         *seqOut = item->seq;
     return true;
@@ -6136,15 +6269,17 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
             memset(item, 0, sizeof(*item));
             item->itemId = itemId;
-            item->seq = role->nextBackpackSeq;
-            if (item->seq == 0)
-                item->seq = 1;
+            if (!vm_net_mock_role_allocate_backpack_sequence(
+                    role, NULL, 0, role->nextBackpackSeq, &item->seq))
+            {
+                *role = before;
+                return false;
+            }
             item->count = reservoirCapacity != 0 ? reservoirCapacity : 1;
             if (firstSeq == 0)
                 firstSeq = item->seq;
             role->nextBackpackSeq = (u16)(item->seq + 1);
-            if (role->nextBackpackSeq == 0)
-                role->nextBackpackSeq = 1;
+            role->backpackItemCount = (u8)(itemCount + unit + 1);
         }
         role->backpackItemCount = (u8)(itemCount + count);
         if (seqOut)
@@ -6229,14 +6364,15 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
     memset(item, 0, sizeof(*item));
     item->itemId = itemId;
-    item->seq = role->nextBackpackSeq;
-    if (item->seq == 0)
-        item->seq = 1;
+    if (!vm_net_mock_role_allocate_backpack_sequence(
+            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+    {
+        *role = before;
+        return false;
+    }
     item->count = count;
     role->backpackItemCount = (u8)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
-    if (role->nextBackpackSeq == 0)
-        role->nextBackpackSeq = 1;
     if (seqOut)
         *seqOut = item->seq;
     vm_net_mock_role_normalize_backpack(role);

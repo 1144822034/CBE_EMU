@@ -2189,6 +2189,44 @@ static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex
     return vm_net_mock_role_designation(role)->overheadResource;
 }
 
+/* Fresh ActorInfo's status section is not an arbitrary six-stat array.
+ * `parse_actorinfo_playerinfo_blob(0x0100FA88)` stores the scalar after
+ * primary/secondary HP/MP at actor+132, then writes its next six values to
+ * actor+290, +292, +298, +294, +306 and +300 respectively.  The local
+ * equipment application path (`scene_rebuild_status_meter_node` calling
+ * `AddActorStatBonus(0x0100FE2C)`) proves the strength/agility/wisdom/hit/
+ * defense/resist destinations.  The remaining +294 word is the client speed
+ * slot; DSH has no speed column, so zero is the only confirmed server
+ * baseline for it.
+ *
+ * Keep this wire contract separate from `vm_net_mock_player_stats`: that
+ * structure can retain unresolved endurance/charm values for server gameplay,
+ * but they have no proven place in this ActorInfo status section. */
+typedef struct vm_net_mock_actorinfo_status_fields {
+    u32 strength;
+    u32 words[6]; /* agility, wisdom, hit, speed, defense, resist */
+} vm_net_mock_actorinfo_status_fields;
+
+static void vm_net_mock_build_actorinfo_status_fields(
+    const vm_net_mock_player_stats *stats,
+    vm_net_mock_actorinfo_status_fields *fields)
+{
+    if (fields == NULL)
+        return;
+
+    memset(fields, 0, sizeof(*fields));
+    if (stats == NULL)
+        return;
+
+    fields->strength = vm_net_mock_cap_u32(stats->strength, 999);
+    fields->words[0] = vm_net_mock_cap_u32(stats->agility, 999);
+    fields->words[1] = vm_net_mock_cap_u32(stats->wisdom, 999);
+    fields->words[2] = vm_net_mock_cap_u32(stats->hit, 9999);
+    fields->words[3] = 0; /* speed: unresolved; equip.dsh has no such column */
+    fields->words[4] = vm_net_mock_cap_u32(stats->defense, 9999);
+    fields->words[5] = vm_net_mock_cap_u32(stats->resist, 9999);
+}
+
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 {
     u32 pos = 0;
@@ -2210,11 +2248,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     u32 roleMaxMpDefault = VM_NET_MOCK_ROLE_DEFAULT_MP;
     u32 visualVariant = 0;
     u32 visualGroup = 0;
-    u16 actorStrength = 0;
-    u16 actorAgility = 0;
-    u16 actorWisdom = 0;
-    u16 actorEndurance = 0;
-    u16 actorCharm = 0;
+    vm_net_mock_actorinfo_status_fields actorStatusFields;
     u32 actorAttrWords[6];
     u32 primaryCurrent = 0;
     u32 primaryBaseMax = 0;
@@ -2292,18 +2326,21 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     if (secondaryDisplayMax == 0)
         secondaryDisplayMax = secondaryBaseMax;
 
-    actorStrength = (u16)vm_net_mock_cap_u32(playerStats.strength, 999);
-    actorAgility = (u16)vm_net_mock_cap_u32(playerStats.agility, 999);
-    actorWisdom = (u16)vm_net_mock_cap_u32(playerStats.wisdom, 999);
-    actorEndurance = (u16)vm_net_mock_cap_u32(playerStats.endurance, 999);
-    actorCharm = (u16)vm_net_mock_cap_u32(playerStats.charm, 999);
-    actorAttrWords[0] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH", actorStrength);
-    actorAttrWords[1] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_AGILITY", actorAgility);
-    actorAttrWords[2] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM", actorWisdom);
-    actorAttrWords[3] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_ENDURANCE", actorEndurance);
-    actorAttrWords[4] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_CHARM", actorCharm);
-    actorAttrWords[5] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESERVE",
-                                            playerStats.defense);
+    vm_net_mock_build_actorinfo_status_fields(&playerStats, &actorStatusFields);
+    actorStatusFields.strength = vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH",
+                                                      actorStatusFields.strength);
+    actorAttrWords[0] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_AGILITY",
+                                             actorStatusFields.words[0]);
+    actorAttrWords[1] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM",
+                                             actorStatusFields.words[1]);
+    actorAttrWords[2] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_HIT",
+                                             actorStatusFields.words[2]);
+    actorAttrWords[3] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_SPEED",
+                                             actorStatusFields.words[3]);
+    actorAttrWords[4] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_DEFENSE",
+                                             actorStatusFields.words[4]);
+    actorAttrWords[5] = vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESIST",
+                                             actorStatusFields.words[5]);
     actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
     actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", playerStats.attack);
     actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", playerStats.defense);
@@ -2357,8 +2394,9 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
      *   u32 primaryBaseMax
      *   u32 secondaryCurrent
      *   u32 secondaryBaseMax
-     *   u32 charm-like attribute
-     *   six truncated u32 -> property words (str/agi/wis/end/charm/reserve)
+     *   u32 strength (actor+132)
+     *   six truncated u32 -> actor+290/+292/+298/+294/+306/+300
+     *                            (agility/wisdom/hit/speed/defense/resist)
      *   u32 total EXP (actor+176)
      *   u32 gap09C0
      *   u8 backpackCapacity (stored into main item manager +38)
@@ -2388,8 +2426,7 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         return 0;
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, secondaryBaseMax))
         return 0;
-    if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
-                                 vm_net_mock_env_u32("CBE_ACTOR_EXTRA132", actorCharm)))
+    if (!vm_net_mock_seq_put_u32(out, outCap, &pos, actorStatusFields.strength))
         return 0;
 
     for (u32 i = 0; i < 6; ++i)

@@ -896,7 +896,9 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0))
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, 0,
+                vm_net_mock_item_common_extra_enhance_cap(itemId)))
         {
             return false;
         }
@@ -911,7 +913,9 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         if (vm_net_mock_find_equipment_catalog_item(itemId) == NULL ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0))
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, 0,
+                vm_net_mock_item_common_extra_enhance_cap(itemId)))
         {
             return false;
         }
@@ -2236,10 +2240,12 @@ static bool vm_net_mock_append_trade_offer_object(
              !vm_net_mock_seq_put_string(itemInfo, sizeof(itemInfo),
                                          &itemInfoLen, "")) ||
             !vm_net_mock_seq_put_item_common_extra(itemInfo, sizeof(itemInfo),
-                                                   &itemInfoLen, 0,
+                                                   &itemInfoLen,
                                                    (u8)SDL_min(
                                                        item->enhanceLevel,
-                                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                                                   vm_net_mock_item_common_extra_enhance_cap(
+                                                       item->itemId)))
         {
             return false;
         }

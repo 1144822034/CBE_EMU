@@ -4260,6 +4260,13 @@ enum
     VM_NET_MOCK_ROLE_INITIAL_Y = 132
 };
 
+/* Equipped-item login records use their slot number plus one as a client
+ * identity (1..VM_NET_MOCK_EQUIP_SLOT_COUNT).  The enhancement response
+ * handler matches item identities globally, without a backpack/equipment
+ * category filter, so backpack instances must never enter this range. */
+#define VM_NET_MOCK_BACKPACK_INSTANCE_SEQ_FIRST \
+    ((u16)(VM_NET_MOCK_EQUIP_SLOT_COUNT + 1u))
+
 enum
 {
     /* server_dynamic_npcs.npc_kind.  Zero keeps every existing task/dialog

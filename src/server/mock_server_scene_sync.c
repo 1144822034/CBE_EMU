@@ -2582,10 +2582,9 @@ static bool vm_net_mock_build_task_awardinfo(
         !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
         !vm_net_mock_seq_put_item_common_extra(
             out, outCap, &pos,
-            isReservoir ? 1 : (incrementalCount > 255 ? 255 :
-                                              (u8)incrementalCount),
             (u8)SDL_min(rewardItem->enhanceLevel,
-                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            vm_net_mock_item_common_extra_enhance_cap(task->rewardItemId)))
     {
         printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u incremental=%u pos=%u cap=%u reason=serialize\n",
                task->taskId, role->roleId, task->rewardItemId, rewardSeq,

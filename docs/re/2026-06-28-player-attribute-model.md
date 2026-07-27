@@ -95,15 +95,21 @@ Equipment bonuses only apply when:
 > 在取得正确的江湖 OL 客户端 IDA 实例或原服对照包前，不应将本节五维、派生战斗数值
 > 或随机结算公式视为原版规则。
 
-The existing job tables remain the base model:
+The job table's first three per-level increments are now client-confirmed;
+level-one intercepts and the last two attributes remain the earlier mock
+baseline:
 
 ```text
-job 1: strength 12 +3/L, agility  8 +2/L, wisdom  7 +1/L, endurance 11 +3/L, charm 3 +1/L
-job 2: strength  9 +2/L, agility 14 +3/L, wisdom  8 +2/L, endurance  8 +2/L, charm 4 +1/L
-job 3: strength  7 +1/L, agility  9 +2/L, wisdom 15 +4/L, endurance  7 +2/L, charm 5 +1/L
+job 1: strength 12 +12/L, agility  8 +4/L, wisdom  7 +6/L, endurance 11 +3/L*, charm 3 +1/L*
+job 2: strength  9  +6/L, agility 14 +10/L, wisdom 8 +3/L, endurance  8 +2/L*, charm 4 +1/L*
+job 3: strength  7  +3/L, agility  9  +6/L, wisdom 15 +12/L, endurance 7 +2/L*, charm 5 +1/L*
 ```
 
-The increment uses `(level - 1)`, so level 1 is exactly the base row.
+`/L` denotes the increment multiplied by `(level - 1)`, so level 1 is exactly
+the base row. `*` marks the still-unresolved legacy mock values. The strength,
+agility and wisdom increments come directly from
+`scene_apply_levelup_status_growth(0x01017F1C)`; it writes the three growth
+numbers to the same client status fields consumed by fresh `actorinfo`.
 
 Visible attributes:
 
