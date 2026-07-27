@@ -4014,6 +4014,8 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
+    bool rewardGranted = false;
+    u32 cooldownRemainingMs = 0;
     char dropInfo[VM_NET_MOCK_SHOP_NAME_BYTES + 16];
     bool haveDropInfo = false;
     u32 applyRewardExp = 0;
@@ -4027,16 +4029,18 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     {
         rewardAlreadyGranted = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial);
         applyRewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
-                                                              &dropSeq,
-                                                              &dropCount,
-                                                              &dropGranted);
+                                                               &dropSeq,
+                                                               &dropCount,
+                                                               &dropGranted,
+                                                               &rewardGranted,
+                                                               &cooldownRemainingMs);
         displayExpGain = (g_vm_net_mock_battle_rewarded_serial == g_mockBattleOperateSessionSerial)
                              ? g_vm_net_mock_battle_rewarded_exp
                              : applyRewardExp;
     }
     if (role != NULL)
     {
-        u32 rewardGold = (victory && !rewardAlreadyGranted)
+        u32 rewardGold = (victory && !rewardAlreadyGranted && rewardGranted)
                               ? vm_net_mock_mul_capped_u32(
                                     vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
                                                                vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
@@ -4070,11 +4074,13 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
             haveDropInfo = written > 0 && (u32)written < sizeof(dropInfo);
         }
     }
-    printf("[info][network] mock_battle_settle enemy=%u enemies=%u victory=%u team_victory=%u exp_gain=%u exp_total=%u gold=%u level=%u recover=%u/%u drop=%u seq=%u count=%u role=%u battle_role=%u fdata_len=%u\n",
+    printf("[info][network] mock_battle_settle enemy=%u enemies=%u victory=%u team_victory=%u reward_claimed=%u cooldown_remaining_ms=%u exp_gain=%u exp_total=%u gold=%u level=%u recover=%u/%u drop=%u seq=%u count=%u role=%u battle_role=%u fdata_len=%u\n",
            g_vm_net_mock_battle_enemy_id_current,
            vm_net_mock_battle_enemy_count_current(),
            victory ? 1 : 0,
            forceTeamVictory ? 1 : 0,
+            rewardGranted ? 1 : 0,
+            cooldownRemainingMs,
            displayExpGain,
            statusExp,
            statusGold,
@@ -4087,12 +4093,14 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
            role ? role->roleId : 0,
            g_vm_net_mock_battle_role_id_current,
            haveDropInfo ? (u32)strlen(dropInfo) : 0);
-    vm_autotest_note("mock_battle_settle enemy=%u enemies=%u victory=%u team_victory=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u count=%u role=%u battle_role=%u fdata_len=%u\n",
+    vm_autotest_note("mock_battle_settle enemy=%u enemies=%u victory=%u team_victory=%u reward_claimed=%u cooldown_remaining_ms=%u exp_gain=%u exp_total=%u gold=%u level=%u hp=%u mp=%u recover=%u/%u recovered=%u drop=%u seq=%u count=%u role=%u battle_role=%u fdata_len=%u\n",
                      g_vm_net_mock_battle_enemy_id_current,
                      vm_net_mock_battle_enemy_count_current(),
-                     victory ? 1 : 0,
-                     forceTeamVictory ? 1 : 0,
-                     displayExpGain,
+                      victory ? 1 : 0,
+                      forceTeamVictory ? 1 : 0,
+                      rewardGranted ? 1 : 0,
+                      cooldownRemainingMs,
+                      displayExpGain,
                      statusExp,
                      statusGold,
                      statusLevel,

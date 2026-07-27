@@ -809,7 +809,9 @@ static u32 vm_net_mock_battle_reward_gold_for_enemy(u32 enemyId)
 static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 u32 *dropCountOut,
-                                                bool *dropGrantedOut)
+                                                bool *dropGrantedOut,
+                                                bool *rewardGrantedOut,
+                                                u32 *cooldownRemainingMsOut)
 {
     u32 rewardExp = 0;
     u32 dropItemId = 0;
@@ -825,6 +827,8 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u32 expCardMultiplier = 1;
     u32 battleInsightBonusPercent = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
+    bool cooldownGranted = false;
+    u32 cooldownRemainingMs = 0;
 
     if (dropItemIdOut)
         *dropItemIdOut = 0;
@@ -834,6 +838,10 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         *dropCountOut = 0;
     if (dropGrantedOut)
         *dropGrantedOut = false;
+    if (rewardGrantedOut)
+        *rewardGrantedOut = false;
+    if (cooldownRemainingMsOut)
+        *cooldownRemainingMsOut = 0;
 
     if (g_mockBattleOperateSessionSerial == 0)
         return 0;
@@ -853,6 +861,46 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         }
         return 0;
     }
+
+    if (!vm_net_mock_role_try_claim_monster_reward_cooldown(
+            role, &cooldownGranted, &cooldownRemainingMs))
+    {
+        /* A terminal 4/7 still has to reach the real client parser.  Mark this
+         * battle session as settled with a zero award so a later duplicate
+         * status packet cannot turn a persistence failure into a speculative
+         * reward. */
+        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
+        g_vm_net_mock_battle_rewarded_exp = 0;
+        memset(g_vm_net_mock_battle_rewarded_drops, 0,
+               sizeof(g_vm_net_mock_battle_rewarded_drops));
+        g_vm_net_mock_battle_rewarded_drop_result_count = 0;
+        vm_autotest_note("mock_battle_reward_claim action=storage-denied role=%u session=%u\n",
+                         role ? role->roleId : 0,
+                         g_mockBattleOperateSessionSerial);
+        return 0;
+    }
+    if (!cooldownGranted)
+    {
+        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
+        g_vm_net_mock_battle_rewarded_exp = 0;
+        memset(g_vm_net_mock_battle_rewarded_drops, 0,
+               sizeof(g_vm_net_mock_battle_rewarded_drops));
+        g_vm_net_mock_battle_rewarded_drop_result_count = 0;
+        if (cooldownRemainingMsOut)
+            *cooldownRemainingMsOut = cooldownRemainingMs;
+        printf("[info][network] mock_battle_reward_cooldown action=blocked account=%s role=%u enemy=%u remaining_ms=%u session=%u\n",
+               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+               role ? role->roleId : 0,
+               g_vm_net_mock_battle_enemy_id_current,
+               cooldownRemainingMs, g_mockBattleOperateSessionSerial);
+        vm_autotest_note("mock_battle_reward_cooldown action=blocked role=%u enemy=%u remaining_ms=%u session=%u\n",
+                         role ? role->roleId : 0,
+                         g_vm_net_mock_battle_enemy_id_current,
+                         cooldownRemainingMs, g_mockBattleOperateSessionSerial);
+        return 0;
+    }
+    if (rewardGrantedOut)
+        *rewardGrantedOut = true;
 
     baseRewardExp = vm_net_mock_mul_capped_u32(
         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
@@ -1098,6 +1146,8 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
+    bool rewardGranted = false;
+    u32 cooldownRemainingMs = 0;
     /* A shared party victory is not invalidated because this particular
      * observer was knocked out earlier in the same battle.  Preserve its
      * actual zero HP, but settle the victory/reward once under its own role
@@ -1116,8 +1166,10 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
         rewardExp = vm_net_mock_battle_grant_reward_once(&dropItemId,
                                                          &dropSeq,
                                                          &dropCount,
-                                                         &dropGranted);
-        if (!rewardAlreadyGranted)
+                                                         &dropGranted,
+                                                         &rewardGranted,
+                                                         &cooldownRemainingMs);
+        if (!rewardAlreadyGranted && rewardGranted)
             rewardGold = vm_net_mock_mul_capped_u32(
                 vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
                                            vm_net_mock_battle_reward_gold_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
@@ -1134,13 +1186,15 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
      * completed-state helper below.  The durable-state serial guard makes a
      * repeated terminal response harmless. */
     vm_net_mock_role_service_apply_battle_wear(role);
-    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u reward_claimed=%u cooldown_remaining_ms=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
                      vm_net_mock_battle_enemy_count_current(),
-                     victory ? 1 : 0,
-                     forceTeamVictory ? 1 : 0,
-                     rewardExp,
+                      victory ? 1 : 0,
+                      forceTeamVictory ? 1 : 0,
+                      rewardGranted ? 1 : 0,
+                      cooldownRemainingMs,
+                      rewardExp,
                      statusGold,
                      role->exp,
                      statusLevel,
