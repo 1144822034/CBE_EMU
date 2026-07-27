@@ -5177,6 +5177,68 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
     return pos;
 }
 
+/*
+ * The battle menu's Auto entry sends exactly one 1/4/11 object with its
+ * requested state in `type`: BattleMenu_SelectOption(0x5F78) writes type=1,
+ * while BattleScene_HandleInput(0x6258) writes type=0 when cancelling.
+ *
+ * HandleServerBattleCmd(0x7BD0) consumes the matching response only when
+ * `result=1`; it uses `type=1` to enter its native automatic-action phase and
+ * `type=0` to return to the ordinary battle phase.  This is a toggle
+ * acknowledgement, not an action result, so it must not advance the server
+ * round or clear a pending monster turn.
+ */
+static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap)
+{
+    u8 kind = 0;
+    u8 subtype = 0;
+    u8 requestedType = 0;
+    u32 offset = 4;
+    u32 pos = 5;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || out == NULL ||
+        !vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 4 || subtype != 11 ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen ||
+        object.major != 1 || object.kind != 4 || object.subtype != 11 ||
+        !vm_net_mock_get_object_u8_field(object.payload, object.payloadLen,
+                                         "type", &requestedType) ||
+        requestedType > 1)
+    {
+        return 0;
+    }
+
+    /* In standalone-service mode battle ownership is the authoritative
+     * per-session operation state; there is no emulator screen stack to query.
+     */
+    if (g_mockBattleOperateSessionArmed == 0 && !vm_net_mock_current_screen_is_battle())
+        return 0;
+    if (outCap < pos ||
+        !vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos,
+                                                            requestedType))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    printf("[info][network] mock_battle_auto_toggle type=%u session=%u turn=%u "
+           "pending_enemy=%u resp=%u evidence=mmBattle:0x5F78/0x6258->0x7BD0(case11)\n",
+           requestedType,
+           g_mockBattleOperateSessionSerial,
+           g_mockBattleOperateTurnCounter,
+           g_mockBattlePendingEnemyTurn,
+           pos);
+    vm_autotest_note("mock_battle_auto_toggle type=%u session=%u turn=%u "
+                     "response=4/11 evidence=mmBattle:0x5F78/0x6258/0x7BD0\n",
+                     requestedType,
+                     g_mockBattleOperateSessionSerial,
+                     g_mockBattleOperateTurnCounter);
+    return pos;
+}
+
 static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
 {

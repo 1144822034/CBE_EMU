@@ -1271,8 +1271,10 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     u32 respawnDistance = 0;
     u32 expBefore = 0;
     u32 levelBefore = 1;
-    u32 levelAfter = 1;
-    u32 targetExp = 0;
+    u32 levelStartExp = 0;
+    u32 nextLevelStartExp = 0;
+    u32 levelExpRequired = 0;
+    u32 availableLevelExp = 0;
     u32 expPenalty = 0;
     u32 moneyPenalty = 0;
     u32 reviveHp = 0;
@@ -1336,12 +1338,25 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     vm_net_mock_role_sync_derived_vitals(role);
     expBefore = role->exp;
     levelBefore = vm_net_mock_role_level_from_exp(expBefore);
-    levelAfter = levelBefore > 2 ? levelBefore - 2 : 1;
-    targetExp = vm_net_mock_role_level_start_exp(levelAfter);
-    if (targetExp == 0xffffffffu || targetExp > expBefore)
-        targetExp = 0;
-    expPenalty = expBefore - targetExp;
-    role->exp = targetExp;
+    /* EXP is stored as a cumulative value.  The amount needed for the
+     * current upgrade is therefore the interval from this level's threshold
+     * to the next one, not the accumulated total.  Keep the post-penalty EXP
+     * at or above this level's threshold: ordinary revival may reset progress
+     * but must never reduce the character's level. */
+    levelStartExp = vm_net_mock_role_level_start_exp(levelBefore);
+    nextLevelStartExp = vm_net_mock_role_level_start_exp(levelBefore + 1);
+    if (levelStartExp != 0xffffffffu &&
+        nextLevelStartExp != 0xffffffffu &&
+        nextLevelStartExp > levelStartExp)
+    {
+        levelExpRequired = nextLevelStartExp - levelStartExp;
+        expPenalty = vm_net_mock_percent_ceil_u32(
+            levelExpRequired, VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT);
+        availableLevelExp = expBefore > levelStartExp ? expBefore - levelStartExp : 0;
+        if (expPenalty > availableLevelExp)
+            expPenalty = availableLevelExp;
+    }
+    role->exp = expBefore - expPenalty;
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     moneyPenalty = vm_net_mock_percent_ceil_u32(role->money,
                                                VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT);
@@ -1370,14 +1385,14 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     g_mockBattleRoleMpCurrent = role->mp;
     g_mockBattleRoleMpMax = role->mpMax;
 
-    printf("[info][network] mock_death_penalty reason=%s level=%u->%u exp=%u->%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u)\n",
+    printf("[info][network] mock_death_penalty reason=%s level=%u->%u exp=%u->%u level_exp_required=%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u)\n",
            reason ? reason : "battle-death", levelBefore, role->level,
-           expBefore, role->exp, expPenalty, moneyPenalty, role->scene,
+           expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
            sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
            respawnDistance, role->x, role->y);
-    vm_autotest_note("mock_death_penalty reason=%s level=%u->%u exp=%u->%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
+    vm_autotest_note("mock_death_penalty reason=%s level=%u->%u exp=%u->%u level_exp_required=%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u) evidence=sMap.dsh/wMap.dsh/SCE:n_telestone\n",
                      reason ? reason : "battle-death", levelBefore, role->level,
-                     expBefore, role->exp, expPenalty, moneyPenalty, role->scene,
+                     expBefore, role->exp, levelExpRequired, expPenalty, moneyPenalty, role->scene,
                      sourceSmapRow, targetSmapRow, respawnRoute ? respawnRoute : "-",
                      respawnDistance, role->x, role->y);
 
