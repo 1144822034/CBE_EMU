@@ -107,10 +107,11 @@ WT object 1/23/1
   designationinfo = raw stream title rows
 ```
 
-The mock keeps a server-side wealth-title catalog backed by the recovered
-`riches_name*.gif` resources. These are not granted as fixed defaults: `23/1`
-only includes entries whose `minMoney` condition is satisfied by the active
-role's current money:
+The mock keeps a server-side wealth-title catalog backed by recovered
+`riches_name*.gif` resources, plus a level-title catalog backed by
+`level_name*.gif`. These are not granted as fixed defaults: `23/1`
+only includes entries whose money or level condition is satisfied by the
+active role:
 
 ```text
 0  一贫如洗    riches_name0.gif  minMoney=0
@@ -124,6 +125,29 @@ role's current money:
 8  富甲一方    riches_name8.gif  minMoney=3000000
 9  富可敌国    riches_name9.gif  minMoney=10000000
 ```
+
+Level titles:
+
+```text
+16  不堪一击  level_name0.gif   minLevel=1
+17  初学乍练  level_name1.gif   minLevel=5
+18  小试牛刀  level_name2.gif   minLevel=10
+19  初露锋芒  level_name3.gif   minLevel=15
+20  出人头地  level_name4.gif   minLevel=20
+21  名震江湖  level_name5.gif   minLevel=25
+22  江湖豪杰  level_name6.gif   minLevel=30
+23  了然于胸  level_name7.gif   minLevel=35
+24  炉火纯青  level_name8.gif   minLevel=40
+25  江湖侠隐  level_name9.gif   minLevel=45
+26  登峰造极  level_name10.gif  minLevel=50
+27  超越极限  level_name11.gif  minLevel=55
+28  开山鼻祖  level_name12.gif  minLevel=60
+```
+
+The resource strip level_name.gif and its thirteen individual badge files
+establish the exact display-name/resource mapping.  初来乍到 is a task name
+in the recovered task data; the level-title badge at this progression point is
+初学乍练 (level_name1.gif).
 
 If the active stored designation is no longer unlocked, the page-open path
 falls back to the highest currently unlocked title before emitting `equiptype`.
@@ -141,9 +165,9 @@ WT object 1/23/2
 
 The mock treats the request's `type` field as the selected designation id,
 persists it on the active role, then returns success plus a scene-node update.
-Because row `+114` is a real `riches_name*.gif` resource name, this updates
-actor `+256` and the resource-bearing badge slot without triggering a Chinese
-filename update request.
+Because row `+114` is a real `riches_name*.gif` or `level_name*.gif` resource
+name, this updates actor `+256` and the resource-bearing badge slot without
+triggering a Chinese filename update request.
 If the requested title is locked, the mock returns `23/3 result=0` and does not
 emit the scene-node update.
 

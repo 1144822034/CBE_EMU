@@ -6040,6 +6040,50 @@ static const char *vm_mock_user_job_label(u8 job)
     }
 }
 
+static void vm_mock_user_render_backpack_item(vm_mock_admin_text *page,
+                                              const vm_net_mock_role_state *role,
+                                              const vm_net_mock_backpack_item_state *item)
+{
+    const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+    char itemNameUtf8[128];
+    const char *countLabel = "数量";
+
+    if (page == NULL || role == NULL || item == NULL || item->itemId == 0 ||
+        item->seq == 0 || item->count == 0)
+    {
+        return;
+    }
+    catalogItem = vm_net_mock_find_shop_catalog_item(item->itemId);
+    memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+    if (catalogItem != NULL)
+        vm_net_mock_gbk_label_to_utf8(catalogItem->name, itemNameUtf8,
+                                      sizeof(itemNameUtf8));
+    if (item->itemId == 802)
+        countLabel = "剩余生命储量";
+    else if (item->itemId == 803)
+        countLabel = "剩余法力储量";
+
+    vm_mock_admin_text_appendf(page,
+        "<li class=\"bag-item\"><div class=\"bag-item-main\"><strong>");
+    if (itemNameUtf8[0] != 0)
+        vm_mock_admin_text_append_html(page, itemNameUtf8);
+    else
+        vm_mock_admin_text_appendf(page, "未知物品 #%u", item->itemId);
+    vm_mock_admin_text_appendf(page,
+        "</strong><span>物品 ID %u · 序列 %u · %s %u",
+        item->itemId, item->seq, countLabel, item->count);
+    if (item->enhanceLevel != 0)
+        vm_mock_admin_text_appendf(page, " · 强化 +%u", item->enhanceLevel);
+    vm_mock_admin_text_appendf(page,
+        "</span></div><form method=\"post\" action=\"/user/backpack/delete\" "
+        "onsubmit=\"return confirm('确定丢弃这件背包物品？此操作无法恢复。');\">"
+        "<input type=\"hidden\" name=\"role_id\" value=\"%u\">"
+        "<input type=\"hidden\" name=\"item_id\" value=\"%u\">"
+        "<input type=\"hidden\" name=\"item_seq\" value=\"%u\">"
+        "<button class=\"bag-delete\" type=\"submit\">丢弃</button></form></li>",
+        role->roleId, item->itemId, item->seq);
+}
+
 static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
                                           const char *accountId,
                                           const char *status,
@@ -6057,7 +6101,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>我的江湖账号</title><style>"
-        "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f4f7f9;color:#17202a;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(1080px,calc(100%% - 28px));margin:0 auto;padding:30px 0 46px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 20px serif}h1{font-size:24px;margin:0}.sub,.muted{color:#667085;margin:2px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;color:#475467;cursor:pointer}.hero{position:relative;overflow:hidden;border-radius:16px;padding:24px;background:linear-gradient(125deg,#12372d,#175cd3);color:#fff;box-shadow:0 14px 34px #175cd326;margin-bottom:18px}.hero:after{content:\"\";position:absolute;width:220px;height:220px;border-radius:50%%;right:-70px;top:-125px;background:#ffffff12}.account-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.account-name{font-size:25px;font-weight:750}.hero .sub{color:#dbeafe}.badge{font-size:12px;padding:3px 9px;border-radius:999px;background:#ffffff20;color:#fff}.badge.on{background:#d1fadf;color:#05603a}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:19px}.overview div{padding:11px 13px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff10}.overview strong{display:block;font-size:18px}.section-title{display:flex;align-items:end;justify-content:space-between;margin:23px 0 10px}.section-title h2{font-size:18px;margin:0}.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.card,.role{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 2px 7px #1018280a}.role-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.role h3{font-size:19px;margin:0}.active{display:inline-block;color:#175cd3;background:#eef4ff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650}.vitals{display:grid;gap:10px;margin:17px 0}.vital-head{display:flex;justify-content:space-between;color:#475467}.bar{height:7px;border-radius:999px;background:#edf1f5;overflow:hidden}.bar i{display:block;height:100%%;border-radius:inherit;background:#12b76a}.bar.mp i{background:#2e90fa}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding-top:13px;border-top:1px solid #eaecf0}.stats strong{display:block;color:#667085;font-size:12px;font-weight:550}.empty{color:#667085;text-align:center}.security{display:grid;grid-template-columns:minmax(190px,.65fr) minmax(0,1.35fr);gap:22px;align-items:start;margin-top:18px}.security h2{font-size:18px;margin:0 0 4px}.password-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.password-form label{display:grid;gap:4px;color:#475467}.password-form .current{grid-column:1/-1}.password-form input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.password-form button{grid-column:1/-1;justify-self:start;border:0;border-radius:8px;padding:9px 14px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:16px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}@media(max-width:720px){.wrap{padding:18px 0}.overview{grid-template-columns:1fr}.roles,.security,.password-form{grid-template-columns:1fr}.password-form .current{grid-column:auto}.password-form button{grid-column:auto}.stats{grid-template-columns:1fr}header{align-items:center}}"
+        "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f4f7f9;color:#17202a;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(1080px,calc(100%% - 28px));margin:0 auto;padding:30px 0 46px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 20px serif}h1{font-size:24px;margin:0}.sub,.muted{color:#667085;margin:2px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;color:#475467;cursor:pointer}.hero{position:relative;overflow:hidden;border-radius:16px;padding:24px;background:linear-gradient(125deg,#12372d,#175cd3);color:#fff;box-shadow:0 14px 34px #175cd326;margin-bottom:18px}.hero:after{content:\"\";position:absolute;width:220px;height:220px;border-radius:50%%;right:-70px;top:-125px;background:#ffffff12}.account-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.account-name{font-size:25px;font-weight:750}.hero .sub{color:#dbeafe}.badge{font-size:12px;padding:3px 9px;border-radius:999px;background:#ffffff20;color:#fff}.badge.on{background:#d1fadf;color:#05603a}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:19px}.overview div{padding:11px 13px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff10}.overview strong{display:block;font-size:18px}.section-title{display:flex;align-items:end;justify-content:space-between;margin:23px 0 10px}.section-title h2{font-size:18px;margin:0}.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.card,.role{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 2px 7px #1018280a}.role-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.role h3{font-size:19px;margin:0}.active{display:inline-block;color:#175cd3;background:#eef4ff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650}.vitals{display:grid;gap:10px;margin:17px 0}.vital-head{display:flex;justify-content:space-between;color:#475467}.bar{height:7px;border-radius:999px;background:#edf1f5;overflow:hidden}.bar i{display:block;height:100%%;border-radius:inherit;background:#12b76a}.bar.mp i{background:#2e90fa}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding-top:13px;border-top:1px solid #eaecf0}.stats strong{display:block;color:#667085;font-size:12px;font-weight:550}.bag-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:17px;padding-top:13px;border-top:1px solid #eaecf0}.bag-head h4{margin:0;font-size:15px}.bag-list{list-style:none;padding:0;margin:9px 0 0;border:1px solid #eaecf0;border-radius:9px;max-height:260px;overflow:auto}.bag-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px;border-bottom:1px solid #f0f2f5}.bag-item:last-child{border-bottom:0}.bag-item-main{min-width:0}.bag-item-main strong,.bag-item-main span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bag-item-main span{font-size:12px;color:#667085}.bag-delete{border:1px solid #fecdca;border-radius:7px;padding:6px 10px;background:#fff5f4;color:#b42318;font:inherit;cursor:pointer}.bag-delete:hover{background:#fee4e2}.bag-empty{margin:9px 0 0;padding:12px;border:1px dashed #d0d5dd;border-radius:9px;color:#667085;text-align:center}.empty{color:#667085;text-align:center}.security{display:grid;grid-template-columns:minmax(190px,.65fr) minmax(0,1.35fr);gap:22px;align-items:start;margin-top:18px}.security h2{font-size:18px;margin:0 0 4px}.password-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.password-form label{display:grid;gap:4px;color:#475467}.password-form .current{grid-column:1/-1}.password-form input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.password-form button{grid-column:1/-1;justify-self:start;border:0;border-radius:8px;padding:9px 14px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:16px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}@media(max-width:720px){.wrap{padding:18px 0}.overview{grid-template-columns:1fr}.roles,.security,.password-form{grid-template-columns:1fr}.password-form .current{grid-column:auto}.password-form button{grid-column:auto}.stats{grid-template-columns:1fr}.bag-item{align-items:flex-start;flex-direction:column}.bag-delete{align-self:flex-end}header{align-items:center}}"
         ".recharge{margin-top:18px}.recharge h2{font-size:18px;margin:0 0 4px}.recharge-form{display:grid;grid-template-columns:1.2fr .8fr .8fr auto;gap:10px;align-items:end;margin-top:15px}.recharge-form label{display:grid;gap:4px;color:#475467}.recharge-form input,.recharge-form select{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit;background:#fff}.recharge-form button{border:0;border-radius:8px;padding:10px 14px;background:#175cd3;color:#fff;font-weight:700;cursor:pointer}.recharge-unavailable{padding:12px;border-radius:9px;background:#f2f4f7;color:#667085}.recharge-history{margin-top:18px;border-top:1px solid #eaecf0;padding-top:13px}.recharge-history h3{font-size:14px;margin:0 0 6px}.recharge-history a{display:flex;justify-content:space-between;gap:12px;padding:7px 0;color:#344054;text-decoration:none}.recharge-history a strong{color:#175cd3;font-size:12px}.recharge-note{color:#98a2b3;font-size:12px;margin:13px 0 0}@media(max-width:900px){.recharge-form{grid-template-columns:1fr 1fr}.recharge-form button{align-self:stretch}}@media(max-width:720px){.recharge-form{grid-template-columns:1fr}}"
         "</style></head><body><main class=\"wrap\"><header><div class=\"brand\"><div class=\"brand-mark\">江</div><div><h1>账号中心</h1><p class=\"sub\">查看角色资料与管理账号安全</p></div></div>"
         "<form method=\"post\" action=\"/user/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
@@ -6072,7 +6116,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         "<section class=\"hero\"><div class=\"account-line\"><span class=\"account-name\">");
     vm_mock_admin_text_append_html(&page, accountId);
     vm_mock_admin_text_appendf(&page,
-        "</span><span class=\"badge %s\">%s</span></div><p class=\"sub\">账号数据已连接至江湖服务</p>"
+        "</span><span class=\"badge %s\">%s</span></div><p class=\"sub\">账号数据已连接至江湖服务，可管理角色背包</p>"
         "<div class=\"overview\"><div><span>账号状态</span><strong>正常</strong></div><div><span>角色数量</span><strong>%u</strong></div><div><span>当前状态</span><strong>%s</strong></div></div></section>"
         "<div class=\"section-title\"><h2>我的角色</h2><span class=\"muted\">角色数据实时读取</span></div><section class=\"roles\">",
         online ? "on" : "", online ? "游戏在线" : "游戏离线",
@@ -6122,9 +6166,27 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
                 gold, silver, copper, role->wcoin);
             vm_mock_admin_text_append_html(&page, sceneUtf8);
             vm_mock_admin_text_appendf(&page,
-                "</div><div><strong>坐标</strong>(%u, %u)</div></div></article>",
-                role->x, role->y);
+                "</div><div><strong>坐标</strong>(%u, %u)</div></div>"
+                "<div class=\"bag-head\"><h4>背包管理</h4><span class=\"muted\">%u / %u 格</span></div>",
+                role->x, role->y, vm_net_mock_role_backpack_count(role),
+                role->backpackCapacity);
+            if (vm_net_mock_role_backpack_count(role) == 0)
+            {
+                vm_mock_admin_text_appendf(&page,
+                    "<div class=\"bag-empty\">背包为空</div>");
+            }
+            else
+            {
+                u8 backpackCount = vm_net_mock_role_backpack_count(role);
+                vm_mock_admin_text_appendf(&page, "<ul class=\"bag-list\">");
+                for (u32 itemIndex = 0; itemIndex < backpackCount; ++itemIndex)
+                    vm_mock_user_render_backpack_item(&page, role,
+                                                       &role->backpackItems[itemIndex]);
+                vm_mock_admin_text_appendf(&page, "</ul>");
+            }
+            vm_mock_admin_text_appendf(&page, "</article>");
         }
+        vm_mock_admin_text_appendf(&page, "</section>");
         vm_mock_payment_render_dashboard(&page, accountId);
         vm_mock_service_close_account_role_db_for_management(accountState, false);
     }
@@ -6133,14 +6195,11 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         vm_mock_admin_text_appendf(&page,
             "<div class=\"card empty\">%s</div>",
             roleError ? roleError : "该账号尚未创建角色，请进入游戏创建角色。");
+        vm_mock_admin_text_appendf(&page, "</section>");
         if (accountState != NULL)
         {
             vm_mock_payment_render_dashboard(&page, accountId);
             vm_mock_service_close_account_role_db_for_management(accountState, false);
-        }
-        else
-        {
-            vm_mock_admin_text_appendf(&page, "</section>");
         }
     }
     vm_mock_admin_text_appendf(&page,
@@ -6540,6 +6599,57 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                                     "text/html; charset=utf-8", NULL, response);
         free(response);
         return 1;
+    }
+    if (strcmp(target, "/user/backpack/delete") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        char roleText[32];
+        char itemText[32];
+        char seqText[32];
+        const char *error = NULL;
+        u32 roleId = 0;
+        u32 itemId = 0;
+        u32 itemSeq = 0;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "删除背包物品只允许 POST。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(roleText, 0, sizeof(roleText));
+        memset(itemText, 0, sizeof(itemText));
+        memset(seqText, 0, sizeof(seqText));
+        if (!vm_mock_admin_form_value(body, "role_id", roleText,
+                                      sizeof(roleText)) ||
+            !vm_mock_admin_form_value(body, "item_id", itemText,
+                                      sizeof(itemText)) ||
+            !vm_mock_admin_form_value(body, "item_seq", seqText,
+                                      sizeof(seqText)) ||
+            !vm_net_mock_parse_u32_strict(roleText, &roleId) || roleId == 0 ||
+            !vm_net_mock_parse_u32_strict(itemText, &itemId) || itemId == 0 ||
+            !vm_net_mock_parse_u32_strict(seqText, &itemSeq) || itemSeq == 0 ||
+            itemSeq > 0xffffu)
+        {
+            vm_mock_user_redirect_message(client, "error", "背包物品参数无效");
+            return 0;
+        }
+        /* accountId comes exclusively from the authenticated cookie session;
+         * a posted account id can never select another user's backpack. */
+        ok = vm_mock_service_account_remove_role_backpack_item(
+            session->accountId, roleId, itemId, (u16)itemSeq, &error);
+        vm_mock_user_redirect_message(client, ok ? "ok" : "error",
+                                      ok ? "物品已丢弃" :
+                                           (error ? error : "丢弃物品失败"));
+        return ok ? 1 : 0;
     }
     if (strcmp(target, "/user/password") == 0)
     {

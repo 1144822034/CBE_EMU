@@ -909,7 +909,6 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
     char descriptionHex[sizeof(g_vm_net_mock_training_book_default_description) * 2 + 1];
     size_t titleLen = sizeof(g_vm_net_mock_training_book_default_title) - 1;
     size_t descriptionLen = sizeof(g_vm_net_mock_training_book_default_description) - 1;
-    bool hasInstances = false;
 
     if (database == NULL || accountHex == NULL || accountHex[0] == 0 ||
         !vm_net_mock_training_book_schema_prepare() ||
@@ -921,20 +920,9 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
         return false;
     }
 
-    for (u32 roleIndex = 0; roleIndex < database->roleCount; ++roleIndex)
-    {
-        const vm_net_mock_role_state *role = &database->roles[roleIndex];
-        if (!fullSnapshot && role->roleId != scopedRoleId)
-            continue;
-        if (vm_net_mock_training_book_role_has_instances(role))
-        {
-            hasInstances = true;
-            break;
-        }
-    }
-    if (!hasInstances)
-        return true;
-
+    /* Run orphan cleanup even when this write removed the last book in the
+     * scope.  Deciding from the post-mutation inventory alone used to leave
+     * account_role_training_books rows behind after an instance disappeared. */
     if (fullSnapshot)
     {
         snprintf(query, sizeof(query),

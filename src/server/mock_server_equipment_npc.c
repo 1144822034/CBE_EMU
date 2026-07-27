@@ -4563,6 +4563,82 @@ static bool vm_mock_service_account_grant_role_item(const char *accountId,
     return true;
 }
 
+/* The public account page sends an exact persisted backpack identity.  Do not
+ * fall back to an item-id-only lookup here: stacks, equipment and reservoir
+ * items may legitimately share an item id while having distinct instances. */
+static bool vm_mock_service_account_remove_role_backpack_item(
+    const char *accountId, u32 roleId, u32 itemId, u16 itemSeq,
+    const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    vm_net_mock_role_state before;
+    char roleSelector[32];
+    u32 removedCount = 0;
+
+    if (messageOut)
+        *messageOut = "删除物品失败";
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0 || itemId == 0 ||
+        itemSeq == 0)
+    {
+        if (messageOut)
+            *messageOut = "物品定位参数无效";
+        return false;
+    }
+
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                 messageOut);
+    if (state == NULL)
+        return false;
+    snprintf(roleSelector, sizeof(roleSelector), "%u", roleId);
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    item = vm_net_mock_role_find_backpack_item(role, itemId, itemSeq);
+    if (item == NULL || item->itemId != itemId || item->seq != itemSeq ||
+        item->count == 0)
+    {
+        if (messageOut)
+            *messageOut = "该背包物品已不存在或已变更";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    before = *role;
+    removedCount = item->count;
+    memset(item, 0, sizeof(*item));
+    vm_net_mock_role_normalize_backpack(role);
+
+    /* The selected role is not necessarily active.  A normal role save only
+     * persists activeRoleId, so use the relational full snapshot transaction
+     * and keep the account's active role unchanged. */
+    if (!vm_net_mock_role_db_save_relational("user-web-backpack-delete", NULL,
+                                             NULL, 0, true, NULL))
+    {
+        *role = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "物品删除未能保存";
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+
+    vm_mock_service_account_capture(state);
+    printf("[info][user-web] backpack_delete account=%s role=%u item=%u seq=%u count=%u result=success\n",
+           accountId, roleId, itemId, itemSeq, removedCount);
+    if (messageOut)
+        *messageOut = "物品已删除";
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
 
 enum
 {
