@@ -89,6 +89,12 @@ Equipment bonuses only apply when:
 
 ## Base Attributes
 
+> 取证状态（2026-07-27）：本节的职业基础五维表是早期 mock 基线，不是已恢复的
+> 原服成长表。客户端已确认 HP/MP 职业成长和装备 `equip.dsh` 基础词条的叠加方式，
+> 见 [2026-07-27-player-equipment-attribute-audit.md](2026-07-27-player-equipment-attribute-audit.md)。
+> 在取得正确的江湖 OL 客户端 IDA 实例或原服对照包前，不应将本节五维、派生战斗数值
+> 或随机结算公式视为原版规则。
+
 The existing job tables remain the base model:
 
 ```text
@@ -114,26 +120,30 @@ level/job based until a recovered item field proves otherwise.
 
 ## Derived Combat Stats
 
+> 实现状态（2026-07-27）：下面角色自身的常数和五维派生仍是 mock 基线；但装备的
+> `equip.dsh` 基础攻击、护甲、爆击、命中、躲闪、抗性必须完整相加，不再按 `/3`、`/5`
+> 或 `/2` 缩放。该修正只统一已确认的装备基础词条量纲，并不宣称恢复了原服最终伤害。
+
 The mock derives combat stats as:
 
 ```text
-maxHp   = 90 + level * 8 + endurance * 2 + equipment.hp
-maxMp   = 70 + level * 9 + wisdom * 3 + equipment.mp
-attack  = 6 + level * 2 + strength / 2 + equipment.attack / 3
-defense = 4 + level + endurance / 2 + equipment.armor / 5
+maxHp   = 120 + classHpGrowth * (level - 1) + equipment.hp
+maxMp   = 100 + classMpGrowth * (level - 1) + equipment.mp
+attack  = 6 + level * 2 + strength / 2 + equipment.attack
+defense = 4 + level + endurance / 2 + equipment.armor
 hit     = 75 + level + agility * 2 + equipment.hit
-dodge   = 3 + level / 2 + agility / 2 + equipment.dodge / 2
-crit    = 1 + agility / 3 + wisdom / 5 + equipment.crit / 2
+dodge   = 3 + level / 2 + agility / 2 + equipment.dodge
+crit    = 1 + agility / 3 + wisdom / 5 + equipment.crit
 resist  = wisdom / 2 + endurance / 3 + equipment.resist
 ```
 
 Rationale:
 
-- equipment primary attributes are visible at full value;
-- weapon attack and armor are folded into combat at a reduced rate so early
-  `equip.dsh` rows matter without making monster stats unusable;
-- HP/MP scale gently with level so role persistence remains readable on the
-  original feature-phone UI.
+- HP/MP 使用客户端 `scene_apply_levelup_status_growth(0x01017F1C)` 已确认的职业成长：
+  职业 1 为 `25/15`、职业 2 为 `20/20`、职业 3 为 `15/25`；
+- 客户端 `CalcEquipStatBonus(0x01028B34)` 和
+  `AddActorStatBonus(0x0100FE2C)` 对 DSH 基础词条直接相加；
+- 上式中其余角色派生项仅保持现有 mock 行为，等待原服战斗证据。
 
 ## Defense Formula
 
@@ -143,8 +153,8 @@ Damage now uses a soft mitigation curve:
 damage = max(1, attack * 100 / (100 + defense))
 ```
 
-This avoids the old `attack - defense` cliff where a small stat mismatch could
-collapse damage to `1`, while still making defense meaningful at all levels.
+这是当前 mock 的防御曲线，而非已恢复的原服公式；它只避免了旧 `attack - defense`
+会因小幅属性差异直接归零的实现问题。
 
 ## Skill Damage
 
