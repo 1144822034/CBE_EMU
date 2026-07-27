@@ -1449,6 +1449,7 @@ typedef struct
     u8 id;
     u8 fieldB;
     u32 minMoney;
+    u16 minLevel;
     const char *name;
     const char *description;
     const char *overheadResource;
@@ -1456,6 +1457,7 @@ typedef struct
 
 static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] = {
     {
+        0,
         0,
         0,
         0,
@@ -1467,6 +1469,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         1,
         0,
         5000,
+        0,
         "\xd2\xc2\xca\xb3\xce\xde\xd3\xc7", /* GBK: yi shi wu you */
         "\xc2\xd4\xd3\xd0\xbb\xfd\xd0\xee", /* GBK: lue you ji xu */
         "riches_name1.gif",
@@ -1475,6 +1478,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         2,
         0,
         20000,
+        0,
         "\xc9\xfa\xb2\xc6\xd3\xd0\xb5\xc0", /* GBK: sheng cai you dao */
         "\xd0\xa1\xd3\xd0\xd7\xca\xb2\xfa", /* GBK: xiao you zi chan */
         "riches_name2.gif",
@@ -1483,6 +1487,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         3,
         0,
         50000,
+        0,
         "\xc0\xed\xb2\xc6\xd3\xd0\xb7\xbd", /* GBK: li cai you fang */
         "\xb2\xc6\xc2\xb7\xbd\xa5\xbf\xed", /* GBK: cai lu jian kuan */
         "riches_name3.gif",
@@ -1491,6 +1496,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         4,
         0,
         100000,
+        0,
         "\xb2\xc6\xd4\xcb\xba\xe0\xcd\xa8", /* GBK: cai yun heng tong */
         "\xc7\xae\xb2\xc6\xb7\xe1\xba\xf1", /* GBK: qian cai feng hou */
         "riches_name4.gif",
@@ -1499,6 +1505,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         5,
         0,
         300000,
+        0,
         "\xd1\xfc\xb2\xf8\xcd\xf2\xb9\xe1", /* GBK: yao chan wan guan */
         "\xbb\xd3\xbd\xf0\xd3\xd0\xb6\xc8", /* GBK: hui jin you du */
         "riches_name5.gif",
@@ -1507,6 +1514,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         6,
         0,
         500000,
+        0,
         "\xbc\xd2\xb2\xc6\xcd\xf2\xb9\xe1", /* GBK: jia cai wan guan */
         "\xb2\xc6\xb8\xbb\xbe\xaa\xc8\xcb", /* GBK: cai fu jing ren */
         "riches_name6.gif",
@@ -1515,6 +1523,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         7,
         0,
         1000000,
+        0,
         "\xb8\xbb\xc9\xcc\xbe\xde\xbc\xd6", /* GBK: fu shang ju gu */
         "\xc9\xcc\xbc\xd6\xce\xc5\xc3\xfb", /* GBK: shang gu wen ming */
         "riches_name7.gif",
@@ -1523,6 +1532,7 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         8,
         0,
         3000000,
+        0,
         "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd", /* GBK: fu jia yi fang */
         "\xb2\xc6\xb9\xda\xd2\xbb\xb7\xbd", /* GBK: cai guan yi fang */
         "riches_name8.gif",
@@ -1531,9 +1541,94 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         9,
         0,
         10000000,
+        0,
         "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa", /* GBK: fu ke di guo */
         "\xcc\xec\xcf\xc2\xbe\xde\xb8\xbb", /* GBK: tian xia ju fu */
         "riches_name9.gif",
+    },
+    /*
+     * The level-title badge strip and individual badge files are present in
+     * JHOnlineData as level_name.gif and level_name0.gif..level_name12.gif.
+     * Their ids deliberately live outside 0..9 so persisted wealth-title
+     * choices remain stable and WT 23/3 can distinguish the two families.
+     */
+    {
+        16, 0, 0, 1,
+        "\xB2\xBB\xBF\xB0\xD2\xBB\xBB\xF7", /* GBK: bu kan yi ji */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "1" "\xBC\xB6", /* level 1 */
+        "level_name0.gif",
+    },
+    {
+        17, 0, 0, 5,
+        "\xB3\xF5\xD1\xA7\xD5\xA7\xC1\xB7", /* GBK: chu xue zha lian */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "5" "\xBC\xB6", /* level 5 */
+        "level_name1.gif",
+    },
+    {
+        18, 0, 0, 10,
+        "\xD0\xA1\xCA\xD4\xC5\xA3\xB5\xB6", /* GBK: xiao shi niu dao */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "10" "\xBC\xB6", /* level 10 */
+        "level_name2.gif",
+    },
+    {
+        19, 0, 0, 15,
+        "\xB3\xF5\xC2\xB6\xB7\xE6\xC3\xA2", /* GBK: chu lu feng mang */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "15" "\xBC\xB6", /* level 15 */
+        "level_name3.gif",
+    },
+    {
+        20, 0, 0, 20,
+        "\xB3\xF6\xC8\xCB\xCD\xB7\xB5\xD8", /* GBK: chu ren tou di */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "20" "\xBC\xB6", /* level 20 */
+        "level_name4.gif",
+    },
+    {
+        21, 0, 0, 25,
+        "\xC3\xFB\xD5\xF0\xBD\xAD\xBA\xFE", /* GBK: ming zhen jiang hu */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "25" "\xBC\xB6", /* level 25 */
+        "level_name5.gif",
+    },
+    {
+        22, 0, 0, 30,
+        "\xBD\xAD\xBA\xFE\xBA\xC0\xBD\xDC", /* GBK: jiang hu hao jie */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "30" "\xBC\xB6", /* level 30 */
+        "level_name6.gif",
+    },
+    {
+        23, 0, 0, 35,
+        "\xC1\xCB\xC8\xBB\xD3\xDA\xD0\xD8", /* GBK: liao ran yu xiong */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "35" "\xBC\xB6", /* level 35 */
+        "level_name7.gif",
+    },
+    {
+        24, 0, 0, 40,
+        "\xC2\xAF\xBB\xF0\xB4\xBF\xC7\xE0", /* GBK: lu huo chun qing */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "40" "\xBC\xB6", /* level 40 */
+        "level_name8.gif",
+    },
+    {
+        25, 0, 0, 45,
+        "\xBD\xAD\xBA\xFE\xCF\xC0\xD2\xFE", /* GBK: jiang hu xia yin */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "45" "\xBC\xB6", /* level 45 */
+        "level_name9.gif",
+    },
+    {
+        26, 0, 0, 50,
+        "\xB5\xC7\xB7\xE5\xD4\xEC\xBC\xAB", /* GBK: deng feng zao ji */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "50" "\xBC\xB6", /* level 50 */
+        "level_name10.gif",
+    },
+    {
+        27, 0, 0, 55,
+        "\xB3\xAC\xD4\xBD\xBC\xAB\xCF\xDE", /* GBK: chao yue ji xian */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "55" "\xBC\xB6", /* level 55 */
+        "level_name11.gif",
+    },
+    {
+        28, 0, 0, 60,
+        "\xBF\xAA\xC9\xBD\xB1\xC7\xD7\xE6", /* GBK: kai shan bi zu */
+        "\xB5\xC8\xBC\xB6\xB4\xEF\xB5\xBD" "60" "\xBC\xB6", /* level 60 */
+        "level_name12.gif",
     },
 };
 
@@ -1551,16 +1646,17 @@ static const vm_net_mock_designation_entry *vm_net_mock_designation_by_id(u8 id)
         if (g_vm_net_mock_designation_entries[i].id == id)
             return &g_vm_net_mock_designation_entries[i];
     }
-    return &g_vm_net_mock_designation_entries[0];
+    return NULL;
 }
 
 static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *role,
                                                 const vm_net_mock_designation_entry *entry)
 {
     u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 level = role ? role->level : 1;
     if (entry == NULL)
         return false;
-    return money >= entry->minMoney;
+    return money >= entry->minMoney && level >= entry->minLevel;
 }
 
 static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(const vm_net_mock_role_state *role)
@@ -1579,7 +1675,7 @@ static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(co
 static const vm_net_mock_designation_entry *vm_net_mock_role_designation(const vm_net_mock_role_state *role)
 {
     const vm_net_mock_designation_entry *entry = vm_net_mock_designation_by_id(role ? role->designationId : 0);
-    if (vm_net_mock_designation_is_unlocked(role, entry))
+    if (entry != NULL && vm_net_mock_designation_is_unlocked(role, entry))
         return entry;
     return vm_net_mock_role_best_designation(role);
 }
@@ -3089,11 +3185,9 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
-    if (role->designationId >= VM_NET_MOCK_ROLE_DESIGNATION_COUNT)
-        role->designationId = 0;
+    role->level = vm_net_mock_role_level_from_exp(role->exp);
     if (!vm_net_mock_designation_is_unlocked(role, vm_net_mock_designation_by_id(role->designationId)))
         role->designationId = vm_net_mock_role_best_designation(role)->id;
-    role->level = vm_net_mock_role_level_from_exp(role->exp);
     vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
     if (!vm_net_mock_scene_name_is_persistable(role->scene))
@@ -4225,7 +4319,6 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     size_t bulk_capacity = 131072;
     bool transaction_started = false;
     u32 scoped_role_id = 0;
-    bool training_books_in_scope = false;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -4263,18 +4356,10 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             return false;
     }
 
-    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-    {
-        const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
-        if ((!full_snapshot && role->roleId != scoped_role_id) ||
-            !vm_net_mock_training_book_role_has_instances(role))
-        {
-            continue;
-        }
-        training_books_in_scope = true;
-        break;
-    }
-    if (training_books_in_scope && !vm_net_mock_training_book_schema_prepare())
+    /* account_role_training_books is companion state keyed by a backpack
+     * instance.  Reconcile it for every role/backpack write, including a
+     * write that removed the final 921 instance from the scope. */
+    if (!vm_net_mock_training_book_schema_prepare())
         return false;
 
     bulk_query = (char *)malloc(bulk_capacity);
@@ -4521,8 +4606,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
      * run after the replacement of account_role_backpack, not after its
      * delete: otherwise orphan cleanup would erase every live instance before
      * it can be matched to its 921 row. */
-    if (training_books_in_scope &&
-        !vm_net_mock_training_book_sync_role_records(&g_vm_net_mock_role_db,
+    if (!vm_net_mock_training_book_sync_role_records(&g_vm_net_mock_role_db,
                                                       account_hex, full_snapshot,
                                                       scoped_role_id))
     {

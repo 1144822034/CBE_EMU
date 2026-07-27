@@ -5776,12 +5776,13 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
 {
     u32 pos = 5;
     u32 objectStart = 0;
-    u8 designationInfo[768];
+    u8 designationInfo[2048];
     u32 designationInfoLen = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
     const vm_net_mock_designation_entry *activeDesignation = vm_net_mock_role_designation(role);
     u32 roleMoney = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
+    u32 roleLevel = role ? role->level : 1;
     u8 requestIndex = 0xff;
     u8 requestType = 0xff;
     u8 requestResult = 0xff;
@@ -5815,7 +5816,8 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
         const vm_net_mock_designation_entry *selectedDesignation =
             vm_net_mock_designation_by_id(requestType == 0xff ? activeDesignation->id : requestType);
         u32 updateInfoLen = 0;
-        if (!vm_net_mock_designation_is_unlocked(role, selectedDesignation))
+        if (selectedDesignation == NULL ||
+            !vm_net_mock_designation_is_unlocked(role, selectedDesignation))
         {
             if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 3, &objectStart))
                 return 0;
@@ -5823,22 +5825,25 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
                 return 0;
             vm_net_mock_finish_wt_object(out, objectStart, pos);
             vm_net_mock_finish_wt_packet(out, pos, 1);
-            vm_net_mock_gbk_label_to_utf8(selectedDesignation->name, selectedTitleUtf8, sizeof(selectedTitleUtf8));
-            printf("[info][network] mock_role_designation23_select role=%u result=0 locked=1 title=%s designation=%u money=%u min_money=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
+            vm_net_mock_gbk_label_to_utf8(selectedDesignation ? selectedDesignation->name : "", selectedTitleUtf8, sizeof(selectedTitleUtf8));
+            printf("[info][network] mock_role_designation23_select role=%u result=0 reason=%s title=%s designation=%u money=%u level=%u min_money=%u min_level=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
                    roleId,
+                   selectedDesignation ? "locked" : "unknown-designation",
                    selectedTitleUtf8,
-                   selectedDesignation->id,
+                   selectedDesignation ? selectedDesignation->id : 0xffu,
                    roleMoney,
-                   selectedDesignation->minMoney,
+                   roleLevel,
+                   selectedDesignation ? selectedDesignation->minMoney : 0,
+                   selectedDesignation ? selectedDesignation->minLevel : 0,
                    requestIndex,
                    requestType,
                    requestPayloadHex,
                    pos);
-            vm_autotest_note("mock_role_designation23_select role=%u result=0 locked=1 designation=%u money=%u min_money=%u response=23/3 evidence=JianghuOL.CBE:0x0102A93E\n",
+            vm_autotest_note("mock_role_designation23_select role=%u result=0 designation=%u money=%u level=%u response=23/3 evidence=JianghuOL.CBE:0x0102A93E\n",
                              roleId,
-                             selectedDesignation->id,
+                             selectedDesignation ? selectedDesignation->id : 0xffu,
                              roleMoney,
-                             selectedDesignation->minMoney);
+                             roleLevel);
             return pos;
         }
         if (role != NULL)
@@ -5863,13 +5868,15 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
         }
         vm_net_mock_finish_wt_packet(out, pos, 2);
         vm_net_mock_gbk_label_to_utf8(selectedDesignation->name, selectedTitleUtf8, sizeof(selectedTitleUtf8));
-        printf("[info][network] mock_role_designation23_select role=%u result=1 title=%s designation=%u field_b=%u money=%u min_money=%u overhead=%s update=23/2 designationinfo_len=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
+        printf("[info][network] mock_role_designation23_select role=%u result=1 title=%s designation=%u field_b=%u money=%u level=%u min_money=%u min_level=%u overhead=%s update=23/2 designationinfo_len=%u req_index=%u req_type=%u req_payload=%s resp=%u\n",
                roleId,
                selectedTitleUtf8,
                selectedDesignation->id,
                selectedDesignation->fieldB,
                roleMoney,
+               roleLevel,
                selectedDesignation->minMoney,
+               selectedDesignation->minLevel,
                selectedDesignation->overheadResource[0] ? selectedDesignation->overheadResource : "-",
                updateInfoLen,
                requestIndex,
@@ -5912,13 +5919,14 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_mock_gbk_label_to_utf8(activeDesignation->name, titleUtf8, sizeof(titleUtf8));
-    printf("[info][network] mock_role_designation23_list role=%u count=%u catalog=%u active=%u title=%s money=%u overhead=%s req_index=%u req_type=%u req_result=%u req_page=%u req_id=%u req_payload=%s designationinfo_len=%u resp=%u\n",
+    printf("[info][network] mock_role_designation23_list role=%u count=%u catalog=%u active=%u title=%s money=%u level=%u overhead=%s req_index=%u req_type=%u req_result=%u req_page=%u req_id=%u req_payload=%s designationinfo_len=%u resp=%u\n",
            roleId,
            unlockedCount,
            vm_net_mock_designation_entry_count(),
            activeDesignation->id,
            titleUtf8,
            roleMoney,
+           roleLevel,
            activeDesignation->overheadResource[0] ? activeDesignation->overheadResource : "-",
            requestIndex,
            requestType,
