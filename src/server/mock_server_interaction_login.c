@@ -1899,6 +1899,143 @@ static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
     return item != NULL && item->enabled;
 }
 
+typedef struct
+{
+    u32 itemId;
+    u32 count;
+} vm_net_mock_shop_direct_grant;
+
+typedef struct
+{
+    u32 itemId;
+    u32 moneyPerPurchase;
+    const vm_net_mock_shop_direct_grant *grants;
+    u8 grantCount;
+    const char *name;
+} vm_net_mock_shop_direct_effect;
+
+/*
+ * `item.dsh` is authoritative for the contents.  mmShop:0x9DE specifically
+ * omits 808 and 817..819 from the client item manager after a type-2 purchase,
+ * so these values are server-side purchase effects, not backpack rows.
+ */
+static const vm_net_mock_shop_direct_grant g_vm_net_mock_shop_bundle_817[] = {
+    {815, 5}, /* 黄金钥匙 * 5 */
+};
+static const vm_net_mock_shop_direct_grant g_vm_net_mock_shop_bundle_818[] = {
+    {800, 5},  /* 传送石 * 5 */
+    {807, 5},  /* 小喇叭 * 5 */
+    {809, 10}, /* 双倍经验卡 * 10 */
+    {827, 10}, /* 修炼丹 * 10 */
+};
+static const vm_net_mock_shop_direct_grant g_vm_net_mock_shop_bundle_819[] = {
+    {815, 10}, /* 黄金钥匙 * 10 */
+    {828, 5},  /* 战斗心得 * 5 */
+    {810, 5},  /* 四倍经验卡 * 5 */
+};
+static const vm_net_mock_shop_direct_effect g_vm_net_mock_shop_direct_effects[] = {
+    /* 金元宝的 `购买个数=100`，一金=10000 铜钱。 */
+    {808, 100u * 10000u, NULL, 0, "gold-ingot"},
+    {817, 0, g_vm_net_mock_shop_bundle_817,
+     (u8)(sizeof(g_vm_net_mock_shop_bundle_817) / sizeof(g_vm_net_mock_shop_bundle_817[0])),
+     "ordinary-bundle"},
+    {818, 0, g_vm_net_mock_shop_bundle_818,
+     (u8)(sizeof(g_vm_net_mock_shop_bundle_818) / sizeof(g_vm_net_mock_shop_bundle_818[0])),
+     "advanced-bundle"},
+    {819, 0, g_vm_net_mock_shop_bundle_819,
+     (u8)(sizeof(g_vm_net_mock_shop_bundle_819) / sizeof(g_vm_net_mock_shop_bundle_819[0])),
+     "supreme-bundle"},
+};
+
+static const vm_net_mock_shop_direct_effect *
+vm_net_mock_shop_find_direct_effect(u8 type, u32 itemId)
+{
+    if (type != 2)
+        return NULL;
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_shop_direct_effects) /
+                 sizeof(g_vm_net_mock_shop_direct_effects[0]);
+         ++i)
+    {
+        if (g_vm_net_mock_shop_direct_effects[i].itemId == itemId)
+            return &g_vm_net_mock_shop_direct_effects[i];
+    }
+    return NULL;
+}
+
+/*
+ * Commit a direct-store purchase as one role snapshot.  The common one-item
+ * helper persists on success, which is correct for an ordinary purchase but
+ * would make a multi-content gift pack observable in partial states.  This
+ * path composes its in-memory variant with W-coin deduction and saves only
+ * after every grant has succeeded.
+ */
+static bool vm_net_mock_shop_apply_direct_effect(
+    vm_net_mock_role_state *role, const vm_net_mock_shop_direct_effect *effect,
+    u32 purchaseCount, u32 cost, u32 *moneyBeforeOut, u32 *moneyGrantOut,
+    u8 *grantEntriesOut)
+{
+    vm_net_mock_role_state before;
+    u32 moneyGrant = 0;
+    u8 grantEntries = 0;
+
+    if (moneyBeforeOut)
+        *moneyBeforeOut = 0;
+    if (moneyGrantOut)
+        *moneyGrantOut = 0;
+    if (grantEntriesOut)
+        *grantEntriesOut = 0;
+    if (role == NULL || effect == NULL || purchaseCount == 0 ||
+        role->wcoin < cost)
+    {
+        return false;
+    }
+
+    before = *role;
+    if (effect->moneyPerPurchase != 0)
+    {
+        moneyGrant = vm_net_mock_mul_capped_u32(effect->moneyPerPurchase,
+                                                 purchaseCount);
+        if (moneyGrant == 0 || role->money > 0xffffffffu - moneyGrant)
+            return false;
+        role->money += moneyGrant;
+    }
+    else
+    {
+        if (effect->grants == NULL || effect->grantCount == 0)
+            return false;
+        for (u32 i = 0; i < effect->grantCount; ++i)
+        {
+            u32 grantCount = vm_net_mock_mul_capped_u32(effect->grants[i].count,
+                                                         purchaseCount);
+            u16 ignoredSeq = 0;
+
+            if (grantCount == 0 ||
+                !vm_net_mock_role_add_backpack_item_to_role_in_memory(
+                    role, effect->grants[i].itemId, grantCount, &ignoredSeq))
+            {
+                *role = before;
+                return false;
+            }
+            ++grantEntries;
+        }
+    }
+
+    role->wcoin -= cost;
+    if (!vm_net_mock_role_db_save("shop-buy14-direct"))
+    {
+        *role = before;
+        return false;
+    }
+    if (moneyBeforeOut)
+        *moneyBeforeOut = before.money;
+    if (moneyGrantOut)
+        *moneyGrantOut = moneyGrant;
+    if (grantEntriesOut)
+        *grantEntriesOut = grantEntries;
+    return true;
+}
+
 static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestLen,
                                                  u8 *out, u32 outCap)
 {
@@ -1920,8 +2057,14 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     bool directExpandRejectedCount = false;
     bool insufficientFunds = false;
     bool revivalStoneConfirmPending = false;
+    bool directActorStateRefresh = false;
     u32 directExpandApplied = 0;
+    u32 directMoneyBefore = 0;
+    u32 directMoneyGrant = 0;
+    u8 directGrantEntries = 0;
+    u32 actorInfoLen = 0;
     vm_net_mock_role_state *role = NULL;
+    const vm_net_mock_shop_direct_effect *directEffect = NULL;
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -1933,6 +2076,7 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     wcoinBefore = vm_net_mock_shop_wcoin_balance();
     wcoinAfter = wcoinBefore;
     directExpand = vm_net_mock_shop_item_is_direct_backpack_expand(type, itemId);
+    directEffect = vm_net_mock_shop_find_direct_effect(type, itemId);
     if (role != NULL)
     {
         capacityBefore = role->backpackCapacity;
@@ -1978,6 +2122,30 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
                 result = vm_net_mock_shop_buy14_failure_result(type);
             }
         }
+        else if (directEffect != NULL)
+        {
+            if (vm_net_mock_shop_apply_direct_effect(role, directEffect, count, cost,
+                                                     &directMoneyBefore,
+                                                     &directMoneyGrant,
+                                                     &directGrantEntries))
+            {
+                wcoinAfter = role->wcoin;
+                g_netMockShop17ListPending = 0;
+                /* Bundle contents are normal backpack rows, but the package
+                 * itself is not.  Let the next native list request render the
+                 * contents through its owning `17/1`/`7/42` parser. */
+                g_netMockBackpackPreferRoleListAfterShopBuy =
+                    directEffect->grantCount != 0 ? 1 : 0;
+                if (directEffect->grantCount != 0)
+                    g_netMockBackpackGridSeededRoleId = 0;
+                directActorStateRefresh = directMoneyGrant != 0;
+                result = 1;
+            }
+            else
+            {
+                result = vm_net_mock_shop_buy14_failure_result(type);
+            }
+        }
         else if (vm_net_mock_role_add_backpack_item(itemId, count, &seq))
         {
             role->wcoin = wcoinBefore - cost;
@@ -2007,21 +2175,40 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    /*
+     * `sub_9DE` reads the purchase result first, then treats a trailing
+     * 1/1/14 actorinfo object as an ordinary actor-state update and returns.
+     * This is the parser-owned money refresh for 808; do not synthesize a
+     * backpack row for a zero-stack direct-store value.
+     */
+    if (result == 1 && directActorStateRefresh &&
+        !vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos, &actorInfoLen))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos,
+                                 directActorStateRefresh && result == 1 ? 2 : 1);
 
-    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
+    printf("[info][network] mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u known=%u direct_expand=%u direct_applied=%u direct_reject_count=%u direct=%s direct_money=%u+%u direct_grants=%u actorinfo_refresh=%u actorinfo_len=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u resp=14/3\n",
            type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter, seq,
            result, knownItem ? 1 : 0, directExpand ? 1 : 0, directExpandApplied,
-           directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+           directExpandRejectedCount ? 1 : 0,
+           directEffect ? directEffect->name : "none",
+           directMoneyBefore, directMoneyGrant, directGrantEntries,
+           directActorStateRefresh ? 1 : 0, actorInfoLen, insufficientFunds ? 1 : 0,
            revivalStoneConfirmPending ? 1 : 0,
            capacityBefore, capacityAfter,
            g_netMockShop17ListPending,
            g_netMockBackpackPreferRoleListAfterShopBuy,
            result ? 1 : 0);
-    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x2F6C/0x9DE\n",
+    vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u seq=%u result=%u direct_expand=%u direct_applied=%u direct_reject_count=%u direct=%s direct_money=%u+%u direct_grants=%u actorinfo_refresh=%u actorinfo_len=%u insufficient=%u revival_confirm_pending=%u capacity=%u/%u shop_pending=%u backpack_prefer_role=%u grid_reseed=%u response=14/3 evidence=mmShop:0x9DE(type2-direct-store)+item.dsh\n",
                      type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
                      seq, result, directExpand ? 1 : 0, directExpandApplied,
-                     directExpandRejectedCount ? 1 : 0, insufficientFunds ? 1 : 0,
+                     directExpandRejectedCount ? 1 : 0,
+                     directEffect ? directEffect->name : "none",
+                     directMoneyBefore, directMoneyGrant, directGrantEntries,
+                     directActorStateRefresh ? 1 : 0, actorInfoLen,
+                     insufficientFunds ? 1 : 0,
                      revivalStoneConfirmPending ? 1 : 0,
                      capacityBefore, capacityAfter,
                      g_netMockShop17ListPending,
