@@ -6228,11 +6228,14 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     return true;
 }
 
-static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
-                                                        u32 itemId,
-                                                        u32 count,
-                                                        u16 *seqOut,
-                                                        const char *reason)
+/*
+ * Mutate one normal backpack entry without persistence.  Multi-effect server
+ * transactions (for example a shop bundle plus its W-coin charge) compose
+ * several calls to this helper and commit exactly one complete role snapshot.
+ * Callers that only add one item must use the persistent wrapper below.
+ */
+static bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
+    vm_net_mock_role_state *role, u32 itemId, u32 count, u16 *seqOut)
 {
     const vm_net_mock_item_effect_catalog_item *effect = NULL;
     u32 reservoirCapacity = 0;
@@ -6285,15 +6288,6 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         if (seqOut)
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
-        if (!vm_net_mock_role_db_save(reason ? reason :
-                                      (itemId == 921 ? "backpack-add-training-book" :
-                                                       "backpack-add-reservoir-item")))
-        {
-            *role = before;
-            if (seqOut)
-                *seqOut = 0;
-            return false;
-        }
         return true;
     }
     if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
@@ -6326,13 +6320,6 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         if (seqOut)
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
-        if (!vm_net_mock_role_db_save(reason ? reason : "backpack-add-equipment-instance"))
-        {
-            *role = before;
-            if (seqOut)
-                *seqOut = 0;
-            return false;
-        }
         return true;
     }
     for (u32 i = 0; i < itemCount; ++i)
@@ -6347,13 +6334,6 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             if (seqOut)
                 *seqOut = item->seq;
             vm_net_mock_role_normalize_backpack(role);
-            if (!vm_net_mock_role_db_save(reason ? reason : "backpack-add-stack"))
-            {
-                *role = before;
-                if (seqOut)
-                    *seqOut = 0;
-                return false;
-            }
             return true;
         }
     }
@@ -6376,6 +6356,25 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     if (seqOut)
         *seqOut = item->seq;
     vm_net_mock_role_normalize_backpack(role);
+    return true;
+}
+
+static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
+                                                        u32 itemId,
+                                                        u32 count,
+                                                        u16 *seqOut,
+                                                        const char *reason)
+{
+    vm_net_mock_role_state before;
+
+    if (seqOut)
+        *seqOut = 0;
+    if (role == NULL || itemId == 0 || count == 0)
+        return false;
+
+    before = *role;
+    if (!vm_net_mock_role_add_backpack_item_to_role_in_memory(role, itemId, count, seqOut))
+        return false;
     if (!vm_net_mock_role_db_save(reason ? reason : "backpack-add-item"))
     {
         *role = before;
