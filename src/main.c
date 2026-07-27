@@ -424,6 +424,8 @@ static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outC
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u32 requestLen,
+                                                           u8 *out, u32 outCap);
 static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
