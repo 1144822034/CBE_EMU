@@ -4230,7 +4230,10 @@ enum
     VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
     VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
     VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION = 4,
-    VM_NET_MOCK_ROLE_DB_VERSION = 5,
+    /* Version 6 makes equipment a durable instance: item id, enhancement and
+     * current/max durability travel together whether the instance is worn or
+     * in the backpack.  Version 5 and older stored only worn item ids. */
+    VM_NET_MOCK_ROLE_DB_VERSION = 6,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
@@ -4300,13 +4303,34 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT 50u
 
+/* Keep the exact pre-v6 binary layout for one-time nvram/payload migration.
+ * Do not reuse this type for live state: it cannot represent durable
+ * equipment once it leaves an equipped slot. */
 typedef struct
 {
     u32 itemId;
     u16 seq;
     u16 enhanceLevel;
     u32 count;
+} vm_net_mock_backpack_item_state_v5;
+
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u16 enhanceLevel;
+    u16 durability;
+    u16 durabilityMax;
+    u32 count;
 } vm_net_mock_backpack_item_state;
+
+typedef struct
+{
+    u32 itemId;
+    u16 enhanceLevel;
+    u16 durability;
+    u16 durabilityMax;
+} vm_net_mock_equipped_item_state;
 
 typedef struct
 {
@@ -4330,7 +4354,7 @@ typedef struct
     u8 backpackItemCount;
     u8 designationId;
     u16 nextBackpackSeq;
-    u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_equipped_item_state equippedItems[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
 
@@ -4375,8 +4399,37 @@ typedef struct
     u8 designationId;
     u16 nextBackpackSeq;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
-    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    vm_net_mock_backpack_item_state_v5 backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state_v4;
+
+/* This is the former live v5 layout.  It must remain byte-for-byte stable so
+ * an existing file fallback can be migrated after the relational database has
+ * been made authoritative. */
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    u32 wcoin;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u8 backpackItemCount;
+    u8 designationId;
+    u16 nextBackpackSeq;
+    u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_backpack_item_state_v5 backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+} vm_net_mock_role_state_v5;
 
 typedef struct
 {
@@ -4399,7 +4452,7 @@ typedef struct
     u8 backpackItemCount;
     u8 reserved1;
     u16 nextBackpackSeq;
-    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
+    vm_net_mock_backpack_item_state_v5 backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
 } vm_net_mock_role_state_v2;
 
 typedef struct
@@ -4424,7 +4477,7 @@ typedef struct
     u8 designationId;
     u16 nextBackpackSeq;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
-    vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
+    vm_net_mock_backpack_item_state_v5 backpackItems[VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS];
 } vm_net_mock_role_state_v3;
 
 typedef struct
@@ -4482,6 +4535,15 @@ typedef struct
     u32 roleCount;
     vm_net_mock_role_state_v4 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file_v4;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
+    vm_net_mock_role_state_v5 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v5;
 
 typedef struct
 {

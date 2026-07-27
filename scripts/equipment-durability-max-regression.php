@@ -53,7 +53,7 @@ function has_object($response, $kind, $subtype) {
     return false;
 }
 function durability($pdo, $account, $role, $slot) {
-    $stmt = $pdo->prepare('SELECT item_id,durability,durability_max FROM account_role_equipment_durability WHERE account_id=? AND role_id=? AND slot_index=?');
+    $stmt = $pdo->prepare('SELECT item_id,durability,durability_max FROM account_role_equipment WHERE account_id=? AND role_id=? AND slot_index=?');
     $stmt->execute([$account, $role, $slot]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$row) throw new RuntimeException("missing durability row slot=$slot");
@@ -84,7 +84,10 @@ if ($mode === 'setup') {
         $pdo->prepare('INSERT INTO accounts(account_id,password_value) VALUES(?,?)')->execute([$account, $password]);
         $pdo->prepare('INSERT INTO account_role_state(account_id,format_version,active_role_id,role_count) VALUES(?,5,?,1)')->execute([$account, $role]);
         $pdo->prepare('INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) VALUES(?,?,0,?,1,1,20,1,0,120,120,100,100,1000,0,?,220,440,0,0,1)')->execute([$account, $role, 'DurabilityMax', $scene]);
-        $pdo->prepare('INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id) VALUES(?,?,0,1001),(?,?,1,1101)')->execute([$account, $role, $account, $role]);
+        /* Format 5 rows deliberately lack instance durability.  The legacy
+           companion table below is only a migration source; after login the
+           v6 service writes the recovered state into account_role_equipment. */
+        $pdo->prepare('INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) VALUES(?,?,0,1001,0,0,0),(?,?,1,1101,0,0,0)')->execute([$account, $role, $account, $role]);
         /* Legacy fabricated 100 max rows: 1001 is really 50; 1101 is really 80. */
         $pdo->prepare('INSERT INTO account_role_equipment_durability(account_id,role_id,slot_index,item_id,durability,durability_max) VALUES(?,?,0,1001,44,100),(?,?,1,1101,70,100)')->execute([$account, $role, $account, $role]);
         $pdo->commit();
@@ -119,7 +122,7 @@ try {
 
     if (durability($pdo, $account, $role, 0) !== [1001, 44, 50] ||
         durability($pdo, $account, $role, 1) !== [1101, 70, 80]) {
-        throw new RuntimeException('login did not normalize legacy durability maxima from equip.dsh');
+        throw new RuntimeException('login did not migrate legacy durability into the equipment instance');
     }
     $repair = call_service($port, $clientId, wt(26, 1,
         f_u8('type', 2) . f_u32('id', 0xE3000001)));

@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment` (
   `role_id` INT UNSIGNED NOT NULL,
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `durability` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `durability_max` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
     FOREIGN KEY (`account_id`, `role_id`)
@@ -218,6 +221,8 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   `item_seq` SMALLINT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL COMMENT '普通物品为堆叠数；802/803 为剩余 HP/MP 储量',
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `durability` SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '装备实例当前耐久；非装备为 0',
+  `durability_max` SMALLINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '装备实例最大耐久；非装备为 0',
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_backpack_role`

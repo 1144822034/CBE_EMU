@@ -2252,7 +2252,11 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     displayName = displayNameOverride != NULL && displayNameOverride[0] != 0 ?
                   displayNameOverride : guildName;
 
-    vm_net_mock_role_build_player_stats(role, &playerStats);
+    /* The client consumes 1/7/7 immediately after ActorInfo and adds the
+     * equipment DSH bonuses in scene_rebuild_status_meter_node().  ActorInfo
+     * therefore carries the unequipped baseline; battle continues to use the
+     * full server-side calculation. */
+    vm_net_mock_role_build_base_player_stats(role, &playerStats);
     vm_net_mock_role_default_vitals(role,
                                     &roleHpDefault,
                                     &roleMaxHpDefault,
@@ -2260,10 +2264,10 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
                                     &roleMaxMpDefault);
     primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
                                          vm_net_mock_env_u32("CBE_ACTOR_HP", roleHpDefault));
-    primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", roleMaxHpDefault);
+    primaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_HP_MAX", playerStats.maxHp);
     secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
                                            vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
-    secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", roleMaxMpDefault);
+    secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", playerStats.maxMp);
     primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
     secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
     if (roleLevel == 0)
@@ -2276,10 +2280,13 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
         primaryBaseMax = 120;
     if (secondaryBaseMax == 0)
         secondaryBaseMax = 100;
-    if (primaryCurrent > primaryBaseMax)
-        primaryCurrent = primaryBaseMax;
-    if (secondaryCurrent > secondaryBaseMax)
-        secondaryCurrent = secondaryBaseMax;
+    /* Current HP/MP are durable full-combat values.  The client clamps them
+     * after it has added local equipment maxima; clipping to the wire baseline
+     * here loses health whenever equipment raises the maximum. */
+    if (primaryCurrent > roleMaxHpDefault)
+        primaryCurrent = roleMaxHpDefault;
+    if (secondaryCurrent > roleMaxMpDefault)
+        secondaryCurrent = roleMaxMpDefault;
     if (primaryDisplayMax == 0)
         primaryDisplayMax = primaryBaseMax;
     if (secondaryDisplayMax == 0)
