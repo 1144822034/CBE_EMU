@@ -71,15 +71,6 @@ static bool vm_net_mock_backpack_item_id_uses_reservoir_count(u32 itemId)
     return itemId == 802 || itemId == 803;
 }
 
-static u8 vm_net_mock_backpack_stack_byte(const vm_net_mock_backpack_item_state *item)
-{
-    if (item == NULL || item->count == 0)
-        return 0;
-    if (vm_net_mock_backpack_item_id_uses_reservoir_count(item->itemId))
-        return 1;
-    return item->count > 255 ? 255 : (u8)item->count;
-}
-
 static u32 vm_net_mock_backpack_grid_wire_count(const vm_net_mock_backpack_item_state *item)
 {
     if (item == NULL)
@@ -2005,6 +1996,21 @@ static const vm_net_mock_equipment_catalog_item *vm_net_mock_find_equipment_cata
     return NULL;
 }
 
+/*
+ * ParseEquipAttributes (JianghuOL.CBE:0x010185C2) stores the first two
+ * i16 values in the wire extension at item+286 and item+287 respectively.
+ * The client renders item+286 as "+%d" and uses it for equipment stat
+ * thresholds; item+287 is the enhancement ceiling.  These fields are not a
+ * stack-count extension.  Keep the cap derived from the same equip.dsh
+ * classification that validates actual equipment instances.
+ */
+static u8 vm_net_mock_item_common_extra_enhance_cap(u32 itemId)
+{
+    return vm_net_mock_find_equipment_catalog_item(itemId) != NULL
+               ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL
+               : 0;
+}
+
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId)
 {
     const vm_net_mock_equipment_catalog_item *item =
@@ -2498,22 +2504,25 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
 
 static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
                                                    u32 *pos,
-                                                   u8 stackRuntimeByte,
-                                                   u8 enhanceLevel)
+                                                   u8 enhanceLevel,
+                                                   u8 enhanceMaxLevel)
 {
     /*
-     * JianghuOL.CBE:ParseEquipAttributes (vtable +2452) reads two i16-ish
-     * fields, then one u8 attr-count. It only consumes attr slots when that
-     * count is nonzero, so zero-attr rows must stop after the count byte.
+     * JianghuOL.CBE:ParseEquipAttributes (vtable +2452, 0x010185C2) reads
+     * current enhancement then maximum enhancement as i16 values, followed
+     * by u8 attr-count.  mmGame's backpack renderer reads the first value
+     * from item+286 for the visible "+N" suffix.  It only consumes attr
+     * slots when attr-count is nonzero, so zero-attr rows stop here.
      */
-    if (!vm_net_mock_seq_put_i16(out, outCap, pos, stackRuntimeByte))
-        return false;
     if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel))
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel))
         return false;
     return vm_net_mock_seq_put_u8(out, outCap, pos, 0);
 }
 
-static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte)
+static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
+                                                      u32 *pos, u32 itemId)
 {
     /*
      * mmShopMstarWqvga.cbm:sub_7BC calls a shop-page item-extra reader after
@@ -2521,11 +2530,9 @@ static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap, u32 *p
      * ParseEquipAttributes helper as mmGame:0x418C; the six attr arrays are
      * destination capacity, not fields to send when attr-count is zero.
      */
-    if (!vm_net_mock_seq_put_i16(out, outCap, pos, stackRuntimeByte))
-        return false;
-    if (!vm_net_mock_seq_put_i16(out, outCap, pos, 0))
-        return false;
-    return vm_net_mock_seq_put_u8(out, outCap, pos, 0);
+    return vm_net_mock_seq_put_item_common_extra(
+        out, outCap, pos, 0,
+        vm_net_mock_item_common_extra_enhance_cap(itemId));
 }
 
 static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
@@ -2550,9 +2557,10 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
         if (!vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, vm_net_mock_backpack_stack_byte(item),
+                out, outCap, &pos,
                 (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
         {
             return false;
         }
@@ -2652,8 +2660,9 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
                 continue;
             if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
                 return false;
-            if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
-                                                       item->stack, 0))
+            if (!vm_net_mock_seq_put_item_common_extra(
+                    out, outCap, &pos, 0,
+                    vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
                 return false;
             ++emitted;
         }
@@ -2690,9 +2699,10 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
         if (!vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, 0,
+                out, outCap, &pos,
                 (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
             return false;
     }
     *blobLenOut = pos;
@@ -2757,7 +2767,8 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
          */
         if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
             return false;
-        if (!vm_net_mock_seq_put_shop_page_item_extra(out, outCap, &pos, item->stack))
+        if (!vm_net_mock_seq_put_shop_page_item_extra(out, outCap, &pos,
+                                                       item->itemId))
             return false;
     }
 
@@ -3424,11 +3435,8 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(
-            out, outCap, &pos,
-            vm_net_mock_backpack_item_id_uses_reservoir_count(itemId)
-                ? (count == 0 ? 0 : 1)
-                : (count > 255 ? 255 : (u8)count),
-            0))
+            out, outCap, &pos, 0,
+            vm_net_mock_item_common_extra_enhance_cap(itemId)))
         return false;
 
     *blobLenOut = pos;
@@ -3470,10 +3478,8 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos,
-                vm_net_mock_backpack_item_id_uses_reservoir_count(rows[i].itemId)
-                    ? 1 : (rows[i].count > 255 ? 255 : (u8)rows[i].count),
-                0))
+                out, outCap, &pos, 0,
+                vm_net_mock_item_common_extra_enhance_cap(rows[i].itemId)))
         {
             return false;
         }
@@ -3585,7 +3591,10 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, durability) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, 0, (u8)item->enhanceLevel))
+                out, outCap, &pos,
+                (u8)SDL_min(item->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL))
         {
             return false;
         }

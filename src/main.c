@@ -417,6 +417,7 @@ static bool vm_host_file_exists(const char *path);
 static bool vm_net_mock_current_screen_is_battle(void);
 static void vm_autotest_note_role_attr_page_pc(u32 pc);
 static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
+static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc);
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
                                                      u32 autoRecoverHp, u32 autoRecoverMp,
                                                      bool forceTeamVictory);
@@ -4507,6 +4508,59 @@ static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 l
                          valueText, valueHex, seen);
         if (seen >= 120)
             return;
+    }
+}
+
+/*
+ * CalcEquipStatBonus is the only confirmed consumer of the client-side
+ * equipment-enhancement rule table.  The table is deliberately observed here
+ * rather than reproduced in the service: until its sixteen entries are read
+ * from the running Jianghu client, a server-side enhancement formula would be
+ * a guess.  This is diagnostic-only and is gated by CBE_AUTOTEST; it performs
+ * guest-memory reads only and never changes CBE state.
+ */
+static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
+{
+    static u32 reportedTable = 0;
+    u32 itemCtrl = 0;
+    u32 ruleTable = 0;
+    u32 baseStat = 0;
+    u32 enhanceLevel = 0;
+
+    if (!g_autotestEnabled || Global_R9 == 0 || pc != 0x01028BCE)
+        return;
+    if (uc_mem_read(MTK, Global_R9 + 0x54AC, &itemCtrl, sizeof(itemCtrl)) != UC_ERR_OK ||
+        itemCtrl == 0 ||
+        uc_mem_read(MTK, itemCtrl + 0x584, &ruleTable, sizeof(ruleTable)) != UC_ERR_OK ||
+        ruleTable == 0 || ruleTable == reportedTable)
+    {
+        return;
+    }
+    if (uc_mem_read(MTK, ruleTable, &baseStat, sizeof(baseStat)) != UC_ERR_OK)
+        return;
+
+    /* At the calculator entry, R2/R3 are the equipment base stat and current
+     * enhancement level.  Read them only to bind the captured table to the
+     * proven call contract. */
+    uc_reg_read(MTK, UC_ARM_REG_R2, &baseStat);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &enhanceLevel);
+    reportedTable = ruleTable;
+    vm_autotest_note("equipment_enhance_rules pc=%08x item_ctrl=%08x table=%08x base=%u level=%u entries=16\\n",
+                     pc, itemCtrl, ruleTable, baseStat, enhanceLevel);
+
+    for (u32 i = 0; i < 16; ++i)
+    {
+        u8 raw[4];
+        int16_t percent = 0;
+
+        if (uc_mem_read(MTK, ruleTable + i * 4, raw, sizeof(raw)) != UC_ERR_OK)
+        {
+            vm_autotest_note("equipment_enhance_rule index=%u read=failed\\n", i);
+            return;
+        }
+        percent = (int16_t)((u16)raw[2] | ((u16)raw[3] << 8));
+        vm_autotest_note("equipment_enhance_rule index=%u flat=%u percent=%d raw=%02x%02x%02x%02x\\n",
+                         i, raw[0], (int)percent, raw[0], raw[1], raw[2], raw[3]);
     }
 }
 
@@ -14745,6 +14799,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
     vm_autotest_note_shop_parser_pc((u32)address & ~1u);
     vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
+    vm_autotest_note_equipment_enhance_rules_pc((u32)address & ~1u);
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);

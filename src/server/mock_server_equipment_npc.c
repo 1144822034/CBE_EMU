@@ -373,6 +373,47 @@ static u32 vm_net_mock_build_item_equip_swap_response(const u8 *request,
     return pos;
 }
 
+typedef enum
+{
+    VM_NET_MOCK_EQUIP_ENHANCE_REJECT_EQUIPMENT_NOT_FOUND = 1,
+    VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MONEY_INSUFFICIENT,
+    VM_NET_MOCK_EQUIP_ENHANCE_REJECT_CRYSTAL_INSUFFICIENT,
+    VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MAX_LEVEL
+} vm_net_mock_equipment_enhance_reject_reason;
+
+/* HandleItemUseAndEquip(0x01028C7C) switches the 29/3 result directly.
+ * Raw JianghuOL.CBE GBK strings at 0x01027B90/0x010296A4/0x010296B0 prove
+ * this exact contract: 4=money insufficient, 5=crystal insufficient,
+ * 6=enhancement level cap.  Do not reuse a server-local error ordering here:
+ * doing so presents the wrong client message while rejecting valid work. */
+static u8 vm_net_mock_equipment_enhance_reject_result(
+    u8 subtype,
+    vm_net_mock_equipment_enhance_reject_reason reason)
+{
+    if (subtype == 1)
+    {
+        if (reason == VM_NET_MOCK_EQUIP_ENHANCE_REJECT_EQUIPMENT_NOT_FOUND)
+            return 2;
+        if (reason == VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MAX_LEVEL)
+            return 3;
+        return 0;
+    }
+
+    switch (reason)
+    {
+    case VM_NET_MOCK_EQUIP_ENHANCE_REJECT_EQUIPMENT_NOT_FOUND:
+        return 3;
+    case VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MONEY_INSUFFICIENT:
+        return 4;
+    case VM_NET_MOCK_EQUIP_ENHANCE_REJECT_CRYSTAL_INSUFFICIENT:
+        return 5;
+    case VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MAX_LEVEL:
+        return 6;
+    default:
+        return 0;
+    }
+}
+
 static bool vm_net_mock_equipment_enhance_decode_materials(
     const vm_net_mock_equipment_enhance_request *parsed,
     u32 itemIds[5],
@@ -547,7 +588,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     }
     if (equipment == NULL || catalog == NULL)
     {
-        result = parsed.subtype == 1 ? 2 : 3;
+        result = vm_net_mock_equipment_enhance_reject_result(
+            parsed.subtype, VM_NET_MOCK_EQUIP_ENHANCE_REJECT_EQUIPMENT_NOT_FOUND);
         reason = "equipment-not-found";
     }
     else
@@ -556,7 +598,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
             equipment->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
         if (currentLevel >= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
         {
-            result = parsed.subtype == 1 ? 3 : 5;
+            result = vm_net_mock_equipment_enhance_reject_result(
+                parsed.subtype, VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MAX_LEVEL);
             reason = "max-level";
         }
     }
@@ -569,7 +612,9 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                              role, &parsed, itemIds, counts, &materialPower);
         if (!materialsValid)
         {
-            result = 4;
+            result = vm_net_mock_equipment_enhance_reject_result(
+                parsed.subtype,
+                VM_NET_MOCK_EQUIP_ENHANCE_REJECT_CRYSTAL_INSUFFICIENT);
             reason = "crystal-insufficient";
         }
         else
@@ -584,7 +629,9 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     {
         if (role->money < moneyCost)
         {
-            result = 6;
+            result = vm_net_mock_equipment_enhance_reject_result(
+                parsed.subtype,
+                VM_NET_MOCK_EQUIP_ENHANCE_REJECT_MONEY_INSUFFICIENT);
             reason = "money-insufficient";
         }
         else
@@ -613,7 +660,9 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 if (!vm_net_mock_role_consume_backpack_item(
                         role, itemIds[i], 0, consumeCount, &remaining))
                 {
-                    result = 4;
+                    result = vm_net_mock_equipment_enhance_reject_result(
+                        parsed.subtype,
+                        VM_NET_MOCK_EQUIP_ENHANCE_REJECT_CRYSTAL_INSUFFICIENT);
                     reason = "crystal-consume-failed";
                     break;
                 }
@@ -2801,7 +2850,11 @@ static bool vm_mock_service_trade_role_add_item(
     vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
     memset(item, 0, sizeof(*item));
     item->itemId = incoming->itemId;
-    item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+    if (!vm_net_mock_role_allocate_backpack_sequence(
+            role, NULL, 0, role->nextBackpackSeq, &item->seq))
+    {
+        return false;
+    }
     item->count = incoming->count;
     if (isEquipment)
     {
@@ -2813,8 +2866,6 @@ static bool vm_mock_service_trade_role_add_item(
     }
     role->backpackItemCount = (u8)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
-    if (role->nextBackpackSeq == 0)
-        role->nextBackpackSeq = 1;
     if (destinationSeqOut)
         *destinationSeqOut = item->seq;
     return true;
