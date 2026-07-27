@@ -3244,6 +3244,14 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                                      matchedSeed->actorId;
             }
             break;
+        case VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER:
+            serviceOptionName =
+                "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8"; /* 出售装备 */
+            serviceOptionDescription =
+                "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
+            serviceOptionValue =
+                VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
+            break;
         default:
             break;
         }
@@ -3464,6 +3472,147 @@ static const char *vm_net_mock_npc_shop_selector_name(u32 selector)
     return "";
 }
 
+/* Equipment recovery is deliberately driven by the active role's concrete
+ * backpack sequence, not a catalog item id.  A player can own several copies
+ * of one equipment id with different enhancement state, and an equipped item
+ * is absent from this list by construction. */
+static bool vm_net_mock_npc_sell_backpack_item_matches(
+    const vm_net_mock_backpack_item_state *backpackItem,
+    const vm_net_mock_shop_catalog_item **catalogItemOut)
+{
+    const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+
+    if (catalogItemOut)
+        *catalogItemOut = NULL;
+    if (backpackItem == NULL || backpackItem->itemId == 0 ||
+        backpackItem->seq == 0 || backpackItem->count == 0)
+    {
+        return false;
+    }
+    catalogItem = vm_net_mock_find_shop_catalog_item(backpackItem->itemId);
+    if (catalogItem == NULL || !catalogItem->isEquip || catalogItem->price == 0)
+        return false;
+    if (catalogItemOut)
+        *catalogItemOut = catalogItem;
+    return true;
+}
+
+static u32 vm_net_mock_npc_sell_equipment_price(
+    const vm_net_mock_shop_catalog_item *catalogItem)
+{
+    if (catalogItem == NULL || !catalogItem->isEquip || catalogItem->price == 0)
+        return 0;
+    /* The configured price is the DSH/server-catalog base value.  There is no
+     * client or resource evidence for an enhancement surcharge, so recovery
+     * intentionally remains 50% of that base value. */
+    return (catalogItem->price / 100u) *
+               VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+           (((catalogItem->price % 100u) *
+                 VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+             99u) /
+            100u);
+}
+
+static u32 vm_net_mock_npc_sell_equipment_total(
+    const vm_net_mock_role_state *role)
+{
+    u32 total = 0;
+    u8 itemCount = 0;
+
+    if (role == NULL)
+        return 0;
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (vm_net_mock_npc_sell_backpack_item_matches(
+                &role->backpackItems[i], NULL))
+        {
+            ++total;
+        }
+    }
+    return total;
+}
+
+static vm_net_mock_backpack_item_state *
+vm_net_mock_npc_sell_equipment_item_at(vm_net_mock_role_state *role,
+                                       u32 ordinal,
+                                       const vm_net_mock_shop_catalog_item **catalogItemOut)
+{
+    u32 seen = 0;
+    u8 itemCount = 0;
+
+    if (catalogItemOut)
+        *catalogItemOut = NULL;
+    if (role == NULL)
+        return NULL;
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+        vm_net_mock_backpack_item_state *backpackItem = &role->backpackItems[i];
+
+        if (!vm_net_mock_npc_sell_backpack_item_matches(backpackItem,
+                                                        &catalogItem))
+        {
+            continue;
+        }
+        if (seen++ != ordinal)
+            continue;
+        if (catalogItemOut)
+            *catalogItemOut = catalogItem;
+        return backpackItem;
+    }
+    return NULL;
+}
+
+/* JianghuOL.CBE:0x01033544 consumes the same type=2 row update after a
+ * regular item use.  The 7/7 row removes/updates the visible entry and the
+ * 7/11 count stream keeps the item's sequence manager coherent.  This avoids
+ * appending 17/1 here: that full-list response is only valid while the
+ * backpack module owns the callback, not while a 26/1 dialog is active. */
+static bool vm_net_mock_append_backpack_item_remove7_objects(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u16 seq, u32 itemId,
+    u32 remaining)
+{
+    u8 itemInfo[64];
+    u8 countInfo[32];
+    u32 itemInfoLen = 0;
+    u32 countInfoLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || seq == 0 ||
+        itemId == 0 ||
+        !vm_net_mock_build_item_use_iteminfo_blob(
+            itemInfo, sizeof(itemInfo), seq, itemId, remaining, &itemInfoLen) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu ||
+        !vm_net_mock_build_item_use_count_info_blob(
+            countInfo, sizeof(countInfo), seq, remaining, &countInfoLen) ||
+        countInfoLen == 0 || countInfoLen > 0xffffu)
+    {
+        return false;
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++*objectCount;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,
+                                    (u16)countInfoLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++*objectCount;
+    return true;
+}
+
 static bool vm_net_mock_is_npc_service_dialog_request(
     const u8 *request, u32 requestLen, u32 *serviceValueOut)
 {
@@ -3488,7 +3637,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE &
+            (VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
@@ -3848,10 +3997,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 objectStart = 0;
     u8 objectCount = 1;
     bool appendBackpackAdd = false;
+    bool appendBackpackRemove = false;
     bool appendSkills = false;
     u32 backpackAddItemId = 0;
     u32 backpackAddCount = 0;
     u16 backpackAddSeq = 0;
+    u32 backpackRemoveItemId = 0;
+    u32 backpackRemoveCount = 0;
+    u16 backpackRemoveSeq = 0;
     const char *action = "invalid";
     u32 result = 0;
     u32 skillEligibleCount = 0;
@@ -4191,6 +4344,157 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             dialogText =
                 "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
     }
+    else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE)
+    {
+        u32 page = value;
+        u32 total = 0;
+        u32 start = 0;
+        bool saleRequest =
+            operation == VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE;
+
+        action = saleRequest ? "equipment-sell" : "equipment-sell-list";
+        dialogText =
+            "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa3\xba"; /* 请选择要出售的装备： */
+
+        if (saleRequest)
+        {
+            vm_net_mock_backpack_item_state *backpackItem = NULL;
+            const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+            vm_net_mock_role_state before;
+            u32 price = 0;
+            u32 remaining = 0;
+
+            page = 0;
+            if (value == 0 || value > 0xffffu)
+            {
+                dialogText =
+                    "\xb8\xc3\xd7\xb0\xb1\xb8\xd2\xd1\xb2\xbb\xd4\xda\xb1\xb3\xb0\xfc\xd6\xd0\xa1\xa3"; /* 该装备已不在背包中。 */
+            }
+            else
+            {
+                backpackItem = vm_net_mock_role_find_backpack_item(
+                    role, 0, (u16)value);
+                if (!vm_net_mock_npc_sell_backpack_item_matches(
+                        backpackItem, &catalogItem) ||
+                    (price = vm_net_mock_npc_sell_equipment_price(catalogItem)) == 0)
+                {
+                    dialogText =
+                        "\xb8\xc3\xd7\xb0\xb1\xb8\xd2\xd1\xb2\xbb\xd4\xda\xb1\xb3\xb0\xfc\xd6\xd0\xa1\xa3"; /* 该装备已不在背包中。 */
+                }
+                else
+                {
+                    before = *role;
+                    backpackRemoveItemId = backpackItem->itemId;
+                    backpackRemoveSeq = backpackItem->seq;
+                    if (!vm_net_mock_role_consume_backpack_item(
+                            role, backpackRemoveItemId, backpackRemoveSeq,
+                            1, &remaining))
+                    {
+                        dialogText =
+                            "\xb8\xc3\xd7\xb0\xb1\xb8\xd2\xd1\xb2\xbb\xd4\xda\xb1\xb3\xb0\xfc\xd6\xd0\xa1\xa3"; /* 该装备已不在背包中。 */
+                    }
+                    else
+                    {
+                        role->money = vm_net_mock_add_capped_u32(role->money,
+                                                                   price);
+                        /* role_db_save_relational replaces this active role's
+                         * backpack rows and money inside one MySQL transaction.
+                         * Restore RAM only after its rollback path reports a
+                         * failure; never leave the item deleted without the
+                         * corresponding copper credit. */
+                        if (!vm_net_mock_role_db_save("npc-equipment-sell"))
+                        {
+                            *role = before;
+                            backpackRemoveItemId = 0;
+                            backpackRemoveSeq = 0;
+                            dialogText =
+                                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                        }
+                        else
+                        {
+                            backpackRemoveCount = remaining;
+                            appendBackpackRemove = true;
+                            result = 1;
+                            snprintf(dialogTextStorage,
+                                     sizeof(dialogTextStorage), "%s%u%s",
+                                     "\xb3\xf6\xca\xdb\xb3\xc9\xb9\xa6\xa3\xac\xbb\xf1\xb5\xc3", /* 出售成功，获得 */
+                                     price,
+                                     "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
+                            dialogText = dialogTextStorage;
+                        }
+                    }
+                }
+            }
+        }
+
+        total = vm_net_mock_npc_sell_equipment_total(role);
+        start = page * VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
+        if (total != 0 && start >= total)
+        {
+            page = (total - 1u) /
+                   VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
+            start = page * VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
+        }
+        for (u32 ordinal = start;
+             ordinal < total &&
+             ordinal < start + VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
+             ++ordinal)
+        {
+            const vm_net_mock_shop_catalog_item *catalogItem = NULL;
+            vm_net_mock_backpack_item_state *backpackItem =
+                vm_net_mock_npc_sell_equipment_item_at(role, ordinal,
+                                                       &catalogItem);
+            u32 price = vm_net_mock_npc_sell_equipment_price(catalogItem);
+
+            if (backpackItem == NULL || catalogItem == NULL || price == 0)
+                continue;
+            snprintf(optionNameStorage[optionCount],
+                     sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
+                     "\xbb\xd8\xca\xd5", /* 回收 */
+                     catalogItem->name, price,
+                     "\xcd\xad"); /* 铜 */
+            snprintf(optionDescriptionStorage[optionCount],
+                     sizeof(optionDescriptionStorage[optionCount]),
+                     "%s +%u", catalogItem->name,
+                     backpackItem->enhanceLevel);
+            optionNames[optionCount] = optionNameStorage[optionCount];
+            optionDescriptions[optionCount] = optionDescriptionStorage[optionCount];
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE |
+                backpackItem->seq;
+            ++optionCount;
+        }
+        if (page > 0 &&
+            optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+        {
+            optionNames[optionCount] =
+                "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+            optionDescriptions[optionCount] =
+                "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE |
+                (page - 1u);
+            ++optionCount;
+        }
+        if (start + VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS < total &&
+            optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+        {
+            optionNames[optionCount] =
+                "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+            optionDescriptions[optionCount] =
+                "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE |
+                (page + 1u);
+            ++optionCount;
+        }
+        if (optionCount == 0 && !appendBackpackRemove)
+        {
+            dialogText =
+                "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有可出售的装备。 */
+        }
+    }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL)
     {
         u16 repairCount = 0;
@@ -4384,6 +4688,15 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 backpackAddCount))
             return 0;
         ++objectCount;
+    }
+    if (appendBackpackRemove)
+    {
+        if (!vm_net_mock_append_backpack_item_remove7_objects(
+                out, outCap, &pos, &objectCount, backpackRemoveSeq,
+                backpackRemoveItemId, backpackRemoveCount))
+        {
+            return 0;
+        }
     }
     if (appendSkills)
     {
