@@ -272,6 +272,29 @@ static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len, u32 *re
     return true;
 }
 
+static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
+                                    uint64_t *result_out)
+{
+    uint64_t result = 0;
+    const uint64_t maximum = ~(uint64_t)0;
+
+    if (value == NULL || value_len == 0 || result_out == NULL)
+        return false;
+    for (size_t i = 0; i < value_len; ++i)
+    {
+        uint64_t digit = 0;
+
+        if (value[i] < '0' || value[i] > '9')
+            return false;
+        digit = (uint64_t)(value[i] - '0');
+        if (result > (maximum - digit) / 10u)
+            return false;
+        result = result * 10u + digit;
+    }
+    *result_out = result;
+    return true;
+}
+
 /*
  * MySQL is the sole authority once the initial legacy/payload import has
  * completed.  In particular, a relation row disappearing later must not be
@@ -3244,6 +3267,155 @@ static bool vm_net_mock_mysql_account_hex(char account_hex[129])
     size_t account_len = vm_mock_mysql_bounded_strlen(account_id, 64);
     return account_id != NULL && account_len > 0 && account_len < 64 &&
            vm_mysql_hex_encode(account_id, account_len, account_hex, 129) != 0;
+}
+
+/* A battle session serial prevents duplicate status packets from granting a
+ * second reward, but it is deliberately process-local.  The rate limit is a
+ * different contract: it belongs to the persisted account/role identity and
+ * must survive reconnects and a service restart. */
+typedef struct
+{
+    uint64_t value;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_monster_reward_cooldown_context;
+
+static bool g_vm_net_mock_monster_reward_cooldown_schema_prepared = false;
+
+static bool vm_mock_mysql_monster_reward_cooldown_row(
+    void *context_value, unsigned int column_count,
+    const char *const *values, const size_t *lengths)
+{
+    vm_mock_mysql_monster_reward_cooldown_context *context =
+        (vm_mock_mysql_monster_reward_cooldown_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u64(values[0], lengths[0], &context->value))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_role_prepare_monster_reward_cooldown_schema(void)
+{
+    if (g_vm_net_mock_monster_reward_cooldown_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_monster_reward_cooldowns ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "last_reward_ms BIGINT UNSIGNED NOT NULL,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id),"
+            "CONSTRAINT fk_account_role_monster_reward_cooldowns_role "
+            "FOREIGN KEY(account_id,role_id) REFERENCES account_roles(account_id,role_id) "
+            "ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] monster_reward_cooldown_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_monster_reward_cooldown_schema_prepared = true;
+    return true;
+}
+
+/* Returns false for a storage/identity failure.  A successful call with
+ * grantedOut=false means a previous monster victory for this exact role is
+ * still inside the server-authoritative eight-second window. */
+static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
+    const vm_net_mock_role_state *role, bool *grantedOut, u32 *remainingMsOut)
+{
+    char account_hex[129];
+    char query[768];
+    char mysql_error[512];
+    vm_mock_mysql_monster_reward_cooldown_context now_context;
+    vm_mock_mysql_monster_reward_cooldown_context previous_context;
+    bool transaction_started = false;
+    uint64_t elapsed_ms = 0;
+    uint64_t remaining_ms = 0;
+
+    if (grantedOut)
+        *grantedOut = false;
+    if (remainingMsOut)
+        *remainingMsOut = 0;
+    if (role == NULL || role->roleId == 0 ||
+        !vm_net_mock_mysql_account_hex(account_hex) ||
+        !vm_net_mock_role_prepare_monster_reward_cooldown_schema())
+    {
+        return false;
+    }
+
+    memset(&now_context, 0, sizeof(now_context));
+    memset(&previous_context, 0, sizeof(previous_context));
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transaction_started = true;
+    if (!vm_mysql_query(
+            "SELECT CAST(FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000) AS UNSIGNED)",
+            vm_mock_mysql_monster_reward_cooldown_row, &now_context) ||
+        now_context.invalid || !now_context.found)
+    {
+        goto failed;
+    }
+
+    snprintf(query, sizeof(query),
+             "SELECT last_reward_ms FROM account_role_monster_reward_cooldowns "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
+             account_hex, role->roleId);
+    if (!vm_mysql_query(query, vm_mock_mysql_monster_reward_cooldown_row,
+                        &previous_context) ||
+        previous_context.invalid)
+    {
+        goto failed;
+    }
+
+    if (previous_context.found)
+    {
+        if (now_context.value < previous_context.value)
+            remaining_ms = VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS;
+        else
+        {
+            elapsed_ms = now_context.value - previous_context.value;
+            if (elapsed_ms < VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS)
+                remaining_ms = VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS - elapsed_ms;
+        }
+        if (remaining_ms != 0)
+        {
+            if (!vm_mysql_exec("COMMIT"))
+                goto failed;
+            transaction_started = false;
+            if (remainingMsOut)
+                *remainingMsOut = (u32)remaining_ms;
+            return true;
+        }
+    }
+
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_monster_reward_cooldowns "
+             "(account_id,role_id,last_reward_ms) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%llu) "
+             "ON DUPLICATE KEY UPDATE last_reward_ms=VALUES(last_reward_ms)",
+             account_hex, role->roleId, (unsigned long long)now_context.value);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transaction_started = false;
+    if (grantedOut)
+        *grantedOut = true;
+    return true;
+
+failed:
+    snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+    if (transaction_started)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] monster_reward_cooldown_claim_failed account=%s role=%u error=%s\n",
+           g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, mysql_error);
+    return false;
 }
 
 /*

@@ -4247,6 +4247,8 @@ enum
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
     VM_NET_MOCK_ROLE_DEFAULT_MONEY = 0,
+    /* Monster rewards are server-rate-limited per persisted account/role. */
+    VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS = 8000,
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 1,
     VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT = 60,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
@@ -4656,6 +4658,9 @@ static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static bool vm_net_mock_role_db_save(const char *reason);
+static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
+    const vm_net_mock_role_state *role, bool *grantedOut,
+    u32 *remainingMsOut);
 static bool vm_mock_service_mysql_authority_prepare(void);
 static bool vm_mock_service_mysql_authority_seal(void);
 static bool vm_mock_service_mysql_authority_is_sealed(void);
