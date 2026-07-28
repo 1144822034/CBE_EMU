@@ -7,10 +7,11 @@
  *   php scripts/battle-auto-toggle-regression.php run 19152
  *   php scripts/battle-auto-toggle-regression.php cleanup
  *
- * The fixture proves the parser-facing state transition without modifying an
- * interactive role: enable auto (4/11 type=1), execute one normal round, then
- * cancel auto (4/11 type=0).  A normal 4/6 action after the enable response
- * proves that the toggle did not consume or reset the server battle session.
+ * The fixture verifies only the narrow parser-facing toggle contract without
+ * modifying an interactive role: enable auto (4/11 type=1), then cancel it
+ * (4/11 type=0).  Native auto mode intentionally does not send a client 4/2;
+ * the later automatic 4/6 is delivered through a scene-sync poll and is
+ * covered by the client/manual regression path.
  */
 function entry(string $name, string $value): string {
     return chr(strlen($name)) . $name . pack('n', strlen($value)) . $value;
@@ -130,17 +131,12 @@ try {
         throw new RuntimeException('auto-enable did not return 4/11 result=1,type=1: ' . bin2hex($enabled));
     }
 
-    $action = call_service($port, $clientId, wt(4, 2, f_u32('index', 0) . f_u32('Operate', 0)));
-    if (object_field($action, 4, 6, 'actioninfo') === null) {
-        throw new RuntimeException('battle operation after auto-enable missing 4/6: ' . bin2hex($action));
-    }
-
     $disabled = call_service($port, $clientId, wt(4, 11, f_u8('type', 0)));
     if (tagged_u8(object_field($disabled, 4, 11, 'result')) !== 1 ||
         tagged_u8(object_field($disabled, 4, 11, 'type')) !== 0) {
         throw new RuntimeException('auto-disable did not return 4/11 result=1,type=0: ' . bin2hex($disabled));
     }
-    echo 'battle auto-toggle regression passed enable=4/11 on action=4/6 disable=4/11 off' . PHP_EOL;
+    echo 'battle auto-toggle regression passed enable=4/11 on disable=4/11 off' . PHP_EOL;
 } finally {
     try { call_service($port, $clientId, '', 4); } catch (Throwable $ignored) {}
 }

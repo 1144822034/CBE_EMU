@@ -1225,7 +1225,15 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
     bool victory = g_mockBattleEnemyHpCurrent == 0 &&
                    (forceTeamVictory || roleHp > 0);
     bool rewardAlreadyGranted = false;
-    u32 recoverMp = vm_net_mock_battle_recover_mp_value();
+    /* A zero-delta victory uses the native no-result close path (4/11+4/9),
+     * not 4/7.  Since 4/7 is the only established carrier for this automatic
+     * MP recovery, keep persistent and displayed battle state identical until
+     * a protocol-backed out-of-battle status update is available. */
+    u32 recoverMp =
+        g_vm_net_mock_battle_no_reward_terminal_serial ==
+                g_mockBattleOperateSessionSerial
+            ? 0
+            : vm_net_mock_battle_recover_mp_value();
     bool mpRecoveryApplied = false;
 
     if (role == NULL)
@@ -1783,6 +1791,8 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleOperateSessionSerial;
     u32 mockBattleOperateTurnCounter;
     u8 mockBattleOperateSessionArmed;
+    u8 mockBattleAutoEnabled;
+    u32 mockBattleAutoNextActionTick;
     u8 mockBattleOperateSessionFinished;
     u8 mockBattlePendingEnemyTurn;
     u8 mockBattleAwaitingSettlement;
@@ -1825,6 +1835,7 @@ typedef struct vm_mock_service_account_state
     u32 battleRoleIdCurrent;
     u32 battleRewardRng;
     u32 battleSettlementSentSerial;
+    u32 battleNoRewardTerminalSerial;
     u32 battleDropRefreshSentSerial;
     u32 battleRecoveredSerial;
 
@@ -2269,6 +2280,9 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleOperateSessionSerial = g_mockBattleOperateSessionSerial;
     state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
     state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
+    state->mockBattleAutoEnabled = g_vm_net_mock_battle_auto_enabled;
+    state->mockBattleAutoNextActionTick =
+        g_vm_net_mock_battle_auto_next_action_tick;
     state->mockBattleOperateSessionFinished = g_mockBattleOperateSessionFinished;
     state->mockBattlePendingEnemyTurn = g_mockBattlePendingEnemyTurn;
     state->mockBattleAwaitingSettlement = g_mockBattleAwaitingSettlement;
@@ -2309,6 +2323,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->battleRoleIdCurrent = g_vm_net_mock_battle_role_id_current;
     state->battleRewardRng = g_vm_net_mock_battle_reward_rng;
     state->battleSettlementSentSerial = g_vm_net_mock_battle_settlement_sent_serial;
+    state->battleNoRewardTerminalSerial = g_vm_net_mock_battle_no_reward_terminal_serial;
     state->battleDropRefreshSentSerial = g_vm_net_mock_battle_drop_refresh_sent_serial;
     state->battleRecoveredSerial = g_vm_net_mock_battle_recovered_serial;
 
@@ -2374,6 +2389,9 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_mockBattleOperateSessionSerial = state->mockBattleOperateSessionSerial;
     g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
     g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
+    g_vm_net_mock_battle_auto_enabled = state->mockBattleAutoEnabled;
+    g_vm_net_mock_battle_auto_next_action_tick =
+        state->mockBattleAutoNextActionTick;
     g_mockBattleOperateSessionFinished = state->mockBattleOperateSessionFinished;
     g_mockBattlePendingEnemyTurn = state->mockBattlePendingEnemyTurn;
     g_mockBattleAwaitingSettlement = state->mockBattleAwaitingSettlement;
@@ -2415,6 +2433,8 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_battle_role_id_current = state->battleRoleIdCurrent;
     g_vm_net_mock_battle_reward_rng = state->battleRewardRng;
     g_vm_net_mock_battle_settlement_sent_serial = state->battleSettlementSentSerial;
+    g_vm_net_mock_battle_no_reward_terminal_serial =
+        state->battleNoRewardTerminalSerial;
     g_vm_net_mock_battle_drop_refresh_sent_serial = state->battleDropRefreshSentSerial;
     g_vm_net_mock_battle_recovered_serial = state->battleRecoveredSerial;
 

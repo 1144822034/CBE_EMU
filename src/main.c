@@ -398,6 +398,10 @@ static u32 g_battleSubtype8InfoDstWriteLimitCount = 0;
 static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 u8 g_mockBattleOperateSessionArmed = 0;
+/* The native 4/11 acknowledgement only changes the client's battle input
+ * state.  The service owns the corresponding per-account turn scheduler. */
+static u8 g_vm_net_mock_battle_auto_enabled = 0;
+static u32 g_vm_net_mock_battle_auto_next_action_tick = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
@@ -418,9 +422,6 @@ static bool vm_net_mock_current_screen_is_battle(void);
 static void vm_autotest_note_role_attr_page_pc(u32 pc);
 static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
 static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc);
-static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
-                                                     u32 autoRecoverHp, u32 autoRecoverMp,
-                                                     bool forceTeamVictory);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);

@@ -32,8 +32,10 @@
 Success response:
 
 - `1/2/10`: empty actor-other acknowledgement.
-- `1/2/2`: moveinfo for the selected scene monster node.
-- `1/4/5`: battle start, using the normal scene-monster battle start blob.
+- `1/2/2`: the selected scene monster's HP/MP seed.
+- `1/4/5`: scene-monster battle start. Its `battleinfo` contains the server
+  SCE2 combat-spawn tuple and local player vitals; the client copies the
+  monster model from its existing scene node.
 - Optional `1/4/11`: auto-battle UI flag, controlled by `CBE_HANGUP_BATTLE_AUTO_FLAG`.
 - When the request contains the trailing movement upload, one empty `1/2/1`
   acknowledgement is appended after the battle objects.
@@ -56,24 +58,10 @@ Failure response:
   - `web/fs/JHOnlineData/automonster.dsh`
 - Matching uses loose scene-name comparison, then chooses one of the row monster ids.
 - `CBE_HANGUP_BATTLE_ENEMY_ID` can force a monster id for debugging only.
-- The standalone service cannot read the emulator process's `R9+0x5CB0` scene
-  node table. It resolves the selected monster instance from the real SCE2
-  scene resource instead. The recovered combat-spawn record is:
-
-```text
-u16 kind = 3
-u16 x
-u16 y
-meta token 5/6: field 14 = actor id
-string field 15 = display name
-scalar field 16 = visual/class hint
-string field 17 = actor resource
-```
-
-- The response first sends `2/2 moveinfo` for this actor id and coordinate.
-  `HandleBattleStartMsg(0x66CC)` checks the supplied row index, then scans up to
-  25 active kind-2 scene rows for matching coordinates. This keeps the SCE
-  fallback valid when dynamic actors have shifted the live slot ordinal.
+- The service chooses the monster **type** from `automonster.dsh` and selects
+  its first matching SCE2 combat spawn from the server-owned scene resource.
+  `HandleBattleStartMsg(0x66CC)` resolves that source tuple by coordinate if
+  its SCE ordinal differs from the client's live node slot.
 
 ## Implementation Notes
 
@@ -92,10 +80,69 @@ string field 17 = actor resource
   `2/10 + 25/11 "Monster not ready"`. `HandleBattleEnterReq(0x01015E14)` had
   already set the client battle state to `3`, while the banner parser did not
   reset it, leaving the UI at `获取数据`.
-- After adding the real-SCE combat-spawn fallback, the 24-byte request returns
-  `2/10 + 2/2 + 4/5 + 4/11` (`248` bytes in the regression scene).
-- The 52-byte request with a trailing movement upload returns the same battle
-  objects plus empty `2/1` ACK (`254` bytes).
-- Both requests log as `source=builtin-hangup-battle-start`, include
-  `mock_scene_monster_target ... source=SCE2-combat-spawn`, leave the service
-  alive, and produce zero stderr bytes.
+
+### 2026-07-28 visual-contract correction
+
+The temporary `4/10` path avoided the old null scene-node draw, but user
+runtime then showed a player-shaped opponent on the left and a player attacking
+that opponent. This is an earlier protocol deviation, not a rendering bug.
+
+`mmBattle:HandleBattleStartMsg(0x66CC)` gives subtype `4/10` one full left row
+with two visual bytes and a short right row resolved from the local party
+template. The same full-row construction is used by the verified duel builder,
+where those two bytes are the peer's job and sex codes. They are not an
+arbitrary `.actor` resource field. The hangup builder supplied generic `0/1`,
+which the client faithfully decoded as a player appearance; `4/10` therefore
+cannot represent an `e_mucusP.actor` monster.
+
+The server/source resource contract is now sufficient for a real scene start:
+
+- `bin/JHOnlineData/01桃花岛_01.sce` and
+  `web/fs/JHOnlineData/01桃花岛_01.sce` share SHA-256
+  `AE11796E2970FF97A5CBBC855F7E1141A75E8D96E79B16DC9A2CDF402863FCEE`.
+- Decoding that common SCE2 resource produces four `actor_id=105` combat
+  spawns: `(295,57)`, `(179,120)`, `(146,349)`, `(292,484)`; each has
+  `e_mucusP.actor`.
+- In the same runtime, normal collision battles successfully sent live tuples
+  `(index=6,pos=(295,57))` and `(index=8,pos=(146,349))`. Thus the source
+  resource's coordinates are present in the live client node table.
+- `0x66CC` first tests its supplied index then scans active kind-2 nodes by
+  `node+240/+244` coordinates. The SCE ordinal need not equal the live slot.
+- `scene_node_update_move_blob(0x01012A76)` seeds HP/MP at the first active
+  actor-id match. The hangup selector also chooses the first matching SCE
+  combat spawn, so its preceding `2/2` and the `4/5` source refer to the same
+  monster node.
+
+The corrected response is:
+
+```text
+1/2/10 { othernum=0, otherinfo="" }
+1/2/2  { moveinfo for first verified SCE combat spawn }
+1/4/5  { side=1, battleinfo(scene-index, scene-x, scene-y, player vitals) }
+1/4/11 { result=1, type=1 }                 # if auto is enabled
+[1/2/1 empty acknowledgement]               # only when uploaded with request
+```
+
+There is no `4/10` fallback for scene hangup. If the selected
+`automonster.dsh` id has no corresponding server SCE2 combat spawn, the handler
+returns `2/10 + 25/11` instead of fabricating a player-template battle.
+
+Expected trace:
+
+```text
+mock_hangup_battle_start ... subtype=5 index=<sce ordinal> pos=(<x>,<y>)
+  target_source=sce-combat-spawn-coordinate
+  ... response=2/10+2/2+4/5+4/11[+2/1]
+```
+
+Manual regression required:
+
+1. On 桃花岛_01, press 挂机 twice. Both entries show 毒泥怪 on the left and
+   the local role on the right; no player-shaped opponent appears.
+2. Automatic solo actions use scene slots (`actor=1,target=0`) and the result
+   panel returns to the scene normally.
+3. Repeat within the eight-second reward cooldown. The visual contract remains
+   subtype 5, while terminal closure follows the separate no-reward
+   `4/11 + 4/9` poll contract.
+4. A configured hangup monster with no server SCE2 spawn shows the bounded
+   `Monster scene node unavailable` banner rather than entering battle.

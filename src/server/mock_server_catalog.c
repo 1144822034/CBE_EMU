@@ -5023,6 +5023,7 @@ static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLI
 static u32 g_vm_net_mock_battle_role_id_current = VM_NET_MOCK_ROLE_DEFAULT_ID;
 static u32 g_vm_net_mock_battle_reward_rng = 0;
 static u32 g_vm_net_mock_battle_settlement_sent_serial = 0;
+static u32 g_vm_net_mock_battle_no_reward_terminal_serial = 0;
 static u32 g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
 static u32 g_vm_net_mock_battle_recovered_serial = 0;
 static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];
