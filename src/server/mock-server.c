@@ -40,6 +40,13 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"
+
+/* A client in battle keeps receiving normal scene-poll events.  The battle
+ * fragment owns the auto-mode state and emits a parser-faithful 4/6 action on
+ * that existing transport path after the 4/11 acknowledgement has settled. */
+static u32 vm_net_mock_build_pending_auto_battle_action_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer);
+
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
 #include "mock_server_interaction_login.c"

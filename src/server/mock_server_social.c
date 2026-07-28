@@ -2540,9 +2540,6 @@ static bool vm_net_mock_append_scene_actorinfo_npc_object(u8 *out, u32 outCap, u
     return true;
 }
 
-static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
-                                                     u32 autoRecoverHp, u32 autoRecoverMp,
-                                                     bool forceTeamVictory);
 static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 outCap);
 static bool vm_net_mock_append_battle_drop_refresh7_if_needed(
     u8 *out,
@@ -4239,6 +4236,18 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
+    if (g_mockBattleAwaitingSettlement != 0 &&
+        g_vm_net_mock_battle_no_reward_terminal_serial ==
+            g_mockBattleOperateSessionSerial &&
+        observer->onlineRoleId != 0 &&
+        g_vm_net_mock_battle_role_id_current == observer->onlineRoleId)
+    {
+        return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
+    }
+    teamBattleResponseLen = vm_net_mock_build_pending_auto_battle_action_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(scene);
     if (!g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_pending &&
@@ -4731,62 +4740,6 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
            (u32)strlen(chat.message),
            pos);
     return pos;
-}
-
-static bool vm_net_mock_select_scene_actor_moveinfo_target(u32 actorId,
-                                                           u32 *indexOut,
-                                                           u32 *posxOut,
-                                                           u32 *posyOut)
-{
-#ifdef CBE_SERVER_ONLY
-    /* The authoritative service has no emulator-local scene-node memory. Use
-     * the real SCE2 combat-spawn catalog that created those client nodes. */
-    return vm_net_mock_select_sce_combat_spawn(vm_net_mock_current_scene_name(),
-                                               actorId,
-                                               indexOut, posxOut, posyOut);
-#else
-    u32 sceneNodeBase = 0;
-
-    if (actorId == 0 || Global_R9 == 0)
-    {
-        return vm_net_mock_select_sce_combat_spawn(vm_net_mock_current_scene_name(),
-                                                   actorId,
-                                                   indexOut, posxOut, posyOut);
-    }
-    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase, sizeof(sceneNodeBase)) != UC_ERR_OK ||
-        sceneNodeBase == 0)
-    {
-        return vm_net_mock_select_sce_combat_spawn(vm_net_mock_current_scene_name(),
-                                                   actorId,
-                                                   indexOut, posxOut, posyOut);
-    }
-
-    for (u32 i = 0; i < 25; ++i)
-    {
-        u32 node = sceneNodeBase + i * 340u;
-        u32 nodeActorId = 0;
-        u32 nodePosX = 0;
-        u32 nodePosY = 0;
-        u8 active = 0;
-        if (uc_mem_read(MTK, node + 319, &active, sizeof(active)) != UC_ERR_OK || active == 0)
-            continue;
-        if (uc_mem_read(MTK, node + 100, &nodeActorId, sizeof(nodeActorId)) != UC_ERR_OK ||
-            nodeActorId != actorId)
-            continue;
-        (void)uc_mem_read(MTK, node + 240, &nodePosX, sizeof(nodePosX));
-        (void)uc_mem_read(MTK, node + 244, &nodePosY, sizeof(nodePosY));
-        if (indexOut)
-            *indexOut = i;
-        if (posxOut)
-            *posxOut = nodePosX;
-        if (posyOut)
-            *posyOut = nodePosY;
-        return true;
-    }
-    return vm_net_mock_select_sce_combat_spawn(vm_net_mock_current_scene_name(),
-                                               actorId,
-                                               indexOut, posxOut, posyOut);
-#endif
 }
 
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason)
