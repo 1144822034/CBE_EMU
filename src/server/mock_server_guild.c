@@ -437,46 +437,44 @@ static bool vm_net_mock_find_friend_role_seed_by_role_id(
         return false;
     }
 
-    vm_mock_service_friend_db_load();
-    if (!g_vm_mock_service_friend_db_valid)
-        return false;
-    for (u32 i = 0; i < g_vm_mock_service_friend_db.recordCount; ++i)
-    {
-        const vm_mock_service_friend_record *record = &g_vm_mock_service_friend_db.records[i];
-        vm_mock_service_client_session *onlineSession = NULL;
-        vm_net_mock_scene_role_seed seed;
+    static char offlineFriendName[32];
+    vm_mock_service_friend_record friendRecord;
+    vm_mock_service_client_session *onlineSession = NULL;
+    vm_net_mock_scene_role_seed seed;
 
-        if (record->ownerRoleId != ownerRole->roleId ||
-            record->targetRoleId != roleId ||
-            strcmp(record->ownerAccountId, ownerAccountId) != 0)
-        {
-            continue;
-        }
-        memset(&seed, 0, sizeof(seed));
-        onlineSession = vm_mock_service_find_online_friend_session(record);
-        seed.actorId = record->targetRoleId;
-        seed.x = onlineSession ? onlineSession->onlineX : 0;
-        seed.y = onlineSession ? onlineSession->onlineY : 0;
-        seed.job = onlineSession && onlineSession->onlineJob ?
-                   onlineSession->onlineJob : (record->targetJob ? record->targetJob : 1);
-        seed.sex = onlineSession && onlineSession->onlineSex <= 1 ?
-                   onlineSession->onlineSex : (record->targetSex <= 1 ? record->targetSex : 0);
-        seed.level = onlineSession && onlineSession->onlineLevel ?
-                     onlineSession->onlineLevel : (u16)(record->targetLevel ? record->targetLevel : 1);
-        seed.hp = onlineSession ? onlineSession->onlineHp : 0;
-        seed.hpMax = onlineSession ? onlineSession->onlineHpMax : 0;
-        seed.mp = onlineSession ? onlineSession->onlineMp : 0;
-        seed.mpMax = onlineSession ? onlineSession->onlineMpMax : 0;
-        seed.roleName = onlineSession && onlineSession->onlineRoleName[0] ?
-                        onlineSession->onlineRoleName :
-                        (record->targetRoleName[0] ? record->targetRoleName : "Player");
-        seed.stateText = onlineSession ? "Online" : "Offline";
-        seed.session = onlineSession;
-        if (seedOut)
-            *seedOut = seed;
-        return true;
+    vm_mock_service_friend_db_load();
+    if (!vm_mock_service_friend_db_mysql_find_owner_target(
+            ownerAccountId, ownerRole->roleId, roleId, &friendRecord))
+    {
+        return false;
     }
-    return false;
+    memset(&seed, 0, sizeof(seed));
+    onlineSession = vm_mock_service_find_online_friend_session(&friendRecord);
+    seed.actorId = friendRecord.targetRoleId;
+    seed.x = onlineSession ? onlineSession->onlineX : 0;
+    seed.y = onlineSession ? onlineSession->onlineY : 0;
+    seed.job = onlineSession && onlineSession->onlineJob ?
+               onlineSession->onlineJob : (friendRecord.targetJob ? friendRecord.targetJob : 1);
+    seed.sex = onlineSession && onlineSession->onlineSex <= 1 ?
+               onlineSession->onlineSex : (friendRecord.targetSex <= 1 ? friendRecord.targetSex : 0);
+    seed.level = onlineSession && onlineSession->onlineLevel ?
+                 onlineSession->onlineLevel :
+                 (u16)(friendRecord.targetLevel ? friendRecord.targetLevel : 1);
+    seed.hp = onlineSession ? onlineSession->onlineHp : 0;
+    seed.hpMax = onlineSession ? onlineSession->onlineHpMax : 0;
+    seed.mp = onlineSession ? onlineSession->onlineMp : 0;
+    seed.mpMax = onlineSession ? onlineSession->onlineMpMax : 0;
+    /* Offline names come from a request-local MySQL row; keep a static copy so
+     * callers can read seed.roleName after this function returns (protocol mutex). */
+    snprintf(offlineFriendName, sizeof(offlineFriendName), "%s",
+             friendRecord.targetRoleName[0] ? friendRecord.targetRoleName : "Player");
+    seed.roleName = onlineSession && onlineSession->onlineRoleName[0] ?
+                    onlineSession->onlineRoleName : offlineFriendName;
+    seed.stateText = onlineSession ? "Online" : "Offline";
+    seed.session = onlineSession;
+    if (seedOut)
+        *seedOut = seed;
+    return true;
 }
 
 static bool vm_net_mock_open_server_data_resource(const char *name,
@@ -896,7 +894,11 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0))
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, 0,
+                (u8)SDL_min(session->onlineEquippedEnhanceLevels[slot],
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                itemId))
         {
             return false;
         }
@@ -911,7 +913,8 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         if (vm_net_mock_find_equipment_catalog_item(itemId) == NULL ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
-            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0))
+            !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0,
+                                                   itemId))
         {
             return false;
         }
@@ -929,7 +932,12 @@ static u32 vm_net_mock_build_nearby_equip_view_response(const u8 *request, u32 r
                                                          u8 *out, u32 outCap)
 {
     vm_net_mock_scene_role_seed targetSeed;
-    u8 equipInfo[VM_NET_MOCK_EQUIP_SLOT_COUNT * 11];
+    /*
+     * Each equipinfo row is tagged: u32 itemId + i16 seq + ParseEquipAttributes
+     * (2×i16 + u8 attr_count + up to CLIENT_CAP×(u8 unlock,u8 type,u8 flag,i16 value)).
+     * Worst case ≈ 6+4+89 ≈ 99 bytes/row; use ITEMINFO_ROW_WIRE_MAX headroom.
+     */
+    u8 equipInfo[VM_NET_MOCK_NEARBY_EQUIP_INFO_SCRATCH];
     u32 objectStart = 0;
     u32 actorId = 0;
     u32 pos = 5;
@@ -1234,9 +1242,26 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
         if (team != NULL && vm_mock_service_team_is_leader(team, source->clientId) &&
             vm_mock_service_team_add_member(team, responder))
         {
-            accepted = true;
-            vm_mock_service_team_enqueue_member_join_for_peers(
-                team, source->clientId, responder->clientId, responder);
+            /* Build the joiner 5/3 before notifying peers.  If encoding fails,
+             * roll the membership back so leader notices are not queued against
+             * a team the accepter never received. */
+            if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
+                                                                     team, responder))
+            {
+                printf("[warn][network] mock_team_invite_reply_roster_fail "
+                       "source=%08x target=%08x members=%u action=rollback\n",
+                       source->clientId, responder->clientId,
+                       team->memberCount);
+                (void)vm_mock_service_team_remove_member(responder, "invite-reply-roster-fail");
+                team = NULL;
+                pos = 5;
+            }
+            else
+            {
+                accepted = true;
+                vm_mock_service_team_enqueue_member_join_for_peers(
+                    team, source->clientId, responder->clientId, responder);
+            }
         }
     }
 
@@ -1256,35 +1281,27 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     responder->teamInviteSourceClientId = 0;
     responder->teamInviteSourceWireId = 0;
 
-    /* The joiner already has its self roster row from the login 5/10 request.
-     * A successful subtype 3 still requires a complete parser payload, but it
-     * contributes exactly the leader row.  The first subtype-3 row is the
-     * native leader assignment, so do not duplicate the joiner in this list. */
-    if (accepted && team != NULL)
+    /* Joiner already has self from login 5/10.  Successful 5/3 appends every
+     * other current member (leader first); never re-send self.  A 3-person
+     * join must include the middle member or battle-start sub_66A4 misses
+     * that wire id and the joiner crashes on first battle draw. */
+    if (!accepted)
     {
-        if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
-                                                                 responder, source))
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 5, 3, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
         {
             return 0;
         }
-    }
-    else if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 5, 3, &objectStart) ||
-             !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
-    {
-        return 0;
-    }
-    else
-    {
         vm_net_mock_finish_wt_object(out, objectStart, pos);
     }
     objectCount = 1;
     vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
-    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-leader-delta)\n",
+    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-existing-delta)\n",
            source ? source->clientId : 0, sourceWireId,
            responder->clientId, responderRole->roleId,
            result, accepted ? 1u : 0u, sourceNotified ? 1u : 0u,
            sourceMemberJoinQueued ? 1u : 0u,
-           accepted ? "inline-5/3-leader-delta" : "none",
+           accepted ? "inline-5/3-existing-delta" : "none",
            team ? team->memberCount : 0, pos);
     return pos;
 }
@@ -1331,6 +1348,39 @@ static u32 vm_net_mock_build_team_leave_response(const u8 *request, u32 requestL
            leaver ? leaver->clientId : 0, leaver ? leaver->onlineRoleId : 0,
            removed ? 1u : 0u, pos);
     return pos;
+}
+
+static void vm_mock_service_duel_resolve_visual(
+    const vm_mock_service_client_session *member,
+    u8 *jobIndexOut,
+    u8 *sexGroupOut)
+{
+    vm_net_mock_role_state *role = vm_mock_service_trade_role_for_session(member, NULL);
+    u8 job = 1;
+    u8 sex = 0;
+
+    if (jobIndexOut)
+        *jobIndexOut = 0;
+    if (sexGroupOut)
+        *sexGroupOut = 1;
+    if (role != NULL)
+    {
+        job = role->job;
+        sex = role->sex;
+    }
+    else if (member != NULL)
+    {
+        job = member->onlineJob ? member->onlineJob : 1;
+        sex = member->onlineSex <= 1 ? member->onlineSex : 0;
+    }
+    if (job < 1 || job > 3)
+        job = 1;
+    if (sex > 1)
+        sex = 0;
+    if (jobIndexOut)
+        *jobIndexOut = (u8)(job - 1);
+    if (sexGroupOut)
+        *sexGroupOut = (u8)(sex + 1);
 }
 
 static vm_mock_service_duel *vm_mock_service_duel_begin(
@@ -1390,16 +1440,42 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
     slot->mpMax[1] = responder->onlineMpMax;
     slot->mp[0] = vm_net_mock_min_u32(inviter->onlineMp, slot->mpMax[0]);
     slot->mp[1] = vm_net_mock_min_u32(responder->onlineMp, slot->mpMax[1]);
+    vm_mock_service_duel_resolve_visual(inviter, &slot->jobIndex[0], &slot->sexGroup[0]);
+    vm_mock_service_duel_resolve_visual(responder, &slot->jobIndex[1], &slot->sexGroup[1]);
     slot->startPendingMask = 3;
-    slot->turnIndex = 0xff;
-    printf("[info][mock-service] duel_begin serial=%u inviter=%08x/%u "
-           "responder=%08x/%u scene=%s hp=%u/%u,%u/%u mp=%u/%u,%u/%u\n",
-           slot->serial,
-           inviter->clientId, inviter->onlineRoleId,
-           responder->clientId, responder->onlineRoleId,
-           slot->scene,
-           slot->hp[0], slot->hpMax[0], slot->hp[1], slot->hpMax[1],
-           slot->mp[0], slot->mpMax[0], slot->mp[1], slot->mpMax[1]);
+    {
+        vm_net_mock_role_state *inviterRole =
+            vm_mock_service_trade_role_for_session(inviter, NULL);
+        vm_net_mock_role_state *responderRole =
+            vm_mock_service_trade_role_for_session(responder, NULL);
+        vm_net_mock_player_stats inviterStats;
+        vm_net_mock_player_stats responderStats;
+
+        memset(&inviterStats, 0, sizeof(inviterStats));
+        memset(&responderStats, 0, sizeof(responderStats));
+        vm_net_mock_role_build_player_stats(inviterRole, &inviterStats);
+        vm_net_mock_role_build_player_stats(responderRole, &responderStats);
+        /* Higher agility plays first inside a resolved round. Equal keeps inviter. */
+        slot->firstTurnIndex =
+            (responderStats.agility > inviterStats.agility) ? 1 : 0;
+        slot->roundCommitMask = 0;
+        slot->roundCommitOperate[0] = 0;
+        slot->roundCommitOperate[1] = 0;
+        slot->roundCommitDeadlineTick = 0;
+        printf("[info][mock-service] duel_begin serial=%u inviter=%08x/%u "
+               "responder=%08x/%u scene=%s hp=%u/%u,%u/%u mp=%u/%u,%u/%u "
+               "visual0=job_index=%u sex_group=%u visual1=job_index=%u sex_group=%u "
+               "agility=%u/%u first_turn=%u commit=both-then-resolve\n",
+               slot->serial,
+               inviter->clientId, inviter->onlineRoleId,
+               responder->clientId, responder->onlineRoleId,
+               slot->scene,
+               slot->hp[0], slot->hpMax[0], slot->hp[1], slot->hpMax[1],
+               slot->mp[0], slot->mpMax[0], slot->mp[1], slot->mpMax[1],
+               slot->jobIndex[0], slot->sexGroup[0],
+               slot->jobIndex[1], slot->sexGroup[1],
+               inviterStats.agility, responderStats.agility, slot->firstTurnIndex);
+    }
     return slot;
 }
 
@@ -1449,7 +1525,13 @@ static u32 vm_net_mock_build_duel_start_response(
      *   left/full row  = the remote opponent
      *   right/id row   = this observer's local controllable role
      * With side=1 and one fighter per side, wire 0 maps to the right/local
-     * fighter and wire 1 maps to the left/opponent fighter. */
+     * fighter and wire 1 maps to the left/opponent fighter.
+     *
+     * Left visual bytes are visual_group then visual_variant
+     * (scene actorinfo: sexGroup, jobIndex).  Parser passes them as
+     * sub_23F6(variant, group) == GetMapTileData(jobIndex, sexGroup).
+     * Writing job before sex selected the wrong six-slot portrait and could
+     * fall through to the default 女天机 art. */
     memset(battleInfo, 0, sizeof(battleInfo));
     if (!vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen, 1) ||
         !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
@@ -1466,9 +1548,9 @@ static u32 vm_net_mock_build_duel_start_response(
                                     peer->onlineRoleName[0] ?
                                         peer->onlineRoleName : "Player") ||
         !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
-                                vm_mock_service_team_member_job_code(peer)) ||
+                                duel->sexGroup[peerIndex]) ||
         !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
-                                vm_mock_service_team_member_sex_code(peer)) ||
+                                duel->jobIndex[peerIndex]) ||
         !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen, 1) ||
         !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
                                  observerWireId) ||
@@ -1497,10 +1579,13 @@ static u32 vm_net_mock_build_duel_start_response(
     duel->startedMask |= observerBit;
     printf("[info][mock-service] duel_start_deliver serial=%u observer=%08x "
            "peer=%08x local_wire=%u peer_wire=%u side=1 subtype=10 "
-           "battleinfo=%u started=%02x pending=%02x resp=%u "
-           "evidence=mmBattle:0x66CC/0x6C5E/0x6CE8\n",
+           "peer_sex_group=%u peer_job_index=%u battleinfo=%u "
+           "started=%02x pending=%02x resp=%u "
+           "evidence=mmBattle:0x66CC/0x6C5E/0x6CE8/sub_23F6\n",
            duel->serial, observer->clientId, peer->clientId,
-           observerWireId, peerWireId, battleInfoLen,
+           observerWireId, peerWireId,
+           duel->sexGroup[peerIndex], duel->jobIndex[peerIndex],
+           battleInfoLen,
            duel->startedMask, duel->startPendingMask, pos);
     return pos;
 }
@@ -1949,8 +2034,18 @@ static u32 vm_net_mock_build_friend_invite_reply_response(const u8 *request, u32
     responderSession->friendInviteReplyActive = false;
     responderSession->friendInviteSourceClientId = 0;
     responderSession->friendInviteSourceRoleId = 0;
-    vm_net_mock_finish_wt_packet(out, pos, 0);
-    printf("[info][network] mock_friend_invite_reply source=%08x/%u target=%08x/%u result=%u added=%u notify_source=%u resp=%u evidence=JianghuOL.CBE:0x010114A4+0x010114FC\n",
+    /*
+     * 10/4 stores the inviter id/name into a Global_R9-backed slot that the
+     * map HUD also reads for the local plate.  Sending 10/5 clears that id to
+     * zero but does not rewrite the display name, so the inviter's name (e.g.
+     * "爱馨阁…") remains until re-login.  Re-emit authoritative 1/1/14
+     * actorinfo so the accepter's own role name is restored on the same
+     * reply that closes the confirm dialog.
+     */
+    if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos, NULL))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_friend_invite_reply source=%08x/%u target=%08x/%u result=%u added=%u notify_source=%u resp=%u evidence=JianghuOL.CBE:0x010114A4+0x010114FC+0x01012E4C(1/1/14-name-restore)\n",
            sourceSession ? sourceSession->clientId : 0,
            sourceRoleId,
            responderSession->clientId,
@@ -1959,7 +2054,7 @@ static u32 vm_net_mock_build_friend_invite_reply_response(const u8 *request, u32
            added ? 1u : 0u,
            resultQueued ? 1u : 0u,
            pos);
-    vm_autotest_note("mock_friend_invite_reply source_role=%u result=%u added=%u notify_source=%u response=empty-wt evidence=JianghuOL.CBE:0x010114A4\n",
+    vm_autotest_note("mock_friend_invite_reply source_role=%u result=%u added=%u notify_source=%u response=1/1/14 evidence=JianghuOL.CBE:0x010114A4+name-restore\n",
                      sourceRoleId, result, added ? 1u : 0u, resultQueued ? 1u : 0u);
     return pos;
 }
@@ -2229,9 +2324,12 @@ static bool vm_net_mock_append_trade_offer_object(
                                          &itemInfoLen, "")) ||
             !vm_net_mock_seq_put_item_common_extra(
                 itemInfo, sizeof(itemInfo), &itemInfoLen,
-                (u8)SDL_min(item->count, 0xffu),
+                vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL
+                    ? 0
+                    : (u8)SDL_min(item->count, 0xffu),
                 (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                item->itemId))
         {
             return false;
         }
@@ -2258,7 +2356,8 @@ static bool vm_net_mock_append_trade_terminal_object(
     u32 finalMoney,
     const vm_mock_service_trade_offer *receipt)
 {
-    u8 itemInfo[512];
+    u8 itemInfo[8 + (VM_MOCK_SERVICE_TRADE_ITEM_MAX *
+                     VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX)];
     u32 itemInfoLen = 0;
     u32 objectStart = 0;
 
@@ -2272,17 +2371,37 @@ static bool vm_net_mock_append_trade_terminal_object(
         for (u32 i = 0; i < receipt->itemCount; ++i)
         {
             const vm_mock_service_trade_item *item = &receipt->items[i];
+            u8 stackRuntime = 0;
+            /*
+             * BuildShopBuyList(0x010259B6) feeds MoveBattleActorStep via the
+             * same tagged stream as 7/7 and 6/4 award rows: seq i16, itemId
+             * u32, count u32, then ParseEquipAttributes.  stream_read_i32_be_tagged
+             * skips a 2-byte tag and always consumes a 4-byte value, so a
+             * tagged-i16 count (00 02 ...) is misread as a huge quantity and
+             * fills the client bag with duplicate equipment rows while MySQL
+             * still holds a single instance.
+             *
+             * Equipment first i16 must be 0 (login 30/21 grid contract); a
+             * value of 1 is shown as enhance (+1) on unenhanced gear.
+             */
+            if (vm_net_mock_find_equipment_catalog_item(item->itemId) != NULL)
+                stackRuntime = 0;
+            else if (vm_net_mock_backpack_item_id_uses_reservoir_count(
+                         item->itemId))
+                stackRuntime = item->count == 0 ? 0 : 1;
+            else
+                stackRuntime = item->count > 255 ? 255 : (u8)item->count;
             if (!vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                          item->destinationSeq) ||
                 !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                          item->itemId) ||
-                !vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
-                                         (u16)SDL_min(item->count, 0xffffu)) ||
+                !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                         item->count) ||
                 !vm_net_mock_seq_put_item_common_extra(
-                    itemInfo, sizeof(itemInfo), &itemInfoLen,
-                    (u8)SDL_min(item->count, 0xffu),
+                    itemInfo, sizeof(itemInfo), &itemInfoLen, stackRuntime,
                     (u8)SDL_min(item->enhanceLevel,
-                                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                    item->itemId))
             {
                 return false;
             }
@@ -2420,18 +2539,52 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             return VM_MOCK_TRADE_COMMIT_INVALID;
         roles[side].money = (u32)finalMoney;
         receipt->submitted = true;
-        receipt->itemCount = incoming->itemCount;
+        receipt->itemCount = 0;
         for (u32 i = 0; i < incoming->itemCount; ++i)
         {
-            receipt->items[i] = incoming->items[i];
+            const vm_mock_service_trade_item *incomingItem = &incoming->items[i];
+            bool isEquipment =
+                vm_net_mock_find_equipment_catalog_item(incomingItem->itemId) !=
+                NULL;
+
+            /* Equipment is one client row per instance (same as 7/7 battle
+             * drops).  A single receipt row with count>1 would still ask
+             * BuildShopBuyList to insert multiple local copies from one seq. */
+            if (isEquipment)
+            {
+                for (u32 unit = 0; unit < incomingItem->count; ++unit)
+                {
+                    vm_mock_service_trade_item *row = NULL;
+                    if (receipt->itemCount >= VM_MOCK_SERVICE_TRADE_ITEM_MAX)
+                        return VM_MOCK_TRADE_COMMIT_BAG_FULL;
+                    row = &receipt->items[receipt->itemCount];
+                    memset(row, 0, sizeof(*row));
+                    row->itemId = incomingItem->itemId;
+                    row->sourceSeq = incomingItem->sourceSeq;
+                    row->count = 1;
+                    row->enhanceLevel = incomingItem->enhanceLevel;
+                    if (!vm_mock_service_trade_role_add_item(
+                            &roles[side], row->itemId, 1, row->enhanceLevel,
+                            &row->destinationSeq))
+                    {
+                        return VM_MOCK_TRADE_COMMIT_BAG_FULL;
+                    }
+                    receipt->itemCount =
+                        (u8)(receipt->itemCount + 1);
+                }
+                continue;
+            }
+            if (receipt->itemCount >= VM_MOCK_SERVICE_TRADE_ITEM_MAX)
+                return VM_MOCK_TRADE_COMMIT_BAG_FULL;
+            receipt->items[receipt->itemCount] = *incomingItem;
             if (!vm_mock_service_trade_role_add_item(
-                    &roles[side], incoming->items[i].itemId,
-                    incoming->items[i].count,
-                    incoming->items[i].enhanceLevel,
-                    &receipt->items[i].destinationSeq))
+                    &roles[side], incomingItem->itemId, incomingItem->count,
+                    incomingItem->enhanceLevel,
+                    &receipt->items[receipt->itemCount].destinationSeq))
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;
             }
+            receipt->itemCount = (u8)(receipt->itemCount + 1);
         }
         vm_net_mock_role_normalize_backpack(&roles[side]);
         trade->finalMoney[side] = roles[side].money;

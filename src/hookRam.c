@@ -109,8 +109,10 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
     uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
     if (sp >= STACK_ADDRESS && sp <= STACK_ADDRESS + 0x100000)
         dumpVirtMemory(sp - 64, 128);
-    assert(0);
-    return false;
+    printf("[warn][mem] unmapped access soft-failed (host continues)\n");
+    fflush(stdout);
+    uc_emu_stop(uc);
+    return true;
 }
 void hookCpuIntr(uc_engine *uc, uint32_t intno, void *user_data)
 {

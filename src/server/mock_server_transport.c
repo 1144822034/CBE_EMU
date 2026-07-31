@@ -21,6 +21,29 @@ static u32 vm_net_mock_sync_response_to_vm(void)
 #endif
 }
 
+/* Same peel set as network-client.c: 17/1(+26/1) for use; discard also peels
+ * 7/42, 7/11, 10/26 so lone 7/4 clears the wait flag first. */
+static bool vm_net_mock_wt_object_is_item_use_followup(
+    const vm_net_mock_request_object *object, bool haveItemDiscard)
+{
+    if (object == NULL || object->major != 1)
+        return false;
+    if (object->kind == 17 && object->subtype == 1)
+        return true;
+    if (object->kind == 26 && object->subtype == 1)
+        return true;
+    if (haveItemDiscard)
+    {
+        if (object->kind == 7 && object->subtype == 42)
+            return true;
+        if (object->kind == 7 && object->subtype == 11)
+            return true;
+        if (object->kind == 0x0a && object->subtype == 0x1a)
+            return true;
+    }
+    return false;
+}
+
 static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
                                                            u32 *responseLen,
                                                            u8 *followOut,
@@ -33,6 +56,7 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
     u8 primaryCount = 0;
     u8 followCount = 0;
     bool haveItemUse = false;
+    bool haveItemDiscard = false;
     vm_net_mock_request_object object;
 
     if (followLenOut)
@@ -47,12 +71,16 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
     {
         if (object.major == 1 && object.kind == 7 && object.subtype == 1)
             haveItemUse = true;
-        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+        if (object.major == 1 && object.kind == 7 && object.subtype == 4)
+            haveItemDiscard = true;
+        if (vm_net_mock_wt_object_is_item_use_followup(&object, haveItemDiscard))
             ++followCount;
         else
             ++primaryCount;
     }
-    if (offset != *responseLen || !haveItemUse || followCount == 0 || primaryCount == 0)
+    if (offset != *responseLen ||
+        (!haveItemUse && !haveItemDiscard) ||
+        followCount == 0 || primaryCount == 0)
         return false;
 
     offset = 4;
@@ -67,7 +95,7 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
         if (!vm_net_mock_next_request_object(response, *responseLen, &offset, &object))
             return false;
         objectLen = offset - objectStart;
-        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+        if (vm_net_mock_wt_object_is_item_use_followup(&object, haveItemDiscard))
         {
             if (followPos + objectLen > followCap || followCount == 0xff)
                 return false;
@@ -276,6 +304,7 @@ static void vm_mock_service_copy_account_id(char *dst, size_t dstCap, const char
 typedef struct
 {
     u32 clientId;
+    char preferredTitleServerGbk[32];
 } vm_mock_service_request_meta;
 
 static bool vm_mock_service_parse_login_request(const u8 *request,
@@ -362,10 +391,21 @@ static u32 vm_mock_service_encode_request_meta(const vm_mock_service_request_met
                                                u8 *out,
                                                u32 outCap)
 {
+    u32 nameLen;
+
     if (meta == NULL || out == NULL || outCap < 4)
         return 0;
     vm_mock_service_write_le32(out, meta->clientId);
-    return 4;
+    nameLen = (u32)strlen(meta->preferredTitleServerGbk);
+    if (nameLen == 0)
+        return 4;
+    if (nameLen > 31)
+        nameLen = 31;
+    if (outCap < 5 + nameLen)
+        return 4;
+    out[4] = (u8)nameLen;
+    memcpy(out + 5, meta->preferredTitleServerGbk, nameLen);
+    return 5 + nameLen;
 }
 
 static void vm_mock_service_parse_account_metadata(const u8 *meta,
@@ -379,6 +419,17 @@ static void vm_mock_service_parse_account_metadata(const u8 *meta,
         return;
     if (metaLen >= 4)
         parsed->clientId = vm_mock_service_read_le32(meta);
+    if (metaLen >= 5)
+    {
+        u32 nameLen = meta[4];
+        if (nameLen > 31)
+            nameLen = 31;
+        if (5 + nameLen <= metaLen && nameLen > 0)
+        {
+            memcpy(parsed->preferredTitleServerGbk, meta + 5, nameLen);
+            parsed->preferredTitleServerGbk[nameLen] = 0;
+        }
+    }
 }
 
 static int vm_mock_service_resolve_ipv4_host(const char *host,
@@ -660,8 +711,38 @@ static int vm_net_mock_remote_request(const u8 *request,
         return 0;
     }
 
+    if ((flags & VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP) != 0 &&
+        followupResponse != NULL && followupCap != 0 && followupLenOut != NULL)
+    {
+        u8 followupHeader[VM_MOCK_SERVICE_FRAME_SIZE];
+        u32 followupBodyLen = 0;
+        u32 followupEvent = 7;
+
+        if (!vm_mock_service_recv_all(sock, followupHeader, sizeof(followupHeader)) ||
+            memcmp(followupHeader, "CBMR", 4) != 0 ||
+            vm_mock_service_read_le32(followupHeader + 4) != 1)
+        {
+            vm_mock_service_socket_close(sock);
+            return 0;
+        }
+        followupBodyLen = vm_mock_service_read_le32(followupHeader + 12);
+        followupEvent = vm_mock_service_read_le32(followupHeader + 16);
+        if (followupEvent == 0)
+            followupEvent = 7;
+        (void)followupEvent;
+        if (followupBodyLen > followupCap ||
+            (followupBodyLen != 0 &&
+             !vm_mock_service_recv_all(sock, followupResponse, followupBodyLen)))
+        {
+            vm_mock_service_socket_close(sock);
+            return 0;
+        }
+        *followupLenOut = followupBodyLen;
+    }
+
     vm_mock_service_socket_close(sock);
-    if (responseEventType == 7 &&
+    if ((followupLenOut == NULL || *followupLenOut == 0) &&
+        responseEventType == 7 &&
         followupResponse != NULL && followupCap != 0 && followupLenOut != NULL)
     {
         (void)vm_net_mock_extract_item_use_backpack_followup(response,
@@ -809,6 +890,145 @@ static void vm_net_mock_service_notify_disconnect(const char *reason)
  * reading requests, while the legacy state transition remains atomic until it
  * is migrated to an explicit per-request context.
  */
+static void vm_mock_service_flush_deferred_role_db(
+    vm_mock_service_account_state *accountState,
+    const char *logAccountId)
+{
+    typedef struct
+    {
+        char accountId[64];
+        vm_net_mock_role_db_file roleDb;
+        bool roleDbValid;
+        vm_net_mock_warehouse_state warehouse;
+        bool warehouseIncluded;
+        u32 persistGeneration;
+        bool hadInventoryDirty;
+        bool hadPositionDirty;
+    } vm_mock_role_persist_job;
+
+    vm_mock_role_persist_job *job = NULL;
+    u32 flushStartMs;
+    bool didFlush = false;
+    const char *flushReason = "role-deferred";
+    int retry;
+
+    if (accountState == NULL)
+        return;
+
+    for (retry = 0; retry < 2; ++retry)
+    {
+        flushStartMs = scheduler_get_tick_ms();
+        didFlush = false;
+        flushReason = "role-deferred";
+
+        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        if ((!accountState->roleInventoryDirty && !accountState->rolePositionDirty) ||
+            accountState->persistFlushBusy ||
+            !accountState->roleDbValid)
+        {
+            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+            break;
+        }
+
+        job = (vm_mock_role_persist_job *)malloc(sizeof(*job));
+        if (job == NULL)
+        {
+            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+            printf("[error][mock-service] role_deferred_flush_oom account=%s\n",
+                   accountState->accountId[0] ? accountState->accountId : "-");
+            break;
+        }
+        memset(job, 0, sizeof(*job));
+        snprintf(job->accountId, sizeof(job->accountId), "%s", accountState->accountId);
+        job->roleDb = accountState->roleDb;
+        job->roleDbValid = accountState->roleDbValid;
+        if (accountState->warehouse.loaded &&
+            accountState->warehouse.accountId[0] != 0 &&
+            strcmp(accountState->warehouse.accountId, accountState->accountId) == 0)
+        {
+            job->warehouse = accountState->warehouse;
+            job->warehouseIncluded = true;
+        }
+        accountState->persistGeneration += 1u;
+        if (accountState->persistGeneration == 0u)
+            accountState->persistGeneration = 1u;
+        job->persistGeneration = accountState->persistGeneration;
+        job->hadInventoryDirty = accountState->roleInventoryDirty;
+        job->hadPositionDirty = accountState->rolePositionDirty;
+        if (job->hadInventoryDirty && job->hadPositionDirty)
+            flushReason = "role-deferred-position+inventory";
+        else if (job->hadPositionDirty)
+            flushReason = "role-deferred-position";
+        else
+            flushReason = "role-deferred-inventory";
+        accountState->persistFlushBusy = true;
+        pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+
+        /*
+         * MySQL runs outside the protocol mutex so other accounts can restore/
+         * build/capture while this snapshot is persisted.
+         */
+        didFlush = vm_net_mock_role_db_save_relational_ex(
+            flushReason,
+            job->accountId,
+            &job->roleDb,
+            job->roleDbValid,
+            job->warehouseIncluded ? &job->warehouse : NULL,
+            false,
+            NULL,
+            NULL,
+            0,
+            false,
+            NULL);
+
+        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        accountState->persistFlushBusy = false;
+        if (didFlush)
+        {
+            if (accountState->persistGeneration == job->persistGeneration)
+            {
+                if (job->hadInventoryDirty)
+                    accountState->roleInventoryDirty = false;
+                if (job->hadPositionDirty)
+                    accountState->rolePositionDirty = false;
+                if (g_vm_mock_service_active_account == accountState)
+                {
+                    if (job->hadInventoryDirty)
+                        g_vm_net_mock_role_inventory_dirty = false;
+                    if (job->hadPositionDirty)
+                        g_vm_net_mock_role_position_dirty = false;
+                }
+            }
+        }
+        else
+        {
+            printf("[error][mock-service] role_deferred_flush_failed account=%s "
+                   "reason=%s\n",
+                   accountState->accountId[0] ? accountState->accountId : "-",
+                   flushReason);
+        }
+        {
+            bool stillDirty = accountState->roleInventoryDirty ||
+                              accountState->rolePositionDirty;
+            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+            if (didFlush)
+            {
+                u32 flushEndMs = scheduler_get_tick_ms();
+                printf("[info][mock-service] role_deferred_flush account=%s reason=%s "
+                       "flush_ms=%u off_lock=1 gen=%u\n",
+                       logAccountId ? logAccountId : "-",
+                       flushReason,
+                       flushEndMs >= flushStartMs ? flushEndMs - flushStartMs : 0,
+                       job->persistGeneration);
+            }
+            free(job);
+            job = NULL;
+            if (!stillDirty)
+                break;
+        }
+    }
+}
+
 static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                                              u8 *requestBuffer,
                                              u32 requestCap,
@@ -828,6 +1048,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     u32 responseLen = 0;
     u32 responseEventType = 7;
     u32 responseFlags = 0;
+    u32 followupLen = 0;
+    u32 followupEventType = 7;
+    u8 followupBuffer[2048];
     u32 requestReceivedMs = 0;
     u32 requestProcessStartMs = 0;
     u32 requestProcessEndMs = 0;
@@ -918,17 +1141,30 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         {
             vm_mock_service_account_restore(accountState);
             g_vm_mock_service_active_client_id = requestMeta.clientId;
-            if (g_vm_net_mock_role_position_dirty)
-                vm_net_mock_role_db_save("client-disconnect-position");
+            if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
+            {
+                const char *flushReason = "client-disconnect-position";
+                if (g_vm_net_mock_role_inventory_dirty &&
+                    !g_vm_net_mock_role_position_dirty)
+                    flushReason = "client-disconnect-inventory";
+                else if (g_vm_net_mock_role_position_dirty &&
+                         g_vm_net_mock_role_inventory_dirty)
+                    flushReason = "client-disconnect-position+inventory";
+                vm_net_mock_role_db_save(flushReason);
+            }
             vm_mock_service_account_capture(accountState);
         }
         vm_mock_service_session_mark_offline(clientSession, "explicit-disconnect");
+        vm_mock_service_session_unbind_account(clientSession);
         g_vm_mock_service_active_account = NULL;
         g_vm_mock_service_active_account_id = NULL;
         g_vm_mock_service_active_client_id = 0;
         vm_mock_service_encode_header(header, "CBMR", 0, 0, 0);
         VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
-        return vm_mock_service_send_all(client, header, sizeof(header));
+        if (!vm_mock_service_send_all(client, header, sizeof(header)))
+            return 0;
+        /* 2 = success, but end the multi-frame TCP session. */
+        return 2;
     }
     if (requestFlags & VM_MOCK_SERVICE_REQUEST_FLAG_SCENE_SYNC_POLL)
     {
@@ -967,9 +1203,19 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                    workerQueueWaitMs,
                    protocolWaitMs,
                    protocolHoldMs);
+            fflush(stdout);
         }
-        fflush(stdout);
-        return 1;
+        /* Battle settle / auto operate may mark dirty under the poll lock.
+         * Flush after CBMR so other clients are not blocked during MySQL while
+         * this client's response is still being built. */
+        vm_mock_service_flush_deferred_role_db(accountState, logAccountId);
+        /*
+         * Poll cadence is ~3s; SESSION_IDLE reuse (400ms) never bridges two
+         * polls and only occupies a worker.  End the TCP session so the next
+         * accepted client is not stuck behind idle select (server_out queue
+         * wait ~0.6–0.9s under multiplayer).  Data keeps its own reuse window.
+         */
+        return 2;
     }
     if (payloadLen == 0)
         VM_MOCK_SERVICE_PROTOCOL_RETURN(0);
@@ -977,6 +1223,40 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     haveLoginRequest = vm_mock_service_parse_login_request(requestBuffer + requestMetaLen,
                                                            payloadLen,
                                                            &loginRequest);
+    if (haveLoginRequest)
+    {
+        g_vm_mock_service_active_client_id = requestMeta.clientId;
+        vm_mock_service_session_note_code_version(requestBuffer + requestMetaLen,
+                                                  payloadLen);
+        if (!vm_net_mock_login_code_version_ok(&authError))
+        {
+            responseLen = vm_net_mock_build_login_failure_response(
+                loginRequest.requestSubtype,
+                authError ? authError : g_vm_net_mock_login_update_required_gbk,
+                responseBuffer,
+                responseCap);
+            vm_mock_service_encode_header(header, "CBMR", 0, responseLen, 7);
+            VM_MOCK_SERVICE_PROTOCOL_UNLOCK();
+            if (!vm_mock_service_send_all(client, header, sizeof(header)))
+                return 0;
+            if (responseLen > 0 &&
+                !vm_mock_service_send_all(client, responseBuffer, responseLen))
+            {
+                return 0;
+            }
+            printf("[info][mock-service] login_reject client=%08x user=%s "
+                   "reason=codeVersion queue_wait_ms=%u state_wait_ms=%u "
+                   "state_hold_ms=%u\n",
+                   requestMeta.clientId,
+                   loginRequest.userName[0] ? loginRequest.userName : "-",
+                   workerQueueWaitMs,
+                   protocolWaitMs,
+                   protocolHoldMs);
+            g_vm_mock_service_active_client_id = 0;
+            return 1;
+        }
+        g_vm_mock_service_active_client_id = 0;
+    }
     if (haveLoginRequest && !vm_mock_service_authenticate_login_request(&loginRequest, &authError))
     {
         responseLen = vm_net_mock_build_login_failure_response(loginRequest.requestSubtype,
@@ -1103,6 +1383,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
 
     g_schedulerTick = scheduler_get_tick_ms() / VM_SCHED_FRAME_MS;
     g_vm_mock_service_active_client_id = requestMeta.clientId;
+    vm_net_mock_set_preferred_title_server_gbk(requestMeta.preferredTitleServerGbk);
     requestProcessStartMs = scheduler_get_tick_ms();
     responseLen = vm_net_mock_process_request_bytes(0,
                                                     requestBuffer + requestMetaLen,
@@ -1112,6 +1393,54 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                                                     &responseEventType,
                                                     &closeAfterData);
     requestProcessEndMs = scheduler_get_tick_ms();
+    /*
+     * Same-TCP second CBMR (HAS_FOLLOWUP): take while account/client context is
+     * still active, and BEFORE account_capture.  Instance-challenge followup
+     * arms g_mockBattleOperateSessionArmed; capturing first then building the
+     * 4/10 left armed=1 only in process globals, so the next request's
+     * account_restore wiped it (2026-07-30 小猴子: battle_wire then
+     * battle_operate_ignore no-armed-session).
+     */
+    followupLen = 0;
+    if (responseEventType == 7)
+    {
+        vm_mock_service_client_session *passSession =
+            vm_mock_service_find_client_session(requestMeta.clientId);
+
+        if (responseLen != 0 &&
+            passSession != NULL &&
+            passSession->warehouseDialogPending &&
+            passSession->warehouseDialogTick == g_schedulerTick)
+        {
+            followupLen = vm_net_mock_take_warehouse_dialog_wire_followup(
+                followupBuffer, sizeof(followupBuffer), passSession);
+            if (followupLen != 0)
+                responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP;
+        }
+        else if (responseLen != 0 &&
+                 passSession != NULL &&
+                 passSession->equipSellDialogPending &&
+                 passSession->equipSellDialogTick == g_schedulerTick)
+        {
+            followupLen = vm_net_mock_take_equip_sell_dialog_wire_followup(
+                followupBuffer, sizeof(followupBuffer), passSession);
+            if (followupLen != 0)
+                responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP;
+        }
+        else if (passSession != NULL &&
+                 passSession->instanceChallengeBattlePending)
+        {
+            /*
+             * Confirm same-tick: primary 30/10 + followup 4/10 (responseLen!=0).
+             * 临安 retry: empty poll (responseLen==0) may still carry a second
+             * HAS_FOLLOWUP 4/10 after age_ticks>=1.  take_* itself gates age.
+             */
+            followupLen = vm_net_mock_take_instance_challenge_battle_wire_followup(
+                followupBuffer, sizeof(followupBuffer), passSession);
+            if (followupLen != 0)
+                responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP;
+        }
+    }
     if (accountState != NULL)
     {
         vm_mock_service_capture_session_presence(requestMeta.clientId);
@@ -1123,6 +1452,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     g_vm_mock_service_active_account = NULL;
     g_vm_mock_service_active_account_id = NULL;
     g_vm_mock_service_active_client_id = 0;
+    vm_net_mock_set_preferred_title_server_gbk(NULL);
     handledValid = g_netLastHandledValid != 0;
     if (handledValid)
         snprintf(handledSource, sizeof(handledSource), "%s", g_netLastHandledSource);
@@ -1147,32 +1477,61 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                    requestProcessEndMs - requestProcessStartMs : 0);
         return 0;
     }
+    if (followupLen != 0)
+    {
+        vm_mock_service_encode_header(header, "CBMR", 0, followupLen, followupEventType);
+        if (!vm_mock_service_send_all(client, header, sizeof(header)) ||
+            !vm_mock_service_send_all(client, followupBuffer, followupLen))
+        {
+            printf("[warn][mock-service] response_send_failed stage=followup account=%s "
+                   "request=%u primary=%u followup=%u\n",
+                   logAccountId, payloadLen, responseLen, followupLen);
+            return 0;
+        }
+    }
 
     if (handledValid &&
         strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0)
     {
+        static u32 s_moveinfoTimingBucketMs = 0;
         u32 nowMs = scheduler_get_tick_ms();
-        printf("[info][mock-service] actor_moveinfo_timing client=%08x process_ms=%u total_ms=%u\n",
-               requestMeta.clientId,
-               requestProcessEndMs >= requestProcessStartMs ?
-                   requestProcessEndMs - requestProcessStartMs : 0,
-               nowMs >= requestReceivedMs ? nowMs - requestReceivedMs : 0);
+        u32 processMs = requestProcessEndMs >= requestProcessStartMs ?
+                            requestProcessEndMs - requestProcessStartMs : 0;
+        /* Always log slow acks; rate-limit the routine timing line. */
+        if (processMs >= 50u ||
+            s_moveinfoTimingBucketMs == 0 ||
+            nowMs < s_moveinfoTimingBucketMs ||
+            (nowMs - s_moveinfoTimingBucketMs) >= 1000u)
+        {
+            printf("[info][mock-service] actor_moveinfo_timing client=%08x process_ms=%u total_ms=%u\n",
+                   requestMeta.clientId,
+                   processMs,
+                   nowMs >= requestReceivedMs ? nowMs - requestReceivedMs : 0);
+            s_moveinfoTimingBucketMs = nowMs;
+        }
     }
 
-    printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u source=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u process_ms=%u\n",
-           logAccountId,
-           payloadLen, responseLen, responseEventType, responseFlags,
-           handledValid ? handledSource : "-",
-           workerQueueWaitMs,
-           protocolWaitMs,
-           protocolHoldMs,
-           requestProcessEndMs >= requestProcessStartMs ?
-               requestProcessEndMs - requestProcessStartMs : 0);
-    /* Response bytes are already on the client socket and the protocol lock
-     * has been released.  Flush the service-only batch here so diagnostics
-     * remain current without putting disk latency on the request critical
-     * path. */
-    fflush(stdout);
+    /* High-frequency moveinfo: skip the per-request summary line + fflush. */
+    if (!(handledValid &&
+          strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0))
+    {
+        printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u followup=%u source=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u process_ms=%u\n",
+               logAccountId,
+               payloadLen, responseLen, responseEventType, responseFlags, followupLen,
+               handledValid ? handledSource : "-",
+               workerQueueWaitMs,
+               protocolWaitMs,
+               protocolHoldMs,
+               requestProcessEndMs >= requestProcessStartMs ?
+                   requestProcessEndMs - requestProcessStartMs : 0);
+        fflush(stdout);
+    }
+    /*
+     * Hot paths mark inventory/position dirty without MySQL under the request
+     * lock.  Flush only after CBMR is on the wire so continuous ops stay within
+     * client recv budgets; crash before flush can lose the last mutations.
+     */
+    vm_mock_service_flush_deferred_role_db(accountState, logAccountId);
 #undef VM_MOCK_SERVICE_PROTOCOL_RETURN
 #undef VM_MOCK_SERVICE_PROTOCOL_UNLOCK
     return 1;
@@ -1228,10 +1587,22 @@ static bool vm_net_mock_service_ensure_resource_root(void)
 
 enum
 {
-    VM_MOCK_SERVICE_WORKER_DEFAULT = 4,
+    /* Short-connect clients open scene-poll + WT bursts; 12 default cuts
+     * accept-queue wait under concurrent phones (was 8; server_out ~0.6–0.9s). */
+    VM_MOCK_SERVICE_WORKER_DEFAULT = 12,
     VM_MOCK_SERVICE_WORKER_MIN = 2,
-    VM_MOCK_SERVICE_WORKER_MAX = 16,
-    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 128
+    VM_MOCK_SERVICE_WORKER_MAX = 32,
+    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 128,
+    /*
+     * After a WT data frame, wait briefly for another CBMS on the same TCP
+     * (client data-session reuse).  Keep short: long idle holds starve the
+     * accept queue under multiplayer.  Poll path returns 2 and skips this.
+     */
+    VM_MOCK_SERVICE_SESSION_IDLE_MS = 200,
+    /* Dedicated admin workers so game CBMS backlog cannot starve :19091. */
+    VM_MOCK_ADMIN_WORKER_DEFAULT = 2,
+    VM_MOCK_ADMIN_WORKER_MIN = 1,
+    VM_MOCK_ADMIN_WORKER_MAX = 4
 };
 
 typedef enum
@@ -1275,6 +1646,7 @@ struct vm_mock_service_worker_pool
 };
 
 static vm_mock_service_worker_pool g_vmMockServiceWorkerPool;
+static vm_mock_service_worker_pool g_vmMockAdminWorkerPool;
 
 static u32 vm_mock_service_worker_count_from_environment(void)
 {
@@ -1295,19 +1667,63 @@ static u32 vm_mock_service_worker_count_from_environment(void)
     return (u32)value;
 }
 
+static u32 vm_mock_admin_worker_count_from_environment(void)
+{
+    const char *configured = getenv("CBE_MOCK_ADMIN_WORKERS");
+    long value = VM_MOCK_ADMIN_WORKER_DEFAULT;
+    char *end = NULL;
+
+    if (configured != NULL && configured[0] != 0)
+    {
+        value = strtol(configured, &end, 10);
+        if (end == configured || *end != 0)
+            value = VM_MOCK_ADMIN_WORKER_DEFAULT;
+    }
+    if (value < VM_MOCK_ADMIN_WORKER_MIN)
+        value = VM_MOCK_ADMIN_WORKER_MIN;
+    if (value > VM_MOCK_ADMIN_WORKER_MAX)
+        value = VM_MOCK_ADMIN_WORKER_MAX;
+    return (u32)value;
+}
+
 static void vm_mock_service_configure_accepted_socket(vm_mock_service_socket client)
 {
+    int keepalive = 1;
 #ifdef _WIN32
     int timeoutMs = VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS;
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
+    setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keepalive, sizeof(keepalive));
 #else
     struct timeval timeout;
     timeout.tv_sec = VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS / 1000;
     timeout.tv_usec = (VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS % 1000) * 1000;
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
 #endif
+}
+
+static int vm_mock_service_socket_wait_readable(vm_mock_service_socket sock, u32 timeoutMs)
+{
+    fd_set readSet;
+    struct timeval tv;
+    int rc;
+
+    if (sock == VM_MOCK_SERVICE_INVALID_SOCKET)
+        return 0;
+    FD_ZERO(&readSet);
+    FD_SET(sock, &readSet);
+    tv.tv_sec = (long)(timeoutMs / 1000u);
+    tv.tv_usec = (long)((timeoutMs % 1000u) * 1000u);
+#ifdef _WIN32
+    rc = select(0, &readSet, NULL, NULL, &tv);
+#else
+    rc = select((int)sock + 1, &readSet, NULL, NULL, &tv);
+#endif
+    if (rc <= 0)
+        return 0;
+    return FD_ISSET(sock, &readSet) ? 1 : 0;
 }
 
 static void *vm_mock_service_connection_worker_main(void *opaque)
@@ -1354,56 +1770,93 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         }
         if (job.kind == VM_MOCK_SERVICE_CONNECTION_GAME)
         {
-            ok = vm_net_mock_service_handle_client(job.socket,
-                                                   worker->requestBuffer,
-                                                   sizeof(g_netMockResponse),
-                                                   worker->responseBuffer,
-                                                   sizeof(g_netMockResponse),
-                                                   queueWaitMs);
-            if (!ok)
+            if (worker->requestBuffer == NULL || worker->responseBuffer == NULL)
             {
-                printf("[warn][mock-service] dropped malformed request worker=%u sequence=%u queue_wait_ms=%u\n",
-                       worker->workerId, job.sequence, queueWaitMs);
+                printf("[error][mock-service] game job on admin-only worker=%u sequence=%u\n",
+                       worker->workerId, job.sequence);
+                ok = 0;
+            }
+            else
+            {
+                u32 sessionFrames = 0;
+                u32 sessionStartMs = workerStartMs;
+
+                for (;;)
+                {
+                    int frameRc = vm_net_mock_service_handle_client(
+                        job.socket,
+                        worker->requestBuffer,
+                        sizeof(g_netMockResponse),
+                        worker->responseBuffer,
+                        sizeof(g_netMockResponse),
+                        queueWaitMs);
+                    if (frameRc <= 0)
+                    {
+                        ok = 0;
+                        if (sessionFrames == 0)
+                        {
+                            printf("[warn][mock-service] dropped malformed request worker=%u sequence=%u queue_wait_ms=%u\n",
+                                   worker->workerId, job.sequence, queueWaitMs);
+                        }
+                        break;
+                    }
+                    ok = 1;
+                    ++sessionFrames;
+                    /* Explicit disconnect (rc==2) ends the TCP session. */
+                    if (frameRc == 2)
+                        break;
+                    if (!vm_mock_service_socket_wait_readable(
+                            job.socket, (u32)VM_MOCK_SERVICE_SESSION_IDLE_MS))
+                        break;
+                    /* Subsequent frames are not charged the original accept wait. */
+                    queueWaitMs = 0;
+                }
+                if (sessionFrames > 1)
+                {
+                    u32 holdMs = scheduler_get_tick_ms();
+                    holdMs = holdMs >= sessionStartMs ? holdMs - sessionStartMs : 0;
+                    printf("[info][mock-service] session_reuse worker=%u sequence=%u frames=%u hold_ms=%u\n",
+                           worker->workerId, job.sequence, sessionFrames, holdMs);
+                    fflush(stdout);
+                }
             }
         }
         else if (job.kind == VM_MOCK_SERVICE_CONNECTION_ADMIN)
         {
-            u32 protocolWaitStartMs = scheduler_get_tick_ms();
-            u32 protocolLockMs = 0;
-            u32 protocolDoneMs = 0;
+            u32 handleStartMs = 0;
+            u32 handleDoneMs = 0;
 
-            /* The admin surface shares the same MySQL connection and mutates
-             * the same account/guild/task caches as game requests. */
-            pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
-            protocolLockMs = scheduler_get_tick_ms();
+            /* HTTP receive runs unlocked inside handle_client; dispatch takes
+             * g_vm_mock_service_protocol_mutex but releases it around HTTP
+             * send so game traffic is not blocked by page body transfer. */
+            handleStartMs = scheduler_get_tick_ms();
             ok = vm_mock_admin_handle_client(job.socket);
-            protocolDoneMs = scheduler_get_tick_ms();
-            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+            handleDoneMs = scheduler_get_tick_ms();
             if (!ok || queueWaitMs > 20 ||
-                protocolLockMs - protocolWaitStartMs > 20 ||
-                protocolDoneMs - protocolLockMs > 100)
+                handleDoneMs - handleStartMs > 100)
             {
-                printf("[info][mock-admin] request worker=%u sequence=%u result=%d queue_wait_ms=%u state_wait_ms=%u process_ms=%u\n",
+                printf("[info][mock-admin] request worker=%u sequence=%u result=%d queue_wait_ms=%u handle_ms=%u\n",
                        worker->workerId,
                        job.sequence,
                        ok,
                        queueWaitMs,
-                       protocolLockMs >= protocolWaitStartMs ?
-                           protocolLockMs - protocolWaitStartMs : 0,
-                       protocolDoneMs >= protocolLockMs ?
-                           protocolDoneMs - protocolLockMs : 0);
+                       handleDoneMs >= handleStartMs ?
+                           handleDoneMs - handleStartMs : 0);
             }
         }
         vm_mock_service_socket_close(job.socket);
     }
 }
 
-static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool)
+static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool,
+                                              u32 requestedWorkers,
+                                              bool allocateGameBuffers,
+                                              const char *poolName)
 {
-    u32 requestedWorkers = vm_mock_service_worker_count_from_environment();
     u32 createdWorkers = 0;
 
-    if (pool == NULL)
+    if (pool == NULL || requestedWorkers == 0 ||
+        requestedWorkers > VM_MOCK_SERVICE_WORKER_MAX)
         return false;
     memset(pool, 0, sizeof(*pool));
     if (pthread_mutex_init(&pool->mutex, NULL) != 0)
@@ -1417,14 +1870,71 @@ static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool)
     pool->workerCount = requestedWorkers;
     for (u32 i = 0; i < requestedWorkers; ++i)
     {
+        /* Prefer 8MB stacks (admin pages used to overflow ~1MB defaults).
+         * If winpthread rejects the custom size, fall back to default so the
+         * whole service (including :19091 admin) still comes up. */
+        pthread_attr_t attr;
+        size_t workerStackBytes = 8u * 1024u * 1024u;
         vm_mock_service_worker_context *worker = &pool->workers[i];
+        int createRc = -1;
+        bool customStackReady = false;
+
         worker->pool = pool;
         worker->workerId = i + 1;
-        worker->requestBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
-        worker->responseBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
-        if (worker->requestBuffer == NULL || worker->responseBuffer == NULL ||
-            pthread_create(&worker->thread, NULL,
-                           vm_mock_service_connection_worker_main, worker) != 0)
+        worker->requestBuffer = NULL;
+        worker->responseBuffer = NULL;
+        if (allocateGameBuffers)
+        {
+            worker->requestBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
+            worker->responseBuffer = (u8 *)malloc(sizeof(g_netMockResponse));
+            if (worker->requestBuffer == NULL || worker->responseBuffer == NULL)
+            {
+                free(worker->requestBuffer);
+                free(worker->responseBuffer);
+                worker->requestBuffer = NULL;
+                worker->responseBuffer = NULL;
+                pthread_mutex_lock(&pool->mutex);
+                pool->stopRequested = true;
+                pthread_cond_broadcast(&pool->condition);
+                pthread_mutex_unlock(&pool->mutex);
+                for (u32 j = 0; j < createdWorkers; ++j)
+                    pthread_join(pool->workers[j].thread, NULL);
+                for (u32 j = 0; j < createdWorkers; ++j)
+                {
+                    free(pool->workers[j].requestBuffer);
+                    free(pool->workers[j].responseBuffer);
+                }
+                pthread_cond_destroy(&pool->condition);
+                pthread_mutex_destroy(&pool->mutex);
+                memset(pool, 0, sizeof(*pool));
+                return false;
+            }
+        }
+        if (pthread_attr_init(&attr) == 0)
+        {
+            if (pthread_attr_setstacksize(&attr, workerStackBytes) == 0)
+                customStackReady = true;
+            else
+                printf("[warn][%s] worker stacksize=%u failed; using default\n",
+                       poolName ? poolName : "mock-service",
+                       (u32)workerStackBytes);
+            createRc = pthread_create(
+                &worker->thread,
+                customStackReady ? &attr : NULL,
+                vm_mock_service_connection_worker_main,
+                worker);
+            pthread_attr_destroy(&attr);
+            if (createRc != 0 && customStackReady)
+            {
+                printf("[warn][%s] worker create with stack_mb=8 failed rc=%d; retry default stack\n",
+                       poolName ? poolName : "mock-service",
+                       createRc);
+                createRc = pthread_create(&worker->thread, NULL,
+                                          vm_mock_service_connection_worker_main,
+                                          worker);
+            }
+        }
+        if (createRc != 0)
         {
             free(worker->requestBuffer);
             free(worker->responseBuffer);
@@ -1449,9 +1959,11 @@ static bool vm_mock_service_worker_pool_start(vm_mock_service_worker_pool *pool)
         createdWorkers++;
     }
     pool->initialized = true;
-    printf("[info][mock-service] concurrency workers=%u queue=%u state_model=serialized-legacy-context\n",
+    printf("[info][%s] concurrency workers=%u queue=%u worker_stack_mb=8 allocate_game_buffers=%d\n",
+           poolName ? poolName : "mock-service",
            pool->workerCount,
-           (u32)VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX);
+           (u32)VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX,
+           allocateGameBuffers ? 1 : 0);
     return true;
 }
 
@@ -1536,6 +2048,22 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     }
     if (!vm_mock_payment_ensure_tables())
         printf("[warn][payment] recharge_disabled reason=schema-unavailable\n");
+    /*
+     * Warm MySQL overlay catalogs before XSE/NPC validation.  Validation
+     * collects server_dynamic_npcs into the 27/11 catalog; a prior shop-item
+     * socket timeout used to sticky-fail that load and leave copper-stage
+     * with npcnum=0 for the whole process lifetime.
+     */
+    {
+        u32 shopCount = vm_net_mock_load_shop_catalog();
+        bool monsterOk = vm_net_mock_monster_db_load();
+        bool dynamicNpcOk = vm_net_mock_dynamic_npc_db_load();
+        printf("[info][mock-service] battle_catalog_warmup shop_items=%u monster_db=%s "
+               "dynamic_npc=%s evidence=challenge-start-must-not-block-on-mysql\n",
+               shopCount,
+               monsterOk ? "ok" : "base-stats-fallback",
+               dynamicNpcOk ? "ok" : "retry-on-scene-collect");
+    }
     if (!vm_net_mock_validate_xse_task_resources())
     {
         printf("[error][mock-service] xse/task resource validation failed\n");
@@ -1595,13 +2123,27 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             printf("[info][mock-admin] listening=http://%s:%u/\n",
                    g_mockAdminBindHost, g_mockAdminPort);
     }
-    if (!vm_mock_service_worker_pool_start(&g_vmMockServiceWorkerPool))
+    if (!vm_mock_service_worker_pool_start(&g_vmMockServiceWorkerPool,
+                                           vm_mock_service_worker_count_from_environment(),
+                                           true,
+                                           "mock-service"))
     {
         printf("[error][mock-service] worker pool start failed\n");
         vm_mock_service_socket_close(adminSocket);
         vm_mock_service_socket_close(serverSocket);
         return -1;
     }
+    if (adminSocket != VM_MOCK_SERVICE_INVALID_SOCKET &&
+        !vm_mock_service_worker_pool_start(&g_vmMockAdminWorkerPool,
+                                           vm_mock_admin_worker_count_from_environment(),
+                                           false,
+                                           "mock-admin"))
+    {
+        printf("[error][mock-admin] worker pool start failed; rejecting admin accepts\n");
+        vm_mock_service_socket_close(adminSocket);
+        adminSocket = VM_MOCK_SERVICE_INVALID_SOCKET;
+    }
+    printf("[info][mock-service] state_model=serialized-legacy-context admin_isolated=1\n");
     fflush(stdout);
     for (;;)
     {
@@ -1665,13 +2207,19 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
             if (adminClient != VM_MOCK_SERVICE_INVALID_SOCKET)
             {
                 u32 sequence = 0;
-                vm_mock_service_configure_accepted_socket(adminClient);
-                if (!vm_mock_service_worker_pool_enqueue(&g_vmMockServiceWorkerPool,
+                /* Use the admin HTTP timeout, not the shorter game CBMS
+                 * timeout, so queued admin sockets keep a full receive window. */
+                vm_mock_admin_configure_client_socket(adminClient);
+                if (!g_vmMockAdminWorkerPool.initialized ||
+                    !vm_mock_service_worker_pool_enqueue(&g_vmMockAdminWorkerPool,
                                                          adminClient,
                                                          VM_MOCK_SERVICE_CONNECTION_ADMIN,
                                                          &sequence))
                 {
                     printf("[warn][mock-admin] connection_rejected reason=queue-full\n");
+                    (void)vm_mock_admin_send_response(
+                        adminClient, "503 Service Unavailable", NULL, NULL,
+                        "管理请求队列已满，请稍后重试。\n");
                     vm_mock_service_socket_close(adminClient);
                 }
                 else if (acceptedAdminLogCount++ < 8)
@@ -1937,6 +2485,7 @@ static void vm_net_mock_capture_remote_completion(
     u8 objectCount = 0;
     u8 parsedObjects = 0;
     vm_net_mock_response_object object;
+    bool hasEnterWithPosinfo = false;
 
     if (observation == NULL)
         return;
@@ -1955,6 +2504,27 @@ static void vm_net_mock_capture_remote_completion(
         return;
     objectCount = response[4];
 
+    while (parsedObjects < objectCount &&
+           vm_net_mock_next_response_object(response, packetLen, &offset,
+                                            &object))
+    {
+        if (object.major == 1 && object.kind == 30 && object.subtype == 1)
+        {
+            char scene[64];
+            u16 x = 0;
+            u16 y = 0;
+
+            if (vm_net_mock_response_object_string(&object, "scene", scene,
+                                                    sizeof(scene)) &&
+                vm_net_mock_response_object_posinfo(&object, &x, &y))
+            {
+                hasEnterWithPosinfo = true;
+            }
+        }
+        ++parsedObjects;
+    }
+    offset = 5;
+    parsedObjects = 0;
     while (parsedObjects < objectCount &&
            vm_net_mock_next_response_object(response, packetLen, &offset,
                                             &object))
@@ -1980,7 +2550,7 @@ static void vm_net_mock_capture_remote_completion(
                 if (object.subtype == 2)
                     observation->sceneCompleteAfterCallback = 1;
             }
-            else if (object.subtype == 2)
+            else if (object.subtype == 2 && !hasEnterWithPosinfo)
             {
                 observation->sceneCompleteAfterCallback = 1;
                 if (haveScene)

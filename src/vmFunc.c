@@ -365,7 +365,13 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
 
         if (ch <= 0x7F)
         {
-            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' || ch == '+' ||
+            /* Space is required: retail SCE embeds map names such as
+             * "16锁妖塔_01 .map" (U+0020 before ".map"). Rejecting space
+             * makes UCS-2 detection fail, then the GBK C-string fallback
+             * stops at the first 0x00 high byte and truncates the path,
+             * so WT18/7 installs never stick and the client re-downloads. */
+            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' ||
+                  ch == '+' || ch == ' ' ||
                   (ch >= '0' && ch <= '9') ||
                   (ch >= 'A' && ch <= 'Z') ||
                   (ch >= 'a' && ch <= 'z')))
@@ -823,7 +829,6 @@ static int vm_file_is_invalid_named_resource_cache(const char *normalizedName, c
 static int vm_file_try_resolve_map_path(const char *normalizedName, const char *mode, char *resolvedName, size_t resolvedSize)
 {
     FILE *fp;
-    const char *baseName;
     char sceneName[256];
     if (normalizedName == NULL || resolvedName == NULL || resolvedSize == 0)
         return 0;
@@ -831,9 +836,21 @@ static int vm_file_try_resolve_map_path(const char *normalizedName, const char *
         return 0;
     if (strncmp(normalizedName, "JHOnlineData/", 13) != 0)
         return 0;
-    baseName = normalizedName + 13;
-    if ((baseName[0] == 'c' || baseName[0] == 'b') &&
-        snprintf(sceneName, sizeof(sceneName), "%s.sce", normalizedName) < (int)sizeof(sceneName))
+    /*
+     * Extensionless scene keys (e.g. 29梦境空间_01) are SCE payloads.  Prefer
+     * the real SCE leaf over a sibling ".map": dream maps share embedded
+     * 29*_03.map, and an orphan 29*_01.map (copy of _03) would steal the open,
+     * version-probe a never-published name, and crash ScreenInit after
+     * not-published (2026-07-31).
+     */
+    fp = fopen(normalizedName, "rb");
+    if (fp != NULL)
+    {
+        fclose(fp);
+        return 0;
+    }
+    if (snprintf(sceneName, sizeof(sceneName), "%s.sce", normalizedName) <
+            (int)sizeof(sceneName))
     {
         fp = fopen(sceneName, "rb");
         if (fp != NULL)
@@ -1045,10 +1062,37 @@ int vm_get_file_handle(char *nameBuf, const char *mode)
                 if (f != NULL)
                     snprintf(normalizedName, sizeof(normalizedName), "%s", resolvedName);
             }
-            if (f == NULL && vm_file_is_read_only_mode(openMode) &&
-                vm_file_try_download_named_resource(normalizedName))
+            /*
+             * Named resources published by admin (SCE/Actor/GIF): compare the
+             * local content-version with the server catalog.  Miss or stale
+             * pulls WT18/7; matching version keeps the cache.
+             *
+             * When the path already opened successfully, close it before the
+             * probe: Windows cannot remove/rename over a still-open FILE*, so
+             * version-stale SCE installs previously no-op'd while the server
+             * still logged client-install-callback.
+             */
+            if (vm_file_is_read_only_mode(openMode))
             {
-                f = fopen(normalizedName, openMode);
+                if (f == NULL)
+                {
+                    if (vm_file_try_download_named_resource(normalizedName))
+                        f = fopen(normalizedName, openMode);
+                }
+                else
+                {
+                    bool maybeNamed =
+                        (strncmp(normalizedName, "JHOnlineData/", 13) == 0) ||
+                        (strchr(normalizedName, '/') == NULL &&
+                         strchr(normalizedName, '\\') == NULL);
+                    if (maybeNamed)
+                    {
+                        fclose(f);
+                        f = NULL;
+                        (void)vm_file_try_download_named_resource(normalizedName);
+                        f = fopen(normalizedName, openMode);
+                    }
+                }
             }
             if (f == NULL && vm_file_mode_is_writeable(openMode))
             {

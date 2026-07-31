@@ -200,17 +200,36 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     u32 hookedLen = 0;
 
     /*
-     * After battle revival, mmGame may still show HP=0 until it consumes an
-     * in-scene actorinfo refresh.  Prefer delivering that on the next real WT
-     * request (move / hangup / etc.) so it is not stuck behind sceneVisibleReady.
+     * After mmShop return, rebuild SCE combat kind-2 nodes with a deferred
+     * 30/1 at the live grid position (unstuck contract).  After battle/map
+     * revival, mmGame may still show HP=0 until it consumes an in-scene
+     * actorinfo refresh.  Deliver those on scene-poll (or harmless WT) —
+     * never preempt collision 4/1, hangup 2/10, mall open, plain actor-other
+     * 2/10, or moveinfo 2/1.  Stealing those with 1/1/14 mid-fight / before
+     * mall poisoned actor state and flash-crashed mmShop (2026-07-28).
      */
-    hookedLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
-        out, outCap, "wt-dispatch");
-    if (hookedLen)
+    if (!vm_net_mock_is_challenge_interaction_request(request, requestLen) &&
+        !vm_net_mock_is_hangup_battle_start_request(request, requestLen) &&
+        !vm_net_mock_is_scene_interaction_followup_request(request, requestLen) &&
+        !vm_net_mock_is_actor_other_only10_request(request, requestLen) &&
+        !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
     {
-        vm_net_log_handled_packet("builtin-map-actor-vitals-sync", request,
-                                  requestLen, hookedLen);
-        return hookedLen;
+        hookedLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
+            out, outCap, "wt-dispatch");
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-shop-return-scene-enter", request,
+                                      requestLen, hookedLen);
+            return hookedLen;
+        }
+        hookedLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
+            out, outCap, "wt-dispatch");
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-map-actor-vitals-sync", request,
+                                      requestLen, hookedLen);
+            return hookedLen;
+        }
     }
 
     /*
@@ -239,6 +258,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    hookedLen = vm_net_mock_build_paid_portal_confirm_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-paid-portal-confirm", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     /* Chat is commonly flushed together with the scene's 2/10 refresh object.
      * Handle it before the generic `type` detector, whose unrelated type=2
      * branch would otherwise consume a world/team chat request. */
@@ -265,6 +291,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
 
     if (vm_net_mock_is_update_version_catalog_request(request, requestLen))
     {
+        vm_mock_service_session_note_code_version(request, requestLen);
         hookedLen = vm_net_mock_build_version_response(request, requestLen,
                                                        out, outCap);
         if (hookedLen)
@@ -443,6 +470,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
+        vm_net_mock_note_backpack_open_cleared_deposit_resync("17/1+7/42");
         vm_net_log_handled_packet("builtin-backpack-items-books-combo", request, requestLen, hookedLen);
         return hookedLen;
     }
@@ -451,6 +479,13 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-settings-unstuck", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_ranking_board23_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-ranking-board23", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -807,6 +842,26 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    /*
+     * Empty 1/25/11 is the client's info-banner follow-up after a center
+     * prompt.  Ignoring it (response=0) leaves mmGame waiting and can show a
+     * stuck 斗 status.  ACK with 25/12 clear (same clear path as hangup docs).
+     */
+    if (vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 11))
+    {
+        hookedLen = vm_net_mock_build_info_banner_clear12_ack_response(out, outCap);
+        if (hookedLen)
+        {
+            printf("[info][network] mock_info_banner_clear12_ack "
+                   "request=25/11 empty response=25/12 resp=%u "
+                   "evidence=IDA:0x01010C7E\n",
+                   hookedLen);
+            vm_net_log_handled_packet("builtin-info-banner-clear12-ack",
+                                      request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
     if (vm_net_mock_is_actor_other_scene_default_combo_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_scene_default_event_response(out, outCap);
@@ -837,6 +892,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    hookedLen = vm_net_mock_build_practise_help19_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-help19", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_gold21_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-gold21", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_battle_death_prompt_followup_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -853,11 +922,47 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_chest_open_response(request, requestLen, out,
+                                                       outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-chest-open", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_timed_special_item_use_response(
         request, requestLen, out, outCap);
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-special-timed-item-use", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_pill_use_response(request, requestLen,
+                                                             out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-pill-use", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_pill_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-pill-followup", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_battle_insight_followup_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-battle-insight-followup", request,
                                   requestLen, hookedLen);
         return hookedLen;
     }
@@ -910,11 +1015,30 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_equipment_repair_confirm_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-equipment-repair-confirm", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_equipment_repair_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-equipment-repair", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (vm_net_mock_is_backpack_open_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_note_backpack_open_cleared_deposit_resync("7/42->17/1+7/42");
             vm_net_log_handled_packet("builtin-backpack-open", request, requestLen, hookedLen);
             return hookedLen;
         }
@@ -925,6 +1049,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_backpack_items_response(out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_note_backpack_open_cleared_deposit_resync("17/1");
             vm_net_log_handled_packet("builtin-backpack-items", request, requestLen, hookedLen);
             return hookedLen;
         }
@@ -1078,10 +1203,22 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_duel_post_release_exit_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-duel-exit-redeliver", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_synchronized_team_battle_response(
         request, requestLen, out, outCap, VM_MOCK_TEAM_BATTLE_BUILD_OPERATE);
     if (hookedLen)
     {
+        vm_net_mock_clear_instance_challenge_battle_pending(
+            vm_mock_service_get_active_client_session(),
+            "battle-operate-4/2");
         vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-operate", request, requestLen, hookedLen);
         return hookedLen;
@@ -1090,8 +1227,18 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         request, requestLen, out, outCap, VM_MOCK_TEAM_BATTLE_BUILD_OPERATE_FALLBACK);
     if (hookedLen)
     {
+        vm_net_mock_clear_instance_challenge_battle_pending(
+            vm_mock_service_get_active_client_session(),
+            "battle-operate-4/2");
         vm_net_mock_battle_publish_role_vitals();
         vm_net_log_handled_packet("builtin-battle-operate-fallback", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_battle_auto11_flag_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-battle-auto11-flag", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -1121,6 +1268,9 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_actor_other_portal_response(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_clear_instance_challenge_battle_pending(
+                vm_mock_service_get_active_client_session(),
+                "actor-other-portal");
             vm_net_log_handled_packet("builtin-actor-other-portal", request, requestLen, hookedLen);
             return hookedLen;
         }
@@ -1128,6 +1278,9 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_actor_other_only10_response(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_clear_instance_challenge_battle_pending(
+                vm_mock_service_get_active_client_session(),
+                "actor-other-only10");
             vm_net_log_handled_packet("builtin-actor-other-only10", request, requestLen, hookedLen);
             return hookedLen;
         }
@@ -1151,6 +1304,9 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
             vm_net_log_handled_packet("builtin-title-server-select", request, requestLen, hookedLen);
             return hookedLen;
         }
+        printf("[error][network] title-server-select detector matched but builder returned 0 "
+               "req_len=%u out_cap=%u (see mock_title_server_select errors above)\n",
+               requestLen, outCap);
     }
 
     u8 requestKind = 0;
@@ -1251,6 +1407,7 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (vm_net_mock_request_contains(request, requestLen, "version"))
     {
         vm_net_mock_title_login_phase_reset("version-handshake");
+        vm_mock_service_session_note_code_version(request, requestLen);
         hookedLen = vm_net_mock_build_version_response(request, requestLen,
                                                        out, outCap);
         if (hookedLen)
@@ -1272,6 +1429,11 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_battle_operate_response_fallback(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_clear_instance_challenge_battle_pending(
+                vm_mock_service_get_active_client_session(),
+                "battle-operate-4/2");
+            if (g_mockBattleAutoPrefer != 0)
+                vm_net_mock_battle_auto_note_client_operate();
             vm_net_mock_battle_publish_role_vitals();
             vm_net_log_handled_packet("builtin-battle-operate-lastchance-fallback", request, requestLen, hookedLen);
             return hookedLen;
@@ -1279,6 +1441,11 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         hookedLen = vm_net_mock_build_battle_operate_response_raw82(request, requestLen, out, outCap);
         if (hookedLen)
         {
+            vm_net_mock_clear_instance_challenge_battle_pending(
+                vm_mock_service_get_active_client_session(),
+                "battle-operate-4/2");
+            if (g_mockBattleAutoPrefer != 0)
+                vm_net_mock_battle_auto_note_client_operate();
             vm_net_mock_battle_publish_role_vitals();
             vm_net_log_handled_packet("builtin-battle-operate-raw82", request, requestLen, hookedLen);
             return hookedLen;

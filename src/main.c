@@ -5,6 +5,9 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>
+#else
+#include <unistd.h>
 #endif
 #include <stdarg.h>
 #include <math.h>
@@ -13,6 +16,10 @@
 
 #include "main.h"
 #include "lcd.h"
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+#include "gameLauncher.h"
+#endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
 #include "hookRam.c"
@@ -211,6 +218,14 @@ u32 g_vmInputWatchUserBufLen = 0;
 u32 g_vmInputWatchCallback = 0;
 u32 g_vmInputWatchCallR9 = 0;
 u32 g_vmInputWatchWriteCount = 0;
+#ifdef CBE_PLATFORM_ANDROID
+/* Staged on the UI thread; applied only on the emulator thread. */
+enum { VM_ANDROID_INPUT_PENDING_MAX = 256 };
+static unsigned short g_vmAndroidInputPendingText[VM_ANDROID_INPUT_PENDING_MAX];
+static volatile int g_vmAndroidInputPendingLen = 0;
+static volatile int g_vmAndroidInputPendingCancelled = 0;
+static volatile int g_vmAndroidInputPendingReady = 0;
+#endif
 u32 screenStructChange = 0;
 u32 screenStructNotifyLoadRes = 0;
 u32 vmAddedScreen = 0;
@@ -258,9 +273,50 @@ static u32 g_screenRootExitPendingTick = 0;
 static volatile u32 g_hostQuitRequested = 0;
 static volatile u32 g_hostQuitCleanupStarted = 0;
 static volatile u32 g_vmThreadFinished = 0;
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+bool g_gameLauncherActive = false;
+GameLauncherState g_gameLauncherState;
+static u8 g_forceLaunchCbe = 0;
+
+static int vm_client_server_list_apply(const char *selectedName,
+                                      const char *listPath,
+                                      int allowPrompt,
+                                      int *appliedOut);
+static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
+
+static void vm_game_launcher_update(void)
+{
+    if (!g_gameLauncherActive)
+        return;
+    if (!g_gameLauncherState.frame_dirty)
+        return;
+    SDL_Surface *surface = SDL_GetWindowSurface(window);
+    if (surface)
+        vm_game_launcher_render(&g_gameLauncherState, surface);
+    g_gameLauncherState.frame_dirty = false;
+    SDL_UpdateWindowSurface(window);
+}
+#endif
 static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
 static u8 g_wpayMockFlowActive = 0;
+static u8 g_wpayCancelKeysRemaining = 0;
+/* Cached from Ctrl softkey-bar draw; used for main-HUD left-soft → chat shortcut. */
+static u8 g_softkeyLeftCache[128];
+static u8 g_softkeyCenterCache[128];
+static u8 g_softkeyRightCache[128];
+enum { VM_HOST_KEYQ_MAX = 24 };
+static struct
+{
+    u8 skey;
+    u8 press;
+    u8 pre_delay;
+} g_hostKeyQ[VM_HOST_KEYQ_MAX];
+static u8 g_hostKeyQLen = 0;
+static u8 g_hostKeyQPos = 0;
+static u8 g_hostKeyQDelay = 0;
+static u8 g_hostChatArmOnRightSoftRelease = 0;
 static u32 g_lastSceLoadCtx = 0;
 static u32 g_lastSceLoadNamePtr = 0;
 static char g_lastSceLoadName[96] = "-";
@@ -380,7 +436,6 @@ static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
 static char g_mockServiceHost[64] = "127.0.0.1";
-// static char g_mockServiceHost[64] = "23.141.172.143";
 #ifdef CBE_SERVER_ONLY
 static char g_mockServiceBindHost[64] = "0.0.0.0";
 static char g_mockAdminBindHost[64] = "0.0.0.0";
@@ -391,6 +446,8 @@ static char g_mockAdminBindHost[64] = "127.0.0.1";
 static u32 g_mockServiceClientId = 0;
 static u16 g_mockServicePort = 19090;
 static u16 g_mockAdminPort = 19091;
+/* UTF-8 zone name chosen in Game Center; forwarded to service as CBMS meta. */
+static char g_mockPreferredTitleServerUtf8[64];
 static u32 g_battleSubtype8InfoDstWatchBase = 0;
 static u32 g_battleSubtype8InfoDstWatchLen = 0;
 static u32 g_battleSubtype8InfoDstWatchTick = 0;
@@ -402,7 +459,97 @@ u8 g_mockBattleAwaitsRevivalConfirm = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
+/*
+ * Solo/team victory inlines 4/7, then delayed poll tear-down
+ * 4/8+4/11 type=0+4/9.  Exit-then-4/7 was tried 2026-07-28 and failed:
+ * 4/8 UpdateCharAttrs flashes empty box; post-exit 4/7 is not a map settle
+ * UI (user: settle while still in battle feel / empty after exit).  See
+ * docs/re/2026-07-28-settlement-after-battle-exit.md.  Hangup must not
+ * re-enter while exit is pending.
+ */
+static u8 g_mockBattleSettlementExitPending = 0;
+static u32 g_mockBattleSettlementExitNotBeforeMs = 0;
+/*
+ * After map-side battle tear-down (delayed 4/8 / escape).  Encounter cooldown
+ * gate is disabled (default CBE_BATTLE_ENCOUNTER_COOLDOWN_MS=0); NotBefore stays
+ * unused.  ClearPending may still deliver one recovery 25/12 after exit.
+ */
+static u32 g_mockBattleEncounterNotBeforeMs = 0;
+/*
+ * After battle exit, deliver one 25/12 on scene poll / next challenge so a
+ * leftover info-banner / 斗 icon from older cooldown rejects can clear.
+ */
+static u8 g_mockBattleEncounterCooldownClearPending = 0;
+/*
+ * After settlement exit, suppress the immediate empty 25/5 scene-default ACK
+ * that often follows 4/8 on the map (cold first fight).  Wall-clock ms.
+ */
+static u32 g_mockBattlePostExitSuppressSceneDefaultUntilMs = 0;
+/* Retained for session save/restore; post-exit settle path stays disarmed. */
+static u8 g_mockBattlePostExitSettlePending = 0;
+static u32 g_mockBattlePostExitSettleNotBeforeMs = 0;
+/* Last victory 4/7.hp/mp deltas (wire bookkeeping; exit no longer replays 4/7). */
+static u32 g_mockBattleSettleWireRecoverHp = 0;
+static u32 g_mockBattleSettleWireRecoverMp = 0;
 static u8 g_mockBattleSceneMonsterStartActive = 0;
+/*
+ * Wire-table flavor frozen at battle-start (1 = subtype-5 scene maps with
+ * player wire 1 / enemy wire 0).  While the operate session is armed, action
+ * builders must keep this layout even if SceneMonsterStartActive is lost —
+ * otherwise medicines/heals land on wire 0 (monster) under subtype-5 clients.
+ */
+static u8 g_mockBattleStartUsesSceneWireMaps = 0;
+/* Last turn-consuming Operate (skill id+2 or 0).  Kept across battles so a new
+ * fight can replay the same skill under auto; only the target wire resets.
+ * Auto (4/11 type=1) replays it; when never set, fall back to Operate=0. */
+static u8 g_mockBattleLastOperateValid = 0;
+static u32 g_mockBattleLastOperate = 0;
+static u32 g_mockBattleLastIndex = 0;
+/* Client asked for auto (4/11 type=1).  Cleared by explicit type=0 / real
+ * 4/12 cancel.  Mid-button never enters hangup auto-fire 4/2, so continuous
+ * ticks are armed here and delivered on scene-sync poll (team/duel style). */
+static u8 g_mockBattleAutoPrefer = 0;
+/* After auto11 operate-only, the mid-battle button still emits one 4/12.
+ * Suppress converting that immediate cancel into a second synth operate. */
+static u8 g_mockBattleAutoSuppressNext12 = 0;
+/* Prefer-driven next operate: armed after a synth (or battle-start prefer),
+ * delivered when wall-clock reaches NextActNotBeforeMs via scene-sync poll.
+ * Default turn-gap is 0 (no cancel window); multi-action rounds still wait
+ * for playback hold so the next synth cannot stomp still-playing turns.
+ * Optional CBE_BATTLE_AUTO_TURN_GAP_MS>0 restores a post-play cancel pause. */
+static u8 g_mockBattleAutoPendingArmed = 0;
+static u32 g_mockBattleAutoPendingNotBeforeTick = 0;
+static u32 g_mockBattleAutoNextActNotBeforeMs = 0;
+static u8 g_mockBattleLastRoundActionCount = 0;
+/* Mid-battle button never leaves the client in hangup auto-fire.  After the
+ * 4/12 toggle race settles, poll delivers an unsolicited 4/11 type=1 (same
+ * shape as challenge/hangup start) so THIS fight can enter auto state. */
+static u8 g_mockBattleAutoFlagPendingArmed = 0;
+/* Wall-clock ms gate for unsolicited mid-fight 4/11 (derived from delay ticks). */
+static u32 g_mockBattleAutoFlagPendingNotBeforeMs = 0;
+/* True once this fight already has hangup-style 4/11 type=1 (start packet or
+ * one successful flag_poll).  Further 4/12 must not re-arm mid-playback type=1
+ * or skill cast visuals restart ("有蓝时重复施法"). */
+static u8 g_mockBattleAutoHangupStyleFlagOk = 0;
+/* Deprecated: turn-gap / playback hold owns continuous auto.  Kept only so
+ * session blobs stay sized; always forced to 0 on save/restore. */
+static u8 g_mockBattleAutoClientDriven = 0;
+/*
+ * Hangup button arms a map-side loop: while prefer stays set, victory marks
+ * ScheduleAfterExit; delayed 4/8 tear-down then arms
+ * CBE_HANGUP_LOOP_INTERVAL_MS (default 2000) of pure map-side wait before
+ * scene poll synthesizes the next hangup start.  Cleared by explicit auto
+ * off, escape, death, or scene change.
+ */
+static u8 g_mockHangupLoopActive = 0;
+static u8 g_mockHangupLoopScheduleAfterExit = 0;
+static u8 g_mockHangupLoopPendingArmed = 0;
+static u32 g_mockHangupLoopNotBeforeMs = 0;
+/* First hangup-button tap: default immediate start; optional env delay. */
+static u8 g_mockHangupStartPendingArmed = 0;
+static u32 g_mockHangupStartNotBeforeMs = 0;
+/* Second tap: finish current/next fight then clear hangup (no loop re-entry). */
+static u8 g_mockHangupStopAfterBattle = 0;
 static u32 g_mockBattleRoleHpCurrent = 0;
 static u32 g_mockBattleRoleHpMax = 0;
 static u32 g_mockBattleRoleMpCurrent = 0;
@@ -412,6 +559,8 @@ static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
+/* Boss/cast_skill monsters may self-heal once per battle when HP < 60%. */
+static bool g_mockBattleMonsterHealUsed = false;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static bool vm_host_file_exists(const char *path);
@@ -420,11 +569,15 @@ static void vm_autotest_note_role_attr_page_pc(u32 pc);
 static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
 static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *pos,
                                                      u32 autoRecoverHp, u32 autoRecoverMp,
-                                                     bool forceTeamVictory);
+                                                     bool forceTeamVictory,
+                                                     u8 *objectCount,
+                                                     bool seedMapBaseline);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_battle_auto11_flag_response(const u8 *request, u32 requestLen,
+                                                         u8 *out, u32 outCap);
 static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
@@ -2589,7 +2742,8 @@ static bool vm_named_resource_put_string_field(u8 *out, u32 outCap, u32 *pos,
 }
 
 static u32 vm_named_resource_build_chunk_request(const char *name, u32 start,
-                                                 u8 *out, u32 outCap)
+                                                 u16 version, u8 *out,
+                                                 u32 outCap)
 {
     /* Uplink WT packets have no object-count byte: their first object starts
      * at offset 4 and uses a 5-byte {major, kind, subtype, len16} header.
@@ -2599,7 +2753,8 @@ static u32 vm_named_resource_build_chunk_request(const char *name, u32 start,
         !vm_named_resource_put_string_field(out, outCap, &pos, "name", name) ||
         !vm_named_resource_put_u8_field(out, outCap, &pos, "type", 0) ||
         !vm_named_resource_put_u32_field(out, outCap, &pos, "start", start) ||
-        !vm_named_resource_put_u16_field(out, outCap, &pos, "version", 1) ||
+        !vm_named_resource_put_u16_field(out, outCap, &pos, "version",
+                                         version != 0 ? version : 1) ||
         !vm_named_resource_put_u8_field(out, outCap, &pos, "clientmiss", 1))
     {
         return 0;
@@ -2742,26 +2897,142 @@ static bool vm_named_resource_leaf_is_safe(const char *leaf)
 {
     const char *ext = NULL;
     size_t len = leaf ? strlen(leaf) : 0;
+    bool asciiOnly = true;
+    bool hasHighByte = false;
+
     if (len == 0 || len >= 128)
+        return false;
+    if (strstr(leaf, "..") != NULL)
         return false;
     for (size_t i = 0; i < len; ++i)
     {
         unsigned char ch = (unsigned char)leaf[i];
+        if (ch == '/' || ch == '\\' || ch < 0x20)
+            return false;
         if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
               (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' ||
-              ch == '.'))
+              ch == '.' || ch >= 0x80))
         {
             return false;
         }
+        if (ch >= 0x80)
+        {
+            asciiOnly = false;
+            hasHighByte = true;
+        }
+    }
+    /*
+     * Never treat client state/cache leaves as publishable named resources.
+     * Broad extensionless matching caused WT18/7 spam for mmorpgTempdata /
+     * mmorpg_musicset / mmorpg_update* on every open.
+     */
+    if (len >= 6 &&
+        (leaf[0] == 'm' || leaf[0] == 'M') &&
+        (leaf[1] == 'm' || leaf[1] == 'M') &&
+        (leaf[2] == 'o' || leaf[2] == 'O') &&
+        (leaf[3] == 'r' || leaf[3] == 'R') &&
+        (leaf[4] == 'p' || leaf[4] == 'P') &&
+        (leaf[5] == 'g' || leaf[5] == 'G'))
+    {
+        return false;
     }
     ext = strrchr(leaf, '.');
-    return ext != NULL &&
-           (_stricmp(ext, ".actor") == 0 || _stricmp(ext, ".gif") == 0);
+    if (ext == NULL)
+    {
+        /* Extensionless scene keys only: GBK names or *_NN ASCII keys. */
+        if (hasHighByte)
+            return true;
+        return len >= 3 && leaf[len - 3] == '_' &&
+               leaf[len - 2] >= '0' && leaf[len - 2] <= '9' &&
+               leaf[len - 1] >= '0' && leaf[len - 1] <= '9';
+    }
+    if (_stricmp(ext, ".actor") == 0 || _stricmp(ext, ".gif") == 0)
+        return asciiOnly;
+    if (_stricmp(ext, ".sce") == 0 || _stricmp(ext, ".map") == 0)
+        return true;
+    return false;
+}
+
+/* Same FNV-1a content version as mock_server_core.c
+ * vm_net_mock_update_named_content_version (name + payload bytes). */
+static u16 vm_named_resource_local_content_version(const char *leaf,
+                                                   const char *path)
+{
+    FILE *fp = NULL;
+    u8 buffer[8192];
+    u32 hash = 2166136261u;
+    bool readAny = false;
+    size_t nameLen = 0;
+
+    if (leaf == NULL || leaf[0] == 0 || path == NULL || path[0] == 0)
+        return 0;
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    nameLen = strlen(leaf);
+    for (size_t i = 0; i < nameLen; ++i)
+    {
+        hash ^= (u8)leaf[i];
+        hash *= 16777619u;
+    }
+    while (!feof(fp))
+    {
+        size_t readLen = fread(buffer, 1, sizeof(buffer), fp);
+        if (readLen != 0)
+        {
+            readAny = true;
+            for (size_t i = 0; i < readLen; ++i)
+            {
+                hash ^= buffer[i];
+                hash *= 16777619u;
+            }
+        }
+        if (ferror(fp))
+        {
+            fclose(fp);
+            return 0;
+        }
+    }
+    fclose(fp);
+    if (!readAny)
+        return 0;
+    return (u16)((hash % 65535u) + 1u);
+}
+
+/*
+ * Existing-file version probes are only for admin-published scene payloads and
+ * outdoor combat actors (e_*).  Probing every UI .actor/.gif on open (shop
+ * return / title / mmGame rebuild) floods WT18/7 with not-published rejects
+ * and stalls the UI on the synchronous host download path.
+ */
+static bool vm_named_resource_should_version_check_existing(const char *leaf)
+{
+    const char *ext = NULL;
+
+    if (leaf == NULL || leaf[0] == 0)
+        return false;
+    ext = strrchr(leaf, '.');
+    if (ext == NULL)
+        return true;
+    if (_stricmp(ext, ".sce") == 0 || _stricmp(ext, ".map") == 0)
+        return true;
+    if ((_stricmp(ext, ".actor") == 0 || _stricmp(ext, ".gif") == 0) &&
+        (leaf[0] == 'e' || leaf[0] == 'E') && leaf[1] == '_')
+    {
+        return true;
+    }
+    return false;
 }
 
 static bool vm_file_try_download_named_resource(const char *normalizedPath)
 {
     static bool active = false;
+    static struct
+    {
+        char leaf[128];
+        u16 localVersion;
+    } uptodateMemo[48];
+    static u32 uptodateMemoCount = 0;
     u8 request[512];
     u8 response[VM_NAMED_RESOURCE_RESPONSE_CAP];
     char target[256];
@@ -2771,6 +3042,8 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
     u32 start = 0;
     u32 totalSize = 0;
     u32 runningCrc = 0;
+    u16 localVersion = 0;
+    bool fileExists = false;
     bool ok = false;
 
     if (active || g_mockServiceOnly || g_mockServiceClientId == 0 ||
@@ -2786,6 +3059,33 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
     if (!vm_named_resource_leaf_is_safe(leaf))
         return false;
     snprintf(target, sizeof(target), "%s", normalizedPath);
+    {
+        FILE *probe = fopen(target, "rb");
+        if (probe != NULL)
+        {
+            fclose(probe);
+            fileExists = true;
+        }
+    }
+    /*
+     * Skip network (and content hashing) for existing UI/role assets.  Only
+     * scene payloads and e_* combat actors are version-probed when present.
+     */
+    if (fileExists && !vm_named_resource_should_version_check_existing(leaf))
+        return false;
+    if (fileExists)
+        localVersion = vm_named_resource_local_content_version(leaf, target);
+    if (fileExists && localVersion != 0)
+    {
+        for (u32 i = 0; i < uptodateMemoCount; ++i)
+        {
+            if (uptodateMemo[i].localVersion == localVersion &&
+                strcmp(uptodateMemo[i].leaf, leaf) == 0)
+            {
+                return true;
+            }
+        }
+    }
     if (snprintf(temp, sizeof(temp), "%s.cbe-download.tmp", target) >=
         (int)sizeof(temp))
     {
@@ -2794,11 +3094,8 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
 
     active = true;
     vm_file_ensure_parent_dirs(target);
-    fp = fopen(temp, "wb");
-    if (fp == NULL)
-        goto done;
-    printf("[info][resource] resource_cache_miss_download_begin file=%s protocol=WT18/7 source=server-catalog\n",
-           leaf);
+    printf("[info][resource] resource_cache_version_check file=%s local_version=%u exists=%u protocol=WT18/7\n",
+           leaf, localVersion, fileExists ? 1u : 0u);
 
     while (start < VM_NAMED_RESOURCE_DOWNLOAD_MAX)
     {
@@ -2810,14 +3107,14 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
         u32 responseTotal = 0;
         u32 responseCrc = 0;
         u32 requestLen = vm_named_resource_build_chunk_request(
-            leaf, start, request, sizeof(request));
+            leaf, start, localVersion, request, sizeof(request));
         bool requestOk = false;
         if (requestLen == 0)
             break;
 #ifdef CBE_CLIENT_ONLY
         requestOk = vm_client_remote_request(
             request, requestLen, response, sizeof(response), &responseLen,
-            &eventType, NULL, NULL, 0, NULL);
+            &eventType, NULL, NULL, 0, NULL, (u32)VM_CLIENT_DATA_ATTEMPTS);
 #else
         requestOk = vm_net_mock_remote_request(
                         request, requestLen, response, sizeof(response),
@@ -2829,16 +3126,53 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
             result != 1 ||
             !vm_named_resource_response_u32(response, responseLen, "totalsize",
                                             &responseTotal) ||
-            responseTotal == 0 ||
             responseTotal > VM_NAMED_RESOURCE_DOWNLOAD_MAX ||
             !vm_named_resource_response_u32(response, responseLen, "crc",
-                                            &responseCrc) ||
-            !vm_named_resource_response_blob(response, responseLen, "data",
+                                            &responseCrc))
+        {
+            break;
+        }
+        /* Published version matches local content hash: keep cache. */
+        if (responseTotal == 0)
+        {
+            ok = fileExists;
+            printf("[info][resource] resource_cache_uptodate file=%s local_version=%u protocol=WT18/7\n",
+                   leaf, localVersion);
+            if (ok && localVersion != 0 && strlen(leaf) < sizeof(uptodateMemo[0].leaf))
+            {
+                u32 slot = uptodateMemoCount;
+                for (u32 i = 0; i < uptodateMemoCount; ++i)
+                {
+                    if (strcmp(uptodateMemo[i].leaf, leaf) == 0)
+                    {
+                        slot = i;
+                        break;
+                    }
+                }
+                if (slot >= 48u)
+                    slot = 0;
+                else if (slot == uptodateMemoCount && uptodateMemoCount < 48u)
+                    ++uptodateMemoCount;
+                snprintf(uptodateMemo[slot].leaf, sizeof(uptodateMemo[slot].leaf),
+                         "%s", leaf);
+                uptodateMemo[slot].localVersion = localVersion;
+            }
+            break;
+        }
+        if (!vm_named_resource_response_blob(response, responseLen, "data",
                                              &chunk, &chunkLen) ||
             chunkLen == 0 || start + chunkLen > responseTotal ||
             (totalSize != 0 && totalSize != responseTotal))
         {
             break;
+        }
+        if (fp == NULL)
+        {
+            fp = fopen(temp, "wb");
+            if (fp == NULL)
+                break;
+            printf("[info][resource] resource_cache_miss_download_begin file=%s protocol=WT18/7 source=server-catalog reason=%s\n",
+                   leaf, fileExists ? "version-stale" : "cache-miss");
         }
         totalSize = responseTotal;
         if (fwrite(chunk, 1, chunkLen, fp) != chunkLen)
@@ -2857,25 +3191,50 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
         }
     }
 
-done:
     if (fp != NULL)
         fclose(fp);
-    if (ok)
+    if (ok && totalSize != 0)
     {
+        /*
+         * Windows rename() fails with EEXIST when the destination already
+         * exists, so a successful WT18/7 transfer never replaced the stale
+         * SCE.  That left the host parsing the old payload while the server
+         * logged client-install-callback — scene enter then crashed or
+         * re-downloaded forever.  Remove the target first (POSIX rename
+         * already replaces).
+         */
+        remove(target);
         if (rename(temp, target) != 0)
+        {
             ok = false;
+            printf("[warn][resource] resource_cache_install_replace_failed file=%s temp=%s protocol=WT18/7\n",
+                   leaf, temp);
+        }
+        else
+        {
+            /* Fresh bytes: drop any stale uptodate memo for this leaf. */
+            for (u32 i = 0; i < uptodateMemoCount; ++i)
+            {
+                if (strcmp(uptodateMemo[i].leaf, leaf) == 0)
+                {
+                    uptodateMemo[i] = uptodateMemo[uptodateMemoCount - 1u];
+                    --uptodateMemoCount;
+                    break;
+                }
+            }
+        }
     }
-    if (!ok)
+    if (!ok || totalSize == 0)
         remove(temp);
-    if (ok)
+    if (ok && totalSize != 0)
     {
         printf("[info][resource] resource_cache_download_complete file=%s bytes=%u crc=%u protocol=WT18/7 install=%s\n",
                leaf, totalSize, runningCrc, target);
     }
-    else
+    else if (!ok)
     {
-        printf("[warn][resource] resource_cache_download_failed file=%s received=%u total=%u protocol=WT18/7\n",
-               leaf, start, totalSize);
+        printf("[warn][resource] resource_cache_download_failed file=%s received=%u total=%u exists=%u protocol=WT18/7\n",
+               leaf, start, totalSize, fileExists ? 1u : 0u);
     }
     active = false;
     return ok;
@@ -2992,6 +3351,99 @@ static void vm_scene_same_reenter_remember_target(const vm_net_mock_scene_change
     g_sceneSameReenterGuard.serial = g_vm_net_mock_last_scene_change_target_serial;
     g_sceneSameReenterGuard.valid = 1;
 }
+
+#if defined(CBE_CLIENT_ONLY)
+static void vm_host_clear_download_busy(const char *reason)
+{
+    u32 r9 = vm_read_current_pool_r9();
+    u8 zero = 0;
+
+    if (r9 == 0)
+        r9 = Global_R9;
+    if (r9 == 0)
+        return;
+    /*
+     * EnterSceneByMapName can arm r9+21808/21804 before screen_mgr rejects a
+     * same-target reenter.  ResetDownloadState (0x0103993C) clears the same
+     * pair; do that here so same-suppressed does not leave the progress bar.
+     */
+    uc_mem_write(MTK, r9 + 21808, &zero, 1);
+    uc_mem_write(MTK, r9 + 21804, &zero, 1);
+    printf("[info][screen] download_busy_clear reason=%s r9=%08x "
+           "evidence=ResetDownloadState:0x0103993C\n",
+           reason ? reason : "-", r9);
+}
+
+/*
+ * Dream 29*: instance 30/1 already DF-ScreenInit'd.  2/3 still calls
+ * EnterSceneByMapName(0x01018150).  Rejecting at screen_mgr is too late —
+ * busy/DF are already re-armed and poll 30/2 cannot close the half-open
+ * bar (same class as outdoor same-suppressed before allow-once).  Return
+ * at function entry before any arm; trailing/poll 30/2 closes the first
+ * DF load.  screen_mgr dream-suppress remains a fallback.
+ */
+static bool vm_host_intercept_dream_completion_enter_scene(u32 pc)
+{
+    u32 lr = 0;
+    u32 retScreen = 0;
+    const vm_net_mock_scene_change_target *activeTarget = NULL;
+
+    if (!g_vm_scene_block_dream_completion_reenter)
+        return false;
+    if ((pc & ~1u) != 0x01018150u)
+        return false;
+
+    activeTarget = vm_active_scene_reenter_target();
+    if (activeTarget == NULL ||
+        activeTarget->scene[0] != '2' || activeTarget->scene[1] != '9' ||
+        !vm_net_mock_scene_names_equal_loose(
+            activeTarget->scene,
+            g_vm_net_mock_last_scene_change_target.scene))
+    {
+        return false;
+    }
+
+    /*
+     * Callers of EnterSceneByMapName use the return value as a live
+     * screen/object pointer (blx / field deref).  Returning r0=0 after an
+     * entry skip caused pc=0 at lastPc=0x0104d77e (使者再进 2026-07-31).
+     * Hand back the already-DF-initialized mmGame screen instead.
+     */
+    retScreen = vmAddedScreen;
+    if (retScreen == 0)
+        retScreen = g_currentScreenThis;
+    if (retScreen == 0)
+    {
+        printf("[warn][screen] enter_scene_skip_dream_no_screen "
+               "scene=%s action=fallthrough-to-screen_mgr-suppress "
+               "evidence=need-nonnull-EnterScene-return\n",
+               activeTarget->scene);
+        return false;
+    }
+
+    g_vm_scene_block_dream_completion_reenter = false;
+    vm_host_clear_download_busy("dream-skip-completion-EnterScene");
+    printf("[info][screen] enter_scene_skip_dream_completion "
+           "pc=01018150 serial=%u scene=%s pos=(%u,%u) exit=%u "
+           "return_screen=%08x "
+           "evidence=block-before-busy-arm+DF-already-ScreenInit\n",
+           g_vm_net_mock_last_scene_change_target_serial,
+           activeTarget->scene,
+           activeTarget->x,
+           activeTarget->y,
+           activeTarget->exitId,
+           retScreen);
+    vm_autotest_note("enter_scene_skip_dream_completion scene=%s serial=%u "
+                     "return_screen=%08x evidence=01018150-entry-bx-lr\n",
+                     activeTarget->scene,
+                     g_vm_net_mock_last_scene_change_target_serial,
+                     retScreen);
+    vm_set_call_result(retScreen);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    vm_bx(lr);
+    return true;
+}
+#endif
 
 static uc_err scheduler_dispatch_tscreen_event(u32 tScreenEventEntry, u32 screenPtr)
 {
@@ -3577,6 +4029,11 @@ static uc_err vm_input_finish(u32 result)
     g_vmInputWatchCallback = callback;
     g_vmInputWatchCallR9 = callbackR9;
     g_vmInputWatchWriteCount = 0;
+#ifdef CBE_PLATFORM_ANDROID
+    g_vmAndroidInputPendingReady = 0;
+    g_vmAndroidInputPendingLen = 0;
+    g_vmAndroidInputPendingCancelled = 0;
+#endif
     printf("[debug][vmInput] callback-call cb=%08x pool=%u callR9=%08x curR9=%08x dispU=%08x target=%08x input=%08x\n",
            callback,
            vm_is_pool_entry(callback) ? 1u : 0u,
@@ -3602,6 +4059,62 @@ static uc_err vm_input_finish(u32 result)
     return err;
 }
 
+#ifdef CBE_PLATFORM_ANDROID
+static void vm_android_input_apply_pending_text(void)
+{
+    u32 copyLen;
+    u32 maxChars;
+    u32 i;
+
+    if (!g_vmInputOpen || !g_vmInputBuffer || g_vmInputMaxLen == 0)
+        return;
+    if (g_vmAndroidInputPendingCancelled)
+        return;
+
+    maxChars = g_vmInputMaxLen > 1 ? g_vmInputMaxLen - 1 : 0;
+    copyLen = (u32)g_vmAndroidInputPendingLen;
+    if (copyLen > maxChars)
+        copyLen = maxChars;
+    if (copyLen > (u32)(VM_ANDROID_INPUT_PENDING_MAX - 1))
+        copyLen = (u32)(VM_ANDROID_INPUT_PENDING_MAX - 1);
+
+    for (i = 0; i < copyLen; ++i)
+        vm_input_write_u16(g_vmInputBuffer + i * 2, g_vmAndroidInputPendingText[i]);
+    vm_input_write_u16(g_vmInputBuffer + copyLen * 2, 0);
+
+    /* Keep the original guest edit buffer in sync for create-role / login forms. */
+    if (g_vmInputTargetBuffer != 0 && g_vmInputTargetBuffer != g_vmInputBuffer)
+    {
+        for (i = 0; i < copyLen; ++i)
+            vm_input_write_u16(g_vmInputTargetBuffer + i * 2,
+                               g_vmAndroidInputPendingText[i]);
+        vm_input_write_u16(g_vmInputTargetBuffer + copyLen * 2, 0);
+    }
+}
+
+static uc_err vm_android_input_consume_pending_submit(void)
+{
+    int cancelled;
+    int pendingLen;
+
+    if (!g_vmAndroidInputPendingReady)
+        return UC_ERR_OK;
+    g_vmAndroidInputPendingReady = 0;
+    if (!g_vmInputOpen)
+        return UC_ERR_OK;
+
+    cancelled = g_vmAndroidInputPendingCancelled ? 1 : 0;
+    pendingLen = g_vmAndroidInputPendingLen;
+    if (!cancelled)
+        vm_android_input_apply_pending_text();
+    g_vmAndroidInputPendingLen = 0;
+    printf("[info][vmInput] android_submit cancel=%d len=%d target=%08x "
+           "scratch=%08x\n",
+           cancelled, pendingLen, g_vmInputTargetBuffer, g_vmInputBuffer);
+    return vm_input_finish((u32)cancelled);
+}
+#endif
+
 static uc_err scheduler_dispatch_input_event(vm_event *evt)
 {
     if (evt->event == VM_EVENT_INPUT_CHAR)
@@ -3615,7 +4128,13 @@ static uc_err scheduler_dispatch_input_event(vm_event *evt)
         return UC_ERR_OK;
     }
     if (evt->event == VM_EVENT_INPUT_DONE)
+    {
+#ifdef CBE_PLATFORM_ANDROID
+        if (g_vmAndroidInputPendingReady)
+            return vm_android_input_consume_pending_submit();
+#endif
         return vm_input_finish(evt->r0);
+    }
 
     return UC_ERR_OK;
 }
@@ -3753,28 +4272,149 @@ const char *cbeAndroidInputGetPromptUtf8(void)
 }
 void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled)
 {
-    u32 copyLen;
-    u32 maxChars;
+    int copyLen;
+    int maxChars;
+
     if (!g_vmInputOpen)
         return;
-    if (!cancelled && g_vmInputBuffer && g_vmInputMaxLen > 0)
+
+    /*
+     * Dialog confirm runs on the Android UI thread. Unicorn is not thread-safe,
+     * so never uc_mem_write here — stage host-side text and let the emu thread
+     * apply it when INPUT_DONE / scheduler_tick runs.
+     */
+    g_vmAndroidInputPendingCancelled = cancelled ? 1 : 0;
+    g_vmAndroidInputPendingLen = 0;
+    if (!cancelled && text != NULL && len > 0 && g_vmInputMaxLen > 1)
     {
-        maxChars = g_vmInputMaxLen - 1;
-        copyLen = len > 0 ? (u32)len : 0;
-        if (copyLen > maxChars)
-            copyLen = maxChars;
-        for (u32 i = 0; i < copyLen; ++i)
-            vm_input_write_u16(g_vmInputBuffer + i * 2, text ? text[i] : 0);
-        vm_input_write_u16(g_vmInputBuffer + copyLen * 2, 0);
+        maxChars = (int)g_vmInputMaxLen - 1;
+        if (maxChars > VM_ANDROID_INPUT_PENDING_MAX - 1)
+            maxChars = VM_ANDROID_INPUT_PENDING_MAX - 1;
+        copyLen = len > maxChars ? maxChars : len;
+        if (copyLen > 0)
+        {
+            memcpy(g_vmAndroidInputPendingText, text,
+                   (size_t)copyLen * sizeof(unsigned short));
+            g_vmAndroidInputPendingLen = copyLen;
+        }
     }
+    g_vmAndroidInputPendingReady = 1;
     EnqueueVMEvent(VM_EVENT_INPUT_DONE, cancelled ? 1 : 0, 0);
 }
 #endif
 
+static void vm_host_pump_wpay_cancel_keys(void)
+{
+    if (g_wpayCancelKeysRemaining == 0)
+        return;
+    if (g_wpayCancelKeysRemaining & 1u)
+        EnqueueVMEvent(VM_EVENT_KEYBOARD, 13, 1);
+    else
+        EnqueueVMEvent(VM_EVENT_KEYBOARD, 13, 0);
+    g_wpayCancelKeysRemaining--;
+}
+
+static int vm_softkey_eq_gbk(const u8 *text, const u8 *gbk, size_t n)
+{
+    if (text == NULL || gbk == NULL)
+        return 0;
+    return memcmp(text, gbk, n) == 0 && text[n] == 0;
+}
+
+/*
+ * Main map HUD where 返回 cannot pop further: stack depth 1, not title root,
+ * right softkey is 返回 or empty. Typical bar: left=菜单 right=返回.
+ */
+static int vm_host_is_main_hud_no_back(void)
+{
+    static const u8 kBack[] = {0xB7, 0xB5, 0xBB, 0xD8}; /* 返回 */
+
+    if (g_screenStackCount != 1 || vmAddedScreen == 0)
+        return 0;
+    if (vm_screen_is_entry_root(vmAddedScreen))
+        return 0;
+    if (g_softkeyRightCache[0] != 0 &&
+        !vm_softkey_eq_gbk(g_softkeyRightCache, kBack, sizeof(kBack)))
+        return 0;
+    return 1;
+}
+
+static void vm_host_keyq_reset(void)
+{
+    g_hostKeyQLen = 0;
+    g_hostKeyQPos = 0;
+    g_hostKeyQDelay = 0;
+}
+
+static void vm_host_keyq_push(u8 skey, u8 press, u8 pre_delay)
+{
+    if (g_hostKeyQLen >= VM_HOST_KEYQ_MAX)
+        return;
+    g_hostKeyQ[g_hostKeyQLen].skey = skey;
+    g_hostKeyQ[g_hostKeyQLen].press = press;
+    g_hostKeyQ[g_hostKeyQLen].pre_delay = pre_delay;
+    g_hostKeyQLen++;
+}
+
+/*
+ * Open scene menu (left soft / 菜单) then select 社交聊天 (index 2).
+ * Evidence: 江湖OL.CBE @0x0101AD3A; case @0x0101B21C -> StartSceneTransition(2,1,1).
+ */
+static void vm_host_queue_open_chat_via_menu(void)
+{
+    vm_host_keyq_reset();
+    vm_host_keyq_push(12, 1, 2);  /* 左软=菜单 */
+    vm_host_keyq_push(12, 0, 2);
+    vm_host_keyq_push(18, 1, 12); /* down */
+    vm_host_keyq_push(18, 0, 2);
+    vm_host_keyq_push(18, 1, 4);
+    vm_host_keyq_push(18, 0, 2);
+    vm_host_keyq_push(14, 1, 4); /* OK */
+    vm_host_keyq_push(14, 0, 2);
+    printf("[info][softkey] main HUD right-soft/返回 -> chat via menu idx=2\n");
+}
+
+static void vm_host_pump_key_queue(void)
+{
+    if (g_hostKeyQPos >= g_hostKeyQLen)
+    {
+        if (g_hostKeyQLen != 0)
+            vm_host_keyq_reset();
+        return;
+    }
+    if (g_hostKeyQDelay > 0)
+    {
+        g_hostKeyQDelay--;
+        return;
+    }
+    if (g_hostKeyQ[g_hostKeyQPos].pre_delay > 0)
+    {
+        g_hostKeyQDelay = g_hostKeyQ[g_hostKeyQPos].pre_delay;
+        g_hostKeyQ[g_hostKeyQPos].pre_delay = 0;
+        return;
+    }
+    EnqueueVMEvent(VM_EVENT_KEYBOARD,
+                   g_hostKeyQ[g_hostKeyQPos].skey,
+                   g_hostKeyQ[g_hostKeyQPos].press);
+    g_hostKeyQPos++;
+    if (g_hostKeyQPos >= g_hostKeyQLen)
+        vm_host_keyq_reset();
+}
+
 static uc_err scheduler_tick(void)
 {
+#ifdef CBE_PLATFORM_ANDROID
+    if (g_vmAndroidInputPendingReady && g_vmInputOpen)
+    {
+        uc_err inputErr = vm_android_input_consume_pending_submit();
+        if (inputErr != UC_ERR_OK)
+            return inputErr;
+    }
+#endif
     g_schedulerTick++;
     currentTime = clock();
+    vm_host_pump_wpay_cancel_keys();
+    vm_host_pump_key_queue();
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
@@ -3866,6 +4506,7 @@ void keyEvent(int type, int key)
     int isPress = type == 4 ? 1 : 0;
     if (skey != -1)
     {
+        /* Chat/map shortcuts are Android UI digit keys ('6'/'4'), not softkey remap. */
         EnqueueVMEvent(VM_EVENT_KEYBOARD, skey, isPress);
     }
 }
@@ -3918,12 +4559,33 @@ static int vm_autotest_parse_u32(const char *text, u32 *value)
 
 static int vm_mock_service_parse_host_port(const char *text, char *host, size_t hostCap, u16 *port)
 {
+    char normalized[96];
     const char *colon = NULL;
+    char *comma;
     u32 parsedPort = 0;
     size_t hostLen = 0;
+    size_t len;
 
     if (text == NULL || *text == 0 || host == NULL || hostCap == 0 || port == NULL)
         return 0;
+
+    /* servers.conf allows host:port[,account_web_url].  Strip the optional
+     * suffix before looking for the port colon; otherwise strrchr hits the
+     * colon inside https:// and the whole entry is rejected. */
+    snprintf(normalized, sizeof(normalized), "%s", text);
+    comma = strchr(normalized, ',');
+    if (comma != NULL)
+        *comma = 0;
+    len = strlen(normalized);
+    while (len > 0 &&
+           (normalized[len - 1] == ' ' || normalized[len - 1] == '\t' ||
+            normalized[len - 1] == '\r' || normalized[len - 1] == '\n'))
+    {
+        normalized[--len] = 0;
+    }
+    if (normalized[0] == 0)
+        return 0;
+    text = normalized;
 
     colon = strrchr(text, ':');
     if (colon != NULL)
@@ -3950,6 +4612,355 @@ static int vm_mock_service_parse_host_port(const char *text, char *host, size_t 
         return 0;
     snprintf(host, hostCap, "127.0.0.1");
     *port = (u16)parsedPort;
+    return 1;
+}
+
+/*
+ * Host-side physical endpoint list.  Title WT 1/1/12 serverinfo never carries
+ * IP/port; version handshake already needs a TCP endpoint before zone select.
+ * Prefer servers.conf + --server=/CBE_SERVER= over inventing a protocol field.
+ */
+enum
+{
+    VM_CLIENT_SERVER_LIST_MAX = 16,
+    VM_CLIENT_SERVER_NAME_CAP = 64,
+    VM_CLIENT_SERVER_ENDPOINT_CAP = 96
+};
+
+typedef struct
+{
+    char name[VM_CLIENT_SERVER_NAME_CAP];
+    char endpoint[VM_CLIENT_SERVER_ENDPOINT_CAP];
+} vm_client_server_list_entry;
+
+typedef struct
+{
+    char path[260];
+    char current[VM_CLIENT_SERVER_NAME_CAP];
+    u32 count;
+    vm_client_server_list_entry entries[VM_CLIENT_SERVER_LIST_MAX];
+} vm_client_server_list;
+
+static void vm_client_server_list_trim(char *text)
+{
+    size_t len;
+    char *start;
+
+    if (text == NULL)
+        return;
+    start = text;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')
+        ++start;
+    if (start != text)
+        memmove(text, start, strlen(start) + 1);
+    len = strlen(text);
+    while (len > 0 &&
+           (text[len - 1] == ' ' || text[len - 1] == '\t' ||
+            text[len - 1] == '\r' || text[len - 1] == '\n'))
+    {
+        text[--len] = 0;
+    }
+}
+
+/* Optional trailing ",account_web_url" must not reach host:port parsing. */
+static void vm_client_server_list_split_endpoint(const char *value,
+                                                char *endpoint,
+                                                size_t endpointCap)
+{
+    const char *comma;
+    size_t endpointLen;
+
+    if (endpoint == NULL || endpointCap == 0)
+        return;
+    endpoint[0] = 0;
+    if (value == NULL || value[0] == 0)
+        return;
+    comma = strchr(value, ',');
+    if (comma != NULL)
+    {
+        endpointLen = (size_t)(comma - value);
+        if (endpointLen >= endpointCap)
+            endpointLen = endpointCap - 1;
+        memcpy(endpoint, value, endpointLen);
+        endpoint[endpointLen] = 0;
+        vm_client_server_list_trim(endpoint);
+        return;
+    }
+    snprintf(endpoint, endpointCap, "%s", value);
+    vm_client_server_list_trim(endpoint);
+}
+
+static int vm_client_server_list_load_file(const char *path,
+                                          vm_client_server_list *list)
+{
+    FILE *fp;
+    char line[256];
+
+    if (path == NULL || path[0] == 0 || list == NULL)
+        return 0;
+    memset(list, 0, sizeof(*list));
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return 0;
+    snprintf(list->path, sizeof(list->path), "%s", path);
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        char *eq;
+        char key[VM_CLIENT_SERVER_NAME_CAP];
+        char value[240];
+        char endpoint[VM_CLIENT_SERVER_ENDPOINT_CAP];
+        size_t keyLen;
+        size_t valueLen;
+
+        vm_client_server_list_trim(line);
+        if (line[0] == 0 || line[0] == '#' || line[0] == ';')
+            continue;
+        if ((unsigned char)line[0] == 0xEFu &&
+            (unsigned char)line[1] == 0xBBu &&
+            (unsigned char)line[2] == 0xBFu)
+        {
+            memmove(line, line + 3, strlen(line + 3) + 1);
+            vm_client_server_list_trim(line);
+            if (line[0] == 0 || line[0] == '#' || line[0] == ';')
+                continue;
+        }
+        eq = strchr(line, '=');
+        if (eq == NULL)
+            continue;
+        *eq = 0;
+        snprintf(key, sizeof(key), "%s", line);
+        snprintf(value, sizeof(value), "%s", eq + 1);
+        vm_client_server_list_trim(key);
+        vm_client_server_list_trim(value);
+        if (key[0] == 0 || value[0] == 0)
+            continue;
+        keyLen = strlen(key);
+        valueLen = strlen(value);
+        if (keyLen >= sizeof(key) || valueLen >= sizeof(value))
+            continue;
+        if (strcmp(key, "current") == 0)
+        {
+            snprintf(list->current, sizeof(list->current), "%s", value);
+            continue;
+        }
+        if (list->count >= VM_CLIENT_SERVER_LIST_MAX)
+        {
+            printf("[warn][network] server_list truncated path=%s max=%u\n",
+                   path, VM_CLIENT_SERVER_LIST_MAX);
+            break;
+        }
+        vm_client_server_list_split_endpoint(value, endpoint, sizeof(endpoint));
+        if (endpoint[0] == 0)
+            continue;
+        snprintf(list->entries[list->count].name,
+                 sizeof(list->entries[list->count].name), "%s", key);
+        snprintf(list->entries[list->count].endpoint,
+                 sizeof(list->entries[list->count].endpoint), "%s", endpoint);
+        ++list->count;
+    }
+    fclose(fp);
+    return list->count > 0 || list->current[0] != 0;
+}
+
+static int vm_client_server_list_open(const char *explicitPath,
+                                     vm_client_server_list *list)
+{
+    static const char *defaults[] = {
+        "servers.conf",
+        "bin/servers.conf",
+        "JHOnlineData/servers.conf"
+    };
+
+    if (list == NULL)
+        return 0;
+    if (explicitPath != NULL && explicitPath[0] != 0)
+    {
+        if (vm_client_server_list_load_file(explicitPath, list))
+            return 1;
+        printf("[warn][network] server_list missing path=%s\n", explicitPath);
+        return 0;
+    }
+    for (u32 i = 0; i < sizeof(defaults) / sizeof(defaults[0]); ++i)
+    {
+        if (vm_client_server_list_load_file(defaults[i], list))
+            return 1;
+    }
+    return 0;
+}
+
+static const vm_client_server_list_entry *vm_client_server_list_find(
+    const vm_client_server_list *list, const char *name)
+{
+    if (list == NULL || name == NULL || name[0] == 0)
+        return NULL;
+    for (u32 i = 0; i < list->count; ++i)
+    {
+        if (strcmp(list->entries[i].name, name) == 0)
+            return &list->entries[i];
+    }
+    return NULL;
+}
+
+static int vm_client_server_list_stdin_interactive(void)
+{
+#ifdef CBE_PLATFORM_ANDROID
+    return 0;
+#elif defined(_WIN32)
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
+static u32 vm_client_server_list_default_index(const vm_client_server_list *list)
+{
+    const vm_client_server_list_entry *entry;
+
+    if (list == NULL || list->count == 0)
+        return 0;
+    entry = vm_client_server_list_find(list, list->current);
+    if (entry != NULL)
+        return (u32)(entry - list->entries);
+    return 0;
+}
+
+/* Prompt on stderr so `main.exe > log.txt` still shows the menu. */
+static int vm_client_server_list_prompt(const vm_client_server_list *list,
+                                       char *nameOut, size_t nameCap)
+{
+    u32 defaultIndex;
+    char line[64];
+
+    if (list == NULL || list->count == 0 || nameOut == NULL || nameCap == 0)
+        return 0;
+    defaultIndex = vm_client_server_list_default_index(list);
+    fprintf(stderr, "\n======== 选择游戏服务器 ========\n");
+    fprintf(stderr, "文件: %s\n", list->path[0] ? list->path : "servers.conf");
+    for (u32 i = 0; i < list->count; ++i)
+    {
+        fprintf(stderr, "  %u) %-20s %s%s\n", i + 1,
+                list->entries[i].name, list->entries[i].endpoint,
+                i == defaultIndex ? "  [默认]" : "");
+    }
+    fprintf(stderr,
+            "输入序号后回车（直接回车= %u %s）。"
+            "跳过可选: --server=名称 / --no-server-select\n> ",
+            defaultIndex + 1, list->entries[defaultIndex].name);
+    fflush(stderr);
+    if (fgets(line, sizeof(line), stdin) == NULL)
+    {
+        fprintf(stderr, "[warn][network] server_list prompt read failed, "
+                        "using default\n");
+        snprintf(nameOut, nameCap, "%s", list->entries[defaultIndex].name);
+        return 1;
+    }
+    vm_client_server_list_trim(line);
+    if (line[0] == 0)
+    {
+        snprintf(nameOut, nameCap, "%s", list->entries[defaultIndex].name);
+        return 1;
+    }
+    {
+        u32 choice = 0;
+        if (vm_autotest_parse_u32(line, &choice) && choice >= 1 &&
+            choice <= list->count)
+        {
+            snprintf(nameOut, nameCap, "%s",
+                     list->entries[choice - 1].name);
+            return 1;
+        }
+    }
+    if (vm_client_server_list_find(list, line) != NULL)
+    {
+        snprintf(nameOut, nameCap, "%s", line);
+        return 1;
+    }
+    fprintf(stderr, "[warn][network] server_list invalid choice=%s, "
+                    "using default\n",
+            line);
+    snprintf(nameOut, nameCap, "%s", list->entries[defaultIndex].name);
+    return 1;
+}
+
+static int vm_client_server_list_apply(const char *selectedName,
+                                      const char *listPath,
+                                      int allowPrompt,
+                                      int *appliedOut)
+{
+    vm_client_server_list list;
+    const vm_client_server_list_entry *entry = NULL;
+    char promptedName[VM_CLIENT_SERVER_NAME_CAP];
+    const char *useName = selectedName;
+    char parsedHost[64];
+    u16 parsedPort = 0;
+
+    if (appliedOut)
+        *appliedOut = 0;
+    memset(promptedName, 0, sizeof(promptedName));
+    if (!vm_client_server_list_open(listPath, &list))
+    {
+        if (selectedName != NULL && selectedName[0] != 0)
+        {
+            printf("[warn][network] server_list unavailable while selecting "
+                   "name=%s\n",
+                   selectedName);
+            return 0;
+        }
+        return 1;
+    }
+    if (list.count == 0)
+    {
+        printf("[info][network] server_list loaded path=%s entries=0 "
+               "reason=empty-keep-default endpoint=%s:%u\n",
+               list.path, g_mockServiceHost, g_mockServicePort);
+        return 1;
+    }
+    if ((useName == NULL || useName[0] == 0) && allowPrompt &&
+        !g_autotestEnabled && list.count >= 2 &&
+        vm_client_server_list_stdin_interactive())
+    {
+        if (vm_client_server_list_prompt(&list, promptedName,
+                                         sizeof(promptedName)))
+            useName = promptedName;
+    }
+    if (useName == NULL || useName[0] == 0)
+        useName = list.current;
+    if (useName == NULL || useName[0] == 0)
+    {
+        if (list.count == 1)
+            useName = list.entries[0].name;
+    }
+    if (useName == NULL || useName[0] == 0)
+    {
+        printf("[info][network] server_list loaded path=%s entries=%u "
+               "reason=no-current-keep-default endpoint=%s:%u\n",
+               list.path, list.count, g_mockServiceHost, g_mockServicePort);
+        return 1;
+    }
+    entry = vm_client_server_list_find(&list, useName);
+    if (entry == NULL)
+    {
+        printf("[warn][network] server_list name=%s not-found path=%s "
+               "entries=%u\n",
+               useName, list.path, list.count);
+        return 0;
+    }
+    if (!vm_mock_service_parse_host_port(entry->endpoint, parsedHost,
+                                         sizeof(parsedHost), &parsedPort))
+    {
+        printf("[warn][network] server_list name=%s invalid endpoint=%s "
+               "path=%s\n",
+               entry->name, entry->endpoint, list.path);
+        return 0;
+    }
+    snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+    g_mockServicePort = parsedPort;
+    if (appliedOut)
+        *appliedOut = 1;
+    printf("[info][network] server_list selected name=%s endpoint=%s:%u "
+           "path=%s entries=%u\n",
+           entry->name, g_mockServiceHost, g_mockServicePort, list.path,
+           list.count);
     return 1;
 }
 
@@ -4127,10 +5138,16 @@ static void vm_mock_service_init_config(int argc, char *args[])
 {
 #ifdef CBE_CLIENT_ONLY
     const char *envEndpoint = getenv("CBE_SERVER_ENDPOINT");
+    const char *envServer = getenv("CBE_SERVER");
+    const char *envServerList = getenv("CBE_SERVER_LIST");
+    const char *envNoSelect = getenv("CBE_NO_SERVER_SELECT");
+    const char *selectedServer = NULL;
+    const char *selectedListPath = NULL;
     char parsedHost[64];
     u16 parsedPort = 0;
-    (void)argc;
-    (void)args;
+    int explicitEndpoint = 0;
+    int listApplied = 0;
+    int allowPrompt = 1;
 
     if (g_mockServiceClientId == 0)
     {
@@ -4140,22 +5157,74 @@ static void vm_mock_service_init_config(int argc, char *args[])
         if (g_mockServiceClientId == 0)
             g_mockServiceClientId = 1;
     }
-    if (envEndpoint != NULL && envEndpoint[0] != 0)
+    if (envNoSelect != NULL && envNoSelect[0] != 0 &&
+        strcmp(envNoSelect, "0") != 0)
+        allowPrompt = 0;
+    if (envServer != NULL && envServer[0] != 0)
+        selectedServer = envServer;
+    if (envServerList != NULL && envServerList[0] != 0)
+        selectedListPath = envServerList;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(args[i], "--no-server-select") == 0)
+            allowPrompt = 0;
+        else if (strncmp(args[i], "--server=", 9) == 0 && args[i][9] != 0)
+            selectedServer = args[i] + 9;
+        else if (strncmp(args[i], "--server-list=", 14) == 0 &&
+                 args[i][14] != 0)
+            selectedListPath = args[i] + 14;
+        else if (strncmp(args[i], "--mock-service=", 15) == 0)
+        {
+            if (vm_mock_service_parse_host_port(args[i] + 15, parsedHost,
+                                                sizeof(parsedHost),
+                                                &parsedPort))
+            {
+                snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s",
+                         parsedHost);
+                g_mockServicePort = parsedPort;
+                explicitEndpoint = 1;
+            }
+            else
+            {
+                printf("[warn][network] invalid mock-service=%s\n",
+                       args[i] + 15);
+            }
+        }
+    }
+    if (!explicitEndpoint && envEndpoint != NULL && envEndpoint[0] != 0)
     {
         if (vm_mock_service_parse_host_port(envEndpoint, parsedHost,
                                             sizeof(parsedHost), &parsedPort))
         {
-            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
+            snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s",
+                     parsedHost);
             g_mockServicePort = parsedPort;
+            explicitEndpoint = 1;
         }
         else
         {
-            printf("[warn][network] invalid CBE_SERVER_ENDPOINT=%s\n", envEndpoint);
+            printf("[warn][network] invalid CBE_SERVER_ENDPOINT=%s\n",
+                   envEndpoint);
         }
     }
+    if (!explicitEndpoint)
+    {
+        /* Game Center shows a zone picker for 江湖OL; skip console prompt.
+         * Android/headless client builds have no launcher force-launch flag. */
+#if defined(CBE_PLATFORM_ANDROID) || defined(CBE_PLATFORM_NO_WINDOW)
+        allowPrompt = 0;
+#else
+        if (!g_forceLaunchCbe)
+            allowPrompt = 0;
+#endif
+        (void)vm_client_server_list_apply(selectedServer, selectedListPath,
+                                          allowPrompt, &listApplied);
+    }
     g_mockServiceOnly = 0;
-    printf("[info][network] mode=android-client server=%s:%u\n",
-           g_mockServiceHost, g_mockServicePort);
+    printf("[info][network] mode=android-client server=%s:%u source=%s\n",
+           g_mockServiceHost, g_mockServicePort,
+           explicitEndpoint ? "endpoint" :
+           (listApplied ? "server-list" : "default"));
 #else
     const char *envOnly = getenv("CBE_MOCK_SERVICE_ONLY");
     const char *envEndpoint = getenv("CBE_MOCK_SERVICE");
@@ -4164,8 +5233,16 @@ static void vm_mock_service_init_config(int argc, char *args[])
     const char *envLegacyRemote = getenv("CBE_MOCK_SERVICE_REMOTE");
     const char *envAdminBind = getenv("CBE_MOCK_ADMIN_BIND");
     const char *envAdminPort = getenv("CBE_MOCK_ADMIN_PORT");
+    const char *envServer = getenv("CBE_SERVER");
+    const char *envServerList = getenv("CBE_SERVER_LIST");
+    const char *envNoSelect = getenv("CBE_NO_SERVER_SELECT");
+    const char *selectedServer = NULL;
+    const char *selectedListPath = NULL;
     char parsedHost[64];
     u16 parsedPort = 0;
+    int explicitEndpoint = 0;
+    int listApplied = 0;
+    int allowPrompt = 1;
 
     if (envOnly && strcmp(envOnly, "0") != 0)
         g_mockServiceOnly = 1;
@@ -4192,12 +5269,21 @@ static void vm_mock_service_init_config(int argc, char *args[])
             g_mockServiceClientId = 1;
     }
 
+    if (envNoSelect != NULL && envNoSelect[0] != 0 &&
+        strcmp(envNoSelect, "0") != 0)
+        allowPrompt = 0;
+    if (envServer != NULL && envServer[0] != 0)
+        selectedServer = envServer;
+    if (envServerList != NULL && envServerList[0] != 0)
+        selectedListPath = envServerList;
+
     if (envEndpoint)
     {
         if (vm_mock_service_parse_host_port(envEndpoint, parsedHost, sizeof(parsedHost), &parsedPort))
         {
             snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
             g_mockServicePort = parsedPort;
+            explicitEndpoint = 1;
         }
         else
         {
@@ -4210,6 +5296,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
         {
             snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
             g_mockServicePort = parsedPort;
+            explicitEndpoint = 1;
         }
         else
         {
@@ -4220,7 +5307,10 @@ static void vm_mock_service_init_config(int argc, char *args[])
     {
         u32 portValue = 0;
         if (vm_autotest_parse_u32(envLegacyPort, &portValue) && portValue > 0 && portValue <= 65535u)
+        {
             g_mockServicePort = (u16)portValue;
+            explicitEndpoint = 1;
+        }
         else
         {
             printf("[warn][mock-service] invalid CBE_MOCK_SERVICE_PORT=%s\n", envLegacyPort);
@@ -4242,11 +5332,27 @@ static void vm_mock_service_init_config(int argc, char *args[])
         {
             g_mockServiceOnly = 1;
         }
+        else if (strcmp(args[i], "--no-server-select") == 0)
+        {
+            allowPrompt = 0;
+        }
+        else if (strncmp(args[i], "--server=", 9) == 0 && args[i][9] != 0)
+        {
+            selectedServer = args[i] + 9;
+        }
+        else if (strncmp(args[i], "--server-list=", 14) == 0 &&
+                 args[i][14] != 0)
+        {
+            selectedListPath = args[i] + 14;
+        }
         else if (strncmp(args[i], "--mock-service-port=", 20) == 0)
         {
             u32 portValue = 0;
             if (vm_autotest_parse_u32(args[i] + 20, &portValue) && portValue > 0 && portValue <= 65535u)
+            {
                 g_mockServicePort = (u16)portValue;
+                explicitEndpoint = 1;
+            }
             else
                 printf("[warn][mock-service] invalid mock-service-port=%s\n", args[i] + 20);
         }
@@ -4271,6 +5377,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
             {
                 snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
                 g_mockServicePort = parsedPort;
+                explicitEndpoint = 1;
             }
             else
             {
@@ -4290,6 +5397,7 @@ static void vm_mock_service_init_config(int argc, char *args[])
             {
                 snprintf(g_mockServiceHost, sizeof(g_mockServiceHost), "%s", parsedHost);
                 g_mockServicePort = parsedPort;
+                explicitEndpoint = 1;
             }
             else
             {
@@ -4297,6 +5405,10 @@ static void vm_mock_service_init_config(int argc, char *args[])
             }
         }
     }
+
+    if (!g_mockServiceOnly && !explicitEndpoint)
+        (void)vm_client_server_list_apply(selectedServer, selectedListPath,
+                                          allowPrompt, &listApplied);
 
     if (g_mockServiceOnly)
     {
@@ -4310,8 +5422,10 @@ static void vm_mock_service_init_config(int argc, char *args[])
     }
     else
     {
-        printf("[info][mock-service] mode=emulator client=%s:%u auth=packet-driven required=service\n",
-               g_mockServiceHost, g_mockServicePort);
+        printf("[info][mock-service] mode=emulator client=%s:%u source=%s auth=packet-driven required=service\n",
+               g_mockServiceHost, g_mockServicePort,
+               explicitEndpoint ? "endpoint" :
+               (listApplied ? "server-list" : "default"));
     }
 #endif
 }
@@ -6042,6 +7156,100 @@ static void vm_autotest_tick(void)
     }
 }
 
+#define LOAD_CBE_PATH "CBE/僵尸先生.CBE"//这个加载太慢了
+#define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
+#define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
+#define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
+#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
+#define LOAD_CBE_PATH "CBE/战争机器.CBE"
+#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
+#define LOAD_CBE_PATH "CBE/魔塔.CBE"
+#define LOAD_CBE_PATH "CBE/孤岛.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
+#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
+#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
+#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
+#define LOAD_CBE_PATH "CBE/血剑Online.CBE"
+#define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
+#define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
+#define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
+#define LOAD_CBE_PATH "CBE/众神之战.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
+#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
+#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
+
+#ifdef CBE_PLATFORM_ANDROID
+static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.cbe";
+#else
+static char g_cbeLoadPathUtf8[260] = LOAD_CBE_PATH;
+#endif
+
+static void vm_cbe_init_config(int argc, char *args[])
+{
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(args[i], "--cbe=", 6) == 0 && args[i][6] != 0)
+        {
+            snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", args[i] + 6);
+        }
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+        if (strcmp(args[i], "--no-launcher") == 0)
+            g_forceLaunchCbe = 1;
+        if (strcmp(args[i], "--launcher") == 0)
+            g_forceLaunchCbe = 0;
+#endif
+    }
+    printf("[info][cbe] selected=%s\n", g_cbeLoadPathUtf8);
+}
+
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+static bool vm_cbe_load_and_start(const char *cbe_path_utf8);
+
+static void vm_game_launcher_start_selected(const char *path)
+{
+    const char *serverName;
+    int applied = 0;
+
+    if (path == NULL || path[0] == 0)
+        return;
+    serverName = vm_game_launcher_get_selected_server_name(&g_gameLauncherState);
+    if (serverName != NULL && serverName[0] != 0)
+    {
+        (void)vm_client_server_list_apply(serverName, NULL, 0, &applied);
+        snprintf(g_mockPreferredTitleServerUtf8,
+                 sizeof(g_mockPreferredTitleServerUtf8), "%s", serverName);
+    }
+    else
+    {
+        g_mockPreferredTitleServerUtf8[0] = 0;
+    }
+    printf("[info][launcher] launching %s server=%s endpoint=%s:%u\n", path,
+           serverName && serverName[0] ? serverName : "-", g_mockServiceHost,
+           g_mockServicePort);
+    g_gameLauncherState.loading = true;
+    snprintf(g_gameLauncherState.loading_name,
+             sizeof(g_gameLauncherState.loading_name), "%s",
+             g_gameLauncherState.entries[g_gameLauncherState.selected_index]
+                 .display_name);
+    vm_game_launcher_render(&g_gameLauncherState, SDL_GetWindowSurface(window));
+    SDL_UpdateWindowSurface(window);
+    g_gameLauncherActive = false;
+    if (!vm_cbe_load_and_start(path))
+    {
+        printf("[error][launcher] failed to load %s\n", path);
+        g_gameLauncherActive = true;
+        g_gameLauncherState.loading = false;
+        g_gameLauncherState.selected_server_name[0] = 0;
+        g_gameLauncherState.frame_dirty = true;
+    }
+    else
+    {
+        vm_game_launcher_record_launch(path);
+    }
+}
+#endif
 
 void loop()
 {
@@ -6050,6 +7258,56 @@ void loop()
     bool isLoop = true;
     while (isLoop)
     {
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+        if (g_gameLauncherActive && !g_autotestEnabled)
+        {
+            vm_game_launcher_update();
+            if (g_hostQuitRequested)
+                break;
+            while (SDL_PollEvent(&ev))
+            {
+                if (ev.type == SDL_QUIT)
+                {
+                    vm_request_host_quit("window_close");
+                    break;
+                }
+                if (g_hostQuitRequested)
+                    continue;
+                switch (ev.type)
+                {
+                case SDL_MOUSEBUTTONDOWN:
+                {
+                    const char *path = vm_game_launcher_handle_mouse(
+                        &g_gameLauncherState, ev.button.x, ev.button.y,
+                        ev.button.button);
+                    if (path)
+                        vm_game_launcher_start_selected(path);
+                    break;
+                }
+                case SDL_MOUSEBUTTONUP:
+                    vm_game_launcher_handle_mouse(&g_gameLauncherState,
+                                                  ev.button.x, ev.button.y, 0);
+                    break;
+                case SDL_MOUSEWHEEL:
+                    vm_game_launcher_handle_mouse(
+                        &g_gameLauncherState, 0, 0,
+                        ev.wheel.y > 0 ? 5 : 4);
+                    break;
+                case SDL_KEYDOWN:
+                {
+                    const char *path = vm_game_launcher_handle_key(
+                        &g_gameLauncherState, ev.key.keysym.sym, true);
+                    if (path)
+                        vm_game_launcher_start_selected(path);
+                    break;
+                }
+                }
+            }
+            SDL_Delay(16);
+            continue;
+        }
+#endif
         vm_input_sync_sdl_text_input();
         while (SDL_PollEvent(&ev))
         {
@@ -6151,7 +7409,8 @@ void loop()
     g_vmInputSdlTextInputWanted = 0;
     vm_input_sync_sdl_text_input();
 #ifndef CBE_PLATFORM_ANDROID
-    pthread_join(&EmuThread, &thread_ret);
+    if (MTK != NULL)
+        pthread_join(&EmuThread, &thread_ret);
 #else
     (void)thread_ret;
 #endif
@@ -6219,46 +7478,6 @@ u8 *SimpleRamMatch(u8 *start, u8 *end, u8 *matchStart, int matchLen)
         return NULL;
 }
 
-#define LOAD_CBE_PATH "CBE/僵尸先生.CBE"//这个加载太慢了
-#define LOAD_CBE_PATH "CBE/钻石迷情3.CBE"
-#define LOAD_CBE_PATH "CBE/捕鱼猎人.CBE"
-#define LOAD_CBE_PATH "CBE/枪之荣誉.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/战争机器.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/魔塔.CBE"
-#define LOAD_CBE_PATH "CBE/孤岛.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城.CBE"
-#define LOAD_CBE_PATH "CBE/鬼吹灯.CBE"
-#define LOAD_CBE_PATH "CBE/皇牌空战.CBE"
-#define LOAD_CBE_PATH "CBE/涂鸦跳跃.CBE"
-#define LOAD_CBE_PATH "CBE/血剑Online.CBE"
-#define LOAD_CBE_PATH "CBE/愤怒的小鸟.CBE"
-#define LOAD_CBE_PATH "CBE/歪歪猫发条城历险记V100.CBE"
-#define LOAD_CBE_PATH "CBE/武林外传(新品).CBE"
-#define LOAD_CBE_PATH "CBE/众神之战.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
-#define LOAD_CBE_PATH "CBE/恶魔城登录版.CBE"
-#define LOAD_CBE_PATH "CBE/江湖OL.CBE"
-
-#ifdef CBE_PLATFORM_ANDROID
-static char g_cbeLoadPathUtf8[260] = "CBE/江湖OL.cbe";
-#else
-static char g_cbeLoadPathUtf8[260] = LOAD_CBE_PATH;
-#endif
-
-static void vm_cbe_init_config(int argc, char *args[])
-{
-    for (int i = 1; i < argc; ++i)
-    {
-        if (strncmp(args[i], "--cbe=", 6) == 0 && args[i][6] != 0)
-        {
-            snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", args[i] + 6);
-        }
-    }
-    printf("[info][cbe] selected=%s\n", g_cbeLoadPathUtf8);
-}
-
 static bool vm_cbe_uses_fixed_base_manager_abi(void)
 {
     /* Older fixed-base images reserve manager-copy space after the actual
@@ -6316,6 +7535,125 @@ static void vm_init_fixed_base_manager_directory(void)
            VM_Manager_Table_ADDRESS,
            VM_NATIVE_MANAGER_DIRECTORY_ADDRESS);
 }
+
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
+{
+    uc_err err;
+    uc_hook hookHandle;
+
+    if (cbe_path_utf8 == NULL || cbe_path_utf8[0] == 0)
+        return false;
+    snprintf(g_cbeLoadPathUtf8, sizeof(g_cbeLoadPathUtf8), "%s", cbe_path_utf8);
+
+#ifdef CBE_HOST_UTF8_PATHS
+    snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", cbe_path_utf8);
+#else
+    utf8_to_gbk(cbe_path_utf8, cbeTextString, mySizeOf(cbeTextString));
+#endif
+
+    {
+        char *fileBuffer = readFile(cbeTextString, &changeTmp1);
+        if (fileBuffer == NULL || changeTmp1 == 0)
+        {
+            printf("[error][cbe] failed to load %s\n", cbeTextString);
+            return false;
+        }
+        g_cbeFileBuffer = (u8 *)fileBuffer;
+        g_cbeFileSize = changeTmp1;
+        parseCbeHeader(fileBuffer, changeTmp1);
+        vm_config_program_mapping();
+
+        if (g_cbeInfo.isBiggianProgram)
+            err = uc_open(UC_ARCH_ARM, UC_MODE_ARM | UC_MODE_BIG_ENDIAN, &MTK);
+        else
+            err = uc_open(UC_ARCH_ARM, UC_MODE_ARM, &MTK);
+        if (err)
+        {
+            printf("[error][cbe] uc_open failed: %u (%s)\n", err,
+                   uc_strerror(err));
+            return false;
+        }
+
+        ROM_MEMPOOL = SDL_malloc(Program_ROM_Mapped_Size);
+        STACK_MEMPOOL = SDL_malloc(size_4mb);
+        PRAM_MEMPOOL = SDL_malloc(size_1mb);
+        RAM_MEMPOOL = SDL_malloc(VM_MEMPOOL_TOTAL_SIZE);
+        if (ROM_MEMPOOL)
+            memset(ROM_MEMPOOL, 0, Program_ROM_Mapped_Size);
+
+        uc_mem_map_ptr(MTK, Program_ROM_Address, Program_ROM_Mapped_Size,
+                       UC_PROT_ALL, ROM_MEMPOOL);
+        uc_mem_map_ptr(MTK, STACK_ADDRESS, size_1mb, UC_PROT_ALL, STACK_MEMPOOL);
+        uc_mem_map_ptr(MTK, VM_Manager_Table_ADDRESS, size_1mb, UC_PROT_ALL,
+                       PRAM_MEMPOOL);
+        uc_mem_map_ptr(MTK, VM_FUNC_HK_TABLE_ADDRESS, size_1mb, UC_PROT_ALL,
+                       SDL_malloc(size_1mb));
+        uc_mem_map_ptr(MTK, VM_Memory_Pool_ADDRESS, VM_MEMPOOL_TOTAL_SIZE,
+                       UC_PROT_ALL, RAM_MEMPOOL);
+        uc_mem_map(MTK, PROGRAM_EXIT_ADDR, 0x1000, UC_PROT_ALL);
+
+        InitVmMalloc();
+        if (!g_mockServiceOnly)
+        {
+            InitLcd();
+            vm_lcd_update_with_input_overlay();
+            InitFontEngine();
+        }
+
+        err = uc_hook_add(MTK, &hookHandle, UC_HOOK_CODE, hookCodeCallBack, 0, 0,
+                          0xFFFFFFFF);
+        if (err == UC_ERR_OK)
+            err = add_manager_code_hooks(MTK);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                    hookRamCallBack, 0, 0, 0xFFFFFFFF);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_READ_UNMAPPED, hookRamErrorBack,
+                    2, 0, 0xFFFFFFFF);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_WRITE_UNMAPPED, hookRamErrorBack,
+                    3, 0, 0xFFFFFFFF);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_MEM_FETCH_UNMAPPED, hookRamErrorBack,
+                    4, 0, 0xFFFFFFFF);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_INTR, hookCpuIntr, NULL, 1, 0);
+        uc_hook_add(MTK, &hookHandle, UC_HOOK_INSN_INVALID, hookInsnInvalid, 4, 0,
+                    0xFFFFFFFF);
+        if (err != UC_ERR_OK)
+        {
+            printf("[error][cbe] hook add failed: %u (%s)\n", err,
+                   uc_strerror(err));
+            return false;
+        }
+
+        uc_mem_write(MTK, Program_ROM_Address,
+                     fileBuffer + g_cbeInfo.codeOffset, g_cbeInfo.codeLen);
+        printf("[info][cbe] loaded %s entry=0x%x loadBase=0x%x\n", cbe_path_utf8,
+               g_cbeInfo.codeOffset, Program_ROM_Address);
+        uc_mem_write(MTK, Program_Data_Address,
+                     fileBuffer + g_cbeInfo.BssDataOffset, g_cbeInfo.BssDataLen);
+
+        changeTmp3 = VM_MANAGER_TABLE_ADDRESS;
+        vm_set_var(VM_Manager_Table_ADDRESS + 8, changeTmp3);
+        changeTmp3 = VM_LOG_NOOP_ADDRESS;
+        vm_set_var(VM_Manager_Table_ADDRESS + 12, changeTmp3);
+        changeTmp3 = VM_CURR_APP_INFO_ADDRESS;
+        vm_set_var(VM_Manager_Table_ADDRESS + 16, changeTmp3);
+
+        vm_initManagerTable();
+        vm_init_fixed_base_manager_directory();
+
+        Global_R9 = Program_Data_Address;
+        uc_reg_write(MTK, UC_ARM_REG_R9, &Global_R9);
+        changeTmp2 = STACK_ADDRESS + size_1mb;
+        uc_reg_write(MTK, UC_ARM_REG_SP, &changeTmp2);
+
+        changeTmp1 = Program_ROM_Address;
+        g_vmThreadFinished = 0;
+        pthread_create(&EmuThread, NULL, RunArmProgram, changeTmp1);
+        printf("[info][cbe] VM started\n");
+    }
+    return true;
+}
+#endif
 
 
 static int vm_ascii_stricmp(const char *a, const char *b)
@@ -6874,6 +8212,100 @@ static void vm_trace_read_guest_string(u32 ptr, char *out, size_t outSize)
     vm_read_path_string(ptr, out, outSize);
     if (out[0] == 0)
         snprintf(out, outSize, "-");
+}
+
+static u8 g_mallRechargeAccountWebOpened = 0;
+
+static void vm_host_block_mall_recharge(const char *reason)
+{
+    (void)reason;
+    g_mallRechargeAccountWebOpened = 1;
+    g_wpayMockFlowActive = 0;
+}
+
+static void vm_host_queue_wpay_cancel_keys(void)
+{
+    if (g_wpayCancelKeysRemaining < 4u)
+        g_wpayCancelKeysRemaining = 4u;
+}
+
+/* Keep desktop aligned with Android: only null-BLX is recharge-specific. */
+static bool vm_host_intercept_wpay_http_pay(u32 pc)
+{
+    (void)pc;
+    return false;
+}
+
+static void vm_host_exit_current_emu_slice(void)
+{
+    vm_set_call_result(0);
+    vm_bx(PROGRAM_EXIT_ADDR | 1u);
+}
+
+static void vm_host_abort_pending_pay_overlay(void)
+{
+    u32 top = 0;
+    u32 topInit = 0;
+    u32 resumeScreen = 0;
+    u32 resumeParam = 0;
+    u32 resumeModule = 0;
+    u32 resumeDp = 0;
+
+    if (g_screenStackCount == 0)
+        return;
+
+    top = g_screenStack[g_screenStackCount - 1];
+    topInit = top ? (vm_get_var(top) & ~1u) : 0;
+    if (!(g_screenStackCount >= 2 &&
+          (top == vmAddedScreen || screenStructChange == 1) &&
+          topInit != 0 && topInit < 0x05000000u &&
+          !vm_screen_is_entry_root(top)))
+        return;
+
+    printf("[info][wpay] discard pending pay overlay screen=%08x init=%08x\n",
+           top, topInit);
+    g_screenStackCount--;
+    if (g_screenStackCount == 0)
+        return;
+
+    resumeScreen = g_screenStack[g_screenStackCount - 1];
+    resumeParam = g_screenStackParam[g_screenStackCount - 1];
+    resumeModule = g_screenStackModuleBase[g_screenStackCount - 1];
+    resumeDp = g_screenStackDataPackage[g_screenStackCount - 1];
+    vmAddedScreen = resumeScreen;
+    g_currentScreenThis = resumeParam ? resumeParam : vm_screen_default_call_param(resumeScreen);
+    g_currentScreenModuleBase = resumeModule;
+    if (resumeModule)
+        vm_dl_note_sp_bf(resumeModule, "wpay-cancel-keep");
+    g_currentScreenDataPackage = resumeDp;
+    vm_restore_data_package(resumeDp);
+    vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, resumeScreen);
+    vm_set_var(VM_SCREEN_isInQuit_ADDRESS, 0);
+    screenStructChange = 1;
+    g_screenResumeExisting = 1;
+    g_screenEnterExistingNoCallback = 0;
+    g_screenExitMode = VM_SCREEN_EXIT_SKIP;
+    g_screenRemovedWithoutNext = 0;
+    printf("[info][wpay] keep screen=%08x for guest cancel key\n", resumeScreen);
+}
+
+static bool vm_host_intercept_mall_recharge_null_blx(u32 pc, u32 size)
+{
+    u32 r0 = 0;
+
+    (void)size;
+    if ((pc & ~1u) != 0x0100BAB6u)
+        return false;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    if (r0 != 0)
+        return false;
+
+    vm_host_block_mall_recharge("mall_recharge_null_blx");
+    vm_host_abort_pending_pay_overlay();
+    vm_host_queue_wpay_cancel_keys();
+    printf("[info][wpay] null BLX at 0x0100bab6 blocked -> inject cancel key\n");
+    vm_host_exit_current_emu_slice();
+    return true;
 }
 
 static void vm_note_castlevania_wpay_pc(u32 pc)
@@ -7635,8 +9067,8 @@ void RunArmProgram(void *param)
                     vm_lcd_update_with_input_overlay();
                     u32 _now = SDL_GetTicks();
                     u32 _elapsed = _now - _frameTick;
-                    if (_elapsed < 100)
-                        SDL_Delay(100 - _elapsed);
+                    if (_elapsed < (u32)VM_SCHED_FRAME_MS)
+                        SDL_Delay((u32)VM_SCHED_FRAME_MS - _elapsed);
                     _frameTick = SDL_GetTicks();
                 }
                 if (g_hostQuitCleanupStarted)
@@ -7757,6 +9189,15 @@ int cbeInit(const char *rootPath)
 int main(int argc, char *args[])
 #endif
 {
+#ifdef CBE_PLATFORM_ANDROID
+    cbe_log_init_from_args(0, NULL);
+#else
+    cbe_log_init_from_args(argc, args);
+#endif
+    /* Always emit once via fprintf so operators see the active mode even when
+     * production suppresses filtered [info] printf traffic. */
+    fprintf(stdout, "[info][host] log_mode=%s (CBE_LOG_MODE / --log-mode= / --debug-log)\n",
+            cbe_log_mode_name(cbe_log_get_mode()));
 #ifdef CBE_SERVER_ONLY
     const char *resourceRoot = getenv("CBE_RESOURCE_ROOT");
     char originalCwd[1024];
@@ -7940,6 +9381,34 @@ int main(int argc, char *args[])
 
     InitVmEvent();
 
+#if !defined(CBE_SERVER_ONLY) && !defined(CBE_PLATFORM_ANDROID) && \
+    !defined(CBE_PLATFORM_NO_WINDOW)
+    if (!g_mockServiceOnly)
+    {
+        InitLcd();
+        InitFontEngine();
+        if (!g_forceLaunchCbe && !g_autotestEnabled)
+        {
+            if (vm_game_launcher_init(&g_gameLauncherState, LcdGetWindowWidth(),
+                                      LcdGetWindowHeight()))
+            {
+                g_gameLauncherActive = true;
+                printf("[info][launcher] game center initialized, %d games "
+                       "found\n",
+                       g_gameLauncherState.count);
+            }
+        }
+    }
+    if (g_gameLauncherActive)
+    {
+        printf("[info][launcher] showing launcher, deferring CBE load\n");
+        loop();
+        vm_net_mock_async_shutdown();
+        vm_net_mock_service_notify_disconnect("host-loop-exit");
+        goto _launcher_done;
+    }
+#endif
+
 #ifdef CBE_HOST_UTF8_PATHS
     snprintf((char *)cbeTextString, mySizeOf(cbeTextString), "%s", g_cbeLoadPathUtf8);
 #else
@@ -8085,6 +9554,7 @@ int main(int argc, char *args[])
         vm_net_mock_service_notify_disconnect("host-loop-exit");
 #endif
     }
+_launcher_done:
     return 0;
 #endif
 }
@@ -9212,6 +10682,11 @@ return 4;
         g_vmInputPrompt = 0;
         g_vmInputPassword = 0;
         g_vmInputComposition[0] = 0;
+#ifdef CBE_PLATFORM_ANDROID
+        g_vmAndroidInputPendingReady = 0;
+        g_vmAndroidInputPendingLen = 0;
+        g_vmAndroidInputPendingCancelled = 0;
+#endif
         vm_set_call_result(0);
     }
     else if (idx == 46)
@@ -9572,8 +11047,12 @@ return 4;
     }
     else if (idx == 110)
     {
-        printf("[call]vmSysOpenBrowser\n");
-        assert(0);
+        /* Feature-phone browser unavailable; open account web center instead. */
+        printf("[call]vmSysOpenBrowser -> account_web\n");
+#ifdef CBE_PLATFORM_ANDROID
+        vm_android_request_account_web_open("vmSysOpenBrowser");
+#endif
+        vm_set_call_result(0);
     }
     else if (idx == 111)
     {
@@ -10397,12 +11876,20 @@ static bool hook_vm_manager_lcd_func(u32 address)
         {
             char srcText[64];
             char dstText[64];
+            char srcUtf8[128];
+            char dstUtf8[128];
             memset(srcText, 0, sizeof(srcText));
             memset(dstText, 0, sizeof(dstText));
+            memset(srcUtf8, 0, sizeof(srcUtf8));
+            memset(dstUtf8, 0, sizeof(dstUtf8));
             vm_debug_read_guest_ucs2_as_gbk(tmp1, srcText, sizeof(srcText), 64);
             vm_debug_read_guest_cstr(tmp2, dstText, sizeof(dstText));
+            /* Guest text is GBK; convert before printf so Android print-buffer
+             * polling (NewStringUTF / UTF-8 String) never sees illegal bytes. */
+            gbk_to_utf8((u8 *)srcText, (u8 *)srcUtf8, sizeof(srcUtf8));
+            gbk_to_utf8((u8 *)dstText, (u8 *)dstUtf8, sizeof(dstUtf8));
             printf("[debug][vmInput] lcd40 pc=%08x src=%08x dst=%08x max=%u srcText='%s' dstBefore='%s'\n",
-                   lastAddress, tmp1, tmp2, tmp3, srcText, dstText);
+                   lastAddress, tmp1, tmp2, tmp3, srcUtf8, dstUtf8);
         }
         if (tmp1 == 0 || tmp2 == 0 || tmp3 == 0 || tmp3 > 0xfff0)
         {
@@ -10432,10 +11919,13 @@ static bool hook_vm_manager_lcd_func(u32 address)
             if (g_vmInputWatchCallback)
             {
                 char dstAfter[64];
+                char dstAfterUtf8[128];
                 memset(dstAfter, 0, sizeof(dstAfter));
+                memset(dstAfterUtf8, 0, sizeof(dstAfterUtf8));
                 vm_debug_read_guest_cstr(tmp2, dstAfter, sizeof(dstAfter));
+                gbk_to_utf8((u8 *)dstAfter, (u8 *)dstAfterUtf8, sizeof(dstAfterUtf8));
                 printf("[debug][vmInput] lcd40-write dst=%08x wrote=%u conv=%d dstAfter='%s'\n",
-                       tmp2, writeLen, conv, dstAfter);
+                       tmp2, writeLen, conv, dstAfterUtf8);
             }
             vm_set_call_result(strlen((char *)sprintfBuff));
         }
@@ -11364,6 +12854,9 @@ static u32 vm_ctrl_draw_softkey_bar(u32 imageInfo, u32 leftPtr, u32 centerPtr, u
     vm_ctrl_read_text(leftPtr, ucs2, left, sizeof(left));
     vm_ctrl_read_text(centerPtr, ucs2, center, sizeof(center));
     vm_ctrl_read_text(rightPtr, ucs2, right, sizeof(right));
+    memcpy(g_softkeyLeftCache, left, sizeof(g_softkeyLeftCache));
+    memcpy(g_softkeyCenterCache, center, sizeof(g_softkeyCenterCache));
+    memcpy(g_softkeyRightCache, right, sizeof(g_softkeyRightCache));
 
     if (left[0])
         vm_ctrl_draw_text(left, 10, y, color);
@@ -12444,21 +13937,84 @@ static bool hook_vm_manager_screen_func(u32 address)
             }
             else if (vm_scene_same_reenter_matches_target(activeTarget))
             {
+#if defined(CBE_CLIENT_ONLY)
+                /*
+                 * Map-stone: deferred 30/1 already entered; 2/3 27/12+posinfo
+                 * must run once more to bind the walking sprite.  Allow that
+                 * single completion reenter; further duplicates stay suppressed.
+                 */
+                if (g_vm_scene_allow_one_map_stone_completion_reenter)
+                {
+                    acceptChange = true;
+                    g_vm_scene_allow_one_map_stone_completion_reenter = false;
+                    vm_scene_same_reenter_remember_target(activeTarget);
+                    printf("[info][screen] screen_mgr same-reenter-allowed-once "
+                           "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                           "evidence=map-stone-27/12-after-remote-30/1\n",
+                           lastAddress,
+                           g_vm_net_mock_last_scene_change_target_serial,
+                           activeTarget ? activeTarget->scene : "",
+                           activeTarget ? activeTarget->x : 0,
+                           activeTarget ? activeTarget->y : 0,
+                           activeTarget ? activeTarget->exitId : 0);
+                }
+                else
+#endif
+                {
+                    acceptChange = false;
+#if defined(CBE_CLIENT_ONLY)
+                    g_vm_scene_block_dream_completion_reenter = false;
+                    vm_host_clear_download_busy("same-suppressed");
+#endif
+                    printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+                           lastAddress,
+                           g_vm_net_mock_last_scene_change_target_serial,
+                           activeTarget ? activeTarget->scene : "",
+                           activeTarget ? activeTarget->x : 0,
+                           activeTarget ? activeTarget->y : 0,
+                           activeTarget ? activeTarget->exitId : 0);
+                    vm_autotest_note("screen_mgr idx=%u type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
+                                     idx, lastAddress, tmp1, vmAddedScreen,
+                                     activeTarget ? activeTarget->scene : "",
+                                     activeTarget ? activeTarget->x : 0,
+                                     activeTarget ? activeTarget->y : 0,
+                                     activeTarget ? activeTarget->exitId : 0);
+                }
+            }
+#if defined(CBE_CLIENT_ONLY)
+            else if (g_vm_scene_block_dream_completion_reenter &&
+                     activeTarget != NULL &&
+                     g_vm_net_mock_last_scene_change_target_valid &&
+                     vm_net_mock_scene_names_equal_loose(
+                         activeTarget->scene,
+                         g_vm_net_mock_last_scene_change_target.scene))
+            {
+                /*
+                 * Fallback if EnterScene body runs without hitting the
+                 * 01018150 entry intercept (vm_host_intercept_dream_...).
+                 * Prefer entry skip: reject here still leaves half-open
+                 * loading after busy was armed.
+                 */
                 acceptChange = false;
-                printf("[info][screen] screen_mgr same-suppressed caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u\n",
+                g_vm_scene_block_dream_completion_reenter = false;
+                vm_host_clear_download_busy("same-suppressed-dream-reenter");
+                printf("[info][screen] screen_mgr same-suppressed-dream-reenter "
+                       "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                       "evidence=fallback-after-entry-intercept-miss\n",
                        lastAddress,
                        g_vm_net_mock_last_scene_change_target_serial,
-                       activeTarget ? activeTarget->scene : "",
-                       activeTarget ? activeTarget->x : 0,
-                       activeTarget ? activeTarget->y : 0,
-                       activeTarget ? activeTarget->exitId : 0);
-                vm_autotest_note("screen_mgr idx=%u type=same-suppressed caller=%08x screen=%08x added=%08x scene=%s pos=(%u,%u) exit=%u\n",
+                       activeTarget->scene,
+                       activeTarget->x,
+                       activeTarget->y,
+                       activeTarget->exitId);
+                vm_autotest_note("screen_mgr idx=%u type=same-suppressed-dream-reenter "
+                                 "caller=%08x screen=%08x added=%08x scene=%s "
+                                 "pos=(%u,%u) exit=%u\n",
                                  idx, lastAddress, tmp1, vmAddedScreen,
-                                 activeTarget ? activeTarget->scene : "",
-                                 activeTarget ? activeTarget->x : 0,
-                                 activeTarget ? activeTarget->y : 0,
-                                 activeTarget ? activeTarget->exitId : 0);
+                                 activeTarget->scene, activeTarget->x,
+                                 activeTarget->y, activeTarget->exitId);
             }
+#endif
             else
             {
                 vm_scene_same_reenter_remember_target(activeTarget);
@@ -12495,6 +14051,16 @@ static bool hook_vm_manager_screen_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         u32 oldActiveScreen = vmAddedScreen;
         bool wasEmptyScreenStack = g_screenRemovedWithoutNext || vmAddedScreen == 0 || g_screenStackCount == 0;
+        if ((lastAddress & ~1u) == 0x01002e50u)
+        {
+            printf("[info][wpay] reject pay overlay add screen=%08x caller=%08x "
+                   "-> inject cancel\n",
+                   tmp1, lastAddress);
+            vm_host_block_mall_recharge("pay_overlay_add");
+            vm_host_queue_wpay_cancel_keys();
+            vm_set_call_result(0);
+            goto screen_func_return;
+        }
         if (idx == 4)
         {
             tmp2 = 0;
@@ -14749,6 +16315,14 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_note_net_wrapper_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
+    if (vm_host_intercept_wpay_http_pay((u32)address & ~1u))
+        return;
+    if (vm_host_intercept_mall_recharge_null_blx((u32)address & ~1u, size))
+        return;
+#if defined(CBE_CLIENT_ONLY)
+    if (vm_host_intercept_dream_completion_enter_scene((u32)address & ~1u))
+        return;
+#endif
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;

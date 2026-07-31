@@ -60,6 +60,7 @@ typedef struct SDL_Event
 #define _stricmp strcasecmp
 
 #ifdef CBE_PLATFORM_ANDROID
+#include "cbe_log.h"
 int cbe_android_printf(const char *fmt, ...);
 const char *cbe_android_get_print_buffer(void);
 #define printf(...) cbe_android_printf(__VA_ARGS__)

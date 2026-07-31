@@ -20,6 +20,11 @@
 #include "../Lib/unicorn-2.1.4/unicorn/unicorn.h"
 #endif
 #include <pthread.h>
+#include "cbe_log.h"
+#if !defined(CBE_PLATFORM_ANDROID) && !defined(CBE_LOG_NO_PRINTF_REDIRECT)
+#undef printf
+#define printf(...) cbe_log_printf(__VA_ARGS__)
+#endif
 #include "fileIoEngine.h"
 #include "vmMalloc.h"
 #include "fontEngine.h"
@@ -62,6 +67,8 @@ int cbeAndroidInputGetInputType(void);
 const char *cbeAndroidInputGetTextUtf8(void);
 const char *cbeAndroidInputGetPromptUtf8(void);
 void cbeAndroidInputSubmitUtf16(const unsigned short *text, int len, int cancelled);
+int cbeAndroidConsumeAccountWebOpenRequest(void);
+int cbeAndroidConsumeRechargeBlockedTip(void);
 #endif
 
 u32 last_gpt1_interrupt_time;

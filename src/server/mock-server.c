@@ -23,6 +23,10 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
 static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
     const vm_net_mock_request_object *object, u16 *positionXOut);
 
+/* Gold-chest rare-loot world announce lives with chat delivery in
+ * mock_server_equipment_npc.c; the open handler in catalog.c calls it. */
+static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
+
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
 
@@ -34,6 +38,7 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
     const char *fromScene, char *sceneOut, size_t sceneOutCap,
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
     u32 *distanceOut, const char **routeOut);
+static void vm_net_mock_hangup_loop_clear(const char *reason);
 
 #include "mock_server_equipment_npc.c"
 #include "mock_server_scene_task.c"

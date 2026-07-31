@@ -189,7 +189,7 @@ static bool vm_net_mock_append_misc_player_type_object(u8 *out, u32 outCap, u32 
     else if (subtype == 32)
     {
         if (!vm_net_mock_put_object_u8(out, outCap, pos, "expcard",
-                                       vm_net_mock_role_active_exp_card_flag()))
+                                       vm_net_mock_role_active_status_icon_flag()))
             return false;
     }
     else
@@ -2358,6 +2358,24 @@ static u32 vm_net_mock_task_required_item_count(
     return count;
 }
 
+static u32 vm_net_mock_role_backpack_item_total(vm_net_mock_role_state *role,
+                                                 u32 itemId)
+{
+    u32 total = 0;
+    u8 itemCount = 0;
+
+    if (role == NULL || itemId == 0)
+        return 0;
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (role->backpackItems[i].itemId == itemId)
+            total += role->backpackItems[i].count;
+    }
+    return total;
+}
+
 static bool vm_net_mock_task_role_has_required_items(
     vm_net_mock_role_state *role, const vm_net_mock_task_definition *task)
 {
@@ -2369,16 +2387,147 @@ static bool vm_net_mock_task_role_has_required_items(
     itemIds[1] = task->requirementType2 == 1 ? task->requirementId2 : 0;
     for (u32 i = 0; i < 2; ++i)
     {
-        vm_net_mock_backpack_item_state *item = NULL;
         u32 requiredCount = 0;
 
         if (itemIds[i] == 0 || (i != 0 && itemIds[i] == itemIds[0]))
             continue;
         requiredCount = vm_net_mock_task_required_item_count(task, itemIds[i]);
-        item = vm_net_mock_role_find_backpack_item(role, itemIds[i], 0);
-        if (requiredCount != 0 && (item == NULL || item->count < requiredCount))
+        if (requiredCount != 0 &&
+            vm_net_mock_role_backpack_item_total(role, itemIds[i]) < requiredCount)
+        {
             return false;
+        }
     }
+    return true;
+}
+
+/* Item requirements (type 1) are owned by backpack contents.  Kill counters
+ * (type 2) stay on persisted progress.  Accept-given materials such as task 22
+ * 「定情信物」grant 锦帕 without a battle drop, so progress1 alone never reaches
+ * requirementCount1 and state 1 cannot promote to the submit-ready state 2. */
+static bool vm_net_mock_task_requirement_slot_met(
+    vm_net_mock_role_state *role, u8 requirementType, u32 requirementId,
+    u8 requirementCount, u8 progress)
+{
+    if (requirementCount == 0)
+        return true;
+    if (requirementType == 1)
+    {
+        if (role == NULL || requirementId == 0)
+            return false;
+        return vm_net_mock_role_backpack_item_total(role, requirementId) >=
+               requirementCount;
+    }
+    return progress >= requirementCount;
+}
+
+static bool vm_net_mock_task_requirements_met(
+    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
+    u8 progress1, u8 progress2)
+{
+    if (task == NULL)
+        return false;
+    return vm_net_mock_task_requirement_slot_met(
+               role, task->requirementType1, task->requirementId1,
+               task->requirementCount1, progress1) &&
+           vm_net_mock_task_requirement_slot_met(
+               role, task->requirementType2, task->requirementId2,
+               task->requirementCount2, progress2);
+}
+
+static bool vm_net_mock_task_progress_state_update(u32 roleId, u32 taskId,
+                                                   u8 progress1, u8 progress2,
+                                                   u8 state)
+{
+    char accountHex[129];
+    char query[768];
+
+    if (roleId == 0 || taskId == 0 || (state != 1 && state != 2) ||
+        !vm_net_mock_mysql_account_hex(accountHex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_tasks SET progress1=%u,progress2=%u,task_state=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u "
+             "AND task_state IN (1,2)",
+             progress1, progress2, state, accountHex, roleId, taskId);
+    return vm_mysql_exec(query);
+}
+
+/* Raise type-1 progress from backpack and promote/demote state 1/2 so 6/1
+ * prompts, NPC submit options, and 6/4 commit share one readiness contract. */
+static bool vm_net_mock_task_sync_item_progress(
+    vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
+    u8 *progress1InOut, u8 *progress2InOut, u8 *stateInOut)
+{
+    u8 progress1 = 0;
+    u8 progress2 = 0;
+    u8 state = 0;
+    u8 next1 = 0;
+    u8 next2 = 0;
+    u8 nextState = 0;
+    bool changed = false;
+
+    if (role == NULL || task == NULL || progress1InOut == NULL ||
+        progress2InOut == NULL || stateInOut == NULL)
+    {
+        return false;
+    }
+    progress1 = *progress1InOut;
+    progress2 = *progress2InOut;
+    state = *stateInOut;
+    if (state != 1 && state != 2)
+        return true;
+
+    next1 = progress1;
+    next2 = progress2;
+    if (task->requirementType1 == 1 && task->requirementCount1 != 0)
+    {
+        u32 have =
+            vm_net_mock_role_backpack_item_total(role, task->requirementId1);
+        u8 fromBag =
+            (u8)vm_net_mock_min_u32(have, task->requirementCount1);
+        if (fromBag != next1)
+        {
+            next1 = fromBag;
+            changed = true;
+        }
+    }
+    if (task->requirementType2 == 1 && task->requirementCount2 != 0)
+    {
+        u32 have =
+            vm_net_mock_role_backpack_item_total(role, task->requirementId2);
+        u8 fromBag =
+            (u8)vm_net_mock_min_u32(have, task->requirementCount2);
+        if (fromBag != next2)
+        {
+            next2 = fromBag;
+            changed = true;
+        }
+    }
+
+    nextState = vm_net_mock_task_requirements_met(role, task, next1, next2) ? 2 : 1;
+    if (nextState != state)
+        changed = true;
+    if (changed)
+    {
+        if (!vm_net_mock_task_progress_state_update(role->roleId, task->taskId,
+                                                    next1, next2, nextState))
+        {
+            return false;
+        }
+        /* Drop the per-request MySQL snapshot so a later list/dialog load in
+         * the same packet sees the backpack-synced row. */
+        g_vm_net_mock_task_state_request_cache.active = false;
+        printf("[info][network] mock_task_item_progress_sync task=%u role=%u "
+               "progress=%u/%u,%u/%u state=%u->%u evidence=backpack-type1\n",
+               task->taskId, role->roleId, next1, task->requirementCount1,
+               next2, task->requirementCount2, state, nextState);
+    }
+    *progress1InOut = next1;
+    *progress2InOut = next2;
+    *stateInOut = nextState;
     return true;
 }
 
@@ -2508,7 +2657,7 @@ static bool vm_net_mock_task_commit_reward(
                       ? 0xffffffffu
                       : role->money + task->rewardMoney;
     vm_net_mock_role_normalize(role);
-    vm_net_mock_role_db_save("task-commit");
+    vm_net_mock_role_mark_inventory_dirty("task-commit");
     if (rewardSeqOut != NULL)
         *rewardSeqOut = rewardSeq;
     printf("[info][network] mock_task_reward task=%u role=%u exp=%u money=%u item=%u item_type=%u count=%u consumed=%u\n",
@@ -2582,10 +2731,11 @@ static bool vm_net_mock_build_task_awardinfo(
         !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
         !vm_net_mock_seq_put_item_common_extra(
             out, outCap, &pos,
-            isReservoir ? 1 : (incrementalCount > 255 ? 255 :
-                                              (u8)incrementalCount),
+            vm_net_mock_item_common_extra_stack_byte(task->rewardItemId,
+                                                    incrementalCount),
             (u8)SDL_min(rewardItem->enhanceLevel,
-                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)))
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            task->rewardItemId))
     {
         printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u incremental=%u pos=%u cap=%u reason=serialize\n",
                task->taskId, role->roleId, task->rewardItemId, rewardSeq,
@@ -2825,7 +2975,13 @@ static const char *vm_net_mock_task_prompt_receiver_for_scene(
         for (u32 refIndex = 0; refIndex < summary.taskRefCount; ++refIndex)
         {
             const vm_net_mock_xse_task_ref *ref = &summary.taskRefs[refIndex];
-            if (ref->taskId == task->taskId && (ref->active || ref->completed) &&
+            /* Only the delivery branch owner (（已完成）) may replace the
+             * catalog receiver in 6/1.  Giver scripts often keep a
+             * （未完成） marker for the same task id; treating that as a
+             * prompt receiver put the yellow submit "?" on 黄药师 for
+             * task 5 while dialog correctly required 黄蓉's completed
+             * branch (task3.xse active-only vs task4.xse completed). */
+            if (ref->taskId == task->taskId && ref->completed &&
                 seeds[i].displayName[0] != 0)
             {
                 snprintf(resolved, resolvedCap, "%s", seeds[i].displayName);
@@ -3062,8 +3218,16 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
 
-    if (matchedSeed != NULL && activeRole != NULL && xseSummary.loaded &&
-        matchedSeed->taskId == 0)
+    /*
+     * Walk XSE offer/submit refs for every matched NPC that has a script.
+     * Dynamic bindings (matchedSeed->taskId != 0) used to skip this block,
+     * so 6/14 could still advertise an XSE candidate (prompt "!") while the
+     * dialog only evaluated the bound task.  On 192.1.1.3, 大侠郭靖 binds
+     * completed 100003 but task0.xse still offers task 1 — candidates showed
+     * 1, dialog offered 0.  Always merge XSE refs; the bound-task block below
+     * dedupes by task id.
+     */
+    if (matchedSeed != NULL && activeRole != NULL && xseSummary.loaded)
     {
         for (u32 refIndex = 0; refIndex < xseSummary.taskRefCount; ++refIndex)
         {
@@ -3078,16 +3242,31 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             u8 progress1 = persisted ? persisted->progress1 : 0;
             u8 progress2 = persisted ? persisted->progress2 : 0;
             bool requirementsDone = false;
+            bool duplicate = false;
 
             if (task == NULL)
                 continue;
-            requirementsDone =
-                progress1 >= task->requirementCount1 &&
-                progress2 >= task->requirementCount2;
+            for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
+            {
+                if (optionTasks[optionIndex] != NULL &&
+                    optionTasks[optionIndex]->taskId == task->taskId)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+            (void)vm_net_mock_task_sync_item_progress(activeRole, task,
+                                                      &progress1, &progress2,
+                                                      &state);
             /* A completion marker in this XSE means the clicked actor owns the
-             * delivery branch. For talk-only tasks both required counts are
-             * zero; combat/item tasks transition only after persisted progress
-             * reaches task.dsh's two thresholds. */
+             * delivery branch. Talk-only tasks have zero required counts; item
+             * tasks use backpack ownership (synced above); kill tasks use
+             * persisted battle progress. */
+            requirementsDone =
+                vm_net_mock_task_requirements_met(activeRole, task,
+                                                  progress1, progress2);
             if (state == 1 && ref->completed && requirementsDone &&
                 vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
             {
@@ -3104,6 +3283,9 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 optionTasks[optionCount] = task;
                 optionSubmits[optionCount] = false;
                 optionCount += 1;
+                vm_net_mock_task_offer_context_record(task->taskId,
+                                                       matchedSeed->actorId,
+                                                       false, scene);
             }
             else if (state == 2 && ref->completed &&
                      optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
@@ -3157,9 +3339,15 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 break;
             }
         }
+        if (task != NULL)
+        {
+            (void)vm_net_mock_task_sync_item_progress(activeRole, task,
+                                                      &progress1, &progress2,
+                                                      &state);
+        }
         if (task != NULL && state == 1 &&
-            progress1 >= task->requirementCount1 &&
-            progress2 >= task->requirementCount2 &&
+            vm_net_mock_task_requirements_met(activeRole, task,
+                                              progress1, progress2) &&
             vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
         {
             state = 2;
@@ -3284,20 +3472,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             return 0;
         }
     }
-    if (serviceOptionCount != 0)
-    {
-        if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
-            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
-                                        serviceOptionName) ||
-            !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
-            !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
-                                     serviceOptionValue) ||
-            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
-                                        serviceOptionDescription))
-        {
-            return 0;
-        }
-    }
+    /* Task options must come before service entries.  docs/re/2026-07-19-dynamic-
+     * npc-services.md: non-zero npc_kind adds a service entry in addition to the
+     * NPC's original task options.  Putting the skill-trainer/shop action=1
+     * first made mis-tagged task NPCs (e.g. 白展堂 npc_kind=3) present "学习技能"
+     * ahead of "接受关于任务", and the service submenu path can consume the
+     * follow-up confirm so 6/11 never leaves the client. */
     for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
     {
         const vm_net_mock_task_definition *task = optionTasks[optionIndex];
@@ -3312,6 +3492,20 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
             !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen, task->taskId) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen, task->goal))
+        {
+            return 0;
+        }
+    }
+    if (serviceOptionCount != 0)
+    {
+        if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
+            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                        serviceOptionName) ||
+            !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+            !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
+                                     serviceOptionValue) ||
+            !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                        serviceOptionDescription))
         {
             return 0;
         }
@@ -3343,6 +3537,11 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_packet(out, pos,
                                  (u8)(1u + (taskCompletedNow ? 1u : 0u) +
                                       completedTaskCount));
+    /* Heal prompt types after talk: 6/11/6/1 may have previously baked a
+     * wrong delivery-name override into the client's active-task row;
+     * case 4 only removes the committed id and refreshes from that row. */
+    if (vm_net_mock_scene_name_is_safe(scene))
+        vm_mock_service_session_arm_task_prompt_refresh(scene);
 
     printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u npc_kind=%u service_action=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
            actorId,
@@ -3373,6 +3572,57 @@ static bool vm_net_mock_npc_shop_selector_is_valid(u32 selector)
            selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR;
 }
 
+static bool vm_net_mock_npc_shop_selector_is_equipment(u32 selector)
+{
+    return selector >= 1u && selector <= 10u;
+}
+
+static bool vm_net_mock_npc_shop_level_band_is_valid(u32 band)
+{
+    return band >= 1u && band <= VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_COUNT;
+}
+
+static bool vm_net_mock_npc_shop_level_in_band(u32 levelRequired, u32 band)
+{
+    switch (band)
+    {
+    case 1:
+        return levelRequired >= 1u && levelRequired <= 20u;
+    case 2:
+        return levelRequired >= 21u && levelRequired <= 40u;
+    case 3:
+        return levelRequired >= 41u && levelRequired <= 60u;
+    case 4:
+        return levelRequired >= 61u && levelRequired <= 70u;
+    default:
+        return false;
+    }
+}
+
+static const char *vm_net_mock_npc_shop_level_band_name(u32 band)
+{
+    static const char *names[] = {
+        "1-20\xbc\xb6",  /* 1-20级 */
+        "21-40\xbc\xb6", /* 21-40级 */
+        "41-60\xbc\xb6", /* 41-60级 */
+        "61-70\xbc\xb6"  /* 61-70级 */
+    };
+
+    if (!vm_net_mock_npc_shop_level_band_is_valid(band))
+        return "";
+    return names[band - 1u];
+}
+
+static u32 vm_net_mock_npc_shop_category_value(u32 selector, u32 levelBand,
+                                              u32 page)
+{
+    return VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE |
+           ((page & 0xfffu) << VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT) |
+           ((levelBand & VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_MASK)
+            << VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_SHIFT) |
+           (selector & VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK);
+}
+
 static u32 vm_net_mock_npc_shop_selector_for_item(
     const vm_net_mock_shop_catalog_item *item)
 {
@@ -3393,29 +3643,65 @@ static u32 vm_net_mock_npc_shop_selector_for_item(
 static bool vm_net_mock_npc_shop_item_matches_selector(
     const vm_net_mock_shop_catalog_item *item, u32 selector)
 {
-    if (item == NULL || !item->enabled ||
-        item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+    const vm_net_mock_equipment_catalog_item *equipment = NULL;
+
+    if (item == NULL || item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+        return false;
+    if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
+    {
+        /* Category-10 shelf split: 下架 stock stays on the medicine NPC;
+         * 上架 rows are appended to mall 秘宝道具 instead (see shop page 14/5). */
+        return !item->enabled && !item->isEquip && item->category == 10;
+    }
+    if (!(selector >= 1u && selector <= 10u) || !item->isEquip ||
+        item->category != selector - 1u ||
+        vm_net_mock_equipment_slot_for_category(item->category) >=
+            VM_NET_MOCK_EQUIP_SLOT_COUNT)
     {
         return false;
     }
-    if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
-        return !item->isEquip && item->category == 10;
-    return selector >= 1u && selector <= 10u && item->isEquip &&
-           item->category == selector - 1u &&
-           vm_net_mock_equipment_slot_for_category(item->category) <
-               VM_NET_MOCK_EQUIP_SLOT_COUNT;
+
+    /* Weapon/armor NPC stock is white 1..70 gear from equip.dsh.  Do not honor
+     * server_shop_items.enabled here: that flag is the mall shelf switch, and
+     * admins commonly 下架 white rows from 神兵利器 while NPC merchants must
+     * keep selling them (otherwise every band shows 暂无可购买的商品). */
+    equipment = vm_net_mock_find_equipment_catalog_item(item->itemId);
+    return equipment != NULL && equipment->quality == 0 &&
+           equipment->levelRequired >= 1u && equipment->levelRequired <= 70u;
 }
 
-static u32 vm_net_mock_npc_shop_selector_total(u32 selector)
+static bool vm_net_mock_npc_shop_item_matches_selector_band(
+    const vm_net_mock_shop_catalog_item *item, u32 selector, u32 levelBand)
+{
+    const vm_net_mock_equipment_catalog_item *equipment = NULL;
+
+    if (!vm_net_mock_npc_shop_item_matches_selector(item, selector))
+        return false;
+    if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
+        return true;
+    if (!vm_net_mock_npc_shop_level_band_is_valid(levelBand))
+        return false;
+    equipment = vm_net_mock_find_equipment_catalog_item(item->itemId);
+    return equipment != NULL &&
+           vm_net_mock_npc_shop_level_in_band(equipment->levelRequired,
+                                              levelBand);
+}
+
+static u32 vm_net_mock_npc_shop_selector_total(u32 selector, u32 levelBand)
 {
     u32 total = 0;
 
     if (!vm_net_mock_npc_shop_selector_is_valid(selector))
         return 0;
+    if (vm_net_mock_npc_shop_selector_is_equipment(selector) &&
+        !vm_net_mock_npc_shop_level_band_is_valid(levelBand))
+    {
+        return 0;
+    }
     for (u32 i = 0; i < vm_net_mock_load_shop_catalog(); ++i)
     {
-        if (vm_net_mock_npc_shop_item_matches_selector(
-                &g_vm_net_mock_shop_catalog[i], selector))
+        if (vm_net_mock_npc_shop_item_matches_selector_band(
+                &g_vm_net_mock_shop_catalog[i], selector, levelBand))
         {
             ++total;
         }
@@ -3423,18 +3709,129 @@ static u32 vm_net_mock_npc_shop_selector_total(u32 selector)
     return total;
 }
 
+static void vm_net_mock_npc_shop_append_stat_line(
+    char *out, size_t outCap, size_t *pos, const char *labelGb, u32 base,
+    u16 enhanceLevel)
+{
+    int wrote = 0;
+    u32 scaled = 0;
+    u32 bonus = 0;
+
+    if (out == NULL || outCap == 0 || pos == NULL || *pos >= outCap ||
+        labelGb == NULL || base == 0)
+    {
+        return;
+    }
+    /*
+     * Match native detail semantics (c0[物攻]:c4+%d): the main number is the
+     * post-enhance total.  Keep (+bonus) so the reinforce delta stays visible.
+     */
+    scaled = vm_net_mock_equipment_bonus_scale(base, enhanceLevel);
+    bonus = scaled > base ? scaled - base : 0;
+    if (bonus != 0)
+        wrote = snprintf(out + *pos, outCap - *pos, "%s+%u(+%u) ", labelGb,
+                         scaled, bonus);
+    else
+        wrote = snprintf(out + *pos, outCap - *pos, "%s+%u ", labelGb, scaled);
+    if (wrote > 0)
+        *pos += (size_t)wrote;
+}
+
+static bool vm_net_mock_npc_shop_format_equipment_detail(
+    char *out, size_t outCap, const vm_net_mock_shop_catalog_item *item,
+    const vm_net_mock_equipment_catalog_item *equipment, u16 enhanceLevel)
+{
+    size_t pos = 0;
+    int wrote = 0;
+    u16 level = enhanceLevel;
+
+    if (out == NULL || outCap == 0 || item == NULL || equipment == NULL)
+        return false;
+    if (level > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+        level = (u16)VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
+    out[0] = 0;
+    /* Feature-phone dialog text is one wrapped paragraph; avoid raw newlines. */
+    wrote = snprintf(out, outCap, "%s %s%u %s%u%s ",
+                     item->name,
+                     "\xb5\xc8\xbc\xb6", /* 等级 */
+                     equipment->levelRequired,
+                     "\xca\xdb\xbc\xdb", /* 售价 */
+                     item->price,
+                     "\xcd\xad"); /* 铜 */
+    if (wrote <= 0)
+        return false;
+    pos = (size_t)wrote;
+    if (level != 0)
+    {
+        wrote = snprintf(out + pos, outCap - pos, "%s+%u ",
+                         "\xc7\xbf\xbb\xaf", /* 强化 */
+                         level);
+        if (wrote > 0)
+            pos += (size_t)wrote;
+    }
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xb9\xa5\xbb\xf7", equipment->bonus.attack,
+        level); /* 攻击 — 强化基础缩放 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xbb\xa4\xbc\xd7", equipment->bonus.armor,
+        level); /* 护甲 — 强化基础缩放 */
+    /* 气血/法力：显示基值，不套强化基础缩放 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xc9\xfa\xc3\xfc", equipment->bonus.hp, 0); /* 生命 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xb7\xa8\xc1\xa6", equipment->bonus.mp, 0); /* 法力 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xc1\xa6\xc1\xbf", equipment->bonus.strength,
+        0); /* 力量 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xc3\xf4\xbd\xdd", equipment->bonus.agility,
+        0); /* 敏捷 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xd6\xc7\xc1\xa6", equipment->bonus.wisdom,
+        0); /* 智力 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xb1\xac\xbb\xf7", equipment->bonus.crit,
+        0); /* 暴击 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xc3\xfc\xd6\xd0", equipment->bonus.hit, 0); /* 命中 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xb6\xe3\xc9\xc1", equipment->bonus.dodge,
+        0); /* 闪避 */
+    vm_net_mock_npc_shop_append_stat_line(
+        out, outCap, &pos, "\xbf\xb9\xd0\xd4", equipment->bonus.resist,
+        0); /* 抗性 */
+    if (equipment->durabilityMax != 0 && pos < outCap)
+    {
+        wrote = snprintf(out + pos, outCap - pos, "%s%u",
+                         "\xc4\xcd\xbe\xc3", /* 耐久 */
+                         equipment->durabilityMax);
+        if (wrote > 0)
+            pos += (size_t)wrote;
+    }
+    if (pos == 0)
+        return false;
+    out[pos < outCap ? pos : outCap - 1] = 0;
+    return true;
+}
+
 static const vm_net_mock_shop_catalog_item *
-vm_net_mock_npc_shop_selector_item_at(u32 selector, u32 ordinal)
+vm_net_mock_npc_shop_selector_item_at(u32 selector, u32 levelBand, u32 ordinal)
 {
     u32 seen = 0;
 
     if (!vm_net_mock_npc_shop_selector_is_valid(selector))
         return NULL;
+    if (vm_net_mock_npc_shop_selector_is_equipment(selector) &&
+        !vm_net_mock_npc_shop_level_band_is_valid(levelBand))
+    {
+        return NULL;
+    }
     for (u32 i = 0; i < vm_net_mock_load_shop_catalog(); ++i)
     {
         const vm_net_mock_shop_catalog_item *item =
             &g_vm_net_mock_shop_catalog[i];
-        if (!vm_net_mock_npc_shop_item_matches_selector(item, selector))
+        if (!vm_net_mock_npc_shop_item_matches_selector_band(item, selector,
+                                                             levelBand))
             continue;
         if (seen++ == ordinal)
             return item;
@@ -3488,7 +3885,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE &
+            (VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
@@ -3535,10 +3932,18 @@ static u32 vm_net_mock_build_instance_enter_response(
     const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
 {
     vm_net_mock_scene_change_target target;
-    u32 pos = 0;
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    u32 pos = 5;
+    u8 drainRemaining = 0;
+    char drainScene[64];
+    u8 objectCount = 0;
+    u32 objectStart = 0;
+    u32 i = 0;
 
     if (seed == NULL || seed->instanceScene[0] == 0 ||
-        seed->instanceX == 0 || seed->instanceY == 0)
+        seed->instanceX == 0 || seed->instanceY == 0 || out == NULL ||
+        outCap < 5)
     {
         return 0;
     }
@@ -3548,10 +3953,109 @@ static u32 vm_net_mock_build_instance_enter_response(
     target.y = seed->instanceY;
     target.mapType = 2;
     target.hasSceEntry = true;
-    pos = vm_net_mock_build_scene_channel_enter_combo_for_target(
-        &target, out, outCap);
-    if (pos == 0)
+    drainScene[0] = 0;
+    /*
+     * Dream 29* must not hop while outdoor map-stone clear is still armed.
+     * Caller already gates with a retry dialog; refuse here too so no other
+     * path can cancel clear + same-packet 30/1 (intermittent 518c ScreenInit).
+     */
+    if (session != NULL &&
+        target.scene[0] == '2' && target.scene[1] == '9' &&
+        session->mapStoneLoadingClearPending &&
+        session->mapStoneLoadingClearRemaining > 0u &&
+        vm_net_mock_scene_name_is_safe(session->mapStoneLoadingClearScene) &&
+        !vm_net_mock_scene_names_equal_loose(session->mapStoneLoadingClearScene,
+                                              target.scene))
+    {
+        printf("[warn][network] mock_npc_instance_enter_refused "
+               "actor=%u scene=%s clear_scene=%s remaining=%u "
+               "reason=wait-outdoor-map-stone-clear "
+               "evidence=gate-before-drain\n",
+               seed->actorId, target.scene,
+               session->mapStoneLoadingClearScene,
+               (u32)session->mapStoneLoadingClearRemaining);
         return 0;
+    }
+    /*
+     * Outdoor map-stone poll 30/2 may still be armed when the player hops via
+     * non-dream instance enter.  Cancelling without flush left ResetDownloadState
+     * half-open.  Same-packet: drain remaining outdoor 30/2, then immediate 30/1.
+     * Dream 29* is gated above until remaining=0 (then dream_drain below).
+     */
+    if (session != NULL &&
+        session->mapStoneLoadingClearPending &&
+        session->mapStoneLoadingClearRemaining > 0 &&
+        vm_net_mock_scene_name_is_safe(session->mapStoneLoadingClearScene) &&
+        !vm_net_mock_scene_names_equal_loose(session->mapStoneLoadingClearScene,
+                                              target.scene))
+    {
+        drainRemaining = session->mapStoneLoadingClearRemaining;
+        snprintf(drainScene, sizeof(drainScene), "%s",
+                 session->mapStoneLoadingClearScene);
+        vm_mock_service_session_cancel_map_stone_loading_clear(
+            session, "instance-enter-drain-prepare");
+    }
+    /*
+     * Dream 29* from outdoor after map-stone clear already exhausted: plain
+     * 30/1 alone intermittently faults hot DF ScreenInit while ParseMinfo
+     * builds kind3 (r6=0 / lr=0x010136b3 / ui_h_war.actor) — same class as
+     * half-open clear.  Successful hops used same-packet outdoor 30/2 then
+     * dream 30/1 (resp≈102) and often never issued WT 2/3.  Synthesize one
+     * ResetDownloadState for the visible outdoor scene only; outdoor→outdoor
+     * instance enter unchanged.  Client observation ignores drain 30/2 when
+     * 30/1+posinfo is in the same packet.
+     */
+    if (drainRemaining == 0 &&
+        target.scene[0] == '2' && target.scene[1] == '9' &&
+        session != NULL &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+        !(session->sceneVisibleScene[0] == '2' &&
+          session->sceneVisibleScene[1] == '9') &&
+        !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene,
+                                              target.scene))
+    {
+        drainRemaining = 1;
+        snprintf(drainScene, sizeof(drainScene), "%s",
+                 session->sceneVisibleScene);
+        printf("[info][network] mock_npc_instance_enter_dream_drain "
+               "actor=%u scene=%s from=%s drain_30_2=1 "
+               "action=synthetic-outdoor-ResetDownloadState-then-30/1 "
+               "evidence=clear-exhausted-hot-ScreenInit-r6-0\n",
+               seed->actorId, target.scene, drainScene);
+        vm_autotest_note("mock_npc_instance_enter_dream_drain scene=%s "
+                         "from=%s drain_30_2=1\n",
+                         target.scene, drainScene);
+    }
+
+    if (drainRemaining > 0)
+    {
+        for (i = 0; i < (u32)drainRemaining; ++i)
+        {
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                             &objectStart) ||
+                !vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2,
+                                                           drainScene))
+            {
+                return 0;
+            }
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
+        if (session != NULL && session->mapStoneLoadingClearPending)
+        {
+            vm_mock_service_session_cancel_map_stone_loading_clear(
+                session, "instance-enter-same-packet-drain");
+        }
+    }
+
+    if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
+                                                         target.scene, target.x,
+                                                         target.y))
+    {
+        return 0;
+    }
+    objectCount += 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     vm_net_mock_remember_scene_change_target(&target);
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
@@ -3561,8 +4065,37 @@ static u32 vm_net_mock_build_instance_enter_response(
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
                                       "npc-instance-enter");
-    printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
-           seed->actorId, target.scene, target.x, target.y, pos);
+    {
+        const char *publishError = NULL;
+        if (!vm_net_mock_publish_scene_resource(target.scene, &publishError))
+        {
+            printf("[warn][network] mock_npc_instance_enter_publish_miss "
+                   "scene=%s error=%s evidence=clientmiss-not-published\n",
+                   target.scene,
+                   publishError ? publishError : "publish-failed");
+        }
+    }
+    vm_net_mock_session_bind_instance_hangup_enemy(seed);
+    if (drainRemaining > 0)
+    {
+        printf("[info][network] mock_npc_instance_enter actor=%u scene=%s "
+               "pos=(%u,%u) challenge_enemy=%u response=30/1 "
+               "drain_scene=%s drain_30_2=%u resp=%u "
+               "action=same-packet-ResetDownloadState-then-30/1 "
+               "evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+               seed->actorId, target.scene, target.x, target.y,
+               seed->challengeEnemyId, drainScene, (u32)drainRemaining, pos);
+        vm_autotest_note("mock_npc_instance_enter scene=%s drain_scene=%s "
+                         "drain_30_2=%u response=30/2-drain+30/1 "
+                         "evidence=service-context-enter-after-clear-flush\n",
+                         target.scene, drainScene, (u32)drainRemaining);
+    }
+    else
+    {
+        printf("[info][network] mock_npc_instance_enter actor=%u scene=%s pos=(%u,%u) challenge_enemy=%u response=30/1 resp=%u evidence=JianghuOL.CBE:0x01039B8A+0x010396D6\n",
+               seed->actorId, target.scene, target.x, target.y,
+               seed->challengeEnemyId, pos);
+    }
     return pos;
 }
 
@@ -3574,9 +4107,35 @@ static u32 vm_net_mock_build_instance_challenge_battle_response(
     u32 requestPos = 9;
     u32 objectStart = 4;
     u32 responseLen = 0;
+    u16 wireX = challengeX;
+    u16 wireY = challengeY;
 
-    if (actorId == 0 || enemyId == 0 || challengeX == 0 || challengeY == 0)
+    if (actorId == 0 || enemyId == 0)
+    {
+        printf("[warn][network] mock_npc_instance_challenge_start_skip actor=%u enemy=%u "
+               "pos=(%u,%u) reason=missing-actor-or-enemy\n",
+               actorId, enemyId, challengeX, challengeY);
         return 0;
+    }
+    /*
+     * forceNonSceneStart subtype-10 embeds the enemy by id; live-node
+     * index/pos are unused.  Challenge-only guides often leave instanceX/Y
+     * at 0, and some dynamic NPC rows also store map x/y as 0.  The old
+     * gate `challengeX==0 || challengeY==0 -> return 0` dropped the HAS_FOLLOWUP
+     * 4/10 entirely (临安), so confirm only got 30/10 and poll-fallback 4/10
+     * never reaches mmBattle.
+     */
+    if (wireX == 0)
+        wireX = 1;
+    if (wireY == 0)
+        wireY = 1;
+    if (wireX != challengeX || wireY != challengeY)
+    {
+        printf("[warn][network] mock_npc_instance_challenge_start_coord_fallback "
+               "actor=%u enemy=%u req_pos=(%u,%u) wire_pos=(%u,%u) "
+               "evidence=subtype10-ignores-live-node-pos\n",
+               actorId, enemyId, challengeX, challengeY, wireX, wireY);
+    }
     memset(synthetic, 0, sizeof(synthetic));
     synthetic[0] = 'W';
     synthetic[1] = 'T';
@@ -3588,9 +4147,9 @@ static u32 vm_net_mock_build_instance_challenge_battle_response(
         !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
                                     "index", 0) ||
         !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "posx", challengeX) ||
+                                    "posx", wireX) ||
         !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
-                                    "posy", challengeY))
+                                    "posy", wireY))
     {
         return 0;
     }
@@ -3602,9 +4161,14 @@ static u32 vm_net_mock_build_instance_challenge_battle_response(
         synthetic, requestPos, out, outCap, true);
     if (responseLen != 0)
     {
-        printf("[info][network] mock_npc_instance_challenge_start actor=%u enemy=%u pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x01039566(30/10)+mmBattle:0x67AC(non-scene-start)\n",
-               actorId, enemyId, challengeX, challengeY,
+        printf("[info][network] mock_npc_instance_challenge_start actor=%u enemy=%u pos=(%u,%u) wire_pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x01039566(30/10)+mmBattle:0x67AC(non-scene-start)\n",
+               actorId, enemyId, challengeX, challengeY, wireX, wireY,
                responseLen);
+    }
+    else
+    {
+        printf("[warn][network] mock_npc_instance_challenge_start_fail actor=%u enemy=%u pos=(%u,%u) wire_pos=(%u,%u) reason=challenge-builder-returned-0\n",
+               actorId, enemyId, challengeX, challengeY, wireX, wireY);
     }
     return responseLen;
 }
@@ -3649,8 +4213,9 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
      *
      * Keep the native instance confirmation as the second object.  Its
      * confirmation callback sends 30/10.  That request is acknowledged first;
-     * the actual non-scene battle start is delivered independently so the
-     * business dispatcher cannot gate the battle-module callback. */
+     * the non-scene battle start follows as a second CBMR on the same
+     * data_request so business dispatch cannot gate the battle callback and
+     * the packet is not trapped in scene-poll context. */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
                                      &ackObjectStart))
     {
@@ -3672,6 +4237,7 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
 
     session->instanceChallengePending = !leaderBlocked;
     session->instanceChallengeBattlePending = false;
+    session->instanceChallengeBattleWireCount = 0;
     session->instanceChallengeActorId = !leaderBlocked ? seed->actorId : 0;
     session->instanceChallengeEnemyId =
         !leaderBlocked ? seed->challengeEnemyId : 0;
@@ -3747,6 +4313,7 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
                scene ? scene : "-", session->instanceChallengeScene);
         session->instanceChallengePending = false;
         session->instanceChallengeBattlePending = false;
+        session->instanceChallengeBattleWireCount = 0;
         return 0;
     }
 
@@ -3762,18 +4329,56 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
 
     session->instanceChallengePending = false;
     session->instanceChallengeBattlePending = true;
+    session->instanceChallengeBattleWireCount = 0;
     session->instanceChallengeTick = g_schedulerTick;
-    printf("[info][network] mock_npc_instance_challenge_confirm client=%08x actor=%u enemy=%u age_ticks=%u request=30/10{agree} response=30/10{result=0} battle_delivery=next-scene-poll resp=%u evidence=JianghuOL.CBE:0x01039528(clear-pending)+0x01012F8E(module-callback-gate)\n",
+    printf("[info][network] mock_npc_instance_challenge_confirm client=%08x actor=%u enemy=%u age_ticks=%u request=30/10{agree} response=30/10{result=0} battle_delivery=data-followup resp=%u evidence=JianghuOL.CBE:0x01039528(clear-pending)+0x01012F8E(module-callback-gate)+warehouse-HAS_FOLLOWUP\n",
            session->clientId, session->instanceChallengeActorId,
            session->instanceChallengeEnemyId, ageTicks, pos);
     return pos;
 }
 
-static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
+/*
+ * Same-TCP second CBMR after 30/10 confirm: primary clears confirm pending,
+ * followup 4/10 starts mmBattle (warehouse/equip-sell HAS_FOLLOWUP pattern).
+ *
+ * Runtime 2026-07-30: 蓬莱小猴子 enters mmBattle only when 4/10 is attached
+ * on the *confirm* response (same scheduler tick, flags HAS_FOLLOWUP).
+ * Deferring age_ticks>=1 left confirm as lone 30/10 (followup=0); the client
+ * never entered battle — regression vs stage-4 working path.
+ *
+ * 临安炼狱魔头 may ignore the same-tick followup.  Keep pending after the
+ * first wire so one later event=7 (often empty poll) can carry a second
+ * HAS_FOLLOWUP at age_ticks>=1.  Never replace scene_sync_poll primary with
+ * 4/10 (stage-3 negative).  Clear pending when the client shows battle entry
+ * (2/10 actor-other / 4/2) so 蓬莱 does not get a duplicate wire.
+ */
+static void vm_net_mock_clear_instance_challenge_battle_pending(
+    vm_mock_service_client_session *session, const char *reason)
+{
+    if (session == NULL || !session->instanceChallengeBattlePending)
+        return;
+    printf("[info][network] mock_npc_instance_challenge_battle_pending_clear "
+           "client=%08x actor=%u enemy=%u wire_count=%u reason=%s\n",
+           session->clientId, session->instanceChallengeActorId,
+           session->instanceChallengeEnemyId,
+           session->instanceChallengeBattleWireCount,
+           reason != NULL ? reason : "-");
+    session->instanceChallengeBattlePending = false;
+    session->instanceChallengeBattleWireCount = 0;
+    session->instanceChallengeActorId = 0;
+    session->instanceChallengeEnemyId = 0;
+    session->instanceChallengeX = 0;
+    session->instanceChallengeY = 0;
+    session->instanceChallengeTick = 0;
+    session->instanceChallengeScene[0] = 0;
+}
+
+static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session)
 {
     u32 responseLen = 0;
     u32 ageTicks = 0;
+    u8 priorWireCount = 0;
 
     if (out == NULL || session == NULL ||
         !session->instanceChallengeBattlePending)
@@ -3781,25 +4386,30 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
         return 0;
     }
     ageTicks = g_schedulerTick - session->instanceChallengeTick;
-    if (ageTicks > (10u * 1000u / VM_SCHED_FRAME_MS) ||
-        !session->sceneVisibleReady || session->sceneVisiblePending ||
-        !vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
-        !vm_net_mock_scene_names_equal_loose(
-            session->sceneVisibleScene, session->instanceChallengeScene))
+    if (ageTicks > (10u * 1000u / VM_SCHED_FRAME_MS))
     {
-        printf("[warn][mock-service] instance_challenge_battle_drop client=%08x actor=%u enemy=%u age_ticks=%u visible_scene=%s pending_scene=%s reason=expired-or-scene-changed\n",
+        printf("[warn][network] mock_npc_instance_challenge_battle_wire_expire "
+               "client=%08x actor=%u enemy=%u age_ticks=%u wire_count=%u\n",
                session->clientId, session->instanceChallengeActorId,
                session->instanceChallengeEnemyId, ageTicks,
-               session->sceneVisibleScene, session->instanceChallengeScene);
-        session->instanceChallengeBattlePending = false;
-        session->instanceChallengeActorId = 0;
-        session->instanceChallengeEnemyId = 0;
-        session->instanceChallengeX = 0;
-        session->instanceChallengeY = 0;
-        session->instanceChallengeTick = 0;
-        session->instanceChallengeScene[0] = 0;
+               session->instanceChallengeBattleWireCount);
+        vm_net_mock_clear_instance_challenge_battle_pending(session, "expire");
         return 0;
     }
+
+    /*
+     * First delivery: age=0 confirm same-tick (蓬莱).
+     * Second delivery: only after at least one scheduler tick if the client
+     * ignored the first wire (临安 poll retry).  Cap at two wires.
+     */
+    if (session->instanceChallengeBattleWireCount >= 2)
+    {
+        vm_net_mock_clear_instance_challenge_battle_pending(session,
+                                                            "wire-cap");
+        return 0;
+    }
+    if (session->instanceChallengeBattleWireCount >= 1 && ageTicks < 1)
+        return 0;
 
     responseLen = vm_net_mock_build_instance_challenge_battle_response(
         session->instanceChallengeActorId,
@@ -3808,20 +4418,793 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
         session->instanceChallengeY,
         out, outCap);
     if (responseLen == 0)
+    {
+        printf("[warn][network] mock_npc_instance_challenge_battle_wire_empty "
+               "client=%08x actor=%u enemy=%u pos=(%u,%u) scene=%s age_ticks=%u "
+               "wire_count=%u pending_kept=1 evidence=builder-0\n",
+               session->clientId, session->instanceChallengeActorId,
+               session->instanceChallengeEnemyId,
+               session->instanceChallengeX, session->instanceChallengeY,
+               session->instanceChallengeScene, ageTicks,
+               session->instanceChallengeBattleWireCount);
         return 0;
+    }
 
-    printf("[info][mock-service] instance_challenge_battle_deliver client=%08x actor=%u enemy=%u age_ticks=%u scene=%s response=4/10 resp=%u evidence=JianghuOL.CBE:0x01012F8E(isolated-module-callback)+mmBattle:0x67AC(non-scene-start)\n",
+    priorWireCount = session->instanceChallengeBattleWireCount;
+    session->instanceChallengeBattleWireCount =
+        (u8)(session->instanceChallengeBattleWireCount + 1u);
+    printf("[info][network] mock_npc_instance_challenge_battle_wire "
+           "client=%08x actor=%u enemy=%u scene=%s age_ticks=%u wire_count=%u "
+           "retry=%u response=4/10 resp=%u evidence=confirm-HAS_FOLLOWUP+"
+           "mmBattle:0x67AC+linan-poll-retry\n",
+           session->clientId, session->instanceChallengeActorId,
+           session->instanceChallengeEnemyId,
+           session->instanceChallengeScene, ageTicks,
+           session->instanceChallengeBattleWireCount,
+           priorWireCount >= 1 ? 1u : 0u, responseLen);
+    if (session->instanceChallengeBattleWireCount >= 2)
+    {
+        /* Second (final) delivery: drop retry arm; battle session stays armed. */
+        session->instanceChallengeBattlePending = false;
+        session->instanceChallengeBattleWireCount = 0;
+        session->instanceChallengeActorId = 0;
+        session->instanceChallengeEnemyId = 0;
+        session->instanceChallengeX = 0;
+        session->instanceChallengeY = 0;
+        session->instanceChallengeTick = 0;
+        session->instanceChallengeScene[0] = 0;
+    }
+    /* First delivery keeps pending + tick so age_ticks advances for retry. */
+    return responseLen;
+}
+
+static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 ageTicks = 0;
+
+    (void)out;
+    (void)outCap;
+    if (session == NULL || !session->instanceChallengeBattlePending)
+        return 0;
+    ageTicks = g_schedulerTick - session->instanceChallengeTick;
+    /*
+     * Delivery is owned by HAS_FOLLOWUP take_* (same-tick + one age>=1 retry).
+     * Never replace scene_sync_poll primary with 4/10.  Only expire a stuck arm.
+     */
+    if (ageTicks <= (10u * 1000u / VM_SCHED_FRAME_MS))
+        return 0;
+    printf("[warn][mock-service] instance_challenge_battle_drop client=%08x actor=%u enemy=%u age_ticks=%u wire_count=%u scene=%s reason=wire-followup-never-taken\n",
            session->clientId, session->instanceChallengeActorId,
            session->instanceChallengeEnemyId, ageTicks,
-           session->sceneVisibleScene, responseLen);
-    session->instanceChallengeBattlePending = false;
-    session->instanceChallengeActorId = 0;
-    session->instanceChallengeEnemyId = 0;
-    session->instanceChallengeX = 0;
-    session->instanceChallengeY = 0;
-    session->instanceChallengeTick = 0;
-    session->instanceChallengeScene[0] = 0;
-    return responseLen;
+           session->instanceChallengeBattleWireCount,
+           session->sceneVisibleScene);
+    vm_net_mock_clear_instance_challenge_battle_pending(session,
+                                                        "poll-expire");
+    return 0;
+}
+
+/*
+ * Mall 802/803: after mmGame is scene-ready, restore the main bag the same way
+ * login does (30/21 grid rows with wire count=1 + 7/11 reservoirs).
+ *
+ * Why not 7/7 type=1 alone:
+ *   mmGame:0xD04 treats the 7/7 u32 count as the HP/MP reservoir for 802/803.
+ *   A peel of count=1 therefore writes reservoir=1; with an existing flask the
+ *   add path often fails to create a second seq row, so "修炼丹/经验卡能买、
+ *   壶不行 / 好像已有就不能再买" matches this contract gap — not a unique cap.
+ *   Login already proves multiple flasks via distinct 30/21 seq rows.
+ *
+ * Skip if group-type1 already reseeded after shop-return (GridSeededRoleId).
+ */
+static u32 vm_net_mock_build_pending_shop_flask_backpack_deliver_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 ageTicks = 0;
+    vm_net_mock_role_state *role = NULL;
+
+    if (out == NULL || session == NULL || !session->shopFlaskBackpackDeliverPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->shopFlaskBackpackDeliverTick;
+    if (ageTicks > (10u * 1000u / VM_SCHED_FRAME_MS))
+    {
+        printf("[warn][mock-service] shop_flask_backpack_drop client=%08x "
+               "item=%u seq=%u reservoir=%u age_ticks=%u reason=expired\n",
+               session->clientId, session->shopFlaskBackpackDeliverItemId,
+               session->shopFlaskBackpackDeliverSeq,
+               session->shopFlaskBackpackDeliverReservoir, ageTicks);
+        session->shopFlaskBackpackDeliverPending = false;
+        session->shopFlaskBackpackDeliverSeq = 0;
+        session->shopFlaskBackpackDeliverItemId = 0;
+        session->shopFlaskBackpackDeliverReservoir = 0;
+        session->shopFlaskBackpackDeliverTick = 0;
+        return 0;
+    }
+    if (ageTicks < 2u)
+        return 0;
+
+    role = vm_net_mock_active_role();
+    if (role != NULL && g_netMockBackpackGridSeededRoleId == role->roleId)
+    {
+        printf("[info][mock-service] shop_flask_backpack_skip client=%08x "
+               "item=%u seq=%u reason=grid-already-seeded-after-shop-return\n",
+               session->clientId, session->shopFlaskBackpackDeliverItemId,
+               session->shopFlaskBackpackDeliverSeq);
+        session->shopFlaskBackpackDeliverPending = false;
+        session->shopFlaskBackpackDeliverSeq = 0;
+        session->shopFlaskBackpackDeliverItemId = 0;
+        session->shopFlaskBackpackDeliverReservoir = 0;
+        session->shopFlaskBackpackDeliverTick = 0;
+        return 0;
+    }
+
+    /*
+     * Empty mmGame shell after mmShop: one login-shaped 30/21 + 7/11 (+equip)
+     * rebuilds every bag row including the newly purchased flask seq.
+     */
+    g_netMockBackpackGridSeededRoleId = 0;
+    if (!vm_net_mock_append_backpack_role_grid_main_objects(out, outCap, &pos,
+                                                            &objectCount) ||
+        objectCount == 0)
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][mock-service] shop_flask_backpack_deliver client=%08x "
+           "item=%u seq=%u reservoir=%u age_ticks=%u objects=%u resp=%u "
+           "evidence=30/21+7/11-login-grid-after-mmShop "
+           "JianghuOL:0x01039952+0x01033544 mmGame:0x0D04\n",
+           session->clientId, session->shopFlaskBackpackDeliverItemId,
+           session->shopFlaskBackpackDeliverSeq,
+           session->shopFlaskBackpackDeliverReservoir, ageTicks, objectCount,
+           pos);
+    session->shopFlaskBackpackDeliverPending = false;
+    session->shopFlaskBackpackDeliverSeq = 0;
+    session->shopFlaskBackpackDeliverItemId = 0;
+    session->shopFlaskBackpackDeliverReservoir = 0;
+    session->shopFlaskBackpackDeliverTick = 0;
+    return pos;
+}
+
+/*
+ * Legacy mmShop-only 7/11 peel — kept as a no-op drop so old session flags
+ * cannot keep firing after the backpack-deliver fix.
+ */
+static u32 vm_net_mock_build_pending_shop_flask_loading_clear_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    (void)out;
+    (void)outCap;
+    if (session == NULL || !session->shopFlaskLoadingClearPending)
+        return 0;
+    printf("[warn][mock-service] shop_flask_loading_clear_drop client=%08x "
+           "item=%u seq=%u reason=replaced-by-7/7+7/11-after-mmGame\n",
+           session->clientId, session->shopFlaskLoadingClearItemId,
+           session->shopFlaskLoadingClearSeq);
+    session->shopFlaskLoadingClearPending = false;
+    session->shopFlaskLoadingClearSeq = 0;
+    session->shopFlaskLoadingClearItemId = 0;
+    session->shopFlaskLoadingClearReservoir = 0;
+    session->shopFlaskLoadingClearTick = 0;
+    return 0;
+}
+
+static void vm_net_mock_clear_npc_purchase_backpack_pending(
+    vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->npcPurchaseBackpackPending = false;
+    session->npcPurchaseBackpackPhase = 0;
+    session->npcPurchaseBackpackSeq = 0;
+    session->npcPurchaseBackpackItemId = 0;
+    session->npcPurchaseBackpackCount = 0;
+    session->npcPurchaseBackpackEnhance = 0;
+    session->npcPurchaseBackpackTick = 0;
+}
+
+/*
+ * Arm deferred 7/7 (+ later lone 26/0).  Single-slot pending: a new arm while
+ * phase 2 would otherwise drop the busy-clear.  Callers always emit kind-26 on
+ * the same request (buy/retrieve dialog), which clears r9+21808 first; log when
+ * overwriting so multi-buy / retrieve races stay visible.
+ */
+static void vm_net_mock_arm_npc_purchase_backpack_pending(
+    vm_mock_service_client_session *session, u16 seq, u32 itemId, u32 count,
+    u16 enhance, const char *via)
+{
+    if (session == NULL || seq == 0 || itemId == 0 || count == 0)
+        return;
+    if (session->npcPurchaseBackpackPending)
+    {
+        printf("[warn][mock-service] npc_purchase_backpack_rearm client=%08x "
+               "via=%s old_phase=%u old_item=%u old_seq=%u new_item=%u new_seq=%u "
+               "evidence=single-slot-pending-kind26-on-same-request-clears-busy\n",
+               session->clientId, via ? via : "-",
+               session->npcPurchaseBackpackPhase,
+               session->npcPurchaseBackpackItemId,
+               session->npcPurchaseBackpackSeq, itemId, seq);
+    }
+    session->npcPurchaseBackpackPending = true;
+    session->npcPurchaseBackpackPhase = 1;
+    session->npcPurchaseBackpackSeq = seq;
+    session->npcPurchaseBackpackItemId = itemId;
+    session->npcPurchaseBackpackCount = count;
+    session->npcPurchaseBackpackEnhance = enhance;
+    session->npcPurchaseBackpackTick = g_schedulerTick;
+}
+
+/*
+ * Buy success returns only 26/1.  7/7 must not share that event: sub_11CE can
+ * finish ProcessItem after kind-26 busy clear and leave r9+21808 set.  A
+ * trailing 26/0 in the same WT packet is still too early.  Phase 1 delivers
+ * items; a later poll phase 2 delivers lone 26/0 after the item event settles.
+ */
+static u32 vm_net_mock_build_pending_npc_purchase_backpack_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 ageTicks = 0;
+    u32 wireCount = 0;
+    u32 reservoir = 0;
+    bool usesReservoir = false;
+    u32 ackObjectStart = 0;
+    bool expired = false;
+
+    if (out == NULL || session == NULL || !session->npcPurchaseBackpackPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->npcPurchaseBackpackTick;
+    expired = ageTicks > (10u * 1000u / VM_SCHED_FRAME_MS);
+    if (expired && session->npcPurchaseBackpackPhase != 2)
+    {
+        /* Phase 1 never peeled 7/7: buy 26/1 already cleared busy. */
+        printf("[warn][mock-service] npc_purchase_backpack_drop client=%08x phase=%u item=%u seq=%u age_ticks=%u reason=expired\n",
+               session->clientId, session->npcPurchaseBackpackPhase,
+               session->npcPurchaseBackpackItemId,
+               session->npcPurchaseBackpackSeq, ageTicks);
+        vm_net_mock_clear_npc_purchase_backpack_pending(session);
+        return 0;
+    }
+
+    if (session->npcPurchaseBackpackPhase == 2)
+    {
+        /* Wait at least one poll cadence after the 7/7 event — unless the
+         * slot aged out; then still emit lone 26/0 so busy cannot stick. */
+        if (!expired && ageTicks < 2u)
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
+                                         &ackObjectStart))
+            return 0;
+        vm_net_mock_finish_wt_object(out, ackObjectStart, pos);
+        objectCount = 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][mock-service] npc_purchase_busy_ack client=%08x age_ticks=%u objects=1 resp=%u %s evidence=JianghuOL.CBE:0x01039C28(26/0-after-7/7)\n",
+               session->clientId, ageTicks, pos,
+               expired ? "reason=expired-phase2-still-ack" : "reason=poll-phase2");
+        vm_net_mock_clear_npc_purchase_backpack_pending(session);
+        return pos;
+    }
+
+    if (session->npcPurchaseBackpackPhase != 1 ||
+        session->npcPurchaseBackpackSeq == 0 ||
+        session->npcPurchaseBackpackItemId == 0 ||
+        session->npcPurchaseBackpackCount == 0)
+    {
+        printf("[warn][mock-service] npc_purchase_backpack_drop client=%08x "
+               "phase=%u item=%u seq=%u count=%u reason=invalid-pending\n",
+               session->clientId, session->npcPurchaseBackpackPhase,
+               session->npcPurchaseBackpackItemId,
+               session->npcPurchaseBackpackSeq,
+               session->npcPurchaseBackpackCount);
+        vm_net_mock_clear_npc_purchase_backpack_pending(session);
+        return 0;
+    }
+    /* Let the buy 26/1 queue_data event finish before item peel. */
+    if (ageTicks < 2u)
+        return 0;
+
+    usesReservoir = vm_net_mock_backpack_item_id_uses_reservoir_count(
+        session->npcPurchaseBackpackItemId);
+    wireCount = usesReservoir ? 1u : session->npcPurchaseBackpackCount;
+    reservoir = usesReservoir ? session->npcPurchaseBackpackCount : 0u;
+    if (!vm_net_mock_append_backpack_item_add7_object(
+            out, outCap, &pos, session->npcPurchaseBackpackSeq,
+            session->npcPurchaseBackpackItemId, wireCount,
+            session->npcPurchaseBackpackEnhance))
+    {
+        return 0;
+    }
+    ++objectCount;
+    if (usesReservoir)
+    {
+        if (!vm_net_mock_append_backpack_reservoir_count7_11_object(
+                out, outCap, &pos, session->npcPurchaseBackpackSeq, reservoir))
+        {
+            return 0;
+        }
+        ++objectCount;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][mock-service] npc_purchase_backpack_deliver client=%08x item=%u seq=%u wire_count=%u reservoir=%u age_ticks=%u objects=%u resp=%u evidence=mmGame:0x11CE+0x0D04+JianghuOL.CBE:0x01033544\n",
+           session->clientId, session->npcPurchaseBackpackItemId,
+           session->npcPurchaseBackpackSeq, wireCount, reservoir, ageTicks,
+           objectCount, pos);
+    session->npcPurchaseBackpackPhase = 2;
+    session->npcPurchaseBackpackTick = g_schedulerTick;
+    return pos;
+}
+
+/*
+ * Quick-repair durability sync after 7/29+26/0 cleared the wait overlay.
+ * Phase 1 peels 7/7 type=2 (may re-arm r9+21808); phase 2 lone 26/0 clears it.
+ */
+static u32 vm_net_mock_build_pending_quick_repair_equip_sync_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u32 ageTicks = 0;
+    u8 equipmentRows = 0;
+    u32 ackObjectStart = 0;
+    u32 dropTicks = 10u * 1000u / VM_SCHED_FRAME_MS;
+    bool expired = false;
+
+    if (out == NULL || session == NULL || !session->quickRepairEquipSyncPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->quickRepairEquipSyncTick;
+    expired = ageTicks > dropTicks;
+    if (expired && session->quickRepairEquipSyncPhase != 2)
+    {
+        printf("[warn][mock-service] quick_repair_equip_sync_drop client=%08x "
+               "phase=%u age_ticks=%u reason=expired\n",
+               session->clientId, session->quickRepairEquipSyncPhase, ageTicks);
+        session->quickRepairEquipSyncPending = false;
+        session->quickRepairEquipSyncPhase = 0;
+        session->quickRepairEquipSyncTick = 0;
+        return 0;
+    }
+
+    if (session->quickRepairEquipSyncPhase == 2)
+    {
+        if (!expired && ageTicks < 2u)
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
+                                         &ackObjectStart))
+            return 0;
+        vm_net_mock_finish_wt_object(out, ackObjectStart, pos);
+        objectCount = 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][mock-service] quick_repair_equip_sync_busy_ack "
+               "client=%08x age_ticks=%u objects=1 resp=%u %s "
+               "evidence=JianghuOL.CBE:0x01039C28(26/0-after-7/7)\n",
+               session->clientId, ageTicks, pos,
+               expired ? "reason=expired-phase2-still-ack"
+                       : "reason=poll-phase2");
+        session->quickRepairEquipSyncPending = false;
+        session->quickRepairEquipSyncPhase = 0;
+        session->quickRepairEquipSyncTick = 0;
+        return pos;
+    }
+
+    if (session->quickRepairEquipSyncPhase != 1)
+        return 0;
+    if (ageTicks < 2u)
+        return 0;
+
+    if (!vm_net_mock_append_equipment_login_object(out, outCap, &pos,
+                                                  &equipmentRows))
+    {
+        printf("[warn][mock-service] quick_repair_equip_sync_encode_failed "
+               "client=%08x age_ticks=%u ->busy-ack-only\n",
+               session->clientId, ageTicks);
+        session->quickRepairEquipSyncPhase = 2;
+        session->quickRepairEquipSyncTick = g_schedulerTick;
+        return 0;
+    }
+    objectCount = 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    session->quickRepairEquipSyncPhase = 2;
+    session->quickRepairEquipSyncTick = g_schedulerTick;
+    printf("[info][mock-service] quick_repair_equip_sync client=%08x "
+           "age_ticks=%u rows=%u phase=1->2 resp=%u "
+           "evidence=7/7-type2-then-26/0\n",
+           session->clientId, ageTicks, equipmentRows, pos);
+    return pos;
+}
+
+static const char *vm_net_mock_warehouse_item_display_name(u32 itemId)
+{
+    const vm_net_mock_shop_catalog_item *item =
+        vm_net_mock_find_shop_catalog_item(itemId);
+    if (item != NULL && item->name[0] != 0)
+        return item->name;
+    return "\xce\xef\xc6\xb7"; /* 物品 */
+}
+
+static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
+                                                             u32 *pos)
+{
+    u8 dialog[512];
+    u32 dialogLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL)
+        return false;
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_seq_put_string(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xc7\xeb\xd1\xa1\xd4\xf1\xb2\xd6\xbf\xe2\xb2\xd9\xd7\xf7\xa3\xba") || /* 请选择仓库操作： */
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 2) ||
+        !vm_net_mock_append_npc_service_dialog_option(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xc8\xa1\xbb\xd8\xce\xef\xc6\xb7", /* 取回物品 */
+            1, VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU,
+            "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2") || /* 个人仓库 */
+        !vm_net_mock_append_npc_service_dialog_option(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xb4\xe6\xc8\xeb\xce\xef\xc6\xb7", /* 存入物品 */
+            1, VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU,
+            "\xb1\xb3\xb0\xfc") || /* 背包 */
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "hidebtn", 0) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "dialog", dialog,
+                                    (u16)dialogLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_warehouse_root_dialog_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_warehouse_root_dialog_object(out, outCap, &pos))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/*
+ * Same-TCP second CBMR after 834 use: primary 7/1 clears loading, then this
+ * lone 26/1 opens the warehouse.  Prefer over scene-poll (public poll often
+ * fails/backsoff while mall data_request still succeeds).
+ */
+static u32 vm_net_mock_take_warehouse_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL || !session->warehouseDialogPending)
+        return 0;
+    pos = vm_net_mock_build_warehouse_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->warehouseDialogPending = false;
+    session->warehouseDialogTick = 0;
+    printf("[info][network] mock_warehouse_dialog_wire client=%08x resp=%u "
+           "evidence=second-CBMR-lone-26/1-after-7/1\n",
+           session->clientId, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_pending_warehouse_dialog_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 ageTicks = 0;
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL || !session->warehouseDialogPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->warehouseDialogTick;
+    /* Fallback when wire second-CBMR did not run (old service path / build
+     * failure).  Long window covers remote poll backoff (2–8s). */
+    if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS))
+    {
+        printf("[warn][mock-service] warehouse_dialog_drop client=%08x age_ticks=%u\n",
+               session->clientId, ageTicks);
+        session->warehouseDialogPending = false;
+        session->warehouseDialogTick = 0;
+        return 0;
+    }
+    /*
+     * Wait at least one scene-poll cadence after the 7/1 use event so
+     * DF_DataPackage_DoLoading can finish clearing on the item-use path
+     * before a lone 26/1 opens the warehouse menu.
+     */
+    if (ageTicks < 2u)
+        return 0;
+    pos = vm_net_mock_build_warehouse_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->warehouseDialogPending = false;
+    session->warehouseDialogTick = 0;
+    printf("[info][network] mock_warehouse_dialog_deliver client=%08x age_ticks=%u resp=%u evidence=26/1-poll-fallback-after-7/1\n",
+           session->clientId, ageTicks, pos);
+    return pos;
+}
+
+static bool vm_net_mock_append_equip_sell_root_dialog_object(u8 *out, u32 outCap,
+                                                              u32 *pos)
+{
+    u8 dialog[512];
+    u32 dialogLen = 0;
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL)
+        return false;
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_seq_put_string(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa3\xba") || /* 请选择要出售的装备： */
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+        !vm_net_mock_append_npc_service_dialog_option(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8", /* 出售装备 */
+            1, VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU,
+            "\xb1\xb3\xb0\xfc") || /* 背包 */
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "hidebtn", 0) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "dialog", dialog,
+                                    (u16)dialogLen))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_equip_sell_root_dialog_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_equip_sell_root_dialog_object(out, outCap, &pos))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/*
+ * Same-TCP second CBMR after 839 use: primary 7/1 clears loading, then this
+ * lone 26/1 opens equipment sell.  Mirror warehouse 834 wire contract.
+ */
+static u32 vm_net_mock_take_equip_sell_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL || !session->equipSellDialogPending)
+        return 0;
+    pos = vm_net_mock_build_equip_sell_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->equipSellDialogPending = false;
+    session->equipSellDialogTick = 0;
+    printf("[info][network] mock_equip_sell_dialog_wire client=%08x resp=%u "
+           "evidence=second-CBMR-lone-26/1-after-7/1\n",
+           session->clientId, pos);
+    return pos;
+}
+
+static u32 vm_net_mock_build_pending_equip_sell_dialog_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 ageTicks = 0;
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL || !session->equipSellDialogPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->equipSellDialogTick;
+    if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS))
+    {
+        printf("[warn][mock-service] equip_sell_dialog_drop client=%08x age_ticks=%u\n",
+               session->clientId, ageTicks);
+        session->equipSellDialogPending = false;
+        session->equipSellDialogTick = 0;
+        return 0;
+    }
+    if (ageTicks < 2u)
+        return 0;
+    pos = vm_net_mock_build_equip_sell_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->equipSellDialogPending = false;
+    session->equipSellDialogTick = 0;
+    printf("[info][network] mock_equip_sell_dialog_deliver client=%08x age_ticks=%u resp=%u evidence=26/1-poll-fallback-after-7/1\n",
+           session->clientId, ageTicks, pos);
+    return pos;
+}
+
+/*
+ * Warehouse deposit bag peel mirrors NPC-buy busy contract
+ * (docs/re/2026-07-25-npc-purchase-progress-stuck.md):
+ *   phase 1: bag mutation (sub_11CE may re-arm r9+21808)
+ *   phase 2: lone 26/0 clears busy after the item event settles
+ *
+ *   flask      → 7/11=0 only
+ *   equipment  → authoritative backpack list 17/1+7/42 on poll
+ *                (open-bag / warehouse-exit do not send net requests; cannot
+ *                wait for those).  Main-manager ghost may still need a later
+ *                scene-owned peel; list push is the requested contract.
+ *   consumable → 7/7 morph→802 + 7/11=0
+ */
+static u32 vm_net_mock_build_pending_backpack_list_resync_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 ageTicks = 0;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u16 removeSeq = 0;
+    u32 removeItemId = 0;
+    u32 ackObjectStart = 0;
+    bool flaskRemove = false;
+    bool equipRemove = false;
+    const char *peelLabel = "7/7-morph802-type2+7/11";
+    u32 dropTicks = 10u * 1000u / VM_SCHED_FRAME_MS;
+
+    if (out == NULL || session == NULL || !session->backpackListResyncPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->backpackListResyncTick;
+    if (ageTicks > dropTicks && session->backpackListResyncPhase != 2)
+    {
+        printf("[warn][mock-service] backpack_list_resync_drop client=%08x "
+               "phase=%u age_ticks=%u\n",
+               session->clientId, session->backpackListResyncPhase, ageTicks);
+        session->backpackListResyncPending = false;
+        session->backpackListResyncPhase = 0;
+        session->backpackListResyncListOnly = false;
+        session->backpackListResyncTick = 0;
+        session->backpackResyncRemoveSeq = 0;
+        session->backpackResyncRemoveItemId = 0;
+        return 0;
+    }
+
+    if (session->backpackListResyncPhase == 2)
+    {
+        bool expiredPhase2 = ageTicks > dropTicks;
+
+        if (!expiredPhase2 && ageTicks < 2u)
+            return 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
+                                         &ackObjectStart))
+            return 0;
+        vm_net_mock_finish_wt_object(out, ackObjectStart, pos);
+        objectCount = 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][mock-service] backpack_resync_busy_ack client=%08x "
+               "age_ticks=%u objects=1 resp=%u %s "
+               "evidence=JianghuOL.CBE:0x01039C28(26/0-after-deposit-bag-peel)\n",
+               session->clientId, ageTicks, pos,
+               expiredPhase2 ? "reason=expired-phase2-still-ack"
+                             : "reason=poll-phase2");
+        session->backpackListResyncPending = false;
+        session->backpackListResyncPhase = 0;
+        session->backpackListResyncListOnly = false;
+        session->backpackListResyncTick = 0;
+        session->backpackResyncRemoveSeq = 0;
+        session->backpackResyncRemoveItemId = 0;
+        return pos;
+    }
+
+    if (session->backpackListResyncPhase != 1)
+        return 0;
+    if (ageTicks < 2u)
+        return 0;
+
+    removeSeq = session->backpackResyncRemoveSeq;
+    removeItemId = session->backpackResyncRemoveItemId;
+    if (removeSeq == 0 || removeItemId == 0)
+    {
+        session->backpackListResyncPhase = 2;
+        session->backpackListResyncTick = g_schedulerTick;
+        return 0;
+    }
+    flaskRemove = vm_net_mock_backpack_item_id_uses_reservoir_count(removeItemId);
+    equipRemove = !flaskRemove &&
+                  vm_net_mock_find_equipment_catalog_item(removeItemId) != NULL;
+    if (flaskRemove)
+    {
+        peelLabel = "7/11-flask-only";
+        if (!vm_net_mock_append_backpack_reservoir_count7_11_object(
+                out, outCap, &pos, removeSeq, 0))
+            return 0;
+        objectCount += 1;
+    }
+    else if (equipRemove)
+    {
+        /*
+         * Push the authoritative 17/1 list on the deposit poll.  Opening the
+         * bag / closing the warehouse dialog are often local-only (no WT), so
+         * do not wait for those.  Follow-ups are best-effort after 17/1.
+         */
+        peelLabel = "17/1+7/42-backpack-list-after-equip-deposit";
+        if (!vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (vm_net_mock_append_books42_object(out, outCap, &pos))
+            objectCount += 1;
+    }
+    else
+    {
+        if (!vm_net_mock_append_backpack_item_remove7_object(
+                out, outCap, &pos, removeSeq, removeItemId))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_backpack_reservoir_count7_11_object(
+                out, outCap, &pos, removeSeq, 0))
+            return 0;
+        objectCount += 1;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    if (session->backpackListResyncListOnly)
+    {
+        session->backpackListResyncPending = false;
+        session->backpackListResyncPhase = 0;
+        session->backpackListResyncListOnly = false;
+        session->backpackListResyncTick = 0;
+        session->backpackResyncRemoveSeq = 0;
+        session->backpackResyncRemoveItemId = 0;
+        printf("[info][network] mock_backpack_list_resync client=%08x age_ticks=%u "
+               "remove_item=%u remove_seq=%u flask=%u equip=%u phase=1-done resp=%u "
+               "evidence=%s-list-only-no-26/0\n",
+               session->clientId, ageTicks, removeItemId, removeSeq,
+               flaskRemove ? 1 : 0, equipRemove ? 1 : 0, pos, peelLabel);
+        return pos;
+    }
+    session->backpackListResyncPhase = 2;
+    session->backpackListResyncTick = g_schedulerTick;
+    printf("[info][network] mock_backpack_list_resync client=%08x age_ticks=%u "
+           "remove_item=%u remove_seq=%u flask=%u equip=%u phase=1->2 resp=%u "
+           "evidence=%s-then-26/0-after-warehouse-deposit\n",
+           session->clientId, ageTicks, removeItemId, removeSeq,
+           flaskRemove ? 1 : 0, equipRemove ? 1 : 0, pos, peelLabel);
+    return pos;
+}
+
+/*
+ * Equipment deposit defers bag UI rebuild to the next real backpack open
+ * (7/42 or 17/1+7/42).  That response already carries authoritative 17/1;
+ * clear phase-3 (or still-phase-1 equip) pending here so poll stops waiting.
+ */
+static void vm_net_mock_note_backpack_open_cleared_deposit_resync(const char *shape)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    u16 removeSeq = 0;
+    u32 removeItemId = 0;
+    bool equipPending = false;
+
+    if (session == NULL || !session->backpackListResyncPending)
+        return;
+    removeSeq = session->backpackResyncRemoveSeq;
+    removeItemId = session->backpackResyncRemoveItemId;
+    equipPending =
+        removeItemId != 0 &&
+        !vm_net_mock_backpack_item_id_uses_reservoir_count(removeItemId) &&
+        vm_net_mock_find_equipment_catalog_item(removeItemId) != NULL;
+    if (session->backpackListResyncPhase != 3 && !equipPending)
+        return;
+    session->backpackListResyncPending = false;
+    session->backpackListResyncPhase = 0;
+    session->backpackListResyncListOnly = false;
+    session->backpackListResyncTick = 0;
+    session->backpackResyncRemoveSeq = 0;
+    session->backpackResyncRemoveItemId = 0;
+    printf("[info][network] mock_backpack_open_after_deposit client=%08x "
+           "remove_item=%u remove_seq=%u shape=%s response=17/1+7/42 "
+           "evidence=mmGame:0x418C-after-warehouse-equip-deposit\n",
+           session->clientId, removeItemId, removeSeq,
+           shape != NULL ? shape : "backpack-open");
 }
 
 static u32 vm_net_mock_build_npc_service_dialog_response(
@@ -3834,21 +5217,24 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     const char *optionNames[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     const char *optionDescriptions[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     char optionNameStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
-    char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
-    char dialogTextStorage[256];
+    /* Must stay <= client option-desc buffer (59 usable + NUL). */
+    char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS]
+                                 [VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES + 1];
+    char dialogTextStorage[VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES + 1];
     u32 optionValues[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     u32 serviceValue = 0;
     u32 operation = 0;
     u32 value = 0;
     u8 optionCount = 0;
     u8 instanceChallengeOptionIndex = 0xff;
-    u8 dialog[1536];
+    u8 dialog[4096];
     u32 dialogLen = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 1;
     bool appendBackpackAdd = false;
     bool appendSkills = false;
+    bool appendMoneyRefresh = false;
     u32 backpackAddItemId = 0;
     u32 backpackAddCount = 0;
     u16 backpackAddSeq = 0;
@@ -3903,12 +5289,68 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE)
         {
-            u32 transferLen = vm_net_mock_build_instance_enter_response(
-                instanceSeed, out, outCap);
-            if (transferLen != 0)
-                return transferLen;
-            dialogText =
-                "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xb5\xe3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本传送点未配置。 */
+            /*
+             * Dream 29* while outdoor map-stone ResetDownloadState still armed
+             * (remaining>0): same-packet drain+30/1 still intermittent-faults
+             * hot DF ScreenInit (518c* / r6 junk / ui_h_war).  Proven-safe hop
+             * waits until remaining=0 then synthetic dream_drain.  Gate here —
+             * keep clear armed, stay on outdoor map, let the player retry.
+             */
+            bool gateWaitClear =
+                instanceSeed->instanceScene[0] == '2' &&
+                instanceSeed->instanceScene[1] == '9' &&
+                session != NULL &&
+                session->mapStoneLoadingClearPending &&
+                session->mapStoneLoadingClearRemaining > 0u &&
+                vm_net_mock_scene_name_is_safe(
+                    session->mapStoneLoadingClearScene) &&
+                !vm_net_mock_scene_names_equal_loose(
+                    session->mapStoneLoadingClearScene,
+                    instanceSeed->instanceScene);
+
+            if (gateWaitClear)
+            {
+                action = "instance-enter-gate-wait-clear";
+                dialogText =
+                    "\xb5\xd8\xcd\xbc\xbc\xd3\xd4\xd8\xd6\xd0\xa3\xac"
+                    "\xc7\xeb\xc9\xd4\xba\xf2\xd4\xd9\xbd\xf8\xc8\xeb\xa1\xa3"; /* 地图加载中，请稍候再进入。 */
+                optionNames[optionCount] =
+                    "\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe"; /* 进入副本 */
+                optionDescriptions[optionCount] =
+                    "\xb5\xd8\xcd\xbc\xbc\xd3\xd4\xd8\xcd\xea\xb3\xc9\xba\xf3\xd6\xd8\xca\xd4"; /* 地图加载完成后重试 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE |
+                    instanceSeed->actorId;
+                ++optionCount;
+                printf("[info][network] mock_npc_instance_enter_gate "
+                       "actor=%u scene=%s clear_scene=%s remaining=%u "
+                       "action=wait-clear-then-retry "
+                       "evidence=remaining-gt0-same-packet-drain-intermittent-"
+                       "518c-ScreenInit\n",
+                       instanceSeed->actorId, instanceSeed->instanceScene,
+                       session->mapStoneLoadingClearScene,
+                       (u32)session->mapStoneLoadingClearRemaining);
+                vm_autotest_note("mock_npc_instance_enter_gate scene=%s "
+                                 "remaining=%u wait-clear\n",
+                                 instanceSeed->instanceScene,
+                                 (u32)session->mapStoneLoadingClearRemaining);
+                if (session != NULL)
+                {
+                    (void)vm_mock_service_session_enqueue_system_message(
+                        session,
+                        "\xb5\xd8\xcd\xbc\xbc\xd3\xd4\xd8\xd6\xd0\xa3\xac"
+                        "\xc7\xeb\xc9\xd4\xba\xf2\xd4\xd9\xbd\xf8\xc8\xeb\xa1\xa3");
+                }
+            }
+            else
+            {
+                u32 transferLen = vm_net_mock_build_instance_enter_response(
+                    instanceSeed, out, outCap);
+                if (transferLen != 0)
+                    return transferLen;
+                dialogText =
+                    "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xb5\xe3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本传送点未配置。 */
+            }
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
         {
@@ -3937,21 +5379,701 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             if (instanceSeed->challengeEnemyId != 0 &&
                 optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
             {
-                instanceChallengeOptionIndex = optionCount;
                 optionNames[optionCount] =
                     "\xcc\xf4\xd5\xbd\xca\xd8\xb9\xd8\xb9\xd6"; /* 挑战守关怪 */
                 optionDescriptions[optionCount] =
                     "\xbf\xaa\xca\xbc\xb8\xb1\xb1\xbe\xd5\xbd\xb6\xb7"; /* 开始副本战斗 */
-                /* task_hall_activate_selected_entry action 13 is the native
-                 * scene challenge path.  It emits 4/1 {id,index,posx,posy};
-                 * using the monster id here lets the client prepare the battle
-                 * request/module before it receives the non-scene 4/10 start. */
-                optionValues[optionCount] = instanceSeed->challengeEnemyId;
+                /*
+                 * Prefer EC (action=1) over task-hall action 13.
+                 *
+                 * Runtime 2026-07-30 (炼狱魔头 actor=30461): action 13 emitted
+                 * 4/1 and the same-packet 4/10 was logged
+                 * (mock_npc_instance_challenge_native resp=134), but the client
+                 * stayed on scene_sync_poll — business dispatch gates the
+                 * battle-module callback (0x01012F8E).  The EC path uses
+                 * 26/0+30/9 confirm, then HAS_FOLLOWUP lone 4/10 on the
+                 * confirm data_request (not scene poll — poll resp=116 still
+                 * failed to enter mmBattle).
+                 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE |
+                    instanceSeed->actorId;
                 ++optionCount;
             }
         }
     }
 
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE ||
+             (serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU ||
+             (serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU ||
+             operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE)
+    {
+        vm_net_mock_warehouse_state *warehouse = vm_net_mock_warehouse_active();
+        u32 page = serviceValue & 0xffffu;
+        bool fillRetrieveMenu = false;
+        bool fillDepositMenu = false;
+        const char *failReason = NULL;
+
+        if (session == NULL || !session->warehouseSessionArmed)
+        {
+            vm_net_mock_backpack_item_state *passItem =
+                role != NULL
+                    ? vm_net_mock_role_find_backpack_item(
+                          role, VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID, 0)
+                    : NULL;
+
+            action = "warehouse-locked";
+            if (passItem != NULL && passItem->count != 0)
+            {
+                /* Pass still has durability; session arm was lost (e.g. old
+                 * global clear) or dialog opened without a prior use. */
+                dialogText =
+                    "\xc7\xeb\xcf\xc8\xca\xb9\xd3\xc3\xb1\xb3\xb0\xfc\xd6\xd0\xb5\xc4\xb2\xd6\xbf\xe2\xc6\xbe\xd6\xa4\xa1\xa3"; /* 请先使用背包中的仓库凭证。 */
+            }
+            else
+            {
+                dialogText =
+                    "\xb2\xd6\xbf\xe2\xc6\xbe\xd6\xa4\xc4\xcd\xbe\xc3\xb2\xbb\xd7\xe3\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xb9\xba\xc2\xf2\xa1\xa3"; /* 仓库凭证耐久不足，请重新购买。 */
+            }
+        }
+        else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE)
+        {
+            action = "warehouse-root";
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xb2\xd6\xbf\xe2\xb2\xd9\xd7\xf7\xa3\xba"; /* 请选择仓库操作： */
+            optionNames[optionCount] =
+                "\xc8\xa1\xbb\xd8\xce\xef\xc6\xb7"; /* 取回物品 */
+            optionDescriptions[optionCount] =
+                "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2"; /* 个人仓库 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU;
+            ++optionCount;
+            optionNames[optionCount] =
+                "\xb4\xe6\xc8\xeb\xce\xef\xc6\xb7"; /* 存入物品 */
+            optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc"; /* 背包 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU;
+            ++optionCount;
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE)
+        {
+            u16 addedSeq = 0;
+            u32 returnPage =
+                (session != NULL && session->warehouseBrowseValid &&
+                 session->warehouseBrowseKind == 1u)
+                    ? session->warehouseBrowsePage
+                    : 0u;
+
+            action = "warehouse-retrieve";
+            if (vm_net_mock_warehouse_retrieve_slot(role, value, &addedSeq,
+                                                    &failReason))
+            {
+                vm_net_mock_backpack_item_state *added =
+                    vm_net_mock_role_find_backpack_item(role, 0, addedSeq);
+                result = 1;
+                fillRetrieveMenu = true;
+                page = returnPage;
+                if (added != NULL && session != NULL)
+                {
+                    u32 peelCount =
+                        vm_net_mock_backpack_item_id_uses_reservoir_count(
+                            added->itemId)
+                            ? added->count
+                            : (added->count ? added->count : 1u);
+                    vm_net_mock_arm_npc_purchase_backpack_pending(
+                        session, addedSeq, added->itemId, peelCount,
+                        added->enhanceLevel, "warehouse-retrieve");
+                }
+            }
+            else if (failReason != NULL &&
+                     strcmp(failReason, "backpack-full") == 0)
+            {
+                dialogText =
+                    "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xc8\xa1\xbb\xd8\xa1\xa3";
+                fillRetrieveMenu = true;
+                page = returnPage;
+            }
+            else
+            {
+                dialogText =
+                    "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3";
+                fillRetrieveMenu = true;
+                page = returnPage;
+            }
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE)
+        {
+            u32 returnPage =
+                (session != NULL && session->warehouseBrowseValid &&
+                 session->warehouseBrowseKind == 2u)
+                    ? session->warehouseBrowsePage
+                    : 0u;
+
+            action = "warehouse-deposit";
+            {
+                vm_net_mock_backpack_item_state *bagItem =
+                    vm_net_mock_role_find_backpack_item(role, 0, (u16)value);
+                u32 depositedItemId = bagItem != NULL ? bagItem->itemId : 0;
+
+                if (vm_net_mock_warehouse_deposit_backpack_seq(role, (u16)value,
+                                                               &failReason))
+                {
+                    result = 1;
+                    g_netMockBackpackGridSeededRoleId = 0;
+                    fillDepositMenu = true;
+                    page = returnPage;
+                    if (session != NULL)
+                    {
+                        /*
+                         * 26/1 must not carry bag mutation.  Later poll:
+                         * flask/consumable peel, or equipment 17/1+7/42 list;
+                         * then lone 26/0.
+                         */
+                        session->backpackListResyncPending = true;
+                        session->backpackListResyncPhase = 1;
+                        session->backpackListResyncListOnly = false;
+                        session->backpackListResyncTick = g_schedulerTick;
+                        session->backpackResyncRemoveSeq = (u16)value;
+                        session->backpackResyncRemoveItemId = depositedItemId;
+                    }
+                }
+                else if (failReason != NULL &&
+                         strcmp(failReason, "warehouse-full") == 0)
+                {
+                    dialogText =
+                        "\xb2\xd6\xbf\xe2\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb4\xe6\xc8\xeb\xa1\xa3";
+                    fillDepositMenu = true;
+                    page = returnPage;
+                }
+                else
+                {
+                    dialogText =
+                        "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3";
+                    fillDepositMenu = true;
+                    page = returnPage;
+                }
+            }
+        }
+        else if ((serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU)
+        {
+            fillRetrieveMenu = true;
+        }
+        else if ((serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU)
+        {
+            fillDepositMenu = true;
+        }
+
+        if (fillRetrieveMenu)
+        {
+            u32 total = 0;
+            u32 start = 0;
+            bool keepFailText =
+                operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE &&
+                result != 1;
+
+            warehouse = vm_net_mock_warehouse_active();
+            total = warehouse != NULL ? warehouse->itemCount : 0;
+            start = page * VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS;
+            if (strcmp(action, "warehouse-retrieve") != 0)
+                action = "warehouse-retrieve-menu";
+            if (result == 1)
+            {
+                dialogText = total == 0
+                                 ? "\xc8\xa1\xbb\xd8\xb3\xc9\xb9\xa6\xa1\xa3\xb2\xd6\xbf\xe2\xd2\xd1\xbf\xd5\xa1\xa3" /* 取回成功。仓库已空。 */
+                                 : "\xc8\xa1\xbb\xd8\xb3\xc9\xb9\xa6\xa1\xa3\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba"; /* 取回成功。请继续选择： */
+            }
+            else if (!keepFailText)
+            {
+                dialogText = total == 0
+                                 ? "\xb2\xd6\xbf\xe2\xce\xaa\xbf\xd5\xa1\xa3" /* 仓库为空。 */
+                                 : "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xc8\xa1\xbb\xd8\xb5\xc4\xce\xef\xc6\xb7\xa3\xba"; /* 请选择要取回的物品： */
+            }
+            if (total != 0)
+            {
+                if (start >= total)
+                {
+                    page = (total - 1u) / VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS;
+                    start = page * VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS;
+                }
+                if (session != NULL)
+                {
+                    session->warehouseBrowseValid = true;
+                    session->warehouseBrowseKind = 1;
+                    session->warehouseBrowsePage = (u16)page;
+                }
+                for (u32 ordinal = start;
+                     ordinal < total &&
+                     ordinal < start + VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS &&
+                     optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                     ++ordinal)
+                {
+                    const vm_net_mock_backpack_item_state *item =
+                        &warehouse->items[ordinal];
+
+                    snprintf(optionNameStorage[optionCount],
+                             sizeof(optionNameStorage[optionCount]),
+                             "%s%s x%u",
+                             "\xc8\xa1\xbb\xd8", /* 取回 */
+                             vm_net_mock_warehouse_item_display_name(
+                                 item->itemId),
+                             item->count);
+                    optionNames[optionCount] = optionNameStorage[optionCount];
+                    optionDescriptions[optionCount] =
+                        "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2"; /* 个人仓库 */
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE |
+                        ordinal;
+                    ++optionCount;
+                }
+                if (page > 0 &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+                    optionDescriptions[optionCount] =
+                        "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU |
+                        (page - 1u);
+                    ++optionCount;
+                }
+                if (start + VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS < total &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+                    optionDescriptions[optionCount] =
+                        "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU |
+                        (page + 1u);
+                    ++optionCount;
+                }
+            }
+            if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    "\xb7\xb5\xbb\xd8\xb2\xd6\xbf\xe2"; /* 返回仓库 */
+                optionDescriptions[optionCount] =
+                    "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE;
+                ++optionCount;
+            }
+        }
+        else if (fillDepositMenu)
+        {
+            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 depositable = 0;
+            u32 listed = 0;
+            u32 start = 0;
+            bool keepFailText =
+                operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE &&
+                result != 1;
+
+            if (strcmp(action, "warehouse-deposit") != 0)
+                action = "warehouse-deposit-menu";
+            for (u32 i = 0; i < bagCount; ++i)
+            {
+                if (vm_net_mock_warehouse_item_is_depositable(
+                        role->backpackItems[i].itemId))
+                    ++depositable;
+            }
+            if (result == 1)
+            {
+                dialogText =
+                    depositable == 0
+                        ? "\xb4\xe6\xc8\xeb\xb3\xc9\xb9\xa6\xa1\xa3\xb1\xb3\xb0\xfc\xd2\xd1\xce\xde\xbf\xc9\xb4\xe6\xce\xef\xc6\xb7\xa1\xa3" /* 存入成功。背包已无可存物品。 */
+                        : "\xb4\xe6\xc8\xeb\xb3\xc9\xb9\xa6\xa1\xa3\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba"; /* 存入成功。请继续选择： */
+            }
+            else if (!keepFailText)
+            {
+                dialogText =
+                    depositable == 0
+                        ? "\xb1\xb3\xb0\xfc\xc3\xbb\xd3\xd0\xbf\xc9\xb4\xe6\xc8\xeb\xb5\xc4\xce\xef\xc6\xb7\xa1\xa3" /* 背包没有可存入的物品。 */
+                        : "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb4\xe6\xc8\xeb\xb5\xc4\xce\xef\xc6\xb7\xa3\xba"; /* 请选择要存入的物品： */
+            }
+            if (depositable != 0)
+            {
+                if (page * VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS >= depositable)
+                    page = (depositable - 1u) / VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS;
+                start = page * VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS;
+                if (session != NULL)
+                {
+                    session->warehouseBrowseValid = true;
+                    session->warehouseBrowseKind = 2;
+                    session->warehouseBrowsePage = (u16)page;
+                }
+                for (u32 i = 0; i < bagCount &&
+                     optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                     ++i)
+                {
+                    const vm_net_mock_backpack_item_state *item =
+                        &role->backpackItems[i];
+
+                    if (!vm_net_mock_warehouse_item_is_depositable(item->itemId))
+                        continue;
+                    if (listed < start)
+                    {
+                        ++listed;
+                        continue;
+                    }
+                    if (listed >= start + VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS)
+                        break;
+                    snprintf(optionNameStorage[optionCount],
+                             sizeof(optionNameStorage[optionCount]),
+                             "%s%s x%u",
+                             "\xb4\xe6\xc8\xeb", /* 存入 */
+                             vm_net_mock_warehouse_item_display_name(
+                                 item->itemId),
+                             item->count);
+                    optionNames[optionCount] = optionNameStorage[optionCount];
+                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE |
+                        item->seq;
+                    ++optionCount;
+                    ++listed;
+                }
+                if (page > 0 &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU |
+                        (page - 1u);
+                    ++optionCount;
+                }
+                if ((page + 1u) * VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS < depositable &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU |
+                        (page + 1u);
+                    ++optionCount;
+                }
+            }
+            if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    "\xb7\xb5\xbb\xd8\xb2\xd6\xbf\xe2"; /* 返回仓库 */
+                optionDescriptions[optionCount] =
+                    "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE;
+                ++optionCount;
+            }
+        }
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL ||
+             (serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU ||
+             operation == VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE)
+    {
+        u32 page = serviceValue & 0xffffu;
+        bool fillSellMenu = false;
+        bool showSellDetail = false;
+        const char *failReason = NULL;
+        u32 soldPrice = 0;
+        u32 soldItemId = 0;
+        vm_net_mock_backpack_item_state *viewBagItem = NULL;
+        const vm_net_mock_shop_catalog_item *viewCatalog = NULL;
+        const vm_net_mock_equipment_catalog_item *viewEquipment = NULL;
+
+        if (session == NULL || !session->equipSellSessionArmed)
+        {
+            vm_net_mock_backpack_item_state *passItem =
+                role != NULL
+                    ? vm_net_mock_role_find_backpack_item(
+                          role, VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID, 0)
+                    : NULL;
+
+            action = "equip-sell-locked";
+            if (passItem != NULL && passItem->count != 0)
+            {
+                dialogText =
+                    "\xc7\xeb\xcf\xc8\xca\xb9\xd3\xc3\xb1\xb3\xb0\xfc\xd6\xd0\xb5\xc4\xd7\xb0\xb1\xb8\xb3\xf6\xca\xdb\xc6\xbe\xd6\xa4\xa1\xa3"; /* 请先使用背包中的装备出售凭证。 */
+            }
+            else
+            {
+                dialogText =
+                    "\xd7\xb0\xb1\xb8\xb3\xf6\xca\xdb\xc6\xbe\xd6\xa4\xc4\xcd\xbe\xc3\xb2\xbb\xd7\xe3\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xb9\xba\xc2\xf2\xa1\xa3"; /* 装备出售凭证耐久不足，请重新购买。 */
+            }
+        }
+        else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL)
+        {
+            action = "equip-sell-root";
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa3\xba"; /* 请选择要出售的装备： */
+            optionNames[optionCount] =
+                "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8"; /* 出售装备 */
+            optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc"; /* 背包 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU;
+            ++optionCount;
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE)
+        {
+            u32 returnPage =
+                (session != NULL && session->equipSellBrowseValid)
+                    ? session->equipSellBrowsePage
+                    : 0u;
+
+            action = "equip-sell-view";
+            page = returnPage;
+            viewBagItem =
+                vm_net_mock_role_find_backpack_item(role, 0, (u16)value);
+            if (viewBagItem != NULL &&
+                vm_net_mock_equip_sell_item_is_sellable(viewBagItem->itemId))
+            {
+                viewCatalog =
+                    vm_net_mock_find_shop_catalog_item(viewBagItem->itemId);
+                viewEquipment = vm_net_mock_find_equipment_catalog_item(
+                    viewBagItem->itemId);
+            }
+            if (viewBagItem != NULL && viewCatalog != NULL &&
+                viewEquipment != NULL &&
+                vm_net_mock_npc_shop_format_equipment_detail(
+                    dialogTextStorage, sizeof(dialogTextStorage), viewCatalog,
+                    viewEquipment, viewBagItem->enhanceLevel))
+            {
+                dialogText = dialogTextStorage;
+                showSellDetail = true;
+            }
+            else
+            {
+                dialogText =
+                    "\xb8\xc3\xce\xef\xc6\xb7\xce\xde\xb7\xa8\xb3\xf6\xca\xdb\xa1\xa3"; /* 该物品无法出售。 */
+                fillSellMenu = true;
+            }
+        }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE)
+        {
+            u32 returnPage =
+                (session != NULL && session->equipSellBrowseValid)
+                    ? session->equipSellBrowsePage
+                    : 0u;
+
+            action = "equip-sell";
+            if (vm_net_mock_equip_sell_backpack_seq(role, (u16)value,
+                                                    &soldPrice, &soldItemId,
+                                                    &failReason))
+            {
+                result = 1;
+                fillSellMenu = true;
+                page = returnPage;
+                appendMoneyRefresh = true;
+                g_netMockBackpackGridSeededRoleId = 0;
+                if (session != NULL)
+                {
+                    session->backpackListResyncPending = true;
+                    session->backpackListResyncPhase = 1;
+                    session->backpackListResyncListOnly = false;
+                    session->backpackListResyncTick = g_schedulerTick;
+                    session->backpackResyncRemoveSeq = (u16)value;
+                    session->backpackResyncRemoveItemId = soldItemId;
+                }
+                printf("[info][network] mock_equip_sell_dialog role=%u seq=%u "
+                       "item=%u price=%u money=%u evidence=full-价值-copper\n",
+                       role->roleId, value, soldItemId, soldPrice, role->money);
+            }
+            else if (failReason != NULL &&
+                     strcmp(failReason, "price-unresolved") == 0)
+            {
+                dialogText =
+                    "\xb8\xc3\xd7\xb0\xb1\xb8\xbc\xdb\xd6\xb5\xce\xb4\xc8\xb7\xc8\xcf\xa3\xac\xce\xde\xb7\xa8\xb3\xf6\xca\xdb\xa1\xa3"; /* 该装备价值未确认，无法出售。 */
+                fillSellMenu = true;
+                page = returnPage;
+            }
+            else
+            {
+                dialogText =
+                    "\xb8\xc3\xce\xef\xc6\xb7\xce\xde\xb7\xa8\xb3\xf6\xca\xdb\xa1\xa3"; /* 该物品无法出售。 */
+                fillSellMenu = true;
+                page = returnPage;
+            }
+        }
+        else if ((serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU)
+        {
+            fillSellMenu = true;
+        }
+
+        if (showSellDetail)
+        {
+            optionNames[optionCount] =
+                "\xb3\xf6\xca\xdb\xb8\xc3\xd7\xb0\xb1\xb8"; /* 出售该装备 */
+            snprintf(optionDescriptionStorage[optionCount],
+                     sizeof(optionDescriptionStorage[optionCount]),
+                     "%u%s",
+                     viewCatalog != NULL ? viewCatalog->price : 0u,
+                     "\xcd\xad"); /* ...铜 */
+            optionDescriptions[optionCount] =
+                optionDescriptionStorage[optionCount];
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE |
+                (viewBagItem != NULL ? viewBagItem->seq : 0u);
+            ++optionCount;
+            optionNames[optionCount] =
+                "\xb7\xb5\xbb\xd8\xd7\xb0\xb1\xb8\xc1\xd0\xb1\xed"; /* 返回装备列表 */
+            optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU | page;
+            ++optionCount;
+        }
+        else if (fillSellMenu)
+        {
+            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 sellable = 0;
+            u32 listed = 0;
+            u32 start = 0;
+            bool keepFailText =
+                operation == VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE &&
+                result != 1;
+
+            if (strcmp(action, "equip-sell") != 0 &&
+                strcmp(action, "equip-sell-view") != 0)
+                action = "equip-sell-menu";
+            for (u32 i = 0; i < bagCount; ++i)
+            {
+                if (vm_net_mock_equip_sell_item_is_sellable(
+                        role->backpackItems[i].itemId))
+                    ++sellable;
+            }
+            if (result == 1)
+            {
+                if (soldPrice != 0)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "%s%u%s%s",
+                             "\xb3\xf6\xca\xdb\xb3\xc9\xb9\xa6\xa3\xac\xbb\xf1\xb5\xc3", /* 出售成功，获得 */
+                             soldPrice,
+                             "\xcd\xad\xa1\xa3", /* 铜。 */
+                             sellable == 0
+                                 ? "\xb1\xb3\xb0\xfc\xd2\xd1\xce\xde\xbf\xc9\xca\xdb\xd7\xb0\xb1\xb8\xa1\xa3" /* 背包已无可售装备。 */
+                                 : "\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba"); /* 请继续选择： */
+                    dialogText = dialogTextStorage;
+                }
+                else
+                {
+                    dialogText =
+                        sellable == 0
+                            ? "\xb3\xf6\xca\xdb\xb3\xc9\xb9\xa6\xa1\xa3\xb1\xb3\xb0\xfc\xd2\xd1\xce\xde\xbf\xc9\xca\xdb\xd7\xb0\xb1\xb8\xa1\xa3"
+                            : "\xb3\xf6\xca\xdb\xb3\xc9\xb9\xa6\xa1\xa3\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba";
+                }
+            }
+            else if (!keepFailText)
+            {
+                dialogText =
+                    sellable == 0
+                        ? "\xb1\xb3\xb0\xfc\xc3\xbb\xd3\xd0\xbf\xc9\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa1\xa3" /* 背包没有可出售的装备。 */
+                        : "\xc7\xeb\xd1\xa1\xd4\xf1\xd7\xb0\xb1\xb8\xb2\xe9\xbf\xb4\xca\xf4\xd0\xd4\xa3\xba"; /* 请选择装备查看属性： */
+            }
+            if (sellable != 0)
+            {
+                if (page * VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS >= sellable)
+                    page = (sellable - 1u) / VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS;
+                start = page * VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS;
+                if (session != NULL)
+                {
+                    session->equipSellBrowseValid = true;
+                    session->equipSellBrowsePage = (u16)page;
+                }
+                for (u32 i = 0; i < bagCount &&
+                     optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                     ++i)
+                {
+                    const vm_net_mock_backpack_item_state *item =
+                        &role->backpackItems[i];
+                    const vm_net_mock_shop_catalog_item *catalog = NULL;
+
+                    if (!vm_net_mock_equip_sell_item_is_sellable(item->itemId))
+                        continue;
+                    if (listed < start)
+                    {
+                        ++listed;
+                        continue;
+                    }
+                    if (listed >= start + VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS)
+                        break;
+                    catalog = vm_net_mock_find_shop_catalog_item(item->itemId);
+                    if (item->enhanceLevel != 0)
+                    {
+                        snprintf(optionNameStorage[optionCount],
+                                 sizeof(optionNameStorage[optionCount]),
+                                 "%s+%u",
+                                 vm_net_mock_warehouse_item_display_name(
+                                     item->itemId),
+                                 item->enhanceLevel);
+                    }
+                    else
+                    {
+                        snprintf(optionNameStorage[optionCount],
+                                 sizeof(optionNameStorage[optionCount]), "%s",
+                                 vm_net_mock_warehouse_item_display_name(
+                                     item->itemId));
+                    }
+                    optionNames[optionCount] = optionNameStorage[optionCount];
+                    snprintf(optionDescriptionStorage[optionCount],
+                             sizeof(optionDescriptionStorage[optionCount]),
+                             "%u%s %s",
+                             catalog != NULL ? catalog->price : 0u,
+                             "\xcd\xad", /* 铜 */
+                             "\xb2\xe9\xbf\xb4\xca\xf4\xd0\xd4"); /* 查看属性 */
+                    optionDescriptions[optionCount] =
+                        optionDescriptionStorage[optionCount];
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE |
+                        item->seq;
+                    ++optionCount;
+                    ++listed;
+                }
+                if (page > 0 &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU |
+                        (page - 1u);
+                    ++optionCount;
+                }
+                if ((page + 1u) * VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS < sellable &&
+                    optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] =
+                        "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+                    optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc";
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU |
+                        (page + 1u);
+                    ++optionCount;
+                }
+            }
+            if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    "\xb7\xb5\xbb\xd8"; /* 返回 */
+                optionDescriptions[optionCount] =
+                    "\xd7\xb0\xb1\xb8\xb3\xf6\xca\xdb"; /* 装备出售 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL;
+                ++optionCount;
+            }
+        }
+    }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON)
     {
         static const u8 weaponSelectors[] = {8, 9, 10};
@@ -3967,7 +6089,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             optionDescriptions[optionCount] =
                 "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
             optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
+                vm_net_mock_npc_shop_category_value(selector, 0, 0);
             ++optionCount;
         }
     }
@@ -3986,27 +6108,33 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             optionDescriptions[optionCount] =
                 "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
             optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
+                vm_net_mock_npc_shop_category_value(selector, 0, 0);
             ++optionCount;
         }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE ||
              operation == VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE ||
              operation == VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE ||
-             operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE)
+             operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_VIEW_ITEM_BASE)
     {
         const vm_net_mock_shop_catalog_item *buyItem = NULL;
+        const vm_net_mock_equipment_catalog_item *viewEquipment = NULL;
         u32 selector = 0;
+        u32 levelBand = 0;
         u32 page = 0;
         u32 total = 0;
         u32 start = 0;
         bool buyRequest = operation == VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE ||
                           operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE;
+        bool viewRequest = operation == VM_NET_MOCK_NPC_SERVICE_VIEW_ITEM_BASE;
         bool legacyWeaponBuy =
             operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE;
+        bool showLevelBandMenu = false;
+        bool showItemDetail = false;
 
         action = buyRequest ? (legacyWeaponBuy ? "weapon-buy" : "shop-buy")
-                            : "shop-category";
+                            : (viewRequest ? "shop-view" : "shop-category");
         if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE)
         {
             selector = VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR;
@@ -4014,6 +6142,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE)
         {
             selector = value & VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK;
+            levelBand = (value >> VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_SHIFT) &
+                        VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_MASK;
             page = value >> VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT;
         }
         else
@@ -4022,6 +6152,30 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             selector = vm_net_mock_npc_shop_selector_for_item(buyItem);
             if (legacyWeaponBuy && (selector < 8u || selector > 10u))
                 selector = 0;
+            if (buyItem != NULL && buyItem->isEquip)
+            {
+                const vm_net_mock_equipment_catalog_item *equipment =
+                    vm_net_mock_find_equipment_catalog_item(buyItem->itemId);
+                if (equipment != NULL)
+                {
+                    viewEquipment = equipment;
+                    if (equipment->levelRequired >= 1u &&
+                        equipment->levelRequired <= 20u)
+                        levelBand = 1;
+                    else if (equipment->levelRequired <= 40u)
+                        levelBand = 2;
+                    else if (equipment->levelRequired <= 60u)
+                        levelBand = 3;
+                    else if (equipment->levelRequired <= 70u)
+                        levelBand = 4;
+                }
+            }
+            if (session != NULL && session->npcShopBrowseValid &&
+                session->npcShopBrowseSelector == (u8)selector)
+            {
+                levelBand = session->npcShopBrowseLevelBand;
+                page = session->npcShopBrowsePage;
+            }
         }
 
         if (!vm_net_mock_npc_shop_selector_is_valid(selector))
@@ -4031,9 +6185,38 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else
         {
-            dialogText = selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR
-                             ? "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb9\xba\xc2\xf2\xb5\xc4\xd2\xa9\xc6\xb7\xa3\xba" /* 请选择要购买的药品： */
-                             : "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa3\xba"; /* 请选择要购买的商品： */
+            showLevelBandMenu =
+                !buyRequest && !viewRequest &&
+                vm_net_mock_npc_shop_selector_is_equipment(selector) &&
+                levelBand == 0;
+            if (showLevelBandMenu)
+            {
+                dialogText =
+                    "\xc7\xeb\xd1\xa1\xd4\xf1\xb5\xc8\xbc\xb6\xb6\xce\xa3\xba"; /* 请选择等级段： */
+            }
+            else if (viewRequest)
+            {
+                showItemDetail =
+                    buyItem != NULL && buyItem->isEquip &&
+                    viewEquipment != NULL &&
+                    vm_net_mock_npc_shop_item_matches_selector(buyItem,
+                                                               selector) &&
+                    vm_net_mock_npc_shop_format_equipment_detail(
+                        dialogTextStorage, sizeof(dialogTextStorage), buyItem,
+                        viewEquipment, 0);
+                if (showItemDetail)
+                    dialogText = dialogTextStorage;
+                else
+                    dialogText =
+                        "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3"; /* 该商品已下架。 */
+            }
+            else
+            {
+                dialogText =
+                    selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR
+                        ? "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb9\xba\xc2\xf2\xb5\xc4\xd2\xa9\xc6\xb7\xa3\xba" /* 请选择要购买的药品： */
+                        : "\xc7\xeb\xd1\xa1\xd4\xf1\xc9\xcc\xc6\xb7\xb2\xe9\xbf\xb4\xca\xf4\xd0\xd4\xa3\xba"; /* 请选择商品查看属性： */
+            }
         }
 
         if (buyRequest)
@@ -4051,15 +6234,15 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             }
             else
             {
-                /* vm_net_mock_role_add_backpack_item_to_role persists its
-                 * mutation.  Retain the complete pre-purchase state so an
-                 * impossible postcondition can be rolled back consistently
-                 * instead of refunding only money in RAM after the item has
-                 * already reached MySQL. */
+                /* vm_net_mock_role_add_backpack_item_to_role marks inventory
+                 * dirty (MySQL flushes after CBMR).  Retain the complete
+                 * pre-purchase state so an impossible postcondition can be
+                 * rolled back with a sync save instead of refunding only money
+                 * in RAM after a partial grant. */
                 vm_net_mock_role_state purchaseBefore = *role;
                 role->money -= buyItem->price;
                 if (!vm_net_mock_role_add_backpack_item_to_role(
-                        role, buyItem->itemId, 1, &backpackAddSeq,
+                        role, buyItem->itemId, 1, 0, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy"))
                 {
@@ -4093,9 +6276,26 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                 buyItem->itemId)
                                 ? purchasedItem->count
                                 : 1;
-                        appendBackpackAdd = backpackAddCount != 0;
-                        if (appendBackpackAdd)
+                        if (backpackAddCount != 0 && session != NULL)
                         {
+                            /*
+                             * Dialog-only on the buy queue_data event.  7/7 is
+                             * deferred to scene poll phase 1; lone 26/0 follows
+                             * in phase 2 after ProcessItem can re-arm busy.
+                             */
+                            appendBackpackAdd = false;
+                            vm_net_mock_arm_npc_purchase_backpack_pending(
+                                session, backpackAddSeq, backpackAddItemId,
+                                backpackAddCount,
+                                purchasedItem->enhanceLevel, "shop-buy");
+                            dialogText =
+                                "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
+                            result = 1;
+                        }
+                        else if (backpackAddCount != 0)
+                        {
+                            /* No session: prefer clear progress over bag sync. */
+                            appendBackpackAdd = false;
                             dialogText =
                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
                             result = 1;
@@ -4114,7 +6314,63 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             page = 0;
         }
 
-        total = vm_net_mock_npc_shop_selector_total(selector);
+        /*
+         * Buy success is a terminal notice (option-count=0), same shape as
+         * repair-all.  Do not rebuild the category menu under the success text.
+         */
+        if (!(buyRequest && result == 1))
+        {
+        if (showItemDetail)
+        {
+            optionNames[optionCount] =
+                "\xb9\xba\xc2\xf2\xb8\xc3\xd7\xb0\xb1\xb8"; /* 购买该装备 */
+            snprintf(optionDescriptionStorage[optionCount],
+                     sizeof(optionDescriptionStorage[optionCount]),
+                     "%u%s", buyItem->price, "\xcd\xad"); /* ...铜 */
+            optionDescriptions[optionCount] =
+                optionDescriptionStorage[optionCount];
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE | buyItem->itemId;
+            ++optionCount;
+            optionNames[optionCount] =
+                "\xb7\xb5\xbb\xd8\xc9\xcc\xc6\xb7\xc1\xd0\xb1\xed"; /* 返回商品列表 */
+            optionDescriptions[optionCount] =
+                vm_net_mock_npc_shop_selector_is_equipment(selector)
+                    ? vm_net_mock_npc_shop_level_band_name(levelBand)
+                    : vm_net_mock_npc_shop_selector_name(selector);
+            optionValues[optionCount] = vm_net_mock_npc_shop_category_value(
+                selector, levelBand != 0 ? levelBand : 1u, page);
+            ++optionCount;
+        }
+        else if (showLevelBandMenu)
+        {
+            action = "shop-level-bands";
+            for (u32 band = 1;
+                 band <= VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_COUNT &&
+                 optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                 ++band)
+            {
+                u32 bandTotal =
+                    vm_net_mock_npc_shop_selector_total(selector, band);
+                if (bandTotal == 0)
+                    continue;
+                optionNames[optionCount] =
+                    vm_net_mock_npc_shop_level_band_name(band);
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]),
+                         "%s %u%s",
+                         vm_net_mock_npc_shop_selector_name(selector), bandTotal,
+                         "\xbc\xfe"); /* ...件 */
+                optionDescriptions[optionCount] =
+                    optionDescriptionStorage[optionCount];
+                optionValues[optionCount] =
+                    vm_net_mock_npc_shop_category_value(selector, band, 0);
+                ++optionCount;
+            }
+        }
+        else
+        {
+        total = vm_net_mock_npc_shop_selector_total(selector, levelBand);
         start = page * VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
         if (total != 0 && start >= total)
         {
@@ -4122,13 +6378,23 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                    VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
             start = page * VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
         }
+        if (session != NULL &&
+            vm_net_mock_npc_shop_selector_is_equipment(selector) &&
+            levelBand != 0)
+        {
+            session->npcShopBrowseValid = true;
+            session->npcShopBrowseSelector = (u8)selector;
+            session->npcShopBrowseLevelBand = (u8)levelBand;
+            session->npcShopBrowsePage = (u16)page;
+        }
         for (u32 ordinal = start;
              ordinal < total &&
              ordinal < start + VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
              ++ordinal)
         {
             const vm_net_mock_shop_catalog_item *item =
-                vm_net_mock_npc_shop_selector_item_at(selector, ordinal);
+                vm_net_mock_npc_shop_selector_item_at(selector, levelBand,
+                                                     ordinal);
             const vm_net_mock_equipment_catalog_item *equipment = NULL;
             const vm_net_mock_item_effect_catalog_item *effect = NULL;
             u32 levelRequired = 1;
@@ -4147,18 +6413,39 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 if (effect != NULL)
                     levelRequired = effect->levelRequired;
             }
-            snprintf(optionNameStorage[optionCount],
-                     sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
-                     "\xb9\xba\xc2\xf2", item->name, item->price,
-                     "\xcd\xad"); /* 购买...铜 */
-            snprintf(optionDescriptionStorage[optionCount],
-                     sizeof(optionDescriptionStorage[optionCount]),
-                     "%s Lv.%u", item->name, levelRequired);
-            optionNames[optionCount] = optionNameStorage[optionCount];
-            optionDescriptions[optionCount] =
-                optionDescriptionStorage[optionCount];
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE | item->itemId;
+            if (optionCount >= VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                break;
+            if (item->isEquip)
+            {
+                /* Mall-like: select row → view attrs → buy on detail page. */
+                snprintf(optionNameStorage[optionCount],
+                         sizeof(optionNameStorage[optionCount]), "%s %u%s",
+                         item->name, item->price, "\xcd\xad"); /* ...铜 */
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]),
+                         "Lv.%u %s", levelRequired,
+                         "\xb2\xe9\xbf\xb4\xca\xf4\xd0\xd4"); /* 查看属性 */
+                optionNames[optionCount] = optionNameStorage[optionCount];
+                optionDescriptions[optionCount] =
+                    optionDescriptionStorage[optionCount];
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_VIEW_ITEM_BASE | item->itemId;
+            }
+            else
+            {
+                snprintf(optionNameStorage[optionCount],
+                         sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
+                         "\xb9\xba\xc2\xf2", item->name, item->price,
+                         "\xcd\xad"); /* 购买...铜 */
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]),
+                         "%s Lv.%u", item->name, levelRequired);
+                optionNames[optionCount] = optionNameStorage[optionCount];
+                optionDescriptions[optionCount] =
+                    optionDescriptionStorage[optionCount];
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE | item->itemId;
+            }
             ++optionCount;
         }
         if (page > 0 &&
@@ -4167,11 +6454,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             optionNames[optionCount] =
                 "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
             optionDescriptions[optionCount] =
-                vm_net_mock_npc_shop_selector_name(selector);
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE |
-                ((page - 1u) << VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT) |
-                selector;
+                vm_net_mock_npc_shop_selector_is_equipment(selector)
+                    ? vm_net_mock_npc_shop_level_band_name(levelBand)
+                    : vm_net_mock_npc_shop_selector_name(selector);
+            optionValues[optionCount] = vm_net_mock_npc_shop_category_value(
+                selector, levelBand, page - 1u);
             ++optionCount;
         }
         if (start + VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS < total &&
@@ -4180,16 +6467,18 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             optionNames[optionCount] =
                 "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
             optionDescriptions[optionCount] =
-                vm_net_mock_npc_shop_selector_name(selector);
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE |
-                ((page + 1u) << VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT) |
-                selector;
+                vm_net_mock_npc_shop_selector_is_equipment(selector)
+                    ? vm_net_mock_npc_shop_level_band_name(levelBand)
+                    : vm_net_mock_npc_shop_selector_name(selector);
+            optionValues[optionCount] = vm_net_mock_npc_shop_category_value(
+                selector, levelBand, page + 1u);
             ++optionCount;
         }
-        if (optionCount == 0 && !appendBackpackAdd)
+        }
+        if (optionCount == 0 && !appendBackpackAdd && !showItemDetail)
             dialogText =
                 "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
+        }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL)
     {
@@ -4219,10 +6508,16 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             result = 1;
         }
     }
-    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS ||
+    else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS_BASE ||
              operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
     {
         u8 rawJob = vm_net_mock_role_job_to_skill_raw_job(role->job);
+        const vm_net_mock_skill_catalog_item *eligible[64];
+        u32 eligibleCount = 0;
+        u32 page = 0;
+        u32 start = 0;
+        u32 catalogCount = 0;
+
         action = operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE
                      ? "skill-learn"
                      : "skill-list";
@@ -4270,7 +6565,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             else if (vm_net_mock_role_service_add_skill(role, skill->skillId))
             {
                 role->money -= skill->learnPrice;
-                vm_net_mock_role_db_save("npc-skill-learn");
+                vm_net_mock_role_mark_inventory_dirty("npc-skill-learn");
                 snprintf(dialogTextStorage, sizeof(dialogTextStorage),
                          "%s%u%s",
                          "\xbc\xbc\xc4\xdc\xd1\xa7\xcf\xb0\xb3\xc9\xb9\xa6\xa3\xac\xcf\xfb\xba\xc4", /* 技能学习成功，消耗 */
@@ -4280,15 +6575,20 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 result = 1;
                 serviceState = vm_net_mock_role_service_state_get(role);
             }
+            page = session != NULL ? session->skillBrowsePage : 0;
         }
-        for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
+        else
+        {
+            page = value;
+        }
+
+        catalogCount = vm_net_mock_load_skill_catalog();
+        for (u32 i = 0; i < catalogCount; ++i)
         {
             const vm_net_mock_skill_catalog_item *skill =
                 &g_vm_net_mock_skill_catalog[i];
             if (skill->rawJob != rawJob)
-            {
                 continue;
-            }
             if (vm_net_mock_role_service_has_skill(serviceState,
                                                    skill->skillId))
             {
@@ -4303,11 +6603,35 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 continue;
             }
             ++skillEligibleCount;
-            if (skill->skillId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
-                optionCount >= VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
-            {
+            if (skill->skillId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
                 continue;
+            if (eligibleCount <
+                (u32)(sizeof(eligible) / sizeof(eligible[0])))
+            {
+                eligible[eligibleCount++] = skill;
             }
+        }
+
+        if (eligibleCount == 0)
+            page = 0;
+        else if (page * VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS >=
+                 eligibleCount)
+        {
+            page = (eligibleCount - 1u) /
+                   VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS;
+        }
+        if (session != NULL)
+            session->skillBrowsePage = (u16)page;
+        start = page * VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS;
+
+        for (u32 i = start;
+             i < eligibleCount &&
+             i < start + VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS &&
+             optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+             ++i)
+        {
+            const vm_net_mock_skill_catalog_item *skill = eligible[i];
+
             snprintf(optionNameStorage[optionCount],
                      sizeof(optionNameStorage[optionCount]), "%s%s",
                      "\xd1\xa7\xcf\xb0", skill->name); /* 学习... */
@@ -4322,6 +6646,29 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE | skill->skillId;
             ++optionCount;
         }
+        if (page > 0 &&
+            optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+        {
+            optionNames[optionCount] =
+                "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+            optionDescriptions[optionCount] =
+                "\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6"; /* 技能导师 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS_BASE | (page - 1u);
+            ++optionCount;
+        }
+        if (start + VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS < eligibleCount &&
+            optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+        {
+            optionNames[optionCount] =
+                "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+            optionDescriptions[optionCount] =
+                "\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6"; /* 技能导师 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS_BASE | (page + 1u);
+            ++optionCount;
+        }
+
         if (operation != VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE &&
             optionCount == 0 && !appendSkills)
         {
@@ -4379,17 +6726,63 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     if (appendBackpackAdd)
     {
+        u32 wireCount = backpackAddCount;
+        bool usesReservoir =
+            vm_net_mock_backpack_item_id_uses_reservoir_count(backpackAddItemId);
+
+        if (usesReservoir)
+            wireCount = 1;
         if (!vm_net_mock_append_backpack_item_add7_object(
                 out, outCap, &pos, backpackAddSeq, backpackAddItemId,
-                backpackAddCount))
+                wireCount, 0))
             return 0;
         ++objectCount;
+        if (usesReservoir)
+        {
+            if (!vm_net_mock_append_backpack_reservoir_count7_11_object(
+                    out, outCap, &pos, backpackAddSeq, backpackAddCount))
+                return 0;
+            ++objectCount;
+        }
+        {
+            u32 ackObjectStart = 0;
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
+                                             &ackObjectStart))
+                return 0;
+            vm_net_mock_finish_wt_object(out, ackObjectStart, pos);
+            ++objectCount;
+        }
     }
     if (appendSkills)
     {
         if (!vm_net_mock_append_role_skills_object(out, outCap, &pos))
             return 0;
         ++objectCount;
+    }
+    if (appendMoneyRefresh)
+    {
+        u32 moneyObjectStart = 0;
+
+        /* Same 1/10/26 money object as equipment discard refund refresh. */
+        if (vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 0x1a,
+                                         &moneyObjectStart) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "type", 1) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "npcnum", 0) &&
+            vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                          "\xce\xde") && /* 无 */
+            vm_net_mock_put_object_u32(out, outCap, &pos, "money",
+                                        role->money))
+        {
+            vm_net_mock_finish_wt_object(out, moneyObjectStart, pos);
+            ++objectCount;
+        }
+        else
+        {
+            printf("[warn][network] mock_equip_sell_money_refresh_failed "
+                   "role=%u money=%u evidence=keep-26/1-dialog\n",
+                   role->roleId, role->money);
+        }
     }
     if (instanceChallengeOptionIndex != 0xff && instanceSeed != NULL &&
         session != NULL)
@@ -4398,6 +6791,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         session->instanceChallengeDirectPending = true;
         session->instanceChallengePending = false;
         session->instanceChallengeBattlePending = false;
+        session->instanceChallengeBattleWireCount = 0;
         session->instanceChallengeActorId = instanceSeed->actorId;
         session->instanceChallengeEnemyId = instanceSeed->challengeEnemyId;
         session->instanceChallengeX = instanceSeed->instanceX != 0
@@ -4472,9 +6866,12 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         return 0;
     }
     /* The real completion path flushes its progress-banner request before the
-     * task request.  Runtime has shown exactly two prefix forms:
+     * task request.  Runtime has shown these prefix forms:
      *   `25/5(empty) + 6/4{taskid}` commits the completed task;
-     *   `25/5(empty) + 6/10{taskid,state,agree}` refreshes its detail text.
+     *   `25/5(empty) + 6/10{taskid,state,agree}` refreshes its detail text;
+     *   `25/5(empty) + 6/11{taskinfo}` accepts after the detail confirm when
+     *   the banner flush wins the queue race (same family as the documented
+     *   trailing `6/11 + 25/5` accept combo).
      * Keep this exception narrow; other task operations either contain one
      * object or, for 6/11 accept, carry the empty 25/5 object after the task
      * object. */
@@ -4484,7 +6881,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (!vm_net_mock_next_request_object(request, requestLen, &offset,
                                              &object) ||
             object.major != 1 || object.kind != 6 ||
-            (object.subtype != 4 && object.subtype != 10) ||
+            (object.subtype != 4 && object.subtype != 10 &&
+             object.subtype != 11) ||
             offset != requestLen)
         {
             return 0;
@@ -4708,14 +7106,23 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (activeRole == NULL)
             return 0;
         if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
-            taskState.found && taskState.state == 2 &&
-            ((taskDefinition != NULL &&
-              vm_net_mock_task_commit_reward(activeRole, taskDefinition,
-                                             &committedRewardSeq)) ||
-             (taskDefinition == NULL &&
-              vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
+            taskState.found && (taskState.state == 1 || taskState.state == 2))
         {
-            committed = true;
+            if (taskDefinition != NULL)
+            {
+                (void)vm_net_mock_task_sync_item_progress(
+                    activeRole, taskDefinition, &taskState.progress1,
+                    &taskState.progress2, &taskState.state);
+            }
+            if (taskState.state == 2 &&
+                ((taskDefinition != NULL &&
+                  vm_net_mock_task_commit_reward(activeRole, taskDefinition,
+                                                 &committedRewardSeq)) ||
+                 (taskDefinition == NULL &&
+                  vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
+            {
+                committed = true;
+            }
         }
         /* net_handle_task_response_dispatch(0x0104726C) case 4 is the normal
          * submit result and uses result=1 for success.  Subtype 16 belongs to
@@ -4761,6 +7168,11 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             {
                 return 0;
             }
+            /* Push authoritative 6/1+6/14 after commit so remaining active
+             * rows carry the catalog/delivery receiver, not a giver-side
+             * （未完成） override left over from the previous list/accept. */
+            vm_mock_service_session_arm_task_prompt_refresh(
+                vm_net_mock_current_scene_name());
         }
         action = "commit";
         evidence = "JianghuOL.CBE:0x01047CFC+0x0104726C(case4)+0x01046EDA";
@@ -4794,7 +7206,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 (void)vm_net_mock_role_consume_backpack_item(
                     activeRole, taskDefinition->givenItemId, 0,
                     taskDefinition->givenItemCount, NULL);
-                vm_net_mock_role_db_save("task-abandon");
+                vm_net_mock_role_mark_inventory_dirty("task-abandon");
             }
         }
         responseSubtype = 7;
@@ -4968,6 +7380,16 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                  !taskState.found || taskState.state != 1))
             {
                 result = 1;
+            }
+            /* Accept-given items (锦帕/蚱蜢/…) satisfy type-1 requirements
+             * immediately; sync progress/state before building 6/11 taskinfo so
+             * the client receives submit-ready state=2 when the bag already
+             * holds the turn-in material. */
+            if (result == 0 && taskDefinition != NULL)
+            {
+                (void)vm_net_mock_task_sync_item_progress(
+                    activeRole, taskDefinition, &taskState.progress1,
+                    &taskState.progress2, &taskState.state);
             }
             if (result == 0 &&
                 !((taskId == VM_NET_MOCK_TEST_TASK_ID &&
@@ -5304,6 +7726,105 @@ static bool vm_net_mock_task_transport_resolve(
     return vm_net_mock_task_transport_resolve_catalog(task, target);
 }
 
+static void vm_net_mock_task_transport_arm_pending(
+    const vm_net_mock_task_transport_target *target)
+{
+    vm_net_mock_scene_change_target pending;
+
+    if (target == NULL || target->scene[0] == 0)
+    {
+        g_vm_net_mock_task_transport_pending_valid = false;
+        g_vm_net_mock_task_transport_pending_task_id = 0;
+        return;
+    }
+    memset(&pending, 0, sizeof(pending));
+    snprintf(pending.scene, sizeof(pending.scene), "%s", target->scene);
+    pending.x = target->x;
+    pending.y = target->y;
+    pending.mapType = 2;
+    pending.exitId = 0;
+    pending.hasSceEntry = (target->x != 0 || target->y != 0);
+    pending.needsSceneDownload = !vm_net_mock_scene_resource_exists(target->scene);
+    g_vm_net_mock_task_transport_pending_target = pending;
+    g_vm_net_mock_task_transport_pending_valid = true;
+    g_vm_net_mock_task_transport_pending_task_id = target->taskId;
+}
+
+static u32 vm_net_mock_build_task_transport_confirm_execute_response(
+    const vm_net_mock_task_transport_target *resolvedTarget,
+    u32 taskId,
+    const char *fieldSummary,
+    u8 *out,
+    u32 outCap)
+{
+    vm_net_mock_scene_change_target target;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+
+    memset(&target, 0, sizeof(target));
+    if (g_vm_net_mock_task_transport_pending_valid &&
+        g_vm_net_mock_task_transport_pending_target.scene[0] != 0)
+    {
+        target = g_vm_net_mock_task_transport_pending_target;
+        if (taskId == 0)
+            taskId = g_vm_net_mock_task_transport_pending_task_id;
+    }
+    else if (resolvedTarget != NULL && resolvedTarget->scene[0] != 0)
+    {
+        snprintf(target.scene, sizeof(target.scene), "%s", resolvedTarget->scene);
+        target.x = resolvedTarget->x;
+        target.y = resolvedTarget->y;
+        target.mapType = 2;
+        target.hasSceEntry = (resolvedTarget->x != 0 || resolvedTarget->y != 0);
+        target.needsSceneDownload =
+            !vm_net_mock_scene_resource_exists(resolvedTarget->scene);
+    }
+    else
+    {
+        printf("[error][network] mock_task_transport_confirm unresolved task=%u fields=%s action=ack-only\n",
+               taskId, fieldSummary ? fieldSummary : "-");
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        g_vm_net_mock_task_transport_pending_valid = false;
+        g_vm_net_mock_task_transport_pending_task_id = 0;
+        return pos;
+    }
+
+    /*
+     * Inbound 16/6 is emitted from the HandleItemUseConfirm path after the
+     * select-phase 16/6 UI.  Mirror the teleport-stone confirm contract:
+     * acknowledge this request now and let the next service-poll deliver 30/1
+     * after the confirmation callback has unwound (crash boundary
+     * 0x01018136/0x01046189/0x01005AF4).
+     */
+    g_vm_net_mock_task_transport_pending_valid = false;
+    g_vm_net_mock_task_transport_pending_task_id = 0;
+    g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+    g_vm_net_mock_teleport_stone_deferred_enter_target = target;
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = true;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = g_schedulerTick;
+    {
+        const char *curScene = vm_net_mock_current_scene_name();
+        g_vm_net_mock_teleport_stone_same_scene =
+            curScene != NULL &&
+            vm_net_mock_scene_names_equal_loose(curScene, target.scene);
+    }
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_task_transport phase=confirm task=%u scene=%s pos=(%u,%u) fields=%s response=empty-ack deferred_scene=1 armed_tick=%u resp=%u evidence=JianghuOL.CBE:0x01047F0A+0x010190A8+runtime:wt16/6\n",
+           taskId, target.scene, target.x, target.y,
+           fieldSummary ? fieldSummary : "-",
+           g_vm_net_mock_teleport_stone_deferred_enter_tick, pos);
+    vm_autotest_note("mock_task_transport phase=confirm task=%u scene=%s response=empty-ack deferred_30/1 evidence=JianghuOL.CBE:0x01047F0A+0x010190A8 runtime:wt16/6\n",
+                     taskId, target.scene);
+    return pos;
+}
+
 static u32 vm_net_mock_build_task_transport_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -5316,18 +7837,23 @@ static u32 vm_net_mock_build_task_transport_response(
     u32 destInfoLen = 0;
     u32 taskId = 0;
     u32 transId = 0;
+    u32 resultU32 = 0;
+    u8 resultU8 = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     bool hasTaskId = false;
     bool hasTransId = false;
+    bool hasResult = false;
     bool activeTask = false;
     bool resolved = false;
+    bool isConfirmRequest = false;
+    char fieldSummary[64];
 
     if (request == NULL || requestLen < 9 || out == NULL || outCap < pos ||
         request[0] != 'W' || request[1] != 'T' || request[4] != 1 ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         offset != requestLen || object.major != 1 || object.kind != 16 ||
-        object.subtype != 5)
+        (object.subtype != 5 && object.subtype != 6))
     {
         return 0;
     }
@@ -5337,13 +7863,51 @@ static u32 vm_net_mock_build_task_transport_response(
     hasTransId = vm_net_mock_get_object_u32_field(object.payload,
                                                   object.payloadLen,
                                                   "transid", &transId);
-    if (hasTaskId == hasTransId)
-        return 0;
+    hasResult = vm_net_mock_get_object_u32_field(object.payload,
+                                                 object.payloadLen,
+                                                 "result", &resultU32) ||
+                vm_net_mock_get_object_u8_field(object.payload,
+                                                object.payloadLen,
+                                                "result", &resultU8);
+    if (hasResult && resultU32 == 0 && resultU8 != 0)
+        resultU32 = resultU8;
+
+    /*
+     * Select/list use 16/5 with exactly one of taskid|transid.
+     * Confirm uses inbound 16/6 with result and/or taskid/transid after the
+     * select-phase 16/6 UI (runtime: unhandled wt=16/6 len=24 first=1/16/6:15).
+     */
+    if (object.subtype == 5)
+    {
+        if (hasTaskId == hasTransId)
+            return 0;
+        if (hasResult)
+            return 0;
+    }
+    else
+    {
+        /* Confirm: result present, or a prior select armed pending. */
+        isConfirmRequest = hasResult || g_vm_net_mock_task_transport_pending_valid;
+        /* Select via 16/6 {taskid|transid} when no confirm context exists. */
+        if (!isConfirmRequest && !hasTaskId && !hasTransId)
+            return 0;
+    }
+
+    snprintf(fieldSummary, sizeof(fieldSummary),
+             "sub=%u taskid=%u transid=%u result=%u pending=%u",
+             object.subtype,
+             hasTaskId ? taskId : 0,
+             hasTransId ? transId : 0,
+             hasResult ? resultU32 : 0xffffffffu,
+             g_vm_net_mock_task_transport_pending_valid ? 1u : 0u);
 
     role = vm_net_mock_active_role();
     memset(&taskState, 0, sizeof(taskState));
+    memset(&target, 0, sizeof(target));
     if (hasTransId)
         taskId = transId;
+    if (taskId == 0 && g_vm_net_mock_task_transport_pending_valid)
+        taskId = g_vm_net_mock_task_transport_pending_task_id;
     if (role != NULL && taskId != 0 &&
         vm_net_mock_task_state_load(role->roleId, taskId, &taskState) &&
         taskState.found && (taskState.state == 1 || taskState.state == 2))
@@ -5352,7 +7916,13 @@ static u32 vm_net_mock_build_task_transport_response(
         resolved = vm_net_mock_task_transport_resolve(taskId, &target);
     }
 
-    if (hasTaskId)
+    if (object.subtype == 6 && isConfirmRequest)
+    {
+        return vm_net_mock_build_task_transport_confirm_execute_response(
+            resolved ? &target : NULL, taskId, fieldSummary, out, outCap);
+    }
+
+    if (hasTaskId && object.subtype == 5)
     {
         if (resolved &&
             (!vm_net_mock_seq_put_u32(destInfo, sizeof(destInfo), &destInfoLen,
@@ -5372,9 +7942,12 @@ static u32 vm_net_mock_build_task_transport_response(
         {
             return 0;
         }
+        g_vm_net_mock_task_transport_pending_valid = false;
+        g_vm_net_mock_task_transport_pending_task_id = 0;
     }
     else
     {
+        /* 16/5 {transid} or 16/6 {taskid|transid} destination select. */
         if (!resolved)
         {
             if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 16, 5,
@@ -5383,6 +7956,8 @@ static u32 vm_net_mock_build_task_transport_response(
             {
                 return 0;
             }
+            g_vm_net_mock_task_transport_pending_valid = false;
+            g_vm_net_mock_task_transport_pending_task_id = 0;
         }
         else if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 16, 6,
                                          &objectStart) ||
@@ -5404,23 +7979,28 @@ static u32 vm_net_mock_build_task_transport_response(
         {
             return 0;
         }
+        else
+        {
+            vm_net_mock_task_transport_arm_pending(&target);
+        }
     }
 
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[info][network] mock_task_transport phase=%s task=%u role=%u active=%u resolved=%u scene=%s scene_name=%s pos=(%u,%u) response=16/%u resp=%u evidence=JianghuOL.CBE:0x01047E9A+0x01047F0A\n",
-           hasTaskId ? "list" : "select", taskId,
+    printf("[info][network] mock_task_transport phase=%s task=%u role=%u active=%u resolved=%u scene=%s scene_name=%s pos=(%u,%u) fields=%s response=16/%u resp=%u evidence=JianghuOL.CBE:0x01047E9A+0x01047F0A\n",
+           (hasTaskId && object.subtype == 5) ? "list" : "select", taskId,
            role ? role->roleId : 0, activeTask ? 1u : 0u,
            resolved ? 1u : 0u,
            resolved ? target.scene : "-",
            resolved ? target.sceneName : "-",
            resolved ? target.x : 0,
            resolved ? target.y : 0,
-           hasTaskId || !resolved ? 5u : 6u, pos);
-    vm_autotest_note("mock_task_transport phase=%s task=%u active=%u resolved=%u response=16/%u evidence=JianghuOL.CBE:0x01047E9A+0x01047F0A runtime:wt16/5\n",
-                     hasTaskId ? "list" : "select", taskId,
+           fieldSummary,
+           (hasTaskId && object.subtype == 5) || !resolved ? 5u : 6u, pos);
+    vm_autotest_note("mock_task_transport phase=%s task=%u active=%u resolved=%u response=16/%u evidence=JianghuOL.CBE:0x01047E9A+0x01047F0A runtime:wt16/5+wt16/6\n",
+                     (hasTaskId && object.subtype == 5) ? "list" : "select", taskId,
                      activeTask ? 1u : 0u, resolved ? 1u : 0u,
-                     hasTaskId || !resolved ? 5u : 6u);
+                     (hasTaskId && object.subtype == 5) || !resolved ? 5u : 6u);
     return pos;
 }
 

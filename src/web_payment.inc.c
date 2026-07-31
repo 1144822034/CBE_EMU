@@ -561,7 +561,7 @@ static bool vm_mock_payment_http_post_locked(const char *apiBase,
 
     /* The admin worker owns the protocol mutex when entering this function.
      * DNS and remote socket waits do not touch emulator/account state. */
-    pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+    vm_mock_admin_protocol_io_pause();
     if (vm_mock_service_connect(target.host, target.port, &socketValue) &&
         vm_mock_service_send_all(socketValue, (const u8 *)request,
                                  (u32)strlen(request)))
@@ -576,7 +576,7 @@ static bool vm_mock_payment_http_post_locked(const char *apiBase,
         }
     }
     vm_mock_service_socket_close(socketValue);
-    pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+    vm_mock_admin_protocol_io_resume();
 
     response[responseLength] = 0;
     if (responseLength != 0)

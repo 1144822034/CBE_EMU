@@ -68,38 +68,60 @@ static void vm_mock_admin_render_monster_page(char *response,
                                                size_t responseCap,
                                                const char *query)
 {
-    enum { VM_MOCK_ADMIN_MONSTER_ROWS_MAX = 128 };
+    enum { VM_MOCK_ADMIN_MONSTER_ROWS_MAX = 192 };
     vm_mock_admin_text page;
-    vm_net_mock_monster_admin_row monsters[VM_MOCK_ADMIN_MONSTER_ROWS_MAX];
+    vm_net_mock_monster_admin_row *monsters = NULL;
     vm_net_mock_monster_admin_row *edit = NULL;
+    vm_net_mock_monster_admin_row emptyMonster;
+    vm_mock_admin_scene_file *actorFiles = NULL;
     char monsterText[32];
+    char newText[16];
     char status[16];
     char message[256];
     char nameUtf8[128];
     char sceneUtf8[192];
     u32 monsterCount = 0;
+    u32 actorCount = 0;
     u32 selectedMonsterId = 0;
+    bool createNew = false;
 
-    memset(monsters, 0, sizeof(monsters));
+    monsters = (vm_net_mock_monster_admin_row *)calloc(
+        VM_MOCK_ADMIN_MONSTER_ROWS_MAX, sizeof(*monsters));
+    actorFiles = (vm_mock_admin_scene_file *)calloc(
+        VM_MOCK_ADMIN_ACTOR_FILE_MAX, sizeof(*actorFiles));
+    if (monsters == NULL || actorFiles == NULL)
+    {
+        free(monsters);
+        free(actorFiles);
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><p>怪物管理页面内存不足。</p>");
+        return;
+    }
+    memset(&emptyMonster, 0, sizeof(emptyMonster));
     memset(monsterText, 0, sizeof(monsterText));
+    memset(newText, 0, sizeof(newText));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
     memset(nameUtf8, 0, sizeof(nameUtf8));
     memset(sceneUtf8, 0, sizeof(sceneUtf8));
     (void)vm_mock_admin_form_value(query, "monster", monsterText,
                                    sizeof(monsterText));
+    (void)vm_mock_admin_form_value(query, "new", newText, sizeof(newText));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
-    if (monsterText[0] != 0)
+    createNew = strcmp(newText, "1") == 0;
+    if (!createNew && monsterText[0] != 0)
         (void)vm_net_mock_parse_u32_strict(monsterText, &selectedMonsterId);
 
     monsterCount = vm_net_mock_monster_admin_list(
         monsters, VM_MOCK_ADMIN_MONSTER_ROWS_MAX);
     if (monsterCount > VM_MOCK_ADMIN_MONSTER_ROWS_MAX)
         monsterCount = VM_MOCK_ADMIN_MONSTER_ROWS_MAX;
-    if (selectedMonsterId == 0 && monsterCount != 0)
+    actorCount = vm_mock_admin_collect_actor_files(
+        actorFiles, VM_MOCK_ADMIN_ACTOR_FILE_MAX);
+    if (!createNew && selectedMonsterId == 0 && monsterCount != 0)
         selectedMonsterId = monsters[0].enemyId;
-    for (u32 i = 0; i < monsterCount; ++i)
+    for (u32 i = 0; !createNew && i < monsterCount; ++i)
     {
         if (monsters[i].enemyId == selectedMonsterId)
         {
@@ -114,10 +136,11 @@ static void vm_mock_admin_render_monster_page(char *response,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 怪物管理</title><style>"
-        "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1320px;height:100vh;margin:auto;padding:22px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{color:#667085;margin:4px 0 14px}.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}.tab{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;background:#fff;color:#475467;text-decoration:none}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:15px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.search{margin-bottom:10px}.list{overflow:auto;display:flex;flex-direction:column;gap:4px;margin-top:9px}.monster{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;border:1px solid transparent}.monster:hover,.monster.on{background:#eef4ff;color:#175cd3}.monster small{display:block;color:#667085}.monster.override{border-color:#fdb022}.editor{overflow:auto}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.override{background:#fffaeb;color:#b54708}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px}.chip{padding:3px 8px;border-radius:999px;background:#f2f4f7;color:#475467}.fields{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}.field,.item-field{display:grid;gap:4px}.field span,.item-field>span{font-size:12px;color:#667085}.group{padding:13px;border:1px solid #e4e7ec;border-radius:8px;margin-top:13px}.group h2{font-size:16px;margin:0 0 10px}input,select{width:100%%;min-width:0;padding:8px 9px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer}.danger{background:#b42318}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:13px}.hint{color:#667085;font-size:12px;margin:8px 0 0}.drop-list{display:grid;gap:9px}.drop-row{display:grid;grid-template-columns:72px minmax(220px,1fr) 135px auto;gap:9px;align-items:end;padding:10px;border:1px solid #e4e7ec;border-radius:8px}.drop-row>span{font-size:12px;color:#667085;padding-bottom:8px}.drop-add{margin-top:9px}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.catalog{max-height:420px}.fields{grid-template-columns:1fr 1fr}.drop-row{grid-template-columns:1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script>"
+        "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1320px;height:100vh;margin:auto;padding:22px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{color:#667085;margin:4px 0 14px}.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}.tab{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;background:#fff;color:#475467;text-decoration:none}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:15px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.search{margin-bottom:10px}.list{overflow:auto;display:flex;flex-direction:column;gap:4px;margin-top:9px}.monster{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;border:1px solid transparent}.monster:hover,.monster.on{background:#eef4ff;color:#175cd3}.monster small{display:block;color:#667085}.monster.override{border-color:#fdb022}.editor{overflow:auto}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.override{background:#fffaeb;color:#b54708}.badge.custom{background:#f4ebff;color:#6941c6}.notice{padding:10px 12px;border-radius:7px;margin-bottom:13px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.summary{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px}.chip{padding:3px 8px;border-radius:999px;background:#f2f4f7;color:#475467}.fields{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}.field,.item-field{display:grid;gap:4px}.field span,.item-field>span{font-size:12px;color:#667085}.group{padding:13px;border:1px solid #e4e7ec;border-radius:8px;margin-top:13px}.group h2{font-size:16px;margin:0 0 10px}input,select{width:100%%;min-width:0;padding:8px 9px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:13px}.hint{color:#667085;font-size:12px;margin:8px 0 0}.check{display:flex;align-items:center;gap:8px;min-height:39px;font-size:13px;color:#344054}.check input{width:auto;min-width:0}.drop-list{display:grid;gap:9px}.drop-row{display:grid;grid-template-columns:72px minmax(220px,1fr) 135px auto;gap:9px;align-items:end;padding:10px;border:1px solid #e4e7ec;border-radius:8px}.drop-row>span{font-size:12px;color:#667085;padding-bottom:8px}.drop-add{margin-top:9px}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.catalog{max-height:420px}.fields{grid-template-columns:1fr 1fr}.drop-row{grid-template-columns:1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js?v=3\" defer></script>"
         "</head><body><main class=\"wrap\"><div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">怪物属性、战斗奖励与掉落覆盖</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab on\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
-        "<div class=\"grid\"><aside class=\"card catalog\"><input class=\"search\" id=\"monster-search\" placeholder=\"按 ID、名称或场景筛选\"><strong>怪物目录（%u）</strong><div class=\"list\" id=\"monster-list\">",
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab on\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
+        "<div class=\"grid\"><aside class=\"card catalog\"><a class=\"button\" href=\"/?tab=monsters&amp;new=1\">＋ 新增怪物</a>"
+        "<input class=\"search\" id=\"monster-search\" placeholder=\"按 ID、名称或场景筛选\" style=\"margin-top:10px\"><strong>怪物目录（%u）</strong><div class=\"list\" id=\"monster-list\">",
         monsterCount);
 
     for (u32 i = 0; i < monsterCount; ++i)
@@ -134,7 +157,7 @@ static void vm_mock_admin_render_monster_page(char *response,
         vm_mock_admin_text_appendf(
             &page,
             "<a class=\"monster%s%s\" data-key=\"%u ",
-            monsters[i].enemyId == selectedMonsterId ? " on" : "",
+            (!createNew && monsters[i].enemyId == selectedMonsterId) ? " on" : "",
             monsters[i].overridden ? " override" : "", monsters[i].enemyId);
         vm_mock_admin_text_append_html(&page, rowNameUtf8);
         vm_mock_admin_text_appendf(&page, " ");
@@ -147,9 +170,11 @@ static void vm_mock_admin_render_monster_page(char *response,
         else
             vm_mock_admin_text_appendf(&page, "未命名怪物");
         vm_mock_admin_text_appendf(
-            &page, "</strong><small>Lv.%u · %s%s</small></a>",
+            &page, "</strong><small>Lv.%u · %s%s%s%s</small></a>",
             monsters[i].level,
             vm_mock_admin_monster_family_name(monsters[i].family),
+            monsters[i].castSkill ? " · 放技能" : "",
+            monsters[i].custom ? " · 自定义" : "",
             monsters[i].overridden ? " · 已编辑" : "");
     }
     vm_mock_admin_text_appendf(
@@ -161,11 +186,60 @@ static void vm_mock_admin_render_monster_page(char *response,
         vm_mock_admin_text_append_html(&page, message);
         vm_mock_admin_text_appendf(&page, "</div>");
     }
+    if (createNew)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<h2>新增怪物 <span class=\"badge custom\">自定义</span></h2>"
+            "<p class=\"hint\">目录 Actor 供后台绑定战斗资源名（如 e_boar.actor）；开战包左侧名字仍用显示名，立绘优先用 SCE 视觉提示。勿把 .actor 当成开战显示名。</p>"
+            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"create-monster\">"
+            "<div class=\"group\"><h2>基础配置</h2><div class=\"fields\">"
+            "<label class=\"field\"><span>怪物 ID</span><input type=\"number\" name=\"monster_id\" min=\"1\" max=\"65535\" required></label>"
+            "<label class=\"field\"><span>显示名称</span><input name=\"display_name\" maxlength=\"31\" required></label>"
+            "<label class=\"field\"><span>等级</span><input type=\"number\" name=\"level\" min=\"1\" max=\"255\" value=\"1\" required></label>"
+            "<label class=\"field\"><span>怪物类型</span>");
+        vm_mock_admin_render_monster_family_select(&page, 0);
+        vm_mock_admin_text_appendf(
+            &page,
+            "</label><label class=\"field\"><span>来源标签（可选）</span><input name=\"source_label\" maxlength=\"63\" placeholder=\"自定义怪物\"></label>"
+            "<label class=\"field\"><span>战斗 Actor</span>");
+        vm_mock_admin_render_actor_select(&page, actorFiles, actorCount, "");
+        vm_mock_admin_text_appendf(
+            &page,
+            "</label><label class=\"field\"><span>反击放技能</span>"
+            "<span class=\"check\"><input type=\"checkbox\" name=\"cast_skill\" value=\"1\">启用（默认首领开启；普通怪可单独勾选）</span>"
+            "</label></div></div>"
+            "<div class=\"group\"><h2>战斗属性</h2><div class=\"fields\">"
+            "<label class=\"field\"><span>HP</span><input type=\"number\" name=\"hp\" min=\"1\" max=\"2147483647\" value=\"100\" required></label>"
+            "<label class=\"field\"><span>MP</span><input type=\"number\" name=\"mp\" min=\"1\" max=\"2147483647\" value=\"100\" required></label>"
+            "<label class=\"field\"><span>攻击</span><input type=\"number\" name=\"attack\" min=\"1\" max=\"2147483647\" value=\"10\" required></label>"
+            "<label class=\"field\"><span>防御</span><input type=\"number\" name=\"defense\" min=\"0\" max=\"2147483647\" value=\"5\" required></label></div></div>"
+            "<div class=\"group\"><h2>结算奖励</h2><div class=\"fields\">"
+            "<label class=\"field\"><span>经验奖励</span><input type=\"number\" name=\"exp\" min=\"0\" max=\"2147483647\" value=\"10\" required></label>"
+            "<label class=\"field\"><span>铜钱奖励</span><input type=\"number\" name=\"gold\" min=\"0\" max=\"2147483647\" value=\"5\" required></label></div></div>"
+            "<div class=\"group\"><h2>物品掉落</h2>");
+        vm_mock_admin_render_monster_drop_rows(&page, &emptyMonster);
+        vm_mock_admin_text_appendf(
+            &page,
+            "</div><div class=\"actions\"><button type=\"submit\">创建怪物</button></div></form>");
+        vm_mock_admin_render_item_picker_modal(&page);
+        vm_mock_admin_text_appendf(
+            &page,
+            "<script>(()=>{const q=document.getElementById('monster-search'),rows=[...document.querySelectorAll('#monster-list .monster')];if(!q)return;q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();for(const row of rows)row.hidden=v&&!row.dataset.key.toLowerCase().includes(v);});})();</script></section></div></main></body></html>");
+        if (page.truncated)
+            snprintf(response, responseCap,
+                     "<!doctype html><meta charset=\"utf-8\"><p>怪物管理页面超过大小限制。</p>");
+        free(monsters);
+        free(actorFiles);
+        return;
+    }
     if (edit == NULL)
     {
         vm_mock_admin_text_appendf(
             &page,
             "<p>没有可编辑的怪物。</p></section></div></main></body></html>");
+        free(monsters);
+        free(actorFiles);
         return;
     }
 
@@ -178,10 +252,13 @@ static void vm_mock_admin_render_monster_page(char *response,
         vm_mock_admin_text_append_html(&page, nameUtf8);
     else
         vm_mock_admin_text_appendf(&page, "未命名怪物");
+    if (edit->custom)
+        vm_mock_admin_text_appendf(&page, " <span class=\"badge custom\">自定义</span>");
     vm_mock_admin_text_appendf(
         &page, " <span class=\"badge%s\">%s</span></h2><div class=\"summary\"><span class=\"chip\">出现位置／来源：",
         edit->overridden ? " override" : "",
-        edit->overridden ? "MySQL 覆盖" : "服务端默认");
+        edit->custom ? "自定义目录" :
+            (edit->overridden ? "MySQL 覆盖" : "服务端默认"));
     if (sceneUtf8[0] != 0)
         vm_mock_admin_text_append_html(&page, sceneUtf8);
     else
@@ -194,18 +271,39 @@ static void vm_mock_admin_render_monster_page(char *response,
     vm_mock_admin_render_monster_family_select(&page, edit->family);
     vm_mock_admin_text_appendf(
         &page,
-        "</label><label class=\"field\"><span>属性来源</span><input value=\"%s\" readonly></label></div></div>"
+        "</label><label class=\"field\"><span>属性来源</span><input value=\"%s\" readonly></label>"
+        "<label class=\"field\"><span>战斗 Actor</span>",
+        edit->custom ? "自定义怪物" :
+            (edit->overridden ? "MySQL 覆盖" : "服务端公式"));
+    vm_mock_admin_render_actor_select(&page, actorFiles, actorCount,
+                                      edit->actorResource);
+    vm_mock_admin_text_appendf(
+        &page,
+        "</label><label class=\"field\"><span>反击放技能</span>"
+        "<span class=\"check\"><input type=\"checkbox\" name=\"cast_skill\" value=\"1\"%s>启用（反击回合可放技能特效；与类型相互独立）</span>"
+        "</label></div>"
+        "<p class=\"hint\">Actor 写入怪物目录供配置与发布；开战 name 用显示名，立绘用 SCE field-16（若有）。不要期望把 .actor 直接写进开战包名字。</p></div>"
         "<div class=\"group\"><h2>战斗属性</h2><div class=\"fields\"><label class=\"field\"><span>HP</span><input type=\"number\" name=\"hp\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>MP</span><input type=\"number\" name=\"mp\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>攻击</span><input type=\"number\" name=\"attack\" min=\"1\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>防御</span><input type=\"number\" name=\"defense\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label></div></div>"
         "<div class=\"group\"><h2>结算奖励</h2><div class=\"fields\"><label class=\"field\"><span>经验奖励</span><input type=\"number\" name=\"exp\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label><label class=\"field\"><span>铜钱奖励</span><input type=\"number\" name=\"gold\" min=\"0\" max=\"2147483647\" value=\"%u\" required></label></div></div>"
         "<div class=\"group\"><h2>物品掉落</h2>",
-        edit->overridden ? "MySQL 覆盖" : "服务端公式",
+        edit->castSkill ? " checked" : "",
         edit->hp, edit->mp, edit->attack, edit->defense, edit->exp, edit->gold);
     vm_mock_admin_render_monster_drop_rows(&page, edit);
     vm_mock_admin_text_appendf(
         &page,
-        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。怪物名称来自真实 SCE，只读；调整等级或类型不会擅自覆盖手工填写的战斗数值。</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>");
+        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。%s</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>",
+        edit->custom
+            ? "自定义怪物请务必配置战斗 Actor；名称与 Actor 均写入目录表。"
+            : "怪物显示名来自真实 SCE，只读；战斗 Actor 可覆盖 SCE 默认值。");
     vm_mock_admin_render_item_picker_modal(&page);
-    if (edit->overridden)
+    if (edit->custom)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<form class=\"actions\" method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"delete-monster\"><input type=\"hidden\" name=\"monster_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">删除自定义怪物</button></form>",
+            edit->enemyId);
+    }
+    else if (edit->overridden)
     {
         vm_mock_admin_text_appendf(
             &page,
@@ -218,4 +316,6 @@ static void vm_mock_admin_render_monster_page(char *response,
     if (page.truncated)
         snprintf(response, responseCap,
                  "<!doctype html><meta charset=\"utf-8\"><p>怪物管理页面超过大小限制。</p>");
+    free(monsters);
+    free(actorFiles);
 }

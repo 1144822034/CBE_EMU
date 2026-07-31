@@ -388,15 +388,35 @@ static bool vm_mysql_connect(void)
 #endif
     }
 
+    /*
+     * Keep MySQL I/O well under the game-client request window
+     * (VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS=5000).  A single hung admin SELECT
+     * must not consume the whole battle-start budget; base monster/shop
+     * catalogs remain usable when overrides fail fast.
+     */
+    {
+        const char *timeoutText = vm_mysql_config("CBE_MYSQL_TIMEOUT_MS", "1000");
+        unsigned long timeoutMs = strtoul(timeoutText ? timeoutText : "1000", NULL, 10);
+        if (timeoutMs < 200ul)
+            timeoutMs = 200ul;
+        if (timeoutMs > 5000ul)
+            timeoutMs = 5000ul;
 #ifdef _WIN32
-    DWORD timeout_ms = 5000;
-    setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms));
-    setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms));
+        DWORD timeout_ms = (DWORD)timeoutMs;
+        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms));
+        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms));
 #else
-    struct timeval timeout_value = {5, 0};
-    setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout_value, sizeof(timeout_value));
-    setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout_value, sizeof(timeout_value));
+        struct timeval timeout_value;
+        timeout_value.tv_sec = (time_t)(timeoutMs / 1000ul);
+        timeout_value.tv_usec = (suseconds_t)((timeoutMs % 1000ul) * 1000ul);
+        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO,
+                   &timeout_value, sizeof(timeout_value));
+        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO,
+                   &timeout_value, sizeof(timeout_value));
 #endif
+    }
 
     uint8_t packet[4096];
     size_t packet_len = 0;
@@ -671,8 +691,15 @@ connection_failed:
     vm_mysql_close();
     return false;
 query_failed:
+    /*
+     * A protocol-level parse failure leaves unread bytes on the persistent
+     * socket.  Reusing it poisons the next COM_QUERY (often the monster-db
+     * load that follows shop-admin on the battle-start path) and can stall
+     * until SO_RCVTIMEO, which then races the game client's 5s window.
+     */
     free(request);
     free(packet);
+    vm_mysql_close();
     return false;
 }
 

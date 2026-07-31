@@ -49,13 +49,43 @@ typedef struct
     int32_t resist;
 } vm_net_mock_battle_stat_modifier;
 
+/* Per-enemy battle ailments (debuff / silence / DoT). Parallel to HP slots. */
+typedef struct
+{
+    vm_net_mock_battle_stat_modifier stat;
+    u8 silenceRounds;
+    u8 dotRounds;
+    u32 dotDamagePerRound;
+} vm_net_mock_battle_enemy_ailment;
+
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
 static u32 g_netMockBackpackGridSeededRoleId = 0;
 static u8 g_netMockShop17ListPending = 0;
+/* Declared early: catalog discard mutates these before the role-db block at
+ * the end of catalog.c defines the remaining role globals. */
+static bool g_vm_net_mock_role_position_dirty = false;
+static bool g_vm_net_mock_role_inventory_dirty = false;
+
+typedef struct vm_mock_service_client_session vm_mock_service_client_session;
+
+static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
+                                                             u32 *pos);
+static u32 vm_net_mock_take_warehouse_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session);
+static void vm_mock_service_session_arm_warehouse_pass_dialog(void);
+static u32 vm_net_mock_take_equip_sell_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session);
+static void vm_mock_service_session_arm_equip_sell_pass_dialog(void);
+static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session);
+static void vm_net_mock_clear_instance_challenge_battle_pending(
+    vm_mock_service_client_session *session, const char *reason);
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
 static u32 g_netMockTitleSelectedServerId = 0;
+/* Host launcher zone name (GBK) carried in CBMS request meta for this request. */
+static char g_vm_net_mock_preferred_title_server_gbk[32];
 static u8 g_netMockBackpackPreferRoleListAfterShopBuy = 0;
 static bool g_vm_net_mock_update_completed_reenter_pending = false;
 static char g_vm_net_mock_update_completed_name[64];
@@ -87,6 +117,9 @@ static u8 g_vm_net_mock_battle_mp_increase_allowed = 0;
  * replaces it with the acting member's shared snapshot. */
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_active_modifier_current;
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_solo_modifier;
+static vm_net_mock_battle_enemy_ailment g_mockBattleEnemyAilments[3];
+/* Index of the enemy slot currently feeding damage formulas (0..2), or 0xff. */
+static u8 g_vm_net_mock_battle_formula_enemy_index = 0xff;
 /* The ordinary solo builder bundles monster actions with every offensive
  * operation.  During a synchronized party battle this flag is armed only for
  * the last still-alive member that has not acted in the current round. */
@@ -96,8 +129,13 @@ static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
 #define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
 #define VM_MOCK_SERVICE_REQUEST_FLAG_SCENE_SYNC_POLL 0x2u
 #define VM_MOCK_SERVICE_REQUEST_FLAG_CLIENT_DISCONNECT 0x4u
-#define VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS 5000
+/* Keep short so abandoned half-open clients free workers quickly; slow MySQL
+ * paths must not rely on sitting in recv() for long. */
+#define VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS 2500
 #define VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA 0x1u
+/* Primary CBMR body is followed by a second CBMR (event in aux) on the same
+ * TCP reply.  Used for warehouse lone 26/1 after 7/1 clears item-use loading. */
+#define VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP 0x2u
 
 #ifdef _WIN32
 typedef SOCKET vm_mock_service_socket;
@@ -470,6 +508,8 @@ static u8 vm_net_mock_team_battle_wire_to_display_slot(u8 wireSlot)
                : (u8)(wireSlot - partyCount);
 }
 
+static bool vm_net_mock_battle_use_scene_monster_wire_maps(bool playerOnRight, u8 side);
+
 static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
                                                   u8 *playerSlotOut, u8 *enemySlotOut)
 {
@@ -478,9 +518,8 @@ static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
 
     if (side == 1)
     {
-        if (g_mockBattleSceneMonsterStartActive != 0 &&
-            playerOnRight &&
-            g_vm_net_mock_team_battle_party_count_current >= 2)
+        if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) &&
+            g_vm_net_mock_team_battle_member_count_current >= 2)
         {
             u8 firstMonsterDisplay = g_vm_net_mock_team_battle_party_count_current;
 
@@ -496,7 +535,7 @@ static void vm_net_mock_battle_default_wire_slots(bool playerOnRight, u8 side,
          * index is still translated separately below, because Callback_Unknown2()
          * reports the selected unit through sub_2B26().
          */
-        else if (g_mockBattleSceneMonsterStartActive != 0)
+        else if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
         {
             playerSlot = 1;
             enemySlot = 0;
@@ -524,8 +563,9 @@ static u32 vm_net_mock_battle_apply_damage_to_role(u32 damage)
 
     if (g_mockBattleRoleHpCurrent == 0)
         return 0;
+    /* damage==0 is a real miss; do not coerce to 1. */
     if (actualDamage == 0)
-        actualDamage = 1;
+        return 0;
     if (actualDamage > g_mockBattleRoleHpCurrent)
         actualDamage = g_mockBattleRoleHpCurrent;
     g_mockBattleRoleHpCurrent -= actualDamage;
@@ -562,14 +602,64 @@ static void vm_net_mock_battle_sync_enemy_hp_totals(void)
     g_mockBattleEnemyHpMax = hpMaxTotal;
 }
 
+/*
+ * Multi-monster victory must look at every seeded slot.  A stale aggregate of 0
+ * (or only slot0 seeded while battleinfo said enemies=3) previously ended the
+ * fight after the first kill while two client models still stood.
+ */
+static bool vm_net_mock_battle_all_enemies_defeated(void)
+{
+    u8 enemyCount = vm_net_mock_battle_enemy_count_current();
+
+    vm_net_mock_battle_sync_enemy_hp_totals();
+    if (enemyCount == 0)
+        return g_mockBattleEnemyHpCurrent == 0;
+    for (u8 i = 0; i < enemyCount && i < 3; ++i)
+    {
+        /* Unseeded slot while battleinfo still says this enemy exists — not a
+         * clear.  Callers must backfill via ensure_* before trusting victory. */
+        if (g_mockBattleEnemyHpMaxSlots[i] == 0)
+            return false;
+        if (g_mockBattleEnemyHpSlots[i] != 0)
+            return false;
+    }
+    return true;
+}
+
+/* True once a slot has ever been given a max-HP — dead slots keep max>0. */
+static bool vm_net_mock_battle_enemy_slot_was_seeded(u8 enemyIndex)
+{
+    return enemyIndex < 3 && g_mockBattleEnemyHpMaxSlots[enemyIndex] != 0;
+}
+
+static bool vm_net_mock_battle_use_scene_monster_wire_maps(bool playerOnRight, u8 side)
+{
+    if (!playerOnRight || side != 1)
+        return false;
+    /*
+     * While this seat still owns an armed (or settling) fight, freeze the
+     * wire table chosen at battle-start.  Falling through to the subtype-10
+     * swap (player=0) mid subtype-5 fight makes medicines/heals target the
+     * monster wire and attacks paint damage on the wrong unit.
+     */
+    if (g_mockBattleOperateSessionArmed != 0 || g_mockBattleAwaitingSettlement != 0)
+        return g_mockBattleStartUsesSceneWireMaps != 0;
+    if (g_mockBattleSceneMonsterStartActive != 0)
+        return true;
+    /* Count>1 must keep the subtype-5 wire table even if the scene-start flag
+     * was lost across account restore — otherwise all damage collapses onto
+     * slot0 and the first kill looks like a full clear on the client. */
+    return vm_net_mock_battle_enemy_count_current() > 1;
+}
+
 static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
                                                    bool playerOnRight,
                                                    u8 side,
                                                    u8 fallbackEnemySlot,
                                                    u8 *enemyIndexOut)
 {
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
-        g_vm_net_mock_team_battle_party_count_current >= 2)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) &&
+        g_vm_net_mock_team_battle_member_count_current >= 2)
     {
         u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
@@ -584,7 +674,7 @@ static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
         }
         return false;
     }
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
     {
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
         if (enemyCount == 1)
@@ -667,7 +757,7 @@ static u8 vm_net_mock_battle_first_alive_enemy_wire(bool playerOnRight,
 {
     u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
     {
         for (u8 enemyIndex = 0; enemyIndex < enemyCount && enemyIndex < 3; ++enemyIndex)
         {
@@ -689,8 +779,8 @@ static u8 vm_net_mock_battle_enemy_wire_for_index(u8 enemyIndex,
 {
     u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
-        g_vm_net_mock_team_battle_party_count_current >= 2)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) &&
+        g_vm_net_mock_team_battle_member_count_current >= 2)
     {
         u8 partyCount = g_vm_net_mock_team_battle_party_count_current;
 
@@ -699,7 +789,7 @@ static u8 vm_net_mock_battle_enemy_wire_for_index(u8 enemyIndex,
         return vm_net_mock_team_battle_display_to_wire_slot(
             (u8)(partyCount + enemyIndex));
     }
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
     {
         if (enemyIndex >= enemyCount)
             enemyIndex = (u8)(enemyCount - 1);
@@ -736,10 +826,13 @@ static u32 vm_net_mock_battle_enemy_hp_for_wire(u8 wireSlot,
 {
     u8 enemyIndex = 0;
 
+    /* Unmapped wires (including the player actor) must not fall back to the
+     * aggregate enemy HP total: that overstates damage and, when paired with a
+     * bad actioninfo target, makes the client apply the skill hit to self. */
     if (!vm_net_mock_battle_enemy_wire_to_index(wireSlot, playerOnRight, side,
                                                 fallbackEnemySlot, &enemyIndex) ||
         enemyIndex >= 3)
-        return g_mockBattleEnemyHpCurrent;
+        return 0;
     return g_mockBattleEnemyHpSlots[enemyIndex];
 }
 
@@ -755,10 +848,6 @@ static void vm_net_mock_battle_damage_enemy_wire(u8 wireSlot,
                                                 fallbackEnemySlot, &enemyIndex) ||
         enemyIndex >= 3)
     {
-        if (g_mockBattleEnemyHpCurrent >= damage)
-            g_mockBattleEnemyHpCurrent -= damage;
-        else
-            g_mockBattleEnemyHpCurrent = 0;
         return;
     }
 
@@ -774,8 +863,8 @@ static u8 vm_net_mock_battle_target_wire_slot_from_request(u8 requestIndex,
                                                            u8 side,
                                                            u8 fallbackEnemySlot)
 {
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1 &&
-        g_vm_net_mock_team_battle_party_count_current >= 2)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) &&
+        g_vm_net_mock_team_battle_member_count_current >= 2)
     {
         if (vm_net_mock_battle_enemy_wire_is_alive(requestIndex,
                                                    playerOnRight,
@@ -786,7 +875,7 @@ static u8 vm_net_mock_battle_target_wire_slot_from_request(u8 requestIndex,
                                                          side,
                                                          fallbackEnemySlot);
     }
-    if (g_mockBattleSceneMonsterStartActive != 0 && playerOnRight && side == 1)
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
     {
         u8 enemyCount = vm_net_mock_battle_enemy_count_current();
         if (enemyCount == 1)
@@ -2306,13 +2395,29 @@ static bool vm_net_mock_update_admin_publish_named_files(
         }
         if (duplicate)
             continue;
-        if (!vm_net_mock_update_name_is_safe(names[i]) ||
-            (size = vm_net_mock_update_file_size(names[i])) <= 0 ||
-            size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX ||
-            !vm_net_mock_update_named_content_version(names[i], &versions[i]))
+        if (!vm_net_mock_update_name_is_safe(names[i]))
         {
             if (errorOut)
-                *errorOut = "Actor 或引用图片无法作为具名资源发布";
+                *errorOut = "具名资源文件名不安全";
+            return false;
+        }
+        size = vm_net_mock_update_file_size(names[i]);
+        if (size <= 0)
+        {
+            if (errorOut)
+                *errorOut = "具名资源文件不存在或无法读取";
+            return false;
+        }
+        if (size > VM_NET_MOCK_UPDATE_PAYLOAD_MAX)
+        {
+            if (errorOut)
+                *errorOut = "具名资源超过发布大小上限";
+            return false;
+        }
+        if (!vm_net_mock_update_named_content_version(names[i], &versions[i]))
+        {
+            if (errorOut)
+                *errorOut = "具名资源版本计算失败";
             return false;
         }
         ++uniqueCount;
@@ -2565,6 +2670,23 @@ static void vm_net_mock_title_login_phase_reset(const char *reason)
     g_netMockTitleSelectedServerId = 0;
 }
 
+static void vm_net_mock_set_preferred_title_server_gbk(const char *gbk)
+{
+    memset(g_vm_net_mock_preferred_title_server_gbk, 0,
+           sizeof(g_vm_net_mock_preferred_title_server_gbk));
+    if (gbk == NULL || gbk[0] == 0)
+        return;
+    snprintf(g_vm_net_mock_preferred_title_server_gbk,
+             sizeof(g_vm_net_mock_preferred_title_server_gbk), "%s", gbk);
+}
+
+static const char *vm_net_mock_preferred_title_server_gbk_get(void)
+{
+    if (g_vm_net_mock_preferred_title_server_gbk[0] == 0)
+        return NULL;
+    return g_vm_net_mock_preferred_title_server_gbk;
+}
+
 static void vm_net_mock_title_login_phase_mark_server_list(void)
 {
     g_netMockTitleServerListPending = 1;
@@ -2813,15 +2935,19 @@ static void vm_net_mock_note_update_chunk_complete(const char *payloadName)
            g_vm_mock_service_active_client_id, payloadNameUtf8);
 }
 
-static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
-                                                 u8 *out,
-                                                 u32 outCap,
-                                                 char *sourcePath,
-                                                 size_t sourcePathCap)
+/*
+ * WT18/7 name resolution for one exact leaf. Scene enter often requests the
+ * runtime scene key without ".sce"; open_server_scene_resource already retries
+ * that suffix, but the update channel historically required a byte-identical
+ * leaf and returned mock_update_chunk_missing (29梦境空间_01, 2026-07-30).
+ */
+static u32 vm_net_mock_load_named_update_payload_exact(
+    const char *payloadName,
+    u8 *out,
+    u32 outCap,
+    char *sourcePath,
+    size_t sourcePathCap)
 {
-    if (payloadName == NULL || payloadName[0] == 0 || out == NULL || outCap == 0)
-        return 0;
-
     char path[1200];
     static const char *pathFormats[] = {
         /*
@@ -2835,9 +2961,8 @@ static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
         "web/fs/JHOnlineData/%s",
     };
 
-    if (sourcePath && sourcePathCap)
-        sourcePath[0] = 0;
-
+    if (payloadName == NULL || payloadName[0] == 0 || out == NULL || outCap == 0)
+        return 0;
     if (!vm_net_mock_update_name_is_safe(payloadName))
         return 0;
 
@@ -2879,6 +3004,83 @@ static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
     return 0;
 }
 
+static vm_net_mock_update_named_config *
+vm_net_mock_update_find_named_for_request(const char *name)
+{
+    static const char *kSuffixes[] = {".sce", ".map", ".actor", ".gif"};
+    vm_net_mock_update_named_config *row = NULL;
+    char extended[320];
+    u32 i = 0;
+
+    row = vm_net_mock_update_find_named(name);
+    if (row != NULL || name == NULL || name[0] == 0 || strchr(name, '.') != NULL)
+        return row;
+
+    for (i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); ++i)
+    {
+        if (snprintf(extended, sizeof(extended), "%s%s", name, kSuffixes[i]) >=
+            (int)sizeof(extended))
+            continue;
+        if (!vm_net_mock_update_name_is_safe(extended))
+            continue;
+        row = vm_net_mock_update_find_named(extended);
+        if (row != NULL)
+            return row;
+    }
+    return NULL;
+}
+
+static u32 vm_net_mock_load_named_update_payload(const char *payloadName,
+                                                 u8 *out,
+                                                 u32 outCap,
+                                                 char *sourcePath,
+                                                 size_t sourcePathCap)
+{
+    static const char *kSuffixes[] = {".sce", ".map", ".actor", ".gif"};
+    char extended[320];
+    char resolvedUtf8[256];
+    char requestUtf8[256];
+    u32 len = 0;
+    u32 i = 0;
+
+    if (sourcePath && sourcePathCap)
+        sourcePath[0] = 0;
+
+    len = vm_net_mock_load_named_update_payload_exact(payloadName, out, outCap,
+                                                      sourcePath, sourcePathCap);
+    if (len > 0)
+        return len;
+
+    /*
+     * Scene / map / actor keys on the wire often omit the on-disk extension.
+     * Match open_server_scene_resource's ".sce" retry for the update channel.
+     */
+    if (payloadName == NULL || payloadName[0] == 0 ||
+        strchr(payloadName, '.') != NULL)
+        return 0;
+
+    for (i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); ++i)
+    {
+        if (snprintf(extended, sizeof(extended), "%s%s", payloadName,
+                     kSuffixes[i]) >= (int)sizeof(extended))
+            continue;
+        len = vm_net_mock_load_named_update_payload_exact(
+            extended, out, outCap, sourcePath, sourcePathCap);
+        if (len == 0)
+            continue;
+        vm_net_mock_gbk_label_to_utf8(payloadName, requestUtf8,
+                                      sizeof(requestUtf8));
+        vm_net_mock_gbk_label_to_utf8(extended, resolvedUtf8,
+                                      sizeof(resolvedUtf8));
+        printf("[info][network] mock_update_named_resolve request=%s "
+               "resolved=%s len=%u evidence=WT18/7-extensionless-scene-key\n",
+               requestUtf8, resolvedUtf8, len);
+        return len;
+    }
+
+    return 0;
+}
+
 static u32 vm_net_mock_load_resource_update_payload(
     const u8 *request,
     u32 requestLen,
@@ -2902,8 +3104,15 @@ static u32 vm_net_mock_load_resource_update_payload(
         if (vm_net_mock_request_contains(request, requestLen, "clientmiss"))
         {
             vm_net_mock_update_named_config *published =
-                vm_net_mock_update_find_named(requestedName);
-            if (published == NULL || !published->enabled)
+                vm_net_mock_update_find_named_for_request(requestedName);
+            /*
+             * Catalog publish forces refresh for admin-edited names.  Stock
+             * outdoor resources are disk-authoritative: if the file exists
+             * under JHOnlineData, allow version compare / chunk serve even
+             * when the delivery ledger never listed them.
+             */
+            if ((published == NULL || !published->enabled) &&
+                vm_net_mock_update_file_size(requestedName) <= 0)
             {
                 char rejectedNameUtf8[256];
                 vm_net_mock_gbk_label_to_utf8(requestedName,
@@ -3865,9 +4074,12 @@ static u16 vm_net_mock_update_response_version(u8 responseSubtype,
         return g_vm_net_mock_update_slots[updateSlot - 1].version;
     if (responseSubtype == 7 && requestName != NULL && requestName[0] != 0)
     {
-        named = vm_net_mock_update_find_named(requestName);
+        u16 diskVersion = 0;
+        named = vm_net_mock_update_find_named_for_request(requestName);
         if (named != NULL && named->enabled)
             return named->version;
+        if (vm_net_mock_update_named_content_version(requestName, &diskVersion))
+            return diskVersion;
     }
     return requestVersion != 0 ? requestVersion : 1;
 }
@@ -3977,6 +4189,63 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
     responseVersion = vm_net_mock_update_response_version(
         responseSubtype, updateSlot, haveRequestName ? requestName : NULL,
         requestVersion);
+
+    /*
+     * Named clientmiss with matching content-version: host already has the
+     * same bytes. Prefer catalog version for published names; otherwise use
+     * disk content-version (stock outdoor maps need no ledger entry).
+     * Return totalsize=0 so the emulator keeps the local cache.
+     */
+    if (responseSubtype == 7 && haveRequestName &&
+        vm_net_mock_request_contains(request, requestLen, "clientmiss"))
+    {
+        vm_net_mock_update_named_config *published =
+            vm_net_mock_update_find_named_for_request(requestName);
+        u16 serverVersion = 0;
+        bool haveServerVersion = false;
+        if (published != NULL && published->enabled && published->version != 0)
+        {
+            serverVersion = published->version;
+            haveServerVersion = true;
+        }
+        else if (vm_net_mock_update_named_content_version(requestName,
+                                                          &serverVersion))
+        {
+            haveServerVersion = true;
+        }
+        if (haveServerVersion && requestVersion == serverVersion)
+        {
+            char nameUtf8[256];
+            responseVersion = serverVersion;
+            versionBytes[0] = (u8)(responseVersion >> 8);
+            versionBytes[1] = (u8)responseVersion;
+            if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", 0) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0) ||
+                !vm_net_mock_put_object_entry(out, outCap, &pos, "version",
+                                             versionBytes, sizeof(versionBytes)) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "type",
+                                          haveRequestType ? requestType : 0) ||
+                !vm_net_mock_put_object_string(
+                    out, outCap, &pos, "name",
+                    haveRequestName ? requestName : "MMORPGTempcbm") ||
+                !vm_net_mock_put_object_blob(out, outCap, &pos, "data", NULL, 0))
+            {
+                return 0;
+            }
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            out[5] = 1;
+            out[6] = 0x12;
+            out[7] = responseSubtype;
+            out[8] = 0;
+            vm_net_mock_finish_wt_object(out, 5, pos);
+            vm_net_mock_gbk_label_to_utf8(requestName, nameUtf8, sizeof(nameUtf8));
+            printf("[info][network] mock_update_chunk_uptodate subtype=7 file=%s "
+                   "version=%u action=keep-client-cache protocol=WT18/7\n",
+                   nameUtf8, responseVersion);
+            return pos;
+        }
+    }
 
     u32 updateLen = vm_net_mock_load_resource_update_payload(request,
                                                              requestLen,
@@ -4175,6 +4444,8 @@ static bool vm_net_mock_append_scene_npcs11_once_or_empty(u8 *out, u32 outCap, u
                                                          const char *phase);
 static bool vm_net_mock_append_fb_target_result12_for_scene(u8 *out, u32 outCap, u32 *pos,
                                                             const char *sceneKey, u16 spawnX, u16 spawnY);
+static bool vm_net_mock_append_fb_target_result12_ack_for_scene(u8 *out, u32 outCap, u32 *pos,
+                                                                const char *sceneKey);
 static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32 *pos,
                                                         u8 typeValue, const char *infoText);
 static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 value);
@@ -4189,17 +4460,41 @@ enum
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
     VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
+    /*
+     * Tagged seq fields: u32=6, i16=4, u8=3.
+     * Zero-attr baselines: 30/21 ≈27/row, 17/1 ≈17/row.
+     * With ParseEquipAttributes CLIENT_CAP=6: common_extra ≤89, so
+     * 30/21 ≈105/row and 17/1 ≈95/row.  Warehouse deposit / enhance
+     * list-resync push full 17/1; under-sized scratch drops the peel.
+     */
+    VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX = 128,
+    VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH =
+        8 + VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX,
+    VM_NET_MOCK_BACKPACK_ITEMINFO_SCRATCH =
+        8 + (VM_NET_MOCK_BACKPACK_MAX_ITEMS *
+             VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX),
     VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_ID = 800,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_SEQ = 1,
     VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT = 5,
     VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID = 806,
     VM_NET_MOCK_SMALL_HORN_ITEM_ID = 807,
-    VM_NET_MOCK_BACKPACK_EXPAND_STEP = 5,
+    /* item.dsh 808 金元宝: shop buy is a direct copper grant, not a grid item. */
+    VM_NET_MOCK_GOLD_YUANBAO_ITEM_ID = 808,
+    /* HUD money: 1 金 = 10000 铜. item.dsh 购买个数/说明 = 100 金 → 1000000 铜. */
+    VM_NET_MOCK_MONEY_COPPER_PER_GOLD = 10000,
+    VM_NET_MOCK_GOLD_YUANBAO_GOLD_UNITS = 100,
+    /*
+     * item.dsh 806「增加您背包的存储空间4格」; mmShop:sub_9DE (0xCE2) does
+     * ldrh/adds #4 / strh on the item-manager capacity halfword (+0x26==+38).
+     * A server step of 5 desynced free slots from the client insert ceiling.
+     */
+    VM_NET_MOCK_BACKPACK_EXPAND_STEP = 4,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
-    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 8,
+    /* 秘宝页：类别 14 + 上架类别 10 + 其它 server_shop_items 上架非装备。 */
+    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 200,
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
@@ -4208,6 +4503,8 @@ enum
     VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS = 64,
     VM_NET_MOCK_AUTO_MONSTER_CATALOG_MAX_ITEMS = 128,
     VM_NET_MOCK_SHOP_NAME_BYTES = 12,
+    /* item.dsh/equip.dsh `说明`; warehouse option highlight uses this. */
+    VM_NET_MOCK_SHOP_DESC_BYTES = 160,
     VM_NET_MOCK_SKILL_NAME_BYTES = 24,
     VM_NET_MOCK_TELEPORT_STONE_DEFAULT_EXIT_ID = 1,
     VM_NET_MOCK_TELEPORT_STONE_COST = 1,
@@ -4218,12 +4515,34 @@ enum
     VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
     VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION = 4,
     VM_NET_MOCK_ROLE_DB_VERSION = 5,
-    VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 10,
+    VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 23,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
-    VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
+    /* Role level curve anchors (see docs/re/2026-07-25-role-level-exp-curve.md):
+     * 1->2 = 200, 49->50 = 2_000_000, total 1..70 = 120_000_000.
+     * Stages 1-2 are one geometric run (~+21%/level); stage 3 is arithmetic. */
+    VM_NET_MOCK_ROLE_MAX_LEVEL = 70,
+    VM_NET_MOCK_ROLE_EXP_TOTAL_TO_MAX = 120000000,
+    VM_NET_MOCK_ROLE_EXP_GEOM_LAST_LEVEL = 49,
+    VM_NET_MOCK_ROLE_EXP_STAGE3_A = 2100000,
+    VM_NET_MOCK_ROLE_EXP_STAGE3_D = 350242,
+    VM_NET_MOCK_ROLE_EXP_STAGE3_FIRST_LEVEL = 50,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
+    /*
+     * Login 7/7 type=2 iteminfo: tagged rowCount + per worn slot
+     * seq(i16)+itemId(u32)+durability(u32)+common_extra.
+     * common_extra worst case (CLIENT_CAP=6 attrs): 2*i16+u8+6*(3*u8+i16)
+     * = 89; per row ≈ 105; 8 worn slots ≈ 843.  A fixed 512-byte scratch
+     * overflowed after 30/21 already logged, aborting group-type1 and leaving
+     * the client bag empty (no HandleItemGridResponse / 0x01039952).
+     */
+    VM_NET_MOCK_EQUIP_LOGIN_ITEMINFO_SCRATCH =
+        8 + (VM_NET_MOCK_EQUIP_SLOT_COUNT *
+             VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX),
+    VM_NET_MOCK_NEARBY_EQUIP_INFO_SCRATCH =
+        VM_NET_MOCK_EQUIP_SLOT_COUNT *
+        VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX,
     VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
@@ -4235,6 +4554,9 @@ enum
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
     VM_NET_MOCK_ROLE_DEFAULT_MONEY = 0,
+    /* Ordinary death: lose this percent of EXP already earned inside the
+     * current level (not total EXP, and not a fixed level drop). */
+    VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT = 10,
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 5,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_MP_PERCENT = 30,
@@ -4256,7 +4578,13 @@ enum
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
-    VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7
+    VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7,
+    /*
+     * ParseNPCDialogData stores description with capacity #0xc8 (200), but the
+     * cursor-highlight paint path (0x01038142) memcpy/SetText only uses #0x3c
+     * (60) including NUL.  Wire longer text still; send at most 59 for display.
+     */
+    VM_NET_MOCK_NPC_DIALOG_OPTION_DESC_BYTES = 59
 };
 
 /* action=1 in task_hall_activate_selected_entry sends 26/1{type=2,id=value}.
@@ -4266,7 +4594,11 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON       0xe1000001u
 #define VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE   0xe2000000u
 #define VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL        0xe3000001u
-#define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS       0xe4000001u
+/* Skill trainer list: opcode 0xe4, page index in low 24 bits (root opens page 0).
+ * Dialog cap is 7 options; keep 5 skills + 上一页/下一页 like warehouse/shop. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS_BASE  0xe4000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS       0xe4000000u
+#define VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS  5u
 #define VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE  0xe5000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR        0xe6000001u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE     0xe7000001u
@@ -4275,11 +4607,45 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE 0xea000000u
 #define VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE 0xeb000000u
 #define VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE 0xec000000u
+#define VM_NET_MOCK_NPC_SERVICE_VIEW_ITEM_BASE    0xed000000u
+/* Warehouse menus reuse the proven 26/1 action=1 dialog path (medicine/equip
+ * NPC services).  Native 钱庄 WT remains unresolved; do not invent a separate
+ * bank kind/subtype. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE            0xee000001u
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU   0xee010000u /* | page */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU    0xee020000u /* | page */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE   0xef000000u /* | slot */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE    0xf0000000u /* | backpack seq */
+/* Equipment sell (mall pass 839): same 26/1 action=1 path as warehouse.
+ * Avoid 0xed (VIEW_ITEM).  Sell is permanent — no retrieve.
+ * Do not reuse 835: item.dsh already has 红玫瑰 at that id. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIP_SELL           0xf1000001u
+#define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU           0xf1010000u /* | page */
+#define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE           0xf2000000u /* | backpack seq */
+#define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE      0xf3000000u /* | backpack seq */
+/* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
+#define VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES            199u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
-#define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
+#define VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID        834u
+#define VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY     50u
+#define VM_NET_MOCK_WAREHOUSE_MAX_ITEMS           64u
+#define VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS          5u
+#define VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID       839u
+#define VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY    50u
+#define VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS         5u
+/* OPEN_CATEGORY value layout (low 24 bits):
+ *   [7:0]  selector (equip category 1..10 or medicine 0xfe)
+ *   [11:8] level band (0=band menu, 1=1-20, 2=21-40, 3=41-60, 4=61-70)
+ *   [23:12] page index within the selected band */
+#define VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_SHIFT  8u
+#define VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_MASK   0x0000000fu
+#define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 12u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
+/* Equipment list rows open a detail page (mall-like select→view); medicine
+ * rows buy directly.  Both keep five goods per page under the 7-option cap. */
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
+#define VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_COUNT  4u
 
 typedef struct
 {
@@ -4288,6 +4654,16 @@ typedef struct
     u16 enhanceLevel;
     u32 count;
 } vm_net_mock_backpack_item_state;
+
+typedef struct
+{
+    char accountId[64];
+    u32 roleId;
+    u16 itemCount;
+    u16 nextSeq;
+    bool loaded;
+    vm_net_mock_backpack_item_state items[VM_NET_MOCK_WAREHOUSE_MAX_ITEMS];
+} vm_net_mock_warehouse_state;
 
 typedef struct
 {
@@ -4312,6 +4688,8 @@ typedef struct
     u8 designationId;
     u16 nextBackpackSeq;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
+    u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
 
@@ -4326,6 +4704,15 @@ enum
     VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3
 };
 
+/* item.dsh 827: +1h per pill, daily train <=8h, bank <=100h. */
+enum
+{
+    VM_NET_MOCK_PRACTISE_PILL_ITEM_ID = 827,
+    VM_NET_MOCK_PRACTISE_PILL_ADD_MINUTES = 60,
+    VM_NET_MOCK_PRACTISE_BANK_MAX_MINUTES = 100u * 60u,
+    VM_NET_MOCK_PRACTISE_DAILY_MAX_MINUTES = 8u * 60u
+};
+
 typedef struct
 {
     u8 kind;
@@ -4333,6 +4720,17 @@ typedef struct
     u32 multiplier;
     u32 expiresUnix;
 } vm_net_mock_role_item_effect;
+
+typedef struct
+{
+    u32 bankMinutes;
+    u32 lastLogoutUnix;
+    u32 todayYmd;
+    u32 todayUsedMinutes;
+    u32 lastSettleExp;
+    u32 lastSettleMinutes;
+    u8 isGold;
+} vm_net_mock_offline_practise_state;
 
 typedef struct
 {
@@ -4474,6 +4872,7 @@ typedef struct
 } vm_net_mock_role_db_file;
 
 #define VM_MOCK_SERVICE_ACCOUNT_DB_VERSION 1
+/* Caps only the legacy JHA1 snapshot import; live accounts are MySQL rows. */
 #define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 1000000
 #define VM_MOCK_SERVICE_FRIEND_DB_VERSION 1
 #define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256
@@ -4489,8 +4888,7 @@ typedef struct
     char magic[4];
     u32 version;
     u32 accountCount;
-    vm_mock_service_account_record accounts[VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS];
-} vm_mock_service_account_db_file;
+} vm_mock_service_account_db_file_header;
 
 typedef struct
 {
@@ -4583,9 +4981,10 @@ typedef struct
     char password[64];
 } vm_mock_service_login_request;
 
-static vm_mock_service_account_db_file g_vm_mock_service_account_db;
 static bool g_vm_mock_service_account_db_loaded = false;
 static bool g_vm_mock_service_account_db_valid = false;
+/* Scratch for on-demand MySQL lookups; invalidated by the next find. */
+static vm_mock_service_account_record g_vm_mock_service_account_lookup_scratch;
 static vm_mock_service_friend_db_file g_vm_mock_service_friend_db;
 static bool g_vm_mock_service_friend_db_loaded = false;
 static bool g_vm_mock_service_friend_db_valid = false;
@@ -4643,15 +5042,35 @@ static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static bool vm_net_mock_role_db_save(const char *reason);
+/* Mark durable role rows dirty without MySQL.  Transport flushes after CBMR
+ * (or on disconnect / heartbeat expire).  Prefer this on hot multiplayer paths
+ * that previously held the protocol lock across DELETE+INSERT. */
+static void vm_net_mock_role_mark_inventory_dirty(const char *reason);
+static bool vm_net_mock_role_db_save_relational_ex(
+    const char *reason,
+    const char *account_id,
+    vm_net_mock_role_db_file *db,
+    bool db_valid,
+    vm_net_mock_warehouse_state *warehouse,
+    bool clear_process_dirty_flags,
+    const u32 *old_ids,
+    const u32 *new_ids,
+    u32 mapping_count,
+    bool full_snapshot,
+    const vm_net_mock_role_item_effect *timed_effect);
 static bool vm_mock_service_mysql_authority_prepare(void);
 static bool vm_mock_service_mysql_authority_seal(void);
 static bool vm_mock_service_mysql_authority_is_sealed(void);
 static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *role,
                                                         u32 itemId,
                                                         u32 count,
+                                                        u16 enhanceLevel,
                                                         u16 *seqOut,
                                                         const char *reason);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
+static bool vm_net_mock_role_add_backpack_item_enhanced(u32 itemId, u32 count,
+                                                        u16 enhanceLevel,
+                                                        u16 *seqOut);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
                                                                             u32 itemId,
                                                                             u16 seq);
@@ -4670,16 +5089,58 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     const char *reason);
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_exp_card_remaining_seconds(
+    const vm_net_mock_role_state *role);
+static bool vm_net_mock_role_exp_card_pause_on_logout(const char *accountId,
+                                                      u32 roleId);
+static bool vm_net_mock_role_exp_card_resume_on_login(
+    vm_net_mock_role_state *role);
+static bool vm_net_mock_role_battle_insight_pause_on_logout(const char *accountId,
+                                                            u32 roleId);
+static bool vm_net_mock_role_battle_insight_resume_on_login(
+    vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_battle_insight_remaining_seconds(
+    const vm_net_mock_role_state *role);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
+static u8 vm_net_mock_role_active_status_icon_flag(void);
+static bool vm_net_mock_append_exp_card_info_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_status_icon_arm_objects(u8 *out, u32 outCap,
+                                                       u32 *pos,
+                                                       u8 *extraObjectsOut);
+static u8 vm_net_mock_append_exp_card_ui_objects(u8 *out, u32 outCap, u32 *pos);
 static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                       u32 requestLen,
                                                       u8 *out, u32 outCap);
+static bool vm_net_mock_role_use_practise_pill(vm_net_mock_role_state *role,
+                                               u16 seq, u32 *remainingOut);
+static bool vm_net_mock_role_offline_practise_mark_logout(const char *accountId,
+                                                          u32 roleId);
+static bool vm_net_mock_role_offline_practise_settle_on_login(
+    vm_net_mock_role_state *role, u32 *settleMinutesOut, u32 *settleExpOut);
+static void vm_net_mock_role_offline_practise_panel_values(
+    u32 *todayPastHourOut, u32 *todayPastMinOut, u32 *getExpOut,
+    u32 *todayLastHourOut, u32 *todayLastMinOut, u32 *allLastHourOut,
+    u32 *allLastMinOut, u8 *isGoldOut);
+static bool vm_net_mock_role_offline_practise_set_gold(u8 isGold);
+static u8 vm_net_mock_role_offline_practise_login_flag(void);
+static const char *vm_net_mock_role_offline_practise_login_info(void);
+static void vm_net_mock_role_offline_practise_clear_login_notice(void);
+static u32 vm_net_mock_build_practise_pill_use_response(const u8 *request,
+                                                        u32 requestLen,
+                                                        u8 *out, u32 outCap);
+static u32 vm_net_mock_build_practise_pill_followup_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_timed_special_item_use_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_battle_insight_followup_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_chest_open_response(const u8 *request,
+                                                 u32 requestLen,
+                                                 u8 *out, u32 outCap);
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role);
 static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp);
 static void vm_net_mock_task_progress_after_battle(u32 enemyId,
