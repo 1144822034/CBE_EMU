@@ -5331,6 +5331,7 @@ static u32 vm_net_mock_build_equipment_repair_response(
     u8 objectCount = 1;
     u16 pieceCount = 0;
     u32 wcoinBefore = 0;
+    u16 coolmoneyOut = 0;
     const char *reason = "ok";
 
     memset(&parsed, 0, sizeof(parsed));
@@ -5367,15 +5368,18 @@ static u32 vm_net_mock_build_equipment_repair_response(
     }
 
     /*
-     * Quote contract: repairnum = pieces to repair, coolmoney = 5 酷宝.
-     * Do not put copper durability-cost into repairnum.
+     * Quote: repairnum=piece count, coolmoney=5 酷宝 (never copper cost).
+     * Fields are u32 — u16 mis-aligned HandleRepairResponse into "coolmoney"
+     * name bytes (0x636F=25455 displayed as piece count).
      */
+    coolmoneyOut =
+        pieceCount > 0 ? (u16)VM_NET_MOCK_QUICK_REPAIR_WCOIN_COST : 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 29, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "type", parsed.type) ||
-        !vm_net_mock_put_object_u16(out, outCap, &pos, "repairnum", pieceCount) ||
-        !vm_net_mock_put_object_u16(
-            out, outCap, &pos, "coolmoney",
-            pieceCount > 0 ? (u16)VM_NET_MOCK_QUICK_REPAIR_WCOIN_COST : 0))
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "repairnum",
+                                    (u32)pieceCount) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "coolmoney",
+                                    (u32)coolmoneyOut))
     {
         return 0;
     }
@@ -5384,16 +5388,14 @@ static u32 vm_net_mock_build_equipment_repair_response(
     printf("[info][network] mock_equipment_repair phase=quote type=%u seq=%u "
            "id=%u repairnum=%u coolmoney=%u wcoin=%u quote_pending=%u "
            "resp=%u reason=%s evidence=JianghuOL.CBE:0x0101CADC/0x01028C9A+"
-           "repairnum=piece-count-not-copper-cost\n",
+           "repairnum=u32-piece-count\n",
            parsed.type, parsed.seq, parsed.itemId, pieceCount,
-           pieceCount > 0 ? VM_NET_MOCK_QUICK_REPAIR_WCOIN_COST : 0,
+           coolmoneyOut,
            wcoinBefore, session && session->quickRepairQuotePending ? 1 : 0,
            pos, reason);
     vm_autotest_note("mock_equipment_repair phase=quote type=%u repairnum=%u "
                      "coolmoney=%u reason=%s evidence=piece-count-not-cost\n",
-                     parsed.type, pieceCount,
-                     pieceCount > 0 ? VM_NET_MOCK_QUICK_REPAIR_WCOIN_COST : 0,
-                     reason);
+                     parsed.type, pieceCount, coolmoneyOut, reason);
     return pos;
 }
 
@@ -5443,22 +5445,27 @@ static u32 vm_net_mock_build_equipment_repair_confirm_response(
     }
     else
     {
+        /*
+         * Armed 7/29 quote owns the operation.  Confirm may carry type/flag=2
+         * that is not quote type; do not let it replace type=1 all-repair.
+         */
         effective.type = session->quickRepairQuoteType;
         effective.seq = session->quickRepairQuoteSeq;
         effective.hasSeq = session->quickRepairQuoteSeq != 0;
         effective.itemId = session->quickRepairQuoteItemId;
         effective.hasItemId = session->quickRepairQuoteHasItemId;
-        if (parsed.type == 1 || parsed.type == 2)
-            effective.type = parsed.type;
-        if (parsed.hasSeq)
+        if (effective.type == 2)
         {
-            effective.seq = parsed.seq;
-            effective.hasSeq = true;
-        }
-        if (parsed.hasItemId)
-        {
-            effective.itemId = parsed.itemId;
-            effective.hasItemId = true;
+            if (parsed.hasSeq)
+            {
+                effective.seq = parsed.seq;
+                effective.hasSeq = true;
+            }
+            if (parsed.hasItemId)
+            {
+                effective.itemId = parsed.itemId;
+                effective.hasItemId = true;
+            }
         }
 
         wcoinBefore = role->wcoin;
@@ -5501,12 +5508,24 @@ static u32 vm_net_mock_build_equipment_repair_confirm_response(
         vm_net_mock_quick_repair_clear_quote(session);
     }
 
+    /* result is u8 (+0x4c); keep 7/13 for wait-clear and append 26/0. */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 13, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
     {
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    {
+        u32 ackObjectStart = 0;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 26, 0,
+                                         &ackObjectStart))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, ackObjectStart, pos);
+        objectCount = 2;
+    }
 
     if (executed && session != NULL)
     {
@@ -5520,12 +5539,30 @@ static u32 vm_net_mock_build_equipment_repair_confirm_response(
                session->clientId);
     }
 
+    /* mmGame tip is unreliable; surface completion via system chat. */
+    if (session != NULL)
+    {
+        if (result == 1)
+        {
+            (void)vm_mock_service_session_enqueue_system_message(
+                session,
+                "\xd0\xde\xc0\xed\xcd\xea\xb3\xc9"); /* 修理完成 */
+        }
+        else if (strcmp(reason, "wcoin-insufficient") == 0)
+        {
+            (void)vm_mock_service_session_enqueue_system_message(
+                session,
+                "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xd0\xde"
+                "\xc0\xed\xa1\xa3"); /* 酷宝不足，无法修理。 */
+        }
+    }
+
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_equipment_repair phase=confirm type=%u seq=%u "
            "id=%u result=%u wcoin=%u/%u cost=%u executed=%u repaired=%u "
            "equip_sync_armed=%u resp=%u reason=%s "
            "evidence=JianghuOL.CBE:0x0101A8A0+mmGame:0x4986+"
-           "quick-repair-5-wcoin\n",
+           "quick-repair-5-wcoin+system-chat\n",
            effective.type, effective.seq, effective.itemId, result,
            wcoinBefore, wcoinAfter, VM_NET_MOCK_QUICK_REPAIR_WCOIN_COST,
            executed ? 1 : 0, repaired, equipSyncArmed ? 1 : 0, pos, reason);

@@ -4871,7 +4871,8 @@ static u32 vm_net_mock_build_pending_quick_repair_equip_sync_response(
 
     if (session->quickRepairEquipSyncPhase != 1)
         return 0;
-    if (ageTicks < 2u)
+    /* Hold ~1s so completion feedback is not wiped by 7/7→sub_11CE wait. */
+    if (ageTicks < (1000u / VM_SCHED_FRAME_MS))
         return 0;
 
     if (!vm_net_mock_append_equipment_login_object(out, outCap, &pos,
@@ -4890,7 +4891,7 @@ static u32 vm_net_mock_build_pending_quick_repair_equip_sync_response(
     session->quickRepairEquipSyncTick = g_schedulerTick;
     printf("[info][mock-service] quick_repair_equip_sync client=%08x "
            "age_ticks=%u rows=%u phase=1->2 resp=%u "
-           "evidence=7/7-type2-then-26/0\n",
+           "evidence=7/7-type2-then-26/0-delayed\n",
            session->clientId, ageTicks, equipmentRows, pos);
     return pos;
 }
