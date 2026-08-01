@@ -17,19 +17,15 @@ Status: implemented (server-driven continuous ticks)
 
 ## 契约（当前）
 
-1. `4/11 type=1` 且可行动 → `operate-only`，`prefer=1`，`suppressNext12=1`，`arm_flag_pending` + `arm_pending`
-2. `4/11 type=1` 且暂不可行动 → `flag-ack` + 同上 pending
-3. `4/11 type=0` → 清 `prefer` + 全部 pending（显式关闭）
-4. `4/12` 且 `prefer=1` → `type=0` **保留 prefer**；补 `arm_flag_pending`；**永不** 对 `4/12` 回 `type=1`
-5. scene-sync poll（先于 `sceneVisibleReady`）：
-   - 先投 `4/11 type=1`（`mock_battle_auto_flag_poll_deliver`，对齐开战）
-   - 若客户端仍不 `4/2`，再投 `operate-only`（`via=auto-poll`）
-6. 真实客户端 `4/2` 且 `prefer` → `client_driven=1`，停止 poll 合成（避免双发）
-7. 开战若 `prefer`：开战包已带 `4/11`，只 `arm_pending` 作兜底
-8. 回合间隔：`CBE_BATTLE_AUTO_TURN_GAP_MS`（默认 **0**，无取消窗）。`playback_hold`
-   = 动作播放时长 + 该可选间隔。非 0 时仅抑制 poll 合成下一击；真实 `4/2`
-   **必须**仍回 `4/6`。见 `2026-07-28-auto-button-cancel-hangup.md`。
-9. 旗标延迟：`CBE_BATTLE_AUTO_FLAG_DELAY_TICKS`（默认 8≈0.8s）仅用于中途补发开战同款 `4/11`
+1. `4/11 type=1`（按 1 开）→ 与挂机开战同机：`prefer=1` + `HangupStyleFlagOk` +
+   arm poll；**只 ACK `4/11`**，不内联 operate
+2. `4/11 type=0`（按 1 关）→ 清 `prefer` + pending；**战斗结束不清**
+3. `4/12` 且 `prefer=1` → **空 ACK**；不内联 synth、不补 `flag_poll`
+4. scene-sync poll：`auto_choose_operate` → `via=auto-poll`（与挂机同一选技/蓝不够普攻）
+5. 开战若 `prefer`：challenge/hangup 开战包带 `4/11 type=1` + `arm_pending`
+6. **唯一差异**：进战方式——手动 `4/1` vs 挂机定时拉怪；战内出手逻辑相同
+7. 回合间隔：`CBE_BATTLE_AUTO_TURN_GAP_MS`（默认 **0**）。`playback_hold` =
+   动作播放时长 + 可选间隔
 
 ## 负向证据
 
@@ -45,7 +41,8 @@ Status: implemented (server-driven continuous ticks)
 
 ## 验证
 
-1. 手动技能 → 点自动 → 立刻一击（`via=auto11`）
-2. 约 3s 后无需再点 → 再击（`via=auto-poll` / `mock_battle_auto_poll_deliver`）
-3. 群体 / 多怪同样连续，不卡死、无 `rearm=1`；日志不应再出现 `mock_battle_auto_turn_gap_wait`
-4. 显式 `4/11 type=0` 或逃跑后不再 poll 出手
+1. 手动技能 → 按 1：`auto11 ... hangup-style-arm` + `4/11`；首击来自
+   `mock_battle_auto_poll_deliver` / `auto_choose`（同挂机）
+2. 蓝不够：`mp_fallback` 普攻，回蓝后恢复记忆技能
+3. 群体 / 多怪连续，无 `rearm=1`、无 4/11 内联 operate
+4. 按 1 关闭后不再出手；胜利后下一场仍自动（`auto_keep`）

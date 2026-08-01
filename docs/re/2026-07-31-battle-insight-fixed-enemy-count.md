@@ -20,10 +20,13 @@
 ## 修改点
 
 - `src/server/mock_server_equipment_npc.c`：`vm_net_mock_battle_roll_enemy_count`
+- `src/server/mock_server_battle.c`：组队 challenge/hangup 开战前
+  `vm_net_mock_battle_apply_leader_insight_enemy_count`（按队长 role 复核）
 
 ## 验证
 
-1. 使用 828 后挑战/挂机开战：日志 `mock_battle_enemy_count_fixed ... count=3 reason=battle-insight`，且 `mock_challenge_battle_start` / `mock_hangup_battle_start` 的 `enemies=3`。
-2. 心得过期后恢复 `1..3` 随机。
-3. 未激活心得时行为不变。
-4. `make -j2 server`。
+1. 使用 828 后挑战/挂机开战：日志 `mock_battle_enemy_count_fixed ... count=3 reason=battle-insight`（或组队 `battle-insight-leader`），且 `mock_challenge_battle_start` / `mock_hangup_battle_start` 的 `enemies=3`。
+2. 队长开 828、队员未开：组队遇怪仍固定 3。
+3. 心得过期后恢复 `1..3` 随机。
+4. 未激活心得时行为不变。
+5. `make -j2 server`。

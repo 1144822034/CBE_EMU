@@ -23,6 +23,9 @@
 
 单人战斗仍只治疗自己（无队友座位）。切磋 duel 路径仍是自疗（1v1 无队友）。
 
+后续回归：友方治疗路径曾再次被 `select_live_enemy_wire` 在敌 0 死后把队友 index
+改写成自己，见 `2026-08-01-ally-heal-remap-and-leader-insight-count.md`。
+
 ## 验证
 
 1. `make -j2 server`，重启服务端。

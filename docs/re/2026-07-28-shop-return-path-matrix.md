@@ -20,7 +20,9 @@ contract: NPC maps always re-poll nonempty 27/11 after shell 30/2
 ```text
 mmShop exit
   → npcnum==0:        shell 30/2 → kind-2 30/1
-  → npcnum>0:         shell 30/2 → poll 27/11 → post-catalog 30/2 → busy（无 kind-2）
+  → npcnum>0:         type27/follow-up 非空 27/11 一次 → shell 30/2 → busy
+                      （禁止 empty gate；禁止二次 catalog；见
+                       2026-08-01-shop-return-warm-type27-single-load.md）
 ```
 
 ## 已证伪假设（2026-07-28 蓬莱登录进店）
@@ -53,23 +55,28 @@ mmShop exit
 |------|------|
 | `2026-07-28-shop-return-npc-catalog-defer.md` | 权威 defer→poll 顺序；本矩阵确认 **所有** NPC 出店都走这条。 |
 | `2026-07-28-penglai-shop-return-after-teleport-stall.md` | 地图石后二次 27/11 曾卡住；根因不是「不该再发」，而是投递/clear 时序。出店仍必须补目录。暖目录短窗见 `2026-07-28-shop-return-post-catalog-lite.md`。 |
-| `2026-07-28-shop-return-post-catalog-lite.md` | priorSeeded → remaining=3 + 可选 2s settle；冷目录仍 remaining=8。 |
+| `2026-07-28-shop-return-post-catalog-lite.md` | 冷目录 post-catalog 窗口；暖目录已改为同包 30/2（2026-08-01）。 |
+| `2026-08-01-shop-return-warm-catalog-same-packet.md` | 曾用 deferred 同包 30/2；传送后仍卡，由 type27 暖即时取代。 |
+| `2026-08-01-shop-return-warm-type27-single-load.md` | priorSeeded：type27 非空一次；shell 关 DF；无 catalog_deliver。 |
 | `2026-07-28-penglai02-shop-return-kind2-portal-snap.md` | NPC 出店仍 kind-2；禁止 follow-up 2/3 用 SCE exit-0 甩到出口。 |
 | `2026-07-28-shop-return-menu-dismiss-late-kind2.md` | post-catalog + moveinfo 立即 cancel+kind2，避免菜单被 30/2 顶掉与晚二次进图。 |
 
 ## 验证
 
 ```text
-# 蓬莱（登录或地图石后）进/出商城
-shop_return_npc_catalog_defer ... npcnum=3
-shop_return_npc_catalog_ready ... via=shell-clear-done|moveinfo-live
-mock_shop_return_npc_catalog_deliver ... post_catalog=1
-shop_return_kind2_reenter_arm ... via=post-catalog-clear-done|moveinfo-live-post-catalog
-# NPC 可见；可走；可踩门
+# 暖 NPC 图（登录或地图石后）出店
+shop_return_npc_warm_immediate ... via=type27|followup
+shop_return_npc_catalog_skip ... warm-already-on-type27   # 若有 WT6/1
+# 无 catalog_deliver / post_catalog=1
+shell loading_clear remaining=0 → busy_ack
+# NPC 可见；可走；无二次进度条
+
+# 冷 NPC 图（本访未 seed）出店
+shop_return_npc_catalog_defer ... cold
+catalog_ready → catalog_deliver → post_catalog → busy
 
 # 空图：桃花岛进出商城
 shop_return_kind2_reenter_arm ... (至多一次)
-# 无 rehydrate 循环；可撞怪
 ```
 
 ## 明确不做

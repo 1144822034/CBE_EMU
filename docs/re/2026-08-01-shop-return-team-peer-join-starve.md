@@ -29,6 +29,9 @@
 
 ## 验证（post-fix）
 
-1. `shop_return_peer_join_poll` / `team_member_join_5_5` 均在对应
-   `team_deliver` 之前（两次商城返回均成立）。
-2. 组队战后双方均发出 `4/2`，并有 `action_deliver`（不再卡屏障/闪退）。
+1. 出商城日志顺序：`shop_return_solo_roster` → `shop_return_team_peers_queue`
+   →（loading-clear/busy_ack 结束后）`shop_return_team_peer_join_poll` +
+   `team_member_join_deliver ... update=5/5`。
+2. 队友客户端恢复队伍列表；队长仍可见。
+3. 队长遇怪：双方进战斗，无队友闪退、无队长卡回合屏障。
+4. 2026-08-01：该优先投递曾在功能还原中丢失，已按本文重新落地。

@@ -44,7 +44,12 @@
 3. 打完剩余：才出现结算与退出。
 4. `make -j2 server` 通过。
 
-## 残留风险
+## 残留风险 / 2026-08-01 组队路径补洞
 
 - 若客户端 battleinfo `enemies` 与服务端 `EnemyCountCurrent` 长期不一致，仍可能错判；需对开战包字段继续取证。
-- 组队共享 `team->battleEnemyHpCurrent` 副本路径需回归：队长首杀一只后其余成员不应看到全灭。
+- **已补**：组队曾用 `team->battleEnemyHpCurrent == 0` 置 `battleFinished` /
+  `terminalVictory`。仅 slot0 seeded 时首杀聚合为 0 → 过早 `battleFinished`，
+  merge 又因 `all_enemies_defeated()==false` **不发 4/7**，下一 operate 走
+  finished 分支（`4/11` auto-off）→ 体感「怪没死完就退出、结算不显示」。
+  现改为 `team_battle_all_enemies_defeated`（按 slot），并在
+  `team_battle_prepare_operation` 调用 `ensure_multi_enemy_slots_seeded` 写回队伍快照。

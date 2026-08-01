@@ -32,7 +32,9 @@ unit(tier) = floor(100 / 3^steps)        // tier <= L, steps = L - tier + 1
 rate = min(100, Σ unit(tier_i) * count_i)
 ```
 
-`29/1` data1/data2 仍用紧凑线性表（与掷骰无关）。真实预览/掷骰以 `29/2` `value` 为准。
+`29/1` 本地显示已按当前等级编码为 `required=100`、`power=unit_rate`
+（见 `2026-08-01-enhance-client-display-unit-rate.md`）。真实预览/掷骰仍以
+`29/2` `value` / `29/3` 为准。
 
 ## 代码
 

@@ -2,10 +2,20 @@
 
 日期：2026-08-01
 
+## 代码现状（2026-08-01 再合入）
+
+曾在细锁回滚中丢失；现已按本文再次合入：
+
+- `active_session_in_team_battle`：`battleActive && !battleFinished`
+- `team_clear_battle_state` + `team_remove_member` 离队 `leftMask`、
+  `memberCount<2` 时 `roster-below-two` 清战斗快照
+
+队友下线走 `mark_offline` → `team_remove_member`，与主动离队同一路径。
+
 ## 症状
 
-组队打过至少一场后，队友脱离队伍，队长开挂机进入战斗：有进战 UI，
-但没有任何行动，一直卡住。
+组队打过至少一场后，队友脱离队伍（或下线），队长开挂机/再进战斗：有进战 UI，
+但没有任何行动（挂机无 4/6，手动操作也被 finished-fight 分支吃掉），一直卡住。
 
 ## 根因（运行时 + 代码交叉验证）
 
