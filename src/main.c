@@ -559,8 +559,9 @@ static u32 g_mockBattleEnemyHpSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpMaxSlots[3] = {0, 0, 0};
 static u32 g_mockBattleEnemyHpCurrent = 0;
 static u32 g_mockBattleEnemyHpMax = 0;
-/* Boss/cast_skill monsters may self-heal once per battle when HP < 60%. */
-static bool g_mockBattleMonsterHealUsed = false;
+/* Set to g_mockBattleOperateSessionSerial when the monster self-heals.
+ * Same de-dupe pattern as rewarded/settlement serials; captured per account. */
+static u32 g_mockBattleMonsterHealUsedSerial = 0;
 
 static uc_err add_manager_code_hooks(uc_engine *uc);
 static bool vm_host_file_exists(const char *path);

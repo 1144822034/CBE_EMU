@@ -2,13 +2,20 @@
 
 日期：2026-08-01
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**未在当前树。** `g_mockBattleAuto*` / `g_mockHangupLoop*` 仍经 `account_state`
-capture/restore 换账号；无 `session_load/store/clear_auto_timers`，亦无
-`clear_request_local_scratch`。详见 `2026-08-01-server-baseline-audit.md`。
+**已合入当前树。** session 为 auto/hangup timer 唯一权威；`account_state` 同名字段在
+capture 前写 session 后清零。详见 `2026-08-01-server-baseline-audit.md`。
 
-下文为曾规划/已撤回的阶段 D 方案。
+| 项 | 现状 |
+| --- | --- |
+| `session_load/store/clear_auto_timers` | **已实现** |
+| `account_clear_auto_timers` | **已实现** |
+| capture / restore | restore 末从 session 灌入；capture 前写回 session |
+| `session_mark_offline` | 清零 session timer |
+| `clear_request_local_scratch` | **已实现**（与阶段 D 配套） |
+
+下文为已落地契约。
 
 ## 问题
 

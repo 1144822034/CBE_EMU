@@ -2,13 +2,19 @@
 
 日期：2026-08-01
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**未在当前树。** 无 `g_vm_mock_service_globals_account` / `sticky_restore skipped` /
-`role_db_capture skipped`。每请求仍全量 `account_restore`/`capture`（含 roleDb）。
-依赖的阶段 D session timer 权威亦不在。详见 `2026-08-01-server-baseline-audit.md`。
+**已合入当前树。** 详见 `2026-08-01-server-baseline-audit.md`。
 
-下文为曾规划/已撤回的阶段 B 方案，勿按验证清单验收。
+| 项 | 现状 |
+| --- | --- |
+| `g_vm_mock_service_globals_account` | **已实现** |
+| 同账号连续请求 | `sticky_restore skipped=1` 跳过全量 restore |
+| 干净 roleDb | `role_db_capture skipped=1` 跳过 memcpy |
+| idle release | 释放 globals 镜像账号时清空 sticky |
+| 依赖 session timer | **已满足**（阶段 D 已合入） |
+
+下文为已落地契约；验证清单可按通过验收。
 
 ## 背景
 

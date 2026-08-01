@@ -39,6 +39,7 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
     u16 *xOut, u16 *yOut, u32 *sourceSmapRowOut, u32 *targetSmapRowOut,
     u32 *distanceOut, const char **routeOut);
 static void vm_net_mock_hangup_loop_clear(const char *reason);
+static void vm_mock_service_clear_request_local_scratch(const char *reason);
 
 #include "mock_server_equipment_npc.c"
 #include "mock_server_scene_task.c"

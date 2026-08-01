@@ -2,20 +2,19 @@
 
 日期：2026-08-01
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**部分仍在 / 缺口补丁不在。** 详见 `2026-08-01-server-baseline-audit.md`。
+**已合入当前树。** 详见 `2026-08-01-server-baseline-audit.md`。
 
 | 项 | 现状 |
 | --- | --- |
 | 主战斗 operate / HP·MP / 奖励 serial 进 `account_state` | 仍在 |
-| `account_restore` 清组队 wire | 仍在（`team_battle_context_clear_on_account_restore`） |
-| 下文「本轮补进快照的缺口」四字段 | **未进** capture/restore |
-| 敌方 ailment / solo modifier 进快照 | **未进**（与本文「已进账号快照」列表冲突，以源码为准） |
-| `vm_mock_service_clear_request_local_scratch` | **不存在** |
-| Boss `MonsterHealUsed` 进快照 | **未进**（进程全局 bool） |
+| `vm_mock_service_clear_request_local_scratch` | **已存在**（restore / request_end / poll / disconnect） |
+| reward suppressed / settle recover / offline practise / remote scene serial | **已进** capture/restore |
+| 敌方 ailment / solo modifier 进快照 | **已进** |
+| Boss `MonsterHealUsed` | **已进**（`mockBattleMonsterHealUsedSerial`，u32 serial 门闩） |
 
-下文「修改 / 验证」描述的是目标契约与曾实现草案，**不得当作当前树已验收**。
+下文「修改 / 验证」描述的目标契约**已在当前树**。
 
 ## 背景
 

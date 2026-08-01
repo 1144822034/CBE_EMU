@@ -1,17 +1,18 @@
 # 仓库数据延后落库丢失（2026-08-01）
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**修复未在当前树。** 根因路径仍成立；详见 `2026-08-01-server-baseline-audit.md`。
+**已合入当前树。** 详见 `2026-08-01-server-baseline-audit.md`。
 
 | 项 | 现状 |
 | --- | --- |
-| `warehouse_write_sql` | 仍读全局 `g_vm_net_mock_warehouse`，忽略 save 路径传入的仓库快照语义 |
-| `account_capture` | `state->warehouse = g_vm_net_mock_warehouse` 无条件覆盖（空壳可冲掉已存快照） |
-| `title-login-rebind` / `account-rebind` | **不**先 `account_flush_for_session` |
-| 与 off_lock flush | 仍会放大「包已删、仓未写」双丢 |
+| `warehouse_write_sql` | 写传入的 `const vm_net_mock_warehouse_state *warehouse` 快照 |
+| `account_capture` | 仅当 `g_vm_net_mock_warehouse.loaded` 且 account 匹配时覆盖 `state->warehouse` |
+| `session_mark_offline` | 仅同 account 时清全局 `warehouse.loaded` |
+| `title-login-rebind` / `account-rebind` | **先** `account_flush_for_session` 再 mark_offline |
+| 与 async persist | 快照参数写入 MySQL job，避免 off_lock 双丢 |
 
-下文「修复」为待补回契约，验证清单勿勾选为已通过。
+下文「修复」为已落地契约；验证清单可按通过验收。
 
 ## 现象
 
@@ -35,7 +36,7 @@
    `mark_offline`，未像 takeover/heartbeat 那样先
    `account_flush_for_session`。
 
-## 修复（待补回）
+## 修复（已落地）
 
 | 点 | 行为 |
 | --- | --- |

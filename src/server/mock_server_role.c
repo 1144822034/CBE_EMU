@@ -6487,6 +6487,7 @@ static vm_net_mock_warehouse_state g_vm_net_mock_warehouse;
 static bool g_vm_net_mock_warehouse_schema_prepared = false;
 static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
                                             const char *account_hex,
+                                            const vm_net_mock_warehouse_state *warehouse,
                                             char *mysql_error,
                                             size_t mysql_error_cap);
 
@@ -6848,7 +6849,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
                     continue;
                 if (role->roleId != warehouse->roleId)
                     continue;
-                if (!vm_net_mock_warehouse_write_sql(role, account_hex,
+                if (!vm_net_mock_warehouse_write_sql(role, account_hex, warehouse,
                                                      mysql_error,
                                                      sizeof(mysql_error)))
                 {
@@ -8588,6 +8589,7 @@ static bool vm_net_mock_warehouse_load_for_role(vm_net_mock_role_state *role)
 
 static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
                                             const char *account_hex,
+                                            const vm_net_mock_warehouse_state *warehouse,
                                             char *mysql_error,
                                             size_t mysql_error_cap)
 {
@@ -8599,8 +8601,8 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
 
     if (mysql_error != NULL && mysql_error_cap > 0)
         mysql_error[0] = 0;
-    if (role == NULL || account_hex == NULL || !g_vm_net_mock_warehouse.loaded ||
-        g_vm_net_mock_warehouse.roleId != role->roleId)
+    if (role == NULL || account_hex == NULL || warehouse == NULL ||
+        !warehouse->loaded || warehouse->roleId != role->roleId)
     {
         return true;
     }
@@ -8621,7 +8623,7 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
             snprintf(mysql_error, mysql_error_cap, "%s", vm_mysql_last_error());
         return false;
     }
-    if (g_vm_net_mock_warehouse.itemCount == 0)
+    if (warehouse->itemCount == 0)
         return true;
 
     prefixLen = (u32)snprintf(
@@ -8635,10 +8637,9 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
         return false;
     }
     queryLen = prefixLen;
-    for (slot = 0; slot < g_vm_net_mock_warehouse.itemCount; ++slot)
+    for (slot = 0; slot < warehouse->itemCount; ++slot)
     {
-        const vm_net_mock_backpack_item_state *item =
-            &g_vm_net_mock_warehouse.items[slot];
+        const vm_net_mock_backpack_item_state *item = &warehouse->items[slot];
         int written;
 
         if (item->itemId == 0 || item->count == 0)
@@ -8680,8 +8681,8 @@ static bool vm_net_mock_warehouse_persist(vm_net_mock_role_state *role)
     }
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
-    if (!vm_net_mock_warehouse_write_sql(role, account_hex, mysql_error,
-                                         sizeof(mysql_error)))
+    if (!vm_net_mock_warehouse_write_sql(role, account_hex, &g_vm_net_mock_warehouse,
+                                         mysql_error, sizeof(mysql_error)))
     {
         printf("[error][network] mock_warehouse_persist role=%u error=%s\n",
                role->roleId, mysql_error[0] ? mysql_error : vm_mysql_last_error());

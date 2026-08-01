@@ -1181,7 +1181,6 @@ static void vm_net_mock_battle_reset_enemy_hp_from_stats(u32 enemyId)
         }
     }
     vm_net_mock_battle_sync_enemy_hp_totals();
-    g_mockBattleMonsterHealUsed = false;
 }
 
 /*
@@ -2226,6 +2225,7 @@ typedef struct vm_mock_service_account_state
     u16 pendingSceneSaveY;
 
     u32 mockBattleOperateSessionSerial;
+    u32 mockBattleMonsterHealUsedSerial;
     u32 mockBattleOperateTurnCounter;
     u8 mockBattleOperateSessionArmed;
     u8 mockBattleAwaitsRevivalConfirm;
@@ -2270,6 +2270,8 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleEnemyHpMaxSlots[3];
     u32 mockBattleEnemyHpCurrent;
     u32 mockBattleEnemyHpMax;
+    vm_net_mock_battle_enemy_ailment mockBattleEnemyAilments[3];
+    vm_net_mock_battle_stat_modifier mockBattleSoloModifier;
 
     u8 netMockTitleServerListPending;
     u8 netMockTitleServerSelectConfirmed;
@@ -2291,6 +2293,8 @@ typedef struct vm_mock_service_account_state
     vm_net_mock_warehouse_state warehouse;
     u32 persistGeneration;
     bool persistFlushBusy;
+    u32 persistDirtySerial;
+    bool persistReflushWanted;
     u32 selectedGuildId;
     bool pendingGuildCreateNameValid;
     char pendingGuildCreateName[VM_NET_MOCK_GUILD_NAME_SIZE];
@@ -2306,6 +2310,12 @@ typedef struct vm_mock_service_account_state
     u32 battleSettlementSentSerial;
     u32 battleDropRefreshSentSerial;
     u32 battleRecoveredSerial;
+    u32 battleRewardRateSuppressedSerial;
+    u32 mockBattleSettleWireRecoverHp;
+    u32 mockBattleSettleWireRecoverMp;
+    u8 offlinePractiseLoginFlag;
+    char offlinePractiseLoginInfo[160];
+    u32 remoteCompletedSceneTargetSerial;
 
     char sceneMoveinfoNpcPendingScene[64];
     bool sceneMoveinfoNpcPending;
@@ -2351,6 +2361,10 @@ typedef struct vm_mock_service_account_state
 
 static vm_mock_service_account_state *g_vm_mock_service_accounts = NULL;
 static vm_mock_service_account_state *g_vm_mock_service_active_account = NULL;
+/* Which account_state the process globals currently mirror.  Consecutive
+ * requests for the same pointer can skip the heavy roleDb memcpy on restore
+ * (phase B).  Cleared on restore(NULL) or when a different account is loaded. */
+static vm_mock_service_account_state *g_vm_mock_service_globals_account = NULL;
 static u32 g_vm_mock_service_active_client_id = 0;
 
 enum
@@ -2878,6 +2892,29 @@ typedef struct vm_mock_service_client_session
      * isgold byte (JianghuOL.CBE:0x0102CBFE).  Session-scoped until offline
      * cultivation hours are modeled in the role DB. */
     u8 practiseIsGold;
+    /*
+     * Auto / hangup playback timers: session is the sole durable authority for
+     * the connected client (solo and team-member seats).  Process globals are
+     * request scratch only.  account_state keeps legacy fields for one-shot
+     * migrate on first seed, then capture zeros them (phase D 2026-08-01).
+     */
+    bool battleAutoTimersSeeded;
+    u8 mockBattleAutoPrefer;
+    u8 mockBattleAutoPendingArmed;
+    u32 mockBattleAutoPendingNotBeforeTick;
+    u32 mockBattleAutoNextActNotBeforeMs;
+    u8 mockBattleLastRoundActionCount;
+    u8 mockBattleAutoFlagPendingArmed;
+    u32 mockBattleAutoFlagPendingNotBeforeMs;
+    u8 mockBattleAutoHangupStyleFlagOk;
+    u8 mockBattleAutoSuppressNext12;
+    u8 mockHangupLoopActive;
+    u8 mockHangupLoopScheduleAfterExit;
+    u8 mockHangupLoopPendingArmed;
+    u32 mockHangupLoopNotBeforeMs;
+    u8 mockHangupStartPendingArmed;
+    u32 mockHangupStartNotBeforeMs;
+    u8 mockHangupStopAfterBattle;
     /* The native action=4 task path carries only task_id after the NPC dialog.
      * Retain the server-observed offer source so a completed task cannot be
      * reaccepted by forging the later 6/11 request. */
@@ -2887,6 +2924,8 @@ typedef struct vm_mock_service_client_session
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
 } vm_mock_service_client_session;
+
+static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
 
 static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
 
@@ -3011,8 +3050,192 @@ static void vm_mock_service_account_state_init(vm_mock_service_account_state *st
     state->lastSceneChangeFb4Type = 1;
 }
 
+static void vm_mock_service_account_clear_auto_timers(vm_mock_service_account_state *state)
+{
+    if (state == NULL)
+        return;
+    state->mockBattleAutoPrefer = 0;
+    state->mockBattleAutoPendingArmed = 0;
+    state->mockBattleAutoPendingNotBeforeTick = 0;
+    state->mockBattleAutoNextActNotBeforeMs = 0;
+    state->mockBattleLastRoundActionCount = 0;
+    state->mockBattleAutoFlagPendingArmed = 0;
+    state->mockBattleAutoFlagPendingNotBeforeMs = 0;
+    state->mockBattleAutoHangupStyleFlagOk = 0;
+    state->mockBattleAutoClientDriven = 0;
+    state->mockBattleAutoSuppressNext12 = 0;
+    state->mockHangupLoopActive = 0;
+    state->mockHangupLoopScheduleAfterExit = 0;
+    state->mockHangupLoopPendingArmed = 0;
+    state->mockHangupLoopNotBeforeMs = 0;
+    state->mockHangupStartPendingArmed = 0;
+    state->mockHangupStartNotBeforeMs = 0;
+    state->mockHangupStopAfterBattle = 0;
+}
+
+static void vm_mock_service_session_clear_auto_timers(vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->battleAutoTimersSeeded = true;
+    session->mockBattleAutoPrefer = 0;
+    session->mockBattleAutoPendingArmed = 0;
+    session->mockBattleAutoPendingNotBeforeTick = 0;
+    session->mockBattleAutoNextActNotBeforeMs = 0;
+    session->mockBattleLastRoundActionCount = 0;
+    session->mockBattleAutoFlagPendingArmed = 0;
+    session->mockBattleAutoFlagPendingNotBeforeMs = 0;
+    session->mockBattleAutoHangupStyleFlagOk = 0;
+    session->mockBattleAutoSuppressNext12 = 0;
+    session->mockHangupLoopActive = 0;
+    session->mockHangupLoopScheduleAfterExit = 0;
+    session->mockHangupLoopPendingArmed = 0;
+    session->mockHangupLoopNotBeforeMs = 0;
+    session->mockHangupStartPendingArmed = 0;
+    session->mockHangupStartNotBeforeMs = 0;
+    session->mockHangupStopAfterBattle = 0;
+}
+
+static void vm_mock_service_session_store_auto_timers(vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return;
+    session->battleAutoTimersSeeded = true;
+    session->mockBattleAutoPrefer = g_mockBattleAutoPrefer;
+    session->mockBattleAutoPendingArmed = g_mockBattleAutoPendingArmed;
+    session->mockBattleAutoPendingNotBeforeTick = g_mockBattleAutoPendingNotBeforeTick;
+    session->mockBattleAutoNextActNotBeforeMs = g_mockBattleAutoNextActNotBeforeMs;
+    session->mockBattleLastRoundActionCount = g_mockBattleLastRoundActionCount;
+    session->mockBattleAutoFlagPendingArmed = g_mockBattleAutoFlagPendingArmed;
+    session->mockBattleAutoFlagPendingNotBeforeMs =
+        g_mockBattleAutoFlagPendingNotBeforeMs;
+    session->mockBattleAutoHangupStyleFlagOk = g_mockBattleAutoHangupStyleFlagOk;
+    session->mockBattleAutoSuppressNext12 = g_mockBattleAutoSuppressNext12;
+    session->mockHangupLoopActive = g_mockHangupLoopActive;
+    session->mockHangupLoopScheduleAfterExit = g_mockHangupLoopScheduleAfterExit;
+    session->mockHangupLoopPendingArmed = g_mockHangupLoopPendingArmed;
+    session->mockHangupLoopNotBeforeMs = g_mockHangupLoopNotBeforeMs;
+    session->mockHangupStartPendingArmed = g_mockHangupStartPendingArmed;
+    session->mockHangupStartNotBeforeMs = g_mockHangupStartNotBeforeMs;
+    session->mockHangupStopAfterBattle = g_mockHangupStopAfterBattle;
+}
+
+static void vm_mock_service_session_load_auto_timers(
+    vm_mock_service_client_session *session,
+    vm_mock_service_account_state *legacyAccount)
+{
+    u8 migrated = 0;
+
+    if (session == NULL)
+    {
+        if (legacyAccount == NULL)
+            return;
+        g_mockBattleAutoPrefer = legacyAccount->mockBattleAutoPrefer;
+        g_mockBattleAutoPendingArmed = legacyAccount->mockBattleAutoPendingArmed;
+        g_mockBattleAutoPendingNotBeforeTick =
+            legacyAccount->mockBattleAutoPendingNotBeforeTick;
+        g_mockBattleAutoNextActNotBeforeMs =
+            legacyAccount->mockBattleAutoNextActNotBeforeMs;
+        g_mockBattleLastRoundActionCount =
+            legacyAccount->mockBattleLastRoundActionCount;
+        g_mockBattleAutoFlagPendingArmed =
+            legacyAccount->mockBattleAutoFlagPendingArmed;
+        g_mockBattleAutoFlagPendingNotBeforeMs =
+            legacyAccount->mockBattleAutoFlagPendingNotBeforeMs;
+        g_mockBattleAutoHangupStyleFlagOk =
+            legacyAccount->mockBattleAutoHangupStyleFlagOk;
+        g_mockBattleAutoClientDriven = 0;
+        g_mockBattleAutoSuppressNext12 = legacyAccount->mockBattleAutoSuppressNext12;
+        g_mockHangupLoopActive = legacyAccount->mockHangupLoopActive;
+        g_mockHangupLoopScheduleAfterExit =
+            legacyAccount->mockHangupLoopScheduleAfterExit;
+        g_mockHangupLoopPendingArmed = legacyAccount->mockHangupLoopPendingArmed;
+        g_mockHangupLoopNotBeforeMs = legacyAccount->mockHangupLoopNotBeforeMs;
+        g_mockHangupStartPendingArmed = legacyAccount->mockHangupStartPendingArmed;
+        g_mockHangupStartNotBeforeMs = legacyAccount->mockHangupStartNotBeforeMs;
+        g_mockHangupStopAfterBattle = legacyAccount->mockHangupStopAfterBattle;
+        return;
+    }
+
+    if (!session->battleAutoTimersSeeded && legacyAccount != NULL)
+    {
+        session->mockBattleAutoPrefer = legacyAccount->mockBattleAutoPrefer;
+        session->mockBattleAutoPendingArmed = legacyAccount->mockBattleAutoPendingArmed;
+        session->mockBattleAutoPendingNotBeforeTick =
+            legacyAccount->mockBattleAutoPendingNotBeforeTick;
+        session->mockBattleAutoNextActNotBeforeMs =
+            legacyAccount->mockBattleAutoNextActNotBeforeMs;
+        session->mockBattleLastRoundActionCount =
+            legacyAccount->mockBattleLastRoundActionCount;
+        session->mockBattleAutoFlagPendingArmed =
+            legacyAccount->mockBattleAutoFlagPendingArmed;
+        session->mockBattleAutoFlagPendingNotBeforeMs =
+            legacyAccount->mockBattleAutoFlagPendingNotBeforeMs;
+        session->mockBattleAutoHangupStyleFlagOk =
+            legacyAccount->mockBattleAutoHangupStyleFlagOk;
+        session->mockBattleAutoSuppressNext12 =
+            legacyAccount->mockBattleAutoSuppressNext12;
+        session->mockHangupLoopActive = legacyAccount->mockHangupLoopActive;
+        session->mockHangupLoopScheduleAfterExit =
+            legacyAccount->mockHangupLoopScheduleAfterExit;
+        session->mockHangupLoopPendingArmed =
+            legacyAccount->mockHangupLoopPendingArmed;
+        session->mockHangupLoopNotBeforeMs = legacyAccount->mockHangupLoopNotBeforeMs;
+        session->mockHangupStartPendingArmed =
+            legacyAccount->mockHangupStartPendingArmed;
+        session->mockHangupStartNotBeforeMs =
+            legacyAccount->mockHangupStartNotBeforeMs;
+        session->mockHangupStopAfterBattle = legacyAccount->mockHangupStopAfterBattle;
+        session->battleAutoTimersSeeded = true;
+        vm_mock_service_account_clear_auto_timers(legacyAccount);
+        migrated = 1;
+    }
+    else if (!session->battleAutoTimersSeeded)
+    {
+        session->battleAutoTimersSeeded = true;
+    }
+
+    g_mockBattleAutoPrefer = session->mockBattleAutoPrefer;
+    g_mockBattleAutoPendingArmed = session->mockBattleAutoPendingArmed;
+    g_mockBattleAutoPendingNotBeforeTick = session->mockBattleAutoPendingNotBeforeTick;
+    g_mockBattleAutoNextActNotBeforeMs = session->mockBattleAutoNextActNotBeforeMs;
+    g_mockBattleLastRoundActionCount = session->mockBattleLastRoundActionCount;
+    g_mockBattleAutoFlagPendingArmed = session->mockBattleAutoFlagPendingArmed;
+    g_mockBattleAutoFlagPendingNotBeforeMs =
+        session->mockBattleAutoFlagPendingNotBeforeMs;
+    g_mockBattleAutoHangupStyleFlagOk = session->mockBattleAutoHangupStyleFlagOk;
+    g_mockBattleAutoClientDriven = 0;
+    g_mockBattleAutoSuppressNext12 = session->mockBattleAutoSuppressNext12;
+    g_mockHangupLoopActive = session->mockHangupLoopActive;
+    g_mockHangupLoopScheduleAfterExit = session->mockHangupLoopScheduleAfterExit;
+    g_mockHangupLoopPendingArmed = session->mockHangupLoopPendingArmed;
+    g_mockHangupLoopNotBeforeMs = session->mockHangupLoopNotBeforeMs;
+    g_mockHangupStartPendingArmed = session->mockHangupStartPendingArmed;
+    g_mockHangupStartNotBeforeMs = session->mockHangupStartNotBeforeMs;
+    g_mockHangupStopAfterBattle = session->mockHangupStopAfterBattle;
+
+    if (migrated != 0 ||
+        g_mockBattleAutoPrefer != 0 ||
+        g_mockHangupLoopActive != 0 ||
+        g_mockBattleAutoPendingArmed != 0)
+    {
+        printf("[info][mock-service] auto_timers_session_load client=%08x "
+               "prefer=%u pending=%u next_act_ms=%u hangup=%u migrated=%u "
+               "evidence=phase-d-session-authority\n",
+               session->clientId,
+               g_mockBattleAutoPrefer ? 1 : 0,
+               g_mockBattleAutoPendingArmed ? 1 : 0,
+               g_mockBattleAutoNextActNotBeforeMs,
+               g_mockHangupLoopActive ? 1 : 0,
+               migrated ? 1 : 0);
+    }
+}
+
 static void vm_mock_service_account_capture(vm_mock_service_account_state *state)
 {
+    vm_mock_service_client_session *session = NULL;
+    int agentRoleDbSkip = 0;
+
     if (state == NULL)
         return;
 
@@ -3030,6 +3253,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->pendingSceneSaveY = g_vm_net_mock_pending_scene_save_y;
 
     state->mockBattleOperateSessionSerial = g_mockBattleOperateSessionSerial;
+    state->mockBattleMonsterHealUsedSerial = g_mockBattleMonsterHealUsedSerial;
     state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
     state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
     state->mockBattleAwaitsRevivalConfirm = g_mockBattleAwaitsRevivalConfirm;
@@ -3052,24 +3276,38 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleLastOperateValid = g_mockBattleLastOperateValid;
     state->mockBattleLastOperate = g_mockBattleLastOperate;
     state->mockBattleLastIndex = g_mockBattleLastIndex;
-    state->mockBattleAutoPrefer = g_mockBattleAutoPrefer;
-    state->mockBattleAutoPendingArmed = g_mockBattleAutoPendingArmed;
-    state->mockBattleAutoPendingNotBeforeTick = g_mockBattleAutoPendingNotBeforeTick;
-    state->mockBattleAutoNextActNotBeforeMs = g_mockBattleAutoNextActNotBeforeMs;
-    state->mockBattleLastRoundActionCount = g_mockBattleLastRoundActionCount;
-    state->mockBattleAutoFlagPendingArmed = g_mockBattleAutoFlagPendingArmed;
-    state->mockBattleAutoFlagPendingNotBeforeMs =
-        g_mockBattleAutoFlagPendingNotBeforeMs;
-    state->mockBattleAutoHangupStyleFlagOk = g_mockBattleAutoHangupStyleFlagOk;
-    state->mockBattleAutoClientDriven = 0;
-    state->mockBattleAutoSuppressNext12 = g_mockBattleAutoSuppressNext12;
-    state->mockHangupLoopActive = g_mockHangupLoopActive;
-    state->mockHangupLoopScheduleAfterExit = g_mockHangupLoopScheduleAfterExit;
-    state->mockHangupLoopPendingArmed = g_mockHangupLoopPendingArmed;
-    state->mockHangupLoopNotBeforeMs = g_mockHangupLoopNotBeforeMs;
-    state->mockHangupStartPendingArmed = g_mockHangupStartPendingArmed;
-    state->mockHangupStartNotBeforeMs = g_mockHangupStartNotBeforeMs;
-    state->mockHangupStopAfterBattle = g_mockHangupStopAfterBattle;
+    /*
+     * Auto/hangup timers: session authority.  Store globals onto the active
+     * session and keep account_state fields zero so restore cannot resurrect
+     * a second clock (phase D).  No session → legacy account stash.
+     */
+    session = vm_mock_service_get_active_client_session();
+    if (session != NULL)
+    {
+        vm_mock_service_session_store_auto_timers(session);
+        vm_mock_service_account_clear_auto_timers(state);
+    }
+    else
+    {
+        state->mockBattleAutoPrefer = g_mockBattleAutoPrefer;
+        state->mockBattleAutoPendingArmed = g_mockBattleAutoPendingArmed;
+        state->mockBattleAutoPendingNotBeforeTick = g_mockBattleAutoPendingNotBeforeTick;
+        state->mockBattleAutoNextActNotBeforeMs = g_mockBattleAutoNextActNotBeforeMs;
+        state->mockBattleLastRoundActionCount = g_mockBattleLastRoundActionCount;
+        state->mockBattleAutoFlagPendingArmed = g_mockBattleAutoFlagPendingArmed;
+        state->mockBattleAutoFlagPendingNotBeforeMs =
+            g_mockBattleAutoFlagPendingNotBeforeMs;
+        state->mockBattleAutoHangupStyleFlagOk = g_mockBattleAutoHangupStyleFlagOk;
+        state->mockBattleAutoClientDriven = 0;
+        state->mockBattleAutoSuppressNext12 = g_mockBattleAutoSuppressNext12;
+        state->mockHangupLoopActive = g_mockHangupLoopActive;
+        state->mockHangupLoopScheduleAfterExit = g_mockHangupLoopScheduleAfterExit;
+        state->mockHangupLoopPendingArmed = g_mockHangupLoopPendingArmed;
+        state->mockHangupLoopNotBeforeMs = g_mockHangupLoopNotBeforeMs;
+        state->mockHangupStartPendingArmed = g_mockHangupStartPendingArmed;
+        state->mockHangupStartNotBeforeMs = g_mockHangupStartNotBeforeMs;
+        state->mockHangupStopAfterBattle = g_mockHangupStopAfterBattle;
+    }
     state->mockBattleRoleHpCurrent = g_mockBattleRoleHpCurrent;
     state->mockBattleRoleHpMax = g_mockBattleRoleHpMax;
     state->mockBattleRoleMpCurrent = g_mockBattleRoleMpCurrent;
@@ -3079,6 +3317,9 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     memcpy(state->mockBattleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots, sizeof(state->mockBattleEnemyHpMaxSlots));
     state->mockBattleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
     state->mockBattleEnemyHpMax = g_mockBattleEnemyHpMax;
+    memcpy(state->mockBattleEnemyAilments, g_mockBattleEnemyAilments,
+           sizeof(state->mockBattleEnemyAilments));
+    state->mockBattleSoloModifier = g_vm_net_mock_battle_solo_modifier;
 
     state->netMockTitleServerListPending = g_netMockTitleServerListPending;
     state->netMockTitleServerSelectConfirmed = g_netMockTitleServerSelectConfirmed;
@@ -3091,12 +3332,42 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->updateCompletedReenterPending = g_vm_net_mock_update_completed_reenter_pending;
     memcpy(state->updateCompletedName, g_vm_net_mock_update_completed_name, sizeof(state->updateCompletedName));
 
-    state->roleDb = g_vm_net_mock_role_db;
-    state->roleDbLoaded = g_vm_net_mock_role_db_loaded;
-    state->roleDbValid = g_vm_net_mock_role_db_valid;
     state->rolePositionDirty = g_vm_net_mock_role_position_dirty;
     state->roleInventoryDirty = g_vm_net_mock_role_inventory_dirty;
-    state->warehouse = g_vm_net_mock_warehouse;
+    if (state->rolePositionDirty || state->roleInventoryDirty ||
+        state != g_vm_mock_service_globals_account ||
+        !state->roleDbLoaded || !g_vm_net_mock_role_db_loaded)
+    {
+        state->roleDb = g_vm_net_mock_role_db;
+        state->roleDbLoaded = g_vm_net_mock_role_db_loaded;
+        state->roleDbValid = g_vm_net_mock_role_db_valid;
+    }
+    else
+    {
+        agentRoleDbSkip = 1;
+        printf("[info][mock-service] role_db_capture skipped=1 account=%s "
+               "pos_dirty=%u inv_dirty=%u evidence=sticky-restore\n",
+               state->accountId[0] ? state->accountId : "-",
+               state->rolePositionDirty ? 1u : 0u,
+               state->roleInventoryDirty ? 1u : 0u);
+    }
+    (void)agentRoleDbSkip;
+    if (state->persistFlushBusy &&
+        (state->rolePositionDirty || state->roleInventoryDirty))
+    {
+        state->persistReflushWanted = true;
+        state->persistDirtySerial += 1u;
+        if (state->persistDirtySerial == 0u)
+            state->persistDirtySerial = 1u;
+    }
+    /* session_mark_offline clears the process warehouse loaded flag.  Do not
+     * let that empty shell overwrite a previously captured account snapshot. */
+    if (g_vm_net_mock_warehouse.loaded &&
+        g_vm_net_mock_warehouse.accountId[0] != 0 &&
+        strcmp(g_vm_net_mock_warehouse.accountId, state->accountId) == 0)
+    {
+        state->warehouse = g_vm_net_mock_warehouse;
+    }
 
     state->battleRewardedSerial = g_vm_net_mock_battle_rewarded_serial;
     state->battleRewardedExp = g_vm_net_mock_battle_rewarded_exp;
@@ -3110,6 +3381,15 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->battleSettlementSentSerial = g_vm_net_mock_battle_settlement_sent_serial;
     state->battleDropRefreshSentSerial = g_vm_net_mock_battle_drop_refresh_sent_serial;
     state->battleRecoveredSerial = g_vm_net_mock_battle_recovered_serial;
+    state->battleRewardRateSuppressedSerial =
+        g_vm_net_mock_battle_reward_rate_suppressed_serial;
+    state->mockBattleSettleWireRecoverHp = g_mockBattleSettleWireRecoverHp;
+    state->mockBattleSettleWireRecoverMp = g_mockBattleSettleWireRecoverMp;
+    state->offlinePractiseLoginFlag = vm_net_mock_role_offline_practise_login_flag();
+    snprintf(state->offlinePractiseLoginInfo, sizeof(state->offlinePractiseLoginInfo),
+             "%s", vm_net_mock_role_offline_practise_login_info());
+    state->remoteCompletedSceneTargetSerial =
+        g_vm_net_mock_remote_completed_scene_target_serial;
 
     memcpy(state->sceneMoveinfoNpcPendingScene, g_vm_net_mock_scene_moveinfo_npc_pending_scene,
            sizeof(state->sceneMoveinfoNpcPendingScene));
@@ -3157,48 +3437,35 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
 
 static void vm_mock_service_account_restore(vm_mock_service_account_state *state)
 {
-    /*
-     * Team-battle wire context lives in process globals and is NOT part of the
-     * per-account snapshot.  Request handlers often null active_account without
-     * clearing it, so party_count>=2 from a prior team poll/operate can leak
-     * into the next client's solo fight (subtype-5 wires look like self-hit).
-     * Always drop it on restore; team prepare / auto_pull re-seed before use.
-     */
-    if (g_vm_net_mock_team_battle_party_count_current != 0 ||
-        g_vm_net_mock_team_battle_actor_slot_current != 0 ||
-        g_vm_net_mock_team_battle_member_count_current != 0 ||
-        g_vm_net_mock_team_battle_resolve_monsters_current != 0)
-    {
-        printf("[info][mock-service] team_battle_context_clear_on_account_restore "
-               "account=%s party=%u actor=%u members=%u resolve=%u "
-               "evidence=cross-account-wire-leak\n",
-               state && state->accountId[0] ? state->accountId : "-",
-               g_vm_net_mock_team_battle_party_count_current,
-               g_vm_net_mock_team_battle_actor_slot_current,
-               g_vm_net_mock_team_battle_member_count_current,
-               g_vm_net_mock_team_battle_resolve_monsters_current);
-    }
-    g_vm_net_mock_team_battle_party_count_current = 0;
-    g_vm_net_mock_team_battle_actor_slot_current = 0;
-    g_vm_net_mock_team_battle_resolve_monsters_current = 0;
-    g_vm_net_mock_team_battle_member_count_current = 0;
-    memset(g_vm_net_mock_team_battle_member_hp_current, 0,
-           sizeof(g_vm_net_mock_team_battle_member_hp_current));
-    memset(g_vm_net_mock_team_battle_member_hp_max_current, 0,
-           sizeof(g_vm_net_mock_team_battle_member_hp_max_current));
-    g_vm_net_mock_team_battle_group_hp_changed_mask = 0;
-    memset(g_vm_net_mock_team_battle_member_modifiers_current, 0,
-           sizeof(g_vm_net_mock_team_battle_member_modifiers_current));
-    g_vm_net_mock_team_battle_group_modifier_changed_mask = 0;
-    memset(&g_vm_net_mock_battle_active_modifier_current, 0,
-           sizeof(g_vm_net_mock_battle_active_modifier_current));
-    g_vm_net_mock_battle_mp_increase_allowed = 0;
+    vm_mock_service_clear_request_local_scratch(
+        state ? "account_restore" : "account_restore_null");
 
     g_vm_mock_service_active_account = state;
     g_vm_mock_service_active_account_id = state ? state->accountId : NULL;
 
     if (state == NULL)
+    {
+        g_vm_mock_service_globals_account = NULL;
         return;
+    }
+
+    if (state == g_vm_mock_service_globals_account)
+    {
+        vm_mock_service_client_session *autoSession =
+            vm_mock_service_get_active_client_session();
+        vm_mock_service_session_load_auto_timers(autoSession, state);
+        g_mockBattleAwaitsRevivalConfirm = state->mockBattleAwaitsRevivalConfirm;
+        if (autoSession != NULL)
+            autoSession->awaitsBattleRevivalConfirm =
+                state->mockBattleAwaitsRevivalConfirm != 0;
+        printf("[info][mock-service] sticky_restore skipped=1 account=%s "
+               "client=%08x prefer=%u hangup=%u evidence=phase-b-sticky\n",
+               state->accountId[0] ? state->accountId : "-",
+               g_vm_mock_service_active_client_id,
+               g_mockBattleAutoPrefer ? 1u : 0u,
+               g_mockHangupLoopActive ? 1u : 0u);
+        return;
+    }
 
     g_netMockSplitProbe = state->netMockSplitProbe;
     g_netMockUpdateDelivered = state->netMockUpdateDelivered;
@@ -3214,6 +3481,7 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_pending_scene_save_y = state->pendingSceneSaveY;
 
     g_mockBattleOperateSessionSerial = state->mockBattleOperateSessionSerial;
+    g_mockBattleMonsterHealUsedSerial = state->mockBattleMonsterHealUsedSerial;
     g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
     g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
     g_mockBattleAwaitsRevivalConfirm = state->mockBattleAwaitsRevivalConfirm;
@@ -3243,30 +3511,6 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_mockBattleLastOperateValid = state->mockBattleLastOperateValid;
     g_mockBattleLastOperate = state->mockBattleLastOperate;
     g_mockBattleLastIndex = state->mockBattleLastIndex;
-    g_mockBattleAutoPrefer = state->mockBattleAutoPrefer;
-    /*
-     * Playback / cancel-window timers must survive same-account restore.
-     * Zeroing them every request let prefer-poll-rearm fire the next synth
-     * while actioninfo was still playing — multi-monster fights looked like
-     * "enemies not dead yet but battle ended".
-     */
-    g_mockBattleAutoPendingArmed = state->mockBattleAutoPendingArmed;
-    g_mockBattleAutoPendingNotBeforeTick = state->mockBattleAutoPendingNotBeforeTick;
-    g_mockBattleAutoNextActNotBeforeMs = state->mockBattleAutoNextActNotBeforeMs;
-    g_mockBattleLastRoundActionCount = state->mockBattleLastRoundActionCount;
-    g_mockBattleAutoFlagPendingArmed = state->mockBattleAutoFlagPendingArmed;
-    g_mockBattleAutoFlagPendingNotBeforeMs =
-        state->mockBattleAutoFlagPendingNotBeforeMs;
-    g_mockBattleAutoHangupStyleFlagOk = state->mockBattleAutoHangupStyleFlagOk;
-    g_mockBattleAutoClientDriven = 0;
-    g_mockBattleAutoSuppressNext12 = state->mockBattleAutoSuppressNext12;
-    g_mockHangupLoopActive = state->mockHangupLoopActive;
-    g_mockHangupLoopScheduleAfterExit = state->mockHangupLoopScheduleAfterExit;
-    g_mockHangupLoopPendingArmed = state->mockHangupLoopPendingArmed;
-    g_mockHangupLoopNotBeforeMs = state->mockHangupLoopNotBeforeMs;
-    g_mockHangupStartPendingArmed = state->mockHangupStartPendingArmed;
-    g_mockHangupStartNotBeforeMs = state->mockHangupStartNotBeforeMs;
-    g_mockHangupStopAfterBattle = state->mockHangupStopAfterBattle;
     g_mockBattleRoleHpCurrent = state->mockBattleRoleHpCurrent;
     g_mockBattleRoleHpMax = state->mockBattleRoleHpMax;
     g_mockBattleRoleMpCurrent = state->mockBattleRoleMpCurrent;
@@ -3276,6 +3520,10 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     memcpy(g_mockBattleEnemyHpMaxSlots, state->mockBattleEnemyHpMaxSlots, sizeof(g_mockBattleEnemyHpMaxSlots));
     g_mockBattleEnemyHpCurrent = state->mockBattleEnemyHpCurrent;
     g_mockBattleEnemyHpMax = state->mockBattleEnemyHpMax;
+    memcpy(g_mockBattleEnemyAilments, state->mockBattleEnemyAilments,
+           sizeof(g_mockBattleEnemyAilments));
+    g_vm_net_mock_battle_solo_modifier = state->mockBattleSoloModifier;
+    g_vm_net_mock_battle_active_modifier_current = state->mockBattleSoloModifier;
 
     g_netMockTitleServerListPending = state->netMockTitleServerListPending;
     g_netMockTitleServerSelectConfirmed = state->netMockTitleServerSelectConfirmed;
@@ -3308,6 +3556,15 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_battle_settlement_sent_serial = state->battleSettlementSentSerial;
     g_vm_net_mock_battle_drop_refresh_sent_serial = state->battleDropRefreshSentSerial;
     g_vm_net_mock_battle_recovered_serial = state->battleRecoveredSerial;
+    g_vm_net_mock_battle_reward_rate_suppressed_serial =
+        state->battleRewardRateSuppressedSerial;
+    g_mockBattleSettleWireRecoverHp = state->mockBattleSettleWireRecoverHp;
+    g_mockBattleSettleWireRecoverMp = state->mockBattleSettleWireRecoverMp;
+    g_vm_net_mock_offline_practise_login_flag = state->offlinePractiseLoginFlag;
+    memcpy(g_vm_net_mock_offline_practise_login_info, state->offlinePractiseLoginInfo,
+           sizeof(g_vm_net_mock_offline_practise_login_info));
+    g_vm_net_mock_remote_completed_scene_target_serial =
+        state->remoteCompletedSceneTargetSerial;
 
     memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, state->sceneMoveinfoNpcPendingScene,
            sizeof(g_vm_net_mock_scene_moveinfo_npc_pending_scene));
@@ -3351,6 +3608,13 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_last_moveinfo_source_y = state->lastMoveinfoSourceY;
     g_vm_net_mock_last_moveinfo_source_tick = state->lastMoveinfoSourceTick;
     g_vm_net_mock_last_moveinfo_source_valid = state->lastMoveinfoSourceValid;
+
+    {
+        vm_mock_service_client_session *autoSession =
+            vm_mock_service_get_active_client_session();
+        vm_mock_service_session_load_auto_timers(autoSession, state);
+    }
+    g_vm_mock_service_globals_account = state;
 }
 
 static vm_mock_service_account_state *vm_mock_service_account_find(const char *accountId)
@@ -3440,6 +3704,8 @@ static void vm_mock_service_account_release_if_idle(const char *accountId)
         prev->next = state->next;
     else
         g_vm_mock_service_accounts = state->next;
+    if (g_vm_mock_service_globals_account == state)
+        g_vm_mock_service_globals_account = NULL;
     printf("[info][mock-service] account_release id=%s reason=idle\n", state->accountId);
     free(state);
 }
@@ -6558,7 +6824,14 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->quickRepairEquipSyncPending = false;
     session->quickRepairEquipSyncPhase = 0;
     session->quickRepairEquipSyncTick = 0;
-    g_vm_net_mock_warehouse.loaded = false;
+    vm_mock_service_session_clear_auto_timers(session);
+    if (session->accountId[0] != 0 &&
+        g_vm_net_mock_warehouse.loaded &&
+        g_vm_net_mock_warehouse.accountId[0] != 0 &&
+        strcmp(g_vm_net_mock_warehouse.accountId, session->accountId) == 0)
+    {
+        g_vm_net_mock_warehouse.loaded = false;
+    }
     vm_mock_service_session_clear_moveinfo(session, reason ? reason : "offline");
     vm_mock_service_session_reset_movement_rate(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
@@ -6652,6 +6925,9 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
                sameAccount ? 1u : 0u,
                session->sceneVisibleReady ? 1u : 0u,
                session->roleOnline ? 1u : 0u);
+        vm_mock_service_account_flush_for_session(
+            session,
+            sameAccount ? "title-login-rebind" : "account-rebind");
         vm_mock_service_session_mark_offline(
             session,
             sameAccount ? "title-login-rebind" : "account-rebind");

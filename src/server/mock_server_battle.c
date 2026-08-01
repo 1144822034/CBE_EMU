@@ -22,6 +22,53 @@ static u8 vm_net_mock_battle_enemy_ailments_advance_round(void);
 static u8 g_mockBattleAutoSynthInProgress = 0;
 
 /*
+ * Team-battle wire scratch and other request-local battle globals must not
+ * survive a request boundary.  They are NOT part of the account snapshot;
+ * handlers often null active_account without restoring NULL, so clear both on
+ * account_restore and after every protocol request ends.
+ */
+static void vm_mock_service_clear_request_local_scratch(const char *reason)
+{
+    if (g_vm_net_mock_team_battle_party_count_current != 0 ||
+        g_vm_net_mock_team_battle_actor_slot_current != 0 ||
+        g_vm_net_mock_team_battle_member_count_current != 0 ||
+        g_vm_net_mock_team_battle_resolve_monsters_current != 0)
+    {
+        printf("[info][mock-service] team_battle_context_clear "
+               "reason=%s account=%s party=%u actor=%u members=%u resolve=%u "
+               "evidence=cross-account-wire-leak\n",
+               reason ? reason : "-",
+               g_vm_mock_service_active_account &&
+                       g_vm_mock_service_active_account->accountId[0]
+                   ? g_vm_mock_service_active_account->accountId
+                   : "-",
+               g_vm_net_mock_team_battle_party_count_current,
+               g_vm_net_mock_team_battle_actor_slot_current,
+               g_vm_net_mock_team_battle_member_count_current,
+               g_vm_net_mock_team_battle_resolve_monsters_current);
+    }
+    g_vm_net_mock_team_battle_party_count_current = 0;
+    g_vm_net_mock_team_battle_actor_slot_current = 0;
+    g_vm_net_mock_team_battle_resolve_monsters_current = 0;
+    g_vm_net_mock_team_battle_member_count_current = 0;
+    memset(g_vm_net_mock_team_battle_member_hp_current, 0,
+           sizeof(g_vm_net_mock_team_battle_member_hp_current));
+    memset(g_vm_net_mock_team_battle_member_hp_max_current, 0,
+           sizeof(g_vm_net_mock_team_battle_member_hp_max_current));
+    g_vm_net_mock_team_battle_group_hp_changed_mask = 0;
+    memset(g_vm_net_mock_team_battle_member_modifiers_current, 0,
+           sizeof(g_vm_net_mock_team_battle_member_modifiers_current));
+    g_vm_net_mock_team_battle_group_modifier_changed_mask = 0;
+    memset(&g_vm_net_mock_battle_active_modifier_current, 0,
+           sizeof(g_vm_net_mock_battle_active_modifier_current));
+    g_vm_net_mock_battle_mp_increase_allowed = 0;
+    g_vm_net_mock_battle_formula_enemy_index = 0xff;
+    g_mockBattleAutoSynthInProgress = 0;
+    g_mockBattleLastOutcomeChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_NORMAL;
+    (void)reason;
+}
+
+/*
  * Solo/group 4/2 actioninfo must fit one type-1 multi-child skill plus up to
  * three death actions and three bundled counterattacks.  Tagged encoding for
  * a non-lethal 3-target group skill + 3 counters is ~232 bytes; the old 128
@@ -331,17 +378,6 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
     vm_net_mock_battle_suspend_solo_auto_for_team("team-battle-deliver");
 
     observer->pendingTeamBattleSerial = 0;
-    printf("[info][mock-service] team_battle_deliver serial=%u observer=%08x "
-           "leader=%08x enemy=%u scene=%s party=%u subtype=5 side=%u "
-           "objects=2 resp=%u evidence=mmBattle:0x7BD0->0x66CC\n",
-           pendingSerial,
-           observer->clientId,
-           team->battleLeaderClientId,
-           team->battleEnemyId,
-           team->battleScene,
-           partyCount,
-           team->battleSide,
-           pos);
     return pos;
 }
 
@@ -978,7 +1014,22 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     }
 
     enemyIndex = vm_net_mock_battle_live_enemy_index_for_strike(strikeIndex);
-    if (enemyIndex < 3 && !g_mockBattleMonsterHealUsed &&
+    /* 封魔/神堂静默 (silenceRounds): same as duel — skills and self-heal are
+     * blocked; only a normal-attack counter remains. */
+    if (enemyIndex < 3 &&
+        g_mockBattleEnemyAilments[enemyIndex].silenceRounds != 0)
+    {
+        damage = vm_net_mock_battle_enemy_damage_to_role(enemyId, roleHpCurrent);
+        printf("[info][network] mock_battle_enemy_silenced enemy=%u slot=%u "
+               "silence_rounds=%u damage=%u evidence=pve-silence-blocks-skill+"
+               "heal+duel-parity\n",
+               enemyId, enemyIndex,
+               g_mockBattleEnemyAilments[enemyIndex].silenceRounds, damage);
+        return damage;
+    }
+    /* Once per OperateSessionSerial (account-scoped via capture/restore). */
+    if (enemyIndex < 3 && g_mockBattleOperateSessionSerial != 0 &&
+        g_mockBattleMonsterHealUsedSerial != g_mockBattleOperateSessionSerial &&
         g_mockBattleEnemyHpMaxSlots[enemyIndex] != 0 &&
         (uint64_t)g_mockBattleEnemyHpSlots[enemyIndex] * 100ull <
             (uint64_t)g_mockBattleEnemyHpMaxSlots[enemyIndex] * 60ull)
@@ -1013,7 +1064,8 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                 if (g_mockBattleEnemyHpSlots[enemyIndex] > hpMax)
                     g_mockBattleEnemyHpSlots[enemyIndex] = hpMax;
                 vm_net_mock_battle_sync_enemy_hp_totals();
-                g_mockBattleMonsterHealUsed = true;
+                g_mockBattleMonsterHealUsedSerial =
+                    g_mockBattleOperateSessionSerial;
                 vm_net_mock_battle_clear_outcome_child_flag();
                 if (actionTypeOut)
                     *actionTypeOut = 1;
@@ -1027,10 +1079,12 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
                     *healAmountOut = healAmount;
                 printf("[info][network] mock_battle_boss_heal enemy=%u skill=%u "
                        "effect=%u heal=%u hp=%u/%u turn=%u chance=%u roll=%u "
-                       "evidence=hp<60+once-per-battle+skill.dsh:生命变化\n",
+                       "battle_serial=%u evidence=hp<60+once-per-battle-serial+"
+                       "skill.dsh:生命变化\n",
                        enemyId, skillId, skill->effectIndex, healAmount,
                        g_mockBattleEnemyHpSlots[enemyIndex], hpMax,
-                       g_mockBattleOperateTurnCounter, chance, roll);
+                       g_mockBattleOperateTurnCounter, chance, roll,
+                       g_mockBattleOperateSessionSerial);
                 return 0;
             }
         }
@@ -1789,7 +1843,26 @@ static u8 vm_net_mock_battle_apply_player_attack_targets(
         }
         else if (operateIsSkill)
         {
-            /* Miss still may apply silence-only skills; damage skills skip. */
+            const vm_net_mock_skill_catalog_item *skill =
+                vm_net_mock_battle_operate_skill(operate);
+            u8 enemyIndex = 0;
+
+            if (vm_net_mock_battle_operate_skill_targets_enemy_status_no_damage(
+                    operate) &&
+                skill != NULL &&
+                vm_net_mock_battle_enemy_wire_to_index(
+                    targetWireSlot, playerOnRight, battleSide, fallbackEnemySlot,
+                    &enemyIndex) &&
+                enemyIndex < 3)
+            {
+                vm_net_mock_battle_apply_skill_to_enemy_ailment(enemyIndex, skill,
+                                                               0);
+                printf("[info][network] mock_battle_status_on_miss operate=%u "
+                       "enemy_slot=%u silence=%u evidence=pve-silence-applies-"
+                       "even-on-dodge\n",
+                       operate, enemyIndex,
+                       g_mockBattleEnemyAilments[enemyIndex].silenceRounds);
+            }
         }
         g_vm_net_mock_battle_formula_enemy_index = 0xff;
     }
@@ -3639,37 +3712,6 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         firstRecordWireTargetUsed,
         operate,
         operateConsumesTurn);
-    printf("[info][network] mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u costAction=%u costHp=%u costMp=%u mp=%u/%u resp=%u evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
-           index, operate, operateIsSkill ? 1 : 0,
-           skillTargetsEnemyGroup ? 4 :
-               ((skillTargetsFriendlyGroupHeal || skillTargetsFriendlyGroupModifier) ? 2 : 0),
-           attackTargetCount,
-           attackWireSlots[0], attackWireSlots[1], attackWireSlots[2],
-           attackDamageValues[0], attackDamageValues[1], attackDamageValues[2],
-           firstActionType, actionCount,
-           (firstActionType == 1 || firstActionType == 2) ? type1EffectIndex : 0,
-           firstRecordWireActorUsed, firstRecordWireTargetUsed,
-           g_mockBattleEnemyHpCurrent,
-           g_mockBattleEnemyHpSlots[0],
-           g_mockBattleEnemyHpSlots[1],
-           g_mockBattleEnemyHpSlots[2],
-           g_mockBattleRoleHpCurrent,
-           allowCounterattack ? counterWireCount : 0,
-           deathActionCount,
-           deathActionCount ? deathActionWireSlot : 0,
-           counterDamageValue,
-           skillMpCost, firstRecordMpDelta,
-           skillTeamInfoEnabled ? skillTeamRoleId : 0,
-           skillTeamInfoEnabled ? skillTeamHp : 0,
-           skillTeamInfoEnabled ? skillTeamMp : 0,
-           bundleWholeRound ? 1 : 0,
-           g_mockBattlePendingEnemyTurn ? 1 : 0,
-           battleEndsThisRound ? "action6-first" : "action6-only",
-           terminalActionEnabled ? 1 : 0,
-           (operateIsSkill && skillCostActionEnabled) ? skillCostActionType : 0,
-           (operateIsSkill && skillCostActionEnabled) ? skillCostValueA : 0,
-           (operateIsSkill && skillCostActionEnabled) ? skillCostValueB : 0,
-           skillMpBefore, skillMpPrepared ? skillMpAfter : skillMpBefore, pos);
     vm_autotest_note("mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u costAction=%u costHp=%u costMp=%u mp=%u/%u response=4/6 evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
                      index, operate, operateIsSkill ? 1 : 0,
                      skillTargetsEnemyGroup ? 4 :
@@ -8574,23 +8616,6 @@ static u32 vm_net_mock_build_pending_team_battle_action_response(
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     event->deliveredMask = (u8)(event->deliveredMask | memberBit);
-    printf("[info][mock-service] team_battle_action_deliver battle=%u action=%u "
-           "observer=%08x source=%08x source_wire=%u actor=%u "
-           "enemyhp=%u/%u terminal=%u objects=%u resp=%u delivered=%02x/%02x "
-           "evidence=mmBattle:0x6CE8/0x6EB0\n",
-           team->battleSerial,
-           event->serial,
-           observer->clientId,
-           event->sourceClientId,
-           sourceWireId,
-           memberIndex,
-           team->battleEnemyHpCurrent,
-           team->battleEnemyHpMax,
-           event->terminalVictory ? 1 : 0,
-           objectCount,
-           pos,
-           event->deliveredMask,
-           fullMask);
     if (event->deliveredMask == fullMask)
         event->valid = false;
     return pos;

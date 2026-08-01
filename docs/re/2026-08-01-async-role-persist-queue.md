@@ -1,18 +1,19 @@
 # 异步 role 落库队列（2026-08-01）
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**专用 persist worker 队列不在当前树。** 详见 `2026-08-01-server-baseline-audit.md`。
+**专用 persist worker 队列已合入当前树。** 详见 `2026-08-01-server-baseline-audit.md`。
 
 | 项 | 现状 |
 | --- | --- |
-| 锁内拷贝 `roleDb`+`warehouse`，锁外 MySQL（`off_lock=1`） | **仍在** |
-| `persistGeneration` 清脏门闩 | **仍在**（同 generation 才清 dirty） |
-| 2 个 persist worker / `persistDirtySerial` / `persistReflushWanted` | **不在** |
-| 日志 `persist_workers=2` / `async_flush=1` / `role_deferred_flush_queued` | **不会出现** |
-| flush 仍在发起请求的 game worker 上等待 `flush_ms` | **是** |
+| 锁内拷贝 `roleDb`+`warehouse`，锁外 MySQL | **仍在**（经 persist worker） |
+| `persistGeneration` 清脏门闩 | **仍在** |
+| 2 persist worker / `persistDirtySerial` / `persistReflushWanted` | **已合入** |
+| 日志 `persist_workers=2` / `async_flush=1` / `role_deferred_flush_queued` | **会出现** |
+| `g_vm_mock_persist_write_mutex` | **已实现** |
+| warehouse 快照参数 | **已合入**（见 warehouse-deferred-flush-lost） |
 
-下文「修改 / 验证」是未合入或已撤回的性能方案；当前验收只认 `off_lock=1` 的 deferred flush。
+下文「修改 / 验证」为已落地方案。
 
 ## 问题
 
@@ -20,7 +21,7 @@ B-lite 已把 MySQL 移出协议锁（`off_lock=1`），但 `flush_deferred_role
 仍在 **game worker** 上同步等待 `flush_ms`。挂机 settle / 背包脏写密集时
 占满 worker，抬高他人 `queue_wait_ms`。
 
-## 修改（目标 / 未落地）
+## 修改（已落地）
 
 1. CBMR 后 `flush_deferred` 只入队账号快照（roleDb + warehouse），立即返回。
 2. 专用 **2** 个 persist worker 写库；`persistGeneration` + `persistDirtySerial`

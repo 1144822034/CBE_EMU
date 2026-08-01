@@ -2,15 +2,14 @@
 
 日期：2026-08-01
 
-## 代码现状（2026-08-01 审计）
+## 代码现状（2026-08-01 补回后）
 
-**热路径 info printf 砍削不在当前树。** `mock_battle_operate` /
-`team_battle_deliver` / `team_battle_action_deliver` 仍打 info 行。传输层仅对
-`builtin-actor-moveinfo-ack` 跳过 summary+`fflush`，**未**对
-`builtin-battle-operate` 跳过。细锁仍未做。详见
-`2026-08-01-server-baseline-audit.md`。
+**热路径 info printf 砍削已合入当前树。** `mock_battle_operate` 主路径仅保留
+`vm_autotest_note`；`team_battle_deliver` / `team_battle_action_deliver` 的 per-request
+info 行已移除。传输层对 `builtin-battle-operate` 与 `builtin-actor-moveinfo-ack` 一样
+跳过 summary+`fflush`。细锁仍未做。详见 `2026-08-01-server-baseline-audit.md`。
 
-下文记录当时取证与曾合入后的 post-fix 数字；与当前源码不一致时以源码为准。
+下文 post-fix 数字来自曾合入 session；与当前源码一致时可作回归对照。
 
 ## 触发与取证
 

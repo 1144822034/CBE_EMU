@@ -511,6 +511,7 @@ static int vm_mock_service_connect(const char *host, u16 port, vm_mock_service_s
  * on the remote provider.  Declare it before the included web implementation
  * so that the payment helper can keep game requests moving during that wait. */
 static pthread_mutex_t g_vm_mock_service_protocol_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_vm_mock_persist_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* HTTP management implementation depends on the shared helpers above. */
 #include "../web_admin_server.c"
@@ -890,102 +891,145 @@ static void vm_net_mock_service_notify_disconnect(const char *reason)
  * reading requests, while the legacy state transition remains atomic until it
  * is migrated to an explicit per-request context.
  */
-static void vm_mock_service_flush_deferred_role_db(
-    vm_mock_service_account_state *accountState,
-    const char *logAccountId)
+/*
+ * Deferred role MySQL is queued to dedicated persist workers so game threads
+ * return immediately after CBMR (async flush). Snapshots are copied at enqueue;
+ * writers must not read process warehouse globals (see warehouse-deferred-flush).
+ */
+enum
 {
-    typedef struct
+    VM_MOCK_PERSIST_WORKER_COUNT = 2,
+    VM_MOCK_PERSIST_QUEUE_MAX = 64
+};
+
+typedef struct
+{
+    char accountId[64];
+    vm_net_mock_role_db_file roleDb;
+    bool roleDbValid;
+    vm_net_mock_warehouse_state warehouse;
+    bool warehouseIncluded;
+    u32 persistGeneration;
+    u32 persistDirtySerial;
+    bool hadInventoryDirty;
+    bool hadPositionDirty;
+    char flushReason[48];
+    u32 enqueuedMs;
+} vm_mock_role_persist_job;
+
+typedef struct
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    bool initialized;
+    bool stopRequested;
+    u32 queueHead;
+    u32 queueTail;
+    u32 queuedJobs;
+    vm_mock_role_persist_job *jobs[VM_MOCK_PERSIST_QUEUE_MAX];
+    pthread_t workers[VM_MOCK_PERSIST_WORKER_COUNT];
+} vm_mock_persist_pool;
+
+static vm_mock_persist_pool g_vmMockPersistPool;
+
+static bool vm_mock_persist_pool_enqueue_job(vm_mock_role_persist_job *job)
+{
+    if (job == NULL || !g_vmMockPersistPool.initialized)
+        return false;
+    pthread_mutex_lock(&g_vmMockPersistPool.mutex);
+    if (g_vmMockPersistPool.stopRequested ||
+        g_vmMockPersistPool.queuedJobs >= VM_MOCK_PERSIST_QUEUE_MAX)
     {
-        char accountId[64];
-        vm_net_mock_role_db_file roleDb;
-        bool roleDbValid;
-        vm_net_mock_warehouse_state warehouse;
-        bool warehouseIncluded;
-        u32 persistGeneration;
-        bool hadInventoryDirty;
-        bool hadPositionDirty;
-    } vm_mock_role_persist_job;
+        pthread_mutex_unlock(&g_vmMockPersistPool.mutex);
+        return false;
+    }
+    g_vmMockPersistPool.jobs[g_vmMockPersistPool.queueTail] = job;
+    g_vmMockPersistPool.queueTail =
+        (g_vmMockPersistPool.queueTail + 1) % VM_MOCK_PERSIST_QUEUE_MAX;
+    g_vmMockPersistPool.queuedJobs++;
+    pthread_cond_signal(&g_vmMockPersistPool.condition);
+    pthread_mutex_unlock(&g_vmMockPersistPool.mutex);
+    return true;
+}
 
-    vm_mock_role_persist_job *job = NULL;
-    u32 flushStartMs;
-    bool didFlush = false;
-    const char *flushReason = "role-deferred";
-    int retry;
+static void vm_mock_service_persist_try_enqueue_account(
+    vm_mock_service_account_state *accountState,
+    const char *logAccountId);
 
-    if (accountState == NULL)
-        return;
+static void *vm_mock_persist_worker_main(void *opaque)
+{
+    u32 workerId = (u32)(uintptr_t)opaque;
 
-    for (retry = 0; retry < 2; ++retry)
+    (void)workerId;
+    for (;;)
     {
-        flushStartMs = scheduler_get_tick_ms();
-        didFlush = false;
-        flushReason = "role-deferred";
+        vm_mock_role_persist_job *job = NULL;
+        vm_mock_service_account_state *accountState = NULL;
+        bool didFlush = false;
+        bool superseded = false;
+        u32 flushStartMs;
+        u32 flushEndMs;
 
-        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
-        if ((!accountState->roleInventoryDirty && !accountState->rolePositionDirty) ||
-            accountState->persistFlushBusy ||
-            !accountState->roleDbValid)
+        pthread_mutex_lock(&g_vmMockPersistPool.mutex);
+        while (!g_vmMockPersistPool.stopRequested &&
+               g_vmMockPersistPool.queuedJobs == 0)
         {
-            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
-            break;
+            pthread_cond_wait(&g_vmMockPersistPool.condition,
+                              &g_vmMockPersistPool.mutex);
         }
+        if (g_vmMockPersistPool.stopRequested &&
+            g_vmMockPersistPool.queuedJobs == 0)
+        {
+            pthread_mutex_unlock(&g_vmMockPersistPool.mutex);
+            return NULL;
+        }
+        job = g_vmMockPersistPool.jobs[g_vmMockPersistPool.queueHead];
+        g_vmMockPersistPool.jobs[g_vmMockPersistPool.queueHead] = NULL;
+        g_vmMockPersistPool.queueHead =
+            (g_vmMockPersistPool.queueHead + 1) % VM_MOCK_PERSIST_QUEUE_MAX;
+        g_vmMockPersistPool.queuedJobs--;
+        pthread_mutex_unlock(&g_vmMockPersistPool.mutex);
 
-        job = (vm_mock_role_persist_job *)malloc(sizeof(*job));
         if (job == NULL)
+            continue;
+
+        flushStartMs = scheduler_get_tick_ms();
+
+        pthread_mutex_lock(&g_vm_mock_persist_write_mutex);
+        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        accountState = vm_mock_service_account_find(job->accountId);
+        if (accountState == NULL ||
+            accountState->persistGeneration != job->persistGeneration)
         {
-            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
-            printf("[error][mock-service] role_deferred_flush_oom account=%s\n",
-                   accountState->accountId[0] ? accountState->accountId : "-");
-            break;
+            superseded = true;
         }
-        memset(job, 0, sizeof(*job));
-        snprintf(job->accountId, sizeof(job->accountId), "%s", accountState->accountId);
-        job->roleDb = accountState->roleDb;
-        job->roleDbValid = accountState->roleDbValid;
-        if (accountState->warehouse.loaded &&
-            accountState->warehouse.accountId[0] != 0 &&
-            strcmp(accountState->warehouse.accountId, accountState->accountId) == 0)
-        {
-            job->warehouse = accountState->warehouse;
-            job->warehouseIncluded = true;
-        }
-        accountState->persistGeneration += 1u;
-        if (accountState->persistGeneration == 0u)
-            accountState->persistGeneration = 1u;
-        job->persistGeneration = accountState->persistGeneration;
-        job->hadInventoryDirty = accountState->roleInventoryDirty;
-        job->hadPositionDirty = accountState->rolePositionDirty;
-        if (job->hadInventoryDirty && job->hadPositionDirty)
-            flushReason = "role-deferred-position+inventory";
-        else if (job->hadPositionDirty)
-            flushReason = "role-deferred-position";
-        else
-            flushReason = "role-deferred-inventory";
-        accountState->persistFlushBusy = true;
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 
-        /*
-         * MySQL runs outside the protocol mutex so other accounts can restore/
-         * build/capture while this snapshot is persisted.
-         */
-        didFlush = vm_net_mock_role_db_save_relational_ex(
-            flushReason,
-            job->accountId,
-            &job->roleDb,
-            job->roleDbValid,
-            job->warehouseIncluded ? &job->warehouse : NULL,
-            false,
-            NULL,
-            NULL,
-            0,
-            false,
-            NULL);
-
-        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
-        accountState->persistFlushBusy = false;
-        if (didFlush)
+        if (!superseded)
         {
-            if (accountState->persistGeneration == job->persistGeneration)
+            didFlush = vm_net_mock_role_db_save_relational_ex(
+                job->flushReason,
+                job->accountId,
+                &job->roleDb,
+                job->roleDbValid,
+                job->warehouseIncluded ? &job->warehouse : NULL,
+                false,
+                NULL,
+                NULL,
+                0,
+                false,
+                NULL);
+        }
+        pthread_mutex_unlock(&g_vm_mock_persist_write_mutex);
+
+        flushEndMs = scheduler_get_tick_ms();
+        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        accountState = vm_mock_service_account_find(job->accountId);
+        if (accountState != NULL)
+        {
+            if (didFlush &&
+                accountState->persistGeneration == job->persistGeneration &&
+                accountState->persistDirtySerial == job->persistDirtySerial)
             {
                 if (job->hadInventoryDirty)
                     accountState->roleInventoryDirty = false;
@@ -999,34 +1043,200 @@ static void vm_mock_service_flush_deferred_role_db(
                         g_vm_net_mock_role_position_dirty = false;
                 }
             }
-        }
-        else
-        {
-            printf("[error][mock-service] role_deferred_flush_failed account=%s "
-                   "reason=%s\n",
-                   accountState->accountId[0] ? accountState->accountId : "-",
-                   flushReason);
-        }
-        {
-            bool stillDirty = accountState->roleInventoryDirty ||
-                              accountState->rolePositionDirty;
-            pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
-            if (didFlush)
+            else if (!didFlush && !superseded)
             {
-                u32 flushEndMs = scheduler_get_tick_ms();
-                printf("[info][mock-service] role_deferred_flush account=%s reason=%s "
-                       "flush_ms=%u off_lock=1 gen=%u\n",
-                       logAccountId ? logAccountId : "-",
-                       flushReason,
-                       flushEndMs >= flushStartMs ? flushEndMs - flushStartMs : 0,
-                       job->persistGeneration);
+                printf("[error][mock-service] role_deferred_flush_failed account=%s "
+                       "reason=%s async=1\n",
+                       job->accountId[0] ? job->accountId : "-",
+                       job->flushReason);
             }
-            free(job);
-            job = NULL;
-            if (!stillDirty)
-                break;
+            accountState->persistFlushBusy = false;
+            if (accountState->persistReflushWanted ||
+                accountState->roleInventoryDirty ||
+                accountState->rolePositionDirty)
+            {
+                accountState->persistReflushWanted = false;
+                vm_mock_service_persist_try_enqueue_account(
+                    accountState, job->accountId);
+            }
+        }
+        pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+
+        if (didFlush)
+        {
+            printf("[info][mock-service] role_deferred_flush account=%s reason=%s "
+                   "flush_ms=%u off_lock=1 async=1 gen=%u\n",
+                   job->accountId[0] ? job->accountId : "-",
+                   job->flushReason,
+                   flushEndMs >= flushStartMs ? flushEndMs - flushStartMs : 0,
+                   job->persistGeneration);
+        }
+        free(job);
+    }
+}
+
+static bool vm_mock_persist_pool_start(void)
+{
+    if (g_vmMockPersistPool.initialized)
+        return true;
+    memset(&g_vmMockPersistPool, 0, sizeof(g_vmMockPersistPool));
+    if (pthread_mutex_init(&g_vmMockPersistPool.mutex, NULL) != 0)
+        return false;
+    if (pthread_cond_init(&g_vmMockPersistPool.condition, NULL) != 0)
+    {
+        pthread_mutex_destroy(&g_vmMockPersistPool.mutex);
+        return false;
+    }
+    for (u32 i = 0; i < VM_MOCK_PERSIST_WORKER_COUNT; ++i)
+    {
+        if (pthread_create(&g_vmMockPersistPool.workers[i],
+                           NULL,
+                           vm_mock_persist_worker_main,
+                           (void *)(uintptr_t)(i + 1)) != 0)
+        {
+            g_vmMockPersistPool.stopRequested = true;
+            pthread_cond_broadcast(&g_vmMockPersistPool.condition);
+            for (u32 j = 0; j < i; ++j)
+                pthread_join(g_vmMockPersistPool.workers[j], NULL);
+            pthread_cond_destroy(&g_vmMockPersistPool.condition);
+            pthread_mutex_destroy(&g_vmMockPersistPool.mutex);
+            memset(&g_vmMockPersistPool, 0, sizeof(g_vmMockPersistPool));
+            return false;
         }
     }
+    g_vmMockPersistPool.initialized = true;
+    printf("[info][mock-service] persist_workers=%u queue=%u async_flush=1\n",
+           (u32)VM_MOCK_PERSIST_WORKER_COUNT,
+           (u32)VM_MOCK_PERSIST_QUEUE_MAX);
+    return true;
+}
+
+static void vm_mock_service_persist_try_enqueue_account(
+    vm_mock_service_account_state *accountState,
+    const char *logAccountId)
+{
+    vm_mock_role_persist_job *job = NULL;
+    const char *flushReason = "role-deferred";
+
+    if (accountState == NULL)
+        return;
+    if ((!accountState->roleInventoryDirty && !accountState->rolePositionDirty) ||
+        !accountState->roleDbValid)
+    {
+        return;
+    }
+    if (accountState->persistFlushBusy)
+    {
+        accountState->persistReflushWanted = true;
+        accountState->persistDirtySerial += 1u;
+        if (accountState->persistDirtySerial == 0u)
+            accountState->persistDirtySerial = 1u;
+        return;
+    }
+
+    job = (vm_mock_role_persist_job *)malloc(sizeof(*job));
+    if (job == NULL)
+    {
+        printf("[error][mock-service] role_deferred_flush_oom account=%s\n",
+               accountState->accountId[0] ? accountState->accountId : "-");
+        return;
+    }
+    memset(job, 0, sizeof(*job));
+    snprintf(job->accountId, sizeof(job->accountId), "%s", accountState->accountId);
+    job->roleDb = accountState->roleDb;
+    job->roleDbValid = accountState->roleDbValid;
+    if (accountState->warehouse.loaded &&
+        accountState->warehouse.accountId[0] != 0 &&
+        strcmp(accountState->warehouse.accountId, accountState->accountId) == 0)
+    {
+        job->warehouse = accountState->warehouse;
+        job->warehouseIncluded = true;
+    }
+    accountState->persistGeneration += 1u;
+    if (accountState->persistGeneration == 0u)
+        accountState->persistGeneration = 1u;
+    job->persistGeneration = accountState->persistGeneration;
+    job->persistDirtySerial = accountState->persistDirtySerial;
+    job->hadInventoryDirty = accountState->roleInventoryDirty;
+    job->hadPositionDirty = accountState->rolePositionDirty;
+    if (job->hadInventoryDirty && job->hadPositionDirty)
+        flushReason = "role-deferred-position+inventory";
+    else if (job->hadPositionDirty)
+        flushReason = "role-deferred-position";
+    else
+        flushReason = "role-deferred-inventory";
+    snprintf(job->flushReason, sizeof(job->flushReason), "%s", flushReason);
+    job->enqueuedMs = scheduler_get_tick_ms();
+    accountState->persistFlushBusy = true;
+    accountState->persistReflushWanted = false;
+
+    if (!vm_mock_persist_pool_enqueue_job(job))
+    {
+        bool didFlush;
+        u32 flushStartMs = scheduler_get_tick_ms();
+
+        accountState->persistFlushBusy = false;
+        pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+        pthread_mutex_lock(&g_vm_mock_persist_write_mutex);
+        didFlush = vm_net_mock_role_db_save_relational_ex(
+            job->flushReason,
+            job->accountId,
+            &job->roleDb,
+            job->roleDbValid,
+            job->warehouseIncluded ? &job->warehouse : NULL,
+            false,
+            NULL,
+            NULL,
+            0,
+            false,
+            NULL);
+        pthread_mutex_unlock(&g_vm_mock_persist_write_mutex);
+        pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        if (didFlush &&
+            accountState->persistGeneration == job->persistGeneration &&
+            accountState->persistDirtySerial == job->persistDirtySerial)
+        {
+            if (job->hadInventoryDirty)
+                accountState->roleInventoryDirty = false;
+            if (job->hadPositionDirty)
+                accountState->rolePositionDirty = false;
+            if (g_vm_mock_service_active_account == accountState)
+            {
+                if (job->hadInventoryDirty)
+                    g_vm_net_mock_role_inventory_dirty = false;
+                if (job->hadPositionDirty)
+                    g_vm_net_mock_role_position_dirty = false;
+            }
+        }
+        printf("[warn][mock-service] role_deferred_flush_sync_fallback account=%s "
+               "reason=%s flush_ms=%u gen=%u\n",
+               logAccountId ? logAccountId : "-",
+               job->flushReason,
+               scheduler_get_tick_ms() >= flushStartMs ?
+                   scheduler_get_tick_ms() - flushStartMs : 0,
+               job->persistGeneration);
+        free(job);
+        return;
+    }
+
+    printf("[info][mock-service] role_deferred_flush_queued account=%s reason=%s "
+           "async=1 gen=%u dirty_serial=%u\n",
+           logAccountId ? logAccountId : "-",
+           job->flushReason,
+           job->persistGeneration,
+           job->persistDirtySerial);
+}
+
+static void vm_mock_service_flush_deferred_role_db(
+    vm_mock_service_account_state *accountState,
+    const char *logAccountId)
+{
+    if (accountState == NULL)
+        return;
+
+    pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+    vm_mock_service_persist_try_enqueue_account(accountState, logAccountId);
+    pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 }
 
 static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
@@ -1154,6 +1364,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             }
             vm_mock_service_account_capture(accountState);
         }
+        vm_mock_service_clear_request_local_scratch("client_disconnect");
         vm_mock_service_session_mark_offline(clientSession, "explicit-disconnect");
         vm_mock_service_session_unbind_account(clientSession);
         g_vm_mock_service_active_account = NULL;
@@ -1185,6 +1396,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             responseLen = vm_net_mock_build_scene_sync_poll_response(responseBuffer, responseCap);
             vm_mock_service_account_capture(accountState);
         }
+        vm_mock_service_clear_request_local_scratch("scene_sync_poll");
         g_vm_mock_service_active_account = NULL;
         g_vm_mock_service_active_account_id = NULL;
         g_vm_mock_service_active_client_id = 0;
@@ -1446,6 +1658,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         vm_mock_service_capture_session_presence(requestMeta.clientId);
         vm_mock_service_account_capture(accountState);
     }
+    vm_mock_service_clear_request_local_scratch("request_end");
     memset(g_vm_mock_service_login_issue_username, 0, sizeof(g_vm_mock_service_login_issue_username));
     memset(g_vm_mock_service_login_issue_password, 0, sizeof(g_vm_mock_service_login_issue_password));
     g_vm_mock_service_login_issue_result = 0;
@@ -1511,9 +1724,10 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         }
     }
 
-    /* High-frequency moveinfo: skip the per-request summary line + fflush. */
+    /* High-frequency moveinfo / battle operate: skip per-request summary + fflush. */
     if (!(handledValid &&
-          strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0))
+          (strcmp(handledSource, "builtin-actor-moveinfo-ack") == 0 ||
+           strcmp(handledSource, "builtin-battle-operate") == 0)))
     {
         printf("[info][mock-service] account=%s request=%u response=%u event=%u flags=%u followup=%u source=%s queue_wait_ms=%u state_wait_ms=%u state_hold_ms=%u process_ms=%u\n",
                logAccountId,
@@ -2129,6 +2343,13 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                                            "mock-service"))
     {
         printf("[error][mock-service] worker pool start failed\n");
+        vm_mock_service_socket_close(adminSocket);
+        vm_mock_service_socket_close(serverSocket);
+        return -1;
+    }
+    if (!vm_mock_persist_pool_start())
+    {
+        printf("[error][mock-service] persist pool start failed\n");
         vm_mock_service_socket_close(adminSocket);
         vm_mock_service_socket_close(serverSocket);
         return -1;
