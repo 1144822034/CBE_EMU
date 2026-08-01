@@ -6873,6 +6873,21 @@ static bool vm_net_mock_role_db_save_relational_ex(
     {
         g_vm_net_mock_role_position_dirty = false;
         g_vm_net_mock_role_inventory_dirty = false;
+        /*
+         * Sync writers (teleport / warehouse / disconnect flush) commit a newer
+         * authority than any snapshot already queued for async flush.  Bump
+         * persistGeneration and refresh account_state.roleDb so sticky capture
+         * cannot restore pre-write coordinates or backpack rows, and so the
+         * in-flight deferred job is superseded instead of overwriting MySQL.
+         */
+        vm_mock_service_account_note_durable_role_write(
+            account_id,
+            db,
+            true,
+            warehouse,
+            true,
+            true,
+            reason ? reason : "role-db-save");
     }
     vm_autotest_note("mock_role_db_mysql_save account=%s reason=%s roles=%u active=%u scope=%s storage=relational\n",
                      account_id ? account_id : "-", reason ? reason : "state",
@@ -8423,6 +8438,19 @@ static bool vm_net_mock_role_commit_timeline_position(const vm_net_mock_role_sta
         return false;
     }
     g_vm_net_mock_role_position_dirty = false;
+    /*
+     * Narrow position UPDATE is still a newer durable authority than a queued
+     * deferred snapshot that may carry the pre-move scene/pos.  Inventory may
+     * remain dirty; note_durable keeps that bit and asks for reflush.
+     */
+    vm_mock_service_account_note_durable_role_write(
+        g_vm_mock_service_active_account_id,
+        &g_vm_net_mock_role_db,
+        g_vm_net_mock_role_db_valid,
+        NULL,
+        false,
+        true,
+        reason ? reason : "moveinfo-timeline");
     return true;
 }
 

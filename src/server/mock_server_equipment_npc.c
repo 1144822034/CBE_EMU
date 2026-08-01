@@ -422,35 +422,22 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
 
 /*
  * Enhance success policy (2026-08-01):
- *   +L → +(L+1):
- *     crystal tier >= L+1 (目标级及以上) → 100% per crystal
- *     crystal tier == L                   → floor(100/3) = 33%
- *     each tier lower                     → /3 again (11%, 3%, ...)
- *   Example: +4→+5, 五级晶 100%, 四级晶 33%, 三级晶 11%.
- *   +0→+1 with 一级: tier 1 > 0 → 100%.
+ *   +L → +(L+1), target = L+1:
+ *     crystal tier >= target → 100% per crystal
+ *     each tier below target → floor(/3) once more (33%, 11%, 3%, ...)
+ *   Example: +5→+6, ≥六级 100%, 五级 33%, 四级 11%, 三级 3%.
  *   Multiple crystals sum unit rates, capped at 100.
  *
- * 29/1 data1/data2 MUST stay compact (tier*100 / level*250). An exponential
- * power table made required(+12)≈1e6 and required(+13)≈2e6; the client then
- * clamped usable enhance max to 12 and showed 强化等级达到上限.
- * Authoritative preview/roll: crystal_unit_rate() via 29/2 / 29/3.
- * Money matches the compact required curve.
+ * Client local display (29/1): rate ≈ min(100, Σpower×100 / required[L]).
+ * To show the same ladder without huge exponential data1 values (which
+ * previously clamped usable maxlevel to 12), encode for the equipment's
+ * current L only:
+ *   required[any] = 100
+ *   power[tier]   = unit_rate(L, tier)   // 100/33/11/3…
+ * so local % equals unit_rate. After a successful +1, append a fresh 29/1
+ * with the new L so the UI tables stay aligned.
+ * Money stays on a separate compact curve (not the display required).
  */
-static u32 vm_net_mock_equipment_enhance_crystal_power(u32 tier)
-{
-    if (tier == 0)
-        return 0;
-    return tier * 100u;
-}
-
-static u32 vm_net_mock_equipment_enhance_required_power(u8 level)
-{
-    /* Compact 29/1 data1 only; local client ratio ≈40% for same-tier. */
-    if (level == 0)
-        return 100u;
-    return (u32)level * 250u;
-}
-
 static u32 vm_net_mock_equipment_enhance_crystal_unit_rate(u8 level, u32 tier)
 {
     u32 rate = 100;
@@ -461,7 +448,7 @@ static u32 vm_net_mock_equipment_enhance_crystal_unit_rate(u8 level, u32 tier)
     /* Target tier (level+1) and above → 100%. */
     if (tier > (u32)level)
         return 100;
-    /* Current tier and below: floor(/3) per step including current. */
+    /* Each step below target: floor(/3). */
     steps = (u32)level - tier + 1u;
     while (steps-- != 0)
         rate = rate / 3u;
@@ -501,7 +488,86 @@ static u32 vm_net_mock_equipment_enhance_success_rate(
 
 static u32 vm_net_mock_equipment_enhance_money_cost(u8 level)
 {
-    return vm_net_mock_equipment_enhance_required_power(level);
+    /* Compact coin curve; independent of 29/1 display required=100. */
+    if (level == 0)
+        return 100u;
+    return (u32)level * 250u;
+}
+
+static bool vm_net_mock_equipment_enhance_fill_rate_tables(
+    u8 currentLevel,
+    u8 *data1,
+    u32 data1Cap,
+    u32 *data1Len,
+    u8 *data2,
+    u32 data2Cap,
+    u32 *data2Len)
+{
+    if (data1 == NULL || data2 == NULL || data1Len == NULL || data2Len == NULL)
+        return false;
+    *data1Len = 0;
+    *data2Len = 0;
+    /* required=100 → local displayed % equals crystal unit rate. */
+    for (u32 level = 0; level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
+    {
+        if (!vm_net_mock_seq_put_u32(data1, data1Cap, data1Len, 100u))
+            return false;
+    }
+    for (u32 tier = 1; tier <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++tier)
+    {
+        u32 unit =
+            vm_net_mock_equipment_enhance_crystal_unit_rate(currentLevel, tier);
+        if (!vm_net_mock_seq_put_u32(data2, data2Cap, data2Len, unit))
+            return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_append_equipment_enhance_rate_table_refresh(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    u8 *objectCount,
+    u8 currentLevel)
+{
+    u8 data1[128];
+    u8 data2[128];
+    u32 data1Len = 0;
+    u32 data2Len = 0;
+    u32 objectStart = 0;
+    u32 savedPos = 0;
+    u8 savedObjects = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL)
+        return false;
+    savedPos = *pos;
+    savedObjects = *objectCount;
+    memset(data1, 0, sizeof(data1));
+    memset(data2, 0, sizeof(data2));
+    if (!vm_net_mock_equipment_enhance_fill_rate_tables(
+            currentLevel, data1, sizeof(data1), &data1Len, data2, sizeof(data2),
+            &data2Len) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 29, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u16(out, outCap, pos, "curlevel", currentLevel) ||
+        !vm_net_mock_put_object_u16(out, outCap, pos, "maxlevel",
+                                    VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "num1",
+                                    VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL + 1) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "data1", data1,
+                                    (u16)data1Len) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "num2",
+                                    VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "data2", data2,
+                                    (u16)data2Len))
+    {
+        *pos = savedPos;
+        *objectCount = savedObjects;
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    *objectCount += 1;
+    return true;
 }
 
 static bool vm_net_mock_equipment_enhance_validate_materials(
@@ -533,7 +599,8 @@ static bool vm_net_mock_equipment_enhance_validate_materials(
         material = vm_net_mock_role_find_backpack_item(role, itemIds[i], 0);
         if (material == NULL || material->count < requestedCount)
             return false;
-        unit = vm_net_mock_equipment_enhance_crystal_power(tier);
+        /* Log helper only; display/roll use unit_rate independently. */
+        unit = tier * 100u;
         if (counts[i] != 0 && unit > 0xffffffffu / counts[i])
             add = 0xffffffffu;
         else
@@ -942,25 +1009,12 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     }
     if (parsed.subtype == 1)
     {
-        if (result == 1)
+        if (result == 1 &&
+            !vm_net_mock_equipment_enhance_fill_rate_tables(
+                currentLevel, data1, sizeof(data1), &data1Len, data2,
+                sizeof(data2), &data2Len))
         {
-            for (u32 level = 0;
-                 level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
-            {
-                if (!vm_net_mock_seq_put_u32(
-                        data1, sizeof(data1), &data1Len,
-                        vm_net_mock_equipment_enhance_required_power(
-                            (u8)level)))
-                    return 0;
-            }
-            for (u32 tier = 1;
-                 tier <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++tier)
-            {
-                if (!vm_net_mock_seq_put_u32(
-                        data2, sizeof(data2), &data2Len,
-                        vm_net_mock_equipment_enhance_crystal_power(tier)))
-                    return 0;
-            }
+            return 0;
         }
         if (!vm_net_mock_put_object_u16(out, outCap, &pos, "curlevel",
                                         currentLevel) ||
@@ -1058,6 +1112,16 @@ static u32 vm_net_mock_build_equipment_enhance_response(
             vm_net_mock_equipment_enhance_maybe_world_announce(
                 equipmentItemId, syncedEnhance);
         }
+        /* Keep client local power/required tables on the new enhance level. */
+        if (enhancementSucceeded && syncEquipment &&
+            syncedEnhance <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL &&
+            !vm_net_mock_append_equipment_enhance_rate_table_refresh(
+                out, outCap, &pos, &objectCount, (u8)syncedEnhance))
+        {
+            printf("[warn][network] mock_equipment_enhance rate-table-refresh-failed "
+                   "seq=%u level=%u evidence=keep-prior-objects\n",
+                   parsed.equipSeq, syncedEnhance);
+        }
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
@@ -1069,7 +1133,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
            parsed.subtype,
            inventorySynced
                ? (enhancementSucceeded
-                      ? "+7/7-type2+7/11-crystal+equip+10/26+17/1"
+                      ? "+7/7-type2+7/11-crystal+equip+10/26+17/1+29/1"
                       : "+7/7-type2+7/11-crystal+10/26")
                : "");
     vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u inv_sync=%u reason=%s response=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+0x0102147C+0x010287C0+0x0103222E\n",
@@ -1080,7 +1144,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                      reason, parsed.subtype,
                      inventorySynced
                          ? (enhancementSucceeded
-                                ? "+7/7-type2+7/11-crystal+equip+10/26+17/1"
+                                ? "+7/7-type2+7/11-crystal+equip+10/26+17/1+29/1"
                                 : "+7/7-type2+7/11-crystal+10/26")
                          : "");
     return pos;
@@ -1127,7 +1191,8 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
     /*
      * Battle insight (item 828): while active, scene-monster encounters are
      * fixed at 3 instead of the normal 1..3 roll.  Env CBE_BATTLE_ENEMY_COUNT
-     * above still wins for forced autotest.
+     * above still wins for forced autotest.  Team starts re-check the leader
+     * role in challenge/hangup after the party gate (see battle.c).
      */
     role = vm_net_mock_active_role();
     if (role != NULL &&
@@ -2476,6 +2541,8 @@ typedef struct
     u32 serial;
     u32 sourceClientId;
     u8 deliveredMask;
+    /* actionnum from the queued 4/6; peer settle exit must wait this playback. */
+    u8 actionCount;
     u16 objectLen;
     u8 objectData[VM_MOCK_SERVICE_TEAM_BATTLE_OBJECT_MAX];
 } vm_mock_service_team_battle_event;
@@ -2616,6 +2683,12 @@ typedef struct vm_mock_service_client_session
     char shopReturnNpcCatalogScene[64];
     /* Set when shell 30/2 finishes; catalog poll waits a settle gap. */
     u32 shopReturnNpcCatalogReadyTick;
+    /*
+     * Warm priorSeeded shop-return already restored nonempty 27/11 on type27
+     * or the first follow-up.  WT6/1 must not empty-gate + defer a second
+     * catalog (传送后二次 DoLoading 卡住 2026-08-01).
+     */
+    bool shopReturnWarmNpcDelivered;
     /* Second clear window after deferred 27/11 (longer gap/remaining). */
     bool shopReturnLoadingClearPostCatalog;
     /*
@@ -2927,6 +3000,26 @@ typedef struct vm_mock_service_client_session
 
 static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
 
+/*
+ * Map shell the active client session still owns for nearby / NPC / map-stone
+ * follow-ups.  role->scene can lag or be restored from a stale account snapshot
+ * while sceneVisible* on the connection remains the EnterScene authority
+ * (map-stone 临安→桃花岛 type27 delivering 临安 catalog, 2026-08-01).
+ */
+static const char *vm_net_mock_client_visible_scene_name(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session != NULL &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+        (session->sceneVisibleReady || session->sceneVisiblePending))
+    {
+        return session->sceneVisibleScene;
+    }
+    return vm_net_mock_current_scene_name();
+}
+
 static vm_mock_service_client_session *g_vm_mock_service_client_sessions = NULL;
 
 /*
@@ -2970,6 +3063,12 @@ typedef struct
      * continues.  They stay in the frozen battleMember* roster for teaminfo
      * row count, but must not block the alive-mask turn barrier. */
     u8 battleMemberLeftMask;
+    /*
+     * Round-open deadline (scheduler ticks).  0 = unarmed / disabled.  Lazy-
+     * armed when a living seat still owes an action; idle seats are filled
+     * with Operate=0 after CBE_TEAM_BATTLE_ROUND_TIMEOUT_MS (default 20s).
+     */
+    u32 battleRoundActDeadlineTick;
     u32 battleRoundSerial;
     bool battleRoundTerminalPending;
     u32 battleRoundActionSerial;
@@ -3334,6 +3433,13 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
 
     state->rolePositionDirty = g_vm_net_mock_role_position_dirty;
     state->roleInventoryDirty = g_vm_net_mock_role_inventory_dirty;
+    /*
+     * Skip only when globals still mirror this account and no dirty bit is
+     * set.  Sync MySQL paths call note_durable_role_write first so account
+     * roleDb already matches the committed authority; skipping then is safe.
+     * Skipping without that mirror left teleport/trade coordinates and bags
+     * stuck at the pre-write snapshot (shop-return / relogin regression).
+     */
     if (state->rolePositionDirty || state->roleInventoryDirty ||
         state != g_vm_mock_service_globals_account ||
         !state->roleDbLoaded || !g_vm_net_mock_role_db_loaded)
@@ -3630,6 +3736,95 @@ static vm_mock_service_account_state *vm_mock_service_account_find(const char *a
         state = state->next;
     }
     return NULL;
+}
+
+/*
+ * After a sync MySQL commit that is newer than any queued deferred snapshot:
+ * refresh account_state.roleDb (so sticky capture skip cannot restore stale
+ * scene/pos/bag) and bump persistGeneration (so persist workers supersede the
+ * in-flight job instead of rewriting MySQL with the old copy).
+ *
+ * Partial commits set only the matching durable* flag.  Remaining dirty bits
+ * keep the account dirty and request reflush once the superseded job finishes.
+ */
+static void vm_mock_service_account_note_durable_role_write(
+    const char *accountId,
+    const vm_net_mock_role_db_file *db,
+    bool dbValid,
+    const vm_net_mock_warehouse_state *warehouse,
+    bool durableInventoryCommitted,
+    bool durablePositionCommitted,
+    const char *reason)
+{
+    vm_mock_service_account_state *account = NULL;
+    u32 prevGen = 0;
+    bool needReflush = false;
+
+    if (accountId == NULL || accountId[0] == 0)
+        return;
+    if (!durableInventoryCommitted && !durablePositionCommitted &&
+        (db == NULL || !dbValid) && warehouse == NULL)
+    {
+        return;
+    }
+    account = vm_mock_service_account_find(accountId);
+    if (account == NULL)
+        return;
+
+    prevGen = account->persistGeneration;
+    account->persistGeneration += 1u;
+    if (account->persistGeneration == 0u)
+        account->persistGeneration = 1u;
+
+    if (db != NULL && dbValid)
+    {
+        account->roleDb = *db;
+        account->roleDbLoaded = true;
+        account->roleDbValid = true;
+    }
+    if (warehouse != NULL && warehouse->loaded &&
+        warehouse->accountId[0] != 0 &&
+        strcmp(warehouse->accountId, account->accountId) == 0)
+    {
+        account->warehouse = *warehouse;
+    }
+
+    if (durableInventoryCommitted)
+    {
+        account->roleInventoryDirty = false;
+        if (account == g_vm_mock_service_active_account)
+            g_vm_net_mock_role_inventory_dirty = false;
+    }
+    if (durablePositionCommitted)
+    {
+        account->rolePositionDirty = false;
+        if (account == g_vm_mock_service_active_account)
+            g_vm_net_mock_role_position_dirty = false;
+    }
+
+    needReflush = account->roleInventoryDirty || account->rolePositionDirty;
+    if (needReflush)
+    {
+        account->persistDirtySerial += 1u;
+        if (account->persistDirtySerial == 0u)
+            account->persistDirtySerial = 1u;
+        if (account->persistFlushBusy)
+            account->persistReflushWanted = true;
+    }
+
+    printf("[info][mock-service] durable_role_write_invalidate account=%s "
+           "reason=%s gen=%u->%u inv_committed=%u pos_committed=%u "
+           "still_dirty_inv=%u still_dirty_pos=%u busy=%u "
+           "evidence=supersede-stale-deferred-flush\n",
+           account->accountId[0] ? account->accountId : "-",
+           reason ? reason : "-",
+           prevGen,
+           account->persistGeneration,
+           durableInventoryCommitted ? 1u : 0u,
+           durablePositionCommitted ? 1u : 0u,
+           account->roleInventoryDirty ? 1u : 0u,
+           account->rolePositionDirty ? 1u : 0u,
+           account->persistFlushBusy ? 1u : 0u);
 }
 
 static vm_mock_service_account_state *vm_mock_service_account_find_or_create(const char *accountId)
@@ -4181,7 +4376,91 @@ static void vm_mock_service_session_arm_shop_return_busy_ack(
 static void vm_mock_service_session_cancel_map_actor_vitals_sync(
     vm_mock_service_client_session *session,
     const char *reason);
+static void vm_mock_service_session_cancel_map_stone_loading_clear(
+    vm_mock_service_client_session *session,
+    const char *reason);
 static u8 vm_net_mock_scene_room_npc_seed_count(const char *scene);
+
+/*
+ * mmShop open/exit is not a map-stone transfer.  Leftover teleport lifecycle
+ * bits (direct/deferred/map pending, last_scene_change_target_valid, armed
+ * map-stone poll 30/2) after the session is already scene-ready hold
+ * shop-return post-catalog 30/2 forever, then expire the clear → loading bar
+ * stuck (传送后进商城返回卡死).
+ */
+static void vm_mock_service_clear_stale_map_transfer_for_shop(
+    vm_mock_service_client_session *session,
+    const char *scene,
+    const char *reason)
+{
+    bool sceneReady = false;
+    bool hadTeleport = false;
+    bool hadMapStoneClear = false;
+
+    if (session == NULL)
+        return;
+    sceneReady = session->sceneVisibleReady &&
+                 !session->sceneVisiblePending &&
+                 (scene == NULL ||
+                  !vm_net_mock_scene_name_is_safe(scene) ||
+                  !vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
+                  vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene,
+                                                      scene));
+    if (!sceneReady)
+        return;
+
+    hadTeleport =
+        g_vm_net_mock_teleport_stone_deferred_enter_valid ||
+        g_vm_net_mock_teleport_stone_direct_enter_pending ||
+        g_vm_net_mock_teleport_stone_map_enter_pending ||
+        g_vm_net_mock_last_scene_change_target_valid;
+    hadMapStoneClear = session->mapStoneLoadingClearPending;
+    if (!hadTeleport && !hadMapStoneClear)
+        return;
+
+    printf("[info][mock-service] stale_map_transfer_clear client=%08x "
+           "scene=%s reason=%s deferred=%u direct=%u map=%u target=%u "
+           "map_stone_clear=%u map_stone_remaining=%u "
+           "evidence=mmShop-scene-already-ready\n",
+           session->clientId,
+           (scene && scene[0]) ? scene
+                               : (session->sceneVisibleScene[0]
+                                      ? session->sceneVisibleScene
+                                      : "-"),
+           reason ? reason : "-",
+           g_vm_net_mock_teleport_stone_deferred_enter_valid ? 1u : 0u,
+           g_vm_net_mock_teleport_stone_direct_enter_pending ? 1u : 0u,
+           g_vm_net_mock_teleport_stone_map_enter_pending ? 1u : 0u,
+           g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
+           hadMapStoneClear ? 1u : 0u,
+           hadMapStoneClear ? (u32)session->mapStoneLoadingClearRemaining : 0u);
+
+    g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+    g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    /*
+     * Do NOT cancel unfinished map-stone poll 30/2 here.  shop-open with
+     * remaining>0 dropped the last ResetDownloadState after map-stone→蓬莱
+     * (2026-08-01: remaining=1 reason=shop-open), then shop-return 27/11
+     * reopened DoLoading with no owed map-stone clear left → stuck bar.
+     * Hold delivery while mmShopShellActive; resume after rehydrate.
+     */
+    if (hadMapStoneClear)
+    {
+        printf("[info][mock-service] map_stone_loading_clear_preserve "
+               "client=%08x scene=%s remaining=%u reason=%s "
+               "evidence=finish-ResetDownloadState-after-mmShop\n",
+               session->clientId,
+               session->mapStoneLoadingClearScene[0]
+                   ? session->mapStoneLoadingClearScene
+                   : "-",
+               (u32)session->mapStoneLoadingClearRemaining,
+               reason ? reason : "-");
+    }
+}
 
 /* After poll 30/2 / moveinfo-live: let ScreenInit settle before kind-2 30/1. */
 #define VM_MOCK_SHOP_RETURN_KIND2_DELAY_TICKS 8u
@@ -4211,6 +4490,13 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
              sizeof(session->shopSceneNpcReseedScene), "%s", scene);
     session->mmShopShellActive = true;
     /*
+     * Opening mmShop proves the map shell is walkable enough for the client.
+     * Drop leftover map-stone / teleport lifecycle so exit post-catalog 30/2
+     * is not held as liveTeleport after a completed teleport.
+     */
+    vm_mock_service_clear_stale_map_transfer_for_shop(session, scene,
+                                                     "shop-open");
+    /*
      * Re-entering mmShop while a prior shop-return poll clear is still armed
      * injects lone 30/2 into the open storm (临安府 2026-07-27).  Drop it.
      */
@@ -4220,6 +4506,7 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
                                                             "shop-open");
     vm_mock_service_session_cancel_shop_return_npc_catalog(session,
                                                           "shop-open");
+    session->shopReturnWarmNpcDelivered = false;
     session->shopReturnKind2Completed = false;
     vm_mock_service_session_cancel_map_actor_vitals_sync(session,
                                                         "shop-open");
@@ -5734,6 +6021,26 @@ static bool vm_mock_service_team_is_leader(const vm_mock_service_team *team, u32
     return team != NULL && team->active && team->leaderClientId == clientId;
 }
 
+/*
+ * Multi-member parties: only the leader may start map encounters (4/1) or
+ * hangup.  Instance-challenge 30/9 already gates via isleader; this covers
+ * walk-in monsters and hangup so members cannot peel into a solo fight.
+ * Leader hangup starts team battles (see team-leader-only-hangup RE note).
+ */
+static bool vm_mock_service_active_session_team_encounter_blocked(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = NULL;
+
+    if (session == NULL || session->clientId == 0)
+        return false;
+    team = vm_mock_service_team_find_for_client(session->clientId);
+    if (team == NULL || !team->active || team->memberCount < 2)
+        return false;
+    return !vm_mock_service_team_is_leader(team, session->clientId);
+}
+
 static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_session *leader)
 {
     vm_mock_service_team *team = NULL;
@@ -5780,6 +6087,10 @@ static bool vm_mock_service_team_add_member(vm_mock_service_team *team,
     }
     member->pendingTeamBattleSerial = 0;
     team->memberClientIds[team->memberCount++] = member->clientId;
+    /* Joiner becomes a non-leader seat: drop solo hangup so poll cannot
+     * start a fight that the 4/1 gate would now reject. */
+    if (member->clientId == g_vm_mock_service_active_client_id)
+        vm_net_mock_hangup_loop_clear("team-join-member");
     printf("[info][mock-service] team_add leader=%08x member=%08x/%u count=%u\n",
            team->leaderClientId, member->clientId, member->onlineRoleId, team->memberCount);
     return true;
@@ -5802,6 +6113,44 @@ static void vm_mock_service_team_notify_leave(vm_mock_service_team *team,
                 leaver, NULL, leaver->accountId);
         }
     }
+}
+
+/* Drop a finished/orphan shared fight so solo hangup prefer cannot be routed
+ * into team_seat_can_act (always false when battleFinished), and so operate
+ * does not hit the finished-fight branch with a stale party snapshot.
+ * See docs/re/2026-08-01-hangup-stuck-after-teammate-leave.md. */
+static void vm_mock_service_team_clear_battle_state(vm_mock_service_team *team,
+                                                    const char *reason)
+{
+    if (team == NULL || (!team->battleActive && !team->battleFinished))
+        return;
+    printf("[info][mock-service] team_battle_clear serial=%u reason=%s "
+           "roster=%u battle_members=%u finished=%u "
+           "evidence=stale-team-battle-blocks-solo-hangup\n",
+           team->battleSerial,
+           reason ? reason : "-",
+           team->memberCount,
+           team->battleMemberCount,
+           team->battleFinished ? 1 : 0);
+    for (u8 i = 0; i < team->memberCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+        if (member != NULL)
+            member->pendingTeamBattleSerial = 0;
+    }
+    team->battleActive = false;
+    team->battleFinished = false;
+    team->battleMemberCount = 0;
+    team->battleRoundActedMask = 0;
+    team->battleMemberLeftMask = 0;
+    team->battleRoundActDeadlineTick = 0;
+    team->battleRoundTerminalPending = false;
+    team->battleRoundActionSerial = 0;
+    team->battleActionSerial = 0;
+    memset(team->battleMemberClientIds, 0, sizeof(team->battleMemberClientIds));
+    memset(team->battleRoundActions, 0, sizeof(team->battleRoundActions));
+    memset(team->battleEvents, 0, sizeof(team->battleEvents));
 }
 
 /* Returns true when the member was part of an active team.  Leader departure
@@ -5841,10 +6190,31 @@ static bool vm_mock_service_team_remove_member(vm_mock_service_client_session *l
         return true;
     }
 
+    /* Departing seat must not keep a shared round barrier / finished-fight
+     * latch that would later block the leader's solo hangup auto synth. */
+    if (team->battleActive || team->battleFinished)
+    {
+        for (u8 battleSeat = 0; battleSeat < team->battleMemberCount; ++battleSeat)
+        {
+            if (team->battleMemberClientIds[battleSeat] != leaver->clientId)
+                continue;
+            {
+                u8 bit = (u8)(1u << battleSeat);
+                team->battleMemberLeftMask =
+                    (u8)(team->battleMemberLeftMask | bit);
+                team->battleRoundActedMask =
+                    (u8)(team->battleRoundActedMask | bit);
+            }
+            break;
+        }
+    }
+
     for (u8 member = memberIndex + 1; member < team->memberCount; ++member)
         team->memberClientIds[member - 1] = team->memberClientIds[member];
     --team->memberCount;
     team->memberClientIds[team->memberCount] = 0;
+    if (team->memberCount < 2)
+        vm_mock_service_team_clear_battle_state(team, "roster-below-two");
     printf("[info][mock-service] team_remove leader=%08x member=%08x/%u count=%u reason=%s\n",
            team->leaderClientId, leaver->clientId, leaver->onlineRoleId,
            team->memberCount, reason ? reason : "-");
@@ -6326,6 +6696,10 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     }
 }
 
+static void vm_mock_service_team_auto_leave_off_leader_scene(
+    vm_mock_service_client_session *session,
+    const char *reason);
+
 static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_session *session,
                                                      const char *scene,
                                                      u16 x,
@@ -6334,18 +6708,23 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
 {
     bool changed = false;
     bool becameOnline = false;
+    bool sceneNameChanged = false;
+    char previousScene[64];
 
     if (session == NULL || !vm_net_mock_scene_name_is_safe(scene) || x == 0 || y == 0)
         return;
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    previousScene[0] = 0;
+    if (vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+        snprintf(previousScene, sizeof(previousScene), "%s", session->sceneVisibleScene);
+    sceneNameChanged = previousScene[0] == 0 ||
+                       !vm_net_mock_scene_names_equal_loose(previousScene, scene);
     changed = !session->sceneVisibleReady ||
               session->sceneVisiblePending ||
-              !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene) ||
+              sceneNameChanged ||
               session->sceneVisibleX != x ||
               session->sceneVisibleY != y;
-    if (changed &&
-        (!vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
-         !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene)))
+    if (changed && sceneNameChanged)
     {
         session->lastSceneMonsterLiveValid = false;
         session->lastSceneMonsterLiveScene[0] = 0;
@@ -6414,6 +6793,13 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
                session->sceneVisibleY,
                reason ? reason : "-");
     }
+    /*
+     * Party is map-local: once this seat's visible scene name changes (or is
+     * first established), drop any teammate who is not on the leader's map.
+     * Covers member teleport-away and leader changing maps while others stay.
+     */
+    if (sceneNameChanged)
+        vm_mock_service_team_auto_leave_off_leader_scene(session, "scene-mismatch");
 }
 
 static u32 vm_net_mock_build_map_actor_fresh_shell_sync_response(u8 *out,
@@ -6791,6 +7177,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->shopReturnNpcCatalogPending = false;
     session->shopReturnNpcCatalogScene[0] = 0;
     session->shopReturnNpcCatalogReadyTick = 0;
+    session->shopReturnWarmNpcDelivered = false;
     session->shopReturnLoadingClearPostCatalog = false;
     session->shopReturnLoadingClearLite = false;
     session->npcShopBrowseValid = false;
@@ -7331,6 +7718,7 @@ static void vm_mock_service_session_cancel_shop_return_npc_catalog(
     session->shopReturnNpcCatalogPending = false;
     session->shopReturnNpcCatalogScene[0] = 0;
     session->shopReturnNpcCatalogReadyTick = 0;
+    session->shopReturnWarmNpcDelivered = false;
 }
 
 static void vm_mock_service_session_arm_shop_return_busy_ack(
@@ -7569,7 +7957,18 @@ static void vm_mock_service_session_arm_shop_return_loading_clear_after_catalog(
      * standing 30/2 drips after map-stone→shop left DF stuck (蓬莱_01).
      */
     session->shopReturnLoadingClearRemaining = priorSeeded ? 3u : 8u;
-    session->shopReturnLoadingClearTick = g_schedulerTick;
+    /*
+     * Catalog response already consumed this poll/25/5 slot.  Backdate so the
+     * next keep-alive can drip the first post-catalog 30/2 without waiting a
+     * full minAge after arm (蓬莱站立出店：catalog 后仅见 25/5).
+     */
+    {
+        u32 minAge = priorSeeded ? 8u : 12u;
+
+        session->shopReturnLoadingClearTick =
+            (g_schedulerTick > minAge) ? (g_schedulerTick - minAge)
+                                       : 0u;
+    }
     session->shopReturnLoadingClearArmTick = g_schedulerTick;
     snprintf(session->shopReturnLoadingClearScene,
              sizeof(session->shopReturnLoadingClearScene),
@@ -7634,10 +8033,8 @@ static void vm_mock_service_finish_shop_return_rehydrate(
         session->shopSceneNpcReseedScene[0] = 0;
     }
     /*
-     * Follow-up owns 27/11 without same-packet 30/2 (wait_wt6-shaped race).
-     * Delayed poll 30/2 covers mmShop→mmGame ScreenInit and any late
-     * DoLoading started by 27/11.  Battle-confirm skips so 1/7/14 is not
-     * interrupted.
+     * Catalog is on type27-inject or follow-up without same-packet 30/2.
+     * Poll 30/2 clears DF (26/0 alone cannot — 2026-07-27 / 2026-08-01).
      */
     if (!awaitsBattleRevivalConfirm)
         vm_mock_service_session_arm_shop_return_loading_clear(session, scene);
@@ -7645,32 +8042,33 @@ static void vm_mock_service_finish_shop_return_rehydrate(
         vm_mock_service_session_cancel_shop_return_loading_clear(
             session, "battle-confirm");
     /*
-     * mmShop→mmGame is not a packet-visible scene transfer.  A leftover
-     * last_scene_change_target_valid from an earlier map-stone remember that
-     * failed to clear would hold post-catalog poll 30/2 forever.
+     * mmShop→mmGame is not a packet-visible scene transfer.  Clear any leftover
+     * map-stone / teleport lifecycle (not only last_scene_change_target_valid)
+     * once this session is already scene-ready; otherwise post-catalog 30/2
+     * is held as liveTeleport until the clear expires and loading sticks.
      */
-    if (!g_vm_net_mock_teleport_stone_deferred_enter_valid &&
-        !g_vm_net_mock_teleport_stone_direct_enter_pending &&
-        !g_vm_net_mock_teleport_stone_map_enter_pending)
-    {
-        g_vm_net_mock_last_scene_change_target_valid = false;
-    }
+    vm_mock_service_clear_stale_map_transfer_for_shop(session, scene,
+                                                     "shop-return-rehydrate");
     vm_mock_service_session_invalidate_nearby_observer_cursors(session,
                                                                 "shop-return");
     (void)vm_mock_service_mark_active_session_scene_ready_from_role(
         scene, "shop-return");
-    vm_mock_service_team_enqueue_hsp_resync_for_client(session);
+    /*
+     * Queue peer 5/5 BEFORE HSP.  Scene-sync delivers one social notice per
+     * poll; HSP-first let loading-clear/kind2 starve JOIN forever
+     * (docs/re/2026-08-01-shop-return-team-peer-join-starve.md).
+     */
     vm_mock_service_team_enqueue_shop_return_peer_joins(session);
+    vm_mock_service_team_enqueue_hsp_resync_for_client(session);
 
     printf("[info][mock-service] shop_return_rehydrate client=%08x scene=%s "
-           "battle_confirm=%u shop17_pending=0 loading_clear=%s "
+           "battle_confirm=%u shop17_pending=0 loading_clear=%s warm_npc=%u "
            "evidence=mmShop->mmGame-shell+nearby+hsp\n",
            session->clientId,
            scene,
            awaitsBattleRevivalConfirm ? 1u : 0u,
-           (!awaitsBattleRevivalConfirm && session->shopReturnLoadingClearPending)
-               ? "poll-30/2"
-               : "0");
+           session->shopReturnLoadingClearPending ? "poll-30/2" : "0",
+           session->shopReturnWarmNpcDelivered ? 1u : 0u);
 }
 
 static bool vm_mock_service_session_presence_is_recent(const vm_mock_service_client_session *session)
@@ -7757,6 +8155,230 @@ static bool vm_mock_service_team_member_has_nonzero_battle_hp(
     if (member->onlineHp != 0)
         return true;
     return seedHp != 0;
+}
+
+/*
+ * Same-scene living seats must be able to enter Battle.cbm before the leader's
+ * 4/1 / hangup can arm team battle.  Block only while the mall shell owns the
+ * screen or the seat is not scene-ready.
+ *
+ * Do NOT block on shop-return housekeeping (loading-clear / busy_ack /
+ * deferred 27/11 / kind2 30/1 / map-stone clear drips): those run after
+ * mmShopShellActive is cleared and sceneVisibleReady is set.  Blocking on
+ * them left captains stuck with reject-party-not-ready after the teammate
+ * was already walking (empty-NPC 桃花岛 kind2-pending; long post-catalog
+ * 30/2).  Evidence: docs/re/2026-08-01-party-not-ready-after-shop-exit.md.
+ */
+static const char *vm_mock_service_session_team_battle_not_ready_reason(
+    const vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return "missing-session";
+    if (session->mmShopShellActive)
+        return "mmShop-shell";
+    /*
+     * shopSceneNpcReseedPending is armed at shop-open and cleared in
+     * rehydrate.  While still set with no live scene ready, the seat has not
+     * finished leaving the mall path.
+     */
+    if (session->shopSceneNpcReseedPending &&
+        (!session->sceneVisibleReady || session->sceneVisiblePending))
+    {
+        return "shop-npc-reseed-pending";
+    }
+    if (!session->sceneVisibleReady || session->sceneVisiblePending)
+        return "scene-not-ready";
+    return NULL;
+}
+
+static bool vm_mock_service_team_member_same_scene_presence(
+    const vm_mock_service_client_session *member,
+    const char *scene)
+{
+    if (vm_mock_service_session_scene_is_visible(member, scene))
+        return true;
+    /*
+     * Shop / shop-return seats often keep onlineScene on the party map while
+     * sceneVisible* is cleared or pending.  Those seats still owe a team
+     * battle operate if the leader starts — treat them as same-scene.
+     */
+    if (member == NULL ||
+        !member->roleOnline ||
+        !vm_mock_service_session_presence_is_recent(member) ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_name_is_safe(member->onlineScene))
+    {
+        return false;
+    }
+    return vm_net_mock_scene_names_equal_loose(member->onlineScene, scene);
+}
+
+/* Visible/online scene used to decide whether a seat still shares the leader's
+ * map.  Pending transitions return NULL so mid-teleport seats are not kicked. */
+static const char *vm_mock_service_session_team_presence_scene(
+    const vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return NULL;
+    if (session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+    {
+        return session->sceneVisibleScene;
+    }
+    if (vm_net_mock_scene_name_is_safe(session->onlineScene))
+        return session->onlineScene;
+    return NULL;
+}
+
+/*
+ * When any seat finishes entering a map, remove non-leader members who are no
+ * longer on the leader's scene.  Uses the same presence rules as team battle
+ * collect (visible, else recent onlineScene for shop seats).
+ */
+static void vm_mock_service_team_auto_leave_off_leader_scene(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    vm_mock_service_team *team = NULL;
+    vm_mock_service_client_session *leader = NULL;
+    const char *leaderScene = NULL;
+    u32 removeClientIds[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    u8 removeCount = 0;
+
+    if (session == NULL || session->clientId == 0)
+        return;
+    team = vm_mock_service_team_find_for_client(session->clientId);
+    if (team == NULL || !team->active || team->memberCount < 2)
+        return;
+    leader = vm_mock_service_find_client_session(team->leaderClientId);
+    if (leader == NULL)
+        return;
+    leaderScene = vm_mock_service_session_team_presence_scene(leader);
+    if (leaderScene == NULL)
+        return;
+
+    for (u8 i = 0; i < team->memberCount && removeCount < VM_MOCK_SERVICE_TEAM_MEMBER_MAX; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+        const char *memberScene = NULL;
+
+        if (member == NULL || member->clientId == team->leaderClientId)
+            continue;
+        memberScene = vm_mock_service_session_team_presence_scene(member);
+        if (memberScene == NULL)
+            continue;
+        if (vm_mock_service_team_member_same_scene_presence(member, leaderScene))
+            continue;
+        removeClientIds[removeCount++] = member->clientId;
+    }
+
+    for (u8 i = 0; i < removeCount; ++i)
+    {
+        vm_mock_service_client_session *leaver =
+            vm_mock_service_find_client_session(removeClientIds[i]);
+        const char *memberScene = NULL;
+        u32 leaderClientId = 0;
+
+        if (leaver == NULL)
+            continue;
+        memberScene = vm_mock_service_session_team_presence_scene(leaver);
+        leaderClientId = team->leaderClientId;
+        if (!vm_mock_service_team_remove_member(leaver, reason ? reason : "scene-mismatch"))
+            continue;
+        /*
+         * Voluntary leave returns 5/7 on the request; this path has no request
+         * response, so the leaver must also receive TEAM_LEAVE for HUD clear.
+         */
+        (void)vm_mock_service_session_enqueue_social_notice(
+            leaver, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_LEAVE, 0,
+            leaver, NULL, leaver->accountId);
+        printf("[info][mock-service] team_auto_leave client=%08x/%u "
+               "leader=%08x leader_scene=%s member_scene=%s reason=%s "
+               "evidence=cross-scene-party-dissolve\n",
+               leaver->clientId,
+               leaver->onlineRoleId,
+               leaderClientId,
+               leaderScene,
+               memberScene ? memberScene : "-",
+               reason ? reason : "scene-mismatch");
+    }
+}
+
+static bool vm_mock_service_team_party_not_battle_ready(
+    const vm_mock_service_team *team,
+    const char *scene,
+    u32 *blockerClientIdOut,
+    const char **reasonOut)
+{
+    if (blockerClientIdOut != NULL)
+        *blockerClientIdOut = 0;
+    if (reasonOut != NULL)
+        *reasonOut = NULL;
+    if (team == NULL || !team->active || team->memberCount < 2 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return false;
+    }
+    for (u8 i = 0; i < team->memberCount; ++i)
+    {
+        vm_mock_service_client_session *member =
+            vm_mock_service_find_client_session(team->memberClientIds[i]);
+        const char *reason = NULL;
+
+        if (!vm_mock_service_team_member_same_scene_presence(member, scene))
+            continue;
+        if (!vm_mock_service_team_member_has_nonzero_battle_hp(member))
+            continue;
+        reason = vm_mock_service_session_team_battle_not_ready_reason(member);
+        if (reason == NULL)
+            continue;
+        if (blockerClientIdOut != NULL)
+            *blockerClientIdOut = member->clientId;
+        if (reasonOut != NULL)
+            *reasonOut = reason;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_mock_service_active_session_team_party_not_battle_ready(
+    u32 *blockerClientIdOut,
+    const char **reasonOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = NULL;
+    const char *scene = NULL;
+
+    if (blockerClientIdOut != NULL)
+        *blockerClientIdOut = 0;
+    if (reasonOut != NULL)
+        *reasonOut = NULL;
+    if (session == NULL || session->clientId == 0)
+        return false;
+    team = vm_mock_service_team_find_for_client(session->clientId);
+    if (team == NULL || !team->active || team->memberCount < 2)
+        return false;
+    if (!vm_mock_service_team_is_leader(team, session->clientId))
+        return false;
+    if (session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+    {
+        scene = session->sceneVisibleScene;
+    }
+    else if (vm_net_mock_scene_name_is_safe(session->onlineScene))
+    {
+        scene = session->onlineScene;
+    }
+    else
+    {
+        scene = vm_net_mock_current_scene_name();
+    }
+    return vm_mock_service_team_party_not_battle_ready(team,
+                                                       scene,
+                                                       blockerClientIdOut,
+                                                       reasonOut);
 }
 
 static u8 vm_mock_service_team_collect_battle_members(
@@ -7949,6 +8571,25 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     {
         return 0;
     }
+    {
+        u32 blockerClientId = 0;
+        const char *notReadyReason = NULL;
+
+        if (vm_mock_service_team_party_not_battle_ready(team,
+                                                       scene,
+                                                       &blockerClientId,
+                                                       &notReadyReason))
+        {
+            printf("[info][mock-service] team_battle_begin_blocked "
+                   "leader=%08x blocker=%08x scene=%s reason=%s "
+                   "evidence=party-not-ready-no-team-battle\n",
+                   leader->clientId,
+                   blockerClientId,
+                   scene ? scene : "-",
+                   notReadyReason ? notReadyReason : "-");
+            return 0;
+        }
+    }
     participantCount = vm_mock_service_team_collect_battle_members(team, scene, participantIds);
     if (participantCount < 2 || participantIds[0] != leader->clientId)
         return participantCount;
@@ -7983,8 +8624,37 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
            sizeof(team->battleEnemyHpMaxSlots));
     team->battleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
     team->battleEnemyHpMax = g_mockBattleEnemyHpMax;
+    /*
+     * Defense: a finished fight can leave globals/team at enemyhp=0.  Never
+     * open a new shared encounter already defeated (prefer arm + seat_can_act
+     * both refuse → stuck until round timeout).
+     */
+    if (monsterCount > 0 && team->battleEnemyHpCurrent == 0)
+    {
+        u8 savedEnemyCount = g_mockBattleEnemyCountCurrent;
+
+        g_mockBattleEnemyCountCurrent = monsterCount;
+        vm_net_mock_battle_reset_enemy_hp_from_stats(enemyId);
+        if (savedEnemyCount != 0)
+            g_mockBattleEnemyCountCurrent = savedEnemyCount;
+        memcpy(team->battleEnemyHpSlots, g_mockBattleEnemyHpSlots,
+               sizeof(team->battleEnemyHpSlots));
+        memcpy(team->battleEnemyHpMaxSlots, g_mockBattleEnemyHpMaxSlots,
+               sizeof(team->battleEnemyHpMaxSlots));
+        team->battleEnemyHpCurrent = g_mockBattleEnemyHpCurrent;
+        team->battleEnemyHpMax = g_mockBattleEnemyHpMax;
+        printf("[warn][mock-service] team_battle_enemy_hp_reseed serial=%u "
+               "enemy=%u enemies=%u enemyhp=%u/%u "
+               "evidence=stale-zero-hp-before-begin\n",
+               team->battleSerial,
+               enemyId,
+               monsterCount,
+               team->battleEnemyHpCurrent,
+               team->battleEnemyHpMax);
+    }
     team->battleRoundActedMask = 0;
     team->battleMemberLeftMask = 0;
+    team->battleRoundActDeadlineTick = 0;
     team->battleRoundSerial = 1;
     team->battleRoundTerminalPending = false;
     team->battleRoundActionSerial = 0;

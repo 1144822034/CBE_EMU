@@ -2595,6 +2595,38 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
     }
     for (u32 side = 0; side < 2; ++side)
         *liveRoles[side] = roles[side];
+    /*
+     * trade_persist_pair writes backpack/money outside role_db_save.  Any
+     * deferred flush queued with a pre-trade snapshot must be superseded, and
+     * account_state.roleDb must mirror the committed bags before sticky
+     * capture can skip a memcpy.
+     */
+    for (u32 side = 0; side < 2; ++side)
+    {
+        const vm_net_mock_role_db_file *db = NULL;
+        bool dbValid = false;
+
+        if (accounts[side] == NULL)
+            continue;
+        if (accounts[side] == g_vm_mock_service_active_account)
+        {
+            db = &g_vm_net_mock_role_db;
+            dbValid = g_vm_net_mock_role_db_valid;
+        }
+        else
+        {
+            db = &accounts[side]->roleDb;
+            dbValid = accounts[side]->roleDbValid;
+        }
+        vm_mock_service_account_note_durable_role_write(
+            sessions[side]->accountId,
+            db,
+            dbValid,
+            NULL,
+            true,
+            false,
+            "trade-commit");
+    }
     printf("[info][mock-service] trade_commit first=%08x/%u money=%u items=%u second=%08x/%u money=%u items=%u\n",
            sessions[0]->clientId, roles[0].roleId, roles[0].money,
            trade->receipts[0].itemCount,

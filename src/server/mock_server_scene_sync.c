@@ -34,6 +34,17 @@ static bool vm_net_mock_active_client_scene_ready_for_nearby(const char *scene)
            !vm_net_mock_scene_runtime_pending_without_target();
 }
 
+/*
+ * 26/1 dialog options are catalog-matched against the map shell the client still
+ * owns.  role->scene may already be the transfer target while sceneVisible*
+ * still names the previous ready map (pending), so collecting against the role
+ * scene alone yields catalog_match=0 for actors the client can still click.
+ */
+static const char *vm_net_mock_npc_dialog_scene_name(void)
+{
+    return vm_net_mock_client_visible_scene_name();
+}
+
 static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 requestLen, u32 *pageOut)
 {
     u32 offset = 4;
@@ -80,7 +91,12 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
     if (outCap < pos || !vm_net_mock_is_scene_ctrl_page_request(request, requestLen, &page))
         return 0;
 
-    scene = vm_net_mock_current_scene_name();
+    /*
+     * Nearby list must use the same shell as scene-sync poll (sceneVisible*),
+     * not durable role->scene alone — otherwise 2/7 can list peers from a
+     * transfer target the client has not entered yet.
+     */
+    scene = vm_net_mock_npc_dialog_scene_name();
     memset(otherInfo, 0, sizeof(otherInfo));
     /*
      * InitSceneCtrlState sends 2/7 only after the current map UI exists.  If
@@ -3110,7 +3126,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
 {
     vm_net_mock_scene_npcinfo_seed seeds[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
     const vm_net_mock_scene_npcinfo_seed *matchedSeed = NULL;
-    const char *scene = vm_net_mock_current_scene_name();
+    const char *scene = vm_net_mock_npc_dialog_scene_name();
     const char *dialogText = NULL;
     u32 actorId = 0;
     u32 index = 0;
@@ -3155,6 +3171,41 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         {
             matchedSeed = &seeds[i];
             break;
+        }
+    }
+    /*
+     * Visible-shell catalog can lag a same-tick role persist (direct enter
+     * complete).  If the clicked actor is absent there, retry the durable role
+     * scene once so service/task options are not dropped when both names are
+     * valid and only the temporary identity split is wrong.
+     */
+    if (matchedSeed == NULL)
+    {
+        const char *visibleScene = scene;
+        const char *roleScene = vm_net_mock_current_scene_name();
+        if (roleScene != NULL &&
+            vm_net_mock_scene_name_is_safe(roleScene) &&
+            !vm_net_mock_scene_names_equal_loose(roleScene, visibleScene))
+        {
+            memset(seeds, 0, sizeof(seeds));
+            seedCount = vm_net_mock_collect_scene_npcinfo_seeds(
+                roleScene, seeds, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX,
+                &totalCount, &dynamicCount);
+            for (u32 i = 0; i < seedCount; ++i)
+            {
+                if (seeds[i].actorId == actorId)
+                {
+                    matchedSeed = &seeds[i];
+                    scene = roleScene;
+                    printf("[info][network] mock_npc_dialog_scene_fallback "
+                           "actor=%u visible_scene=%s role_scene=%s "
+                           "action=use-role-scene-catalog\n",
+                           actorId,
+                           visibleScene ? visibleScene : "-",
+                           roleScene);
+                    break;
+                }
+            }
         }
     }
     if (matchedSeed != NULL)
@@ -3915,14 +3966,43 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
 static const vm_net_mock_scene_npcinfo_seed *
 vm_net_mock_instance_guide_seed(u32 actorId)
 {
-    const char *scene = vm_net_mock_current_scene_name();
+    /*
+     * Must use the same scene authority as 26/1 dialog catalog matching
+     * (visible shell).  role->scene via current_scene_name() can lag on
+     * multi-account restore / c-prefix aliases and miss the dynamic-npc
+     * row → 「副本配置已失效」 after the player already saw 副本传送与挑战.
+     */
+    const char *scene = vm_net_mock_client_visible_scene_name();
+    const char *roleScene = vm_net_mock_current_scene_name();
     int index = vm_net_mock_dynamic_npc_find_override(scene, actorId);
 
-    if (index < 0 ||
-        g_vm_net_mock_dynamic_npc_overrides[index].seed.kind !=
-            VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
-        !g_vm_net_mock_dynamic_npc_overrides[index].enabled)
+    if (index < 0)
     {
+        printf("[warn][network] mock_npc_instance_guide_miss actor=%u "
+               "visible_scene=%s role_scene=%s reason=no-override "
+               "evidence=need-server_dynamic_npcs.npc_kind=6\n",
+               actorId,
+               scene ? scene : "-",
+               roleScene ? roleScene : "-");
+        return NULL;
+    }
+    if (g_vm_net_mock_dynamic_npc_overrides[index].seed.kind !=
+        VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+    {
+        printf("[warn][network] mock_npc_instance_guide_miss actor=%u "
+               "visible_scene=%s kind=%u reason=not-instance-guide "
+               "evidence=npc_kind-must-be-6\n",
+               actorId,
+               scene ? scene : "-",
+               (u32)g_vm_net_mock_dynamic_npc_overrides[index].seed.kind);
+        return NULL;
+    }
+    if (!g_vm_net_mock_dynamic_npc_overrides[index].enabled)
+    {
+        printf("[warn][network] mock_npc_instance_guide_miss actor=%u "
+               "visible_scene=%s reason=disabled\n",
+               actorId,
+               scene ? scene : "-");
         return NULL;
     }
     return &g_vm_net_mock_dynamic_npc_overrides[index].seed;

@@ -1002,6 +1002,16 @@ static void *vm_mock_persist_worker_main(void *opaque)
             accountState->persistGeneration != job->persistGeneration)
         {
             superseded = true;
+            if (accountState != NULL)
+            {
+                printf("[info][mock-service] role_deferred_flush_superseded "
+                       "account=%s reason=%s job_gen=%u live_gen=%u "
+                       "evidence=newer-durable-write\n",
+                       job->accountId[0] ? job->accountId : "-",
+                       job->flushReason,
+                       job->persistGeneration,
+                       accountState->persistGeneration);
+            }
         }
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 
@@ -1349,8 +1359,10 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         }
         if (accountState != NULL)
         {
-            vm_mock_service_account_restore(accountState);
+            /* Session auto timers (prefer/hangup) require active_client_id
+             * before restore — see docs/re/2026-08-01-auto-prefer-lost-on-poll.md */
             g_vm_mock_service_active_client_id = requestMeta.clientId;
+            vm_mock_service_account_restore(accountState);
             if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
             {
                 const char *flushReason = "client-disconnect-position";
@@ -1387,10 +1399,13 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         }
         if (accountState != NULL)
         {
+            /* Must bind client before restore so session_load_auto_timers
+             * reads prefer/pending from the connection session, not the
+             * zeroed account_state stash (phase D). */
+            g_vm_mock_service_active_client_id = requestMeta.clientId;
             vm_mock_service_account_restore(accountState);
             logAccountId = accountState->accountId[0] ? accountState->accountId : "-";
             g_schedulerTick = scheduler_get_tick_ms() / VM_SCHED_FRAME_MS;
-            g_vm_mock_service_active_client_id = requestMeta.clientId;
             vm_mock_service_capture_session_presence(requestMeta.clientId);
             vm_mock_service_expire_stale_online_sessions();
             responseLen = vm_net_mock_build_scene_sync_poll_response(responseBuffer, responseCap);
@@ -1589,6 +1604,8 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
         accountState = vm_mock_service_account_find_or_create(accountId);
         if (accountState == NULL)
             VM_MOCK_SERVICE_PROTOCOL_RETURN(0);
+        /* Bind client before restore: auto prefer lives on the session. */
+        g_vm_mock_service_active_client_id = requestMeta.clientId;
         vm_mock_service_account_restore(accountState);
         logAccountId = accountState->accountId[0] ? accountState->accountId : "-";
     }

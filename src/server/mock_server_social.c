@@ -1275,11 +1275,14 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
         return 0;
 
     /*
-     * current_scene_name() may return a static normalize buffer.  Copy before
-     * any nested helper can overwrite it during 27/11 catalog build.
+     * Prefer the session map shell over role->scene.  After map-stone complete,
+     * sceneVisible* is the EnterScene target while a multi-account restore can
+     * briefly re-expose a stale durable role scene; seeding that scene would
+     * consume wait_wt6 and cancel the target loading clear (2026-08-01).
+     * Copy before nested 27/11 helpers can overwrite static normalize buffers.
      */
     snprintf(sceneBuf, sizeof(sceneBuf), "%s",
-             vm_net_mock_current_scene_name());
+             vm_net_mock_client_visible_scene_name());
     scene = sceneBuf;
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, 1);
     shopReturnReload = vm_mock_service_shop_scene_npc_reseed_matches(scene);
@@ -1300,7 +1303,9 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
             g_vm_net_mock_scene_moveinfo_npc_wait_wt6 &&
             g_vm_net_mock_scene_moveinfo_npc_pending &&
             !g_vm_net_mock_scene_moveinfo_npc_seeded &&
-            g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0;
+            g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
+            vm_net_mock_scene_names_equal_loose(
+                g_vm_net_mock_scene_moveinfo_npc_pending_scene, scene);
         deliverPostEnterSeed =
             !deliverWaitWt6Seed &&
             g_vm_net_mock_scene_moveinfo_npc_wait_post_enter &&
@@ -1312,25 +1317,49 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
         if (shopReturnReload)
         {
             /*
-             * mmShop→mmGame often emits type27 before WT6/1.  A nonempty 27/11
-             * here + trailing 30/2 clears the first load (scene flashes), then
-             * WT6/1 mark_pending re-seeds 27/11 and starts a second DoLoading
-             * that races same-packet 30/2 (蓬莱 2026-07-27).  Empty gate only;
-             * shell poll 30/2 then deferred poll 27/11 (临安府 2026-07-28).
+             * Classic shop-return type27: empty 27/11 gate only, no 30/2
+             * (docs/re/2026-07-27-shop-return-loading-stall.md).  When the
+             * client omits 27/11 (needFb11=0 after map-stone), the inject
+             * branch below owns nonempty catalog instead.
              */
             if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
                 return 0;
         }
         else if (deliverWaitWt6Seed)
         {
+            char seedSceneBuf[64];
+
             /*
              * Cross-scene map-stone prefers WT6/1, but some shells emit type27
-             * first and never WT6/1.  Deliver the one-shot catalog here;
-             * trailing no-posinfo 30/2 is appended after 27/4/7/42 below.
+             * first and never WT6/1.  Deliver the one-shot catalog for the
+             * pending target scene (not a mismatched role scene).
              */
+            snprintf(seedSceneBuf, sizeof(seedSceneBuf), "%s",
+                     g_vm_net_mock_scene_moveinfo_npc_pending_scene);
             if (!vm_net_mock_append_scene_npcs11_once_or_empty(
-                    out, outCap, &pos, scene, "type27-map-stone-wait-wt6"))
+                    out, outCap, &pos, seedSceneBuf,
+                    "type27-map-stone-wait-wt6"))
                 return 0;
+            snprintf(sceneBuf, sizeof(sceneBuf), "%s", seedSceneBuf);
+            scene = sceneBuf;
+        }
+        else if (g_vm_net_mock_scene_moveinfo_npc_wait_wt6 &&
+                 g_vm_net_mock_scene_moveinfo_npc_pending &&
+                 !g_vm_net_mock_scene_moveinfo_npc_seeded &&
+                 g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0)
+        {
+            /*
+             * wait_wt6 armed for another scene: empty gate only.  Consuming the
+             * one-shot against the wrong catalog leaves the target without NPCs
+             * and cancels map_stone_loading_clear (scene-mismatch).
+             */
+            if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
+                return 0;
+            printf("[info][network] mock_scene_npc_type27_hold scene=%s "
+                   "pending=%s reason=wait-wt6-scene-mismatch "
+                   "evidence=JianghuOL.CBE:0x01037998\n",
+                   scene,
+                   g_vm_net_mock_scene_moveinfo_npc_pending_scene);
         }
         else if (deliverPostEnterSeed)
         {
@@ -1351,6 +1380,38 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
             return 0;
         }
         objectCount += 1;
+    }
+    else if (shopReturnReload)
+    {
+        /*
+         * After map-stone, shop-return type27 often has needFb11=0.  Empty
+         * inject without a later nonempty catalog left DF open (2026-08-01).
+         * For type-21 maps, deliver nonempty 27/11 here (no same-packet 30/2);
+         * rehydrate poll 30/2 owns ResetDownloadState.  npcnum==0: no inject.
+         */
+        vm_mock_service_client_session *injectSession =
+            vm_mock_service_get_active_client_session();
+        u8 injectNpcCount = vm_net_mock_scene_room_npc_seed_count(scene);
+
+        if (injectNpcCount > 0 && injectSession != NULL &&
+            !injectSession->shopReturnWarmNpcDelivered)
+        {
+            vm_net_mock_mark_scene_moveinfo_npc_seed_pending(scene);
+            if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                    out, outCap, &pos, scene, "shop-return-type27-inject-warm"))
+                return 0;
+            objectCount += 1;
+            injectSession->shopReturnWarmNpcDelivered = true;
+            injectSession->shopReturnNpcCatalogPending = false;
+            injectSession->shopReturnNpcCatalogScene[0] = 0;
+            injectSession->shopReturnNpcCatalogReadyTick = 0;
+            printf("[info][mock-service] shop_return_npc_warm_immediate "
+                   "client=%08x scene=%s npcnum=%u via=type27-inject "
+                   "evidence=needFb11-0-nonempty-then-poll-30/2\n",
+                   injectSession->clientId,
+                   scene ? scene : "-",
+                   (u32)injectNpcCount);
+        }
     }
 
     if (!vm_net_mock_append_fb_target_result4_object(out, outCap, &pos, fb4Type, ""))
@@ -1418,11 +1479,18 @@ static u32 vm_net_mock_build_type27_followup_combo_response(const u8 *request, u
     }
     else if (shopReturnReload)
     {
+        vm_mock_service_client_session *shopSession =
+            vm_mock_service_get_active_client_session();
+        bool warm = shopSession != NULL && shopSession->shopReturnWarmNpcDelivered;
+
         printf("[info][network] mock_shop_return_type27_gate scene=%s "
-               "objects=%u completion=none "
-               "evidence=empty-27/11-WT6/1-owns-27/11+poll-30/2\n",
+               "objects=%u completion=none warm_npc=%u "
+               "evidence=%s\n",
                scene,
-               objectCount);
+               objectCount,
+               warm ? 1u : 0u,
+               warm ? "warm-27/11-shell-owns-30/2"
+                    : "empty-27/11-WT6/1-owns-27/11+poll-30/2");
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
@@ -1507,6 +1575,15 @@ static u32 vm_net_mock_build_info_banner_clear12_ack_response(u8 *out, u32 outCa
     return pos;
 }
 
+static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *session);
+static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *session);
+
 static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
@@ -1514,6 +1591,49 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
     u8 objectCount = 0;
     if (outCap < pos)
         return 0;
+    /*
+     * Post-catalog shop-return ResetDownloadState normally rides scene_sync_poll.
+     * After deferred 27/11 opens a second DoLoading, some clients keep emitting
+     * empty 25/5 while poll cadence stalls — leaving remaining>0 forever
+     * (临安府_05 map-stone→shop 2026-07-31 / 2026-08-01: one clear then only 25/5).
+     * Prefer delivering pending shop-return 30/2 (shell or post-catalog) on
+     * this keep-alive path.  Also drip preserved map-stone 30/2.
+     */
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_get_active_client_session();
+        if (session != NULL && session->shopReturnLoadingClearPending)
+        {
+            u32 clearLen = vm_net_mock_build_pending_shop_return_loading_clear_response(
+                out, outCap, session);
+            if (clearLen != 0)
+            {
+                printf("[info][mock-service] shop_return_loading_clear_via "
+                       "client=%08x path=25/5 remaining=%u post_catalog=%u "
+                       "evidence=DoLoading-keep-alive-owns-poll-30/2\n",
+                       session->clientId,
+                       (u32)session->shopReturnLoadingClearRemaining,
+                       session->shopReturnLoadingClearPostCatalog ? 1u : 0u);
+                return clearLen;
+            }
+        }
+        if (session != NULL &&
+            session->mapStoneLoadingClearPending &&
+            !session->mmShopShellActive)
+        {
+            u32 clearLen = vm_net_mock_build_pending_map_stone_loading_clear_response(
+                out, outCap, session);
+            if (clearLen != 0)
+            {
+                printf("[info][mock-service] map_stone_loading_clear_via "
+                       "client=%08x path=25/5 remaining=%u "
+                       "evidence=preserved-across-shop-open\n",
+                       session->clientId,
+                       (u32)session->mapStoneLoadingClearRemaining);
+                return clearLen;
+            }
+        }
+    }
     if (g_vm_net_mock_last_scene_change_target_valid)
     {
         vm_net_mock_scene_change_target target = g_vm_net_mock_last_scene_change_target;
@@ -3917,6 +4037,17 @@ static bool vm_net_mock_append_scene_role_remove6_object(u8 *out, u32 outCap, u3
     return true;
 }
 
+static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_role_seed *seeds,
+                                                        u8 roleCount,
+                                                        u32 clientId);
+static int vm_net_mock_append_stale_peer_remove6_objects(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    vm_mock_service_client_session *observer,
+    const vm_net_mock_scene_role_seed *seeds,
+    u8 roleCount);
+
 static u8 vm_net_mock_append_scene_role_remove6_objects(u8 *out, u32 outCap, u32 *pos,
                                                         const char *scene)
 {
@@ -4074,6 +4205,47 @@ static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_
             return true;
     }
     return false;
+}
+
+/*
+ * Drop observer-side peer cursors that are no longer in the same-scene seed
+ * set.  Must run on both baseline and delta polls: the baseline path used to
+ * early-return after 1/2/10, leaving peerSync[].visible stuck for players who
+ * already left to another map — the client kept rendering them with no 1/2/6.
+ */
+static int vm_net_mock_append_stale_peer_remove6_objects(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    vm_mock_service_client_session *observer,
+    const vm_net_mock_scene_role_seed *seeds,
+    u8 roleCount)
+{
+    int appended = 0;
+
+    if (out == NULL || pos == NULL || observer == NULL)
+        return -1;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
+    {
+        vm_mock_service_peer_sync *peerSync = &observer->peerSync[i];
+        if (!peerSync->visible || peerSync->sourceClientId == 0 ||
+            vm_net_mock_scene_role_seeds_contain_client(seeds, roleCount,
+                                                        peerSync->sourceClientId))
+        {
+            continue;
+        }
+        if (peerSync->actorId != 0)
+        {
+            if (!vm_net_mock_append_scene_role_remove6_object(out, outCap, pos,
+                                                              peerSync->actorId))
+            {
+                return -1;
+            }
+            ++appended;
+        }
+        peerSync->visible = false;
+    }
+    return appended;
 }
 
 /* net_handle_type_payload_detail(0x010126C6) reads 1/3/3 as:
@@ -4273,14 +4445,28 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
                   observer->sparInviteReplyActive;
 
     /* Prefer roster-sync notices over a still-queued modal invite so leave /
-     * join cannot starve behind an undismissed confirm prompt. */
+     * join cannot starve behind an undismissed confirm prompt.  Prefer 5/5
+     * JOIN over HSP so shop-return solo 5/10 peers rebuild before vitals. */
     for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
     {
-        if (observer->socialNotices[i].type != VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE &&
-            vm_mock_service_social_notice_bypasses_modal(observer->socialNotices[i].type))
+        if (observer->socialNotices[i].type ==
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN)
         {
             notice = &observer->socialNotices[i];
             break;
+        }
+    }
+    if (notice == NULL)
+    {
+        for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+        {
+            if (observer->socialNotices[i].type != VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE &&
+                vm_mock_service_social_notice_bypasses_modal(
+                    observer->socialNotices[i].type))
+            {
+                notice = &observer->socialNotices[i];
+                break;
+            }
         }
     }
     if (notice == NULL)
@@ -4454,13 +4640,18 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             vm_mock_service_team_find_for_client(observer->clientId);
         u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
                                   : notice->sourceRoleId;
+        u32 joinSourceClientId = notice->sourceClientId;
+        u32 joinSourceRoleId = notice->sourceRoleId;
         u8 result = notice->result;
+        u8 delivered = 1;
 
-        /* The login 5/10 response establishes the inviter's local row.  The
-         * native result path is therefore 5/4 now, followed by the queued
-         * subtype-5 new-member delta on the next scene poll.  5/3 and 5/10
-         * only append in the client; injecting a full roster here duplicates
-         * that local row instead of refreshing it. */
+        /* Login 5/10 owns the inviter local row.  Native accept path is 5/4
+         * then 5/5 new-member delta (not a full 5/10, which would duplicate
+         * self via AddRoleToList).  Scene-sync only drains one social notice
+         * per poll; if 5/5 waits for the next poll, the leader can challenge
+         * with battleinfo right-side ids the local roster does not yet hold
+         * → HandleBattleStartMsg/sub_66A4 empty unit → 0x01004EA8 crash.
+         * Deliver matching 5/5 in the same poll/packet after 5/4. */
         if (result == 1 &&
             (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
              team == NULL || !team->active))
@@ -4476,14 +4667,50 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             return -1;
         }
         vm_net_mock_finish_wt_object(out, objectStart, *pos);
+        memset(notice, 0, sizeof(*notice));
+        for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+        {
+            vm_mock_service_social_notice *join = &observer->socialNotices[i];
+            vm_mock_service_client_session *joinSource;
+
+            if (join->type != VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN ||
+                join->sourceClientId != joinSourceClientId ||
+                join->sourceRoleId != joinSourceRoleId)
+            {
+                continue;
+            }
+            joinSource = vm_mock_service_find_client_session(join->sourceClientId);
+            if (result == 1 &&
+                joinSource != NULL &&
+                joinSource->onlineRoleId == join->sourceRoleId &&
+                vm_net_mock_append_team_member_join_object(out, outCap, pos,
+                                                           observer, joinSource))
+            {
+                printf("[info][mock-service] team_member_join_deliver observer=%08x "
+                       "member=%08x/%u update=5/5 same_packet_as=5/4\n",
+                       observer->clientId, joinSource->clientId,
+                       joinSource->onlineRoleId);
+                delivered = 2;
+            }
+            else
+            {
+                printf("[warn][mock-service] team_member_join_drop observer=%08x "
+                       "member=%08x/%u reason=%s\n",
+                       observer->clientId, joinSourceClientId, joinSourceRoleId,
+                       result == 1 ? "join-encode-or-source" : "result-not-accepted");
+            }
+            memset(join, 0, sizeof(*join));
+            break;
+        }
         printf("[info][mock-service] team_result_deliver observer=%08x result=%u roster_update=%s members=%u\n",
                observer->clientId, result,
-               result == 1 ? "5/4-then-queued-5/5" : "none",
+               result == 1
+                   ? (delivered >= 2 ? "5/4+5/5-same-poll" : "5/4-missing-5/5")
+                   : "none",
                team ? team->memberCount : 0);
-        memset(notice, 0, sizeof(*notice));
         if (noticeTypeOut)
             *noticeTypeOut = noticeType;
-        return 1;
+        return (int)delivered;
     }
 
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN:
@@ -4777,7 +5004,27 @@ static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
         bool liveTeleport =
             g_vm_net_mock_teleport_stone_deferred_enter_valid ||
             g_vm_net_mock_teleport_stone_direct_enter_pending;
-        bool transferActive = session->sceneVisiblePending || liveTeleport;
+        bool transferActive = false;
+
+        /*
+         * After map-stone the client can already be sceneVisibleReady and open
+         * mmShop while direct/deferred teleport bits remain armed.  Holding
+         * post-catalog 30/2 on those stale bits never resumes (clear expires
+         * after 20s with no ResetDownloadState) → 传送后出店卡 loading.
+         * Only real in-flight transfers (pending visibility) must hold.
+         */
+        if (liveTeleport &&
+            session->sceneVisibleReady &&
+            !session->sceneVisiblePending &&
+            vm_net_mock_scene_name_is_safe(session->shopReturnLoadingClearScene) &&
+            vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+            vm_net_mock_scene_names_equal_loose(
+                session->sceneVisibleScene,
+                session->shopReturnLoadingClearScene))
+        {
+            liveTeleport = false;
+        }
+        transferActive = session->sceneVisiblePending || liveTeleport;
 
         if (session->shopReturnLoadingClearPostCatalog)
         {
@@ -4829,7 +5076,15 @@ static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
             minAge = 12u;
 
         if (ageTicks < minAge)
+        {
+            /*
+             * Silent wait used to let the same poll fall through to task
+             * prompts (resp≈77) while remaining>0 — “有网无清条”.
+             * Callers that own ResetDownloadState (poll / 25/5) must treat
+             * pending post-catalog clear as occupying the response slot.
+             */
             return 0;
+        }
     }
     if (!vm_net_mock_scene_name_is_safe(session->shopReturnLoadingClearScene))
     {
@@ -4839,12 +5094,34 @@ static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
     }
     snprintf(sceneBuf, sizeof(sceneBuf), "%s",
              session->shopReturnLoadingClearScene);
-    currentScene = vm_net_mock_current_scene_name();
+    /*
+     * Match map-stone clear: remote shop-return authority is the connection's
+     * sceneVisibleScene, not role/current_scene_name (emulator host / sticky
+     * roleDb can diverge).  Cancelling post-catalog 30/2 after deferred 27/11
+     * already opened a second DoLoading leaves 场景闪现后再卡进度条.
+     */
+    currentScene = vm_net_mock_client_visible_scene_name();
     if (currentScene == NULL ||
         !vm_net_mock_scene_names_equal_loose(currentScene, sceneBuf))
     {
-        vm_mock_service_session_cancel_shop_return_loading_clear(
-            session, "scene-mismatch");
+        printf("[warn][mock-service] shop_return_loading_clear_mismatch "
+               "client=%08x clear=%s visible=%s post_catalog=%u "
+               "action=%s evidence=second-DoLoading-needs-30/2\n",
+               session->clientId,
+               sceneBuf,
+               currentScene ? currentScene : "-",
+               session->shopReturnLoadingClearPostCatalog ? 1u : 0u,
+               session->shopReturnLoadingClearPostCatalog ? "hold"
+                                                         : "cancel");
+        /*
+         * Shell clear (post_catalog=0) may cancel on true leave.  Post-catalog
+         * must hold: 27/11 already started the second load window.
+         */
+        if (!session->shopReturnLoadingClearPostCatalog)
+        {
+            vm_mock_service_session_cancel_shop_return_loading_clear(
+                session, "scene-mismatch");
+        }
         return 0;
     }
     /*
@@ -4954,9 +5231,9 @@ static u32 vm_net_mock_build_pending_shop_return_loading_clear_response(
             {
                 /*
                  * No catalog pending: busy_ack always.  Kind-2 only for empty
-                 * type-21 maps (rebuild combat nodes).  NPC maps always arm
-                 * catalog pending on shop-return, so this branch is empty-map.
-                 * Shell 2s fallback uses loading-clear-timeout via armAge.
+                 * type-21 maps.  Warm NPC maps deliver 27/11 on type27/follow-up
+                 * and land here after shell 30/2; cold NPC maps arm catalog and
+                 * never reach this arm.  Shell 2s fallback → loading-clear-timeout.
                  */
                 const char *kind2Via =
                     (armAgeTicks >= (2000u / VM_SCHED_FRAME_MS))
@@ -4988,10 +5265,12 @@ static u32 vm_net_mock_build_pending_shop_return_busy_ack_response(
         return 0;
     if (session->shopReturnNpcCatalogPending)
         return 0;
-    if (session->sceneVisiblePending ||
-        g_vm_net_mock_teleport_stone_deferred_enter_valid ||
-        g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        g_vm_net_mock_last_scene_change_target_valid)
+    /*
+     * Only a real visibility pending transfer cancels busy ack.  Stale
+     * teleport / target flags after sceneVisibleReady must not drop the
+     * 26/0 that finishes mmShop→mmGame download UI.
+     */
+    if (session->sceneVisiblePending)
     {
         vm_mock_service_session_cancel_shop_return_busy_ack(
             session, "scene-transfer-active");
@@ -5021,6 +5300,60 @@ static u32 vm_net_mock_build_pending_shop_return_busy_ack_response(
     return pos;
 }
 
+/*
+ * After mmShop→mmGame solo 5/10, peer rows are queued as 5/5 social notices.
+ * Shop-return loading-clear / kind2 enter monopolize scene-sync polls and can
+ * starve the late social append until a team battle start is delivered — the
+ * teammate still has no roster (no team HUD) and later battle-start crashes.
+ *
+ * Deliver JOIN as soon as the shell is ready and loading-clear is idle, before
+ * hangup/team-battle early returns.
+ */
+static u32 vm_net_mock_build_pending_shop_return_team_peer_join_response(
+    u8 *out,
+    u32 outCap,
+    vm_mock_service_client_session *session)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u8 noticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+    int socialAppend = 0;
+    bool haveJoin = false;
+
+    if (out == NULL || outCap < pos || session == NULL)
+        return 0;
+    if (!session->sceneVisibleReady || session->sceneVisiblePending ||
+        session->mmShopShellActive || session->shopReturnLoadingClearPending ||
+        session->shopReturnNpcCatalogPending)
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+    {
+        if (session->socialNotices[i].type ==
+            VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN)
+        {
+            haveJoin = true;
+            break;
+        }
+    }
+    if (!haveJoin)
+        return 0;
+    socialAppend = vm_net_mock_append_scene_sync_social_notice_object(
+        out, outCap, &pos, session, &noticeType);
+    if (socialAppend <= 0 ||
+        noticeType != VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN)
+    {
+        return 0;
+    }
+    objectCount = (u8)(objectCount + socialAppend);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][mock-service] shop_return_team_peer_join_poll client=%08x "
+           "objects=%u resp=%u evidence=5/5-before-team-battle-starve\n",
+           session->clientId, objectCount, pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_pending_shop_return_npc_catalog_response(
     u8 *out,
     u32 outCap,
@@ -5043,14 +5376,31 @@ static u32 vm_net_mock_build_pending_shop_return_npc_catalog_response(
         return 0;
     if ((g_schedulerTick - session->shopReturnNpcCatalogReadyTick) < 8u)
         return 0;
-    if (session->sceneVisiblePending ||
-        g_vm_net_mock_teleport_stone_deferred_enter_valid ||
-        g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        g_vm_net_mock_last_scene_change_target_valid)
-    {
-        vm_mock_service_session_cancel_shop_return_npc_catalog(
-            session, "scene-transfer-active");
+    /*
+     * Do not permanently cancel the deferred 27/11 on stale teleport bits.
+     * Shell 30/2 already showed the map; dropping catalog leaves no
+     * post-catalog ResetDownloadState for the second DoLoading that 27/11
+     * (or a late resource follow-up) still opens.  Hold while a real
+     * visibility transfer is pending; ignore leftover map-stone flags when
+     * the session is already scene-ready on this catalog scene.
+     */
+    if (session->sceneVisiblePending)
         return 0;
+    {
+        bool liveTeleport =
+            g_vm_net_mock_teleport_stone_deferred_enter_valid ||
+            g_vm_net_mock_teleport_stone_direct_enter_pending ||
+            g_vm_net_mock_last_scene_change_target_valid;
+        bool staleExempt =
+            session->sceneVisibleReady &&
+            vm_net_mock_scene_name_is_safe(session->shopReturnNpcCatalogScene) &&
+            vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+            vm_net_mock_scene_names_equal_loose(
+                session->sceneVisibleScene,
+                session->shopReturnNpcCatalogScene);
+
+        if (liveTeleport && !staleExempt)
+            return 0;
     }
     if (!vm_net_mock_scene_name_is_safe(session->shopReturnNpcCatalogScene))
     {
@@ -5060,12 +5410,16 @@ static u32 vm_net_mock_build_pending_shop_return_npc_catalog_response(
     }
     snprintf(sceneBuf, sizeof(sceneBuf), "%s",
              session->shopReturnNpcCatalogScene);
-    currentScene = vm_net_mock_current_scene_name();
+    currentScene = vm_net_mock_client_visible_scene_name();
     if (currentScene == NULL ||
         !vm_net_mock_scene_names_equal_loose(currentScene, sceneBuf))
     {
-        vm_mock_service_session_cancel_shop_return_npc_catalog(
-            session, "scene-mismatch");
+        printf("[warn][mock-service] shop_return_npc_catalog_mismatch "
+               "client=%08x catalog=%s visible=%s "
+               "evidence=hold-not-cancel\n",
+               session->clientId,
+               sceneBuf,
+               currentScene ? currentScene : "-");
         return 0;
     }
 
@@ -5081,23 +5435,56 @@ static u32 vm_net_mock_build_pending_shop_return_npc_catalog_response(
         return 0;
     }
     objectCount = 1;
-    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     session->shopReturnNpcCatalogPending = false;
     session->shopReturnNpcCatalogScene[0] = 0;
     session->shopReturnNpcCatalogReadyTick = 0;
     /*
-     * Catalog DoLoading needs its own ResetDownloadState window.  priorSeeded
-     * (checked before mark_pending) selects lite vs heavy remaining.
+     * Warm priorSeeded (本访已投过 type-21，非野外城市场景常见)：shell 30/2
+     * 已让地图可见后，再单独 poll 非空 27/11 会二次 DoLoading，随后靠
+     * post-catalog drip 关条——站立时常卡死（临安府_05 2026-08-01）。
+     * 同包 27/11+30/2 补 NPC 并立刻 ResetDownloadState，无第二段 clear 窗口。
+     * Cold (!priorSeeded) 仍走 post-catalog drip（首次目录资源窗口更长）。
      */
+    if (priorSeeded)
+    {
+        u32 objectStart = 0;
+
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                         &objectStart) ||
+            !vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2,
+                                                       sceneBuf))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount = 2;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        vm_mock_service_session_arm_shop_return_busy_ack(session);
+        printf("[info][network] mock_shop_return_npc_catalog_deliver "
+               "client=%08x scene=%s objects=2 resp=%u "
+               "rearm_clear=0 post_catalog=0 prior_seeded=1 "
+               "completion=same-packet-30/2 "
+               "evidence=warm-npc-no-second-DoLoading-drip\n",
+               session->clientId,
+               sceneBuf,
+               pos);
+        printf("[info][mock-service] shop_return_kind2_skip client=%08x "
+               "scene=%s reason=npc-catalog-live-no-reenter "
+               "via=warm-catalog-same-packet-30/2 "
+               "evidence=27/11+ResetDownloadState-skip-second-30/1\n",
+               session->clientId,
+               sceneBuf);
+        return pos;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     vm_mock_service_session_arm_shop_return_loading_clear_after_catalog(
-        session, sceneBuf, priorSeeded);
+        session, sceneBuf, false);
     printf("[info][network] mock_shop_return_npc_catalog_deliver client=%08x "
            "scene=%s objects=1 resp=%u rearm_clear=1 post_catalog=1 "
-           "prior_seeded=%u evidence=shell-clear-then-27/11\n",
+           "prior_seeded=0 evidence=shell-clear-then-27/11-cold\n",
            session->clientId,
            sceneBuf,
-           pos,
-           priorSeeded ? 1u : 0u);
+           pos);
     return pos;
 }
 
@@ -5113,6 +5500,13 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     const char *currentScene = NULL;
 
     if (out == NULL || session == NULL || !session->mapStoneLoadingClearPending)
+        return 0;
+    /*
+     * mmShop owns the screen; lone poll 30/2 during open dismisses the mall.
+     * Preserve the arm across shop-open (see clear_stale_map_transfer_for_shop)
+     * and resume after rehydrate clears mmShopShellActive.
+     */
+    if (session->mmShopShellActive)
         return 0;
     /*
      * Refuse while a NEW scene transfer is in flight.  The arm happens after
@@ -5161,7 +5555,12 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     }
     snprintf(sceneBuf, sizeof(sceneBuf), "%s",
              session->mapStoneLoadingClearScene);
-    currentScene = vm_net_mock_current_scene_name();
+    /*
+     * Compare against the session shell, not durable role->scene.  A stale
+     * role restore during another account's poll must not cancel the armed
+     * map-stone ResetDownloadState window for this connection.
+     */
+    currentScene = vm_net_mock_client_visible_scene_name();
     if (currentScene == NULL ||
         !vm_net_mock_scene_names_equal_loose(currentScene, sceneBuf))
     {
@@ -5476,6 +5875,18 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
     /*
+     * Shop-return 30/2 still armed but not yet due (minAge / hold): do not
+     * fall through to task-prompt / nearby.  Warm shell clear (postCatalog=0)
+     * had the same steal: type27/followup 27/11 + task_prompt resp=77 then
+     * only one settle 30/2 → stuck after teleport (临安府_05 2026-08-01).
+     * Empty WT keeps the poll socket alive until the next ResetDownloadState.
+     */
+    if (observer->shopReturnLoadingClearPending)
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 0);
+        return pos;
+    }
+    /*
      * After shell 30/2: deliver deferred nonempty 27/11, then rearm clear for
      * that catalog DoLoading.  Must run before busy_ack.
      */
@@ -5486,6 +5897,16 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return teamBattleResponseLen;
     teamBattleResponseLen =
         vm_net_mock_build_pending_shop_return_busy_ack_response(
+            out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    /*
+     * Shop-return peer 5/5: must not wait for the late nearby/social append
+     * after multi-shot 30/2 / kind2 polls, or team battle start steals the
+     * seat while the client still has only the solo 5/10 self row.
+     */
+    teamBattleResponseLen =
+        vm_net_mock_build_pending_shop_return_team_peer_join_response(
             out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
@@ -5776,6 +6197,17 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         u32 nearbyRoleCount = 0;
         u32 nearbyOtherInfoLen = 0;
         u8 nearbyMoveinfoCount = 0;
+        int staleRemoveAppend = 0;
+
+        /*
+         * Removals first: a same poll may both baseline a new peer and drop a
+         * leaver.  Skipping 1/2/6 here left cross-map ghosts on the client.
+         */
+        staleRemoveAppend = vm_net_mock_append_stale_peer_remove6_objects(
+            out, outCap, &pos, observer, seeds, roleCount);
+        if (staleRemoveAppend < 0)
+            return 0;
+        objectCount = (u8)(objectCount + staleRemoveAppend);
 
         u8 addedNearbyObjects = vm_net_mock_append_scene_nearby_role_objects(out,
                                                                              outCap,
@@ -5811,11 +6243,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         if (socialAppend > 0)
             objectCount = (u8)(objectCount + socialAppend);
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u npc=%u task_prompt=%u chat=%d trade=%u social=%s resp=%u evidence=IDA:0x01037998/0x01012958/0x01012A76/0x010126C6\n",
+        printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u remove=%d npc=%u task_prompt=%u chat=%d trade=%u social=%s resp=%u evidence=IDA:0x01037998/0x01012958/0x01012A76/0x010126C6\n",
                observer->clientId,
                scene,
                nearbyRoleCount,
                nearbyMoveinfoCount,
+               staleRemoveAppend,
                npcCatalogAppended ? 1u : 0u,
                taskPromptRefreshAppended ? 1u : 0u,
                chatAppend,
@@ -5857,21 +6290,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         }
     }
 
-    for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
     {
-        vm_mock_service_peer_sync *peerSync = &observer->peerSync[i];
-        if (!peerSync->visible || peerSync->sourceClientId == 0 ||
-            vm_net_mock_scene_role_seeds_contain_client(seeds, roleCount, peerSync->sourceClientId))
-        {
-            continue;
-        }
-        if (peerSync->actorId != 0)
-        {
-            if (!vm_net_mock_append_scene_role_remove6_object(out, outCap, &pos, peerSync->actorId))
-                return 0;
-            ++objectCount;
-        }
-        peerSync->visible = false;
+        int staleRemoveAppend = vm_net_mock_append_stale_peer_remove6_objects(
+            out, outCap, &pos, observer, seeds, roleCount);
+        if (staleRemoveAppend < 0)
+            return 0;
+        objectCount = (u8)(objectCount + staleRemoveAppend);
     }
 
     if (observer->sparResultMessageArmed &&

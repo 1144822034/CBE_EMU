@@ -34,7 +34,7 @@ enum
     /* Primary CBMR is followed by a second CBMR body on the same TCP reply. */
     VM_CLIENT_RESPONSE_FLAG_HAS_FOLLOWUP = 0x2u,
     /* Applied to send/recv after the TCP handshake completes. */
-    VM_CLIENT_SOCKET_TIMEOUT_MS = 12000,
+    VM_CLIENT_SOCKET_TIMEOUT_MS = 10000,
     /* Brief radio blips / Doze wake: retry with backoff before giving up. */
     VM_CLIENT_DATA_ATTEMPTS = 5,
     /* When transport is already marked unreachable, one attempt avoids pinning
@@ -53,8 +53,8 @@ enum
      */
     VM_CLIENT_POLL_CONNECT_TIMEOUT_MS = 2000,
     /* Minimum wall time between scene-poll attempts (scheduler ticks are ~frame).
-     * 3s cuts short-TCP load; server presence timeout is still ~30s. */
-    VM_CLIENT_POLL_MIN_INTERVAL_MS = 3000,
+     * 2s balances sync freshness vs short-TCP load; server presence timeout ~30s. */
+    VM_CLIENT_POLL_MIN_INTERVAL_MS = 2000,
     VM_CLIENT_REQUEST_MAX = 512,
     VM_CLIENT_QUEUE_MAX = 64,
     VM_CLIENT_FOLLOWUP_MAX = 65536

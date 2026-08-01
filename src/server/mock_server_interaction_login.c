@@ -497,30 +497,58 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
 
     if (shopReturnSeed)
     {
+        bool priorSeeded =
+            g_vm_net_mock_scene_moveinfo_npc_seeded &&
+            g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] != 0 &&
+            vm_net_mock_scene_names_equal_loose(
+                g_vm_net_mock_scene_moveinfo_npc_seeded_scene, currentScene);
+
         /*
-         * mmShop clears client type-21 display even when the server still has
-         * g_vm_net_mock_scene_moveinfo_npc_seeded (蓬莱 login→shop 2026-07-28:
-         * catalog_skip already-seeded left walkable map with no NPCs).
-         * Always defer nonempty 27/11 until shell poll 30/2 finishes — do not
-         * put the catalog on WT6/1/task-subset (c04临安府_01 DoLoading stall).
+         * NPC maps: one nonempty 27/11 max (type27 preferred; followup if no
+         * type27).  Never empty+deferred second catalog — that is the
+         * teleport→shop second-load stall (临安府_05 2026-08-01).
          */
-        activeSession->shopReturnNpcCatalogPending = true;
-        snprintf(activeSession->shopReturnNpcCatalogScene,
-                 sizeof(activeSession->shopReturnNpcCatalogScene),
-                 "%s",
-                 currentScene);
-        activeSession->shopSceneNpcReseedPending = false;
-        activeSession->shopSceneNpcReseedScene[0] = 0;
-        if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, pos))
+        if (activeSession->shopReturnWarmNpcDelivered)
+        {
+            activeSession->shopSceneNpcReseedPending = false;
+            activeSession->shopSceneNpcReseedScene[0] = 0;
+            activeSession->shopReturnNpcCatalogPending = false;
+            activeSession->shopReturnNpcCatalogScene[0] = 0;
+            activeSession->shopReturnNpcCatalogReadyTick = 0;
+            printf("[info][mock-service] shop_return_npc_catalog_skip "
+                   "client=%08x scene=%s npcnum=%u reason=warm-already-on-type27 "
+                   "prior_seeded=%u evidence=no-second-DoLoading\n",
+                   activeSession->clientId,
+                   currentScene,
+                   (u32)npcCount,
+                   priorSeeded ? 1u : 0u);
+            return true;
+        }
+        /*
+         * Nonempty 27/11 on follow-up when type27 did not inject.  No
+         * same-packet 30/2 — 26/0 cannot clear DF; poll drip owns
+         * ResetDownloadState (docs/re/2026-07-27-shop-return-loading-stall.md).
+         */
+        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
+        if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                out, outCap, pos, currentScene,
+                "shop-return-followup-warm"))
             return false;
         *objectCount += 1;
-        printf("[info][mock-service] shop_return_npc_catalog_defer client=%08x "
-               "scene=%s npcnum=%u objects=%u "
-               "evidence=shell-30/2-then-poll-27/11\n",
+        activeSession->shopReturnWarmNpcDelivered = true;
+        activeSession->shopReturnNpcCatalogPending = false;
+        activeSession->shopReturnNpcCatalogScene[0] = 0;
+        activeSession->shopReturnNpcCatalogReadyTick = 0;
+        activeSession->shopSceneNpcReseedPending = false;
+        activeSession->shopSceneNpcReseedScene[0] = 0;
+        printf("[info][mock-service] shop_return_npc_warm_immediate "
+               "client=%08x scene=%s npcnum=%u via=followup "
+               "prior_seeded=%u "
+               "evidence=27/11-then-poll-30/2-no-same-packet\n",
                activeSession->clientId,
                currentScene,
                (u32)npcCount,
-               (u32)*objectCount);
+               priorSeeded ? 1u : 0u);
         return true;
     }
 
@@ -630,7 +658,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         return 0;
 
     snprintf(currentSceneBuf, sizeof(currentSceneBuf), "%s",
-             vm_net_mock_current_scene_name());
+             vm_net_mock_client_visible_scene_name());
     currentScene = currentSceneBuf;
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
@@ -1379,7 +1407,12 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
      * follow-up: the current row shape is parsed, but can leave the scene draw
      * callback at +0x148 unset and crash at scene_draw_actor_pass(0x01014594).
      */
-    currentScene = vm_net_mock_current_scene_name();
+    /*
+     * Same shell authority as map-stone type27 / scene-sync poll.  Using only
+     * role->scene after a cross-scene map-stone let WT6/1 seed the previous
+     * town while sceneVisible* already named the target.
+     */
+    currentScene = vm_net_mock_client_visible_scene_name();
     includeSkillBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 0x0c, 1) &&
                         vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
 
@@ -1645,10 +1678,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     }
     else if (shopReturnReload)
     {
-        /*
-         * Same as WT6/1 shop-return: no same-packet 30/2 — 27/11 may push a
-         * late DoLoading; finish_shop_return_rehydrate arms poll clear.
-         */
         printf("[info][network] mock_shop_return_task_subset_complete "
                "scene=%s objects=%u completion=none "
                "loading_clear=poll-30/2 "

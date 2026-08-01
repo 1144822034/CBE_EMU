@@ -28,6 +28,18 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
 
 #include "mock_server_catalog.c"
+
+/* Sync MySQL writers in role.c (position / full role_db_save) must invalidate
+ * in-flight deferred persist jobs owned by account_state in equipment_npc.c. */
+static void vm_mock_service_account_note_durable_role_write(
+    const char *accountId,
+    const vm_net_mock_role_db_file *db,
+    bool dbValid,
+    const vm_net_mock_warehouse_state *warehouse,
+    bool durableInventoryCommitted,
+    bool durablePositionCommitted,
+    const char *reason);
+
 #include "mock_server_role.c"
 
 /* Death recovery owns the role mutation in mock_server_equipment_npc.c, while

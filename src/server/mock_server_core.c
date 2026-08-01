@@ -131,7 +131,7 @@ static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
 #define VM_MOCK_SERVICE_REQUEST_FLAG_CLIENT_DISCONNECT 0x4u
 /* Keep short so abandoned half-open clients free workers quickly; slow MySQL
  * paths must not rely on sitting in recv() for long. */
-#define VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS 2500
+#define VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS 10000
 #define VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA 0x1u
 /* Primary CBMR body is followed by a second CBMR (event in aux) on the same
  * TCP reply.  Used for warehouse lone 26/1 after 7/1 clears item-use loading. */
