@@ -28,6 +28,8 @@ CLIENT_SOURCES := \
 	src/fileIoEngine.c \
 	src/lcd.c \
 	src/md5.c \
+	src/cbe_log.c \
+	src/gameLauncher.c \
 	src/main.c
 
 SERVER_SOURCES := \
@@ -35,6 +37,7 @@ SERVER_SOURCES := \
 	src/mystd.c \
 	src/mysql-client.c \
 	src/md5.c \
+	src/cbe_log.c \
 	src/main.c
 
 ifeq ($(OS),Windows_NT)
@@ -72,6 +75,7 @@ $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
+	src/web_admin_chests.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(CLIENT_OBJDIR)/%.o: src/%.c | $(CLIENT_OBJDIR)
@@ -120,6 +124,7 @@ boundary-check: build
 
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
+	src/web_admin_chests.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)

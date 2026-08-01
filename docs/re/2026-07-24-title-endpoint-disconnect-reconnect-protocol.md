@@ -108,8 +108,11 @@ presence timeout。这两条路径最终都调用同一服务端下线逻辑，�
 
 如需支持多个物理游戏端点，必须明确选择一个不同于原生标题协议的产品层方案：
 
-1. **启动器配置**：用户启动客户端前选择服务器，启动器设置
-   `CBE_SERVER_ENDPOINT=host:port`；标题列表只负责显示和逻辑 serverID。
+1. **启动器 / 配置文件**：用户启动客户端前选择服务器。当前实现是宿主读取
+   `servers.conf`，通过 `--server=` / `CBE_SERVER=`（或文件内 `current=`）在
+   版本握手之前写入 `CBE_SERVER_ENDPOINT` 同类端点；见
+   [2026-07-26-client-server-endpoint-list.md](2026-07-26-client-server-endpoint-list.md)。
+   标题列表只负责显示和逻辑 serverID。
 2. **固定入口网关**：客户端始终连接一个入口服务，选服后的 `serverID` 由入口
    在服务端路由到对应游戏分区。客户端无需端点迁移。
 

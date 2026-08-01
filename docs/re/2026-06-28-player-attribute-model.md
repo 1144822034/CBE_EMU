@@ -17,6 +17,13 @@ No new client field was introduced in this pass.
 - `JianghuOL.CBE:parse_actorinfo_response(0x0100FA88)` still consumes the
   existing scene/login `actorinfo` blob. The mock now fills the known HP/MP and
   attribute scalar slots from the unified model.
+- The six property words seed `actor+0x122..` halfwords.  Word[4] maps to
+  `+0x132` (**护甲** bare).  Panel **物攻** is `actor+0x130`, filled only by
+  weapon wear-apply from `item+0xFA` — not by actorinfo.  Charm stays on
+  `EXTRA132`.  See `2026-07-29-actorinfo-attack-word-mapping.md`.
+- HP/MP keep bare `primaryBaseMax` / `secondaryBaseMax` (client re-add path).
+- Do not push a full-blob `1/1/14` on login equipment bootstrap; refresh mode
+  skips wire reads and desyncs.
 - `mmBattleMstarWqvga.cbm:HandleBattleStartMsg(0x66CC)` still consumes battle
   start HP/MP records. The mock now seeds those records from the same model.
 - `mmBattleMstarWqvga.cbm:HandleBattleActionMsg(0x6EB0)` still consumes action
@@ -24,6 +31,59 @@ No new client field was introduced in this pass.
   defense, or monster attack and player defense.
 - `mmBattleMstarWqvga.cbm:HandleBattleSettleMsg(0x743C)` remains the persistence
   point for HP/MP/EXP/money.
+
+## Client Authority (2026-07-29)
+
+Follow `江湖OL.CBE` evidence; do **not** invent “主属性→攻 / 力量→血 /
+敏捷→甲” unless a client path writes those halfwords that way.
+
+### Login / actorinfo (server absolute)
+
+On each login the server seeds absolute 力量/敏捷/智慧/耐力/气血/法力.
+Observed job tables (attrIndex 0..4 = 力/敏/智/耐/魅) still match live
+`bareStr/bareAgi/bareWis` for known roles — keep
+`vm_net_mock_role_derived_attr`.
+
+### Mid-session level-up (`0x01017FB6`)
+
+When level rises **in an already-running session**, the client adds flat
+per-level deltas from the actor job byte (0/1/2), then re-runs wear-apply:
+
+| job byte | 气血 | 法力 | +0x84 | 力量(+0x122) | 敏捷(+0x124) |
+| --- | --- | --- | --- | --- | --- |
+| 0 | +25 | +15 | +12 | +4 | +6 |
+| 1 | +20 | +20 | +6 | +10 | +3 |
+| 2 | +15 | +25 | +3 | +6 | +12 |
+
+It does **not** add 智慧、物攻(`+0x130`)、护甲(`+0x132`) on level-up.
+Those stay actorinfo / equipment-apply owned. Login absolute formulas are
+therefore not required to equal `(L-1) *` these mid-session rates.
+
+### Property panel
+
+UI labels include 智慧, but paint-8 halfwords (login role34 evidence) pair as
+力量,敏捷,物攻,护甲,闪躲,命中,暴击,抗性.
+
+| 行 | halfword | 客户端来源 |
+| --- | --- | --- |
+| 力量/敏捷 | +0x122/+0x124 | actorinfo word[0]/[1] + apply |
+| **物攻** | **+0x130** | **仅武器** `item+0xFA` |
+| **护甲** | **+0x132** | word[4] bare + 防具 `item+0xF8` |
+| 闪躲 | +0x128 | enhance wire→4 |
+| **命中** | **+0x12a** | **word[2]=hit**（不是智慧） |
+| 暴击 | +0x12e | enhance wire→6 |
+| **抗性** | **+0x12c** | **word[5] bare（0）+ wear `fec6` 装备抗性** |
+| 智慧 | +0x126? | word[3] provisional / paint unresolved |
+| 活力 | unresolved | — |
+
+无武器时物攻为 0 是客户端契约。详见
+`2026-07-29-actorinfo-attack-word-mapping.md`。
+
+### Battle (mock server)
+
+`playerStats.attack` / `defense` / soft mitigation remain **server-side**
+damage authority. They are not the property-panel 物攻/护甲 halfwords.
+See `2026-07-29-actorinfo-attack-word-mapping.md`.
 
 ## Role DB
 
@@ -112,28 +172,44 @@ charm = baseCharm + money / 100000
 `equip.dsh` does not currently expose an endurance column, so endurance remains
 level/job based until a recovered item field proves otherwise.
 
-## Derived Combat Stats
+## Derived Combat Stats (server battle model)
 
-The mock derives combat stats as:
+Panel 物攻/护甲 follow the client table above. Mock **battle** still derives:
 
 ```text
 maxHp   = 90 + level * 8 + endurance * 2 + equipment.hp
 maxMp   = 70 + level * 9 + wisdom * 3 + equipment.mp
-attack  = 6 + level * 2 + strength / 2 + equipment.attack / 3
+attack  = 6 + level * 2 + jobPrimary / 2 + equipment.attack / 3
 defense = 4 + level + endurance / 2 + equipment.armor / 5
-hit     = 75 + level + agility * 2 + equipment.hit
-dodge   = 3 + level / 2 + agility / 2 + equipment.dodge / 2
-crit    = 1 + agility / 3 + wisdom / 5 + equipment.crit / 2
-resist  = wisdom / 2 + endurance / 3 + equipment.resist
+hit     = equipment.hit
+dodge   = equipment.dodge
+crit    = equipment.crit
+resist  = equipment.resist
 ```
 
-Rationale:
+`jobPrimary` (2026-07-31):
 
-- equipment primary attributes are visible at full value;
-- weapon attack and armor are folded into combat at a reduced rate so early
-  `equip.dsh` rows matter without making monster stats unusable;
-- HP/MP scale gently with level so role persistence remains readable on the
-  original feature-phone UI.
+```text
+job 1 天机 → strength
+job 2 幻剑 → agility
+job 3 鬼道 → wisdom
+```
+
+See `2026-07-31-battle-attack-job-primary-attr.md`. Panel 物攻 remains
+weapon-only (`item+0xFA`); this change is server battle authority only.
+
+These feed battle start / hit rolls / soft mitigation only. Do not remap panel
+halfwords to “力量→血、敏捷→甲、主属性→攻” without new client evidence;
+mid-session level-up uses flat job rates, not those derivatives.
+
+Rationale (battle model):
+
+- equipment primary attributes are visible at full value on the panel path;
+- weapon attack and armor fold into **server** combat at a reduced rate;
+- HP/MP scale with level for persistence readability;
+- hit / dodge / crit / resist are equipment-only (including enhance milestones);
+- normal-attack damage scales with the job’s damage primary so agility / wisdom
+  gear affects 幻剑 / 鬼道 auto-attacks the same way strength gear affects 天机.
 
 ## Defense Formula
 
@@ -143,6 +219,13 @@ Damage now uses a soft mitigation curve:
 damage = max(1, attack * 100 / (100 + defense))
 ```
 
+Spell damage uses resist as a flat percent reduction (cap 70%):
+
+```text
+damage = raw * (100 - min(resist, 70)) / 100
+```
+
+命中后若减免到 0，进攻路径仍保底为 1；未命中保持 0。
 This avoids the old `attack - defense` cliff where a small stat mismatch could
 collapse damage to `1`, while still making defense meaningful at all levels.
 

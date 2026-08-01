@@ -71,8 +71,8 @@ human-readable Chinese into row `+114` made the client request that text as a
 resource filename. IDA evidence from `scene_draw_node_overhead_overlay`
 (`0x01045578`) also treats actor `+266` as an optional named overhead
 badge/resource. The mock therefore puts only real local resource names in row
-`+114` (`riches_name0.gif` through `riches_name9.gif`), never human-readable
-title text.
+`+114` (`riches_name0.gif` through `riches_name9.gif`, or `level_name0.gif`
+through `level_name12.gif`), never human-readable title text.
 
 The first row field is the stable server-side designation id. The client sends
 it back as the `type` field in subtype `23/3`, and the mock stores it on the
@@ -107,26 +107,57 @@ WT object 1/23/1
   designationinfo = raw stream title rows
 ```
 
-The mock keeps a server-side wealth-title catalog backed by the recovered
-`riches_name*.gif` resources. These are not granted as fixed defaults: `23/1`
-only includes entries whose `minMoney` condition is satisfied by the active
-role's current money:
+The mock keeps a server-side designation catalog with two kinds:
+
+1. Wealth titles backed by `riches_name*.gif`
+2. Level titles backed by `level_name*.gif`
+
+These are not granted as fixed defaults: `23/1` only includes entries whose
+condition is satisfied by the active role.
+
+Wealth (`kind=money`, ids `0..9`), thresholds in **copper**
+(`1 gold = 10000 copper`):
 
 ```text
-0  一贫如洗    riches_name0.gif  minMoney=0
-1  衣食无忧    riches_name1.gif  minMoney=5000
-2  生财有道    riches_name2.gif  minMoney=20000
-3  理财有方    riches_name3.gif  minMoney=50000
-4  财运亨通    riches_name4.gif  minMoney=100000
-5  腰缠万贯    riches_name5.gif  minMoney=300000
-6  家财万贯    riches_name6.gif  minMoney=500000
-7  富商巨贾    riches_name7.gif  minMoney=1000000
-8  富甲一方    riches_name8.gif  minMoney=3000000
-9  富可敌国    riches_name9.gif  minMoney=10000000
+0  一贫如洗    riches_name0.gif  minMoney=0            (0 gold)
+1  衣食无忧    riches_name1.gif  minMoney=100000       (10 gold)
+2  生财有道    riches_name2.gif  minMoney=1000000      (100 gold)
+3  理财有方    riches_name3.gif  minMoney=5000000      (500 gold)
+4  财运亨通    riches_name4.gif  minMoney=10000000     (1000 gold)
+5  腰缠万贯    riches_name5.gif  minMoney=100000000    (10000 gold)
+6  家财万贯    riches_name6.gif  minMoney=500000000    (50000 gold)
+7  富商巨贾    riches_name7.gif  minMoney=1000000000   (100000 gold)
+8  富甲一方    riches_name8.gif  minMoney=1500000000   (150000 gold)
+9  富可敌国    riches_name9.gif  minMoney=2000000000   (200000 gold)
 ```
 
+Level (`kind=level`, ids `10..22`); badge resources keep
+`level_name0.gif` .. `level_name12.gif` order:
+
+```text
+10 不堪一击    level_name0.gif   minLevel=0
+11 初学乍练    level_name1.gif   minLevel=5
+12 小试牛刀    level_name2.gif   minLevel=10
+13 初露锋芒    level_name3.gif   minLevel=15
+14 出人头地    level_name4.gif   minLevel=25
+15 名震江湖    level_name5.gif   minLevel=30
+16 江湖枭雄    level_name6.gif   minLevel=40
+17 了然于胸    level_name7.gif   minLevel=45
+18 炉火纯青    level_name8.gif   minLevel=50
+19 江湖侠隐    level_name9.gif   minLevel=55
+20 登峰造极    level_name10.gif  minLevel=60
+21 超越极限    level_name11.gif  minLevel=65
+22 开山鼻祖    level_name12.gif  minLevel=70
+```
+
+`fieldB` remains `0` for every row. A prior experiment with `fieldB=1` on the
+`23/2` scene-node update crashed `scene_draw_actor_pass`. Category is therefore
+carried by the stable designation id range and the overhead resource prefix
+(`riches_name*` vs `level_name*`), not by `fieldB`.
+
 If the active stored designation is no longer unlocked, the page-open path
-falls back to the highest currently unlocked title before emitting `equiptype`.
+falls back to the highest currently unlocked title of the same kind, then to
+any unlocked wealth/level title before emitting `equiptype`.
 
 Selecting a row sends subtype `23/3`. The page parser accepts subtype `23/3`
 as a confirmation packet:
@@ -175,8 +206,12 @@ mock_update_chunk_missing subtype=7 file=一贫如洗
 
 Sending `title.gif` is also wrong for scene overhead display. Runtime screenshot
 showed it renders the large login/logo calligraphy over the actor. The correct
-wealth-title badge resources recovered from local assets are `riches_name*.gif`
-(`riches_name0.gif` = `一贫如洗`, `riches_name1.gif` = `衣食无忧`, ...).
+badge resources recovered from local assets are:
+
+- wealth: `riches_name0.gif` .. `riches_name9.gif`
+- level: `level_name0.gif` .. `level_name12.gif`
+
+(`riches_name0.gif` = `一贫如洗`, `level_name0.gif` = `不堪一击`, ...).
 
 Returning subtype `23/2` for the page-open request is parser-safe but does not
 populate the title page list; it only updates actor metadata. Setting

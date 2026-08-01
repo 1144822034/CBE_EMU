@@ -813,8 +813,11 @@ Minimum server fix:
 
 ## unknowns
 
-- The exact semantic name of `child_flag` is still unknown. Current code keeps
-  it configurable and defaults it to zero for both directions.
+- The exact semantic name of `child_flag` was long unknown. 2026-07-29 CBM
+  evidence (`mmBattleMstarWqvga.cbm` `0x24f6`): `2` copies local string 「暴击」,
+  `3` copies 「闪躲」 into the float-text buffer; other values leave numeric text.
+  Mock combat rolls now emit these flags on crit/miss. Remaining values (if any)
+  are still unresolved.
 - Subtype 5 currently copies the touched scene monster art/name correctly, but
   duplicated local SCE actor ids mean the moveinfo seed can only target the
   first active row with that actor id. Recovering the live server's unique

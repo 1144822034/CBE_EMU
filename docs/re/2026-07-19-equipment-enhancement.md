@@ -68,15 +68,29 @@ Status: 已实现，待客户端完整回归（预览、确认、重登）
 
 - `vm_net_mock_build_equipment_enhance_response` 严格处理 `1/29/1..3`。
 - 可用玄晶限定为物品 901..916（一级至十六级玄晶）。
+- 玄晶强度（29/1 data2，紧凑线性表，避免客户端截断 maxlevel）：
+  `power = 玄晶等级 × 100`；`required(data1)`：`+0→100`，`+N→N×250`。
+  指数表曾导致 +12 后提示上限（`2026-07-31-enhance-maxlevel-clamp-at-12.md`）。
+- 成功率（权威：29/2 `value` / 29/3 掷骰）：
+  - `+L→+(L+1)`：**目标级及以上**（`tier≥L+1`）→ 100%；**当前级** → 40%；再低一级 ×40%
+  - 例：`+4→+5` 五级晶 100%，四级晶 40%
+  - `rate = min(100, Σ unit(tier)*count)`
+  - 详见 `2026-07-31-enhance-same-tier-rate-100.md`
+- 铜币：与 compact `required` 同曲线
 - 预览阶段只计算玄晶强度、成功率和费用；确认阶段才扣除玄晶与角色铜币。
-- 强化成功后通过背包 common-extra 的第二个 `i16` 返回等级。
+- 强化成功后通过背包 common-extra 的**第一** `i16` 返回当前等级（第二为 maxlevel；见 `2026-07-29-login-backpack-enhance-zero.md`）。
 - 日志来源名为 `builtin-equipment-enhance`，稳定事件名为 `mock_equipment_enhance`。
 
 ## 6. 持久化
 
-- `account_role_backpack` 新增 `enhance_level SMALLINT UNSIGNED NOT NULL DEFAULT 0`。
-- 新数据库由 `server/mysql/schema.sql` 和 payload 迁移建表脚本直接创建该列。
-- 已有数据库需执行 `server/mysql/migrate_add_equipment_enhancement.sql`。
+- `account_role_backpack` 有 `enhance_level`（背包装备实例）。
+- `account_role_equipment` 有 `enhance_level`（穿戴槽）；穿戴/卸载必须在两侧
+  之间搬运，否则会表现为「强化好的装备卸下后等级丢失」。
+  见 `2026-07-27-equip-unequip-lose-enhance.md`。
+- 新库由 `server/mysql/schema.sql` 建列；旧库执行
+  `migrate_add_equipment_enhancement.sql`（背包）与
+  `migrate_add_equipped_enhance_level.sql`（穿戴），或依赖服务启动时的
+  `ALTER` 探测。
 
 ## 7. 验证清单
 
@@ -88,3 +102,7 @@ Status: 已实现，待客户端完整回归（预览、确认、重登）
 - [ ] 客户端点击强化后进入强化界面且进度条消失。
 - [ ] 选择玄晶后成功率和费用刷新。
 - [ ] 强化完成后等级、玄晶数量和铜币在重登后保持一致。
+- [x] 确认强化后背包玄晶/铜币同步：`29/3` 追加 `7/7 type=2`+`7/11`+`10/26`
+- [x] 确认强化成功后主背包装备强化等级：追加装备行 `7/7 type=2`+`7/11`（见 `2026-07-29-enhance-level-backpack-zero.md`）
+  （见 `2026-07-29-enhance-crystal-bag-count-stale.md`）。
+- [ ] 选晶放入时选择列表即时刷新：客户端 `0x900`/`0x580` 分裂，服务端无 place 包。

@@ -17,8 +17,8 @@ packet stream would be corrupted by concurrent queries.
 
 - The listener now only accepts and enqueues sockets.
 - A bounded pool owns per-worker request and response buffers.
-- Default pool size is 4, configurable with `CBE_MOCK_SERVICE_WORKERS` and
-  clamped to 2..16.
+- Default pool size is 8, configurable with `CBE_MOCK_SERVICE_WORKERS` and
+  clamped to 2..32.
 - The accepted-connection queue holds at most 128 sockets.  Excess connections
   are closed with an explicit `queue-full` warning instead of allowing
   unbounded memory/thread growth.

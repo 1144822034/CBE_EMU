@@ -30,7 +30,7 @@ This rules out a missing scene bundle as the cause of the update UI.
 | `江湖OL.CBE` | `scene_parse_npcinfo_and_spawn_npcs` / `0x01037998` | Each `27/11 npcinfo` row reads three integers, four strings, then the final actor id. The fourth string is registered into the node visual slot. |
 | `江湖OL.CBE` | `RegisterDisplayName` / `0x0100EEE0` | The registered string is copied into one of four scene visual/name slots used by the created node. |
 | `江湖OL.CBE` | `parse_scene_response_entry` / `0x010396D6` | `30/1 scene+posinfo` invokes the scene-enter vtable. |
-| `江湖OL.CBE` | `parse_scene_posinfo_field` / `0x01039770` | `30/2 result=1 scene+posinfo` invokes the same scene-enter vtable; `result=2` without `posinfo` is acknowledgement-only. |
+| `江湖OL.CBE` | `parse_scene_posinfo_field` / `0x01039770` | `30/2 result=1 scene+posinfo` invokes the same scene-enter vtable; `result=2` without `posinfo` is acknowledgement-only. **Runtime note (2026-07-27):** loading-clear / shop-return / map-stone close that must reach `ResetDownloadState` (`0x0103993C`) use `30/2 {result=1,type,scene}` **without** `posinfo` — validated in `2026-07-22-teleport-penglai-mijing-progress-stall.md`. Switching the shared no-posinfo helper to `result=2` left shop-exit stuck (`2026-07-27-shop-return-loading-stall.md`). |
 | `江湖OL.CBE` | `ui_apply_named_posinfo_target` / `0x0100E9B8` | `27/12 name+posinfo` also reaches the scene-enter vtable and is not a no-reentry coordinate update. |
 
 ## Root Causes

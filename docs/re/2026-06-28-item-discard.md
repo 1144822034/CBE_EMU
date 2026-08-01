@@ -53,6 +53,16 @@ The role DB is saved with reason `item-discard` after the stack is removed or
 decremented. `17/1` is the authoritative visible-list refresh; `7/11` is a
 CBE-side row-count fallback for callbacks that see the main kind-7 dispatcher.
 
+## Equipment discard refund
+
+When the discarded row exists in `equip.dsh`, the server refunds
+`floor(价值 / 10) * discardCount` copper into `role->money` before the DB save.
+Ordinary `item.dsh` consumables get no refund.  A non-zero refund also appends
+`1/10/26 {result,type=1,npcnum,name,money}` (group/type-1 money contract) so the
+backpack copper label updates immediately.  Do not append `1/1/14` on this path:
+the discard response is owned by kind-7 / `17/1` parsers, and mmShop's actor-state
+branch is not active.  Do not append `7/26`: that subtype opens the task hall.
+
 ## Runtime Validation
 
 Expected handled source:
@@ -62,6 +72,14 @@ builtin-item-discard
 mock_item_discard ... refresh=7/4+17/1+7/42+7/11
 ```
 
+Follow-up encode failures must still return at least `7/4` (see
+`2026-07-27-item-discard-freeze-and-bind.md`); refresh label may omit failed
+objects. Continuous discard on remote hosts must not sync-save under the
+request lock — see `2026-07-27-item-discard-continuous-freeze-mysql.md`.
+Same-WT dual `7/4` (`len=72`) must still parse — see
+`2026-07-30-item-discard-compound-7-4-hang.md`.
+
+
 Manual checks:
 
 1. Open backpack.
@@ -69,3 +87,4 @@ Manual checks:
 3. Confirm no assert.
 4. Confirm the item list and the bottom slot counter both reflect the active
    role backpack after discard.
+5. Continuously discard equipment: UI must clear waiting state without re-enter.

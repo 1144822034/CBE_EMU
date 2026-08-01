@@ -105,7 +105,7 @@ IDA 交叉证据：
 
 例如 `c00蓬莱仙岛_01.sce`（sMap 行 37）经本地相邻关系到 `c00蓬莱仙岛_03.sce`（行 39）的距离为 2；后者含 `n_telestone`，SCE 安全出生解析得到 `(157,47)`。局部图无候选时才以 `wMap.dsh` 的世界图距离选择候选，保证不会把未连通的任意传送石当作“最近”。资源缺失不会静默回退到出生点：有效源场景会保留当前场景并写 `mock_death_respawn_nearest_telestone_unresolved`，只有角色场景本身无效时才显式使用初始场景。
 
-“掉两级”按等级阈值结算，而非仅减少当前等级的少量进度：普通复活令经验设为 `max(当前等级-2, 1)` 的起始经验。当前阈值为每级累计 100、300、600、1000、1500…；因此 5 级、1250 经验变为 3 级、300 经验，1/2 级均下限为 1 级、0 经验。原有 5% 金钱和 30% HP/MP 普通复活规则保持不变。
+~~“掉两级”按等级阈值结算……~~ **已于 2026-07-26 调整**：普通复活改为扣除「当前等级已获得经验」的 10%，等级不降；见 `docs/re/2026-07-26-battle-death-exp-penalty-current-level.md`。原有 5% 金钱和 30% HP/MP 普通复活规则保持不变。
 
 ## 4. 调用链 / 首个偏差
 
@@ -128,7 +128,7 @@ IDA 交叉证据：
 
 - `result=1`：服务端先原子消费一个 `801`，再将 HP 设为 `hpMax`（MP 保持死亡前的持久值）并持久化角色/背包；随后返回 `1/4/7`（完整结算字段，`hp=恢复后的完整 HP 增量`、`mp=0`）→ `1/4/8(result=1,autorevive=1,info)` → `1/4/11` → `1/4/9`。
 - 上述 `4/7 → 4/8` 由 Battle.cbm 的既有结算路径将 HP 增量写回主角色缓存，随后终止当前战斗。`result=1` 不发送 `20/1` 或 `30/1`，不直接改客户端内存、场景或 battle 全局。
-- `result=2` 是普通复活：服务端以 `sMap.dsh → wMap.dsh → SCE:n_telestone` 解析最近传送石场景及其安全落点，恢复 30% HP/MP，将等级降两级（最低 1 级且经验取该级起始值），并保留 5% 金钱惩罚；客户端响应仍为已验证的 `1/20/1(result=0) + 1/30/1(scene,posinfo)` 场景重生契约。商城购买本身仍不自动消耗 801。
+- `result=2` 是普通复活：服务端以 `sMap.dsh → wMap.dsh → SCE:n_telestone` 解析最近传送石场景及其安全落点，恢复 30% HP/MP，扣除当前等级已获经验的 10%（等级不降；见 2026-07-26 文档），并保留 5% 金钱惩罚；客户端响应仍为已验证的 `1/20/1(result=0) + 1/30/1(scene,posinfo)` 场景重生契约。商城购买本身仍不自动消耗 801。
 
 ## 6. Negative Evidence
 
@@ -141,13 +141,13 @@ IDA 交叉证据：
 2. `src/server/mock_server_equipment_npc.c` 的 `vm_net_mock_role_apply_revival_stone()` 在同一权威角色/背包状态中消费一颗 `801`、设 `hp=hpMax`、保留 MP，并通过 `vm_net_mock_role_db_save("battle-revival-stone")` 持久化。
 3. 移除了 `vm_net_mock_role_revive_floor_after_death()` 及其两处战斗启动调用。挂机和普通怪物触碰在 HP=0 时不再静默写入 1 HP，而是返回已有 parser-safe 的 `2/10 + 25/11` 死亡提示；完整复活仍必须走 `1/7/14(result=1)`。
 4. 商城 `14/3` 仍只购买物品；成功购买 `801` 且角色死亡时只记录 `revival_confirm_pending=1` 供日志取证，不改变 HP。
-5. `vm_net_mock_role_apply_death_penalty()` 现在只处理仍为死亡态（`hp == 0`）的普通复活；解析最近 `n_telestone` 场景后，在同一角色状态中写入落点、两级经验惩罚、既有金钱/HP/MP 惩罚并持久化。重复的 `result=2` 返回 parser-safe `20/1(result=1,info)`，不再次扣除或重入场景。
+5. `vm_net_mock_role_apply_death_penalty()` 现在只处理仍为死亡态（`hp == 0`）的普通复活；解析最近 `n_telestone` 场景后，在同一角色状态中写入落点、当前等级进度 10% 经验惩罚、既有金钱/HP/MP 惩罚并持久化。重复的 `result=2` 返回 parser-safe `20/1(result=1,info)`，不再次扣除或重入场景。
 
 ## 8. 验证
 
 - [x] `result=1` 被严格 detector 命中，服务日志为 `source=builtin-battle-death-prompt-choice`；返回完整的 `4/7 + 4/8 + 4/11 + 4/9`，不含 `20/1` 或 `30/1`。
 - [x] 2026-07-23 在本机 MySQL 夹具运行 `php tmp/battle-revival-stone-regression.php run 19090`：死亡角色使用 801 后，数据库验证 HP `148/148`、MP `31`、经验 `321`、金钱 `654`、场景 `c00蓬莱仙岛_01.sce`、位置 `(220,454)` 保持；背包 801 数量从 `2` 到 `1`。测试同时断言 `4/7.hp=148`、`4/7.mp=0`、`4/8.autorevive=1`、`4/11/4/9` 存在，且不含 `20/1` 或 `30/1`；非死亡时重复 `result=1` 被拒绝且不会再消耗石头或改写状态。
 - [x] HP=0 时不再由战斗启动路径静默补 1 HP。
-- [x] 2026-07-23 在本机 MySQL 夹具运行 `php tmp/battle-ordinary-respawn-regression.php run 19090`：从 `c00蓬莱仙岛_01.sce` 的死亡角色以 `result=2` 复活，响应只含 `20/1 + 30/1`，数据库验证 5 级/1250 经验变为 3 级/300 经验、金钱 `654→621`、HP/MP 为 `45/38`、场景为 `c00蓬莱仙岛_03.sce` 且安全坐标为 `(157,47)`；紧随的重复 `result=2` 被拒绝且数据库行不变。
+- [x] 2026-07-23 在本机 MySQL 夹具运行 `php tmp/battle-ordinary-respawn-regression.php run 19090`：从 `c00蓬莱仙岛_01.sce` 的死亡角色以 `result=2` 复活，响应只含 `20/1 + 30/1`，数据库验证（当时规则）5 级/1250 经验变为 3 级/300 经验、金钱 `654→621`、HP/MP 为 `45/38`、场景为 `c00蓬莱仙岛_03.sce` 且安全坐标为 `(157,47)`；紧随的重复 `result=2` 被拒绝且数据库行不变。**经验断言已过时**：2026-07-26 起应为「仍 5 级、仅扣当前等级进度 10%」。
 - [x] `make -j2` 已通过。
 - [ ] 客户端人工回归：死亡→商城购买→返回→确认使用；以及缺石/重复确认、普通 `result=2` 复活和重新登录后触怪。购买日志的 `revival_confirm_pending` 与随后 `mock_battle_death_prompt_choice result=1` 可用于对照实际路径。

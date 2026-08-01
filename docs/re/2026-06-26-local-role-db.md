@@ -195,9 +195,10 @@ Login and scene enter:
   或“无帮派”文字代替该状态值。
 - scene/login actorinfo now derives display-only RPG properties from the active
   role instead of writing zeros:
-  - title is wealth based through the designation catalog documented in
-    `2026-07-02-role-designation-page.md`; only titles whose money requirement
-    is met are returned by the `23/1` title page list;
+  - title is wealth/level based through the designation catalog documented in
+    `2026-07-02-role-designation-page.md`; only titles whose money or level
+    requirement is currently met are returned and selectable by the `23/1`
+    title page list;
   - display/sect 查询 `guild_members -> guilds` 并显示真实帮派名；未入帮时显示 `无帮派`，不再把 `散人` 当作帮派名；
   - spouse defaults to `无` through the group/type-1 `name` field instead of the
     old hard-coded `Codex`;

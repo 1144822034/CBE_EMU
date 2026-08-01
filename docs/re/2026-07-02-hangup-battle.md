@@ -29,7 +29,7 @@
 
 ## Server Contract
 
-Success response:
+Success response when a live scene-node tuple is known:
 
 - `1/2/10`: empty actor-other acknowledgement.
 - `1/2/2`: moveinfo for the selected scene monster node.
@@ -38,10 +38,17 @@ Success response:
 - When the request contains the trailing movement upload, one empty `1/2/1`
   acknowledgement is appended after the battle objects.
 
+Success response when no live scene-node tuple is known (android/service-only):
+
+- `1/2/10`: empty actor-other acknowledgement.
+- `1/4/10`: non-scene battle start with embedded enemy/role templates.
+- Optional `1/4/11`: same auto-battle UI flag.
+- Optional trailing empty `1/2/1` when the request flushed movement.
+
 Failure response:
 
 - `1/2/10`: empty actor-other acknowledgement.
-- `1/25/11`: `result = 8`, `info = "No hangup monster"` or `"Monster not ready"`.
+- `1/25/11`: `result = 8`, `info = "No hangup monster"`.
 - When present, the trailing movement upload is still consumed through the
   existing movement handler and receives the same empty `1/2/1`
   acknowledgement. Its position/session side effects are not skipped merely
@@ -56,24 +63,17 @@ Failure response:
   - `web/fs/JHOnlineData/automonster.dsh`
 - Matching uses loose scene-name comparison, then chooses one of the row monster ids.
 - `CBE_HANGUP_BATTLE_ENEMY_ID` can force a monster id for debugging only.
-- The standalone service cannot read the emulator process's `R9+0x5CB0` scene
-  node table. It resolves the selected monster instance from the real SCE2
-  scene resource instead. The recovered combat-spawn record is:
-
-```text
-u16 kind = 3
-u16 x
-u16 y
-meta token 5/6: field 14 = actor id
-string field 15 = display name
-scalar field 16 = visual/class hint
-string field 17 = actor resource
-```
-
-- The response first sends `2/2 moveinfo` for this actor id and coordinate.
-  `HandleBattleStartMsg(0x66CC)` checks the supplied row index, then scans up to
-  25 active kind-2 scene rows for matching coordinates. This keeps the SCE
-  fallback valid when dynamic actors have shifted the live slot ordinal.
+- Subtype-5 battle start requires the client's live 25-row scene-node tuple
+  (`index` + battle coords at `node+240/+244`).  The standalone service cannot
+  read `R9+0x5CB0`, so it must not emit SCE combat-spawn ordinals as that
+  tuple.  Hangup now resolves the tuple from:
+  1. the session's last successful scene-monster `4/1` challenge live-node; or
+  2. an in-process emulator live-table scan (no SCE fallback).
+  If neither is available, hangup falls back to non-scene `1/4/10` with an
+  embedded enemy template (`target_source=non-scene-subtype10`).
+- SCE2 combat-spawn records remain useful as human/admin catalog evidence, but
+  their spawn ordinal is not a live scene index.  See
+  `2026-07-25-hangup-battle-start-crash.md`.
 
 ## Implementation Notes
 
@@ -99,3 +99,25 @@ string field 17 = actor resource
 - Both requests log as `source=builtin-hangup-battle-start`, include
   `mock_scene_monster_target ... source=SCE2-combat-spawn`, leave the service
   alive, and produce zero stderr bytes.
+
+## 2026-07-25 Crash Correction
+
+- Client fault after hangup `resp=248`: `JianghuOL.CBE:0x01004EA8` null visual
+  at battle-unit `+0x0C`, same as the 2026-07-22 scene-monster crash.
+- Same-scene challenge had already proven the live tuple
+  `index=6 pos=(102,287)`; hangup emitted SCE ordinal `index=1` for the same
+  coordinates and crashed on first draw.
+- Hangup no longer uses SCE spawn ordinals for subtype 5.  It reuses the
+  session's last challenge live-node, or an emulator live scan, otherwise
+  answers with non-scene `4/10`.  Details:
+  `2026-07-25-hangup-battle-start-crash.md`.
+
+## 2026-07-25 Hangup Loop
+
+- After a hangup start with auto/`prefer`, victory marks `ScheduleAfterExit`;
+  delayed `4/8` tear-down then arms map-side re-entry
+  (`CBE_HANGUP_LOOP_INTERVAL_MS`, default 2000).  Scene poll delivers the next
+  synthetic hangup start while prefer remains set.
+- Explicit auto off, escape, death, or scene change clears the loop.
+- See `2026-07-28-hangup-loop-pacing-refactor.md`.
+- See `2026-07-25-hangup-loop-15s.md`。

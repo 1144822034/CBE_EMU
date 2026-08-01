@@ -48,7 +48,12 @@ ida_evidence:
   function: `HandleEquipInfoResponse`, `0x010216D6`; equipment view renderer `0x01020C1A -> 0x010206C4`
   parser_reads: `result`, `num`, `level`, `name`, `work`, `sex`, `equipinfo`; renderer indexes resource table with `2*work + sex`
 
-`equipinfo` 没有内置行数，行数由外层 `num` 指定；每一行是 `u32 itemId, u16 seq, i16 runtime, i16 reserved, u8 attr_count=0`。服务端从目标在线会话捕获的实际装备槽位生成行，并只发送本地 `equip.dsh` 已知的 id。若会话尚未完成升级后的在线状态捕获，或请求来自离线好友行，则回退到目标职业的默认武器（`1001`、`1501` 或 `2001`）。
+`equipinfo` 没有内置行数，行数由外层 `num` 指定；每一行是
+`u32 itemId, u16 seq, ParseEquipAttributes(common-extra)`。
+`common-extra` 与背包装备相同：强化等级 +（`L>=1` 时）服务端算好的 `M(L)`
+强化附加词条。客户端打开本地 `equip.dsh` 画主属性行；「强化附加」读词条。
+
+服务端从目标在线会话捕获的实际装备槽位生成行，并只发送本地 `equip.dsh` 已知的 id。若会话尚未完成升级后的在线状态捕获，或请求来自离线好友行，则回退到目标职业的默认武器（`1001`、`1501` 或 `2001`）。
 
 目标 `id` 的授权范围是当前场景中可见的其他角色，或持久化好友表中属于当前角色的好友行；后者覆盖好友列表上的“查看装备”请求，避免将任意 `29/4` 包泛化为可查询所有角色。
 
@@ -63,7 +68,23 @@ ida_evidence:
 | 目标回复 | `10/5` | `id`, `result:u8`（`1` 同意，`2` 拒绝） | `0x010114A4` |
 | 发起方结果 | `10/6` | `result:u8`, `name` | `0x010114FC`；显示同意或拒绝结果 |
 
-只有目标回复 `result=1` 后，服务端才将双向好友关系写入 `nvram/mock_service_friends.bin`。因此好友列表需要先经过真实的目标端确认才会显示新好友。
+#### 2026-07-26：同意后本机名字变成对方名
+
+运行时：目标点同意后，地图本机名变成邀请方名字（例如以「爱馨阁」开头）；重登恢
+复。服务端 `role->name` / DB 未改，偏离在客户端会话显示态。
+
+`0x010114FC` subtype 4 会把邀请方 `id` 写入一块 `Global_R9` 相关槽，并用其
+`name` 拼确认文案。该槽与本机头顶名解析共用；`10/5` 发送路径只把该 id 清零，
+不写回本机权威名，因此同意关框后 HUD 仍显示对方名。
+
+修复（不改邀请契约本身）：
+
+1. 场景同步投递 `10/4` 后立即同包追加权威 `1/1/14` actorinfo，用本机
+   `actorinfo` 名字覆盖被污染的显示槽。
+2. `10/5` 直回不再发空 WT，改为 `1/1/14`，在确认框关闭时再次恢复本机名
+   （同意/拒绝都恢复）。
+
+只有目标回复 `result=1` 后，服务端才将双向好友关系写入权威好友表。因此好友列表需要先经过真实的目标端确认才会显示新好友。
 
 ### 好友交易 `21/1 -> 21/2 -> 21/3 -> 21/4 -> 21/5 -> 21/6 -> 21/7 -> 21/8`
 
@@ -106,7 +127,11 @@ ida_evidence:
 再用单个 MySQL 事务同时更新两个 `account_roles` 行并重建双方
 `account_role_backpack`；任一步失败都会回滚，内存角色状态只在 COMMIT 成功后替换。
 成功的 `21/8` 使用交易后的 `money`，并以目标背包的新 `seq/itemId/count` 生成收货行，
-与 `BuildShopBuyList` 的真实消费顺序一致。
+与 `BuildShopBuyList` 的真实消费顺序一致。`iteminfo` 中的 `count` 必须是
+`tagged-u32`（与 `7/7` / `6/4.awardinfo` 相同）：写成 `tagged-i16` 时，
+`stream_read_i32_be_tagged` 会把后续 common-extra 字节拼进数量，客户端对装备
+重复插槽而服务端仍只有一件。详见
+`docs/re/2026-07-25-trade-equipment-duplicate-bag.md`。
 
 不要把同一 UI 区域附近的 `7/19`、`7/21` 误接到交易协议：
 `HandleExpBattleResponse(0x0102CB46)` 已证明二者分别解析 `helpinfo` 和 `result`，
@@ -266,8 +291,13 @@ unknowns:
 `mmBattle:HandleBattleStartMsg(0x66CC)` 证明玩家切磋不能使用场景怪物专用的
 `4/5`。Subtype 5 的左侧单位必须从当前 SCE 怪物行复制；玩家对战改用
 `1/4/10 { side=1, battleinfo }`：每个观察端都把远端玩家编码为左侧完整行
-（id、HP/MP、姓名、jobIndex、sexGroup），把自己的 id/HP/MP 编码为右侧行。
+（id、HP/MP、姓名、**visual_group=sexGroup、visual_variant=jobIndex**），
+把自己的 id/HP/MP 编码为右侧行。
 右侧角色继续由客户端已有的本机角色模板解析，因此不需要伪造队伍成员。
+
+2026-07-25 修正：旧 builder 把左侧两字节写成 `jobIndex, sexGroup`，与
+`visual_group/visual_variant` 及 `sub_23F6(variant, group)` 相反，会显示成
+默认女天机。现已改为 `sexGroup, jobIndex`，并在 `duel_begin` 冻结双方视觉值。
 
 双方各自收到镜像 start，而不是共享同一份绝对阵营数据：
 
@@ -284,16 +314,24 @@ side=1, left_count=1, right_count=1
 对端回放：actor wire 1 -> target wire 0
 ```
 
-服务端新增独立的双人 duel 会话，保存双方战斗 HP/MP、当前行动方和带双端投递
-掩码的行动事件。`4/2` 普攻与技能只结算一次，再按上面的观察端映射分别生成
-`4/6 actioninfo`；技能 MP 只在 duel 快照中扣除，并通过本机视角 `teaminfo`
-刷新施法者缓存。友好切磋的 HP/MP 不写回持久化角色状态，避免失败方在场景中
-留下 0 HP，或切磋消耗永久 MP。
+服务端新增独立的双人 duel 会话，保存双方战斗 HP/MP、敏捷先手序和带双端投递
+掩码的行动事件。切磋回合对齐组队战屏障：任一方 `4/2` 先只登记
+`roundCommitMask`/`Operate`，回零对象 WT（`duel_round_defer`）；双方都提交后才
+按 `firstTurnIndex`（敏捷高者，相等邀请方）顺序结算伤害；每一击单独一条
+`1/4/6`（切磋 `current_team_count=1`，`InitActionSlot_B` 只读一行 `teaminfo`；
+合并多技能进同一 `4/6` 会让施法者 `unit+1344=0` → 蓝条归零并可能解包崩溃）。
+同一提交窗口产生的多条 `4/6` 在 WT 内按序合并投递。首个提交者会武装
+`CBE_DUEL_ROUND_COMMIT_TIMEOUT_MS`（默认 20s）；超时未提交的一方默认
+`Operate=0` 普攻并开回合（`duel_round_timeout_autofill`）。上一回合 `4/6`
+未双边投递完前不得开启新提交窗。技能 MP 只在 duel 快照中扣除，并通过
+`teaminfo` 刷新施法者缓存。友好切磋的 HP/MP 不写回持久化角色状态，避免失败方
+在场景中留下 0 HP，或切磋消耗永久 MP。
 
-任一方 HP 到 0 时，最后一击附带目标侧的 type-3 死亡动作；双方都收到该
-`4/6` 后，保留 25 tick 的播放窗口，再分别下发 `4/11` 关闭自动状态和
-`4/9 {result=1}` 退出战斗。主动脱离由请求方收到原生 `4/4 {result=1}`，对端
-收到同样的终止清理。断线也会清理 duel，并只通知仍在战斗中的另一端。
+任一方 HP 到 0 时，双方终局 `4/6` 均含倒下座位的 type-3 死亡动作，并与
+`4/7(+1 经验/+1 金钱,hp/mp=0，无 fdata)` 同 WT append。横幅 hold（`CBE_DUEL_BANNER_HOLD_TICKS` 默认 5，短于结果消息延时）后发
+`4/8+4/11+4/9` 拆场（每座位一次）。胜负文案「挑战成功/失败」在 `4/8` 之后
+再 **arm**（`CBE_DUEL_RESULT_MSG_DELAY_TICKS` 默认 40，躲过 `4/8` 空白条幅），
+到期后投递 `25/12` 清条 + `1/3/3`（**不**推送 `25/11`，避免空 `25/11` 卡死）。
 
 2026-07-20 的双账号服务回归覆盖：拒绝、同意后双方 `4/10`、两方向普通攻击
 镜像、轮流行动、死亡动作、双方终止退出和主动脱离；stderr 为 0，未出现
@@ -311,8 +349,8 @@ negative_evidence:
 
 unknowns:
   - name: 切磋中的道具使用与主动技能状态效果
-    current_value: 普攻、伤害型技能 MP/伤害和退出/死亡终止已同步；消耗品及持续状态仍沿用通用战斗入口
-    why_kept: 当前证据只确认 `4/2` 伤害行动和 `4/3` 通用道具请求，尚未确认友好切磋是否允许消耗持久化道具、以及状态效果是否应在结束后保留。
+    current_value: 普攻、伤害型技能与 HP=0 完整离场已同步；切磋中 `4/3` 暂回空确认；状态效果仍 unresolved
+    why_kept: 当前证据只确认 `4/2` 伤害行动；友好切磋是否允许消耗持久化道具、以及状态效果是否应在结束后保留仍缺契约。
   - name: 入帮邀请的目标端入站通知与接受/拒绝包
     current_value: 未实现
     why_kept: 当前没有完整的目标端确认解析契约；伪造成功包会跳过真实目标端流程。

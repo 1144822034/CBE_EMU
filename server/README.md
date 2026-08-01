@@ -74,7 +74,25 @@ By default the emulator expects the service at `127.0.0.1:19090`.
 bin/main.exe
 ```
 
-To use another port:
+To keep multiple physical endpoints, edit `bin/servers.conf`. With two or
+more entries, an interactive console startup asks which one to use before
+the version handshake:
+
+```powershell
+bin/main.exe
+```
+
+Skip the prompt when needed:
+
+```powershell
+bin/main.exe --server=jianghu-return
+bin/main.exe --no-server-select
+```
+
+`--mock-service=host:port` / `CBE_SERVER_ENDPOINT` still override the list.
+Change `current=` in `servers.conf` to mark the Enter-key default.
+
+To use another port directly:
 
 ```powershell
 bin/main.exe --mock-service=127.0.0.1:19190

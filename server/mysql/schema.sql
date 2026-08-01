@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS `account_roles` (
   `mp_max` INT UNSIGNED NOT NULL,
   `money` INT UNSIGNED NOT NULL,
   `wcoin` INT UNSIGNED NOT NULL,
+  `pk_points` INT UNSIGNED NOT NULL DEFAULT 0,
   `scene` VARBINARY(64) NOT NULL,
   `pos_x` SMALLINT UNSIGNED NOT NULL,
   `pos_y` SMALLINT UNSIGNED NOT NULL,
@@ -175,6 +176,7 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment` (
   `role_id` INT UNSIGNED NOT NULL,
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
     FOREIGN KEY (`account_id`, `role_id`)
@@ -226,6 +228,25 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- Dialog-driven player warehouse (mall pass 834). Not the unresolved native 钱庄.
+CREATE TABLE IF NOT EXISTS `account_role_warehouse` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `slot_index` SMALLINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `item_seq` SMALLINT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
+  KEY `idx_account_role_warehouse_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
+  CONSTRAINT `fk_account_role_warehouse_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Timed special items are separate from the durable role snapshot because
 -- expiry continues while the character is offline.  The item id and
 -- multiplier preserve the server-authoritative effect rather than trusting a
@@ -242,6 +263,27 @@ CREATE TABLE IF NOT EXISTS `account_role_item_effects` (
   PRIMARY KEY (`account_id`, `role_id`, `effect_kind`),
   KEY `idx_account_role_item_effects_expiry` (`expires_unix`),
   CONSTRAINT `fk_account_role_item_effects_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Offline practise bank for 修炼丹 (827). Wall-clock logout stamp + bank
+-- minutes survive disconnect; login settles exp = minutes * level * 8.
+CREATE TABLE IF NOT EXISTS `account_role_offline_practise` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `bank_minutes` INT UNSIGNED NOT NULL DEFAULT 0,
+  `last_logout_unix` INT UNSIGNED NOT NULL DEFAULT 0,
+  `today_ymd` INT UNSIGNED NOT NULL DEFAULT 0,
+  `today_used_minutes` INT UNSIGNED NOT NULL DEFAULT 0,
+  `last_settle_exp` INT UNSIGNED NOT NULL DEFAULT 0,
+  `last_settle_minutes` INT UNSIGNED NOT NULL DEFAULT 0,
+  `is_gold` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`),
+  CONSTRAINT `fk_account_role_offline_practise_role`
     FOREIGN KEY (`account_id`, `role_id`)
     REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
@@ -357,6 +399,8 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `monster_id` SMALLINT UNSIGNED NOT NULL,
   `level` TINYINT UNSIGNED NOT NULL,
   `family` TINYINT UNSIGNED NOT NULL,
+  `cast_skill` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `actor_resource` VARBINARY(63) NOT NULL DEFAULT '',
   `hp` INT UNSIGNED NOT NULL,
   `mp` INT UNSIGNED NOT NULL,
   `attack_value` INT UNSIGNED NOT NULL,
@@ -368,6 +412,29 @@ CREATE TABLE IF NOT EXISTS `server_monsters` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`monster_id`)
+) ENGINE=InnoDB;
+
+-- Admin-created custom monsters (not present in the builtin/SCE catalog).
+CREATE TABLE IF NOT EXISTS `server_monster_catalog_extra` (
+  `monster_id` SMALLINT UNSIGNED NOT NULL,
+  `level` TINYINT UNSIGNED NOT NULL,
+  `family` TINYINT UNSIGNED NOT NULL,
+  `display_name` VARBINARY(31) NOT NULL,
+  `source_label` VARBINARY(63) NOT NULL,
+  `actor_resource` VARBINARY(63) NOT NULL DEFAULT '',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`monster_id`)
+) ENGINE=InnoDB;
+
+-- Per-scene override of automonster.dsh three monster slots.
+CREATE TABLE IF NOT EXISTS `server_scene_monsters` (
+  `scene` VARBINARY(63) NOT NULL,
+  `monster_id_1` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `monster_id_2` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `monster_id_3` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`scene`)
 ) ENGINE=InnoDB;
 
 -- One independent probability row per monster drop.  The two legacy drop_*

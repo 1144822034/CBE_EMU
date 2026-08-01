@@ -50,6 +50,7 @@ CREATE TABLE `account_role_equipment` (
   `role_id` INT UNSIGNED NOT NULL,
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
     FOREIGN KEY (`account_id`, `role_id`)

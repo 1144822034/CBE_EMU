@@ -6,34 +6,22 @@ Use one server-side level model for title role rows, scene actor info, login
 state, and battle settlement:
 
 - new roles start at level 1 with 0 total EXP
-- the first upgrade needs 100 EXP
-- each later upgrade needs 100 more EXP than the previous upgrade
 - total EXP remains the persisted source of truth; `level` is normalized from it
+- the numeric curve itself was replaced on 2026-07-25; see
+  `docs/re/2026-07-25-role-level-exp-curve.md` for the three-stage arithmetic
+  parameters (`1→2=200`, `49→50=2_000_000`, total to 70 = `120_000_000`)
 
 ## Formula
 
-EXP needed to reach a level:
+Historical triangular helper (removed):
 
 ```text
 levelStartExp(level) = 100 * (level - 1) * level / 2
-```
-
-EXP needed to advance from the current level to the next level:
-
-```text
 nextLevelCost(level) = level * 100
 ```
 
-Examples:
-
-```text
-level 1 starts at    0 total EXP, next cost 100
-level 2 starts at  100 total EXP, next cost 200
-level 3 starts at  300 total EXP, next cost 300
-level 4 starts at  600 total EXP, next cost 400
-level 5 starts at 1000 total EXP, next cost 500
-```
-
+Current curve helpers and constants are documented in
+`docs/re/2026-07-25-role-level-exp-curve.md`.
 ## Wire Fields
 
 `mmBattleMstarWqvga.cbm:0x743C` only proves the battle settlement parser reads
