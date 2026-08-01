@@ -1,5 +1,18 @@
 # 仓库数据延后落库丢失（2026-08-01）
 
+## 代码现状（2026-08-01 审计）
+
+**修复未在当前树。** 根因路径仍成立；详见 `2026-08-01-server-baseline-audit.md`。
+
+| 项 | 现状 |
+| --- | --- |
+| `warehouse_write_sql` | 仍读全局 `g_vm_net_mock_warehouse`，忽略 save 路径传入的仓库快照语义 |
+| `account_capture` | `state->warehouse = g_vm_net_mock_warehouse` 无条件覆盖（空壳可冲掉已存快照） |
+| `title-login-rebind` / `account-rebind` | **不**先 `account_flush_for_session` |
+| 与 off_lock flush | 仍会放大「包已删、仓未写」双丢 |
+
+下文「修复」为待补回契约，验证清单勿勾选为已通过。
+
 ## 现象
 
 仓库存入后，偶发重登仓库为空，且背包中对应物品也不见（双端丢失）。
@@ -22,7 +35,7 @@
    `mark_offline`，未像 takeover/heartbeat 那样先
    `account_flush_for_session`。
 
-## 修复
+## 修复（待补回）
 
 | 点 | 行为 |
 | --- | --- |
@@ -33,7 +46,7 @@
 
 ## 验证
 
-- [x] `make -j2`
+- [ ] `make -j2`（补回后）
 - [ ] 存入仓库后立即回标题再进游戏：仓库有货，背包无该行
 - [ ] 存入后断线/心跳超时：同上
 - [ ] 多人同服一人存仓库、另一人进出：不得互相清空仓库

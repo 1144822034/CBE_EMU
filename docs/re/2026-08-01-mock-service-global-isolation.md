@@ -2,6 +2,21 @@
 
 日期：2026-08-01
 
+## 代码现状（2026-08-01 审计）
+
+**部分仍在 / 缺口补丁不在。** 详见 `2026-08-01-server-baseline-audit.md`。
+
+| 项 | 现状 |
+| --- | --- |
+| 主战斗 operate / HP·MP / 奖励 serial 进 `account_state` | 仍在 |
+| `account_restore` 清组队 wire | 仍在（`team_battle_context_clear_on_account_restore`） |
+| 下文「本轮补进快照的缺口」四字段 | **未进** capture/restore |
+| 敌方 ailment / solo modifier 进快照 | **未进**（与本文「已进账号快照」列表冲突，以源码为准） |
+| `vm_mock_service_clear_request_local_scratch` | **不存在** |
+| Boss `MonsterHealUsed` 进快照 | **未进**（进程全局 bool） |
+
+下文「修改 / 验证」描述的是目标契约与曾实现草案，**不得当作当前树已验收**。
+
 ## 背景
 
 Mock service 仍以「协议锁 + 账号 restore/capture」隔离多账号，大量业务字段是
@@ -19,8 +34,8 @@ Mock service 仍以「协议锁 + 账号 restore/capture」隔离多账号，大
 
 ### 已进账号快照（多账号安全，依赖锁 + capture 完整）
 
-- 战斗 operate / HP·MP / 挂机 / 敌方 ailment / solo modifier
-- 角色 DB、仓库、position/inventory dirty
+- 战斗 operate / HP·MP / 挂机全局镜像（**不含**敌方 ailment / solo modifier）
+- 角色 DB、仓库整份拷贝、position/inventory dirty
 - 传送石 / 场景切换 / moveinfo NPC pending
 - 结算奖励 serial / drops / enemy·role id
 

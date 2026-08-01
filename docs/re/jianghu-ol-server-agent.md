@@ -155,6 +155,13 @@ client_effect:
 unknowns:
 ```
 
+## 服务端基线与文档可信度
+
+细锁实验回退后，部分 `docs/re/2026-08-01-*.md` 仍按「已落地」书写，与源码不符。
+动手前先读 **`docs/re/2026-08-01-server-baseline-audit.md`**：以该审计与当前
+`src/server` 为准；冲突时更新文档，勿假定异步 persist worker、仓库快照写库、
+全局隔离缺口、PvE 封魔挡怪技、sticky restore 等已在树中。
+
 ## 常用代码位置
 
 - `src/mock-server.c`

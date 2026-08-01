@@ -5108,13 +5108,15 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
             if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds &&
                 effect.multiplier != 0)
             {
+                const char *failInfo = NULL;
                 effect.expiresUnix = now + durationSeconds;
                 success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
                     role, item->itemId, requestedSeq, &effect, NULL,
-                    "combat-pill-use");
+                    "combat-pill-use", &failInfo);
                 info = success
                            ? "\xB4\xF3\xC1\xA6\xCD\xE2\xB9\xA5\xD2\xD1\xC9\xFA\xD0\xA7\xA1\xA3"
-                           : "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+                           : (failInfo ? failInfo
+                                       : "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3");
             }
             else
             {
@@ -5123,10 +5125,11 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
         }
         else if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
         {
+            const char *failInfo = NULL;
             effect.expiresUnix = now + durationSeconds;
             success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
                 role, item->itemId, requestedSeq, &effect, NULL,
-                isExpCard ? "exp-card-use" : "battle-insight-use");
+                isExpCard ? "exp-card-use" : "battle-insight-use", &failInfo);
             if (success)
             {
                 if (isBattleInsight)
@@ -5143,9 +5146,11 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
                 }
             }
             else if (isExpCard)
-                info = "\xBE\xAD\xD1\xE9\xBF\xA8\xCA\xB9\xD3\xC3\xCA\xA7\xB0\xDC\xA3\xAC\xC7\xEB\xC9\xD4\xBA\xF3\xD4\xD9\xCA\xD4\xA1\xA3"; /* 经验卡使用失败，请稍后再试。 */
+                info = failInfo ? failInfo
+                                : "\xBE\xAD\xD1\xE9\xBF\xA8\xCA\xB9\xD3\xC3\xCA\xA7\xB0\xDC\xA3\xAC\xC7\xEB\xC9\xD4\xBA\xF3\xD4\xD9\xCA\xD4\xA1\xA3"; /* 经验卡使用失败，请稍后再试。 */
             else
-                info = "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+                info = failInfo ? failInfo
+                                : "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
         }
     }
 
@@ -6477,9 +6482,21 @@ static u32 vm_net_mock_build_exp_card_use_via_generic_7_1(
     }
     if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
     {
+        const char *failInfo = NULL;
         effect.expiresUnix = now + durationSeconds;
         success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
-            role, itemId, seq, &effect, &remaining, "exp-card-use-7-1");
+            role, itemId, seq, &effect, &remaining, "exp-card-use-7-1",
+            &failInfo);
+        if (!success)
+        {
+            printf("[warn][network] mock_exp_card_generic_7_1_failed item=%u seq=%u "
+                   "mult=%u duration_s=%u evidence=runtime:wt7/1-for-custom-exp-card\n",
+                   itemId, seq, multiplier, durationSeconds);
+            return vm_net_mock_build_item_use_hint_response(
+                out, outCap,
+                failInfo ? failInfo
+                         : "\xBE\xAD\xD1\xE9\xBF\xA8\xCA\xB9\xD3\xC3\xCA\xA7\xB0\xDC\xA3\xAC\xC7\xEB\xC9\xD4\xBA\xF3\xD4\xD9\xCA\xD4\xA1\xA3");
+        }
     }
     if (!success)
     {

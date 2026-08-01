@@ -421,12 +421,12 @@ static bool vm_net_mock_equipment_enhance_decode_materials(
 }
 
 /*
- * Enhance success policy (2026-07-31):
+ * Enhance success policy (2026-08-01):
  *   +L → +(L+1):
  *     crystal tier >= L+1 (目标级及以上) → 100% per crystal
- *     crystal tier == L                   → 40%
- *     each tier lower                     → ×0.4 again (16%, 6%, ...)
- *   Example: +4→+5, 五级晶 100%, 四级晶 40%, 三级晶 16%.
+ *     crystal tier == L                   → floor(100/3) = 33%
+ *     each tier lower                     → /3 again (11%, 3%, ...)
+ *   Example: +4→+5, 五级晶 100%, 四级晶 33%, 三级晶 11%.
  *   +0→+1 with 一级: tier 1 > 0 → 100%.
  *   Multiple crystals sum unit rates, capped at 100.
  *
@@ -461,10 +461,10 @@ static u32 vm_net_mock_equipment_enhance_crystal_unit_rate(u8 level, u32 tier)
     /* Target tier (level+1) and above → 100%. */
     if (tier > (u32)level)
         return 100;
-    /* Current tier and below: ×0.4 per step including current. */
+    /* Current tier and below: floor(/3) per step including current. */
     steps = (u32)level - tier + 1u;
     while (steps-- != 0)
-        rate = (rate * 40u) / 100u;
+        rate = rate / 3u;
     return rate;
 }
 

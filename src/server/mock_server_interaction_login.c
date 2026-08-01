@@ -3132,40 +3132,6 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     if (secondaryCurrent > secondaryDisplayMax)
         secondaryCurrent = secondaryDisplayMax;
 
-    /* #region agent log */
-    {
-        char data[512];
-        snprintf(data, sizeof(data),
-                 "{\"roleId\":%u,\"statsMaxHp\":%u,\"statsMaxMp\":%u,"
-                 "\"primaryBaseMax\":%u,\"primaryDisplayMax\":%u,"
-                 "\"secondaryBaseMax\":%u,\"secondaryDisplayMax\":%u,"
-                 "\"equipHp\":%u,\"equipMp\":%u,"
-                 "\"bareStr\":%u,\"bareAgi\":%u,\"bareWis\":%u,"
-                 "\"fullStr\":%u,\"fullAgi\":%u,\"fullWis\":%u,"
-                 "\"eqAgi\":%u,\"eqAtk\":%u,\"eqHit\":%u,\"eqCrit\":%u,\"eqDodge\":%u,"
-                 "\"eq\":[%u,%u,%u,%u,%u,%u,%u,%u]}",
-                 role ? role->roleId : 0u, playerStats.maxHp, playerStats.maxMp,
-                 primaryBaseMax, primaryDisplayMax,
-                 secondaryBaseMax, secondaryDisplayMax,
-                 playerStats.equipment.hp, playerStats.equipment.mp,
-                 playerStats.baseStrength, playerStats.baseAgility,
-                 playerStats.baseWisdom, playerStats.strength, playerStats.agility,
-                 playerStats.wisdom, playerStats.equipment.agility,
-                 playerStats.equipment.attack, playerStats.equipment.hit,
-                 playerStats.equipment.crit, playerStats.equipment.dodge,
-                 role ? role->equippedItemIds[0] : 0u,
-                 role ? role->equippedItemIds[1] : 0u,
-                 role ? role->equippedItemIds[2] : 0u,
-                 role ? role->equippedItemIds[3] : 0u,
-                 role ? role->equippedItemIds[4] : 0u,
-                 role ? role->equippedItemIds[5] : 0u,
-                 role ? role->equippedItemIds[6] : 0u,
-                 role ? role->equippedItemIds[7] : 0u);
-        agent_dbg_hp_log("A", "mock_server_interaction_login.c:build_actor_info",
-                         "actorinfo-hp-mp-wire", data);
-    }
-    /* #endregion */
-
     /*
      * Paint-8: +122力 +124敏 +130物攻 +132护甲 +128闪躲 +12a命中 +12e暴击 +12c抗性.
      * Enhance detail uses name-table types (1..10); jump map differs — panel

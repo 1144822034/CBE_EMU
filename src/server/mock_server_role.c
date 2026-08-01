@@ -2644,42 +2644,6 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
 /* equipment_bonus_scale / _enhance_delta /
  * equipment_bonus_add_unlocked_milestones: defined in mock_server_catalog.c */
 
-/* #region agent log */
-static void agent_dbg_hp_log(const char *hypothesisId,
-                             const char *location,
-                             const char *message,
-                             const char *dataJson)
-{
-    static const char *paths[] = {
-        "D:/works/my/jianghu/CBE_EMU_pay/debug-1afcef.log",
-        "../debug-1afcef.log",
-        "debug-1afcef.log",
-        NULL
-    };
-    FILE *fp = NULL;
-    long long ts = (long long)time(NULL) * 1000LL;
-    u32 i = 0;
-
-    for (i = 0; paths[i] != NULL; ++i)
-    {
-        fp = fopen(paths[i], "a");
-        if (fp != NULL)
-            break;
-    }
-    if (fp == NULL)
-        return;
-    fprintf(fp,
-            "{\"sessionId\":\"1afcef\",\"runId\":\"post-fix\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
-            hypothesisId != NULL ? hypothesisId : "?",
-            location != NULL ? location : "?",
-            message != NULL ? message : "?",
-            dataJson != NULL ? dataJson : "{}",
-            ts);
-    fclose(fp);
-}
-/* #endregion */
-
 static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
                                                      u32 level,
                                                      vm_net_mock_equipment_bonus *bonus)
@@ -7240,20 +7204,31 @@ static u32 vm_net_mock_role_active_combat_pill_attack_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
+/* Exp-card stack ceiling: same multiplier may extend remaining time, but never
+ * past 8 hours wall-clock leftover (offline pause does not count). */
+#define VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC (8u * 3600u)
+
+/* GBK tips for exp-card stack rejects (iteminfo / 7/1 hint). */
+static const char k_vm_net_mock_exp_card_tip_same_effect[] =
+    "\xCD\xAC\xC0\xE0\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xBD\xE1\xCA\xF8\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+static const char k_vm_net_mock_exp_card_tip_max_duration[] =
+    "\xBE\xAD\xD1\xE9\xBF\xA8\xB3\xD6\xD0\xF8\xCA\xB1\xBC\xE4\xD2\xD1\xB4\xEF\xC9\xCF\xCF\xDE\xA3\xA8\x38\xD0\xA1\xCA\xB1\xA3\xA9\xA3\xAC\xC7\xEB\xB5\xC8\xB4\xFD\xCA\xB1\xBC\xE4\xBC\xF5\xC9\xD9\xBA\xF3\xD4\xD9\xCA\xB9\xD3\xC3\xA1\xA3";
+
 /* The backpack decrement and the timed effect belong to one durable action.
  * The row is only changed in memory before the relational transaction has
  * committed; on any failure restore the exact previous role state so a retry
  * cannot lose an item or create an unbacked effect.
  *
- * Experience cards and battle insight may stack while already active: remaining
- * wall-clock end gains another item duration, and for exp cards the stronger
- * multiplier is kept.  Combat pills still reject a second use until expiry.
- * Effects live in account_role_item_effects and are not cleared on disconnect —
- * pausable kinds freeze duration offline and resume on login. */
+ * Experience cards may stack only at the same multiplier: remaining wall-clock
+ * end gains another item duration, item_id/multiplier stay on the active card,
+ * and leftover must stay <= 8h.  Different multipliers reject without consume.
+ * Battle insight may still stack duration.  Combat pills reject a second use
+ * until expiry.  Effects live in account_role_item_effects and are not cleared
+ * on disconnect — pausable kinds freeze duration offline and resume on login. */
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
-    const char *reason)
+    const char *reason, const char **failInfoOut)
 {
     vm_net_mock_role_item_effect active;
     vm_net_mock_role_item_effect stacked;
@@ -7262,10 +7237,14 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     u32 now = (u32)time(NULL);
     u32 addSeconds = 0;
     u32 baseExpires = 0;
+    u32 remainingBefore = 0;
+    u32 remainingAfter = 0;
     bool stackable = false;
 
     if (remainingOut)
         *remainingOut = 0;
+    if (failInfoOut)
+        *failInfoOut = NULL;
     if (role == NULL || effect == NULL || effect->itemId != itemId ||
         !vm_net_mock_role_item_effect_is_valid(effect))
     {
@@ -7285,21 +7264,49 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
                    g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
                    role->roleId, effect->kind, active.itemId, active.expiresUnix,
                    itemId);
+            if (failInfoOut)
+                *failInfoOut = k_vm_net_mock_exp_card_tip_same_effect;
+            return false;
+        }
+        if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD &&
+            active.multiplier != effect->multiplier)
+        {
+            printf("[info][network] mock_exp_card_rejected_different_type account=%s role=%u "
+                   "active_item=%u active_mult=%u active_until=%u requested_item=%u "
+                   "requested_mult=%u\n",
+                   g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+                   role->roleId, active.itemId, active.multiplier, active.expiresUnix,
+                   itemId, effect->multiplier);
+            if (failInfoOut)
+                *failInfoOut = k_vm_net_mock_exp_card_tip_same_effect;
             return false;
         }
         if (effect->expiresUnix <= now)
             return false;
         addSeconds = effect->expiresUnix - now;
         baseExpires = active.expiresUnix > now ? active.expiresUnix : now;
+        remainingBefore = active.expiresUnix > now ? active.expiresUnix - now : 0;
         if (addSeconds > 0xffffffffu - baseExpires)
             stacked.expiresUnix = 0xffffffffu;
         else
             stacked.expiresUnix = baseExpires + addSeconds;
+        /* Keep the active card identity; only extend its end time. */
+        stacked.multiplier = active.multiplier;
+        stacked.itemId = active.itemId;
+        remainingAfter =
+            stacked.expiresUnix > now ? stacked.expiresUnix - now : 0;
         if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD &&
-            active.multiplier > stacked.multiplier)
+            remainingAfter > VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC)
         {
-            stacked.multiplier = active.multiplier;
-            stacked.itemId = active.itemId;
+            printf("[info][network] mock_exp_card_rejected_max_duration account=%s role=%u "
+                   "active_item=%u active_mult=%u remaining_before=%u add_s=%u "
+                   "remaining_after=%u max_s=%u\n",
+                   g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+                   role->roleId, active.itemId, active.multiplier, remainingBefore,
+                   addSeconds, remainingAfter, VM_NET_MOCK_EXP_CARD_MAX_REMAINING_SEC);
+            if (failInfoOut)
+                *failInfoOut = k_vm_net_mock_exp_card_tip_max_duration;
+            return false;
         }
         if (!vm_net_mock_role_item_effect_is_valid(&stacked))
             return false;

@@ -6812,20 +6812,6 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
 
-    /* #region agent log */
-    {
-        char data[320];
-        snprintf(data, sizeof(data),
-                 "{\"path\":\"non-scene-subtype10\",\"roleId\":%u,"
-                 "\"roleHp\":%u,\"roleMaxHp\":%u,\"roleMp\":%u,\"roleMaxMp\":%u,"
-                 "\"vitalsDefaultMaxHp\":%u,\"vitalsDefaultMaxMp\":%u,\"enemyId\":%u}",
-                 roleId, roleHp, roleMaxHp, roleMp, roleMaxMp,
-                 roleMaxHpDefault, roleMaxMpDefault, enemyId);
-        agent_dbg_hp_log("A", "mock_server_social.c:battle_start_blob",
-                         "battle-wire-hp-mp", data);
-    }
-    /* #endregion */
-
     if (enemyId == 0)
         enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
     /*

@@ -5086,7 +5086,7 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
-    const char *reason);
+    const char *reason, const char **failInfoOut);
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_exp_card_remaining_seconds(

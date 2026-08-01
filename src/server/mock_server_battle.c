@@ -72,20 +72,6 @@ static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
     if (roleMp > roleMaxMp)
         roleMp = roleMaxMp;
 
-    /* #region agent log */
-    {
-        char data[320];
-        snprintf(data, sizeof(data),
-                 "{\"path\":\"scene-subtype5\",\"roleId\":%u,"
-                 "\"roleHp\":%u,\"roleMaxHp\":%u,\"roleMp\":%u,\"roleMaxMp\":%u,"
-                 "\"vitalsDefaultMaxHp\":%u,\"vitalsDefaultMaxMp\":%u}",
-                 roleId, roleHp, roleMaxHp, roleMp, roleMaxMp,
-                 roleMaxHpDefault, roleMaxMpDefault);
-        agent_dbg_hp_log("A", "mock_server_battle.c:scene_start_blob",
-                         "battle-wire-hp-mp", data);
-    }
-    /* #endregion */
-
     /*
      * Battle.cbm HandleBattleStartMsg(0x66CC), subtype 5, is the native
      * scene-monster entry path. After the first count it reads scene index,
@@ -356,18 +342,6 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
            partyCount,
            team->battleSide,
            pos);
-    /* #region agent log */
-    {
-        char dbg[256];
-        snprintf(dbg, sizeof(dbg),
-                 "{\"observer\":\"%08x\",\"serial\":%u,\"party\":%u,\"enemy\":%u,"
-                 "\"hp\":%u,\"hpMax\":%u,\"mp\":%u,\"mpMax\":%u,\"resp\":%u}",
-                 observer->clientId, pendingSerial, partyCount,
-                 team->battleEnemyId, hp, hpMax, mp, mpMax, pos);
-        agent_dbg_hp_log("T0", "mock_server_battle.c:team_battle_deliver",
-                         "team_battle_start_deliver", dbg);
-    }
-    /* #endregion */
     return pos;
 }
 
@@ -2173,13 +2147,6 @@ static bool vm_net_mock_build_team_battle_party_teaminfo_blob(
     bool useLiveMemberVitals)
 {
     u32 pos = 0;
-    char dbg[320];
-    u32 mp0 = 0;
-    u32 mp1 = 0;
-    u32 mp2 = 0;
-    u32 id0 = 0;
-    u32 id1 = 0;
-    u32 id2 = 0;
 
     if (teamInfoLenOut)
         *teamInfoLenOut = 0;
@@ -2215,35 +2182,10 @@ static bool vm_net_mock_build_team_battle_party_teaminfo_blob(
         if (!vm_net_mock_append_battle_teaminfo_row(out, outCap, &pos,
                                                     wireId, hp, mp))
             return false;
-        if (i == 0)
-        {
-            id0 = wireId;
-            mp0 = mp;
-        }
-        else if (i == 1)
-        {
-            id1 = wireId;
-            mp1 = mp;
-        }
-        else if (i == 2)
-        {
-            id2 = wireId;
-            mp2 = mp;
-        }
     }
 
     if (teamInfoLenOut)
         *teamInfoLenOut = pos;
-    /* #region agent log */
-    snprintf(dbg, sizeof(dbg),
-             "{\"observer\":\"%08x\",\"members\":%u,\"bytes\":%u,"
-             "\"liveIdx\":%u,\"ids\":[%u,%u,%u],\"mps\":[%u,%u,%u]}",
-             observer->clientId, team->battleMemberCount, pos,
-             useLiveMemberVitals ? liveMemberIndex : 0xffu,
-             id0, id1, id2, mp0, mp1, mp2);
-    agent_dbg_hp_log("T1", "mock_server_battle.c:party_teaminfo",
-                     "team_battle_party_teaminfo", dbg);
-    /* #endregion */
     return true;
 }
 
@@ -8477,7 +8419,6 @@ static void vm_net_mock_rewrite_battle_teaminfo_for_observer(
     u16 teamInfoLen = 0;
     u8 *mutableInfo = NULL;
     u32 expectedLen = 0;
-    char dbg[192];
 
     if (packet == NULL || observer == NULL || team == NULL ||
         team->battleMemberCount < 2 ||
@@ -8490,15 +8431,6 @@ static void vm_net_mock_rewrite_battle_teaminfo_for_observer(
     expectedLen = (u32)team->battleMemberCount * 14u;
     if (teamInfoLen != expectedLen)
     {
-        /* #region agent log */
-        snprintf(dbg, sizeof(dbg),
-                 "{\"observer\":\"%08x\",\"have\":%u,\"want\":%u,\"members\":%u,"
-                 "\"fallback\":%u}",
-                 observer->clientId, teamInfoLen, expectedLen,
-                 team->battleMemberCount, fallbackSourceWireId);
-        agent_dbg_hp_log("T2", "mock_server_battle.c:rewrite_teaminfo",
-                         "teaminfo_len_mismatch", dbg);
-        /* #endregion */
         /* Legacy single-row blobs still rewrite only the caster id. */
         if (fallbackSourceWireId != 0 &&
             teamInfoLen >= 6 && teamInfo[0] == 0 && teamInfo[1] == 4)
@@ -8536,13 +8468,6 @@ static void vm_net_mock_rewrite_battle_teaminfo_for_observer(
         mutableInfo[row + 12] = (u8)(mp >> 8);
         mutableInfo[row + 13] = (u8)mp;
     }
-    /* #region agent log */
-    snprintf(dbg, sizeof(dbg),
-             "{\"observer\":\"%08x\",\"members\":%u,\"bytes\":%u}",
-             observer->clientId, team->battleMemberCount, teamInfoLen);
-    agent_dbg_hp_log("T2", "mock_server_battle.c:rewrite_teaminfo",
-                     "team_battle_teaminfo_rewritten", dbg);
-    /* #endregion */
 }
 
 static u32 vm_net_mock_build_pending_team_battle_action_response(
