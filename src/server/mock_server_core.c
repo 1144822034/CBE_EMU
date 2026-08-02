@@ -21,8 +21,33 @@
 #include <unistd.h>
 #endif
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include "../mysql-client.h"
 #include "../md5.h"
+
+/* #region agent log */
+#ifndef AGENT_DBG191169_LOG_DEFINED
+#define AGENT_DBG191169_LOG_DEFINED
+static void agent_dbg191169_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson)
+{
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
+            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId ? hypothesisId : "",
+            location ? location : "",
+            message ? message : "",
+            dataJson ? dataJson : "{}",
+            (long long)time(NULL) * 1000LL);
+    fclose(fp);
+}
+#endif
+/* #endregion */
 
 typedef struct
 {
@@ -74,6 +99,7 @@ static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
 static u32 vm_net_mock_take_warehouse_dialog_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
 static void vm_mock_service_session_arm_warehouse_pass_dialog(void);
+/* Defined with the session object in mock_server_equipment_npc.c. */
 static u32 vm_net_mock_take_equip_sell_dialog_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
 static void vm_mock_service_session_arm_equip_sell_pass_dialog(void);
@@ -4076,10 +4102,27 @@ static u16 vm_net_mock_update_response_version(u8 responseSubtype,
     {
         u16 diskVersion = 0;
         named = vm_net_mock_update_find_named_for_request(requestName);
+        /*
+         * Prefer disk content-hash over catalog row.  Manual SCE swaps
+         * (inject/heal/stock) can leave named.version stale; clients then
+         * uptodate-keep the wrong bytes under the old stamp (debug-191169).
+         */
+        if (vm_net_mock_update_named_content_version(requestName, &diskVersion) &&
+            diskVersion != 0)
+        {
+            if (named != NULL && named->enabled && named->version != diskVersion)
+            {
+                printf("[info][network] mock_update_named_version_resync "
+                       "file=%s catalog=%u disk=%u "
+                       "action=prefer-disk-content-hash "
+                       "evidence=debug-191169-stale-catalog-uptodate\n",
+                       requestName, named->version, diskVersion);
+                named->version = diskVersion;
+            }
+            return diskVersion;
+        }
         if (named != NULL && named->enabled)
             return named->version;
-        if (vm_net_mock_update_named_content_version(requestName, &diskVersion))
-            return diskVersion;
     }
     return requestVersion != 0 ? requestVersion : 1;
 }
@@ -4203,47 +4246,57 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
             vm_net_mock_update_find_named_for_request(requestName);
         u16 serverVersion = 0;
         bool haveServerVersion = false;
-        if (published != NULL && published->enabled && published->version != 0)
+        /* Disk content-hash wins over stale catalog (see response_version). */
+        if (vm_net_mock_update_named_content_version(requestName,
+                                                     &serverVersion) &&
+            serverVersion != 0)
+        {
+            haveServerVersion = true;
+            if (published != NULL && published->enabled &&
+                published->version != serverVersion)
+            {
+                published->version = serverVersion;
+            }
+        }
+        else if (published != NULL && published->enabled &&
+                 published->version != 0)
         {
             serverVersion = published->version;
             haveServerVersion = true;
         }
-        else if (vm_net_mock_update_named_content_version(requestName,
-                                                          &serverVersion))
         {
-            haveServerVersion = true;
-        }
-        if (haveServerVersion && requestVersion == serverVersion)
-        {
-            char nameUtf8[256];
-            responseVersion = serverVersion;
-            versionBytes[0] = (u8)(responseVersion >> 8);
-            versionBytes[1] = (u8)responseVersion;
-            if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", 0) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0) ||
-                !vm_net_mock_put_object_entry(out, outCap, &pos, "version",
-                                             versionBytes, sizeof(versionBytes)) ||
-                !vm_net_mock_put_object_u8(out, outCap, &pos, "type",
-                                          haveRequestType ? requestType : 0) ||
-                !vm_net_mock_put_object_string(
-                    out, outCap, &pos, "name",
-                    haveRequestName ? requestName : "MMORPGTempcbm") ||
-                !vm_net_mock_put_object_blob(out, outCap, &pos, "data", NULL, 0))
+            if (haveServerVersion && requestVersion == serverVersion)
             {
-                return 0;
+                char nameUtf8[256];
+                responseVersion = serverVersion;
+                versionBytes[0] = (u8)(responseVersion >> 8);
+                versionBytes[1] = (u8)responseVersion;
+                if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+                    !vm_net_mock_put_object_u32(out, outCap, &pos, "totalsize", 0) ||
+                    !vm_net_mock_put_object_u32(out, outCap, &pos, "crc", 0) ||
+                    !vm_net_mock_put_object_entry(out, outCap, &pos, "version",
+                                                 versionBytes, sizeof(versionBytes)) ||
+                    !vm_net_mock_put_object_u8(out, outCap, &pos, "type",
+                                              haveRequestType ? requestType : 0) ||
+                    !vm_net_mock_put_object_string(
+                        out, outCap, &pos, "name",
+                        haveRequestName ? requestName : "MMORPGTempcbm") ||
+                    !vm_net_mock_put_object_blob(out, outCap, &pos, "data", NULL, 0))
+                {
+                    return 0;
+                }
+                vm_net_mock_finish_wt_packet(out, pos, 1);
+                out[5] = 1;
+                out[6] = 0x12;
+                out[7] = responseSubtype;
+                out[8] = 0;
+                vm_net_mock_finish_wt_object(out, 5, pos);
+                vm_net_mock_gbk_label_to_utf8(requestName, nameUtf8, sizeof(nameUtf8));
+                printf("[info][network] mock_update_chunk_uptodate subtype=7 file=%s "
+                       "version=%u action=keep-client-cache protocol=WT18/7\n",
+                       nameUtf8, responseVersion);
+                return pos;
             }
-            vm_net_mock_finish_wt_packet(out, pos, 1);
-            out[5] = 1;
-            out[6] = 0x12;
-            out[7] = responseSubtype;
-            out[8] = 0;
-            vm_net_mock_finish_wt_object(out, 5, pos);
-            vm_net_mock_gbk_label_to_utf8(requestName, nameUtf8, sizeof(nameUtf8));
-            printf("[info][network] mock_update_chunk_uptodate subtype=7 file=%s "
-                   "version=%u action=keep-client-cache protocol=WT18/7\n",
-                   nameUtf8, responseVersion);
-            return pos;
         }
     }
 
@@ -4324,8 +4377,39 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
            responseVersion,
            sourcePathUtf8,
            pos);
+    /* #region agent log */
+    if (responseSubtype == 7 && haveRequestName && requestName[0] == '2' &&
+        requestName[1] == '9')
+    {
+        bool gf = false;
+        u32 i = 0;
+        for (i = 0; i + 11u <= updateLen; ++i)
+        {
+            if (memcmp(updateData + i, "e_ghostfire", 11) == 0)
+            {
+                gf = true;
+                break;
+            }
+        }
+        {
+            char dataBuf[200];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"file\":\"%.48s\",\"total\":%u,\"version\":%u,"
+                     "\"ghostfire\":%u,\"path\":\"%.80s\"}",
+                     payloadNameUtf8, updateLen, responseVersion,
+                     gf ? 1u : 0u, sourcePathUtf8);
+            agent_dbg191169_log("H", "mock_server_core.c:update_chunk",
+                                "dream_update_chunk", dataBuf);
+        }
+    }
+    /* #endregion */
     if (responseSubtype == 7 && start + chunkLen >= updateLen)
-        vm_net_mock_note_update_chunk_complete(payloadName ? payloadName : haveRequestName ? requestName : "");
+    {
+        const char *doneName =
+            payloadName ? payloadName : (haveRequestName ? requestName : "");
+
+        vm_net_mock_note_update_chunk_complete(doneName);
+    }
     if (responseSubtype == 6 && start + chunkLen >= updateLen)
     {
         vm_net_mock_update_mark_delivered(request, requestLen, updateSlot);

@@ -57,6 +57,12 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
 static void vm_net_mock_hangup_loop_clear(const char *reason);
 static void vm_mock_service_clear_request_local_scratch(const char *reason);
 
+/* Dream kind=3 hot-reenter: stock SCE install lives in scene_task.c; session
+ * offline restore is called from equipment_npc.c (included first). */
+static void vm_net_mock_dream_sce_hot_reenter_restore_admin(void);
+/* Heal web/fs↔bin 29* SCE twin drift before WT18/7 publish (equipment_npc). */
+static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"

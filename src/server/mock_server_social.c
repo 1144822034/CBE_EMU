@@ -828,18 +828,80 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
      * 2026-07-31).  Client now allows one completion reenter after remote 30/1
      * so 27/12+posinfo can bind the walking sprite again.
      *
-     * Dream/FB (29*): keep 27/12-ack (no posinfo).  Full 27/12+posinfo after
-     * instance 30/1 re-issues EnterScene; host skip still ends at
-     * 0x0104d775 with bad r0.  Outdoor allow-once path unchanged.
+     * Dream/FB (29*) instance completion: 27/12-ack still calls
+     * EnterSceneByMapName; host skip returns a screen then faults at
+     * 0x0104d775 (pc=0, debug-191169 post-settle).  Proven-safe hops never
+     * issued this 2/3 EnterScene.  Dream-only: lone 30/2 + wait_wt6 NPC +
+     * poll clear — no 27/12 family.  Outdoor unchanged.
      */
     if (closeTeleportDirectEnter &&
         target.scene[0] == '2' && target.scene[1] == '9')
     {
-        if (!vm_net_mock_append_fb_target_result12_ack_for_scene(out, outCap, &pos,
-                                                                target.scene))
-            return 0;
+        u32 objectStart = 0;
+        vm_mock_service_client_session *dreamSession =
+            vm_mock_service_get_active_client_session();
+
+        /*
+         * Three ResetDownloadState shots: one often lands before DF ScreenInit
+         * finishes and is wasted; poll clear is also held by wait_wt6.  Multi
+         * 30/2 on this 2/3 plus non-blocking poll clear closes the bar while
+         * client dream-df-screeninit-complete clears r9 busy flags.
+         */
+        {
+            u32 i;
+            for (i = 0; i < 3u; ++i)
+            {
+                objectStart = 0;
+                if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                                 &objectStart) ||
+                    !vm_net_mock_put_scene_ack_without_posinfo(
+                        out, outCap, &pos, 2, target.scene))
+                {
+                    return 0;
+                }
+                vm_net_mock_finish_wt_object(out, objectStart, pos);
+                objectCount += 1;
+            }
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        g_vm_net_mock_last_scene_change_fb4_type = 1;
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "dream-instance-2-3-loading-clear");
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        g_vm_net_mock_teleport_stone_same_scene = false;
+        /*
+         * Prefer post-enter poll NPC seed over wait_wt6: without 27/12 the
+         * client may never emit WT6/type27, and wait_wt6 would hold poll
+         * ResetDownloadState (stuck bar after walkable DF ScreenInit).
+         */
+        g_vm_net_mock_scene_moveinfo_npc_wait_wt6 = false;
+        g_vm_net_mock_scene_moveinfo_npc_wait_post_enter = true;
+        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+        vm_mock_service_session_arm_map_stone_loading_clear(dreamSession,
+                                                             target.scene);
+        (void)vm_mock_service_mark_active_session_scene_ready_from_role(
+            target.scene, "dream-instance-2-3-loading-clear");
+        if (dreamSession != NULL)
+        {
+            vm_mock_service_session_invalidate_nearby_observer_cursors(
+                dreamSession, "dream-instance-2-3-loading-clear");
+            vm_mock_service_team_enqueue_hsp_resync_for_client(dreamSession);
+        }
+        printf("[info][network] mock_dream_instance_2_3_loading_clear_only "
+               "scene=%s pos=(%u,%u) resp=%u drain_30_2=3 "
+               "action=30/2x3+post-enter-npc+arm-poll-clear "
+               "evidence=walkable-but-bar-stuck-after-loading-clear-only\n",
+               target.scene, target.x, target.y, pos);
+        vm_autotest_note("mock_dream_instance_2_3_loading_clear_only scene=%s "
+                         "response=30/2x3 post_enter_npc=1\n",
+                         target.scene);
+        return pos;
     }
-    else if (!vm_net_mock_append_fb_target_result12_for_scene(out, outCap, &pos,
+    if (!vm_net_mock_append_fb_target_result12_for_scene(out, outCap, &pos,
                                                           target.scene, target.x, target.y))
         return 0;
     objectCount += 1;
@@ -5512,13 +5574,25 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
      * Refuse while a NEW scene transfer is in flight.  The arm happens after
      * this map-stone's 2/3 completed (pending already false); a later
      * scene_pending cancel drops the arm entirely.
+     *
+     * Dream 29* drain reenter: instance enter sets direct_enter_pending +
+     * last_scene_change_target_valid, but the client often never emits WT
+     * 2/3 to clear them (debug-191169).  Poll 30/2 then returns 0 forever
+     * with remaining=3 → stuck progress bar.  Outdoor map-stone keep the
+     * hold; dream clear scene may proceed once DF ScreenInit owns the map.
      */
-    if (session->sceneVisiblePending ||
-        g_vm_net_mock_teleport_stone_deferred_enter_valid ||
-        g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        g_vm_net_mock_last_scene_change_target_valid)
     {
-        return 0;
+        bool dream29Clear =
+            session->mapStoneLoadingClearScene[0] == '2' &&
+            session->mapStoneLoadingClearScene[1] == '9';
+        if (session->sceneVisiblePending ||
+            g_vm_net_mock_teleport_stone_deferred_enter_valid ||
+            (!dream29Clear &&
+             g_vm_net_mock_teleport_stone_direct_enter_pending) ||
+            (!dream29Clear && g_vm_net_mock_last_scene_change_target_valid))
+        {
+            return 0;
+        }
     }
     ageTicks = g_schedulerTick - session->mapStoneLoadingClearTick;
     if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS))
@@ -5546,7 +5620,19 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
      * allows a timeout so a missing follow-up cannot starve loading forever.
      */
     if (g_vm_net_mock_scene_moveinfo_npc_wait_wt6 && ageTicks < 15u)
-        return 0;
+    {
+        /*
+         * Dream 29* instance 2/3 loading_clear_only: DF ScreenInit already
+         * owns the map; holding ResetDownloadState for wait_wt6 leaves the
+         * bar up after the player can walk (2026-08-02).  Outdoor map-stone
+         * wait_wt6 hold unchanged.
+         */
+        bool dream29Clear =
+            session->mapStoneLoadingClearScene[0] == '2' &&
+            session->mapStoneLoadingClearScene[1] == '9';
+        if (!dream29Clear)
+            return 0;
+    }
     if (!vm_net_mock_scene_name_is_safe(session->mapStoneLoadingClearScene))
     {
         vm_mock_service_session_cancel_map_stone_loading_clear(session,
@@ -5780,6 +5866,11 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * scene remains pollable during the item/confirmation phase. */
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
+    {
+        u32 smokeLen = vm_net_mock_dream_reenter_smoke_poll(out, outCap);
+        if (smokeLen != 0)
+            return smokeLen;
+    }
     /*
      * After mmShop, rebuild kind-2 combat nodes with deferred 30/1 before any
      * other poll payload.  Must not wait on sceneVisibleReady.

@@ -4076,14 +4076,10 @@ static u32 vm_net_mock_build_instance_enter_response(
             session, "instance-enter-drain-prepare");
     }
     /*
-     * Dream 29* from outdoor after map-stone clear already exhausted: plain
-     * 30/1 alone intermittently faults hot DF ScreenInit while ParseMinfo
-     * builds kind3 (r6=0 / lr=0x010136b3 / ui_h_war.actor) — same class as
-     * half-open clear.  Successful hops used same-packet outdoor 30/2 then
-     * dream 30/1 (resp≈102) and often never issued WT 2/3.  Synthesize one
-     * ResetDownloadState for the visible outdoor scene only; outdoor→outdoor
-     * instance enter unchanged.  Client observation ignores drain 30/2 when
-     * 30/1+posinfo is in the same packet.
+     * Dream 29* from outdoor after clear exhausted: synthesize one outdoor
+     * ResetDownloadState then dream 30/1.  Mid-game 1/1/6 (no 30/1) was
+     * rejected — NPC enter response context unpack-errors (debug-191169).
+     * Outdoor→outdoor instance enter unchanged.
      */
     if (drainRemaining == 0 &&
         target.scene[0] == '2' && target.scene[1] == '9' &&
@@ -4100,7 +4096,7 @@ static u32 vm_net_mock_build_instance_enter_response(
         printf("[info][network] mock_npc_instance_enter_dream_drain "
                "actor=%u scene=%s from=%s drain_30_2=1 "
                "action=synthetic-outdoor-ResetDownloadState-then-30/1 "
-               "evidence=clear-exhausted-hot-ScreenInit-r6-0\n",
+               "evidence=clear-exhausted-npc-enter-needs-30/1\n",
                seed->actorId, target.scene, drainScene);
         vm_autotest_note("mock_npc_instance_enter_dream_drain scene=%s "
                          "from=%s drain_30_2=1\n",
@@ -4156,6 +4152,78 @@ static u32 vm_net_mock_build_instance_enter_response(
         }
     }
     vm_net_mock_session_bind_instance_hangup_enemy(seed);
+    /*
+     * Leaving 29* → outdoor via instance: mark reenter settle.  Do not change
+     * outdoor→outdoor instance enter.  Arm outdoor clear so loading can drain
+     * while the player walks; enter path may still force one post-ready cycle.
+     */
+    if (session != NULL &&
+        !(target.scene[0] == '2' && target.scene[1] == '9') &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+        session->sceneVisibleScene[0] == '2' &&
+        session->sceneVisibleScene[1] == '9')
+    {
+        session->dreamExitReenterSettleRequired = true;
+        vm_mock_service_session_arm_map_stone_loading_clear(session,
+                                                             target.scene);
+        /*
+         * Keep kind=3 SCE on disk across 使者 reenter.  Stock-swap removed:
+         * inject-v3b / hot-safe coords ParseMinfo Ok on 518* (debug-191169);
+         * only bad admin coords (e.g. y=149/184) faulted.  Admin save snaps
+         * 29* FB spawns to the safe cluster.
+         */
+        printf("[info][network] mock_npc_instance_dream_exit_settle_arm "
+               "actor=%u from=%s to=%s action=require-clear-before-29-reenter "
+               "stock_install=0 keep_kind3=1 "
+               "evidence=debug-191169-hot-safe-kind3-coords\n",
+               seed->actorId, session->sceneVisibleScene, target.scene);
+        /* #region agent log */
+        {
+            char dataBuf[160];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"from\":\"%.48s\",\"to\":\"%.48s\","
+                     "\"action\":\"keep_kind3\"}",
+                     session->sceneVisibleScene, target.scene);
+            agent_dbg191169_log("Z", "mock_server_scene_sync.c:exit",
+                                "dream_keep_kind3", dataBuf);
+        }
+        /* #endregion */
+    }
+    if (session != NULL &&
+        target.scene[0] == '2' && target.scene[1] == '9')
+    {
+        session->dreamExitReenterSettleRequired = false;
+        session->dreamForceColdSceResync = false;
+        /*
+         * After outdoor→29* 30/1 rebuilds the scene shell, deliver login-
+         * shaped 1/1/6 on the next scene poll (map-stone fresh_shell
+         * contract).  Must not put 1/1/6 in the NPC enter response —
+         * that unpack-errored (debug-191169).
+         */
+        if (drainRemaining > 0)
+        {
+            /*
+             * dream_drain path: client often skips WT 2/3, so
+             * loading_clear_only never runs.  Host ScreenInit busy-clear
+             * alone leaves the progress bar (debug-191169 stock-SCE
+             * reenter).  Arm dream poll 30/2 ResetDownloadState like
+             * post-2/3 clear; outdoor drain 30/2 in the enter packet is
+             * not enough for the dream DF load.
+             */
+            vm_mock_service_session_arm_map_stone_loading_clear(session,
+                                                                 target.scene);
+            vm_mock_service_session_arm_map_actor_vitals_sync(session, 0, 0,
+                                                               true);
+            printf("[info][network] mock_npc_instance_dream_fresh_shell_arm "
+                   "actor=%u scene=%s action=poll-1/1/6-after-30/1 "
+                   "evidence=map-stone-fresh-shell+title-subtype-6\n",
+                   seed->actorId, target.scene);
+            printf("[info][network] mock_npc_instance_dream_bar_clear_arm "
+                   "actor=%u scene=%s action=poll-30/2-after-dream-drain "
+                   "evidence=debug-191169-stuck-bar-no-2-3\n",
+                   seed->actorId, target.scene);
+        }
+    }
     if (drainRemaining > 0)
     {
         printf("[info][network] mock_npc_instance_enter actor=%u scene=%s "
@@ -4177,6 +4245,110 @@ static u32 vm_net_mock_build_instance_enter_response(
                seed->challengeEnemyId, pos);
     }
     return pos;
+}
+
+/*
+ * CBE_DREAM_REENTER_SMOKE=1: after the client is ready on 29*, the next scene
+ * polls drive exit(31000) → wait outdoor clear → reenter(30406).  Used so the
+ * agent can verify without manual NPC taps (debug-191169).
+ */
+static u32 vm_net_mock_dream_reenter_smoke_poll(u8 *out, u32 outCap)
+{
+    static u8 phase = 0;
+    static u32 earliestTick = 0;
+    vm_mock_service_client_session *session = NULL;
+    const vm_net_mock_scene_npcinfo_seed *seed = NULL;
+    const char *env = getenv("CBE_DREAM_REENTER_SMOKE");
+    u32 len = 0;
+    bool outdoorReady = false;
+
+    if (env == NULL || env[0] != '1' || out == NULL || outCap < 5)
+        return 0;
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL)
+        return 0;
+
+    if (phase == 0)
+    {
+        if (session->sceneVisibleReady && !session->sceneVisiblePending &&
+            session->sceneVisibleScene[0] == '2' &&
+            session->sceneVisibleScene[1] == '9')
+        {
+            phase = 1;
+            earliestTick = g_schedulerTick + 90u;
+            printf("[info][smoke] dream_reenter_smoke arm_exit tick=%u "
+                   "scene=%s\n",
+                   g_schedulerTick, session->sceneVisibleScene);
+        }
+        return 0;
+    }
+
+    if (phase == 1 && g_schedulerTick >= earliestTick)
+    {
+        seed = vm_net_mock_instance_guide_seed(31000);
+        if (seed == NULL)
+        {
+            printf("[warn][smoke] dream_reenter_smoke exit_seed_miss "
+                   "actor=31000\n");
+            phase = 9;
+            return 0;
+        }
+        len = vm_net_mock_build_instance_enter_response(seed, out, outCap);
+        if (len == 0)
+        {
+            printf("[warn][smoke] dream_reenter_smoke exit_build_fail\n");
+            phase = 9;
+            return 0;
+        }
+        phase = 2;
+        earliestTick = g_schedulerTick + 120u;
+        printf("[info][smoke] dream_reenter_smoke exit_sent resp=%u "
+               "to=%s\n",
+               len, seed->instanceScene);
+        return len;
+    }
+
+    if (phase == 2)
+    {
+        outdoorReady =
+            session->sceneVisibleReady && !session->sceneVisiblePending &&
+            session->sceneVisibleScene[0] != 0 &&
+            !(session->sceneVisibleScene[0] == '2' &&
+              session->sceneVisibleScene[1] == '9') &&
+            (!session->mapStoneLoadingClearPending ||
+             session->mapStoneLoadingClearRemaining == 0u);
+        if (outdoorReady && g_schedulerTick >= earliestTick)
+        {
+            phase = 3;
+            earliestTick = g_schedulerTick + 45u;
+            printf("[info][smoke] dream_reenter_smoke arm_reenter scene=%s "
+                   "clear_rem=%u tick=%u\n",
+                   session->sceneVisibleScene,
+                   (u32)session->mapStoneLoadingClearRemaining,
+                   g_schedulerTick);
+        }
+        return 0;
+    }
+
+    if (phase == 3 && g_schedulerTick >= earliestTick)
+    {
+        seed = vm_net_mock_instance_guide_seed(30406);
+        if (seed == NULL)
+        {
+            printf("[warn][smoke] dream_reenter_smoke enter_seed_miss "
+                   "actor=30406\n");
+            phase = 9;
+            return 0;
+        }
+        len = vm_net_mock_build_instance_enter_response(seed, out, outCap);
+        phase = 4;
+        printf("[info][smoke] dream_reenter_smoke reenter_sent resp=%u "
+               "to=%s\n",
+               len, seed->instanceScene);
+        return len;
+    }
+
+    return 0;
 }
 
 static u32 vm_net_mock_build_instance_challenge_battle_response(
@@ -5377,9 +5549,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
              * waits until remaining=0 then synthetic dream_drain.  Gate here —
              * keep clear armed, stay on outdoor map, let the player retry.
              */
-            bool gateWaitClear =
+            bool toDream29 =
                 instanceSeed->instanceScene[0] == '2' &&
-                instanceSeed->instanceScene[1] == '9' &&
+                instanceSeed->instanceScene[1] == '9';
+            bool gateWaitClear =
+                toDream29 &&
                 session != NULL &&
                 session->mapStoneLoadingClearPending &&
                 session->mapStoneLoadingClearRemaining > 0u &&
@@ -5388,7 +5562,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 !vm_net_mock_scene_names_equal_loose(
                     session->mapStoneLoadingClearScene,
                     instanceSeed->instanceScene);
-
+            /*
+             * After dream→outdoor, leave arms outdoor clear + settle_required.
+             * Gate while that clear remains; cold SCE resync on enter replaces
+             * the old force-second-settle cycle (still hit 518c, debug-191169).
+             */
             if (gateWaitClear)
             {
                 action = "instance-enter-gate-wait-clear";

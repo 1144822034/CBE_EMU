@@ -1,5 +1,29 @@
 #include "main.h"
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+/* #region agent log */
+#ifndef AGENT_DBG191169_LOG_DEFINED
+#define AGENT_DBG191169_LOG_DEFINED
+static void agent_dbg191169_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson)
+{
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
+            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId ? hypothesisId : "",
+            location ? location : "",
+            message ? message : "",
+            dataJson ? dataJson : "{}",
+            (long long)time(NULL) * 1000LL);
+    fclose(fp);
+}
+#endif
+/* #endregion */
 
 bool hookInsnInvalid(uc_engine *uc, void *user_data);
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data);
@@ -111,6 +135,20 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
         dumpVirtMemory(sp - 64, 128);
     printf("[warn][mem] unmapped access soft-failed (host continues)\n");
     fflush(stdout);
+    /* #region agent log */
+    {
+        u32 pc = 0, lr = 0, r6 = 0;
+        char dataBuf[160];
+        uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+        uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"fault\":%u,\"pc\":%u,\"lr\":%u,\"r6\":%u,\"type\":%u}",
+                 (u32)address, pc, lr, r6, (u32)type);
+        agent_dbg191169_log("Y", "hookRam.c:hookRamErrorBack", "mem_fault",
+                            dataBuf);
+    }
+    /* #endregion */
     uc_emu_stop(uc);
     return true;
 }

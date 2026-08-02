@@ -3197,6 +3197,17 @@ typedef struct vm_mock_service_client_session
     u32 mapStoneLoadingClearTick;
     char mapStoneLoadingClearScene[64];
     /*
+     * Dream 29* only: after instance-exit to outdoor, require outdoor
+     * map_stone_loading_clear to finish before reenter.  Non-29 paths ignore.
+     */
+    bool dreamExitReenterSettleRequired;
+    /*
+     * Dream 29* instance enter: next WT18/7 for 29* SCE must not return
+     * uptodate — force a cold payload so DF uses 502* allocation instead of
+     * intermittent hot 518c ParseMinfo (r6=01ffffff, debug-191169).
+     */
+    bool dreamForceColdSceResync;
+    /*
      * mmShop→mmGame ScreenInit may still be settling when WT6/1 delivers
      * nonempty 27/11 (second DoLoading).  Same-packet 30/2 races that
      * ScreenInit (蓬莱 2026-07-27).  Bounded poll 30/2 owns ResetDownloadState;
@@ -3301,6 +3312,21 @@ typedef struct vm_mock_service_client_session
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
+
+static bool vm_mock_service_session_dream_force_cold_sce(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    return session != NULL && session->dreamForceColdSceResync;
+}
+
+static void vm_mock_service_session_dream_force_cold_sce_clear(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    if (session != NULL)
+        session->dreamForceColdSceResync = false;
+}
 
 /*
  * Map shell the active client session still owns for nearby / NPC / map-stone
@@ -7258,6 +7284,17 @@ static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
         return 0;
     }
     /*
+     * Dream drain bar clear: do not let poll/wt 1/1/6 steal seats from
+     * armed 29* ResetDownloadState (debug-191169 clear_rem=3 at offline).
+     */
+    if (session->mapStoneLoadingClearPending &&
+        session->mapStoneLoadingClearScene[0] == '2' &&
+        session->mapStoneLoadingClearScene[1] == '9' &&
+        session->mapStoneLoadingClearRemaining > 0)
+    {
+        return 0;
+    }
+    /*
      * Do not push 1/1/14 while Battle.cbm still owns the settle panel.  Log
      * showed vitals poll before delayed 4/8 on multi-monster victory, which
      * blanked the result UI (same class as early 4/8 tear-down).
@@ -7418,6 +7455,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
                session->sceneVisibleX,
                session->sceneVisibleY,
                reason ? reason : "-");
+        vm_net_mock_dream_sce_hot_reenter_restore_admin();
     }
     session->roleOnline = false;
     session->onlinePresenceValid = false;
@@ -7526,6 +7564,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->mapStoneLoadingClearRemaining = 0;
     session->mapStoneLoadingClearTick = 0;
     session->mapStoneLoadingClearScene[0] = 0;
+    session->dreamExitReenterSettleRequired = false;
+    session->dreamForceColdSceResync = false;
     session->shopReturnLoadingClearPending = false;
     session->shopReturnLoadingClearRemaining = 0;
     session->shopReturnLoadingClearTick = 0;
@@ -9963,6 +10003,13 @@ static bool vm_net_mock_publish_scene_resource(const char *scene,
     memset(leaf, 0, sizeof(leaf));
     memset(twin, 0, sizeof(twin));
     memset(mapLeaf, 0, sizeof(mapLeaf));
+    /*
+     * Dream 29*: heal web/fs↔bin SCE twin drift before resolve/publish so
+     * WT18/7 does not advertise stock-278 while bin/*.sce still has kind=3
+     * (debug-191169: 使者再进 uptodate → 无刷怪).
+     */
+    if (scene[0] == '2' && scene[1] == '9')
+        vm_net_mock_dream_sce_heal_authoritative_kind3(scene);
     if (!vm_net_mock_open_server_scene_resource(scene, NULL, path,
                                                 sizeof(path)) ||
         path[0] == 0)

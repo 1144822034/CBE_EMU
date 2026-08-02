@@ -425,6 +425,100 @@ static bool vm_net_mock_role_position_needs_edge_rescue(u16 x, u16 y)
            y < (u16)VM_NET_MOCK_SCENE_LANDING_SAFE_GAP;
 }
 
+/*
+ * True when the dream SCE leaf on disk carries map kind=3 (e_ghostfire).
+ * Cold login into that SCE faults ParseMinfo for the production client
+ * (debug-191169: lr=0x010136b3 / emu_err=11) even when host smoke passes.
+ */
+static bool vm_net_mock_role_dream_kind3_on_disk(const char *scene)
+{
+    static const char *kPaths[] = {
+        "../web/fs/JHOnlineData/%s",
+        "JHOnlineData/%s",
+        "../web/fs/JHOnlineData/%s.sce",
+        "JHOnlineData/%s.sce",
+    };
+    char path[320];
+    u8 buf[512];
+    size_t i = 0;
+
+    if (scene == NULL || scene[0] != '2' || scene[1] != '9')
+        return false;
+    for (i = 0; i < sizeof(kPaths) / sizeof(kPaths[0]); ++i)
+    {
+        FILE *fp = NULL;
+        size_t n = 0;
+        size_t off = 0;
+
+        snprintf(path, sizeof(path), kPaths[i], scene);
+        fp = fopen(path, "rb");
+        if (fp == NULL)
+            continue;
+        while ((n = fread(buf, 1, sizeof(buf), fp)) > 0)
+        {
+            if (n >= 11u)
+            {
+                for (off = 0; off + 11u <= n; ++off)
+                {
+                    if (memcmp(buf + off, "e_ghostfire", 11) == 0)
+                    {
+                        fclose(fp);
+                        return true;
+                    }
+                }
+            }
+        }
+        fclose(fp);
+    }
+    return false;
+}
+
+/* Relocate login out of 29* when dream SCE has kind=3 so cold DF never
+ * ParseMinfo's it; 使者 instance enter still loads kind=3 for 刷怪. */
+static bool vm_net_mock_role_relocate_dream_kind3_login(
+    vm_net_mock_role_state *role)
+{
+    static const char kOutdoor[] =
+        "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x36"; /* c04临安府_06 */
+    char from[64];
+    u16 x = 50;
+    u16 y = 50;
+
+    if (role == NULL || role->scene[0] != '2' || role->scene[1] != '9')
+        return false;
+    if (!vm_net_mock_role_dream_kind3_on_disk(role->scene))
+        return false;
+    snprintf(from, sizeof(from), "%s", role->scene);
+    snprintf(role->scene, sizeof(role->scene), "%s", kOutdoor);
+    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene, &x, &y,
+                                                          NULL))
+    {
+        x = 50;
+        y = 50;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &x, &y);
+    role->x = x;
+    role->y = y;
+    g_vm_net_mock_role_position_dirty = true;
+    printf("[info][mock-service] role_dream_kind3_login_relocate role=%u "
+           "from=%s to=%s pos=(%u,%u) "
+           "action=outdoor-login-keep-dream-kind3-for-instance "
+           "evidence=debug-191169-cold-kind3-screen_init_fail\n",
+           role->roleId, from, role->scene, role->x, role->y);
+    /* #region agent log */
+    {
+        char dataBuf[200];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"role\":%u,\"from\":\"%.48s\",\"to\":\"%.48s\","
+                 "\"x\":%u,\"y\":%u}",
+                 role->roleId, from, role->scene, role->x, role->y);
+        agent_dbg191169_log("L", "mock_server_role.c:relocate",
+                            "dream_kind3_login_relocate", dataBuf);
+    }
+    /* #endregion */
+    return true;
+}
+
 static bool vm_net_mock_role_rescue_edge_position(vm_net_mock_role_state *role,
                                                   const char *reason)
 {
@@ -8219,6 +8313,8 @@ static bool vm_net_mock_select_active_role(u32 roleId)
     {
         if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
         {
+            bool relocated = false;
+
             if (g_vm_net_mock_role_db.activeRoleId != roleId)
             {
                 u32 previousActiveRoleId = g_vm_net_mock_role_db.activeRoleId;
@@ -8229,6 +8325,15 @@ static bool vm_net_mock_select_active_role(u32 roleId)
                     return false;
                 }
             }
+            /*
+             * Only at role-select (not every normalize): leave 29* when the
+             * dream SCE has kind=3 so cold login skips ParseMinfo; instance
+             * enter later may set scene back to 29* for 刷怪.
+             */
+            relocated = vm_net_mock_role_relocate_dream_kind3_login(
+                &g_vm_net_mock_role_db.roles[i]);
+            if (relocated)
+                (void)vm_net_mock_role_db_save("dream-kind3-login-relocate");
             return true;
         }
     }

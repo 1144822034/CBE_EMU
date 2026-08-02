@@ -24,6 +24,30 @@ typedef SOCKET vm_client_socket;
 typedef int vm_client_socket;
 #define VM_CLIENT_INVALID_SOCKET (-1)
 #endif
+#include <stdio.h>
+#include <time.h>
+
+/* #region agent log */
+#ifndef AGENT_DBG191169_LOG_DEFINED
+#define AGENT_DBG191169_LOG_DEFINED
+static void agent_dbg191169_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson)
+{
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
+            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId ? hypothesisId : "",
+            location ? location : "",
+            message ? message : "",
+            dataJson ? dataJson : "{}",
+            (long long)time(NULL) * 1000LL);
+    fclose(fp);
+}
+#endif
+/* #endregion */
 
 enum
 {
@@ -97,6 +121,33 @@ static bool g_vm_scene_allow_one_map_stone_completion_reenter = false;
  * suppress is fallback only (docs/re/2026-07-31-dream-reenter-loading-stall.md).
  */
 static bool g_vm_scene_block_dream_completion_reenter = false;
+/*
+ * 0=off, 1=next EnterSceneByMapName must run (30/1 primary bind),
+ * 2=skip further EnterScene (2/3 completion).  Skipping the first call
+ * after DF ScreenInit caused pc=0@0x0104d775 (debug-191169).
+ */
+static u8 g_vm_dream_enter_scene_gate = 0;
+/*
+ * Login/cold dream DF shell (init 0x0502xxxx) stays PAUSE'd under outdoor.
+ * Outdoor→29* hot DoLoading reuses the same `this` with init 0x0518xxxx and
+ * faults ParseMinfo (debug-191169). Prefer ScreenResume of that shell.
+ */
+static bool g_vm_dream_prefer_resume_paused_shell = false;
+/* Extensionless 29* leaf seen via WT18/7 uptodate/download (login has no 30/1). */
+static char g_vm_dream_scene_hint[64];
+typedef struct
+{
+    bool valid;
+    bool pausedUnderOther;
+    char scene[64];
+    u32 screen;
+    u32 thisPtr;
+    u32 initEntry;
+    u32 resumeEntry;
+    u32 dataPackage;
+    u32 moduleBase;
+} vm_dream_resumable_shell;
+static vm_dream_resumable_shell g_vm_dream_resumable_shell;
 static vm_net_mock_scene_change_target g_vm_net_mock_last_completed_scene_change_target;
 static bool g_vm_net_mock_last_completed_scene_change_target_valid = false;
 static u32 g_vm_net_mock_last_completed_scene_change_tick = 0;
@@ -205,6 +256,9 @@ static u32 vm_net_mock_apply_remote_observation(
                 observation->sceneSubtype == 1 && !isDream29;
             g_vm_scene_block_dream_completion_reenter =
                 observation->sceneSubtype == 1 && isDream29;
+            g_vm_dream_enter_scene_gate =
+                g_vm_scene_block_dream_completion_reenter ? 1u : 0u;
+            g_vm_dream_prefer_resume_paused_shell = false;
         }
         printf("[info][screen] remote_scene_target_apply serial=%u subtype=%u "
                "scene=%s pos=(%u,%u) allow_map_stone_reenter=%u "
@@ -303,7 +357,10 @@ static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
          */
         g_vm_scene_allow_one_map_stone_completion_reenter = false;
         if (wasDream29)
+        {
             g_vm_scene_block_dream_completion_reenter = false;
+            g_vm_dream_enter_scene_gate = 0;
+        }
     }
 }
 

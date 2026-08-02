@@ -143,6 +143,8 @@ typedef struct
     u8 levelRequired;
     /* equip.dsh column 6 (`品质`): 0=白装, higher values are colored gear. */
     u8 quality;
+    /* equip.dsh `类别`: weapon 7/8/9 → slot0; used by weapon +16 primary. */
+    u8 category;
     /* equip.dsh column 19 (`耐久`) is the client-visible maximum.  The
      * wire payload only carries the current value, so the server must use this
      * same source whenever it creates or repairs durable equipment. */
@@ -1765,6 +1767,7 @@ static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired
     item->slot = slot;
     item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
     item->quality = (u8)(quality > 255 ? 255 : quality);
+    item->category = (u8)(category > 255 ? 255 : category);
     item->durabilityMax = (u16)durabilityMax;
     item->bonus = *bonus;
     return true;
@@ -2523,9 +2526,8 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
  * attr_count is capped at CLIENT_CAP — milestones take priority, then extras
  * in 护甲→物攻→气血→法力 order.
  *
- * Balance intent: weapon is shared by all three jobs — prefer universal
- * lines (暴击/躲闪/护甲/气血), not 物攻/力量.  Job-leaning offense
- * (物攻/力量) lives on pants/ring/belt instead.
+ * Weapon +8/+12/+16: 护甲定表 / 气血(Q+1)*600 / 按类别 7力 8敏 9智 Q*422.
+ * Job-leaning offense on pants/ring/belt remains for non-weapon slots.
  */
 enum
 {
@@ -2581,13 +2583,13 @@ typedef struct
     u8 flag; /* 0=flat 值, 1=percent % */
 } vm_net_mock_equip_enhance_attr_def;
 
-/* slot 0 武器 — 三职业共用：躲闪 + 护甲(抗性向，无独立抗性 type) */
+/* slot 0 武器 — +16 type remapped by equip.dsh 类别 7/8/9 at emit/collect */
 static const vm_net_mock_equip_enhance_attr_def
     g_vm_net_mock_weapon_enhance_attrs[] = {
-        {VM_NET_MOCK_EQUIP_ATTR_CRIT, 0},  /* +4  暴击 */
-        {VM_NET_MOCK_EQUIP_ATTR_DODGE, 0}, /* +8  躲闪 [P] */
-        {VM_NET_MOCK_EQUIP_ATTR_ARMOR, 0}, /* +12 护甲 [P]（抗性向） */
-        {VM_NET_MOCK_EQUIP_ATTR_HIT, 0},   /* +16 命中 [P] */
+        {VM_NET_MOCK_EQUIP_ATTR_CRIT, 0},     /* +4  暴击 */
+        {VM_NET_MOCK_EQUIP_ATTR_ARMOR, 0},    /* +8  护甲 175/350/525/700 */
+        {VM_NET_MOCK_EQUIP_ATTR_HP, 0},       /* +12 气血 (品质+1)*600 */
+        {VM_NET_MOCK_EQUIP_ATTR_STRENGTH, 0}, /* +16 力/敏/智 placeholder */
 };
 
 /* slot 1 帽子 — 三围（智慧）固定 +16 */
@@ -2691,8 +2693,8 @@ static u32 vm_net_mock_equipment_bonus_enhance_delta(u32 base, u16 enhanceLevel)
  * 品质 0=白装；表格式档位按 1..4（白装回退到档 1）。
  * 暴击/闪躲/命中: quality+1
  * 气血%/法力% (flag!=0): (quality+1)*5
- * 力量/敏捷/智慧: (quality+1)*120（三围词条固定在 +16）
- * 气血/法力 值: 150/300/450/600
+ * 力量/敏捷/智慧: (quality+1)*120（非武器 +16）；武器 +16: quality*422
+ * 气血/法力 值: 150/300/450/600；武器 +12 气血: (quality+1)*600
  * 物攻: 23/50/123/296
  * 护甲: 175/350/525/700
  */
@@ -2707,6 +2709,29 @@ static u8 vm_net_mock_equip_quality_table_tier(u8 quality)
 
 static const vm_net_mock_equip_enhance_attr_def *
 vm_net_mock_equip_enhance_attrs_for_slot(u8 slot, u8 *countOut);
+
+/* Weapon +16 primary by equip.dsh 类别: 7力 / 8敏 / 9智. */
+static u8 vm_net_mock_weapon_enhance_primary_type(u8 category)
+{
+    switch (category)
+    {
+    case 8:
+        return VM_NET_MOCK_EQUIP_ATTR_AGILITY;
+    case 9:
+        return VM_NET_MOCK_EQUIP_ATTR_WISDOM;
+    case 7:
+    default:
+        return VM_NET_MOCK_EQUIP_ATTR_STRENGTH;
+    }
+}
+
+static u8 vm_net_mock_equip_enhance_milestone_type(
+    const vm_net_mock_equipment_catalog_item *item, u8 slotIndex, u8 defType)
+{
+    if (item != NULL && item->slot == 0 && slotIndex == 3u)
+        return vm_net_mock_weapon_enhance_primary_type(item->category);
+    return defType;
+}
 
 static u16 vm_net_mock_equip_enhance_attr_value_for_type(u8 quality, u8 type,
                                                          u8 flag)
@@ -2741,6 +2766,27 @@ static u16 vm_net_mock_equip_enhance_attr_value_for_type(u8 quality, u8 type,
     }
 }
 
+/* Weapon-aware milestone value: +12 HP (Q+1)*600, +16 primary Q*422. */
+static u16 vm_net_mock_equip_enhance_milestone_value(
+    const vm_net_mock_equipment_catalog_item *item, u8 unlock, u8 type,
+    u8 flag)
+{
+    if (item != NULL && item->slot == 0)
+    {
+        if (unlock == 12u && type == VM_NET_MOCK_EQUIP_ATTR_HP && flag == 0)
+            return (u16)(((u32)item->quality + 1u) * 600u);
+        if (unlock == 16u &&
+            (type == VM_NET_MOCK_EQUIP_ATTR_STRENGTH ||
+             type == VM_NET_MOCK_EQUIP_ATTR_AGILITY ||
+             type == VM_NET_MOCK_EQUIP_ATTR_WISDOM))
+            return (u16)((u32)item->quality * 422u);
+    }
+    return vm_net_mock_equip_enhance_attr_value_for_type(item != NULL
+                                                             ? item->quality
+                                                             : 0,
+                                                         type, flag);
+}
+
 /* Add unlocked +4/+8/+12/+16 milestone flats (quality table) into dst. */
 static void vm_net_mock_equipment_bonus_add_unlocked_milestones(
     vm_net_mock_equipment_bonus *dst,
@@ -2761,14 +2807,16 @@ static void vm_net_mock_equipment_bonus_add_unlocked_milestones(
     for (i = 0; i < knownCount; ++i)
     {
         u8 unlock = (u8)((i + 1u) * 4u);
+        u8 type;
         u16 value;
         u32 add = 0;
 
         if (unlock > enhanceLevel)
             continue;
-        value = vm_net_mock_equip_enhance_attr_value_for_type(
-            item->quality, defs[i].type, defs[i].flag);
-        switch (defs[i].type)
+        type = vm_net_mock_equip_enhance_milestone_type(item, i, defs[i].type);
+        value = vm_net_mock_equip_enhance_milestone_value(item, unlock, type,
+                                                         defs[i].flag);
+        switch (type)
         {
         case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
             dst->strength += value;
@@ -2929,14 +2977,16 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
                 for (i = 0; i < knownCount; ++i)
                 {
                     u8 realUnlock = (u8)((i + 1u) * 4u);
+                    u8 type = vm_net_mock_equip_enhance_milestone_type(
+                        equip, i, defs[i].type);
                     unlocks[attrCount] = vm_net_mock_equip_enhance_wire_unlock(
-                        defs[i].type, realUnlock);
+                        type, realUnlock);
                     types[attrCount] =
-                        vm_net_mock_equip_enhance_wire_type(defs[i].type);
+                        vm_net_mock_equip_enhance_wire_type(type);
                     flags[attrCount] = defs[i].flag;
                     values[attrCount] =
-                        vm_net_mock_equip_enhance_attr_value_for_type(
-                            equip->quality, defs[i].type, defs[i].flag);
+                        vm_net_mock_equip_enhance_milestone_value(
+                            equip, realUnlock, type, defs[i].flag);
                     attrCount++;
                 }
             }

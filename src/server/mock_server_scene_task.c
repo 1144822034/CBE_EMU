@@ -627,6 +627,303 @@ static bool vm_net_mock_sce_combat_spawn_bindings_replace(
 static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     const char *scene, u32 wireActorId, u32 posx, u32 posy);
 
+/*
+ * Dream FB+kind=3 SCE: cold login ParseMinfo Ok; hot 518* faults on bad
+ * admin coords (debug-191169).  WT18/7 serves ../web/fs (not bin cache).
+ * keep_kind3 on exit; heal twin drift before publish so 使者 reenter still
+ * pulls ghostfire kind=3.  Optional stock-swap helpers remain for fallback.
+ */
+static bool g_vm_net_mock_dream_stock_installed_for_reenter = false;
+
+static bool vm_net_mock_copy_file_raw(const char *srcPath, const char *dstPath)
+{
+    FILE *in = NULL;
+    FILE *out = NULL;
+    u8 buf[4096];
+    size_t n = 0;
+    bool ok = false;
+
+    if (srcPath == NULL || dstPath == NULL || srcPath[0] == 0 || dstPath[0] == 0)
+        return false;
+    in = fopen(srcPath, "rb");
+    if (in == NULL)
+        return false;
+    out = fopen(dstPath, "wb");
+    if (out == NULL)
+    {
+        fclose(in);
+        return false;
+    }
+    ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    {
+        if (fwrite(buf, 1, n, out) != n)
+        {
+            ok = false;
+            break;
+        }
+    }
+    if (ferror(in))
+        ok = false;
+    fclose(in);
+    if (fclose(out) != 0)
+        ok = false;
+    return ok;
+}
+
+static bool vm_net_mock_path_bytes_contain(const char *path, const char *needle)
+{
+    FILE *fp = NULL;
+    long size = 0;
+    u8 *data = NULL;
+    bool found = false;
+    size_t needleLen = 0;
+
+    if (path == NULL || path[0] == 0 || needle == NULL || needle[0] == 0)
+        return false;
+    needleLen = strlen(needle);
+    fp = fopen(path, "rb");
+    if (fp == NULL)
+        return false;
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+        return false;
+    }
+    size = ftell(fp);
+    if (size <= 0 || size > 1024 * 1024)
+    {
+        fclose(fp);
+        return false;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        return false;
+    }
+    data = (u8 *)malloc((size_t)size);
+    if (data == NULL)
+    {
+        fclose(fp);
+        return false;
+    }
+    if (fread(data, 1, (size_t)size, fp) != (size_t)size)
+    {
+        free(data);
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    if ((size_t)size >= needleLen)
+    {
+        size_t i = 0;
+        for (i = 0; i + needleLen <= (size_t)size; ++i)
+        {
+            if (memcmp(data + i, needle, needleLen) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+    free(data);
+    return found;
+}
+
+/*
+ * WT18/7 authority is web/fs extensionless leaf.  Inject/admin may leave
+ * bin/*.sce with e_ghostfire while web/fs stays stock-278 — login then
+ * installs stock and 使者 reenter uptodate-keeps it (debug-191169).  Before
+ * publish, copy any kind3 donor onto every stock twin in web+bin.
+ */
+static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene)
+{
+    char leaf[96];
+    char webBare[320];
+    char webSce[320];
+    char binBare[288];
+    char binSce[288];
+    const char *dot = NULL;
+    const char *donor = NULL;
+    bool webBareGf = false;
+    bool webSceGf = false;
+    bool binBareGf = false;
+    bool binSceGf = false;
+    u32 healed = 0;
+
+    if (scene == NULL || scene[0] != '2' || scene[1] != '9')
+        return;
+    snprintf(leaf, sizeof(leaf), "%s", scene);
+    dot = strrchr(leaf, '.');
+    if (dot != NULL && (strcmp(dot, ".sce") == 0 || strcmp(dot, ".SCE") == 0))
+        leaf[(size_t)(dot - leaf)] = 0;
+    snprintf(webBare, sizeof(webBare), "../web/fs/JHOnlineData/%s", leaf);
+    snprintf(webSce, sizeof(webSce), "../web/fs/JHOnlineData/%s.sce", leaf);
+    snprintf(binBare, sizeof(binBare), "JHOnlineData/%s", leaf);
+    snprintf(binSce, sizeof(binSce), "JHOnlineData/%s.sce", leaf);
+    webBareGf = vm_net_mock_path_bytes_contain(webBare, "e_ghostfire");
+    webSceGf = vm_net_mock_path_bytes_contain(webSce, "e_ghostfire");
+    binBareGf = vm_net_mock_path_bytes_contain(binBare, "e_ghostfire");
+    binSceGf = vm_net_mock_path_bytes_contain(binSce, "e_ghostfire");
+    if (webSceGf)
+        donor = webSce;
+    else if (webBareGf)
+        donor = webBare;
+    else if (binSceGf)
+        donor = binSce;
+    else if (binBareGf)
+        donor = binBare;
+    else
+        return;
+    if (!webBareGf && vm_net_mock_copy_file_raw(donor, webBare))
+        healed += 1u;
+    if (!webSceGf && vm_net_mock_copy_file_raw(donor, webSce))
+        healed += 1u;
+    if (!binBareGf && vm_net_mock_copy_file_raw(donor, binBare))
+        healed += 1u;
+    if (!binSceGf && vm_net_mock_copy_file_raw(donor, binSce))
+        healed += 1u;
+    if (healed == 0u)
+        return;
+    printf("[info][network] mock_dream_sce_heal_kind3 scene=%s donor=%s "
+           "healed=%u action=sync-web-bin-twins "
+           "evidence=debug-191169-web-fs-stock-278-vs-bin-kind3\n",
+           leaf, donor, healed);
+    /* #region agent log */
+    {
+        char dataBuf[220];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"scene\":\"%.48s\",\"donor\":\"%.64s\",\"healed\":%u,"
+                 "\"webBareGf\":%u,\"webSceGf\":%u,\"binBareGf\":%u,"
+                 "\"binSceGf\":%u}",
+                 leaf, donor, healed, webBareGf ? 1u : 0u, webSceGf ? 1u : 0u,
+                 binBareGf ? 1u : 0u, binSceGf ? 1u : 0u);
+        agent_dbg191169_log("H", "mock_server_scene_task.c:heal",
+                            "dream_sce_heal_kind3", dataBuf);
+    }
+    /* #endregion */
+    /*
+     * Republish so catalog named.version tracks the healed bytes.  Without
+     * this, WT18/7 uptodate can keep a prior stamp (debug-191169).
+     */
+    {
+        const char *pubNames[2];
+        char sceName[100];
+        const char *pubErr = NULL;
+        u32 pubCount = 0;
+
+        pubNames[pubCount++] = leaf;
+        snprintf(sceName, sizeof(sceName), "%s.sce", leaf);
+        if (vm_net_mock_update_name_is_safe(sceName) &&
+            vm_net_mock_update_file_size(sceName) > 0)
+            pubNames[pubCount++] = sceName;
+        if (!vm_net_mock_update_admin_publish_named_files(pubNames, pubCount,
+                                                          &pubErr))
+        {
+            printf("[warn][network] mock_dream_sce_heal_publish_miss scene=%s "
+                   "error=%s\n",
+                   leaf, pubErr ? pubErr : "publish-failed");
+        }
+    }
+}
+
+static void vm_net_mock_dream_sce_hot_reenter_install_stock(const char *scene)
+{
+    char leaf[96];
+    char live[256];
+    char liveSce[256];
+    char stock[320];
+    char stockSce[320];
+    char webLive[288];
+    char webLiveSce[288];
+    const char *dot = NULL;
+    bool copied = false;
+
+    if (scene == NULL || scene[0] != '2' || scene[1] != '9')
+        return;
+    snprintf(leaf, sizeof(leaf), "%s", scene);
+    dot = strrchr(leaf, '.');
+    if (dot != NULL && (strcmp(dot, ".sce") == 0 || strcmp(dot, ".SCE") == 0))
+        leaf[(size_t)(dot - leaf)] = 0;
+    snprintf(live, sizeof(live), "JHOnlineData/%s", leaf);
+    snprintf(liveSce, sizeof(liveSce), "JHOnlineData/%s.sce", leaf);
+    snprintf(stock, sizeof(stock),
+             "JHOnlineData/_bak_dream_sce_before_kind3/JHOnlineData__%s", leaf);
+    snprintf(stockSce, sizeof(stockSce),
+             "JHOnlineData/_bak_dream_sce_before_kind3/JHOnlineData__%s.sce",
+             leaf);
+    snprintf(webLive, sizeof(webLive), "../web/fs/JHOnlineData/%s", leaf);
+    snprintf(webLiveSce, sizeof(webLiveSce), "../web/fs/JHOnlineData/%s.sce",
+             leaf);
+    if (!vm_net_mock_path_bytes_contain(live, "e_ghostfire") &&
+        !vm_net_mock_path_bytes_contain(liveSce, "e_ghostfire"))
+    {
+        return;
+    }
+    if (vm_net_mock_copy_file_raw(stock, live))
+        copied = true;
+    if (vm_net_mock_copy_file_raw(stockSce, liveSce))
+        copied = true;
+    (void)vm_net_mock_copy_file_raw(stock, webLive);
+    (void)vm_net_mock_copy_file_raw(stockSce, webLiveSce);
+    if (!copied)
+    {
+        printf("[warn][network] mock_dream_sce_stock_install_miss scene=%s "
+               "stock=%s evidence=hot-reenter-kind3-needs-stock-bytes\n",
+               leaf, stock);
+        return;
+    }
+    g_vm_net_mock_dream_stock_installed_for_reenter = true;
+    printf("[info][network] mock_dream_sce_stock_install scene=%s "
+           "action=replace-kind3-with-stock-278 "
+           "evidence=hot-518-ParseMinfo-kind3-fault\n",
+           leaf);
+}
+
+static void vm_net_mock_dream_sce_hot_reenter_restore_admin(void)
+{
+    const char *names[] = {
+        "29\xc3\xce\xbe\xb3\xbf\xd5\xbc\xe4_01",
+        "29\xc3\xce\xbe\xb3\xbf\xd5\xbc\xe4_02",
+        "29\xc3\xce\xbe\xb3\xbf\xd5\xbc\xe4_03",
+    };
+    u32 i = 0;
+    u32 restored = 0;
+
+    if (!g_vm_net_mock_dream_stock_installed_for_reenter)
+        return;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+    {
+        char admin[288];
+        char adminSce[288];
+        char live[256];
+        char liveSce[256];
+        char webLive[288];
+        char webLiveSce[288];
+
+        snprintf(admin, sizeof(admin), "../tmp_dream_sce_admin_backup/%s",
+                 names[i]);
+        snprintf(adminSce, sizeof(adminSce),
+                 "../tmp_dream_sce_admin_backup/%s.sce", names[i]);
+        snprintf(live, sizeof(live), "JHOnlineData/%s", names[i]);
+        snprintf(liveSce, sizeof(liveSce), "JHOnlineData/%s.sce", names[i]);
+        snprintf(webLive, sizeof(webLive), "../web/fs/JHOnlineData/%s",
+                 names[i]);
+        snprintf(webLiveSce, sizeof(webLiveSce),
+                 "../web/fs/JHOnlineData/%s.sce", names[i]);
+        if (vm_net_mock_copy_file_raw(admin, live))
+            restored += 1;
+        (void)vm_net_mock_copy_file_raw(adminSce, liveSce);
+        (void)vm_net_mock_copy_file_raw(admin, webLive);
+        (void)vm_net_mock_copy_file_raw(adminSce, webLiveSce);
+    }
+    g_vm_net_mock_dream_stock_installed_for_reenter = false;
+    printf("[info][network] mock_dream_sce_admin_restore files=%u "
+           "action=restore-kind3-after-session "
+           "evidence=next-cold-login-keeps-spawns\n",
+           restored);
+}
+
 static bool vm_net_mock_sce_combat_spawn_admin_save_all(
     const char *scene, const vm_net_mock_sce_combat_spawn *spawns, u32 spawnCount,
     const char **errorOut)
@@ -815,6 +1112,44 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
             snprintf(spawn.actorResource2, sizeof(spawn.actorResource2), "%s",
                      "e_ghostfireG.actor");
             spawn.visualHint = 0;
+            /*
+             * Dream 29*: hot 518 reenter ParseMinfo faults on some admin
+             * placements (backup y=149/184) while inject v3b cluster
+             * (135,49)/(65,84)/(107,254) reenters Ok (debug-191169).  Snap
+             * each saved point to the nearest proven-safe coordinate so
+             * 使者再进 keeps map spawns without stock-SCE swap.
+             */
+            if (scene[0] == '2' && scene[1] == '9')
+            {
+                static const u16 kDreamSafeX[3] = {135u, 65u, 107u};
+                static const u16 kDreamSafeY[3] = {49u, 84u, 254u};
+                u32 best = 0;
+                u32 bestDist = 0xffffffffu;
+                u32 si = 0;
+                u16 ox = spawn.x;
+                u16 oy = spawn.y;
+
+                for (si = 0; si < 3u; ++si)
+                {
+                    int dx = (int)spawn.x - (int)kDreamSafeX[si];
+                    int dy = (int)spawn.y - (int)kDreamSafeY[si];
+                    u32 dist = (u32)(dx * dx + dy * dy);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        best = si;
+                    }
+                }
+                spawn.x = kDreamSafeX[best];
+                spawn.y = kDreamSafeY[best];
+                if (ox != spawn.x || oy != spawn.y)
+                {
+                    printf("[info][network] mock_dream_spawn_snap_safe "
+                           "scene=%s from=(%u,%u) to=(%u,%u) slot=%u "
+                           "evidence=hot-518-kind3-coord-safe-cluster\n",
+                           scene, ox, oy, spawn.x, spawn.y, best);
+                }
+            }
         }
         wireActorId = vm_net_mock_sce_combat_spawn_pick_map_wire_id(
             realActorId, fbScene, spawn.actorResource, &fillError);
@@ -846,9 +1181,9 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
             memset(stockName, 0, sizeof(stockName));
             if (fbScene && wireActorId == 200u)
             {
-                /* GBK 幽冥鬼火 — scripts/inject_dream_sce_kind3.py */
+                /* GBK from 25华山洞窟_01 wire#200 (not catalog 梦魇/幽冥). */
                 snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
-                         "\xd3\xc4\xda\xa4\xb9\xed\xbb\xf0");
+                         "\xc1\xb6\xd3\xfc\xb9\xed\xbb\xf0");
             }
             else if (vm_net_mock_monster_battle_left_appearance(
                          wireActorId, stockName, sizeof(stockName), &stockV0,

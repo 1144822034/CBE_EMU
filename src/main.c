@@ -3025,15 +3025,16 @@ static bool vm_named_resource_should_version_check_existing(const char *leaf)
     return false;
 }
 
+static struct
+{
+    char leaf[128];
+    u16 localVersion;
+} g_namedResourceUptodateMemo[48];
+static u32 g_namedResourceUptodateMemoCount = 0;
+
 static bool vm_file_try_download_named_resource(const char *normalizedPath)
 {
     static bool active = false;
-    static struct
-    {
-        char leaf[128];
-        u16 localVersion;
-    } uptodateMemo[48];
-    static u32 uptodateMemoCount = 0;
     u8 request[512];
     u8 response[VM_NAMED_RESOURCE_RESPONSE_CAP];
     char target[256];
@@ -3078,10 +3079,10 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
         localVersion = vm_named_resource_local_content_version(leaf, target);
     if (fileExists && localVersion != 0)
     {
-        for (u32 i = 0; i < uptodateMemoCount; ++i)
+        for (u32 i = 0; i < g_namedResourceUptodateMemoCount; ++i)
         {
-            if (uptodateMemo[i].localVersion == localVersion &&
-                strcmp(uptodateMemo[i].leaf, leaf) == 0)
+            if (g_namedResourceUptodateMemo[i].localVersion == localVersion &&
+                strcmp(g_namedResourceUptodateMemo[i].leaf, leaf) == 0)
             {
                 return true;
             }
@@ -3139,12 +3140,25 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
             ok = fileExists;
             printf("[info][resource] resource_cache_uptodate file=%s local_version=%u protocol=WT18/7\n",
                    leaf, localVersion);
-            if (ok && localVersion != 0 && strlen(leaf) < sizeof(uptodateMemo[0].leaf))
+#if defined(CBE_CLIENT_ONLY)
+            /*
+             * Login spawn into 29* never gets remote 30/1; remember the
+             * extensionless SCE leaf so the next cold DF ScreenInit can be
+             * stored as a resumable dream shell (debug-191169).
+             */
+            if (leaf != NULL && leaf[0] == '2' && leaf[1] == '9' &&
+                strchr(leaf, '.') == NULL)
             {
-                u32 slot = uptodateMemoCount;
-                for (u32 i = 0; i < uptodateMemoCount; ++i)
+                snprintf(g_vm_dream_scene_hint, sizeof(g_vm_dream_scene_hint),
+                         "%s", leaf);
+            }
+#endif
+            if (ok && localVersion != 0 && strlen(leaf) < sizeof(g_namedResourceUptodateMemo[0].leaf))
+            {
+                u32 slot = g_namedResourceUptodateMemoCount;
+                for (u32 i = 0; i < g_namedResourceUptodateMemoCount; ++i)
                 {
-                    if (strcmp(uptodateMemo[i].leaf, leaf) == 0)
+                    if (strcmp(g_namedResourceUptodateMemo[i].leaf, leaf) == 0)
                     {
                         slot = i;
                         break;
@@ -3152,11 +3166,11 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
                 }
                 if (slot >= 48u)
                     slot = 0;
-                else if (slot == uptodateMemoCount && uptodateMemoCount < 48u)
-                    ++uptodateMemoCount;
-                snprintf(uptodateMemo[slot].leaf, sizeof(uptodateMemo[slot].leaf),
+                else if (slot == g_namedResourceUptodateMemoCount && g_namedResourceUptodateMemoCount < 48u)
+                    ++g_namedResourceUptodateMemoCount;
+                snprintf(g_namedResourceUptodateMemo[slot].leaf, sizeof(g_namedResourceUptodateMemo[slot].leaf),
                          "%s", leaf);
-                uptodateMemo[slot].localVersion = localVersion;
+                g_namedResourceUptodateMemo[slot].localVersion = localVersion;
             }
             break;
         }
@@ -3214,12 +3228,12 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
         else
         {
             /* Fresh bytes: drop any stale uptodate memo for this leaf. */
-            for (u32 i = 0; i < uptodateMemoCount; ++i)
+            for (u32 i = 0; i < g_namedResourceUptodateMemoCount; ++i)
             {
-                if (strcmp(uptodateMemo[i].leaf, leaf) == 0)
+                if (strcmp(g_namedResourceUptodateMemo[i].leaf, leaf) == 0)
                 {
-                    uptodateMemo[i] = uptodateMemo[uptodateMemoCount - 1u];
-                    --uptodateMemoCount;
+                    g_namedResourceUptodateMemo[i] = g_namedResourceUptodateMemo[g_namedResourceUptodateMemoCount - 1u];
+                    --g_namedResourceUptodateMemoCount;
                     break;
                 }
             }
@@ -3231,6 +3245,14 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
     {
         printf("[info][resource] resource_cache_download_complete file=%s bytes=%u crc=%u protocol=WT18/7 install=%s\n",
                leaf, totalSize, runningCrc, target);
+#if defined(CBE_CLIENT_ONLY)
+        if (leaf != NULL && leaf[0] == '2' && leaf[1] == '9' &&
+            strchr(leaf, '.') == NULL)
+        {
+            snprintf(g_vm_dream_scene_hint, sizeof(g_vm_dream_scene_hint),
+                     "%s", leaf);
+        }
+#endif
     }
     else if (!ok)
     {
@@ -3405,14 +3427,25 @@ static bool vm_host_intercept_dream_completion_enter_scene(u32 pc)
     }
 
     /*
-     * Callers of EnterSceneByMapName use the return value as a live
-     * screen/object pointer (blx / field deref).  Returning r0=0 after an
-     * entry skip caused pc=0 at lastPc=0x0104d77e (使者再进 2026-07-31).
-     * Hand back the already-DF-initialized mmGame screen instead.
+     * Gate=1: first EnterScene after dream 30/1 must run — it binds the
+     * walking sprite.  Skipping it (old behavior) yielded ScreenInit Ok
+     * then pc=0@0x0104d775 (debug-191169).  Gate=2: skip 2/3 completion
+     * reenter; primary fix remains dream 2/3 loading_clear_only.
      */
-    retScreen = vmAddedScreen;
+    if (g_vm_dream_enter_scene_gate <= 1u)
+    {
+        g_vm_dream_enter_scene_gate = 2u;
+        printf("[info][screen] dream_enter_scene_pass_first "
+               "pc=01018150 serial=%u scene=%s this=%08x gate=2 "
+               "evidence=primary-30-1-EnterScene-must-run\n",
+               g_vm_net_mock_last_scene_change_target_serial,
+               activeTarget->scene, g_currentScreenThis);
+        return false;
+    }
+
+    retScreen = g_currentScreenThis;
     if (retScreen == 0)
-        retScreen = g_currentScreenThis;
+        retScreen = vmAddedScreen;
     if (retScreen == 0)
     {
         printf("[warn][screen] enter_scene_skip_dream_no_screen "
@@ -3423,17 +3456,20 @@ static bool vm_host_intercept_dream_completion_enter_scene(u32 pc)
     }
 
     g_vm_scene_block_dream_completion_reenter = false;
+    g_vm_dream_enter_scene_gate = 0;
     vm_host_clear_download_busy("dream-skip-completion-EnterScene");
     printf("[info][screen] enter_scene_skip_dream_completion "
            "pc=01018150 serial=%u scene=%s pos=(%u,%u) exit=%u "
-           "return_screen=%08x "
-           "evidence=block-before-busy-arm+DF-already-ScreenInit\n",
+           "return_screen=%08x added=%08x current=%08x "
+           "evidence=second-EnterScene-after-primary-bind\n",
            g_vm_net_mock_last_scene_change_target_serial,
            activeTarget->scene,
            activeTarget->x,
            activeTarget->y,
            activeTarget->exitId,
-           retScreen);
+           retScreen,
+           vmAddedScreen,
+           g_currentScreenThis);
     vm_autotest_note("enter_scene_skip_dream_completion scene=%s serial=%u "
                      "return_screen=%08x evidence=01018150-entry-bx-lr\n",
                      activeTarget->scene,
@@ -8867,6 +8903,7 @@ void RunArmProgram(void *param)
             uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr); // 程序退出点
             scheduler_prepare_screen_call(screenThisPtr);
             uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
+            bool ranScreenInitPath = false;
             if (g_screenResumeExisting)
             {
                 if (screenRemuseEntry)
@@ -8884,16 +8921,160 @@ void RunArmProgram(void *param)
             }
             else
             {
+                ranScreenInitPath = true;
                 if (screenInitEntry)
                     p = vm_emu_start(screenInitEntry, exitAddr);
                 else
                     p = UC_ERR_OK;
-                vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
-                                 lastAddress, screenThisPtr, screenInitEntry, screenLogicEntry, screenRenderEntry);
-                printf("ScreenInit Ok\n");
+                if (ranScreenInitPath)
+                {
+                    vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
+                                     lastAddress, screenThisPtr, screenInitEntry, screenLogicEntry, screenRenderEntry);
+                    if (p == UC_ERR_OK)
+                        printf("ScreenInit Ok\n");
+                    else
+                        printf("SCR_Init异常 emu_err=%u init=%08x\n", (unsigned)p,
+                               screenInitEntry);
+#if defined(CBE_CLIENT_ONLY)
+                    if (p == UC_ERR_OK && g_vm_scene_block_dream_completion_reenter)
+                    {
+                        vm_host_clear_download_busy("dream-df-screeninit-complete");
+                    }
+                    /* #region agent log */
+                    {
+                        char dataBuf[220];
+                        snprintf(dataBuf, sizeof(dataBuf),
+                                 "{\"caller\":%u,\"this\":%u,\"init\":%u,"
+                                 "\"block_dream\":%u,\"hot518\":%u,\"emu_err\":%u}",
+                                 lastAddress, screenThisPtr, screenInitEntry,
+                                 g_vm_scene_block_dream_completion_reenter
+                                     ? 1u
+                                     : 0u,
+                                 ((screenInitEntry & 0xffff0000u) ==
+                                  0x05180000u)
+                                     ? 1u
+                                     : 0u,
+                                 (unsigned)p);
+                        agent_dbg191169_log(
+                            "L", "main.c:ScreenInit",
+                            (p == UC_ERR_OK) ? "screen_init_ok" : "screen_init_fail",
+                            dataBuf);
+                    }
+                    /* #endregion */
+#endif
+                }
             }
             if (p == UC_ERR_OK)
                 scheduler_note_screen_data_package(screenThisPtr);
+#if defined(CBE_CLIENT_ONLY)
+            /*
+             * Remember cold dream shell after successful Init (not Resume).
+             * Mark PAUSE'd when a different outdoor shell becomes current.
+             */
+            if (p == UC_ERR_OK && ranScreenInitPath)
+            {
+                bool dreamSce = g_lastSceLoadName[0] == '2' &&
+                                g_lastSceLoadName[1] == '9';
+                bool dreamTarget =
+                    g_vm_net_mock_last_scene_change_target_valid &&
+                    g_vm_net_mock_last_scene_change_target.scene[0] == '2' &&
+                    g_vm_net_mock_last_scene_change_target.scene[1] == '9';
+                bool outdoorTarget =
+                    g_vm_net_mock_last_scene_change_target_valid &&
+                    !(g_vm_net_mock_last_scene_change_target.scene[0] == '2' &&
+                      g_vm_net_mock_last_scene_change_target.scene[1] == '9');
+                bool dreamHint = g_vm_dream_scene_hint[0] == '2' &&
+                                 g_vm_dream_scene_hint[1] == '9' &&
+                                 !outdoorTarget;
+                /* Login DF may land in 0x0501* or 0x0502* (debug-191169). */
+                bool coldDfInit =
+                    (screenInitEntry & 0xfff00000u) == 0x05000000u;
+                if (coldDfInit && (dreamSce || dreamTarget || dreamHint) &&
+                    !g_vm_scene_block_dream_completion_reenter &&
+                    (!g_vm_dream_resumable_shell.valid || dreamSce ||
+                     dreamTarget))
+                {
+                    g_vm_dream_resumable_shell.valid = true;
+                    g_vm_dream_resumable_shell.pausedUnderOther = false;
+                    g_vm_dream_resumable_shell.screen = screenFuncPtr;
+                    g_vm_dream_resumable_shell.thisPtr = screenThisPtr;
+                    g_vm_dream_resumable_shell.initEntry = screenInitEntry;
+                    g_vm_dream_resumable_shell.resumeEntry = screenRemuseEntry;
+                    g_vm_dream_resumable_shell.dataPackage =
+                        g_currentScreenDataPackage
+                            ? g_currentScreenDataPackage
+                            : vm_screen_stack_lookup_data_package(screenFuncPtr);
+                    g_vm_dream_resumable_shell.moduleBase =
+                        g_currentScreenModuleBase;
+                    if (dreamTarget)
+                    {
+                        snprintf(g_vm_dream_resumable_shell.scene,
+                                 sizeof(g_vm_dream_resumable_shell.scene), "%s",
+                                 g_vm_net_mock_last_scene_change_target.scene);
+                    }
+                    else if (dreamSce)
+                    {
+                        snprintf(g_vm_dream_resumable_shell.scene,
+                                 sizeof(g_vm_dream_resumable_shell.scene), "%s",
+                                 g_lastSceLoadName);
+                    }
+                    else
+                    {
+                        snprintf(g_vm_dream_resumable_shell.scene,
+                                 sizeof(g_vm_dream_resumable_shell.scene), "%s",
+                                 g_vm_dream_scene_hint);
+                    }
+                    g_vm_dream_scene_hint[0] = 0;
+                    printf("[info][screen] dream_resumable_shell_remember "
+                           "scene=%s this=%08x init=%08x resume=%08x "
+                           "screen=%08x dp=%08x "
+                           "evidence=cold-502-login-or-first-enter\n",
+                           g_vm_dream_resumable_shell.scene,
+                           g_vm_dream_resumable_shell.thisPtr,
+                           g_vm_dream_resumable_shell.initEntry,
+                           g_vm_dream_resumable_shell.resumeEntry,
+                           g_vm_dream_resumable_shell.screen,
+                           g_vm_dream_resumable_shell.dataPackage);
+                }
+                else if (g_vm_dream_resumable_shell.valid &&
+                         screenThisPtr != g_vm_dream_resumable_shell.thisPtr)
+                {
+                    int shellIdx = vm_screen_stack_find_related(
+                        g_vm_dream_resumable_shell.screen);
+                    g_vm_dream_resumable_shell.pausedUnderOther = true;
+                    printf("[info][screen] dream_resumable_shell_paused "
+                           "scene=%s this=%08x under_this=%08x depth=%u "
+                           "stack_idx=%d evidence=outdoor-on-top-of-login-dream\n",
+                           g_vm_dream_resumable_shell.scene,
+                           g_vm_dream_resumable_shell.thisPtr, screenThisPtr,
+                           g_screenStackCount, shellIdx);
+                    /*
+                     * Host ReleasePackage / deferred Destroy both rejected for
+                     * kind=3 reenter (IMG assert / destroy err=11 + still
+                     * hot 518c).  Server serves stock SCE on outdoor→29*
+                     * reenter instead (see dreamReenterServeStockSce).
+                     */
+                }
+                else if (g_vm_dream_resumable_shell.valid &&
+                         screenThisPtr == g_vm_dream_resumable_shell.thisPtr &&
+                         screenInitEntry != 0 &&
+                         screenInitEntry != g_vm_dream_resumable_shell.initEntry)
+                {
+                    /*
+                     * Same this reinited (e.g. b_29 hot 518c). Cold resume
+                     * entries are stale — drop shell (debug-191169).
+                     */
+                    printf("[info][screen] dream_resumable_shell_invalidate "
+                           "scene=%s this=%08x cold_init=%08x new_init=%08x "
+                           "evidence=same-this-reinited\n",
+                           g_vm_dream_resumable_shell.scene, screenThisPtr,
+                           g_vm_dream_resumable_shell.initEntry, screenInitEntry);
+                    memset(&g_vm_dream_resumable_shell, 0,
+                           sizeof(g_vm_dream_resumable_shell));
+                    g_vm_dream_prefer_resume_paused_shell = false;
+                }
+            }
+#endif
             if (p == UC_ERR_OK)
             {
                 u32 _frameTick = SDL_GetTicks();
@@ -13998,6 +14179,7 @@ static bool hook_vm_manager_screen_func(u32 address)
                  */
                 acceptChange = false;
                 g_vm_scene_block_dream_completion_reenter = false;
+                g_vm_dream_enter_scene_gate = 0;
                 vm_host_clear_download_busy("same-suppressed-dream-reenter");
                 printf("[info][screen] screen_mgr same-suppressed-dream-reenter "
                        "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
@@ -15299,8 +15481,10 @@ static bool hook_vm_df_datapackage_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         printf("[info][cbe] df_do_loading package=%08x source=%08x mode=%u\n",
                tmp1, tmp2, tmp3);
-        VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
-        printf("[call]DF_DataPackage_DoLoading\n");
+        {
+            VM_DF_DataPackage_DoLoading(tmp1, tmp2, tmp3);
+            printf("[call]DF_DataPackage_DoLoading\n");
+        }
     }
     else if (idx == 6)
     {
