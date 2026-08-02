@@ -415,6 +415,59 @@ static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 
     (void)vm_net_mock_adjust_safe_player_pos_from_sce(scene, x, y);
 }
 
+/* Near-origin coords are treated like 0: portal safe-gap math and map edges
+ * leave the sprite in the top-left with no walkable path (runtime: role 158
+ * c04临安府_05 at 9,29). */
+static bool vm_net_mock_role_position_needs_edge_rescue(u16 x, u16 y)
+{
+    return x == 0 || y == 0 ||
+           x < (u16)VM_NET_MOCK_SCENE_LANDING_SAFE_GAP ||
+           y < (u16)VM_NET_MOCK_SCENE_LANDING_SAFE_GAP;
+}
+
+static bool vm_net_mock_role_rescue_edge_position(vm_net_mock_role_state *role,
+                                                  const char *reason)
+{
+    u16 beforeX = 0;
+    u16 beforeY = 0;
+    u16 x = 0;
+    u16 y = 0;
+
+    if (role == NULL || !vm_net_mock_scene_name_is_persistable(role->scene))
+        return false;
+    beforeX = role->x;
+    beforeY = role->y;
+    if (!vm_net_mock_role_position_needs_edge_rescue(beforeX, beforeY))
+        return false;
+
+    x = VM_NET_MOCK_ROLE_INITIAL_X;
+    y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene, &x, &y, NULL))
+    {
+        x = VM_NET_MOCK_ROLE_INITIAL_X;
+        y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &x, &y);
+    if (vm_net_mock_role_position_needs_edge_rescue(x, y))
+    {
+        x = 64;
+        y = 64;
+        vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &x, &y);
+    }
+    if (x == 0)
+        x = VM_NET_MOCK_ROLE_INITIAL_X;
+    if (y == 0)
+        y = VM_NET_MOCK_ROLE_INITIAL_Y;
+    role->x = x;
+    role->y = y;
+    g_vm_net_mock_role_position_dirty = true;
+    printf("[warn][mock-service] role_edge_pos_rescue role=%u scene=%s "
+           "from=(%u,%u) to=(%u,%u) reason=%s evidence=near-origin-edge\n",
+           role->roleId, role->scene, beforeX, beforeY, role->x, role->y,
+           reason ? reason : "edge_rescue");
+    return true;
+}
+
 static void vm_net_mock_role_db_path(char *path, size_t pathSize)
 {
     char safeAccount[64];
@@ -5209,19 +5262,29 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     role->scene[sizeof(role->scene) - 1] = 0;
     if (!vm_net_mock_scene_name_is_persistable(role->scene))
         snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
-    if (role->x == 0 || role->y == 0)
+    if (vm_net_mock_role_position_needs_edge_rescue(role->x, role->y))
     {
-        role->x = VM_NET_MOCK_ROLE_INITIAL_X;
-        role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
-        if (!vm_net_mock_scene_is_penglai01(role->scene))
+        if (!vm_net_mock_role_rescue_edge_position(role, "normalize-edge"))
         {
-            (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
-                                                                  &role->x,
-                                                                  &role->y,
-                                                                  NULL);
+            role->x = VM_NET_MOCK_ROLE_INITIAL_X;
+            role->y = VM_NET_MOCK_ROLE_INITIAL_Y;
+            if (!vm_net_mock_scene_is_penglai01(role->scene))
+            {
+                (void)vm_net_mock_get_scene_reasonable_spawn_from_sce(role->scene,
+                                                                      &role->x,
+                                                                      &role->y,
+                                                                      NULL);
+            }
+            vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x,
+                                                         &role->y);
         }
     }
-    vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
+    else
+    {
+        vm_net_mock_adjust_safe_player_pos_for_scene(role->scene, &role->x, &role->y);
+        if (vm_net_mock_role_position_needs_edge_rescue(role->x, role->y))
+            (void)vm_net_mock_role_rescue_edge_position(role, "normalize-after-portal");
+    }
     vm_net_mock_role_normalize_backpack(role);
 }
 
@@ -8081,6 +8144,24 @@ static bool vm_net_mock_parse_u32_strict(const char *text, u32 *valueOut)
     return true;
 }
 
+static bool vm_net_mock_parse_i32_strict(const char *text, int32_t *valueOut)
+{
+    char *end = NULL;
+    long value = 0;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (text == NULL || text[0] == 0)
+        return false;
+    value = strtol(text, &end, 10);
+    if (end == NULL || end == text || *end != 0 ||
+        value < (long)INT32_MIN || value > (long)INT32_MAX)
+        return false;
+    if (valueOut)
+        *valueOut = (int32_t)value;
+    return true;
+}
+
 static vm_net_mock_role_state *vm_net_mock_find_role_in_db(vm_net_mock_role_db_file *db,
                                                            const char *selector)
 {
@@ -8814,6 +8895,13 @@ static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
     return true;
 }
 
+static bool vm_net_mock_role_grant_flask_reservoir_points(
+    vm_net_mock_role_state *role,
+    u32 itemId,
+    u32 grantPoints,
+    u16 *seqOut,
+    const char *reason);
+
 static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *role,
                                                        u16 backpackSeq,
                                                        const char **reasonOut)
@@ -8857,6 +8945,41 @@ static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *r
     beforeRole = *role;
     beforeWarehouse = *warehouse;
     moved = *bagItem;
+    if (vm_net_mock_backpack_item_id_uses_reservoir_count(moved.itemId))
+    {
+        vm_net_mock_backpack_item_state *whFlask = NULL;
+        for (u16 wi = 0; wi < warehouse->itemCount; ++wi)
+        {
+            if (warehouse->items[wi].itemId == moved.itemId &&
+                warehouse->items[wi].count != 0)
+            {
+                whFlask = &warehouse->items[wi];
+                break;
+            }
+        }
+        if (whFlask != NULL)
+        {
+            if (whFlask->count >= VM_NET_MOCK_FLASK_MAX_RESERVOIR ||
+                moved.count > VM_NET_MOCK_FLASK_MAX_RESERVOIR - whFlask->count)
+            {
+                if (reasonOut)
+                    *reasonOut = "flask-reservoir-full";
+                return false;
+            }
+            whFlask->count += moved.count;
+            bagItem->count = 0;
+            vm_net_mock_role_normalize_backpack(role);
+            (void)beforeRole;
+            (void)beforeWarehouse;
+            vm_net_mock_role_mark_inventory_dirty("warehouse-deposit-flask-merge");
+            printf("[info][network] mock_warehouse_deposit role=%u bag_seq=%u "
+                   "item=%u enhance=%u warehouse_slots=%u bag_rows=%u "
+                   "flask_merge_remaining=%u\n",
+                   role->roleId, backpackSeq, moved.itemId, moved.enhanceLevel,
+                   warehouse->itemCount, role->backpackItemCount, whFlask->count);
+            return true;
+        }
+    }
     if (warehouse->nextSeq == 0)
         warehouse->nextSeq = 1;
     moved.seq = warehouse->nextSeq++;
@@ -8916,13 +9039,29 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
     memset(&warehouse->items[warehouse->itemCount], 0,
            sizeof(warehouse->items[0]));
 
+    if (vm_net_mock_backpack_item_id_uses_reservoir_count(moved.itemId))
+    {
+        if (!vm_net_mock_role_grant_flask_reservoir_points(
+                role, moved.itemId, moved.count, &addedSeq,
+                "warehouse-retrieve-flask"))
+        {
+            *warehouse = beforeWarehouse;
+            if (reasonOut)
+            {
+                *reasonOut =
+                    g_vm_net_mock_backpack_add_fail_kind ==
+                            VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL
+                        ? "flask-reservoir-full"
+                        : "backpack-full";
+            }
+            return false;
+        }
+    }
+    else
     {
         u32 addCount = moved.count;
-        if (vm_net_mock_backpack_item_id_uses_reservoir_count(moved.itemId) ||
-            vm_net_mock_find_equipment_catalog_item(moved.itemId) != NULL)
-        {
+        if (vm_net_mock_find_equipment_catalog_item(moved.itemId) != NULL)
             addCount = 1;
-        }
         if (!vm_net_mock_role_add_backpack_item_to_role(
                 role, moved.itemId, addCount, moved.enhanceLevel, &addedSeq,
                 "warehouse-retrieve-bag"))
@@ -8932,17 +9071,17 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
                 *reasonOut = "backpack-full";
             return false;
         }
-    }
-    /* add_backpack may reset reservoir/stack defaults; restore moved values. */
-    if (addedSeq != 0)
-    {
-        vm_net_mock_backpack_item_state *added =
-            vm_net_mock_role_find_backpack_item(role, moved.itemId, addedSeq);
-        if (added != NULL)
+        /* add_backpack may reset stack defaults; restore moved values. */
+        if (addedSeq != 0)
         {
-            if (vm_net_mock_find_equipment_catalog_item(moved.itemId) == NULL)
-                added->count = moved.count;
-            added->enhanceLevel = moved.enhanceLevel;
+            vm_net_mock_backpack_item_state *added =
+                vm_net_mock_role_find_backpack_item(role, moved.itemId, addedSeq);
+            if (added != NULL)
+            {
+                if (vm_net_mock_find_equipment_catalog_item(moved.itemId) == NULL)
+                    added->count = moved.count;
+                added->enhanceLevel = moved.enhanceLevel;
+            }
         }
     }
     /* add_backpack already marked dirty; re-mark after reservoir/enhance fix. */
@@ -8951,6 +9090,118 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
     vm_net_mock_role_mark_inventory_dirty("warehouse-retrieve");
     if (backpackSeqOut)
         *backpackSeqOut = addedSeq;
+    return true;
+}
+
+static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(
+    vm_net_mock_role_state *role, u32 itemId, u16 seq);
+
+/*
+ * Grant HP/MP reservoir points onto a single bag row for itemId (802/803).
+ * Merges duplicate rows first.  Rejects when the add would exceed MAX.
+ */
+static bool vm_net_mock_role_grant_flask_reservoir_points(
+    vm_net_mock_role_state *role,
+    u32 itemId,
+    u32 grantPoints,
+    u16 *seqOut,
+    const char *reason)
+{
+    u8 itemCount = 0;
+    vm_net_mock_backpack_item_state *existing = NULL;
+    u16 keepSeq = 0;
+    u32 beforePoints = 0;
+
+    if (seqOut)
+        *seqOut = 0;
+    g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE;
+    if (role == NULL || itemId == 0 || grantPoints == 0 ||
+        !vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
+    {
+        g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_SPACE;
+        return false;
+    }
+
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        vm_net_mock_backpack_item_state *row = &role->backpackItems[i];
+        if (row->itemId != itemId || row->count == 0)
+            continue;
+        if (existing == NULL)
+        {
+            existing = row;
+            keepSeq = row->seq;
+        }
+        else
+        {
+            if (existing->count < VM_NET_MOCK_FLASK_MAX_RESERVOIR)
+            {
+                u32 room = VM_NET_MOCK_FLASK_MAX_RESERVOIR - existing->count;
+                existing->count += row->count > room ? room : row->count;
+            }
+            row->count = 0;
+        }
+    }
+    if (existing != NULL)
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        existing = vm_net_mock_role_find_backpack_item(role, itemId, keepSeq);
+        if (existing == NULL)
+            existing = vm_net_mock_role_find_backpack_item(role, itemId, 0);
+    }
+
+    if (existing != NULL)
+    {
+        beforePoints = existing->count;
+        if (beforePoints >= VM_NET_MOCK_FLASK_MAX_RESERVOIR ||
+            grantPoints > VM_NET_MOCK_FLASK_MAX_RESERVOIR - beforePoints)
+        {
+            g_vm_net_mock_backpack_add_fail_kind =
+                VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL;
+            return false;
+        }
+        existing->count = beforePoints + grantPoints;
+        if (seqOut)
+            *seqOut = existing->seq != 0 ? existing->seq : keepSeq;
+        vm_net_mock_role_normalize_backpack(role);
+        vm_net_mock_role_mark_inventory_dirty(
+            reason ? reason : "backpack-merge-reservoir-item");
+        return true;
+    }
+
+    if (grantPoints > VM_NET_MOCK_FLASK_MAX_RESERVOIR)
+    {
+        g_vm_net_mock_backpack_add_fail_kind =
+            VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL;
+        return false;
+    }
+    itemCount = vm_net_mock_role_backpack_count(role);
+    if (itemCount >= role->backpackCapacity ||
+        itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+    {
+        g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_SPACE;
+        return false;
+    }
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount];
+        memset(item, 0, sizeof(*item));
+        item->itemId = itemId;
+        item->seq = role->nextBackpackSeq;
+        if (item->seq == 0)
+            item->seq = 1;
+        item->count = grantPoints;
+        if (seqOut)
+            *seqOut = item->seq;
+        role->nextBackpackSeq = (u16)(item->seq + 1);
+        if (role->nextBackpackSeq == 0)
+            role->nextBackpackSeq = 1;
+        role->backpackItemCount = (u8)(itemCount + 1);
+    }
+    vm_net_mock_role_normalize_backpack(role);
+    vm_net_mock_role_mark_inventory_dirty(
+        reason ? reason : "backpack-add-reservoir-item");
     return true;
 }
 
@@ -8969,6 +9220,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 
     if (seqOut)
         *seqOut = 0;
+    g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE;
     if (role == NULL || itemId == 0 || count == 0)
         return false;
     if (clampedEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -8979,15 +9231,10 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     itemCount = vm_net_mock_role_backpack_count(role);
     effect = vm_net_mock_find_item_effect_catalog_item(itemId);
     reservoirCapacity = vm_net_mock_item_effect_reservoir_capacity(effect);
-    /*
-     * Belt for missing/partial effect rows: 802/803 must never stack-merge
-     * by itemId.  Default capacity matches item.dsh hp/mp and the hardcoded
-     * fallback catalog (50000).
-     */
     if (reservoirCapacity == 0 &&
         vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
     {
-        reservoirCapacity = 50000u;
+        reservoirCapacity = VM_NET_MOCK_FLASK_UNIT_RESERVOIR;
     }
 
     /* Mall warehouse pass: one backpack row, count = remaining durability. */
@@ -9032,44 +9279,25 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         return true;
     }
 
-    if (reservoirCapacity != 0)
+    if (reservoirCapacity != 0 ||
+        vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
     {
-        u32 freeSlots = role->backpackCapacity > itemCount
-                            ? (u32)role->backpackCapacity - itemCount
-                            : 0;
-        u16 firstSeq = 0;
+        u32 grantPoints = 0;
 
-        /*
-         * item.dsh marks the two vitality flasks as stack=1/consumeMode=2.
-         * JianghuOL.CBE:0x10336CA stores their remaining HP/MP pool in the
-         * backpack row's u32 count field, so each acquired flask needs its own
-         * sequence and starts with the DSH capacity rather than count=1.
-         */
-        if (count > freeSlots || count > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
-            return false;
-        for (u32 unit = 0; unit < count; ++unit)
+        g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE;
+        if (reservoirCapacity == 0)
+            reservoirCapacity = VM_NET_MOCK_FLASK_UNIT_RESERVOIR;
+        if (count > 0xffffffffu / reservoirCapacity)
         {
-            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemCount + unit];
-            memset(item, 0, sizeof(*item));
-            item->itemId = itemId;
-            item->seq = role->nextBackpackSeq;
-            if (item->seq == 0)
-                item->seq = 1;
-            item->count = reservoirCapacity;
-            if (firstSeq == 0)
-                firstSeq = item->seq;
-            role->nextBackpackSeq = (u16)(item->seq + 1);
-            if (role->nextBackpackSeq == 0)
-                role->nextBackpackSeq = 1;
+            g_vm_net_mock_backpack_add_fail_kind =
+                VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL;
+            return false;
         }
-        role->backpackItemCount = (u8)(itemCount + count);
-        if (seqOut)
-            *seqOut = firstSeq;
-        vm_net_mock_role_normalize_backpack(role);
+        grantPoints = count * reservoirCapacity;
         (void)before;
-        vm_net_mock_role_mark_inventory_dirty(
+        return vm_net_mock_role_grant_flask_reservoir_points(
+            role, itemId, grantPoints, seqOut,
             reason ? reason : "backpack-add-reservoir-item");
-        return true;
     }
 
     /*

@@ -27,6 +27,10 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
  * mock_server_equipment_npc.c; the open handler in catalog.c calls it. */
 static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
 
+/* Flask reservoir tip: enqueue 1/3/3 system chat from equipment_npc.c. */
+static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
+                                                          u32 remaining);
+
 #include "mock_server_catalog.c"
 
 /* Sync MySQL writers in role.c (position / full role_db_save) must invalidate

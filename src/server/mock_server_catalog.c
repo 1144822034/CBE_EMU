@@ -61,6 +61,21 @@ static u8 vm_net_mock_role_backpack_client_grid_count(
     return gridCount;
 }
 
+/* Per-flask DSH capacity; bag rows merge into one seq up to MAX. */
+#define VM_NET_MOCK_FLASK_UNIT_RESERVOIR 50000u
+#define VM_NET_MOCK_FLASK_MAX_RESERVOIR 5000000u
+/*
+ * Battle: each successful flask use charges this flat amount from the
+ * reservoir (or all remaining if less).  Heal per use is still capped by the
+ * same value via plan_reservoir_restore(..., perUseCap).
+ */
+#define VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP (VM_NET_MOCK_FLASK_UNIT_RESERVOIR / 3u)
+
+#define VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE 0u
+#define VM_NET_MOCK_BACKPACK_ADD_FAIL_SPACE 1u
+#define VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL 2u
+static u8 g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE;
+
 static bool vm_net_mock_backpack_item_id_uses_reservoir_count(u32 itemId)
 {
     /*
@@ -2194,11 +2209,14 @@ static u32 vm_net_mock_item_effect_reservoir_capacity(
 static u32 vm_net_mock_item_effect_plan_reservoir_restore(
     const vm_net_mock_item_effect_catalog_item *item,
     u32 remaining, u32 missingHp, u32 missingMp,
+    u32 perUseCap,
     u32 *hpOut, u32 *mpOut)
 {
     u32 available = remaining;
     u32 hp = 0;
     u32 mp = 0;
+    u32 hpCap = 0;
+    u32 mpCap = 0;
 
     if (hpOut)
         *hpOut = 0;
@@ -2207,14 +2225,38 @@ static u32 vm_net_mock_item_effect_plan_reservoir_restore(
     if (!vm_net_mock_item_effect_is_reservoir(item) || available == 0)
         return 0;
 
-    hp = vm_net_mock_min_u32(missingHp, vm_net_mock_min_u32(item->hp, available));
+    hpCap = item->hp;
+    mpCap = item->mp;
+    if (perUseCap != 0)
+    {
+        if (hpCap != 0)
+            hpCap = vm_net_mock_min_u32(hpCap, perUseCap);
+        if (mpCap != 0)
+            mpCap = vm_net_mock_min_u32(mpCap, perUseCap);
+    }
+
+    hp = vm_net_mock_min_u32(missingHp, vm_net_mock_min_u32(hpCap, available));
     available -= hp;
-    mp = vm_net_mock_min_u32(missingMp, vm_net_mock_min_u32(item->mp, available));
+    mp = vm_net_mock_min_u32(missingMp, vm_net_mock_min_u32(mpCap, available));
     if (hpOut)
         *hpOut = hp;
     if (mpOut)
         *mpOut = mp;
     return hp + mp;
+}
+
+/*
+ * Battle charge is independent of healed amount: any successful restore use
+ * deducts FLASK_BATTLE_PER_USE_CAP, or empties the flask when remaining is
+ * smaller.  Scene use keeps plan_reservoir_restore's returned consume count.
+ */
+static u32 vm_net_mock_item_effect_battle_flask_charge(u32 remaining,
+                                                       u32 restoredHp,
+                                                       u32 restoredMp)
+{
+    if (restoredHp == 0 && restoredMp == 0)
+        return 0;
+    return vm_net_mock_min_u32(remaining, VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP);
 }
 
 static bool vm_net_mock_shop17_should_include_item(
@@ -3565,6 +3607,15 @@ typedef struct
     u16 occultInfoLen;
     u8 materialRows;
 } vm_net_mock_equipment_enhance_request;
+
+/* 强化转移 / 重铸: request 1/29/5 or 1/29/6 { seqd, seqs }.
+ * seqs = source (当前装备), seqd = destination (目标装备). */
+typedef struct
+{
+    u8 subtype;
+    u16 sourceSeq;
+    u16 destSeq;
+} vm_net_mock_equipment_enhance_transfer_request;
 
 typedef struct
 {
@@ -6420,21 +6471,37 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     return pos;
 }
 
+static bool vm_net_mock_append_item_use_hint_object(u8 *out, u32 outCap, u32 *pos,
+                                                     u8 *objectCount,
+                                                     const char *hint)
+{
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || outCap < *pos)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 16, 2, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 4) ||
+        !vm_net_mock_put_object_string(out, outCap, pos, "hint",
+                                       hint ? hint : "OK"))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++(*objectCount);
+    return true;
+}
+
 static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const char *hint)
 {
     u32 pos = 5;
-    u32 objectStart = 0;
+    u8 objectCount = 0;
 
     if (out == NULL || outCap < pos)
         return 0;
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 16, 2, &objectStart))
+    if (!vm_net_mock_append_item_use_hint_object(out, outCap, &pos, &objectCount,
+                                                 hint))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 4))
-        return 0;
-    if (!vm_net_mock_put_object_string(out, outCap, &pos, "hint", hint ? hint : "OK"))
-        return 0;
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
     return pos;
 }
 
@@ -6603,6 +6670,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     u32 countInfoLen = 0;
     u8 itemUseType = 1;
     bool suppressUseSuccessPopup = false;
+    bool flaskFullVitalsUse = false;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 0;
@@ -6862,21 +6930,38 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         reservoirBefore = item->count;
         missingHp = role->hpMax > role->hp ? role->hpMax - role->hp : 0;
         missingMp = role->mpMax > role->mp ? role->mpMax - role->mp : 0;
-        consumedCount = vm_net_mock_item_effect_plan_reservoir_restore(
-            effect, reservoirBefore, missingHp, missingMp, &hpApplied, &mpApplied);
-        remaining = reservoirBefore;
-        if (consumedCount != 0)
-            consumed = vm_net_mock_role_consume_backpack_item(
-                role, itemId, seq, consumedCount, &remaining);
-        else
-            consumed = true;
-        if (consumed)
+        /*
+         * Full vitals: emit only 7/1+7/11 (flask contract).  Do NOT append
+         * 16/2 in the same WT — mmGame routes kind=16/subtype=2 for
+         * scene/hint/teleport families and runtime evidence showed the tip
+         * path still stalled the bag after H1 fired.  Item intro text stays
+         * local item.dsh; reservoir lives in +4/+8 via 7/11.
+         */
+        if (missingHp == 0 && missingMp == 0)
         {
-            role->hp = vm_net_mock_min_u32(
-                vm_net_mock_add_capped_u32(role->hp, hpApplied), role->hpMax);
-            role->mp = vm_net_mock_min_u32(
-                vm_net_mock_add_capped_u32(role->mp, mpApplied), role->mpMax);
-            applied = hpApplied != 0 || mpApplied != 0;
+            remaining = reservoirBefore;
+            consumed = true;
+            flaskFullVitalsUse = true;
+        }
+        else
+        {
+            consumedCount = vm_net_mock_item_effect_plan_reservoir_restore(
+                effect, reservoirBefore, missingHp, missingMp, 0,
+                &hpApplied, &mpApplied);
+            remaining = reservoirBefore;
+            if (consumedCount != 0)
+                consumed = vm_net_mock_role_consume_backpack_item(
+                    role, itemId, seq, consumedCount, &remaining);
+            else
+                consumed = true;
+            if (consumed)
+            {
+                role->hp = vm_net_mock_min_u32(
+                    vm_net_mock_add_capped_u32(role->hp, hpApplied), role->hpMax);
+                role->mp = vm_net_mock_min_u32(
+                    vm_net_mock_add_capped_u32(role->mp, mpApplied), role->mpMax);
+                applied = hpApplied != 0 || mpApplied != 0;
+            }
         }
     }
     else if (vm_net_mock_item_is_backpack_expand_card(itemId, effect))
@@ -6913,7 +6998,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
 
     newCapacity = role->backpackCapacity;
 
-    if (applied || consumed)
+    if ((applied || consumed) && !flaskFullVitalsUse)
         vm_net_mock_role_mark_inventory_dirty("item-use");
 
     if (itemId == 0)
@@ -6926,6 +7011,10 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
 
     itemUseType = parsed.type ? parsed.type : 1;
+    /*
+     * Flask scene contract (docs/re/2026-07-20-vitality-flask-reserve.md):
+     *   7/1 + 7/11 only — never 7/7 type=2, never lone 16/2 tip.
+     */
     suppressUseSuccessPopup = itemId == VM_NET_MOCK_SMALL_HORN_ITEM_ID;
     /*
      * JianghuOL.CBE:0x1033544 handles 7/1 as the original item-use success
@@ -6958,9 +7047,8 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     {
         /*
          * mmGame:0xD04 type=2 invokes the ordinary selected-row removal path.
-         * Do not send it for consumeMode=2 flasks: JianghuOL.CBE:0x10336CA
-         * updates their HP/MP reservoir directly from 7/11 and removes the row
-         * only when that value reaches zero.
+         * Do not send it for flasks: JianghuOL.CBE:0x10336CA updates reservoir
+         * from 7/11 and removes the row only when that value reaches zero.
          */
         if (!vm_net_mock_build_item_use_iteminfo_blob(itemInfo, sizeof(itemInfo),
                                                       seq, itemId, remaining,
@@ -7002,11 +7090,19 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u refresh=%s resp=%u evidence=JianghuOL.CBE:0x1033544+item.dsh:consumeMode\n",
+    /*
+     * System chat tip (not 16/2): show remaining reservoir after 7/1+7/11.
+     * Delivered on the next scene poll via session chat FIFO.
+     */
+    if (reservoirItem && consumed)
+        vm_net_mock_notify_flask_reservoir_system_tip(itemId, remaining);
+
+    printf("[info][network] mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u full_vitals=%u refresh=%s resp=%u evidence=JianghuOL.CBE:0x1033544+item.dsh:consumeMode\n",
            itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
            reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
            oldCapacity, newCapacity, expandedCount,
            applied ? 1 : 0, consumed ? 1 : 0,
+           flaskFullVitalsUse ? 1 : 0,
            suppressUseSuccessPopup ? "7/7+7/11-small-horn-no-popup" :
            (capacityExpanded ? "7/1+7/7+7/11+17/1-followup" :
                (reservoirItem ? "7/1+7/11-reservoir" : "7/1+7/7+7/11")),
@@ -8109,6 +8205,52 @@ static bool vm_net_mock_parse_equipment_enhance_request(
         parsed.materialRows = (u8)(parsed.occultInfoLen / 9);
     }
 
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_parse_equipment_enhance_transfer_request(
+    const u8 *request,
+    u32 requestLen,
+    vm_net_mock_equipment_enhance_transfer_request *parsedOut)
+{
+    u32 offset = 4;
+    u32 seqd = 0;
+    u32 seqs = 0;
+    vm_net_mock_request_object object;
+    vm_net_mock_equipment_enhance_transfer_request parsed;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+    if (request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        (object.subtype != 5 && object.subtype != 6) ||
+        object.payloadLen == 0)
+    {
+        return false;
+    }
+
+    /*
+     * Send helper 0x0101DB3A writes tagged-u16 seqd then seqs.  Runtime
+     * 1/29/5 payload is 22 bytes = two 11-byte u16 entries.
+     */
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seqd", &seqd) ||
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seqs", &seqs) ||
+        seqd == 0 || seqd > 0xffffu || seqs == 0 || seqs > 0xffffu ||
+        seqd == seqs)
+    {
+        return false;
+    }
+
+    parsed.subtype = object.subtype;
+    parsed.destSeq = (u16)seqd;
+    parsed.sourceSeq = (u16)seqs;
     if (parsedOut)
         *parsedOut = parsed;
     return true;

@@ -6328,8 +6328,17 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                          : "npc-medicine-buy"))
                 {
                     role->money += buyItem->price;
-                    dialogText =
-                        "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 背包已满，无法购买。 */
+                    if (g_vm_net_mock_backpack_add_fail_kind ==
+                        VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL)
+                    {
+                        dialogText =
+                            "\xb4\xa2\xc1\xbf\xd2\xd1\xc2\xfa\xa3\xac\xb2\xbb\xbf\xc9\xd4\xd9\xb9\xba\xc2\xf2\xa1\xa3"; /* 储量已满，不可再购买。 */
+                    }
+                    else
+                    {
+                        dialogText =
+                            "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 背包已满，无法购买。 */
+                    }
                 }
                 else
                 {

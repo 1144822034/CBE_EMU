@@ -189,6 +189,63 @@ static u32 vm_net_mock_build_independent_combo_response(const u8 *request,
     return pos;
 }
 
+/*
+ * Fallback when no detector/handler owns the request.  Mirrors the map-side
+ * reject notice (25/12 clear + 1/3/3 system chat) so the player sees a tip and
+ * sticky banner waits are less likely to freeze mmGame.  This is not a forged
+ * success for the original kind/subtype.
+ */
+static u32 vm_net_mock_build_unimplemented_handler_notice_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    /* 功能暂未实现 */
+    static const char tipPrefixGbk[] =
+        "\xB9\xA6\xC4\xDC\xD4\xDD\xCE\xB4\xCA\xB5\xCF\xD6";
+    char tip[82];
+    u8 wtKind = 0;
+    u8 wtSubtype = 0;
+    u32 offset = 4;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    vm_net_mock_request_object object;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+
+    if (request != NULL &&
+        vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        snprintf(tip, sizeof(tip), "%s(%u/%u/%u)", tipPrefixGbk,
+                 object.major, object.kind, object.subtype);
+    }
+    else if (vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                     &wtKind, &wtSubtype))
+    {
+        snprintf(tip, sizeof(tip), "%s(%u/%u)", tipPrefixGbk, wtKind, wtSubtype);
+    }
+    else
+    {
+        snprintf(tip, sizeof(tip), "%s", tipPrefixGbk);
+    }
+
+    if (!vm_net_mock_append_info_banner_clear12_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_chat_message_object(out, outCap, &pos,
+                                                VM_MOCK_CHAT_TYPE_SYSTEM, 0,
+                                                systemNameGbk, tip))
+    {
+        return 0;
+    }
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[warn][network] mock_unimplemented_handler_notice tip=%s resp=%u "
+           "delivery=25/12+1/3/3 evidence=reject-notice-contract\n",
+           tip, pos);
+    return pos;
+}
+
 static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     if (request == NULL || requestLen == 0 || outCap == 0)
@@ -1015,6 +1072,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_equipment_enhance_transfer_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-equipment-enhance-transfer", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_equipment_repair_confirm_response(
         request, requestLen, out, outCap);
     if (hookedLen)
@@ -1454,15 +1520,25 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     vm_net_log_unhandled_packet(request, requestLen);
 #ifdef CBE_SERVER_ONLY
     /*
-     * A production/headless server must not terminate because a client sent a
-     * packet whose protocol has not been implemented yet.  Keep the detailed
-     * unhandled-packet trace above, but complete this service request with an
-     * empty response so the connection can continue serving later packets.
+     * Headless servers must not abort on missing handlers.  An empty CBMR body
+     * leaves many client waiters armed (item-op, banner, dialog), so deliver the
+     * established reject-notice contract instead: 25/12 clears a sticky info
+     * banner, then 1/3/3 type=5 tells the player the feature is unimplemented.
+     * Do not invent request-specific result codes here — those belong to real
+     * handlers once the parser contract is known.
      *
      * Emulator builds deliberately retain the assertion below: while reverse
      * engineering locally, an unknown packet should still stop at the exact
      * point where protocol coverage is missing.
      */
+    hookedLen = vm_net_mock_build_unimplemented_handler_notice_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("unimplemented-handler-notice", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
     vm_net_log_handled_packet("ignored-unhandled-server-only", request, requestLen, 0);
     return 0;
 #else

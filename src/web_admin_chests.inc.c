@@ -371,7 +371,7 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         &page,
         "</p><p class=\"muted\">表：MySQL <code>server_chest_rewards</code>。"
         "开箱协议仍是 1/7/15；箱/钥配对 522↔813、523↔814、524↔815。</p>"
-        "</section></main><script src=\"/admin.js?v=3\" defer></script></body></html>");
+        "</section></main><script src=\"/admin.js?v=4\" defer></script></body></html>");
 
     if (page.truncated)
         snprintf(response, responseCap,

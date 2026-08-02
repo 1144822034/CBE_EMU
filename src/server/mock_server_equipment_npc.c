@@ -488,10 +488,10 @@ static u32 vm_net_mock_equipment_enhance_success_rate(
 
 static u32 vm_net_mock_equipment_enhance_money_cost(u8 level)
 {
-    /* Compact coin curve; independent of 29/1 display required=100. */
-    if (level == 0)
-        return 100u;
-    return (u32)level * 250u;
+    /* Product: 5 金 per step to next level (level is current before attempt).
+     * +0→+1: 5金, +1→+2: 10金, …  role->money is copper (1金=10000铜). */
+    u32 gold = ((u32)level + 1u) * 5u;
+    return gold * (u32)VM_NET_MOCK_MONEY_COPPER_PER_GOLD;
 }
 
 static bool vm_net_mock_equipment_enhance_fill_rate_tables(
@@ -679,6 +679,8 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
     u32 equipItemId,
     u16 equipEnhanceLevel,
     bool syncEquipment,
+    bool syncMoney,
+    bool includeBackpackList,
     u32 money,
     bool *listResyncedOut)
 {
@@ -775,6 +777,7 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
         *objectCount += 1;
     }
 
+    if (syncMoney)
     {
         u32 objectStart = 0;
 
@@ -799,8 +802,10 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
      * Authoritative bag list: same contract as warehouse equip deposit /
      * discard follow-up.  7/7 type=2 alone leaves L>=4 强化附加 missing until
      * mall exit or relogin rebuilds the item manager.
+     * Transfer replies sync two equips; only one inline 17/1 is safe —
+     * a second full list in the same WT trips client unpack (解包错误).
      */
-    if (syncEquipment)
+    if (syncEquipment && includeBackpackList)
     {
         u32 listPos = *pos;
         u8 listObjects = *objectCount;
@@ -1098,7 +1103,8 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         inventorySynced = vm_net_mock_append_equipment_enhance_inventory_sync(
             out, outCap, &pos, &objectCount, consumedItemIds, consumedSeqs,
             consumedRemainings, consumedRows, parsed.equipSeq, equipmentItemId,
-            syncedEnhance, syncEquipment, role->money, &listResynced);
+            syncedEnhance, syncEquipment, true, true, role->money,
+            &listResynced);
         if (!inventorySynced)
         {
             printf("[warn][network] mock_equipment_enhance inventory-sync-failed "
@@ -1147,6 +1153,279 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                                 ? "+7/7-type2+7/11-crystal+equip+10/26+17/1+29/1"
                                 : "+7/7-type2+7/11-crystal+10/26")
                          : "");
+    return pos;
+}
+
+/*
+ * Transfer fee (product):
+ *   29/5 wire money fixed at 7 → UI「2.金钱」≈48金65银
+ *     (calibrated: display铜 ≈ 27664 + money*65536).
+ *   29/6 charges the same 48金65银 (copper). No name `(N金)` suffix.
+ *   level=0 keeps materials+target UI (level==1 drops both).
+ */
+#define VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_MONEY_WIRE 7u
+#define VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_FEE_GOLD 48u
+#define VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_FEE_SILVER 65u
+#define VM_NET_MOCK_MONEY_COPPER_PER_SILVER 100u
+
+static u32 vm_net_mock_equipment_enhance_transfer_money_cost(void)
+{
+    return VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_FEE_GOLD *
+               (u32)VM_NET_MOCK_MONEY_COPPER_PER_GOLD +
+           VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_FEE_SILVER *
+               VM_NET_MOCK_MONEY_COPPER_PER_SILVER;
+}
+
+/* Always 0: materials UI (level!=1); do not inflate halfword fee path. */
+static u8 vm_net_mock_equipment_enhance_transfer_wire_level(u8 sourceLevel)
+{
+    (void)sourceLevel;
+    return 0;
+}
+
+/*
+ * 强化转移 / 重铸 (WT 29/5 select/preview, 29/6 confirm).
+ *
+ * Request: 1/29/{5|6} { seqd, seqs } — seqs=source (当前), seqd=dest (目标).
+ * 29/5: result=1 + flag/id/seq/name/money=7/level=0 opens fee UI; no charge.
+ * 29/6: source=0, dest=sourceLevel, charge 48金65银; result=4 金钱不足.
+ * Parser: HandleItemUseAndEquip 0x010294AA (29/5) / 0x01029690 (29/6).
+ */
+static u32 vm_net_mock_build_equipment_enhance_transfer_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    vm_net_mock_equipment_enhance_transfer_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *source = NULL;
+    vm_net_mock_backpack_item_state *dest = NULL;
+    const vm_net_mock_equipment_catalog_item *sourceCatalog = NULL;
+    const vm_net_mock_equipment_catalog_item *destCatalog = NULL;
+    const vm_net_mock_shop_catalog_item *destShop = NULL;
+    const char *destName = "\xD7\xB0\xB1\xB8"; /* 装备 */
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u8 sourceLevel = 0;
+    u8 destLevelBefore = 0;
+    u8 destLevelAfter = 0;
+    u8 sourceLevelAfter = 0;
+    u32 moneyCost = 0;
+    u32 feeCopper = vm_net_mock_equipment_enhance_transfer_money_cost();
+    u8 wireLevel = 0;
+    bool transferred = false;
+    bool alreadyDone = false;
+    bool inventorySynced = false;
+    const char *reason = "ok";
+
+    memset(&parsed, 0, sizeof(parsed));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_equipment_enhance_transfer_request(
+            request, requestLen, &parsed))
+    {
+        return 0;
+    }
+
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+    {
+        source = vm_net_mock_role_find_backpack_item(role, 0, parsed.sourceSeq);
+        dest = vm_net_mock_role_find_backpack_item(role, 0, parsed.destSeq);
+    }
+    if (source != NULL)
+        sourceCatalog = vm_net_mock_find_equipment_catalog_item(source->itemId);
+    if (dest != NULL)
+        destCatalog = vm_net_mock_find_equipment_catalog_item(dest->itemId);
+
+    if (source == NULL || dest == NULL ||
+        sourceCatalog == NULL || destCatalog == NULL)
+    {
+        result = 2; /* 29/5 tip: 装备不存在！ */
+        reason = "equipment-not-found";
+    }
+    else if (sourceCatalog->slot != destCatalog->slot)
+    {
+        /* 29/6: 不可转移; 29/5: clear wait without「装备不存在」 */
+        result = 5;
+        reason = "slot-mismatch";
+    }
+    else
+    {
+        sourceLevel = (u8)SDL_min(source->enhanceLevel,
+                                  VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        destLevelBefore = (u8)SDL_min(dest->enhanceLevel,
+                                      VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        sourceLevelAfter = sourceLevel;
+        destLevelAfter = destLevelBefore;
+        wireLevel =
+            vm_net_mock_equipment_enhance_transfer_wire_level(sourceLevel);
+
+        if (sourceLevel == 0)
+        {
+            if (parsed.subtype == 6 && destLevelBefore > 0)
+            {
+                /* Confirm replay after success: ACK, no second charge. */
+                alreadyDone = true;
+                reason = "already-transferred";
+            }
+            else
+            {
+                result = 5;
+                reason = "source-not-enhanced";
+            }
+        }
+        else if (destLevelBefore >= sourceLevel)
+        {
+            result = 5;
+            reason = "dest-level-not-lower";
+        }
+        else if (parsed.subtype == 5)
+        {
+            /*
+             * Select/preview only: open fee confirm UI.  Client shows 扣金币
+             * after this ACK; charge happens on 29/6.
+             */
+            destLevelAfter = sourceLevel; /* expected after confirm */
+            sourceLevelAfter = 0;
+            reason = "preview-ok";
+        }
+        else if (role->money < feeCopper)
+        {
+            result = 4; /* 29/6 native「金钱不足」 */
+            reason = "money-insufficient";
+        }
+        else
+        {
+            moneyCost = feeCopper;
+            destLevelAfter = sourceLevel; /* no level loss */
+            sourceLevelAfter = 0;
+            source->enhanceLevel = sourceLevelAfter;
+            dest->enhanceLevel = destLevelAfter;
+            role->money -= moneyCost;
+            transferred = true;
+            vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
+            reason = "transferred";
+        }
+    }
+
+    if (dest != NULL)
+    {
+        destShop = vm_net_mock_find_shop_catalog_item(dest->itemId);
+        if (destShop != NULL && destShop->name[0] != 0)
+            destName = destShop->name;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29,
+                                     parsed.subtype, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+
+    if (parsed.subtype == 5)
+    {
+        u16 moneyWire = (u16)VM_NET_MOCK_EQUIP_ENHANCE_TRANSFER_MONEY_WIRE;
+
+        if (result == 1 &&
+            (!vm_net_mock_put_object_u8(out, outCap, &pos, "flag", 1) ||
+             !vm_net_mock_put_object_u16(
+                 out, outCap, &pos, "id",
+                 dest != NULL ? (u16)(dest->itemId & 0xffffu) : 0) ||
+             !vm_net_mock_put_object_u16(out, outCap, &pos, "seq",
+                                         parsed.destSeq) ||
+             !vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                            destName) ||
+             !vm_net_mock_put_object_u16(out, outCap, &pos, "money",
+                                         moneyWire) ||
+             !vm_net_mock_put_object_u8(out, outCap, &pos, "level",
+                                        wireLevel)))
+        {
+            return 0;
+        }
+    }
+    else if (result == 1)
+    {
+        /* 0x01029690 success: seqs/curlevels then seqd/curleveld. */
+        if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seqs",
+                                         parsed.sourceSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "curlevels",
+                                       sourceLevelAfter) ||
+            !vm_net_mock_put_object_u16(out, outCap, &pos, "seqd",
+                                         parsed.destSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "curleveld",
+                                       destLevelAfter))
+        {
+            return 0;
+        }
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    /* Inventory/money sync only after confirm mutation (not 29/5 preview). */
+    if (result == 1 && role != NULL && (transferred || alreadyDone) &&
+        parsed.subtype == 6 && source != NULL && dest != NULL)
+    {
+        bool listResynced = false;
+        u16 emptySeqs[5];
+        u32 emptyIds[5];
+        u32 emptyRemainings[5];
+
+        memset(emptySeqs, 0, sizeof(emptySeqs));
+        memset(emptyIds, 0, sizeof(emptyIds));
+        memset(emptyRemainings, 0, sizeof(emptyRemainings));
+
+        /*
+         * Narrow transfer sync: double full-bag 17/1 caused 解包错误.
+         * Source: 7/7+7/11; dest: 7/7+7/11+money+one 17/1.
+         */
+        inventorySynced = vm_net_mock_append_equipment_enhance_inventory_sync(
+            out, outCap, &pos, &objectCount, emptyIds, emptySeqs,
+            emptyRemainings, 0, parsed.sourceSeq, source->itemId,
+            sourceLevelAfter, true, false, false, role->money, &listResynced);
+        if (inventorySynced)
+        {
+            bool destListOk = false;
+            if (!vm_net_mock_append_equipment_enhance_inventory_sync(
+                    out, outCap, &pos, &objectCount, emptyIds, emptySeqs,
+                    emptyRemainings, 0, parsed.destSeq, dest->itemId,
+                    destLevelAfter, true, true, true, role->money,
+                    &destListOk))
+            {
+                inventorySynced = false;
+            }
+            else
+            {
+                vm_net_mock_arm_enhance_backpack_list_resync(
+                    parsed.sourceSeq, source->itemId, sourceLevelAfter,
+                    listResynced);
+                vm_net_mock_arm_enhance_backpack_list_resync(
+                    parsed.destSeq, dest->itemId, destLevelAfter,
+                    destListOk || listResynced);
+            }
+        }
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_equipment_enhance_transfer phase=%u "
+           "source_seq=%u dest_seq=%u source_item=%u dest_item=%u "
+           "source_level=%u->%u dest_before=%u dest_after=%u money_cost=%u "
+           "money_after=%u result=%u transferred=%u inv_sync=%u reason=%s "
+           "resp=29/%u evidence=JianghuOL.CBE:0x0101DB3A+0x010294AA+"
+           "0x01029690+0x010287C0+0x010289E2\n",
+           parsed.subtype, parsed.sourceSeq, parsed.destSeq,
+           source ? source->itemId : 0, dest ? dest->itemId : 0,
+           sourceLevel, sourceLevelAfter, destLevelBefore, destLevelAfter,
+           moneyCost, role ? role->money : 0, result,
+           transferred ? 1 : 0, inventorySynced ? 1 : 0, reason,
+           parsed.subtype);
+    vm_autotest_note("mock_equipment_enhance_transfer phase=%u source_seq=%u "
+                     "dest_seq=%u source_level=%u->%u dest_after=%u "
+                     "money_cost=%u result=%u reason=%s response=29/%u\n",
+                     parsed.subtype, parsed.sourceSeq, parsed.destSeq,
+                     sourceLevel, sourceLevelAfter, destLevelAfter, moneyCost,
+                     result, reason, parsed.subtype);
     return pos;
 }
 
@@ -2049,6 +2328,29 @@ static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, c
                scene ? scene : "-", reason ? reason : "position");
     }
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+    if (vm_net_mock_role_position_needs_edge_rescue(x, y))
+    {
+        u16 rescuedX = x;
+        u16 rescuedY = y;
+        if (role != NULL &&
+            vm_net_mock_scene_names_equal_loose(role->scene, scene) &&
+            vm_net_mock_role_rescue_edge_position(role, reason))
+        {
+            x = role->x;
+            y = role->y;
+        }
+        else if (vm_net_mock_get_scene_reasonable_spawn_from_sce(scene,
+                                                                 &rescuedX,
+                                                                 &rescuedY,
+                                                                 NULL))
+        {
+            x = rescuedX;
+            y = rescuedY;
+            vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
+        }
+        if (vm_net_mock_role_position_needs_edge_rescue(x, y))
+            return;
+    }
     vm_net_mock_role_set_position(scene, x, y, reason);
 }
 
@@ -5117,6 +5419,26 @@ static bool vm_mock_service_session_enqueue_system_message(
     static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
     return vm_mock_service_session_enqueue_chat_notice(
         target, VM_MOCK_CHAT_TYPE_SYSTEM, NULL, systemNameGbk, message);
+}
+
+static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
+                                                          u32 remaining)
+{
+    char tip[48];
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    (void)itemId;
+    snprintf(tip, sizeof(tip),
+             "\xb5\xb1\xc7\xb0\xb4\xa2\xc1\xbf\xa3\xba%u/%u",
+             remaining, VM_NET_MOCK_FLASK_MAX_RESERVOIR); /* 当前储量：N/MAX */
+    if (session != NULL &&
+        vm_mock_service_session_enqueue_system_message(session, tip))
+    {
+        printf("[info][network] mock_flask_reservoir_tip item=%u remaining=%u/%u "
+               "delivery=1/3/3-system-chat-queued\n",
+               itemId, remaining, VM_NET_MOCK_FLASK_MAX_RESERVOIR);
+    }
 }
 
 /*
@@ -8874,7 +9196,7 @@ static bool vm_mock_service_migrate_account_role_databases(void)
 
 static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
                                                    const char *roleSelector,
-                                                   u32 amount,
+                                                   int32_t delta,
                                                    const char **messageOut)
 {
     vm_mock_service_account_state *state =
@@ -8882,6 +9204,7 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
     vm_net_mock_role_state *role = NULL;
     u32 before = 0;
     u32 after = 0;
+    uint64_t deduct = 0;
 
     if (state == NULL)
         return false;
@@ -8893,9 +9216,32 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
         vm_mock_service_close_account_role_db_for_management(state, true);
         return false;
     }
+    if (delta == 0)
+    {
+        if (messageOut)
+            *messageOut = "amount must be non-zero";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
     before = role->wcoin;
-    after = vm_net_mock_role_add_wcoin(role, amount);
-    if (!vm_net_mock_role_db_save("admin-wcoin-add"))
+    if (delta > 0)
+    {
+        after = vm_net_mock_role_add_wcoin(role, (u32)delta);
+    }
+    else
+    {
+        deduct = (uint64_t)(-(int64_t)delta);
+        if ((uint64_t)before < deduct)
+        {
+            if (messageOut)
+                *messageOut = "W 币不足，无法扣除";
+            vm_mock_service_close_account_role_db_for_management(state, true);
+            return false;
+        }
+        role->wcoin = before - (u32)deduct;
+        after = role->wcoin;
+    }
+    if (!vm_net_mock_role_db_save(delta > 0 ? "admin-wcoin-add" : "admin-wcoin-deduct"))
     {
         role->wcoin = before;
         vm_mock_service_account_capture(state);
@@ -8905,11 +9251,11 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
         return false;
     }
     vm_mock_service_account_capture(state);
-    printf("[info][mock-service] account_wcoin_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
+    printf("[info][mock-service] account_wcoin_adjust user=%s role=%s id=%u delta=%d before=%u after=%u\n",
            accountId,
            role->name[0] ? role->name : "-",
            role->roleId,
-           amount,
+           (int)delta,
            before,
            after);
     vm_mock_service_close_account_role_db_for_management(state, false);

@@ -2661,9 +2661,13 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                 u32 missingMp = mpMax > mpCurrent ? mpMax - mpCurrent : 0;
 
                 reservoirBefore = item->count;
-                reservoirConsumed = vm_net_mock_item_effect_plan_reservoir_restore(
+                (void)vm_net_mock_item_effect_plan_reservoir_restore(
                     effect, reservoirBefore, missingHp, missingMp,
+                    VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP,
                     &hpPlanned, &mpPlanned);
+                /* Flat battle charge: 50000/3 per use, or drain remaining. */
+                reservoirConsumed = vm_net_mock_item_effect_battle_flask_charge(
+                    reservoirBefore, hpPlanned, mpPlanned);
                 remaining = reservoirBefore;
                 if (reservoirConsumed != 0)
                     consumed = vm_net_mock_role_consume_backpack_item(
@@ -6625,8 +6629,13 @@ static void vm_net_mock_battle_auto_use_vitality_flasks(
                 break;
 
             seq = item->seq;
+            /*
+             * Settle auto-flask charges by actual restored amount.  Flat
+             * 50000/3 charge applies only to manual in-battle item use.
+             */
             consumed = vm_net_mock_item_effect_plan_reservoir_restore(
-                effect, item->count, missingHp, missingMp, &plannedHp, &plannedMp);
+                effect, item->count, missingHp, missingMp,
+                VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP, &plannedHp, &plannedMp);
             if (consumed == 0 ||
                 !vm_net_mock_role_consume_backpack_item(role, item->itemId, seq,
                                                         consumed, &remaining))
@@ -6640,9 +6649,25 @@ static void vm_net_mock_battle_auto_use_vitality_flasks(
                 vm_net_mock_add_capped_u32(roleMp, plannedMp), roleMpMax);
             result->hpRestored = vm_net_mock_add_capped_u32(result->hpRestored, plannedHp);
             result->mpRestored = vm_net_mock_add_capped_u32(result->mpRestored, plannedMp);
-            result->updates[result->updateCount].seq = seq;
-            result->updates[result->updateCount].remaining = remaining;
-            ++result->updateCount;
+            {
+                bool mergedUpdate = false;
+                for (u8 ui = 0; ui < result->updateCount; ++ui)
+                {
+                    if (result->updates[ui].seq == seq)
+                    {
+                        result->updates[ui].remaining = remaining;
+                        mergedUpdate = true;
+                        break;
+                    }
+                }
+                if (!mergedUpdate &&
+                    result->updateCount < VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                {
+                    result->updates[result->updateCount].seq = seq;
+                    result->updates[result->updateCount].remaining = remaining;
+                    ++result->updateCount;
+                }
+            }
         }
     }
 
@@ -6729,8 +6754,10 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     u16 dropSeq = 0;
     u32 dropCount = 0;
     bool dropGranted = false;
-    char dropInfo[VM_NET_MOCK_SHOP_NAME_BYTES + 16];
+    char dropInfo[96];
+    char flaskPrefix[40];
     bool haveDropInfo = false;
+    bool haveFlaskPrefix = false;
     u32 applyRewardExp = 0;
     u32 displayExpGain = 0;
     u32 displayGoldGain = 0;
@@ -6812,6 +6839,7 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     wireExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_WIRE_EXP", statusExp);
     wireGold = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_WIRE_GOLD", statusGold);
     dropInfo[0] = 0;
+    flaskPrefix[0] = 0;
     if (dropGranted && role != NULL)
     {
         const vm_net_mock_shop_catalog_item *dropItem = vm_net_mock_find_shop_catalog_item(dropItemId);
@@ -6846,6 +6874,53 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
             static const char victoryFdataGbk[] =
                 "\xd5\xbd\xb6\xb7\xca\xa4\xc0\xfb"; /* GBK: 战斗胜利 */
             memcpy(dropInfo, victoryFdataGbk, sizeof(victoryFdataGbk));
+            haveDropInfo = true;
+        }
+    }
+    /*
+     * Settlement "背包 xx/64" is drawn from the client item-manager
+     * (+36/+38), not from 4/7.bagstatus.  The only documented custom string
+     * on that panel is 4/7.fdata (mmBattle:0x7B08/0x4462).  Prefix flask
+     * remaining so it sits on the settle tip line (left of bag HUD text).
+     * Auto-flask already ran before this builder; read post-use remaining.
+     * Compact form: N/M (HP/MP reservoir left).
+     */
+    if (role != NULL)
+    {
+        const vm_net_mock_backpack_item_state *hpFlask =
+            vm_net_mock_role_find_backpack_item(role, 802u, 0);
+        const vm_net_mock_backpack_item_state *mpFlask =
+            vm_net_mock_role_find_backpack_item(role, 803u, 0);
+        u32 hpLeft = hpFlask != NULL ? hpFlask->count : 0;
+        u32 mpLeft = mpFlask != NULL ? mpFlask->count : 0;
+        int flaskWritten = 0;
+
+        /* Compact settle tip: HP/MP remaining only (no 血/蓝 labels). */
+        if (hpLeft != 0 && mpLeft != 0)
+            flaskWritten = snprintf(flaskPrefix, sizeof(flaskPrefix),
+                                    "%u/%u", hpLeft, mpLeft);
+        else if (hpLeft != 0)
+            flaskWritten = snprintf(flaskPrefix, sizeof(flaskPrefix),
+                                    "%u", hpLeft);
+        else if (mpLeft != 0)
+            flaskWritten = snprintf(flaskPrefix, sizeof(flaskPrefix),
+                                    "%u", mpLeft);
+        haveFlaskPrefix = flaskWritten > 0 &&
+                          (u32)flaskWritten < sizeof(flaskPrefix);
+    }
+    if (haveFlaskPrefix)
+    {
+        char combined[96];
+        int written;
+
+        if (haveDropInfo && dropInfo[0] != 0)
+            written = snprintf(combined, sizeof(combined), "%s %s",
+                               flaskPrefix, dropInfo);
+        else
+            written = snprintf(combined, sizeof(combined), "%s", flaskPrefix);
+        if (written > 0 && (u32)written < sizeof(combined))
+        {
+            memcpy(dropInfo, combined, (u32)written + 1u);
             haveDropInfo = true;
         }
     }
@@ -6991,6 +7066,59 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
     return true;
 }
 
+/*
+ * Team peer settle rebuilds 4/7 without finish_operation.  Auto-flask may
+ * raise role/globals while onlineHp/teamMember* still hold the pre-flask
+ * snapshot; the next team_battle_queue then reseeds from online* and the
+ * restore never sticks.  Mirror settled vitals into presence + shared rows.
+ */
+static void vm_net_mock_battle_sync_team_presence_after_settle(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_team *team = NULL;
+    int memberIndex = -1;
+    u32 hp = 0;
+    u32 mp = 0;
+    u32 hpMax = 0;
+    u32 mpMax = 0;
+
+    if (role == NULL || session == NULL)
+        return;
+
+    hpMax = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpMax : role->hpMax;
+    mpMax = g_mockBattleRoleMpMax != 0 ? g_mockBattleRoleMpMax : role->mpMax;
+    hp = g_mockBattleRoleHpMax != 0 ? g_mockBattleRoleHpCurrent : role->hp;
+    mp = g_mockBattleRoleMpMax != 0 ? g_mockBattleRoleMpCurrent : role->mp;
+    if (hpMax != 0)
+        hp = vm_net_mock_min_u32(hp, hpMax);
+    if (mpMax != 0)
+        mp = vm_net_mock_min_u32(mp, mpMax);
+
+    session->onlineHp = hp;
+    session->onlineMp = mp;
+    if (hpMax != 0)
+        session->onlineHpMax = hpMax;
+    if (mpMax != 0)
+        session->onlineMpMax = mpMax;
+
+    team = vm_mock_service_team_find_for_client(session->clientId);
+    memberIndex = vm_mock_service_team_battle_member_index(
+        team, session->clientId);
+    if (team == NULL || memberIndex < 0 ||
+        memberIndex >= team->battleMemberCount)
+    {
+        return;
+    }
+    team->battleMemberHp[memberIndex] = hp;
+    team->battleMemberMp[memberIndex] = mp;
+    if (hpMax != 0)
+        team->battleMemberHpMax[memberIndex] = hpMax;
+    if (mpMax != 0)
+        team->battleMemberMpMax[memberIndex] = mpMax;
+}
+
 static bool vm_net_mock_append_battle_terminal_status_objects(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
     bool forceTeamVictory)
@@ -7009,6 +7137,12 @@ static bool vm_net_mock_append_battle_terminal_status_objects(
                                                   true))
     {
         return false;
+    }
+    if (forceTeamVictory ||
+        g_vm_net_mock_team_battle_party_count_current >= 2 ||
+        g_vm_net_mock_team_battle_member_count_current >= 2)
+    {
+        vm_net_mock_battle_sync_team_presence_after_settle();
     }
     if (!vm_net_mock_append_battle_auto_flask_counts_object(out, outCap, pos,
                                                             &autoFlask,

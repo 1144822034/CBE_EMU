@@ -2650,6 +2650,7 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     bool mapRevivedOnBuy = false;
     bool syncActorInfoOnBuy = false;
     bool armFlaskBackpackDeliver = false;
+    bool flaskReservoirFullReject = false;
     u32 buyActorInfoLen = 0;
     u32 flaskReservoir = 0;
     u32 moneyBefore = 0;
@@ -2661,6 +2662,8 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     vm_net_mock_role_state *role = NULL;
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
+    static const char kFlaskReservoirFullTipGbk[] =
+        "\xb4\xa2\xc1\xbf\xd2\xd1\xc2\xfa\xa3\xac\xb2\xbb\xbf\xc9\xd4\xd9\xb9\xba\xc2\xf2\xa1\xa3"; /* 储量已满，不可再购买。 */
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -2795,13 +2798,10 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
             vm_net_mock_role_mark_inventory_dirty("shop-buy14-item");
             result = 1;
             /*
-             * 802/803 are not unique: login can carry multiple seq rows.  Mall
-             * 14/3 local insert is unreliable across mmShop→mmGame rebuild, and
-             * a lone 7/7 type=1 with count=1 is parsed as reservoir=1 (mmGame
-             * 0xD04) so a second flask often never appears — unlike stackable
-             * cat10 rows (经验卡/修炼丹) that merge on 14/3.  After mmGame is
-             * ready, peel the login-shaped 30/21+7/11 grid (or skip if type1
-             * already reseeded).
+             * 802/803 merge into one bag row (super reservoir).  Mall 14/3
+             * local insert is still unreliable across mmShop→mmGame rebuild,
+             * so after mmGame is ready peel login-shaped 30/21+7/11 (or skip
+             * if already reseeded) to refresh the merged remaining value.
              */
             if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId) &&
                 seq != 0)
@@ -2813,6 +2813,13 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
                 if (flaskReservoir != 0)
                     armFlaskBackpackDeliver = true;
             }
+        }
+        else if (g_vm_net_mock_backpack_add_fail_kind ==
+                 VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL)
+        {
+            /* Clear mall loading (result!=0); tip via system chat. */
+            flaskReservoirFullReject = true;
+            result = vm_net_mock_shop_buy14_backpack_fail_result(type);
         }
         else
         {
@@ -2838,6 +2845,17 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
             return 0;
         objectCount = 2;
         respLabel = "14/3+1/1/14";
+    }
+    if (flaskReservoirFullReject)
+    {
+        if (session != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(
+                session, kFlaskReservoirFullTipGbk);
+        if (vm_net_mock_hangup_append_system_chat_object(
+                out, outCap, &pos, &objectCount, kFlaskReservoirFullTipGbk))
+            respLabel = "14/3+1/3/3-flask-full";
+        else
+            respLabel = "14/3-flask-full";
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 

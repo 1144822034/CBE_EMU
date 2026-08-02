@@ -3805,8 +3805,44 @@ static void vm_net_mock_complete_startup_scene_followup(const char *currentScene
 
     memset(&target, 0, sizeof(target));
     snprintf(target.scene, sizeof(target.scene), "%s", currentScene);
-    if (!vm_net_mock_read_current_player_grid(NULL, NULL, &targetX, &targetY, NULL, NULL))
-        vm_net_mock_adjust_safe_player_pos_for_scene(currentScene, &targetX, &targetY);
+    /*
+     * Do not overwrite with host Global_R9 via read_current_player_grid: that
+     * is the emulator process scene, not the authenticated remote role
+     * (same class as unstuck Global_R9 contamination).  Spawn helpers already
+     * read the selected role; rescue near-origin coords before ready/save.
+     */
+    {
+        vm_net_mock_role_state *startupRole = vm_net_mock_active_role();
+        if (startupRole != NULL &&
+            vm_net_mock_scene_names_equal_loose(startupRole->scene, currentScene))
+        {
+            (void)vm_net_mock_role_rescue_edge_position(startupRole,
+                                                        "startup-followup");
+            targetX = startupRole->x;
+            targetY = startupRole->y;
+        }
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(currentScene, &targetX, &targetY);
+    if (vm_net_mock_role_position_needs_edge_rescue(targetX, targetY))
+    {
+        u16 rescuedX = targetX;
+        u16 rescuedY = targetY;
+        if (vm_net_mock_get_scene_reasonable_spawn_from_sce(currentScene,
+                                                            &rescuedX,
+                                                            &rescuedY,
+                                                            NULL))
+        {
+            targetX = rescuedX;
+            targetY = rescuedY;
+            vm_net_mock_adjust_safe_player_pos_for_scene(currentScene,
+                                                         &targetX, &targetY);
+        }
+        if (vm_net_mock_role_position_needs_edge_rescue(targetX, targetY))
+        {
+            targetX = 64;
+            targetY = 64;
+        }
+    }
     target.x = targetX;
     target.y = targetY;
     target.mapType = 2;
