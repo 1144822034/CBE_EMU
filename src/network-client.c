@@ -33,12 +33,13 @@ typedef int vm_client_socket;
 static void agent_dbg191169_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson)
 {
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
     if (fp == NULL)
         return;
     fprintf(fp,
-            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            "{\"sessionId\":\"0b451a\",\"runId\":\"encounter-repreflight\","
+            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+            "\"data\":%s,\"timestamp\":%lld}\n",
             hypothesisId ? hypothesisId : "",
             location ? location : "",
             message ? message : "",
@@ -2277,6 +2278,22 @@ static void vm_net_mock_async_drain_completions(void)
                 s_successLogSuppressed += 1u;
             }
         }
+        /* #region agent log */
+        if (completion->responseLen >= 5u &&
+            (completion->kind != VM_CLIENT_JOB_SCENE_POLL ||
+             completion->responseLen >= 40u))
+        {
+            char dataBuf[160];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"connect\":%u,\"event\":%u,\"resp\":%u,\"followup\":%u,"
+                     "\"poll\":%u}",
+                     completion->connectId, completion->eventType,
+                     completion->responseLen, completion->followupLen,
+                     completion->kind == VM_CLIENT_JOB_SCENE_POLL ? 1u : 0u);
+            agent_dbg191169_log("D", "network-client.c:deliver",
+                                "queue_data_primary", dataBuf);
+        }
+        /* #endregion */
         if (completion->followupLen != 0 && completion->followup != NULL)
         {
             u32 followupPtr = vm_net_mock_sync_buffer_to_vm(completion->followup,
@@ -2288,6 +2305,16 @@ static void vm_net_mock_async_drain_completions(void)
                                           channel->callback, channel->context);
                 printf("[info][network] queue_data_followup connect=%u event=7 resp=%u\n",
                        completion->connectId, completion->followupLen);
+                /* #region agent log */
+                {
+                    char dataBuf[96];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"connect\":%u,\"resp\":%u}",
+                             completion->connectId, completion->followupLen);
+                    agent_dbg191169_log("E", "network-client.c:deliver",
+                                        "queue_data_followup", dataBuf);
+                }
+                /* #endregion */
             }
         }
         if (completion->closeAfterData)

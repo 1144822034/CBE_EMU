@@ -33,12 +33,13 @@
 static void agent_dbg191169_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson)
 {
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
     if (fp == NULL)
         return;
     fprintf(fp,
-            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            "{\"sessionId\":\"0b451a\",\"runId\":\"encounter-repreflight\","
+            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+            "\"data\":%s,\"timestamp\":%lld}\n",
             hypothesisId ? hypothesisId : "",
             location ? location : "",
             message ? message : "",

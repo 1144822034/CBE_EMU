@@ -3383,6 +3383,17 @@ static void vm_host_clear_download_busy(const char *reason)
 
     if (r9 == 0)
         r9 = Global_R9;
+    /* #region agent log */
+    {
+        char dataBuf[160];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"r9\":%u,\"global_r9\":%u,\"reason\":\"%.48s\"}",
+                 r9, Global_R9, reason ? reason : "-");
+        agent_dbg191169_log("F", "main.c:download_busy_clear",
+                            r9 != 0 ? "download_busy_clear" : "download_busy_clear_skip",
+                            dataBuf);
+    }
+    /* #endregion */
     if (r9 == 0)
         return;
     /*

@@ -4209,14 +4209,19 @@ static u32 vm_net_mock_build_instance_enter_response(
              * reenter).  Arm dream poll 30/2 ResetDownloadState like
              * post-2/3 clear; outdoor drain 30/2 in the enter packet is
              * not enough for the dream DF load.
+             *
+             * Do NOT arm fresh_shell 1/1/6 here (debug-0b451a): after
+             * ScreenInit Ok + clear rem→0, poll still delivered two
+             * resp=439 (1/1/6) and the bar stayed up until socket
+             * timeout.  DF 30/1 already owns the shell; HUD uses 1/1/14.
              */
             vm_mock_service_session_arm_map_stone_loading_clear(session,
                                                                  target.scene);
             vm_mock_service_session_arm_map_actor_vitals_sync(session, 0, 0,
-                                                               true);
-            printf("[info][network] mock_npc_instance_dream_fresh_shell_arm "
-                   "actor=%u scene=%s action=poll-1/1/6-after-30/1 "
-                   "evidence=map-stone-fresh-shell+title-subtype-6\n",
+                                                               false);
+            printf("[info][network] mock_npc_instance_dream_vitals_arm "
+                   "actor=%u scene=%s action=poll-1/1/14-after-clear "
+                   "evidence=debug-0b451a-fresh-shell-1/1/6-rearmed-bar\n",
                    seed->actorId, target.scene);
             printf("[info][network] mock_npc_instance_dream_bar_clear_arm "
                    "actor=%u scene=%s action=poll-30/2-after-dream-drain "
@@ -4694,6 +4699,21 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
            session->instanceChallengeScene, ageTicks,
            session->instanceChallengeBattleWireCount,
            priorWireCount >= 1 ? 1u : 0u, responseLen);
+    /* #region agent log */
+    {
+        char dataBuf[192];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"actor\":%u,\"enemy\":%u,\"age\":%u,\"wire_count\":%u,"
+                 "\"retry\":%u,\"resp\":%u,\"scene\":\"%.40s\"}",
+                 session->instanceChallengeActorId,
+                 session->instanceChallengeEnemyId, ageTicks,
+                 session->instanceChallengeBattleWireCount,
+                 priorWireCount >= 1 ? 1u : 0u, responseLen,
+                 session->instanceChallengeScene);
+        agent_dbg191169_log("E", "mock_server_scene_sync.c:take",
+                            "challenge_battle_wire_followup", dataBuf);
+    }
+    /* #endregion */
     if (session->instanceChallengeBattleWireCount >= 2)
     {
         /* Second (final) delivery: drop retry arm; battle session stays armed. */

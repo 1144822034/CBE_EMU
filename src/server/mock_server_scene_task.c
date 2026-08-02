@@ -1852,8 +1852,32 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
         printf("[info][network] mock_scene_combat_spawn_remap scene=%s "
                "pos=(%u,%u) wire=%u real=%u source=wire-unique\n",
                scene, posx, posy, wireActorId, wireOnly);
+        /* #region agent log */
+        {
+            char dataBuf[192];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"posx\":%u,\"posy\":%u,"
+                     "\"wire\":%u,\"real\":%u,\"slots\":1,\"source\":"
+                     "\"wire-unique\"}",
+                     scene, posx, posy, wireActorId, wireOnly);
+            agent_dbg191169_log("C", "mock_server_scene_task.c:remap",
+                                "combat_spawn_remap_unique", dataBuf);
+        }
+        /* #endregion */
         return wireOnly;
     }
+    /* #region agent log */
+    if (wireOnlyCount != 0u)
+    {
+        char dataBuf[192];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"scene\":\"%.40s\",\"posx\":%u,\"posy\":%u,"
+                 "\"wire\":%u,\"slots\":%u,\"source\":\"no-remap\"}",
+                 scene ? scene : "", posx, posy, wireActorId, wireOnlyCount);
+        agent_dbg191169_log("C", "mock_server_scene_task.c:remap",
+                            "combat_spawn_remap_miss", dataBuf);
+    }
+    /* #endregion */
     return wireActorId;
 }
 

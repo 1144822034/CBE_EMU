@@ -1969,6 +1969,69 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
 
     /*
+     * Dream/FB 29* after instance 30/1: DF ScreenInit already owns the map.
+     * Outdoor post-enter still needs 27/12+posinfo to bind the walking sprite,
+     * but on dream that 27/12 re-enters EnterSceneByMapName → host
+     * same-suppressed-dream-reenter (debug-0b451a: after clear rem→0 and
+     * fresh_shell removed, resp=272 still armed suppress + left the bar up).
+     * Match dream 2/3 loading_clear_only: no 27/12; keep 27/11 for SCE
+     * monsters / instance NPCs; re-arm poll 30/2.
+     */
+    if (target.scene[0] == '2' && target.scene[1] == '9')
+    {
+        vm_mock_service_client_session *dreamSession =
+            vm_mock_service_get_active_client_session();
+
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
+                                                           target.scene,
+                                                           "dream-post-enter"))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_fb_target_result4_object(
+                out, outCap, &pos, g_vm_net_mock_last_scene_change_fb4_type,
+                vm_net_mock_fb_target_info_text()))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "dream-post-enter-no-27/12");
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_teleport_stone_map_enter_pending = false;
+        g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_scene_moveinfo_npc_wait_wt6 = false;
+        g_vm_net_mock_scene_moveinfo_npc_wait_post_enter = false;
+        vm_mock_service_session_arm_map_stone_loading_clear(dreamSession,
+                                                             target.scene);
+        (void)vm_mock_service_mark_active_session_scene_ready_from_role(
+            target.scene, "dream-post-enter-no-27/12");
+        printf("[info][network] mock_dream_post_enter_no_27_12 scene=%s "
+               "pos=(%u,%u) objects=%u resp=%u "
+               "action=25/5+27/11+27/4+7/42+arm-poll-clear "
+               "evidence=debug-0b451a-272-same-suppressed-dream-reenter\n",
+               target.scene, target.x, target.y, objectCount, pos);
+        /* #region agent log */
+        {
+            char dataBuf[160];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"objects\":%u,\"resp\":%u,"
+                     "\"path\":\"no-27/12\"}",
+                     target.scene, (u32)objectCount, pos);
+            agent_dbg191169_log("H", "mock_server_social.c:post_enter",
+                                "dream_post_enter_no_27_12", dataBuf);
+        }
+        /* #endregion */
+        return pos;
+    }
+
+    /*
      * Evidence:
      * - runtime: once EnterSceneByMapName() gets a real same-screen lifecycle,
      *   Penglai _02 emits `25/5 + 2/3 + 27/11 + 7/42` instead of stalling;
@@ -5569,7 +5632,19 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
      * and resume after rehydrate clears mmShopShellActive.
      */
     if (session->mmShopShellActive)
+    {
+        /* #region agent log */
+        {
+            char dataBuf[96];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"reason\":\"mmShop\",\"rem\":%u}",
+                     (u32)session->mapStoneLoadingClearRemaining);
+            agent_dbg191169_log("F", "mock_server_social.c:clear",
+                                "loading_clear_hold", dataBuf);
+        }
+        /* #endregion */
         return 0;
+    }
     /*
      * Refuse while a NEW scene transfer is in flight.  The arm happens after
      * this map-stone's 2/3 completed (pending already false); a later
@@ -5591,6 +5666,37 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
              g_vm_net_mock_teleport_stone_direct_enter_pending) ||
             (!dream29Clear && g_vm_net_mock_last_scene_change_target_valid))
         {
+            /* #region agent log */
+            if (dream29Clear)
+            {
+                static u32 s_holdLogTick = 0;
+                if (s_holdLogTick == 0 ||
+                    g_schedulerTick - s_holdLogTick >= 30u)
+                {
+                    char dataBuf[220];
+                    s_holdLogTick = g_schedulerTick;
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"reason\":\"transfer-hold\",\"dream\":1,"
+                             "\"pending\":%u,\"deferred\":%u,\"direct\":%u,"
+                             "\"target_valid\":%u,\"rem\":%u,"
+                             "\"scene\":\"%.40s\"}",
+                             session->sceneVisiblePending ? 1u : 0u,
+                             g_vm_net_mock_teleport_stone_deferred_enter_valid
+                                 ? 1u
+                                 : 0u,
+                             g_vm_net_mock_teleport_stone_direct_enter_pending
+                                 ? 1u
+                                 : 0u,
+                             g_vm_net_mock_last_scene_change_target_valid
+                                 ? 1u
+                                 : 0u,
+                             (u32)session->mapStoneLoadingClearRemaining,
+                             session->mapStoneLoadingClearScene);
+                    agent_dbg191169_log("F", "mock_server_social.c:clear",
+                                        "loading_clear_hold", dataBuf);
+                }
+            }
+            /* #endregion */
             return 0;
         }
     }
@@ -5650,6 +5756,18 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     if (currentScene == NULL ||
         !vm_net_mock_scene_names_equal_loose(currentScene, sceneBuf))
     {
+        /* #region agent log */
+        {
+            char dataBuf[200];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"reason\":\"scene-mismatch\",\"clear\":\"%.40s\","
+                     "\"visible\":\"%.40s\",\"rem\":%u}",
+                     sceneBuf, currentScene ? currentScene : "-",
+                     (u32)session->mapStoneLoadingClearRemaining);
+            agent_dbg191169_log("F", "mock_server_social.c:clear",
+                                "loading_clear_cancel", dataBuf);
+        }
+        /* #endregion */
         vm_mock_service_session_cancel_map_stone_loading_clear(
             session, "scene-mismatch");
         return 0;
@@ -5676,6 +5794,18 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
                    session->clientId, sceneBuf, ageTicks,
                    (u32)session->mapStoneLoadingClearRemaining, pos,
                    waitWt6Timeout ? " reason=wait_wt6-timeout" : "");
+            /* #region agent log */
+            {
+                char dataBuf[160];
+                snprintf(dataBuf, sizeof(dataBuf),
+                         "{\"scene\":\"%.40s\",\"age\":%u,\"rem\":%u,"
+                         "\"resp\":%u,\"final\":0}",
+                         sceneBuf, ageTicks,
+                         (u32)session->mapStoneLoadingClearRemaining, pos);
+                agent_dbg191169_log("F", "mock_server_social.c:clear",
+                                    "loading_clear_ok", dataBuf);
+            }
+            /* #endregion */
         }
         else
         {
@@ -5696,6 +5826,17 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
                        "age_ticks=%u remaining=0 resp=%u evidence=30/2-no-posinfo-after-map-stone-2/3\n",
                        session->clientId, sceneBuf, ageTicks, pos);
             }
+            /* #region agent log */
+            {
+                char dataBuf[160];
+                snprintf(dataBuf, sizeof(dataBuf),
+                         "{\"scene\":\"%.40s\",\"age\":%u,\"rem\":0,"
+                         "\"resp\":%u,\"final\":1}",
+                         sceneBuf, ageTicks, pos);
+                agent_dbg191169_log("F", "mock_server_social.c:clear",
+                                    "loading_clear_ok", dataBuf);
+            }
+            /* #endregion */
         }
     }
     return pos;

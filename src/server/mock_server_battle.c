@@ -12294,6 +12294,30 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             remapScene, wireEnemyId, posx, posy);
         enemyWireId = vm_net_mock_resolve_battle_enemy_id(
             wireEnemyId, &enemyTable, enemyTableIds);
+        /* #region agent log */
+        {
+            char dataBuf[280];
+            u8 dreamScene =
+                (remapScene != NULL &&
+                 ((remapScene[0] == '2' && remapScene[1] == '9') ||
+                  (remapScene[0] == 'b' && remapScene[1] == '_' &&
+                   remapScene[2] == '2' && remapScene[3] == '9')))
+                    ? 1u
+                    : 0u;
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"wire\":%u,\"real\":%u,"
+                     "\"index\":%u,\"posx\":%u,\"posy\":%u,"
+                     "\"use_scene\":%u,\"dream\":%u,\"remap\":%u,"
+                     "\"has_moveinfo\":%u}",
+                     remapScene ? remapScene : "",
+                     wireEnemyId, requestedEnemyId, index, posx, posy,
+                     useSceneMonsterStart ? 1u : 0u, dreamScene,
+                     (requestedEnemyId != wireEnemyId) ? 1u : 0u,
+                     hasMoveinfo ? 1u : 0u);
+            agent_dbg191169_log("B", "mock_server_battle.c:4/1",
+                                "dream_encounter_remap_probe", dataBuf);
+        }
+        /* #endregion */
         /*
          * Dream/FB 29* only: duplicate wire #200 + real remap cannot use
          * subtype-5 (wrong live row / SetMapCtrlViewport null / no mmBattle).
@@ -12353,6 +12377,18 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                 vm_autotest_note("mock_challenge_battle_remap_pure_subtype10 "
                                 "wire=%u real=%u battle_delivery=data-followup\n",
                                 wireEnemyId, requestedEnemyId);
+                /* #region agent log */
+                {
+                    char dataBuf[160];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"wire\":%u,\"real\":%u,\"primary\":%u,"
+                             "\"objects\":%u,\"path\":\"followup-4/10\"}",
+                             wireEnemyId, requestedEnemyId, primaryPos,
+                             (u32)primaryObjects);
+                    agent_dbg191169_log("E", "mock_server_battle.c:4/1",
+                                        "remap_pure_subtype10_armed", dataBuf);
+                }
+                /* #endregion */
                 return primaryPos;
             }
             useSceneMonsterStart = false;

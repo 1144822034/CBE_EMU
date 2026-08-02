@@ -9,12 +9,13 @@
 static void agent_dbg191169_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson)
 {
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-191169.log", "a");
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
     if (fp == NULL)
         return;
     fprintf(fp,
-            "{\"sessionId\":\"191169\",\"runId\":\"ab-kind3\",\"hypothesisId\":\"%s\","
-            "\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            "{\"sessionId\":\"0b451a\",\"runId\":\"encounter-repreflight\","
+            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+            "\"data\":%s,\"timestamp\":%lld}\n",
             hypothesisId ? hypothesisId : "",
             location ? location : "",
             message ? message : "",
@@ -137,15 +138,20 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
     fflush(stdout);
     /* #region agent log */
     {
-        u32 pc = 0, lr = 0, r6 = 0;
-        char dataBuf[160];
+        u32 pc = 0, lr = 0, r0 = 0, r1 = 0, r2 = 0, r5 = 0, r6 = 0;
+        char dataBuf[240];
         uc_reg_read(uc, UC_ARM_REG_PC, &pc);
         uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+        uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+        uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+        uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+        uc_reg_read(uc, UC_ARM_REG_R5, &r5);
         uc_reg_read(uc, UC_ARM_REG_R6, &r6);
         snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"fault\":%u,\"pc\":%u,\"lr\":%u,\"r6\":%u,\"type\":%u}",
-                 (u32)address, pc, lr, r6, (u32)type);
-        agent_dbg191169_log("Y", "hookRam.c:hookRamErrorBack", "mem_fault",
+                 "{\"fault\":%u,\"pc\":%u,\"lr\":%u,\"r0\":%u,\"r1\":%u,"
+                 "\"r2\":%u,\"r5\":%u,\"r6\":%u,\"type\":%u}",
+                 (u32)address, pc, lr, r0, r1, r2, r5, r6, (u32)type);
+        agent_dbg191169_log("A", "hookRam.c:hookRamErrorBack", "mem_fault",
                             dataBuf);
     }
     /* #endregion */
