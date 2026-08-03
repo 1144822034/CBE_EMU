@@ -13,6 +13,15 @@ extern u32 g_vmInputWatchUserBufLen;
 extern u32 g_vmInputWatchCallback;
 extern u32 g_vmInputWatchCallR9;
 extern u32 g_vmInputWatchWriteCount;
+extern u32 g_hangupBattleStateWatchAddress;
+extern u32 g_hangupBattleStateWatchGeneration;
+extern u32 g_hangupBattleStateWatchWriteCount;
+extern u32 g_hangupSceneModeWatchAddress;
+extern u32 g_hangupSceneModeWatchWriteCount;
+extern u32 g_hangupBusinessDelegateWatchAddress;
+extern u32 g_hangupBusinessDelegateWatchWriteCount;
+extern u32 g_vmAutomationGameLoadingGateWatchAddress;
+extern u32 g_vmAutomationGameLoadingGateWatchWriteCount;
 
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
@@ -71,6 +80,112 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                        g_vmInputWatchCallR9);
             }
             ++g_vmInputWatchWriteCount;
+        }
+    }
+    if (type == UC_MEM_WRITE && g_hangupBattleStateWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_hangupBattleStateWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u16);
+        if (start < watchEnd && end > watchStart)
+        {
+            u32 pc = 0;
+            FILE *trace;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            ++g_hangupBattleStateWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_battle_state_write "
+                        "generation=%u count=%u pc=%08x last=%08x "
+                        "addr=%08x size=%u value=%llx\n",
+                        g_hangupBattleStateWatchGeneration,
+                        g_hangupBattleStateWatchWriteCount, pc, lastAddress,
+                        start, size, value);
+                fflush(trace);
+                fclose(trace);
+            }
+        }
+    }
+    if (type == UC_MEM_WRITE && g_hangupSceneModeWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_hangupSceneModeWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u8);
+        if (start < watchEnd && end > watchStart)
+        {
+            u32 pc = 0;
+            FILE *trace;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            ++g_hangupSceneModeWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_scene_mode_write "
+                        "generation=%u count=%u pc=%08x last=%08x "
+                        "addr=%08x size=%u value=%llx\n",
+                        g_hangupBattleStateWatchGeneration,
+                        g_hangupSceneModeWatchWriteCount, pc, lastAddress,
+                        start, size, value);
+                fflush(trace);
+                fclose(trace);
+            }
+        }
+    }
+    if (type == UC_MEM_WRITE && g_hangupBusinessDelegateWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_hangupBusinessDelegateWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u32);
+        if (start < watchEnd && end > watchStart)
+        {
+            u32 pc = 0;
+            FILE *trace;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            ++g_hangupBusinessDelegateWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_business_delegate_write "
+                        "generation=%u count=%u pc=%08x last=%08x "
+                        "addr=%08x size=%u value=%llx\n",
+                        g_hangupBattleStateWatchGeneration,
+                        g_hangupBusinessDelegateWatchWriteCount, pc,
+                        lastAddress, start, size, value);
+                fflush(trace);
+                fclose(trace);
+            }
+        }
+    }
+    if (type == UC_MEM_WRITE && g_vmAutomationGameLoadingGateWatchAddress != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_vmAutomationGameLoadingGateWatchAddress;
+        u32 watchEnd = watchStart + sizeof(u8);
+        if (start < watchEnd && end > watchStart)
+        {
+            u32 pc = 0;
+            FILE *trace;
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            ++g_vmAutomationGameLoadingGateWatchWriteCount;
+            trace = fopen("logs/hangup-protocol.log", "ab");
+            if (trace != NULL)
+            {
+                fprintf(trace,
+                        "[info][network] mock_hangup_game_loading_gate_write "
+                        "count=%u pc=%08x last=%08x addr=%08x size=%u value=%llx\n",
+                        g_vmAutomationGameLoadingGateWatchWriteCount, pc,
+                        lastAddress, start, size, value);
+                fflush(trace);
+                fclose(trace);
+            }
         }
     }
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))

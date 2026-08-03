@@ -109,9 +109,12 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address,
                                        uint32_t size, void *user_data)
 {
     u32 currentR9 = 0;
-    (void)address;
     (void)size;
     (void)user_data;
+    /* The generic code hook is primarily a ROM dispatcher; dynamically
+     * loaded CBM code has its own pool hook.  Keep this forensic observation
+     * here so the post-callback BattleScene render transition is not missed. */
+    vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
     uc_reg_read(uc, UC_ARM_REG_R9, &currentR9);
     if (currentR9 >= VM_Memory_Pool_ADDRESS &&
         currentR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
@@ -732,6 +735,106 @@ static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
     return true;
 }
 
+/*
+ * The post-shop hangup investigation needs the guest callback boundary, not
+ * merely the TCP completion.  Recognise only the battle-start object prefix
+ * emitted by the old direct builder (2/10, 2/2, 4/5, 4/11) or the corrected
+ * scene-poll start (2/2, 4/5, 4/11).  This is observation only; transport
+ * scheduling and response bytes remain untouched.
+ */
+static void vm_client_capture_hangup_battle_start_response(
+    const vm_client_completion *completion,
+    vm_net_remote_observation *observation)
+{
+    const u8 *packet;
+    u32 packetLen;
+    u32 offset;
+    u8 objectCount;
+    u8 parsedCount = 0;
+    vm_client_wt_object object;
+    const u8 *expectedKinds = NULL;
+    const u8 *expectedSubtypes = NULL;
+    u8 expectedCount = 0;
+    static const u8 directKinds[4] = {2, 2, 4, 4};
+    static const u8 directSubtypes[4] = {10, 2, 5, 11};
+    static const u8 pollKinds[3] = {2, 4, 4};
+    static const u8 pollSubtypes[3] = {2, 5, 11};
+
+    if (observation == NULL)
+        return;
+    memset(observation, 0, sizeof(*observation));
+    if (completion == NULL || completion->eventType != 7 ||
+        completion->response == NULL || completion->responseLen < 5)
+    {
+        return;
+    }
+    packet = completion->response;
+    packetLen = ((u32)packet[2] << 8) | packet[3];
+    if (packet[0] != 'W' || packet[1] != 'T' ||
+        packetLen != completion->responseLen)
+    {
+        return;
+    }
+    /* Downlink WT keeps an outer object count at byte 4.  Its objects use a
+     * six-byte header: major/kind/subtype/reserved/len-hi/len-lo.  Do not use
+     * the five-byte request-object helper here. */
+    objectCount = packet[4];
+    if (objectCount < 3 || packetLen < 11)
+        return;
+    offset = 5;
+    if (packet[offset] == 1 && packet[offset + 1] == 2 &&
+        packet[offset + 2] == 10)
+    {
+        expectedKinds = directKinds;
+        expectedSubtypes = directSubtypes;
+        expectedCount = 4;
+        observation->hangupBattleStartDirect = 1;
+    }
+    else if (packet[offset] == 1 && packet[offset + 1] == 2 &&
+             packet[offset + 2] == 2)
+    {
+        expectedKinds = pollKinds;
+        expectedSubtypes = pollSubtypes;
+        expectedCount = 3;
+    }
+    else
+    {
+        return;
+    }
+    if (objectCount < expectedCount)
+        return;
+    while (parsedCount < objectCount)
+    {
+        u16 objectLen;
+        if (offset + 6 > packetLen)
+            return;
+        objectLen = (u16)(((u16)packet[offset + 4] << 8) |
+                          packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > packetLen)
+            return;
+        object.major = packet[offset];
+        object.kind = packet[offset + 1];
+        object.subtype = packet[offset + 2];
+        object.payloadLen = (u16)(objectLen - 6);
+        if (parsedCount < expectedCount &&
+            (object.major != 1 || object.kind != expectedKinds[parsedCount] ||
+             object.subtype != expectedSubtypes[parsedCount]))
+        {
+            return;
+        }
+        ++parsedCount;
+        offset += objectLen;
+    }
+    if (parsedCount != objectCount || offset != packetLen)
+        return;
+
+    observation->hasHangupBattleStart = 1;
+    observation->hangupResponseObjectCount = objectCount;
+    observation->hangupResponseParsedCount = parsedCount;
+    observation->hangupResponseSequence = completion->sequence;
+    observation->hangupResponseLength = completion->responseLen;
+}
+
 static void vm_net_mock_async_drain_completions(void)
 {
     static u32 failureLogCount = 0;
@@ -739,6 +842,7 @@ static void vm_net_mock_async_drain_completions(void)
     {
         vm_client_completion *completion;
         vm_net_channel *channel;
+        vm_net_remote_observation remoteObservation;
         u32 generation;
         u32 responsePtr;
         u32 nowMs;
@@ -799,10 +903,37 @@ static void vm_net_mock_async_drain_completions(void)
             g_netMockResponseLen = completion->responseLen;
             g_netMockResponseOffset = 0;
         }
+        vm_client_capture_hangup_battle_start_response(completion,
+                                                       &remoteObservation);
+        /* Scenario automation observes the exact downlink packet before it is
+         * copied to guest RAM.  It never changes bytes, queues, callbacks or
+         * scheduler ordering. */
+        vm_automation_note_network_response(completion->response,
+                                            completion->responseLen,
+                                            completion->eventType,
+                                            completion->sequence);
         g_netDownLinkData += completion->responseLen;
         scheduler_queue_net_event(completion->eventType, responsePtr,
                                   completion->responseLen, completion->responseLen,
                                   channel->callback, channel->context);
+        if (remoteObservation.hasHangupBattleStart)
+        {
+            (void)scheduler_attach_net_remote_observation(
+                completion->eventType, responsePtr, channel->callback,
+                channel->context, &remoteObservation);
+            printf("[info][network] mock_hangup_response_queue seq=%u "
+                   "event=%u response=%u objects=%u parsed=%u connect=%u "
+                   "delivery=normal source=remote-hangup-start\n",
+                   remoteObservation.hangupResponseSequence,
+                   completion->eventType,
+                   remoteObservation.hangupResponseLength,
+                   remoteObservation.hangupResponseObjectCount,
+                   remoteObservation.hangupResponseParsedCount,
+                   completion->connectId);
+            vm_net_append_hangup_protocol_trace(
+                "queue", &remoteObservation, completion->eventType,
+                responsePtr, channel->callback, 0xffff, 0, UC_ERR_OK);
+        }
         nowMs = SDL_GetTicks();
         printf("[info][network] queue_%s connect=%u event=%u resp=%u queue_ms=%u network_ms=%u deliver_ms=%u\n",
                completion->kind == VM_CLIENT_JOB_SCENE_POLL ? "scene_poll" : "data",

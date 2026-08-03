@@ -33,3 +33,5 @@ web/*
 tmp_ida/
 /bin/update*
 multiplayer-data/
+autotest/
+artifacts/

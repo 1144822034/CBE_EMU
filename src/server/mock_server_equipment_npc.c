@@ -1793,6 +1793,7 @@ typedef struct vm_mock_service_account_state
     u8 mockBattleOperateSessionArmed;
     u8 mockBattleAutoEnabled;
     u32 mockBattleAutoNextActionTick;
+    u32 mockBattleTerminalCloseNotBeforeTick;
     u8 mockBattleOperateSessionFinished;
     u8 mockBattlePendingEnemyTurn;
     u8 mockBattleAwaitingSettlement;
@@ -2148,6 +2149,12 @@ typedef struct vm_mock_service_client_session
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
     char instanceChallengeScene[64];
+    /* Scene hangup is an online-session control, not durable role data. */
+    bool sceneHangupEnabled;
+    bool sceneHangupRestartPending;
+    u32 sceneHangupBattleSessionSerial;
+    u32 sceneHangupRestartNotBeforeTick;
+    char sceneHangupScene[64];
     /* The native action=4 task path carries only task_id after the NPC dialog.
      * Retain the server-observed offer source so a completed task cannot be
      * reaccepted by forging the later 6/11 request. */
@@ -2283,6 +2290,8 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleAutoEnabled = g_vm_net_mock_battle_auto_enabled;
     state->mockBattleAutoNextActionTick =
         g_vm_net_mock_battle_auto_next_action_tick;
+    state->mockBattleTerminalCloseNotBeforeTick =
+        g_vm_net_mock_battle_terminal_close_not_before_tick;
     state->mockBattleOperateSessionFinished = g_mockBattleOperateSessionFinished;
     state->mockBattlePendingEnemyTurn = g_mockBattlePendingEnemyTurn;
     state->mockBattleAwaitingSettlement = g_mockBattleAwaitingSettlement;
@@ -2392,6 +2401,8 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_battle_auto_enabled = state->mockBattleAutoEnabled;
     g_vm_net_mock_battle_auto_next_action_tick =
         state->mockBattleAutoNextActionTick;
+    g_vm_net_mock_battle_terminal_close_not_before_tick =
+        state->mockBattleTerminalCloseNotBeforeTick;
     g_mockBattleOperateSessionFinished = state->mockBattleOperateSessionFinished;
     g_mockBattlePendingEnemyTurn = state->mockBattlePendingEnemyTurn;
     g_mockBattleAwaitingSettlement = state->mockBattleAwaitingSettlement;
@@ -3839,6 +3850,10 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
     }
 }
 
+static void vm_mock_service_session_clear_scene_hangup(
+    vm_mock_service_client_session *session,
+    const char *reason);
+
 static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_session *session,
                                                        const vm_net_mock_scene_change_target *target,
                                                        const char *reason)
@@ -3849,6 +3864,12 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     if (session == NULL)
         return;
     scene = (target != NULL && vm_net_mock_scene_name_is_safe(target->scene)) ? target->scene : NULL;
+    if (session->sceneHangupEnabled || session->sceneHangupRestartPending)
+    {
+        /* A continuation is only valid against the live nodes of its armed
+         * scene.  A transfer must not carry it into a different scene. */
+        vm_mock_service_session_clear_scene_hangup(session, "scene-pending");
+    }
     changed = !session->sceneVisiblePending ||
               !session->sceneVisibleReady ||
               ((scene != NULL || session->scenePendingScene[0] != 0) &&
@@ -3972,6 +3993,30 @@ static void vm_mock_service_session_update_move_position(vm_mock_service_client_
     session->sceneVisibleTick = g_schedulerTick;
 }
 
+static void vm_mock_service_session_clear_scene_hangup(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    if (session == NULL ||
+        (!session->sceneHangupEnabled && !session->sceneHangupRestartPending))
+    {
+        return;
+    }
+    printf("[info][mock-service] scene_hangup_stop client=%08x role=%u scene=%s "
+           "battle=%u restart_pending=%u reason=%s\n",
+           session->clientId,
+           session->onlineRoleId,
+           session->sceneHangupScene[0] ? session->sceneHangupScene : "-",
+           session->sceneHangupBattleSessionSerial,
+           session->sceneHangupRestartPending ? 1u : 0u,
+           reason ? reason : "-");
+    session->sceneHangupEnabled = false;
+    session->sceneHangupRestartPending = false;
+    session->sceneHangupBattleSessionSerial = 0;
+    session->sceneHangupRestartNotBeforeTick = 0;
+    session->sceneHangupScene[0] = 0;
+}
+
 static void vm_mock_service_session_mark_offline(vm_mock_service_client_session *session,
                                                  const char *reason)
 {
@@ -3979,6 +4024,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
 
     if (session == NULL)
         return;
+    vm_mock_service_session_clear_scene_hangup(session,
+                                               reason ? reason : "offline");
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
     /* Notify the remaining clients before clearing the departing session's
      * cached role identity; subtype 5/7 needs that id to remove its HUD row. */

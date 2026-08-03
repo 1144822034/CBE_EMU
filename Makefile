@@ -28,6 +28,7 @@ CLIENT_SOURCES := \
 	src/vmMalloc.c \
 	src/fileIoEngine.c \
 	src/lcd.c \
+	src/automation_png.c \
 	src/md5.c \
 	src/main.c
 
