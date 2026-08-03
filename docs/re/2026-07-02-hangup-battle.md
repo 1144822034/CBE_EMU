@@ -199,8 +199,8 @@ Manual regression required:
 ```text
 scene_hangup_start ... source=request
 mock_hangup_battle_start source=request ... response=2/10+2/2+4/5+4/11
-... 最后一份 4/6 / 4/7 / 4/11+4/9 ...
-scene_hangup_round_complete ... evidence=4/9->25/5->poll
+... 最后一份 4/6 / 4/7(fdata=掉落摘要，若有) ...
+... 用户确认奖励面板后，scene_hangup_round_complete ... evidence=4/7-panel->25/5->poll
 scene_hangup_start ... source=scene-poll
 mock_hangup_battle_start source=scene-poll ... response=2/2+4/5+4/11
 ```
@@ -217,12 +217,14 @@ mock_hangup_battle_start source=scene-poll ... response=2/2+4/5+4/11
 内联 `4/7` 结算：`0x7BD0` 的 case 11 会先清掉 case 9 进入自动终局所需的
 `battle+1140` 标记，客户端便停在结果页，只有用户点击后才会发送空 `25/5`。
 
-当前仅当请求所属角色、battle serial 与 `sceneHangup*` 会话严格一致时，最终
-`4/6 -> 4/7 [-> 7/7]` 保持在同一响应；`4/9 { result=1 }` 则留到最终动作队列跨过
-客户端播放边界后的下一次 scene poll。这样既保留开始时的自动标记使客户端走
-`0x7BD0 -> 0x5444` 的原生关闭路径，也不会在 type-3 最终死亡回调前切换终局阶段。
-无奖励终局不生成 `4/7`，但同样只在该边界后发送 `4/9`。普通战斗、切磋、队伍与复活的
-终局对象不因此改变。
+2026-08-03 的隔离复现已推翻 `4/9 { result=1 }` 作为自动关闭的解释；后续真实客户端
+又证明 `4/8 { result=1, autorevive=1 }` 是复活消息，会弹出空白信息框。当前仅当请求
+所属角色、battle serial 与 `sceneHangup*` 会话严格一致时，最终
+`4/6 -> 4/7 [-> 7/7]` 保持在同一响应；经验、金钱由 `4/7` 的数值字段结算，
+`4/7.fdata` 仅在有物品掉落时提供名称与数量。用户确认结果面板后，客户端才原生发送
+`25/5`。普通战斗、切磋、队伍与复活的终局对象不因此改变。
+完整根因与验证见
+[`2026-08-03-scene-hangup-terminal-close.md`](2026-08-03-scene-hangup-terminal-close.md)。
 
 同一次排查还确认挂机 builder 曾将 `battleEnemyCount` 硬编码为 `1`；它现在复用普通
 场景怪物战斗已验证的 `vm_net_mock_battle_roll_enemy_count(true)`，默认生成 1–3 名

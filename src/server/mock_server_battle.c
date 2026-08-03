@@ -3,9 +3,7 @@ static bool vm_net_mock_append_battle_terminal_status_objects(
     bool forceTeamVictory, bool *statusAppendedOut);
 static bool vm_net_mock_append_battle_terminal_case9_object(
     u8 *out, u32 outCap, u32 *pos);
-static bool vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-    u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
-    const char *phase, bool *appendedOut);
+static bool vm_net_mock_scene_hangup_result_panel_active(void);
 static void vm_net_mock_battle_auto_reset(void);
 static void vm_net_mock_battle_auto_arm(void);
 static bool vm_net_mock_battle_terminal_close_should_defer(bool battleEndsThisRound);
@@ -1609,13 +1607,6 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                                                                    "battle-item-use-inline",
                                                                    true))
                 return 0;
-            if (terminalStatusAppended &&
-                !vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-                    out, outCap, &pos, &objectCount,
-                    "battle-item-use-inline", NULL))
-            {
-                return 0;
-            }
         }
     }
     if (includeBackpackSync)
@@ -2020,7 +2011,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (terminalFollowup)
     {
         u8 terminalObjectCount = 0;
-        bool sceneHangupCloseAppended = false;
+        bool sceneHangupRewardPanelActive = false;
         if (!vm_net_mock_append_battle_terminal_status_objects(
                 out, outCap, &pos, &terminalObjectCount, false,
                 &terminalStatusAppended))
@@ -2031,17 +2022,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                "battle-operate-terminal",
                                                                true))
             return 0;
-        if (terminalStatusAppended)
-        {
-            if (!vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos))
-                return 0;
-            ++terminalObjectCount;
-        }
-        if (!vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-                out, outCap, &pos, &terminalObjectCount,
-                "battle-operate-terminal", &sceneHangupCloseAppended))
-            return 0;
-        if (!sceneHangupCloseAppended)
+        sceneHangupRewardPanelActive = terminalStatusAppended &&
+                                       vm_net_mock_scene_hangup_result_panel_active();
+        if (!sceneHangupRewardPanelActive)
         {
             if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
                 !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
@@ -2255,13 +2238,6 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                "battle-operate-inline",
                                                                true))
             return 0;
-        if (terminalStatusAppended && !terminalCloseDeferred &&
-            !vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-                out, outCap, &pos, &responseObjectCount,
-                "battle-operate-inline", NULL))
-        {
-            return 0;
-        }
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -2665,7 +2641,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     {
         u8 terminalObjectCount = 0;
         bool terminalStatusAppended = false;
-        bool sceneHangupCloseAppended = false;
+        bool sceneHangupRewardPanelActive = false;
         if (!vm_net_mock_append_battle_terminal_status_objects(
                 out, outCap, &pos, &terminalObjectCount, false,
                 &terminalStatusAppended))
@@ -2676,17 +2652,9 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                "battle-operate-fallback-terminal",
                                                                true))
             return 0;
-        if (terminalStatusAppended)
-        {
-            if (!vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, &pos))
-                return 0;
-            ++terminalObjectCount;
-        }
-        if (!vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-                out, outCap, &pos, &terminalObjectCount,
-                "battle-operate-fallback-terminal", &sceneHangupCloseAppended))
-            return 0;
-        if (!sceneHangupCloseAppended)
+        sceneHangupRewardPanelActive = terminalStatusAppended &&
+                                       vm_net_mock_scene_hangup_result_panel_active();
+        if (!sceneHangupRewardPanelActive)
         {
             if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
                 !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
@@ -2892,13 +2860,6 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                "battle-operate-fallback-inline",
                                                                true))
             return 0;
-        if (terminalStatusAppended && !terminalCloseDeferred &&
-            !vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-                out, outCap, &pos, &responseObjectCount,
-                "battle-operate-fallback-inline", NULL))
-        {
-            return 0;
-        }
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -4153,7 +4114,7 @@ static void vm_net_mock_battle_schedule_terminal_close_after_actions(
         g_schedulerTick + delayTicks;
     printf("[info][network] mock_battle_terminal_close_deferred session=%u "
            "actionnum=%u delay_ticks=%u not_before_tick=%u source=%s "
-           "response=4/6+4/7-then-poll-close\n",
+           "response=4/6+4/7-then-terminal-boundary\n",
            g_mockBattleOperateSessionSerial,
            actionCount,
            delayTicks,
@@ -4172,7 +4133,7 @@ static bool vm_net_mock_battle_pending_settlement_is_deliverable(
     }
     /* A reward settlement is emitted together with the terminal 4/6.  The
      * no-reward branch has no parser-supported 4/7 panel, but it follows the
-     * same action-completion boundary before its 4/9 close. */
+     * same action-completion boundary before its session-specific close. */
     if (g_vm_net_mock_battle_settlement_sent_serial !=
             g_mockBattleOperateSessionSerial &&
         g_vm_net_mock_battle_no_reward_terminal_serial !=
@@ -4297,6 +4258,10 @@ static bool vm_net_mock_append_battle_status7_object(
     statusPercentExp = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_PERCENT_EXP",
                                                   statusPercentExp);
     statusLevel = vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_LEVEL", statusLevel);
+    /* 4/7 carries EXP and money in its numeric fields.  fdata is the
+     * optional textual result row rendered by mmBattle at 0x7B08/0x4462;
+     * keep that row exclusively for a safe, display-only drop summary.  The
+     * regular iteminfo path cannot describe ordinary consumables safely. */
     dropInfo[0] = 0;
     if (dropGranted && role != NULL)
     {
@@ -4388,9 +4353,9 @@ static bool vm_net_mock_append_battle_status7_object(
      * enters an equipment/detail registration helper and crashes with ordinary
      * consumable rows; reward-type 2 parses without crashing but only reserves
      * an empty item row in the current client. fdata is a normal settlement
-     * text field rendered by mmBattle at 0x7B08/0x4462, so use it for the
-     * visible drop line while the durable item is already persisted in the
-     * role backpack.
+     * text field rendered by mmBattle at 0x7B08/0x4462, so use it only for
+     * the visible dropped-item line while the durable item is already
+     * persisted in the role backpack.
      */
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0))
         return false;
@@ -4554,11 +4519,6 @@ static bool vm_net_mock_append_battle_escape4_object(u8 *out, u32 outCap, u32 *p
     return true;
 }
 
-static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos)
-{
-    return vm_net_mock_append_battle_escape4_object(out, outCap, pos, 1);
-}
-
 static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
@@ -4577,16 +4537,13 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
 }
 
 /*
- * A scene-hangup victory is the one terminal path where the client already
- * has its native automatic-action flag set by the 4/11 sent at battle start.
- * HandleServerBattleCmd(0x7BD0) consumes 4/9(result=1) only while that flag is
- * still set, then advances its native terminal phase.  Sending 4/11(type=0)
- * first clears the required flag and leaves the 4/7 result panel waiting for
- * a manual close.  Keep the close command scoped to the matching live hangup
- * session; ordinary battles, duels, and revival retain their existing close
+ * A rewarded scene-hangup victory owns a visible 4/7 result panel.  The
+ * client closes that panel through its normal input path and then sends 25/5;
+ * this predicate is deliberately scoped to the matching live hangup session
+ * so ordinary battles and the separate revival path retain their own terminal
  * contracts.
  */
-static bool vm_net_mock_scene_hangup_terminal_close_active(void)
+static bool vm_net_mock_scene_hangup_result_panel_active(void)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
@@ -4598,36 +4555,6 @@ static bool vm_net_mock_scene_hangup_terminal_close_active(void)
                g_mockBattleOperateSessionSerial &&
            session->onlineRoleId != 0 &&
            session->onlineRoleId == g_vm_net_mock_battle_role_id_current;
-}
-
-static bool vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-    u8 *out,
-    u32 outCap,
-    u32 *pos,
-    u8 *objectCount,
-    const char *phase,
-    bool *appendedOut)
-{
-    if (appendedOut)
-        *appendedOut = false;
-    if (!vm_net_mock_scene_hangup_terminal_close_active())
-        return true;
-    if (objectCount == NULL ||
-        !vm_net_mock_append_battle_terminal_case9_object(out, outCap, pos))
-    {
-        return false;
-    }
-
-    ++*objectCount;
-    if (appendedOut)
-        *appendedOut = true;
-    printf("[info][mock-service] scene_hangup_terminal_close client=%08x role=%u "
-           "battle=%u phase=%s response=4/9 action=native-auto-close\n",
-           vm_mock_service_get_active_client_session()->clientId,
-           g_vm_net_mock_battle_role_id_current,
-           g_mockBattleOperateSessionSerial,
-           phase ? phase : "-");
-    return true;
 }
 
 /*
@@ -5086,7 +5013,6 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     u32 pos = 5;
     u8 objectCount = 0;
     bool terminalStatusAppended = false;
-    bool sceneHangupCloseAppended = false;
     bool terminalStatusAlreadyInline =
         g_vm_net_mock_battle_settlement_sent_serial ==
         g_mockBattleOperateSessionSerial;
@@ -5097,15 +5023,16 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     bool noRewardTerminal =
         g_vm_net_mock_battle_no_reward_terminal_serial ==
         g_mockBattleOperateSessionSerial;
+    bool sceneHangupRewardPanelActive =
+        !noRewardTerminal && vm_net_mock_scene_hangup_result_panel_active();
 
     if (outCap < pos)
         return 0;
     /* HandleBattleActionMsg(0x6EB0) has already received the final action,
-     * and the winning 4/7 must have been parsed in that same response.  This
-     * follow-up owns only the close command; rebuilding 4/7 here would both
-     * duplicate the reward panel and arrive after the type-3 death callback.
-     * Keep the older pending-settlement path only for non-inline experiment
-     * responses. */
+     * and the winning 4/7 must have been parsed in that same response.
+     * Rebuilding it here would duplicate the reward panel and arrive after the
+     * type-3 death callback. Keep the older pending-settlement path only for
+     * non-inline experiment responses. */
     if (!noRewardTerminal && !terminalStatusAlreadyInline)
     {
         if (!vm_net_mock_append_battle_terminal_status_objects(
@@ -5123,11 +5050,38 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
                                                            "battle-pending-settlement",
                                                            false))
         return 0;
-    if (!vm_net_mock_append_scene_hangup_terminal_close_if_needed(
-            out, outCap, &pos, &objectCount,
-            "battle-pending-settlement", &sceneHangupCloseAppended))
-        return 0;
-    if (!sceneHangupCloseAppended)
+    if (sceneHangupRewardPanelActive)
+    {
+        /*
+         * 4/7 is the winning result panel.  Do not overwrite it with 4/8:
+         * that packet's autorevive/info fields belong to the revival flow and
+         * produced an empty information dialog after a normal victory.  A
+         * previously-inline 4/7 therefore needs no response here; when 4/7
+         * was built by this fallback path, return only that result object.
+         * The native panel dismissal sends 25/5, which is the established
+         * lifecycle boundary for scheduling the next scene-hangup battle.
+         */
+        /* The delay marker protected the final 4/6 action playback before
+         * this poll.  Once that boundary has elapsed, it must not keep
+         * claiming later scene polls: the separate sceneHangupRestartPending
+         * flag is set only by the native 25/5 confirmation and remains the
+         * sole authority for the next 4/5.
+         */
+        if (closeDeferred)
+        {
+            g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
+            printf("[info][mock-service] scene_hangup_reward_panel_wait "
+                   "battle=%u action_boundary=%u next_start=native-25/5\n",
+                   g_mockBattleOperateSessionSerial, closeNotBeforeTick);
+        }
+        if (objectCount == 0)
+            return 0;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        printf("[info][mock-service] scene_hangup_reward_panel_deliver "
+               "battle=%u objects=%u response=4/7-await-native-25/5\n",
+               g_mockBattleOperateSessionSerial, objectCount);
+        return pos;
+    }
     {
         if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
             !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
@@ -5152,8 +5106,7 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     vm_autotest_note("mock_battle_pending_settlement serial=%u objects=%u response=%s evidence=mmBattle:0x7BD0/0x743C mmGame:0x0D04\n",
                      g_mockBattleOperateSessionSerial,
                      objectCount,
-                     sceneHangupCloseAppended ? "4/9"
-                                               : "4/11+4/9");
+                     "4/11+4/9");
     return pos;
 }
 
@@ -5589,7 +5542,7 @@ static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u3
                g_mockBattleOperateTurnCounter,
                g_mockBattleOperateSessionArmed,
                g_mockBattleAwaitingSettlement,
-               vm_net_mock_scene_hangup_terminal_close_active() ? 1u : 0u);
+               vm_net_mock_scene_hangup_result_panel_active() ? 1u : 0u);
     }
     if (outCap < pos ||
         !vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos,
@@ -6258,9 +6211,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     return pos;
 }
 
-/* The client sends its empty scene-default 25/5 only after the terminal
- * battle animation and screen removal have completed.  It is the first point
- * where a new 4/5 can be delivered safely. */
+/* The client sends its empty scene-default 25/5 only after dismissing the
+ * native rewarded-result panel and removing the battle screen.  It is the
+ * first point where a new 4/5 can be delivered safely. */
 static void vm_net_mock_scene_hangup_on_scene_default_event(void)
 {
     vm_mock_service_client_session *session =
@@ -6307,7 +6260,7 @@ static void vm_net_mock_scene_hangup_on_scene_default_event(void)
     session->sceneHangupRestartNotBeforeTick =
         g_schedulerTick + VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_TICKS;
     printf("[info][mock-service] scene_hangup_round_complete client=%08x "
-           "role=%u scene=%s battle=%u next_tick=%u evidence=4/9->25/5->poll\n",
+           "role=%u scene=%s battle=%u next_tick=%u evidence=4/7-panel->25/5->poll\n",
            session->clientId,
            session->onlineRoleId,
            session->sceneHangupScene,
@@ -6353,7 +6306,7 @@ static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
         return 0;
     }
 
-    /* The previous battle has completed its native 4/9 -> 25/5 close and the
+    /* The previous battle's native reward panel has been dismissed and the
      * client is now safely back in scene.  This is the correct lifecycle
      * boundary for the persisted reward window: delaying a battle start here
      * emits no battle object and cannot leave an automatic 4/11 phase waiting

@@ -22,6 +22,12 @@ extern u32 g_hangupBusinessDelegateWatchAddress;
 extern u32 g_hangupBusinessDelegateWatchWriteCount;
 extern u32 g_vmAutomationGameLoadingGateWatchAddress;
 extern u32 g_vmAutomationGameLoadingGateWatchWriteCount;
+extern u32 g_vmAutomationBattleAutoFlagWatchAddress;
+extern u32 g_vmAutomationBattleOverlayWatchAddress;
+extern u32 g_vmAutomationBattlePhaseWatchAddress;
+extern u32 g_vmAutomationBattleAutoFlagWatchWriteCount;
+extern u32 g_vmAutomationBattleOverlayWatchWriteCount;
+extern u32 g_vmAutomationBattlePhaseWatchWriteCount;
 
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
@@ -30,6 +36,43 @@ extern GDBClient clients[1];
 extern void send_gdb_response(GDBClient *client, const char *response);
 extern int check_watchpoints(unsigned int addr, unsigned int size, int type);
 #endif
+
+/* Isolated auto-battle regressions need the client-owned terminal predicate
+ * (`game+1140 || game+1136`) and its phase write sequence.  These watches are
+ * armed only by the dedicated automation scenarios after native battle start;
+ * they are observational and do not alter emulated memory or scheduling. */
+static void vm_automation_trace_battle_watch_write(uc_engine *uc,
+                                                   uint64_t address,
+                                                   uint32_t size,
+                                                   int64_t value,
+                                                   const char *field,
+                                                   u32 watchAddress,
+                                                   u32 watchSize,
+                                                   u32 *writeCount)
+{
+    u32 start = (u32)address;
+    u32 end = start + size;
+    u32 pc = 0;
+    FILE *trace;
+
+    if (watchAddress == 0 || writeCount == NULL ||
+        start >= watchAddress + watchSize || end <= watchAddress)
+    {
+        return;
+    }
+    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+    ++*writeCount;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] automation_hangup_battle_watch_write "
+            "field=%s count=%u pc=%08x last=%08x addr=%08x size=%u value=%llx\n",
+            field ? field : "-", *writeCount, pc, lastAddress,
+            start, size, value);
+    fflush(trace);
+    fclose(trace);
+}
 
 void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
@@ -187,6 +230,21 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                 fclose(trace);
             }
         }
+    }
+    if (type == UC_MEM_WRITE)
+    {
+        vm_automation_trace_battle_watch_write(
+            uc, address, size, value, "auto-flag",
+            g_vmAutomationBattleAutoFlagWatchAddress, sizeof(u8),
+            &g_vmAutomationBattleAutoFlagWatchWriteCount);
+        vm_automation_trace_battle_watch_write(
+            uc, address, size, value, "overlay",
+            g_vmAutomationBattleOverlayWatchAddress, sizeof(u8),
+            &g_vmAutomationBattleOverlayWatchWriteCount);
+        vm_automation_trace_battle_watch_write(
+            uc, address, size, value, "phase",
+            g_vmAutomationBattlePhaseWatchAddress, sizeof(u16),
+            &g_vmAutomationBattlePhaseWatchWriteCount);
     }
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
