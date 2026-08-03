@@ -27,6 +27,28 @@
 #include "../mysql-client.h"
 #include "../md5.h"
 
+/* #region agent log */
+#ifndef AGENT_DBG191169_LOG_DEFINED
+#define AGENT_DBG191169_LOG_DEFINED
+static void agent_dbg191169_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson)
+{
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"0b451a\",\"runId\":\"fb-hud-timer\","
+            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+            "\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId ? hypothesisId : "",
+            location ? location : "",
+            message ? message : "",
+            dataJson ? dataJson : "{}",
+            (long long)time(NULL) * 1000LL);
+    fclose(fp);
+}
+#endif
+/* #endregion */
 
 typedef struct
 {

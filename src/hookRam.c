@@ -16,6 +16,8 @@ extern u32 g_vmInputWatchUserBufLen;
 extern u32 g_vmInputWatchCallback;
 extern u32 g_vmInputWatchCallR9;
 extern u32 g_vmInputWatchWriteCount;
+extern u32 g_agent_timer_obj;
+void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc);
 
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
@@ -45,6 +47,20 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    /* #region agent log */
+    if (type == UC_MEM_WRITE)
+    {
+        u32 pc = 0;
+        u32 v = (u32)value;
+        /* Catch remain field writes and known 485-minute encodings. */
+        if (v == 29285u || v == 29100u || v == 485u ||
+            (g_agent_timer_obj != 0 && (u32)address == g_agent_timer_obj + 0x10u))
+        {
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            agent_dbg0b451a_on_timer_remain_write((u32)address, size, v, pc);
+        }
+    }
+    /* #endregion */
     if (type == UC_MEM_WRITE && g_vmInputWatchUserBufLen != 0)
     {
         u32 start = (u32)address;

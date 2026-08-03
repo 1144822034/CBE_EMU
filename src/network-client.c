@@ -248,6 +248,10 @@ static u32 vm_net_mock_apply_remote_observation(
                g_vm_scene_allow_one_map_stone_completion_reenter ? 1u : 0u,
                g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
                observation->sceneSubtype);
+        /* #region agent log */
+        if (target.scene[0] == '2' && target.scene[1] == '9')
+            agent_dbg0b451a_on_dream_sce(target.scene);
+        /* #endregion */
     }
 
     if (observation->sceneCompleteAfterCallback &&

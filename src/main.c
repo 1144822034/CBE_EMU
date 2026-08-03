@@ -321,6 +321,12 @@ static u32 g_lastSceLoadCtx = 0;
 static u32 g_lastSceLoadNamePtr = 0;
 static char g_lastSceLoadName[96] = "-";
 
+/* Forward decls: dream HUD forensics (defs later; used from early sites). */
+static void agent_dbg0b451a_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson);
+static void agent_dbg0b451a_on_dream_sce(const char *name);
+static void agent_dbg0b451a_poll_timer_remain(const char *reason);
+
 #define VM_SCREEN_EXIT_DESTROY 0
 #define VM_SCREEN_EXIT_PAUSE 1
 #define VM_SCREEN_EXIT_SKIP 2
@@ -3158,7 +3164,25 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
             {
                 snprintf(g_vm_dream_scene_hint, sizeof(g_vm_dream_scene_hint),
                          "%s", leaf);
+                /* #region agent log */
+                agent_dbg0b451a_on_dream_sce(leaf);
+                /* #endregion */
             }
+            /* #region agent log */
+            if (leaf != NULL &&
+                (strstr(leaf, "time_number") != NULL ||
+                 strstr(leaf, "ui_timer") != NULL ||
+                 strstr(leaf, "addtime") != NULL ||
+                 ((leaf[0] >= '0' && leaf[0] <= '9') &&
+                  strcmp(leaf + 1, ".gif") == 0)))
+            {
+                char dataBuf[160];
+                snprintf(dataBuf, sizeof(dataBuf), "{\"file\":\"%.80s\"}", leaf);
+                agent_dbg0b451a_log("H9", "main.c:res", "timer_asset_uptodate",
+                                    dataBuf);
+                printf("[info][hud-timer] timer_asset_uptodate file=%s\n", leaf);
+            }
+            /* #endregion */
 #endif
             if (ok && localVersion != 0 && strlen(leaf) < sizeof(g_namedResourceUptodateMemo[0].leaf))
             {
@@ -3447,6 +3471,10 @@ static bool vm_host_intercept_dream_completion_enter_scene(u32 pc)
                "evidence=primary-30-1-EnterScene-must-run\n",
                g_vm_net_mock_last_scene_change_target_serial,
                activeTarget->scene, g_currentScreenThis);
+        /* #region agent log */
+        /* Hot DF 0x0518* never hits cold dream_resumable_shell_remember. */
+        agent_dbg0b451a_on_dream_sce(activeTarget->scene);
+        /* #endregion */
         return false;
     }
 
@@ -3768,10 +3796,929 @@ static int vm_lcd_measure_current_string_render_width(const u8 *gbkText)
     return mesureStringRenderWidthWithGbkWidth((char *)gbkText, vm_lcd_current_gbk_width());
 }
 
+/* #region agent log */
+/*
+ * Emulator-side HUD countdown forensics (IDA unavailable): catch HH:MM draw /
+ * sprintf, then scan Global_R9 neighborhood for matching remaining minutes.
+ * Read-only; does not mutate guest state.
+ */
+static void agent_dbg0b451a_log(const char *hypothesisId, const char *location,
+                                const char *message, const char *dataJson)
+{
+    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp,
+            "{\"sessionId\":\"0b451a\",\"runId\":\"emu-hud-timer\","
+            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+            "\"data\":%s,\"timestamp\":%lld}\n",
+            hypothesisId ? hypothesisId : "",
+            location ? location : "",
+            message ? message : "",
+            dataJson ? dataJson : "{}",
+            (long long)time(NULL) * 1000LL);
+    fclose(fp);
+}
+
+static int agent_dbg0b451a_parse_hhmm(const char *text, u32 *minutesOut)
+{
+    int h = -1;
+    int m = -1;
+    char c = 0;
+    const char *p = NULL;
+    if (text == NULL || minutesOut == NULL)
+        return 0;
+    /* Exact or embedded "H:MM" / "HH:MM". */
+    if (sscanf(text, "%d:%d%c", &h, &m, &c) >= 2 && h >= 0 && h <= 99 &&
+        m >= 0 && m <= 59 && (c == 0 || c == ' ' || c == ')'))
+    {
+        *minutesOut = (u32)h * 60u + (u32)m;
+        return 1;
+    }
+    p = strchr(text, ':');
+    if (p != NULL && p > text && sscanf(p - 1, "%d:%d", &h, &m) == 2 &&
+        h >= 0 && h <= 99 && m >= 0 && m <= 59)
+    {
+        *minutesOut = (u32)h * 60u + (u32)m;
+        return 1;
+    }
+    /* GBK fullwidth colon A3 BA between digits: d A3 BA d d */
+    {
+        const u8 *b = (const u8 *)text;
+        u32 i = 0;
+        for (i = 0; b[i] != 0 && b[i + 1] != 0 && b[i + 2] != 0 && b[i + 3] != 0;
+             ++i)
+        {
+            if (b[i] >= '0' && b[i] <= '9' && b[i + 1] == 0xA3 &&
+                b[i + 2] == 0xBA && b[i + 3] >= '0' && b[i + 3] <= '9')
+            {
+                h = b[i] - '0';
+                if (i > 0 && b[i - 1] >= '0' && b[i - 1] <= '9')
+                {
+                    h = (b[i - 1] - '0') * 10 + h;
+                }
+                m = b[i + 3] - '0';
+                if (b[i + 4] >= '0' && b[i + 4] <= '9')
+                    m = m * 10 + (b[i + 4] - '0');
+                if (h <= 99 && m <= 59)
+                {
+                    *minutesOut = (u32)h * 60u + (u32)m;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static u8 g_agent_dream_hud_watch = 0;
+/* Non-static: hookRam.c watches writes to obj+0x10. */
+u32 g_agent_timer_obj = 0;
+static u32 g_agent_timer_last_poll_ms = 0;
+static u32 g_agent_timer_last_remain = 0xffffffffu;
+static u8 g_agent_timer_remain_poke_done = 0;
+
+/* Forensic one-shot: force remain=60 (HUD MM:SS 01:00).
+ * Server treats the same contract as **60 wall minutes** (tick ~1/min). */
+static void agent_dbg0b451a_poke_remain_1m00(void)
+{
+    u32 oldRemain = 0;
+    u32 newRemain = 60u; /* 0h 1m 0s → MM:SS=01:00, HH:MM=00:01, HH:SS=00:00 */
+    char dataBuf[240];
+
+    if (g_agent_timer_remain_poke_done || !g_agent_dream_hud_watch ||
+        g_agent_timer_obj == 0)
+        return;
+    oldRemain = vm_get_var(g_agent_timer_obj + 0x10u);
+    if (oldRemain < 60u || oldRemain > 86400u)
+        return;
+    vm_set_var(g_agent_timer_obj + 0x10u, newRemain);
+    g_agent_timer_remain_poke_done = 1;
+    g_agent_timer_last_remain = newRemain;
+    snprintf(dataBuf, sizeof(dataBuf),
+             "{\"obj\":\"%08x\",\"old\":%u,\"new\":%u,"
+             "\"expect_mmss\":\"01:00\",\"expect_hhmm\":\"00:01\","
+             "\"expect_hhss\":\"00:00\"}",
+             g_agent_timer_obj, oldRemain, newRemain);
+    agent_dbg0b451a_log("H20", "main.c:poke", "timer_remain_poke_1m00", dataBuf);
+    printf("[info][hud-timer] POKE remain %u -> %u (expect MM:SS=01:00 "
+           "HH:MM=00:01 HH:SS=00:00)\n",
+           oldRemain, newRemain);
+}
+
+void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc)
+{
+    static u32 s_wrLogs = 0;
+    char dataBuf[280];
+    if (g_agent_timer_obj == 0 || addr != g_agent_timer_obj + 0x10u)
+        return;
+    if (s_wrLogs >= 32u)
+        return;
+    snprintf(dataBuf, sizeof(dataBuf),
+             "{\"addr\":\"%08x\",\"size\":%u,\"value\":%u,\"hhmmss\":\"%u:%02u:%02u\","
+             "\"pc\":\"%08x\",\"wall\":%u}",
+             addr, size, value, value / 3600u, (value % 3600u) / 60u, value % 60u, pc,
+             SDL_GetTicks());
+    agent_dbg0b451a_log("H18", "main.c:mem", "timer_remain_write", dataBuf);
+    printf("[info][hud-timer] timer_remain_write value=%u (%u:%02u:%02u) pc=%08x\n",
+           value, value / 3600u, (value % 3600u) / 60u, value % 60u, pc);
+    ++s_wrLogs;
+}
+
+static void agent_dbg0b451a_poll_timer_remain(const char *reason)
+{
+    u32 nowWall = 0;
+    u32 remain = 0;
+    u32 lastTick = 0;
+    u32 blinkLast = 0;
+    u8 blink = 0;
+    u16 d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+    static u8 s_lastBlink = 0xffu;
+    static u32 s_blinkChangeLogs = 0;
+    char dataBuf[360];
+
+    if (!g_agent_dream_hud_watch || g_agent_timer_obj == 0)
+        return;
+    nowWall = SDL_GetTicks();
+    remain = vm_get_var(g_agent_timer_obj + 0x10u);
+    lastTick = vm_get_var(g_agent_timer_obj + 0xcu);
+    blinkLast = vm_get_var(g_agent_timer_obj + 0x14u);
+    blink = 0;
+    uc_mem_read(MTK, g_agent_timer_obj + 0x18u, &blink, 1);
+    /* Log immediately when colon blink flag toggles (expect ~1Hz). */
+    if (blink != s_lastBlink && s_blinkChangeLogs < 20u)
+    {
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"obj\":\"%08x\",\"blink\":%u,\"prev\":%u,\"blinkLast\":%u,"
+                 "\"remain\":%u,\"wall\":%u}",
+                 g_agent_timer_obj, (unsigned)blink, (unsigned)s_lastBlink,
+                 blinkLast, remain, nowWall);
+        agent_dbg0b451a_log("H19", "main.c:poll", "timer_colon_blink", dataBuf);
+        printf("[info][hud-timer] timer_colon_blink %u->%u remain=%u wall=%u\n",
+               (unsigned)s_lastBlink, (unsigned)blink, remain, nowWall);
+        s_lastBlink = blink;
+        ++s_blinkChangeLogs;
+    }
+    if (g_agent_timer_last_poll_ms != 0 &&
+        (nowWall - g_agent_timer_last_poll_ms) < 1000u)
+        return;
+    g_agent_timer_last_poll_ms = nowWall;
+    d0 = vm_get_var_short(g_agent_timer_obj);
+    d1 = vm_get_var_short(g_agent_timer_obj + 2u);
+    d2 = vm_get_var_short(g_agent_timer_obj + 4u);
+    d3 = vm_get_var_short(g_agent_timer_obj + 6u);
+    snprintf(dataBuf, sizeof(dataBuf),
+             "{\"obj\":\"%08x\",\"remain\":%u,\"lastTick\":%u,\"blink\":%u,"
+             "\"blinkLast\":%u,\"wall\":%u,\"hhmmss\":\"%u:%02u:%02u\","
+             "\"dig\":\"%u%u:%u%u\",\"deltaRemain\":%d,\"reason\":\"%s\"}",
+             g_agent_timer_obj, remain, lastTick, (unsigned)blink, blinkLast,
+             nowWall, remain / 3600u, (remain % 3600u) / 60u, remain % 60u,
+             (unsigned)d0, (unsigned)d1, (unsigned)d2, (unsigned)d3,
+             (g_agent_timer_last_remain == 0xffffffffu)
+                 ? 0
+                 : (int)remain - (int)g_agent_timer_last_remain,
+             reason ? reason : "-");
+    agent_dbg0b451a_log("H19", "main.c:poll", "timer_remain_poll", dataBuf);
+    printf("[info][hud-timer] timer_remain_poll obj=%08x remain=%u "
+           "(%u:%02u:%02u) blink=%u lastTick=%u wall=%u deltaRemain=%d\n",
+           g_agent_timer_obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+           remain % 60u, (unsigned)blink, lastTick, nowWall,
+           (g_agent_timer_last_remain == 0xffffffffu)
+               ? 0
+               : (int)remain - (int)g_agent_timer_last_remain);
+    g_agent_timer_last_remain = remain;
+}
+/* After first clock colon, sample nearby clip blits for digit glyphs. */
+static u8 g_agent_digit_sample_armed = 0;
+
+static u32 agent_dbg0b451a_scan_buf_for_clock(const u8 *buf, u32 bufLen, u32 minutes,
+                                             char *hitBuf, u32 hitCap, u32 *hitsOut,
+                                             u32 *asciiOut)
+{
+    u32 hits = 0;
+    u32 asciiHits = 0;
+    u32 hp = 0;
+    u32 i = 0;
+
+    if (hitBuf && hitCap)
+        hitBuf[0] = 0;
+    if (minutes != 0 && buf != NULL)
+    {
+        for (i = 0; i + 1u < bufLen; ++i)
+        {
+            u16 v16 = (u16)(buf[i] | ((u16)buf[i + 1] << 8));
+            if (v16 == (u16)minutes)
+            {
+                if (hitBuf && hp + 12u < hitCap)
+                    hp += (u32)snprintf(hitBuf + hp, hitCap - hp, "+%x,", i);
+                ++hits;
+                if (hits >= 8u)
+                    break;
+            }
+            if (i + 3u < bufLen)
+            {
+                u32 v32 = (u32)buf[i] | ((u32)buf[i + 1] << 8) |
+                          ((u32)buf[i + 2] << 16) | ((u32)buf[i + 3] << 24);
+                if (v32 == minutes)
+                {
+                    if (hitBuf && hp + 14u < hitCap)
+                        hp += (u32)snprintf(hitBuf + hp, hitCap - hp, "L+%x,", i);
+                    ++hits;
+                    if (hits >= 8u)
+                        break;
+                }
+            }
+        }
+    }
+    if (buf != NULL)
+    {
+        for (i = 0; i + 4u < bufLen; ++i)
+        {
+            if (buf[i] == '0' && buf[i + 1] == '8' && buf[i + 2] == ':' &&
+                buf[i + 3] >= '0' && buf[i + 3] <= '9' && buf[i + 4] >= '0' &&
+                buf[i + 4] <= '9')
+            {
+                ++asciiHits;
+                if (hitBuf && hp + 14u < hitCap)
+                    hp += (u32)snprintf(hitBuf + hp, hitCap - hp, "A+%x,", i);
+                if (asciiHits >= 4u)
+                    break;
+            }
+        }
+    }
+    if (hitsOut)
+        *hitsOut = hits;
+    if (asciiOut)
+        *asciiOut = asciiHits;
+    return hits + asciiHits;
+}
+
+static void agent_dbg0b451a_scan_r9_for_minutes(u32 minutes, u32 lr, int x, int y,
+                                                const char *text)
+{
+    static u32 s_scanLogs = 0;
+    u8 buf[0x8000];
+    u32 base = 0;
+    u32 hits = 0;
+    u32 asciiHits = 0;
+    char hitBuf[160];
+
+    if (!Global_R9 || s_scanLogs >= 16u)
+        return;
+    base = Global_R9;
+    if (uc_mem_read(MTK, base, buf, sizeof(buf)) != UC_ERR_OK)
+        return;
+    agent_dbg0b451a_scan_buf_for_clock(buf, sizeof(buf), minutes, hitBuf,
+                                       sizeof(hitBuf), &hits, &asciiHits);
+    {
+        char dataBuf[360];
+        char safeText[24];
+        u32 ti = 0;
+        for (ti = 0; text && text[ti] && ti + 1u < sizeof(safeText); ++ti)
+        {
+            char ch = text[ti];
+            safeText[ti] = (ch >= 32 && ch < 127) ? ch : '?';
+        }
+        safeText[ti] = 0;
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"text\":\"%s\",\"min\":%u,\"x\":%d,\"y\":%d,\"lr\":\"%08x\","
+                 "\"r9\":\"%08x\",\"hits\":%u,\"ascii\":%u,\"offs\":\"%s\","
+                 "\"sce\":\"%.40s\"}",
+                 safeText, minutes, x, y, lr, base, hits, asciiHits, hitBuf,
+                 g_lastSceLoadName);
+        agent_dbg0b451a_log("H3", "main.c:hud_scan", "r9_minutes_scan", dataBuf);
+        ++s_scanLogs;
+    }
+}
+
+/* Broader heap scan for clock literal / 485 once dream SCE is armed (H7). */
+static void agent_dbg0b451a_scan_heap_for_clock(u32 minutes)
+{
+    static u32 s_heapLogs = 0;
+    static u32 s_watchAddrs[8];
+    static u32 s_watchCount = 0;
+    u8 *buf = NULL;
+    const u32 chunk = 0x10000;
+    u32 base = VM_MALLOC_POOL_ADDRESS;
+    u32 end = base + 0x200000u; /* 2MB of guest malloc pool */
+    u32 off = 0;
+    u32 totalHits = 0;
+    u32 totalAscii = 0;
+    char hitBuf[200];
+    u32 hp = 0;
+    char ctxBuf[280];
+    u32 cp = 0;
+
+    if (s_heapLogs >= 12u)
+        return;
+    buf = (u8 *)malloc(chunk);
+    if (buf == NULL)
+        return;
+    hitBuf[0] = 0;
+    ctxBuf[0] = 0;
+    s_watchCount = 0;
+    for (off = 0; off + chunk <= (end - base); off += chunk)
+    {
+        u32 hits = 0;
+        u32 asciiHits = 0;
+        char localHits[80];
+        u32 i = 0;
+        if (uc_mem_read(MTK, base + off, buf, chunk) != UC_ERR_OK)
+            continue;
+        agent_dbg0b451a_scan_buf_for_clock(buf, chunk, minutes, localHits,
+                                           sizeof(localHits), &hits, &asciiHits);
+        if (hits == 0 && asciiHits == 0)
+            continue;
+        totalHits += hits;
+        totalAscii += asciiHits;
+        if (hp + 24u < sizeof(hitBuf))
+            hp += (u32)snprintf(hitBuf + hp, sizeof(hitBuf) - hp, "%x:%s",
+                                base + off, localHits);
+        /* Dump +/-8B context for first few le16 hits (H8). */
+        if (minutes != 0 && minutes < 65536u)
+        {
+            for (i = 0; i + 1u < chunk && s_watchCount < 6u; ++i)
+            {
+                u16 v16 = (u16)(buf[i] | ((u16)buf[i + 1] << 8));
+                u32 absAddr = 0;
+                u8 ctx[16];
+                u32 k = 0;
+                if (v16 != (u16)minutes)
+                    continue;
+                absAddr = base + off + i;
+                s_watchAddrs[s_watchCount++] = absAddr;
+                memset(ctx, 0, sizeof(ctx));
+                if (absAddr >= 8u)
+                    uc_mem_read(MTK, absAddr - 8u, ctx, sizeof(ctx));
+                if (cp + 60u < sizeof(ctxBuf))
+                {
+                    cp += (u32)snprintf(ctxBuf + cp, sizeof(ctxBuf) - cp,
+                                        "%08x:", absAddr);
+                    for (k = 0; k < 16u; ++k)
+                        cp += (u32)snprintf(ctxBuf + cp, sizeof(ctxBuf) - cp,
+                                            "%02x", ctx[k]);
+                    cp += (u32)snprintf(ctxBuf + cp, sizeof(ctxBuf) - cp, ",");
+                }
+            }
+        }
+        if (totalAscii + totalHits >= 16u)
+            break;
+    }
+    free(buf);
+    {
+        char dataBuf[520];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"min\":%u,\"hits\":%u,\"ascii\":%u,\"offs\":\"%s\","
+                 "\"ctx\":\"%s\",\"sce\":\"%.40s\"}",
+                 minutes, totalHits, totalAscii, hitBuf, ctxBuf,
+                 g_lastSceLoadName);
+        agent_dbg0b451a_log("H7", "main.c:heap_scan", "heap_clock_scan", dataBuf);
+        printf("[info][hud-timer] heap_clock_scan min=%u hits=%u ascii=%u "
+               "sce=%s ctx=%s\n",
+               minutes, totalHits, totalAscii, g_lastSceLoadName, ctxBuf);
+        ++s_heapLogs;
+    }
+}
+
+static void agent_dbg0b451a_on_dream_sce(const char *name)
+{
+    static char s_lastArm[96];
+    char dataBuf[200];
+    if (name == NULL || name[0] != '2' || name[1] != '9')
+        return;
+    g_agent_dream_hud_watch = 1;
+    /* Re-enter after eject recreates/resets timer to ~29285; allow poke again. */
+    g_agent_timer_remain_poke_done = 0;
+    g_agent_timer_obj = 0;
+    g_agent_timer_last_remain = 0xffffffffu;
+    if (g_lastSceLoadName[0] == '-' || g_lastSceLoadName[0] == 0)
+        snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName), "%s", name);
+    /* Allow a second arm after ScreenInit (same scene) for a late heap scan. */
+    if (s_lastArm[0] && strcmp(s_lastArm, name) == 0 &&
+        g_agent_dream_hud_watch == 1)
+    {
+        /* Still rescan heap once more when re-armed (enter-after-init). */
+    }
+    snprintf(s_lastArm, sizeof(s_lastArm), "%s", name);
+    snprintf(dataBuf, sizeof(dataBuf),
+             "{\"sce\":\"%.80s\",\"r9\":\"%08x\"}", name,
+             Global_R9 ? Global_R9 : 0u);
+    agent_dbg0b451a_log("H7", "main.c:dream_sce", "dream_hud_watch_arm", dataBuf);
+    printf("[info][hud-timer] dream_hud_watch_arm sce=%s r9=%08x\n", name,
+           Global_R9 ? Global_R9 : 0u);
+    agent_dbg0b451a_scan_r9_for_minutes(485, 0, -1, -1, "dream-sce");
+    agent_dbg0b451a_scan_heap_for_clock(485);
+    /* Also hunt remaining-seconds form 485*60=29100. */
+    agent_dbg0b451a_scan_heap_for_clock(29100);
+}
+
+static void agent_dbg0b451a_note_hhmm(const char *source, const char *text, int x,
+                                     int y, const char *fmtOpt)
+{
+    static char s_lastText[16];
+    static u32 s_lastMin = 0;
+    static u32 s_drawLogs = 0;
+    u32 minutes = 0;
+    u32 lr = 0;
+    u32 pc = 0;
+
+    if (text == NULL || !agent_dbg0b451a_parse_hhmm(text, &minutes))
+        return;
+    if (s_drawLogs >= 32u)
+        return;
+    if (s_lastText[0] && strcmp(s_lastText, text) == 0 && s_lastMin == minutes &&
+        s_drawLogs >= 2u)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    {
+        char dataBuf[360];
+        char safeText[24];
+        char safeFmt[48];
+        u32 ti = 0;
+        for (ti = 0; text[ti] && ti + 1u < sizeof(safeText); ++ti)
+        {
+            char ch = text[ti];
+            safeText[ti] = (ch >= 32 && ch < 127) ? ch : '?';
+        }
+        safeText[ti] = 0;
+        safeFmt[0] = 0;
+        if (fmtOpt)
+        {
+            for (ti = 0; fmtOpt[ti] && ti + 1u < sizeof(safeFmt); ++ti)
+            {
+                char ch = fmtOpt[ti];
+                safeFmt[ti] = (ch >= 32 && ch < 127) ? ch : '?';
+            }
+            safeFmt[ti] = 0;
+        }
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"src\":\"%s\",\"text\":\"%s\",\"fmt\":\"%s\",\"min\":%u,"
+                 "\"x\":%d,\"y\":%d,\"lr\":\"%08x\",\"pc\":\"%08x\"}",
+                 source ? source : "?", safeText, safeFmt, minutes, x, y, lr, pc);
+        agent_dbg0b451a_log(minutes >= 60u ? "H1" : "H1b", "main.c:hhmm",
+                            "hhmm_observed", dataBuf);
+        printf("[info][hud-timer] hhmm src=%s text=%s min=%u xy=(%d,%d) lr=%08x "
+               "fmt=%s\n",
+               source ? source : "?", safeText, minutes, x, y, lr, safeFmt);
+    }
+    snprintf(s_lastText, sizeof(s_lastText), "%s", text);
+    s_lastMin = minutes;
+    ++s_drawLogs;
+    if (x >= (LCD_WIDTH / 2) || y <= 40 || minutes >= 60u)
+        agent_dbg0b451a_scan_r9_for_minutes(minutes, lr, x, y, text);
+}
+
+/* Top-right / digit draws during dream watch (H4). Dedupe; ignore login 「状态」. */
+static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
+{
+    static u32 s_trLogs = 0;
+    static u32 s_alive = 0;
+    static char s_lastKey[48];
+    u32 len = 0;
+    u32 lr = 0;
+    int hasDigit = 0;
+    int interesting = 0;
+    char safe[40];
+    char hex[48];
+    char key[48];
+    u32 hi = 0;
+    u32 i = 0;
+
+    if (gbkText == NULL)
+        return;
+    if (s_alive == 0)
+    {
+        s_alive = 1;
+        agent_dbg0b451a_log("H6", "main.c:alive", "client_draw_alive",
+                            "{\"ok\":1}");
+        printf("[info][hud-timer] client_draw_alive instrumentation active\n");
+    }
+    while (gbkText[len] != 0 && len < 32u)
+        ++len;
+    if (len == 0 || len > 16u || s_trLogs >= 64u)
+        return;
+    /* Ignore GBK 「状态」 spam that burned the previous budget. */
+    if (len == 4 && gbkText[0] == 0xD7 && gbkText[1] == 0xB4 &&
+        gbkText[2] == 0xCC && gbkText[3] == 0xAC)
+        return;
+    for (i = 0; i < len; ++i)
+    {
+        u8 ch = gbkText[i];
+        if (ch == ':' || (ch >= '0' && ch <= '9') || ch == 0xA3)
+            hasDigit = 1;
+    }
+    if (g_agent_dream_hud_watch)
+        interesting = (y >= 0 && y <= 64) || hasDigit;
+    else
+        interesting = hasDigit && y >= 0 && y <= 48;
+    if (!interesting)
+        return;
+    for (i = 0; i < len && i + 1u < sizeof(safe); ++i)
+    {
+        u8 ch = gbkText[i];
+        safe[i] = (ch >= 32 && ch < 127) ? (char)ch : '?';
+    }
+    safe[i] = 0;
+    hex[0] = 0;
+    for (i = 0; i < len && i < 12u && hi + 3u < sizeof(hex); ++i)
+        hi += (u32)snprintf(hex + hi, sizeof(hex) - hi, "%02x", gbkText[i]);
+    snprintf(key, sizeof(key), "%s@%d,%d", hex, x, y);
+    if (s_lastKey[0] && strcmp(s_lastKey, key) == 0)
+        return;
+    snprintf(s_lastKey, sizeof(s_lastKey), "%s", key);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    {
+        char dataBuf[280];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"text\":\"%s\",\"hex\":\"%s\",\"len\":%u,\"x\":%d,\"y\":%d,"
+                 "\"lr\":\"%08x\",\"sce\":\"%.40s\",\"watch\":%u}",
+                 safe, hex, len, x, y, lr, g_lastSceLoadName,
+                 (unsigned)g_agent_dream_hud_watch);
+        agent_dbg0b451a_log("H4", "main.c:topright", "topright_draw", dataBuf);
+        printf("[info][hud-timer] topright text=%s hex=%s xy=(%d,%d) lr=%08x "
+               "sce=%s watch=%u\n",
+               safe, hex, x, y, lr, g_lastSceLoadName,
+               (unsigned)g_agent_dream_hud_watch);
+    }
+    ++s_trLogs;
+    /*
+     * Clock colon candidate: lone ':' near top-right (debug: 205,75).
+     * Digits of 08:05 are NOT text draws — likely image glyphs (H5/H8).
+     */
+    if (g_agent_dream_hud_watch && len == 1 && gbkText[0] == ':' && x >= 180 &&
+        y >= 0 && y <= 100)
+    {
+        static u32 s_colonLogs = 0;
+        char dataBuf[160];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"x\":%d,\"y\":%d,\"lr\":\"%08x\",\"sce\":\"%.40s\"}", x, y,
+                 lr, g_lastSceLoadName);
+        agent_dbg0b451a_log("H8", "main.c:colon", "clock_colon_draw", dataBuf);
+        printf("[info][hud-timer] clock_colon_draw xy=(%d,%d) lr=%08x\n", x, y,
+               lr);
+        /* Arm a short window to catch digit clip blits around the colon. */
+        g_agent_digit_sample_armed = 64;
+        if (s_colonLogs < 4u)
+        {
+            /*
+             * H10: LR is inside the generic DrawString helper; walk SP for
+             * CBE code ptrs (HUD painter). Also dump R0-R12 for hour/min-like
+             * immediates (0..23 / 0..59 / 485) without heap e501 noise.
+             */
+            u32 regs[13];
+            u32 sp = 0;
+            u32 i = 0;
+            char regBuf[220];
+            char stkBuf[220];
+            u32 rp = 0;
+            u32 spw = 0;
+            int rids[13] = {
+                UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+                UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+                UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
+                UC_ARM_REG_R12};
+            memset(regs, 0, sizeof(regs));
+            regBuf[0] = 0;
+            stkBuf[0] = 0;
+            for (i = 0; i < 13u; ++i)
+                uc_reg_read(MTK, rids[i], &regs[i]);
+            uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+            /* Full R0-R12 dump — HUD hour/min often sit in callee-saved regs. */
+            for (i = 0; i < 13u; ++i)
+            {
+                if (rp + 16u < sizeof(regBuf))
+                    rp += (u32)snprintf(regBuf + rp, sizeof(regBuf) - rp,
+                                        "%08x,", regs[i]);
+            }
+            for (i = 0; i < 96u && spw + 12u < sizeof(stkBuf); ++i)
+            {
+                u32 word = vm_get_var(sp + i * 4u);
+                u32 code = word & ~1u;
+                if ((code >= 0x01000000u && code < 0x01200000u) ||
+                    (code >= 0x05000000u && code < 0x06000000u))
+                    spw += (u32)snprintf(stkBuf + spw, sizeof(stkBuf) - spw,
+                                         "%08x,", code);
+            }
+            {
+                char dataBuf2[480];
+                snprintf(dataBuf2, sizeof(dataBuf2),
+                         "{\"x\":%d,\"y\":%d,\"lr\":\"%08x\",\"sp\":\"%08x\","
+                         "\"regs\":\"%s\",\"stk\":\"%s\"}",
+                         x, y, lr, sp, regBuf, stkBuf);
+                agent_dbg0b451a_log("H10", "main.c:colon", "clock_colon_ctx",
+                                    dataBuf2);
+                printf("[info][hud-timer] clock_colon_ctx regs=%s stk=%s\n",
+                       regBuf, stkBuf);
+            }
+        }
+        ++s_colonLogs;
+    }
+}
+
+static void agent_dbg0b451a_note_topright_image(u32 imageInfo, int x, int y)
+{
+    static u32 s_imgLogs = 0;
+    u32 lr = 0;
+    int srcW = 0;
+    int srcH = 0;
+    u32 srcPixels = 0;
+    int inClockBand = 0;
+
+    if (s_imgLogs >= 48u)
+        return;
+    /* Colon sits at y=75; previous y<=48 filter missed digit sprites. */
+    inClockBand = (g_agent_dream_hud_watch && y >= 0 && y <= 100 &&
+                   x >= (LCD_WIDTH / 2 - 40));
+    if (!inClockBand && (y < 0 || y > 48 || x < (LCD_WIDTH / 2)))
+        return;
+    if (!vm_lcd_read_image_info(imageInfo, &srcPixels, &srcW, &srcH))
+        return;
+    (void)srcPixels;
+    if (srcW <= 0 || srcW > 64 || srcH <= 0 || srcH > 64)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    {
+        char dataBuf[220];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"img\":\"%08x\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
+                 "\"lr\":\"%08x\",\"sce\":\"%.40s\",\"watch\":%u}",
+                 imageInfo, x, y, srcW, srcH, lr, g_lastSceLoadName,
+                 (unsigned)g_agent_dream_hud_watch);
+        agent_dbg0b451a_log("H5", "main.c:img", "topright_image", dataBuf);
+        printf("[info][hud-timer] topright_image img=%08x xy=(%d,%d) wh=(%d,%d) "
+               "lr=%08x watch=%u\n",
+               imageInfo, x, y, srcW, srcH, lr,
+               (unsigned)g_agent_dream_hud_watch);
+    }
+    ++s_imgLogs;
+}
+
+/*
+ * H9/H11: digit glyphs confirmed as 110x16 sheet via clip26a
+ * (sx=0/88/0/55 → digits 0/8/0/5 at y=78). Prefer that path; dump DF-shell
+ * return addrs (0x05*) — prior H10 walk only checked CBE 0x01* and saw none.
+ */
+static void agent_dbg0b451a_note_clip_draw(const char *api)
+{
+    static u32 s_digitCtxLogs = 0;
+    static u32 s_iconLogs = 0;
+    static u32 s_otherLogs = 0;
+    u32 dstInfo = 0;
+    u32 srcInfo = 0;
+    u32 srcX = 0;
+    u32 srcY = 0;
+    u32 sp = 0;
+    u32 lr = 0;
+    int w = 0;
+    int h = 0;
+    int dstX = 0;
+    int dstY = 0;
+    u16 srcW = 0;
+    u16 srcH = 0;
+    int isDigitSheet = 0;
+    int isTimerIcon = 0;
+    int digit = -1;
+
+    if (!g_agent_dream_hud_watch)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &dstInfo);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &srcInfo);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &srcX);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &srcY);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    w = (int)vm_get_var(sp);
+    h = (int)vm_get_var(sp + 4);
+    dstX = (int)vm_get_var(sp + 8);
+    dstY = (int)vm_get_var(sp + 12);
+    if (srcInfo)
+    {
+        srcW = vm_get_var_short(srcInfo + 4);
+        srcH = vm_get_var_short(srcInfo + 6);
+    }
+    if (w <= 0 || h <= 0 || w > 40 || h > 40)
+        return;
+    /* Decorative 36x36 / 12px grid — ignore. */
+    if (srcW == 36 && srcH == 36 && w == 12 && h == 12)
+        return;
+    /* Confirmed clock digits: horizontal 0-9 strip. */
+    isDigitSheet = (srcW == 110 && srcH == 16 && w == 11 && h == 16 &&
+                    dstY >= 70 && dstY <= 90);
+    /* ui_timer-like icon next to clock (runtime: 32x79 @ 218,78). */
+    isTimerIcon = (srcW == 32 && srcH == 79 && dstY >= 70 && dstY <= 90 &&
+                   dstX >= 200);
+    if (!isDigitSheet && !isTimerIcon)
+    {
+        /* Keep a tiny sample of other near-colon clips, then stop. */
+        if (dstY < 60 || dstY > 90 || dstX < 160 || s_otherLogs >= 4u)
+            return;
+        ++s_otherLogs;
+    }
+    if (isDigitSheet && srcX % 11u == 0u && srcX <= 99u)
+        digit = (int)(srcX / 11u);
+    {
+        char dataBuf[300];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"api\":\"%s\",\"src\":\"%08x\",\"dst\":\"%08x\","
+                 "\"sx\":%u,\"sy\":%u,\"w\":%d,\"h\":%d,\"dx\":%d,\"dy\":%d,"
+                 "\"sw\":%u,\"sh\":%u,\"lr\":\"%08x\",\"digit\":%d,"
+                 "\"kind\":\"%s\"}",
+                 api ? api : "?", srcInfo, dstInfo, srcX, srcY, w, h, dstX,
+                 dstY, (unsigned)srcW, (unsigned)srcH, lr, digit,
+                 isDigitSheet ? "digit" : (isTimerIcon ? "icon" : "other"));
+        agent_dbg0b451a_log("H9", "main.c:clip", "clock_clip_blit", dataBuf);
+        printf("[info][hud-timer] clock_clip_blit kind=%s digit=%d sx=%u "
+               "dst=(%d,%d) sheet=%ux%u lr=%08x\n",
+               isDigitSheet ? "digit" : (isTimerIcon ? "icon" : "other"), digit,
+               srcX, dstX, dstY, (unsigned)srcW, (unsigned)srcH, lr);
+    }
+    if (isTimerIcon)
+        ++s_iconLogs;
+    /* H11: on first few digit glyphs, dump regs + DF/CBE return chain. */
+    if (isDigitSheet && s_digitCtxLogs < 8u)
+    {
+        u32 regs[13];
+        u32 i = 0;
+        char regBuf[220];
+        char stkBuf[280];
+        u32 rp = 0;
+        u32 spw = 0;
+        int rids[13] = {
+            UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
+            UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6, UC_ARM_REG_R7,
+            UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11,
+            UC_ARM_REG_R12};
+        memset(regs, 0, sizeof(regs));
+        regBuf[0] = 0;
+        stkBuf[0] = 0;
+        for (i = 0; i < 13u; ++i)
+            uc_reg_read(MTK, rids[i], &regs[i]);
+        for (i = 0; i < 13u; ++i)
+        {
+            if (rp + 16u < sizeof(regBuf))
+                rp += (u32)snprintf(regBuf + rp, sizeof(regBuf) - rp, "%08x,",
+                                    regs[i]);
+        }
+        for (i = 0; i < 96u && spw + 12u < sizeof(stkBuf); ++i)
+        {
+            u32 word = vm_get_var(sp + i * 4u);
+            u32 code = word & ~1u;
+            /* CBE ROM 0x01* or hot DF shell 0x05* (dream enter init). */
+            if ((code >= 0x01000000u && code < 0x01200000u) ||
+                (code >= 0x05000000u && code < 0x06000000u))
+                spw += (u32)snprintf(stkBuf + spw, sizeof(stkBuf) - spw, "%08x,",
+                                     code);
+        }
+        {
+            char dataBuf2[560];
+            snprintf(dataBuf2, sizeof(dataBuf2),
+                     "{\"digit\":%d,\"sx\":%u,\"dx\":%d,\"dy\":%d,\"lr\":\"%08x\","
+                     "\"sp\":\"%08x\",\"regs\":\"%s\",\"stk\":\"%s\","
+                     "\"src\":\"%08x\"}",
+                     digit, srcX, dstX, dstY, lr, sp, regBuf, stkBuf, srcInfo);
+            agent_dbg0b451a_log("H11", "main.c:clip", "digit_blit_ctx", dataBuf2);
+            printf("[info][hud-timer] digit_blit_ctx digit=%d regs=%s stk=%s\n",
+                   digit, regBuf, stkBuf);
+        }
+        /* H12: scan R9 object for hour/min pair matching this paint. */
+        if (Global_R9 && digit >= 0)
+        {
+            u8 buf[0x4000];
+            u32 base = Global_R9;
+            u32 hits = 0;
+            char hitBuf[160];
+            u32 hp = 0;
+            hitBuf[0] = 0;
+            if (uc_mem_read(MTK, base, buf, sizeof(buf)) == UC_ERR_OK)
+            {
+                u32 off = 0;
+                for (off = 0; off + 3u < sizeof(buf) && hits < 8u; ++off)
+                {
+                    /* Adjacent u8 hour=8,min=5 or u16 pair. */
+                    if (buf[off] == 8u && buf[off + 1] == 5u)
+                    {
+                        if (hp + 20u < sizeof(hitBuf))
+                            hp += (u32)snprintf(hitBuf + hp, sizeof(hitBuf) - hp,
+                                                "u8@%x,", off);
+                        ++hits;
+                    }
+                    if (buf[off] == 8u && buf[off + 1] == 0u &&
+                        buf[off + 2] == 5u && buf[off + 3] == 0u)
+                    {
+                        if (hp + 24u < sizeof(hitBuf))
+                            hp += (u32)snprintf(hitBuf + hp, sizeof(hitBuf) - hp,
+                                                "u16@%x,", off);
+                        ++hits;
+                    }
+                    /* remaining minutes 485 as le16 near small fields */
+                    if ((u16)(buf[off] | ((u16)buf[off + 1] << 8)) == 485u)
+                    {
+                        if (hp + 20u < sizeof(hitBuf))
+                            hp += (u32)snprintf(hitBuf + hp, sizeof(hitBuf) - hp,
+                                                "m485@%x,", off);
+                        ++hits;
+                    }
+                }
+            }
+            {
+                char dataBuf3[240];
+                u8 ctx[24];
+                char ctxHex[56];
+                u32 ci = 0;
+                memset(ctx, 0, sizeof(ctx));
+                ctxHex[0] = 0;
+                /* Dump R9+0x2164 neighborhood (prior hit). */
+                if (uc_mem_read(MTK, base + 0x2164u - 8u, ctx, sizeof(ctx)) ==
+                    UC_ERR_OK)
+                {
+                    for (ci = 0; ci < sizeof(ctx) && ci * 2u + 1u < sizeof(ctxHex);
+                         ++ci)
+                        snprintf(ctxHex + ci * 2u, 3, "%02x", ctx[ci]);
+                }
+                snprintf(dataBuf3, sizeof(dataBuf3),
+                         "{\"r9\":\"%08x\",\"hits\":%u,\"offs\":\"%s\","
+                         "\"digit\":%d,\"ctx2164\":\"%s\"}",
+                         base, hits, hitBuf, digit, ctxHex);
+                agent_dbg0b451a_log("H12", "main.c:r9", "r9_hhmm_pair_scan",
+                                    dataBuf3);
+            }
+        }
+        /*
+         * H13: painter 0x0104c300 does remain=obj+0x10; hours=remain/3600.
+         * Find timer obj on stack: +0x10 in seconds-range.
+         * Runtime: 0500b57c rem=29285 → 08:08:05; blit last digit was 5
+         * (matches seconds). Dump full HH:MM:SS digit halfwords.
+         */
+        if (s_digitCtxLogs < 4u)
+        {
+            u32 i = 0;
+            char foundBuf[400];
+            u32 fp = 0;
+            foundBuf[0] = 0;
+            for (i = 0; i < 96u && fp + 80u < sizeof(foundBuf); ++i)
+            {
+                u32 ptr = vm_get_var(sp + i * 4u);
+                u32 remain = 0;
+                u32 lastTick = 0;
+                u16 d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0;
+                u8 flag = 0;
+                u32 hh = 0, mm = 0, ss = 0;
+                if (ptr < 0x05000000u || ptr >= 0x05800000u)
+                    continue;
+                if ((ptr & 3u) != 0)
+                    continue;
+                remain = vm_get_var(ptr + 0x10u);
+                if (remain < 60u || remain > 86400u)
+                    continue;
+                lastTick = vm_get_var(ptr + 0x0cu);
+                d0 = vm_get_var_short(ptr);
+                d1 = vm_get_var_short(ptr + 2u);
+                d2 = vm_get_var_short(ptr + 4u);
+                d3 = vm_get_var_short(ptr + 6u);
+                d4 = vm_get_var_short(ptr + 8u);
+                d5 = vm_get_var_short(ptr + 0xau);
+                flag = 0;
+                uc_mem_read(MTK, ptr + 0x18u, &flag, 1);
+                hh = remain / 3600u;
+                mm = (remain % 3600u) / 60u;
+                ss = remain % 60u;
+                fp += (u32)snprintf(
+                    foundBuf + fp, sizeof(foundBuf) - fp,
+                    "%08x:rem=%u(%u:%02u:%02u),tick=%u,"
+                    "dig=%u%u:%u%u:%u%u,f=%u;",
+                    ptr, remain, hh, mm, ss, lastTick, (unsigned)d0,
+                    (unsigned)d1, (unsigned)d2, (unsigned)d3, (unsigned)d4,
+                    (unsigned)d5, (unsigned)flag);
+            }
+            {
+                char dataBuf4[480];
+                snprintf(dataBuf4, sizeof(dataBuf4),
+                         "{\"digit\":%d,\"blit_digit\":%d,\"cands\":\"%s\"}",
+                         digit, digit, foundBuf);
+                agent_dbg0b451a_log("H13", "main.c:timer", "timer_obj_scan",
+                                    dataBuf4);
+                printf("[info][hud-timer] timer_obj_scan blit=%d cands=%s\n",
+                       digit, foundBuf);
+            }
+        }
+        ++s_digitCtxLogs;
+    }
+    (void)s_iconLogs;
+}
+/* #endregion */
+
 static void vm_lcd_draw_current_string(u8 *gbkText, int x, int y, u16 color)
 {
     int w = vm_lcd_measure_current_string_render_width(gbkText);
     int h = getFontHeight();
+    /* #region agent log */
+    if (gbkText != NULL)
+    {
+        agent_dbg0b451a_note_hhmm("draw", (const char *)gbkText, x, y, NULL);
+        agent_dbg0b451a_note_topright_draw(gbkText, x, y);
+    }
+    /* #endregion */
     vm_lcd_sync_vm_rect_to_cache(x, y, w, h);
     drawFontStringWithGbkWidth(gbkText, x, y, color, vm_lcd_current_gbk_width());
 }
@@ -8479,6 +9426,9 @@ static void vm_note_sce_load_entry_pc(u32 pc)
     g_lastSceLoadCtx = ctx;
     g_lastSceLoadNamePtr = namePtr;
     snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName), "%s", name);
+    /* #region agent log */
+    agent_dbg0b451a_on_dream_sce(name);
+    /* #endregion */
     if (!g_autotestEnabled)
         return;
     vm_autotest_note("sce_load_entry pc=%08x ctx=%08x name_ptr=%08x name=%s df_pkg=%08x current=%08x this=%08x depth=%u\n",
@@ -9263,6 +10213,9 @@ void RunArmProgram(void *param)
                            g_vm_dream_resumable_shell.resumeEntry,
                            g_vm_dream_resumable_shell.screen,
                            g_vm_dream_resumable_shell.dataPackage);
+                    /* #region agent log */
+                    agent_dbg0b451a_on_dream_sce(g_vm_dream_resumable_shell.scene);
+                    /* #endregion */
                 }
                 else if (g_vm_dream_resumable_shell.valid &&
                          screenThisPtr != g_vm_dream_resumable_shell.thisPtr)
@@ -12142,10 +13095,16 @@ static bool hook_vm_manager_lcd_func(u32 address)
     {
         // vMDrawImageWithClipEx(p_mscreenImage ,ptr2 ,0:x? ,0:y? ,0xbc:x2 ,1:y2? ,0 ,3)
         // vMDrawImageWithClipEx(dst, src, sx, sy, w, h, dx, dy)原图的sx,sy，目标图的dx,dy
+        /* #region agent log */
+        agent_dbg0b451a_note_clip_draw("clip25");
+        /* #endregion */
         vM_DrawImageWithClipEx();
     }
     else if (idx == 26)
     {
+        /* #region agent log */
+        agent_dbg0b451a_note_clip_draw("clip26a");
+        /* #endregion */
         vm_vMDrawImageClipAndAlphaEx();
     }
     else if (idx == 27)
@@ -12154,6 +13113,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp2 >> 16);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(tmp1, x, y);
+        /* #endregion */
         vm_set_call_result(vm_lcd_draw_image_to_screen(tmp1, x, y));
     }
     else if (idx == 28)
@@ -12163,6 +13125,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp3);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(tmp1, x, y);
+        /* #endregion */
         vm_set_call_result(vm_lcd_draw_image_to_screen(tmp1, x, y));
     }
     else if (idx == 29)
@@ -12171,6 +13136,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         int x = vm_lcd_coord_from_reg(tmp2);
         int y = vm_lcd_coord_from_reg(tmp2 >> 16);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(tmp1, x, y);
+        /* #endregion */
         vm_set_call_result(vm_lcd_draw_image_with_alpha_to_screen(tmp1, x, y));
     }
     else if (idx == 30)
@@ -12179,6 +13147,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(
+            tmp1, vm_lcd_coord_from_reg(tmp3),
+            vm_lcd_coord_from_reg(tmp3 >> 16));
+        /* #endregion */
         vm_set_call_result(vm_lcd_draw_image_with_clip_packed(tmp1, tmp2, tmp3, tmp4, false));
     }
     else if (idx == 31)
@@ -12191,6 +13164,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         u32 h = vm_get_var(tmp5);
         u32 dstX = vm_get_var(tmp5 + 4);
         u32 dstY = vm_get_var(tmp5 + 8);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(tmp1, (int)dstX, (int)dstY);
+        /* #endregion */
         u32 srcPacked = vm_lcd_pack_coord(vm_lcd_coord_from_reg(tmp2), vm_lcd_coord_from_reg(tmp3));
         u32 dstStart = vm_lcd_pack_coord(vm_lcd_coord_from_reg(dstX), vm_lcd_coord_from_reg(dstY));
         u32 dstEnd = vm_lcd_pack_coord(
@@ -12205,6 +13181,11 @@ static bool hook_vm_manager_lcd_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         uc_reg_read(MTK, UC_ARM_REG_R3, &tmp4);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(
+            tmp1, vm_lcd_coord_from_reg(tmp3),
+            vm_lcd_coord_from_reg(tmp3 >> 16));
+        /* #endregion */
         vm_set_call_result(vm_lcd_draw_image_with_clip_packed(tmp1, tmp2, tmp3, tmp4, true));
     }
     else if (idx == 33)
@@ -12217,6 +13198,9 @@ static bool hook_vm_manager_lcd_func(u32 address)
         u32 h = vm_get_var(tmp5);
         u32 dstX = vm_get_var(tmp5 + 4);
         u32 dstY = vm_get_var(tmp5 + 8);
+        /* #region agent log */
+        agent_dbg0b451a_note_topright_image(tmp1, (int)dstX, (int)dstY);
+        /* #endregion */
         u32 srcPacked = vm_lcd_pack_coord(vm_lcd_coord_from_reg(tmp2), vm_lcd_coord_from_reg(tmp3));
         u32 dstStart = vm_lcd_pack_coord(vm_lcd_coord_from_reg(dstX), vm_lcd_coord_from_reg(dstY));
         u32 dstEnd = vm_lcd_pack_coord(
@@ -12896,6 +13880,16 @@ static bool hook_vm_manager_stdio_func(u32 address)
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
         DEBUG_PRINT("[call]sprintf(%x,%x,%x)\n", tmp1, tmp2, tmp3);
         vm_sprintf_return_buffer();
+        /* #region agent log */
+        if (tmp1 != 0)
+        {
+            u8 fmtBuf[64];
+            vm_readStringByPtr(tmp1, sprintfBuff);
+            vm_readStringByPtr(tmp2, fmtBuf);
+            agent_dbg0b451a_note_hhmm("sprintf", (const char *)sprintfBuff, -1, -1,
+                                      (const char *)fmtBuf);
+        }
+        /* #endregion */
         if (g_autotestEnabled && tmp1 != 0)
         {
             vm_readStringByPtr(tmp1, sprintfBuff);
@@ -16735,6 +17729,285 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 #if defined(CBE_CLIENT_ONLY)
     if (vm_host_intercept_dream_completion_enter_scene((u32)address & ~1u))
         return;
+    /* #region agent log */
+    /*
+     * H14/H15/H18: timer set/paint + remain MEM_WRITE watch.
+     * Prior H17 mid-tick PC hooks were false positives (r5=UI ptr, r0=0 while
+     * remain stayed 29285; tick/paint *entry* PCs never hit). Use mem-write +
+     * vtable dump + unfiltered tick-window PC sample instead.
+     */
+    {
+        u32 pc = (u32)address & ~1u;
+        if (pc >= 0x0104c2b0u && pc <= 0x0104c2eau)
+        {
+            static u32 s_winLogs = 0;
+            if (s_winLogs < 40u)
+            {
+                u32 r0 = 0, r1 = 0, r4 = 0, r5 = 0, lr = 0;
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                {
+                    char dataBuf[280];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"pc\":\"%08x\",\"r0\":\"%08x\",\"r1\":%u,\"r4\":\"%08x\","
+                             "\"r5\":\"%08x\",\"lr\":\"%08x\",\"wall\":%u}",
+                             pc, r0, r1, r4, r5, lr, SDL_GetTicks());
+                    agent_dbg0b451a_log("H18", "main.c:hook", "timer_tick_window",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_tick_window pc=%08x r0=%08x "
+                           "r1=%u r4=%08x r5=%08x lr=%08x\n",
+                           pc, r0, r1, r4, r5, lr);
+                }
+                ++s_winLogs;
+            }
+        }
+        if (pc == 0x0104c2eeu)
+        {
+            static u32 s_setLogs = 0;
+            u32 obj = 0;
+            u32 remain = 0;
+            u32 lr = 0;
+            if (s_setLogs < 20u)
+            {
+                uc_reg_read(uc, UC_ARM_REG_R0, &obj);
+                uc_reg_read(uc, UC_ARM_REG_R1, &remain);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                if (obj != 0 && remain >= 60u && remain <= 86400u)
+                {
+                    char dataBuf[240];
+                    g_agent_timer_obj = obj;
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"obj\":\"%08x\",\"remain\":%u,\"hhmmss\":\"%u:%02u:%02u\","
+                             "\"lr\":\"%08x\",\"watch\":%u}",
+                             obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                             remain % 60u, lr, (unsigned)g_agent_dream_hud_watch);
+                    agent_dbg0b451a_log("H14", "main.c:hook", "timer_remain_set",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_remain_set obj=%08x remain=%u "
+                           "(%u:%02u:%02u) lr=%08x\n",
+                           obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                           remain % 60u, lr);
+                    ++s_setLogs;
+                }
+            }
+        }
+        else if (pc == 0x0104c20eu)
+        {
+            static u32 s_altSetLogs = 0;
+            u32 obj = 0;
+            u32 remain = 0;
+            u32 r5 = 0;
+            u32 lr = 0;
+            if (s_altSetLogs < 12u)
+            {
+                uc_reg_read(uc, UC_ARM_REG_R4, &obj);
+                uc_reg_read(uc, UC_ARM_REG_R0, &remain);
+                uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                if (obj != 0 && remain >= 60u && remain <= 86400u)
+                {
+                    char dataBuf[240];
+                    g_agent_timer_obj = obj;
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"obj\":\"%08x\",\"remain\":%u,\"r5\":%u,"
+                             "\"hhmmss\":\"%u:%02u:%02u\",\"lr\":\"%08x\"}",
+                             obj, remain, r5, remain / 3600u,
+                             (remain % 3600u) / 60u, remain % 60u, lr);
+                    agent_dbg0b451a_log("H16", "main.c:hook", "timer_remain_alt_set",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_remain_alt_set obj=%08x "
+                           "remain=%u r5=%u (%u:%02u:%02u) lr=%08x\n",
+                           obj, remain, r5, remain / 3600u,
+                           (remain % 3600u) / 60u, remain % 60u, lr);
+                    ++s_altSetLogs;
+                }
+            }
+        }
+        else if (pc == 0x0104c300u)
+        {
+            static u32 s_paintLogs = 0;
+            u32 obj = 0;
+            u32 sp = 0;
+            u32 remain = 0;
+            u32 fl64 = 0, fl68 = 0, fl6c = 0;
+            u32 lr = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &obj);
+            remain = obj ? vm_get_var(obj + 0x10u) : 0;
+            if (obj != 0 && remain >= 1000u && remain <= 86400u)
+                g_agent_timer_obj = obj;
+            if (s_paintLogs < 6u)
+            {
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                fl64 = vm_get_var(sp + 0x10u);
+                fl68 = vm_get_var(sp + 0x14u);
+                fl6c = vm_get_var(sp + 0x18u);
+                {
+                    char dataBuf[280];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"obj\":\"%08x\",\"remain\":%u,\"hhmmss\":\"%u:%02u:%02u\","
+                             "\"arg64\":%u,\"arg68\":%u,\"arg6c\":%u,\"lr\":\"%08x\"}",
+                             obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                             remain % 60u, fl64, fl68, fl6c, lr);
+                    agent_dbg0b451a_log("H15", "main.c:hook", "timer_paint_enter",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_paint_enter obj=%08x remain=%u "
+                           "(%u:%02u:%02u) flags@sp=%u/%u/%u lr=%08x\n",
+                           obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                           remain % 60u, fl64, fl68, fl6c, lr);
+                }
+                ++s_paintLogs;
+            }
+        }
+        else if (pc == 0x0104c38au)
+        {
+            static u32 s_flagLogs = 0;
+            u32 sp = 0;
+            u32 r4 = 0;
+            u32 fl64 = 0, fl68 = 0, fl6c = 0;
+            u32 remain = 0;
+            u32 slot = 0;
+            char vtBuf[200];
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            fl64 = vm_get_var(sp + 0x64u);
+            fl68 = vm_get_var(sp + 0x68u);
+            fl6c = vm_get_var(sp + 0x6cu);
+            remain = r4 ? vm_get_var(r4 + 0x10u) : 0;
+            if (r4 != 0 && remain >= 1000u && remain <= 86400u)
+                g_agent_timer_obj = r4;
+            /* H20: lock dream HUD remain to 60 sec-units → screen 01:00.
+             * Server TTL is 60 minutes (see dream_hud_ttl_arm).  Re-poke
+             * whenever remain drifts above 60 (re-enter resets to ~29285). */
+            if (g_agent_dream_hud_watch && g_agent_timer_obj != 0)
+            {
+                u32 pokeOld = vm_get_var(g_agent_timer_obj + 0x10u);
+                u32 pokeNew = 60u;
+                if (pokeOld != pokeNew && pokeOld >= 60u && pokeOld <= 86400u)
+                {
+                    volatile u32 pokeSink = 0;
+                    vm_set_var(g_agent_timer_obj + 0x10u, pokeNew);
+                    pokeSink = vm_get_var(g_agent_timer_obj + 0x10u);
+                    g_agent_timer_remain_poke_done = 1;
+                    g_agent_timer_last_remain = pokeSink;
+                    /* #region agent log */
+                    {
+                        char dataBuf[240];
+                        snprintf(dataBuf, sizeof(dataBuf),
+                                 "{\"obj\":\"%08x\",\"old\":%u,\"new\":%u,\"readback\":%u,"
+                                 "\"expect_mmss\":\"01:00\",\"expect_hhmm\":\"00:01\","
+                                 "\"expect_hhss\":\"00:00\"}",
+                                 g_agent_timer_obj, pokeOld, pokeNew, pokeSink);
+                        agent_dbg0b451a_log("H20", "main.c:poke",
+                                            "timer_remain_poke_1m00", dataBuf);
+                    }
+                    /* #endregion */
+                    printf("[info][hud-timer] H20_POKE old=%u new=%u readback=%u "
+                           "expect MM:SS=01:00 HH:MM=00:01 HH:SS=00:00\n",
+                           pokeOld, pokeNew, pokeSink);
+                    remain = pokeSink;
+                }
+            }
+            agent_dbg0b451a_poll_timer_remain("paint_flags");
+            if (s_flagLogs < 6u)
+            {
+                vtBuf[0] = 0;
+                if (r4)
+                {
+                    /* Full ctor method-slot range sample. */
+                    snprintf(vtBuf, sizeof(vtBuf),
+                             "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x",
+                             vm_get_var(r4 + 0x24u), vm_get_var(r4 + 0x28u),
+                             vm_get_var(r4 + 0x2cu), vm_get_var(r4 + 0x30u),
+                             vm_get_var(r4 + 0x38u), vm_get_var(r4 + 0x40u),
+                             vm_get_var(r4 + 0x48u), vm_get_var(r4 + 0x50u),
+                             vm_get_var(r4 + 0x6cu));
+                }
+                {
+                    char dataBuf[420];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"r4\":\"%08x\",\"remain\":%u,\"f64\":%u,\"f68\":%u,"
+                             "\"f6c\":%u,\"hhmmss\":\"%u:%02u:%02u\",\"slots\":\"%s\","
+                             "\"lastTick\":%u}",
+                             r4, remain, fl64, fl68, fl6c, remain / 3600u,
+                             (remain % 3600u) / 60u, remain % 60u, vtBuf,
+                             r4 ? vm_get_var(r4 + 0xcu) : 0u);
+                    agent_dbg0b451a_log("H15", "main.c:hook", "timer_paint_flags",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_paint_flags r4=%08x remain=%u "
+                           "f64/68/6c=%u/%u/%u slots=%s\n",
+                           r4, remain, fl64, fl68, fl6c, vtBuf);
+                }
+                ++s_flagLogs;
+            }
+            (void)slot;
+        }
+        else if (pc == 0x0104c44eu)
+        {
+            static u32 s_digLogs = 0;
+            u32 r2 = 0, r3 = 0, r4 = 0;
+            u16 slot4 = 0, slot6 = 0, slot8 = 0, slota = 0;
+            if (s_digLogs < 8u)
+            {
+                uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+                uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+                uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+                if (r4)
+                {
+                    slot4 = vm_get_var_short(r4 + 4u);
+                    slot6 = vm_get_var_short(r4 + 6u);
+                    slot8 = vm_get_var_short(r4 + 8u);
+                    slota = vm_get_var_short(r4 + 0xau);
+                }
+                {
+                    char dataBuf[240];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"r4\":\"%08x\",\"r2\":%u,\"r3\":%u,\"slot4\":%u,"
+                             "\"slot6\":%u,\"slot8\":%u,\"slota\":%u}",
+                             r4, r2, r3, (unsigned)slot4, (unsigned)slot6,
+                             (unsigned)slot8, (unsigned)slota);
+                    agent_dbg0b451a_log("H15", "main.c:hook", "timer_min_ones_digit",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_min_ones r4=%08x r2=%u "
+                           "slots=%u:%u sec=%u:%u\n",
+                           r4, r2, (unsigned)slot4, (unsigned)slot6,
+                           (unsigned)slot8, (unsigned)slota);
+                }
+                ++s_digLogs;
+            }
+        }
+        else if (pc == 0x0104c22au)
+        {
+            static u32 s_ctorLogs = 0;
+            u32 obj = 0;
+            u32 a1 = 0;
+            u32 a2 = 0;
+            u32 lr = 0;
+            if (s_ctorLogs < 8u)
+            {
+                uc_reg_read(uc, UC_ARM_REG_R0, &obj);
+                uc_reg_read(uc, UC_ARM_REG_R1, &a1);
+                uc_reg_read(uc, UC_ARM_REG_R2, &a2);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                {
+                    char dataBuf[200];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"obj\":\"%08x\",\"r1\":%u,\"r2\":%u,\"lr\":\"%08x\"}",
+                             obj, a1, a2, lr);
+                    agent_dbg0b451a_log("H14", "main.c:hook", "timer_ctor",
+                                        dataBuf);
+                    printf("[info][hud-timer] timer_ctor obj=%08x r1=%u r2=%u "
+                           "lr=%08x\n",
+                           obj, a1, a2, lr);
+                }
+                ++s_ctorLogs;
+            }
+        }
+    }
+    /* #endregion */
 #endif
 
     if (vm_is_manager_func_stub_address((u32)address))

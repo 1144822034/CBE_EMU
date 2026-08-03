@@ -258,6 +258,49 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
      * Do not advance CBE state here by forcing return values or writing globals.
      */
     u32 hookedLen = 0;
+    /* #region agent log */
+    /*
+     * Dream HUD timer forensics: only log uncommon requests (skip moveinfo
+     * 2/1 and lone 25/5 keepalive).  Capture proved no timer WT exists in
+     * the enter window (debug-0b451a: only 18/7, 25/5+2/3, 6/1, 2/1).
+     */
+    {
+        vm_mock_service_client_session *hudSess =
+            vm_mock_service_get_active_client_session();
+        u8 k = 0;
+        u8 s = 0;
+        if (hudSess != NULL &&
+            vm_net_mock_scene_name_is_safe(hudSess->sceneVisibleScene) &&
+            hudSess->sceneVisibleScene[0] == '2' &&
+            hudSess->sceneVisibleScene[1] == '9' &&
+            vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &k,
+                                                   &s) &&
+            !(k == 2 && s == 1) &&
+            !(k == 25 && s == 5 && requestLen <= 16))
+        {
+            u32 off = 4;
+            vm_net_mock_request_object obj;
+            char kinds[160];
+            u32 kp = 0;
+            kinds[0] = 0;
+            while (kp + 12 < sizeof(kinds) &&
+                   vm_net_mock_next_request_object(request, requestLen, &off,
+                                                    &obj))
+            {
+                kp += (u32)snprintf(kinds + kp, sizeof(kinds) - kp, "%u/%u/%u,",
+                                    obj.major, obj.kind, obj.subtype);
+            }
+            {
+                char dataBuf[220];
+                snprintf(dataBuf, sizeof(dataBuf),
+                         "{\"hdr\":\"%u/%u\",\"len\":%u,\"objs\":\"%.120s\"}",
+                         k, s, requestLen, kinds);
+                agent_dbg191169_log("F", "mock_server_dispatch.c:build",
+                                    "dream_wt_request", dataBuf);
+            }
+        }
+    }
+    /* #endregion */
 
     /*
      * After mmShop return, rebuild SCE combat kind-2 nodes with a deferred

@@ -3202,6 +3202,19 @@ typedef struct vm_mock_service_client_session
      */
     bool dreamExitReenterSettleRequired;
     /*
+     * Dream HUD countdown contract (debug-0b451a):
+     * client remain at obj+0x10 is in *seconds units* (MM:SS paint); poke/init
+     * uses 60 so HUD shows 01:00.  Tick burns ~1 unit per wall minute, so the
+     * server treats the same duration as **60 minutes** wall TTL and ejects
+     * via instance-guide 31000 when it expires.
+     *
+     * Per-role: armed against dreamHudTtlRoleId so another character on the
+     * same clientId (title rebind) cannot inherit or be ejected by this timer.
+     */
+    bool dreamHudTtlArmed;
+    u32 dreamHudTtlRoleId;
+    u32 dreamHudExpireAtMs;
+    /*
      * Dream 29* instance enter: next WT18/7 for 29* SCE must not return
      * uptodate — force a cold payload so DF uses 502* allocation instead of
      * intermittent hot 518c ParseMinfo (r6=01ffffff, debug-191169).
@@ -7565,6 +7578,9 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->mapStoneLoadingClearTick = 0;
     session->mapStoneLoadingClearScene[0] = 0;
     session->dreamExitReenterSettleRequired = false;
+    session->dreamHudTtlArmed = false;
+    session->dreamHudTtlRoleId = 0;
+    session->dreamHudExpireAtMs = 0;
     session->dreamForceColdSceResync = false;
     session->shopReturnLoadingClearPending = false;
     session->shopReturnLoadingClearRemaining = 0;

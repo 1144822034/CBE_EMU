@@ -4008,6 +4008,69 @@ vm_net_mock_instance_guide_seed(u32 actorId)
     return &g_vm_net_mock_dynamic_npc_overrides[index].seed;
 }
 
+/*
+ * Dream HUD wall TTL (ms).  Default 60 minutes matches client remain=60 with
+ * ~1 unit per wall minute.  Optional override:
+ * JHOnlineData/dream_hud_ttl_ms.txt (decimal milliseconds, 1000..604800000).
+ */
+enum
+{
+    VM_NET_MOCK_DREAM_HUD_TTL_MS_DEFAULT = 60u * 60u * 1000u
+};
+
+static u32 vm_net_mock_dream_hud_ttl_ms(void)
+{
+    static u32 cachedMs = 0;
+    static int cached = 0;
+    char path[1200];
+    FILE *fp = NULL;
+    unsigned long parsed = 0;
+    static const char *fallbackPaths[] = {
+        "web/fs/JHOnlineData/dream_hud_ttl_ms.txt",
+        "../web/fs/JHOnlineData/dream_hud_ttl_ms.txt",
+        "bin/JHOnlineData/dream_hud_ttl_ms.txt",
+        "../bin/JHOnlineData/dream_hud_ttl_ms.txt",
+        "JHOnlineData/dream_hud_ttl_ms.txt"
+    };
+
+    if (cached)
+        return cachedMs;
+
+    cachedMs = VM_NET_MOCK_DREAM_HUD_TTL_MS_DEFAULT;
+    if (vm_net_mock_build_configured_resource_path("dream_hud_ttl_ms.txt",
+                                                   path, sizeof(path)))
+        fp = fopen(path, "rb");
+    for (u32 i = 0; fp == NULL &&
+         i < sizeof(fallbackPaths) / sizeof(fallbackPaths[0]); ++i)
+        fp = fopen(fallbackPaths[i], "rb");
+    if (fp != NULL)
+    {
+        if (fscanf(fp, "%lu", &parsed) == 1 &&
+            parsed >= 1000ul && parsed <= (7ul * 24ul * 3600ul * 1000ul))
+        {
+            cachedMs = (u32)parsed;
+            printf("[info][network] dream_hud_ttl_ms_config value=%u "
+                   "source=dream_hud_ttl_ms.txt\n",
+                   cachedMs);
+        }
+        else
+        {
+            printf("[warn][network] dream_hud_ttl_ms_config_invalid "
+                   "fallback_default=%u\n",
+                   VM_NET_MOCK_DREAM_HUD_TTL_MS_DEFAULT);
+        }
+        fclose(fp);
+    }
+    else
+    {
+        printf("[info][network] dream_hud_ttl_ms_config value=%u "
+               "source=default-60min\n",
+               cachedMs);
+    }
+    cached = 1;
+    return cachedMs;
+}
+
 static u32 vm_net_mock_build_instance_enter_response(
     const vm_net_mock_scene_npcinfo_seed *seed, u8 *out, u32 outCap)
 {
@@ -4131,6 +4194,18 @@ static u32 vm_net_mock_build_instance_enter_response(
         return 0;
     }
     objectCount += 1;
+    /* #region agent log */
+    if (target.scene[0] == '2' && target.scene[1] == '9')
+    {
+        char dataBuf[160];
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"scene\":\"%.40s\",\"objects\":%u,\"resp\":%u,"
+                 "\"note\":\"27/3-probe-rejected-hud-08:05\"}",
+                 target.scene, objectCount, pos);
+        agent_dbg191169_log("F", "mock_server_scene_sync.c:enter",
+                            "dream_enter_hud_unresolved", dataBuf);
+    }
+    /* #endregion */
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     vm_net_mock_remember_scene_change_target(&target);
@@ -4164,6 +4239,9 @@ static u32 vm_net_mock_build_instance_enter_response(
         session->sceneVisibleScene[1] == '9')
     {
         session->dreamExitReenterSettleRequired = true;
+        session->dreamHudTtlArmed = false;
+        session->dreamHudTtlRoleId = 0;
+        session->dreamHudExpireAtMs = 0;
         vm_mock_service_session_arm_map_stone_loading_clear(session,
                                                              target.scene);
         /*
@@ -4183,6 +4261,47 @@ static u32 vm_net_mock_build_instance_enter_response(
     {
         session->dreamExitReenterSettleRequired = false;
         session->dreamForceColdSceResync = false;
+        /*
+         * Server wall TTL = 60 minutes by default (remain=60 ≈ 60 wall min).
+         * Override via JHOnlineData/dream_hud_ttl_ms.txt only — no env.
+         * Bound to entering roleId so characters do not share clocks.
+         */
+        {
+            u32 ttlMs = vm_net_mock_dream_hud_ttl_ms();
+            u32 nowMs = scheduler_get_tick_ms();
+            u32 roleId = session->onlineRoleId;
+            if (roleId == 0 && g_vm_net_mock_role_db_valid)
+                roleId = g_vm_net_mock_role_db.activeRoleId;
+            session->dreamHudTtlArmed = true;
+            session->dreamHudTtlRoleId = roleId;
+            session->dreamHudExpireAtMs = nowMs + ttlMs;
+            printf("[info][network] mock_npc_instance_dream_hud_ttl_arm "
+                   "actor=%u scene=%s role=%u client=%08x "
+                   "server_minutes=%u client_remain_units=60 "
+                   "ttl_ms=%u expire_at=%u now=%u "
+                   "evidence=debug-0b451a-per-role-ttl\n",
+                   seed->actorId, target.scene, roleId, session->clientId,
+                   ttlMs / 60000u, ttlMs, session->dreamHudExpireAtMs, nowMs);
+            /* #region agent log */
+            {
+                FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+                if (fp != NULL)
+                {
+                    fprintf(fp,
+                            "{\"sessionId\":\"0b451a\",\"runId\":\"dream-hud-ttl\","
+                            "\"hypothesisId\":\"H25\",\"location\":\"scene_sync.c:enter\","
+                            "\"message\":\"dream_hud_ttl_arm\",\"data\":{"
+                            "\"scene\":\"%.60s\",\"ttlMs\":%u,\"expireAt\":%u,"
+                            "\"serverMinutes\":%u,\"roleId\":%u,\"clientId\":%u},"
+                            "\"timestamp\":%lld}\n",
+                            target.scene, ttlMs, session->dreamHudExpireAtMs,
+                            ttlMs / 60000u, roleId, session->clientId,
+                            (long long)time(NULL) * 1000LL);
+                    fclose(fp);
+                }
+            }
+            /* #endregion */
+        }
         /*
          * After outdoor→29* 30/1 rebuilds the scene shell, deliver login-
          * shaped 1/1/6 on the next scene poll (map-stone fresh_shell
@@ -4306,6 +4425,208 @@ static u32 vm_net_mock_dream_encounter_smoke_poll(u8 *out, u32 outCap)
     }
 
     return 0;
+}
+
+/*
+ * Prefer actor 31000 (使者出口); else any kind=6 on the visible 29* scene
+ * whose instanceScene is outdoor (not 29*).
+ */
+static const vm_net_mock_scene_npcinfo_seed *
+vm_net_mock_dream_exit_guide_seed(const char *scene, u32 *actorIdOut)
+{
+    const vm_net_mock_scene_npcinfo_seed *seed = NULL;
+    u32 i = 0;
+
+    if (actorIdOut)
+        *actorIdOut = 0;
+    if (scene == NULL || scene[0] == 0)
+        return NULL;
+
+    seed = vm_net_mock_instance_guide_seed(31000);
+    if (seed != NULL)
+    {
+        if (actorIdOut)
+            *actorIdOut = 31000;
+        return seed;
+    }
+
+    if (!vm_net_mock_dynamic_npc_db_load())
+        return NULL;
+    for (i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
+    {
+        const vm_net_mock_dynamic_npc_override *row =
+            &g_vm_net_mock_dynamic_npc_overrides[i];
+        const char *to = NULL;
+
+        if (!row->enabled ||
+            row->seed.kind != VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
+            !vm_net_mock_scene_names_equal_loose(row->scene, scene))
+        {
+            continue;
+        }
+        to = row->seed.instanceScene;
+        if (to == NULL || to[0] == 0 || row->seed.instanceX == 0 ||
+            row->seed.instanceY == 0)
+            continue;
+        if (to[0] == '2' && to[1] == '9')
+            continue;
+        if (actorIdOut)
+            *actorIdOut = row->seed.actorId;
+        return &row->seed;
+    }
+    return NULL;
+}
+
+/*
+ * Per-client / per-role dream HUD wall TTL.  Each role's enter arms its own
+ * expireAt; poll only ejects the session whose onlineRoleId still owns the
+ * timer (multi-account isolation + title rebind safety).
+ */
+static u32 vm_net_mock_dream_hud_ttl_poll(u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *session = NULL;
+    const vm_net_mock_scene_npcinfo_seed *seed = NULL;
+    u32 nowMs = 0;
+    u32 len = 0;
+    u32 exitActor = 0;
+    static u32 s_lastWaitLogMs = 0;
+
+    if (out == NULL || outCap < 5)
+        return 0;
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL || !session->dreamHudTtlArmed)
+        return 0;
+    /* Role rebind / offline left a stale arm: drop without ejecting. */
+    if (session->dreamHudTtlRoleId == 0 ||
+        session->onlineRoleId == 0 ||
+        session->onlineRoleId != session->dreamHudTtlRoleId)
+    {
+        /* #region agent log */
+        {
+            FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+            if (fp != NULL)
+            {
+                fprintf(fp,
+                        "{\"sessionId\":\"0b451a\",\"runId\":\"dream-hud-ttl\","
+                        "\"hypothesisId\":\"H22\",\"location\":\"scene_sync.c:ttl_poll\","
+                        "\"message\":\"dream_hud_ttl_role_mismatch\",\"data\":{"
+                        "\"armedRole\":%u,\"onlineRole\":%u,\"clientId\":%u},"
+                        "\"timestamp\":%lld}\n",
+                        session->dreamHudTtlRoleId, session->onlineRoleId,
+                        session->clientId, (long long)time(NULL) * 1000LL);
+                fclose(fp);
+            }
+        }
+        /* #endregion */
+        printf("[warn][network] mock_dream_hud_ttl_role_mismatch "
+               "armed_role=%u online_role=%u client=%08x action=disarm "
+               "evidence=per-role-ttl\n",
+               session->dreamHudTtlRoleId, session->onlineRoleId,
+               session->clientId);
+        session->dreamHudTtlArmed = false;
+        session->dreamHudTtlRoleId = 0;
+        session->dreamHudExpireAtMs = 0;
+        return 0;
+    }
+    if (!(session->sceneVisibleReady && !session->sceneVisiblePending &&
+          session->sceneVisibleScene[0] == '2' &&
+          session->sceneVisibleScene[1] == '9'))
+    {
+        return 0;
+    }
+    nowMs = scheduler_get_tick_ms();
+    if (nowMs < session->dreamHudExpireAtMs)
+    {
+        /* #region agent log */
+        if (s_lastWaitLogMs == 0 || nowMs - s_lastWaitLogMs >= 10000u)
+        {
+            FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+            if (fp != NULL)
+            {
+                fprintf(fp,
+                        "{\"sessionId\":\"0b451a\",\"runId\":\"dream-hud-ttl\","
+                        "\"hypothesisId\":\"H23\",\"location\":\"scene_sync.c:ttl_poll\","
+                        "\"message\":\"dream_hud_ttl_wait\",\"data\":{"
+                        "\"roleId\":%u,\"clientId\":%u,\"now\":%u,\"expireAt\":%u,"
+                        "\"remainMs\":%u,\"scene\":\"%.60s\"},"
+                        "\"timestamp\":%lld}\n",
+                        session->onlineRoleId, session->clientId, nowMs,
+                        session->dreamHudExpireAtMs,
+                        session->dreamHudExpireAtMs - nowMs,
+                        session->sceneVisibleScene,
+                        (long long)time(NULL) * 1000LL);
+                fclose(fp);
+            }
+            s_lastWaitLogMs = nowMs;
+        }
+        /* #endregion */
+        return 0;
+    }
+
+    seed = vm_net_mock_dream_exit_guide_seed(session->sceneVisibleScene,
+                                            &exitActor);
+    if (seed == NULL)
+    {
+        printf("[warn][network] mock_dream_hud_ttl_exit_miss scene=%s "
+               "role=%u client=%08x action=disarm "
+               "evidence=need-dynamic-npc-kind6-exit\n",
+               session->sceneVisibleScene, session->onlineRoleId,
+               session->clientId);
+        /* #region agent log */
+        {
+            FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+            if (fp != NULL)
+            {
+                fprintf(fp,
+                        "{\"sessionId\":\"0b451a\",\"runId\":\"dream-hud-ttl\","
+                        "\"hypothesisId\":\"H24\",\"location\":\"scene_sync.c:ttl_poll\","
+                        "\"message\":\"dream_hud_ttl_exit_miss\",\"data\":{"
+                        "\"roleId\":%u,\"clientId\":%u,\"scene\":\"%.60s\"},"
+                        "\"timestamp\":%lld}\n",
+                        session->onlineRoleId, session->clientId,
+                        session->sceneVisibleScene,
+                        (long long)time(NULL) * 1000LL);
+                fclose(fp);
+            }
+        }
+        /* #endregion */
+        session->dreamHudTtlArmed = false;
+        session->dreamHudTtlRoleId = 0;
+        session->dreamHudExpireAtMs = 0;
+        return 0;
+    }
+    session->dreamHudTtlArmed = false;
+    session->dreamHudTtlRoleId = 0;
+    session->dreamHudExpireAtMs = 0;
+    len = vm_net_mock_build_instance_enter_response(seed, out, outCap);
+    printf("[info][network] mock_dream_hud_ttl_exit actor=%u scene=%s "
+           "role=%u client=%08x to=%s resp=%u now=%u "
+           "action=per-role-60min-eject "
+           "evidence=debug-0b451a-client-remain60-as-60min\n",
+           exitActor, session->sceneVisibleScene, session->onlineRoleId,
+           session->clientId,
+           seed->instanceScene ? seed->instanceScene : "-", len, nowMs);
+    /* #region agent log */
+    {
+        FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+        if (fp != NULL)
+        {
+            fprintf(fp,
+                    "{\"sessionId\":\"0b451a\",\"runId\":\"dream-hud-ttl\","
+                    "\"hypothesisId\":\"H22\",\"location\":\"scene_sync.c:ttl_poll\","
+                    "\"message\":\"dream_hud_ttl_exit\",\"data\":{"
+                    "\"roleId\":%u,\"clientId\":%u,\"actor\":%u,"
+                    "\"from\":\"%.60s\",\"to\":\"%.60s\",\"resp\":%u,\"now\":%u},"
+                    "\"timestamp\":%lld}\n",
+                    session->onlineRoleId, session->clientId, exitActor,
+                    session->sceneVisibleScene,
+                    seed->instanceScene ? seed->instanceScene : "-", len, nowMs,
+                    (long long)time(NULL) * 1000LL);
+            fclose(fp);
+        }
+    }
+    /* #endregion */
+    return len;
 }
 
 /*
@@ -5631,6 +5952,16 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                        "evidence=debug-0b451a-messenger-not-poll\n",
                        instanceSeed->actorId, session->sceneVisibleScene,
                        instanceSeed->instanceScene, transferLen);
+                /* #region agent log */
+                {
+                    char dataBuf[160];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"actor\":%u,\"resp\":%u,\"path\":\"OPEN-as-ENTER\"}",
+                             instanceSeed->actorId, transferLen);
+                    agent_dbg191169_log("B", "mock_server_scene_sync.c:npc",
+                                        "messenger_enter_response", dataBuf);
+                }
+                /* #endregion */
                 return transferLen;
             }
             dialogText =

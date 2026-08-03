@@ -566,6 +566,7 @@ static bool vm_net_mock_append_fb_target_result4_object(u8 *out, u32 outCap, u32
         infoText = "";
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x1b, 4, &objectStart))
         return false;
+    /* min is NOT the map HUD clock (debug-0b451a: remain=10, HUD stayed 08:05). */
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "min", 0))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
@@ -6078,7 +6079,10 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
     {
-        u32 smokeLen = vm_net_mock_dream_encounter_smoke_poll(out, outCap);
+        u32 smokeLen = vm_net_mock_dream_hud_ttl_poll(out, outCap);
+        if (smokeLen != 0)
+            return smokeLen;
+        smokeLen = vm_net_mock_dream_encounter_smoke_poll(out, outCap);
         if (smokeLen != 0)
             return smokeLen;
         smokeLen = vm_net_mock_dream_reenter_smoke_poll(out, outCap);
