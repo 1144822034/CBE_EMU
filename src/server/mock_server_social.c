@@ -1262,6 +1262,10 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
         return pos;
     }
+    /* Battle.cbm sends this only after the final visual close has returned to
+     * the scene.  Let the hangup owner arm a later poll here; never append a
+     * new 4/5 to this acknowledgement packet. */
+    vm_net_mock_scene_hangup_on_scene_default_event();
     if (g_mockBattleOperateSessionFinished != 0)
     {
         g_mockBattleOperateSessionFinished = 0;
@@ -4236,15 +4240,15 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
-    if (g_mockBattleAwaitingSettlement != 0 &&
-        g_vm_net_mock_battle_no_reward_terminal_serial ==
-            g_mockBattleOperateSessionSerial &&
-        observer->onlineRoleId != 0 &&
-        g_vm_net_mock_battle_role_id_current == observer->onlineRoleId)
+    if (vm_net_mock_battle_pending_settlement_is_deliverable(observer))
     {
         return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
     }
     teamBattleResponseLen = vm_net_mock_build_pending_auto_battle_action_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_pending_scene_hangup_battle_response(
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;

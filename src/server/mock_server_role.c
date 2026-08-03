@@ -3738,6 +3738,61 @@ failed:
     return false;
 }
 
+/* This is deliberately a read-only companion to the transactional claim
+ * above.  Automatic scene hangup needs to know whether it may dispatch a
+ * killing action without creating an unrepresentable zero-reward automatic
+ * terminal.  The database clock remains the authority; scheduler ticks only
+ * delay a later poll and are never used to decide eligibility. */
+static bool vm_net_mock_role_get_monster_reward_cooldown_remaining(
+    const vm_net_mock_role_state *role, u32 *remainingMsOut)
+{
+    char account_hex[129];
+    char query[2048];
+    vm_mock_mysql_monster_reward_cooldown_context context;
+
+    if (remainingMsOut != NULL)
+        *remainingMsOut = 0;
+    if (role == NULL || role->roleId == 0 ||
+        !vm_net_mock_mysql_account_hex(account_hex) ||
+        !vm_net_mock_role_prepare_monster_reward_cooldown_schema())
+    {
+        return false;
+    }
+
+    memset(&context, 0, sizeof(context));
+    /* CURRENT_TIMESTAMP(3) is constant for one statement.  Keeping the clock
+     * in the derived row avoids a host-time approximation and treats a server
+     * clock rollback exactly like the claim path: a full cooldown remains. */
+    snprintf(query, sizeof(query),
+             "SELECT CAST(CASE "
+             "WHEN reward_clock.now_ms < last_reward_ms THEN %u "
+             "WHEN reward_clock.now_ms - last_reward_ms < %u THEN "
+             "%u - (reward_clock.now_ms - last_reward_ms) "
+             "ELSE 0 END AS UNSIGNED) "
+             "FROM account_role_monster_reward_cooldowns "
+             "CROSS JOIN (SELECT CAST(FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000) "
+             "AS UNSIGNED) AS now_ms) AS reward_clock "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
+             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
+             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
+             account_hex, role->roleId);
+    if (!vm_mysql_query(query, vm_mock_mysql_monster_reward_cooldown_row,
+                        &context) || context.invalid ||
+        (context.found && context.value > VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS))
+    {
+        printf("[error][mock-service] monster_reward_cooldown_read_failed "
+               "account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ?
+                   g_vm_mock_service_active_account_id : "-",
+               role->roleId, vm_mysql_last_error());
+        return false;
+    }
+    if (remainingMsOut != NULL && context.found)
+        *remainingMsOut = (u32)context.value;
+    return true;
+}
+
 /*
  * Timed special effects have a different lifecycle from the role snapshot:
  * an item can expire while the character is offline, and an old binary role

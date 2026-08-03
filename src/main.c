@@ -13,6 +13,9 @@
 
 #include "main.h"
 #include "lcd.h"
+#ifdef CBE_CLIENT_ONLY
+#include "automation_png.h"
+#endif
 static bool vm_file_try_download_named_resource(const char *normalizedPath);
 #include "vmFunc.c"
 #include "hookRam.c"
@@ -188,6 +191,119 @@ static int g_autotestKeyReleasePending = 0;
 static u32 g_autotestKeyReleaseMs = 0;
 static int g_autotestKeyReleaseSym = 0;
 static FILE *g_autotestStateFile = NULL;
+
+/*
+ * Scenario automation is intentionally separate from the legacy `--autotest`
+ * time script below.  It may observe VM state/PC/packets, but every action is
+ * still delivered through keyEvent()/mouseEvent() and therefore through the
+ * normal VM hardware-event queue.
+ */
+typedef enum
+{
+    VM_AUTOMATION_SCENARIO_NONE = 0,
+    VM_AUTOMATION_SCENARIO_SHOP_RETURN_HANGUP,
+    /* Control for the shop-return regression.  It uses the identical scene
+     * control and battle assertion, but intentionally omits the shop round
+     * trip so the first differing client lifecycle edge is observable. */
+    VM_AUTOMATION_SCENARIO_DIRECT_HANGUP,
+    /* A read-only visual/protocol probe for the authored n_telestone scene.
+     * It deliberately stops at the native scene boundary; it does not fake a
+     * 16/1 request or call the mmGame action callback directly. */
+    VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+} vm_automation_scenario;
+
+typedef enum
+{
+    VM_AUTOMATION_STAGE_BOOT_CONFIRM = 0,
+    VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP,
+    VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH,
+    VM_AUTOMATION_STAGE_WAIT_ROLE_LIST,
+    VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE,
+    VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
+    VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN,
+    VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE,
+    VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE,
+    VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE_SCREEN,
+    VM_AUTOMATION_STAGE_PASSED,
+    VM_AUTOMATION_STAGE_FAILED
+} vm_automation_stage;
+
+typedef struct
+{
+    vm_automation_scenario scenario;
+    vm_automation_stage stage;
+    u8 active;
+    u8 finished;
+    u8 timedTitleDriver;
+    u8 titleUpdateCompleteSeen;
+    u8 titleScreenInitialized;
+    u8 titleLoginResponseSeen;
+    u8 titleLoginResponseCaptured;
+    u8 titleRoleListSeen;
+    u8 initialScenePacketSeen;
+    u8 shopStatusSeen;
+    u8 shopMoneySeen;
+    u8 shopReturnSeen;
+    u8 shopReturnPreHangupCaptured;
+    /* A 30/2 carrying posinfo is a true scene re-enter: CBE replaces the
+     * scene screen, then scene_runtime_init_and_sync emits its next 25/5
+     * subset request.  Both native lifecycle edges must complete before this
+     * regression sends the Hangup touch. */
+    u8 shopReturnSceneReinitSeen;
+    u8 shopReturnFollowupSeen;
+    u8 hangupBattleResponseSeen;
+    u8 battleStartHandlerSeen;
+    u8 battleSceneCharListSeen;
+    u8 capturePending;
+    u8 captureLabelIndex;
+    u8 exitRequested;
+    u32 renderFrames;
+    u32 stageFrame;
+    u32 stageStartedMs;
+    u32 totalStartedMs;
+    u32 titleUpdateFrame;
+    u32 initialScenePacketFrame;
+    u32 titleScreenInitFrame;
+    /* These are observed screen descriptors, not hard-coded client addresses.
+     * The return touch must be delivered only after the actual 30/2 callback
+     * has restored the same scene owner that accepted the first toolbar tap. */
+    u32 initialSceneScreen;
+    u32 shopScreen;
+    /* A 14/14 + 14/4 packet observed at the host transport boundary is not
+     * yet an interactive shop.  Record its frame and wait for the owning
+     * shop screen to render after the guest callback before sending Back. */
+    u32 shopDataPacketFrame;
+    u32 shopDataPacketSequence;
+    u32 shopReturnPacketFrame;
+    u32 shopReturnPacketSequence;
+    u32 shopReturnSceneReinitFrame;
+    u32 shopReturnFollowupFrame;
+    u32 shopReturnFollowupSequence;
+    u32 battleStartHandlerFrame;
+    u32 battleSceneCharListFrame;
+    u32 battleModuleSpBf;
+    u32 captureIndex;
+    u32 inputCount;
+    u32 timedInputCount;
+    u32 maxSteps;
+    u32 totalTimeoutMs;
+    u32 stepTimeoutMs;
+    char artifactDir[512];
+    char pendingCaptureLabel[48];
+} vm_automation_state;
+
+static vm_automation_state g_vmAutomation;
+static const char *vm_automation_scenario_name(void);
+static void vm_automation_note_startup_pc(u32 pc);
+static void vm_automation_note_screen_init(u32 screen, u32 initEntry,
+                                           u32 logicEntry, u32 renderEntry);
+static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
+                                                 u32 eventType, u32 sequence);
+static void vm_automation_note_battle_handler_pc(u32 localPc,
+                                                  u32 moduleSpBf);
+static void vm_automation_note_battle_scene_char_list(u32 sequence,
+                                                       u32 localPc);
+static void vm_automation_render_complete(void);
 static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
 static u32 g_vmInputSerial = 0;
@@ -293,8 +409,15 @@ typedef struct
     u8 sceneSubtype;
     u8 sceneCompleteAfterCallback;
     u8 updateComplete;
+    u8 hasHangupBattleStart;
+    u8 hangupBattleStartDirect;
+    u8 hangupResponseObjectCount;
+    u8 hangupResponseParsedCount;
+    u8 reserved0;
     u16 sceneX;
     u16 sceneY;
+    u32 hangupResponseSequence;
+    u32 hangupResponseLength;
     char scene[64];
     char updateName[64];
 } vm_net_remote_observation;
@@ -363,6 +486,29 @@ static u32 g_netDownLinkData = 0;
 static u32 g_netCurrentObject = 0;
 static u32 g_netDebugReadWindow = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
+/* Read-only memory-watch target armed immediately after JianghuOL.CBE's
+ * HandleBattleEnterReq writes its state=3 marker.  hookRam.c only observes
+ * writes that overlap this address; it never changes guest memory. */
+u32 g_hangupBattleStateWatchAddress = 0;
+u32 g_hangupBattleStateWatchGeneration = 0;
+u32 g_hangupBattleStateWatchWriteCount = 0;
+u32 g_hangupSceneModeWatchAddress = 0;
+u32 g_hangupSceneModeWatchWriteCount = 0;
+u32 g_hangupBusinessDelegateWatchAddress = 0;
+u32 g_hangupBusinessDelegateWatchWriteCount = 0;
+/* Automation-only, read-only watch for the shared game-context flag consumed
+ * by mmBattle:BattleScene_MainLoop at gameState+1133.  It is armed before
+ * the shop round trip so the actual writer can be attributed to a client
+ * lifecycle transition rather than inferred from the later stuck battle UI. */
+u32 g_vmAutomationGameLoadingGateWatchAddress = 0;
+u32 g_vmAutomationGameLoadingGateWatchWriteCount = 0;
+static u32 g_hangupTransitionTraceStepCount = 0;
+/* Capture the CBM caller context before ROM dispatch restores the main CBE
+ * R9.  It is used only to map the observed CleanupPaymentCb caller back to
+ * the module-local offset that owns the transition. */
+static u32 g_hangupCleanupCallerLr = 0;
+static u32 g_hangupCleanupCallerR9 = 0;
+static u32 g_hangupBattleModuleTraceCount = 0;
 static u8 g_lastStartupScreenState = 0xff;
 static void vm_autotest_note(const char *fmt, ...);
 static u32 g_lastStartupUpdateObj = 0xffffffff;
@@ -402,6 +548,16 @@ u8 g_mockBattleOperateSessionArmed = 0;
  * state.  The service owns the corresponding per-account turn scheduler. */
 static u8 g_vm_net_mock_battle_auto_enabled = 0;
 static u32 g_vm_net_mock_battle_auto_next_action_tick = 0;
+/* Request-local observation written by the common 4/6 builder and consumed
+ * immediately by the automatic-battle scheduler.  It is deliberately not
+ * role state: the value never survives a request/context boundary. */
+static u8 g_vm_net_mock_battle_action6_emitted_count = 0;
+/* The terminal close command (4/9) must not share the network event that
+ * enqueues the final 4/6 action list.  The 4/7 settlement itself remains
+ * inline with that action so the client's type-3 death callback can consume
+ * the terminal result.  This per-account timestamp marks the first scene
+ * poll allowed to deliver only the close command. */
+static u32 g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
 static u8 g_mockBattleOperateSessionFinished = 0;
 static u8 g_mockBattlePendingEnemyTurn = 0;
 static u8 g_mockBattleAwaitingSettlement = 0;
@@ -2297,6 +2453,1221 @@ static bool scheduler_attach_net_remote_observation(
     return false;
 }
 
+/* Only active while scheduler_dispatch_net_tasks invokes the guest callback
+ * for the uniquely identified hangup-start response.  This is host-side,
+ * read-only forensics: it observes which branch the existing CBE parser
+ * takes, and never changes the packet, registers, or CBE state. */
+typedef struct
+{
+    u8 active;
+    u8 packetInitEntered;
+    u8 packetGuardReturned;
+    u8 packetUnpackError;
+    u8 businessFollowup;
+    u8 businessFallback;
+    u8 actorMoveCase;
+    u8 typeResponseCase;
+    u8 entryCount;
+    u8 battleStartReadySeen;
+    u32 sequence;
+    u32 mmBattleCodeBase;
+    u32 entrySwitchWords[4];
+} vm_hangup_protocol_parser_trace;
+
+static vm_hangup_protocol_parser_trace g_hangupProtocolParserTrace;
+
+/* HandleBattleStartMsg(0x66CC) publishes its ready flag while the event-7
+ * callback is still on the stack.  BattleScene_MainLoop consumes that flag on
+ * a later render.  Retain only the relocation base and sequence for that
+ * narrow, read-only post-callback observation window. */
+typedef struct
+{
+    u8 active;
+    u8 mainLoopSeen;
+    u8 firstPoolPcSeen;
+    u8 charListGateSeen;
+    u8 loadingDialogDrawSeen;
+    u8 drawMainSeen;
+    u8 frameDelegateSeen;
+    u8 sceneTickEntrySeen;
+    u8 sceneTickReadySeen;
+    u8 sceneTickLoadingFallbackSeen;
+    u8 battleCompletionCheckSeen;
+    u8 battleCompletionPresentSeen;
+    u8 postDelegateStateSeen;
+    u32 sequence;
+    u32 codeBase;
+} vm_hangup_battle_render_trace;
+
+static vm_hangup_battle_render_trace g_hangupBattleRenderTrace;
+
+static void vm_hangup_protocol_parser_trace_begin(
+    const vm_net_remote_observation *observation)
+{
+    memset(&g_hangupProtocolParserTrace, 0,
+           sizeof(g_hangupProtocolParserTrace));
+    if (observation == NULL || !observation->hasHangupBattleStart)
+        return;
+    /* Keep a completed start response's render observation alive across
+     * ordinary scene-poll/auto-action callbacks.  Only a new 4/5 start can
+     * supersede that lifecycle window. */
+    memset(&g_hangupBattleRenderTrace, 0,
+           sizeof(g_hangupBattleRenderTrace));
+    g_hangupProtocolParserTrace.active = 1;
+    g_hangupProtocolParserTrace.sequence =
+        observation->hangupResponseSequence;
+    /* The state watch is armed before module/screen transitions and therefore
+     * sees unrelated event-7 packets.  The mmBattle boundary belongs only to
+     * this identified hangup-start callback; start its budget here. */
+    g_hangupBattleModuleTraceCount = 0;
+}
+
+static void vm_hangup_protocol_parser_trace_end(
+    const vm_net_remote_observation *observation)
+{
+    FILE *trace;
+    u8 renderArmed = 0;
+    if (g_hangupProtocolParserTrace.active &&
+        g_hangupProtocolParserTrace.battleStartReadySeen &&
+        g_hangupProtocolParserTrace.mmBattleCodeBase != 0)
+    {
+        g_hangupBattleRenderTrace.active = 1;
+        g_hangupBattleRenderTrace.sequence =
+            g_hangupProtocolParserTrace.sequence;
+        g_hangupBattleRenderTrace.codeBase =
+            g_hangupProtocolParserTrace.mmBattleCodeBase;
+        renderArmed = 1;
+    }
+    trace = NULL;
+    if (g_hangupProtocolParserTrace.active ||
+        (observation != NULL && observation->hasHangupBattleStart))
+    {
+        trace = fopen("logs/hangup-protocol.log", "ab");
+    }
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "[info][network] mock_hangup_mmBattle_render_arm sequence=%u "
+                "parser_active=%u ready=%u code_base=%08x armed=%u\n",
+                g_hangupProtocolParserTrace.sequence,
+                g_hangupProtocolParserTrace.active,
+                g_hangupProtocolParserTrace.battleStartReadySeen,
+                g_hangupProtocolParserTrace.mmBattleCodeBase, renderArmed);
+        fflush(trace);
+        fclose(trace);
+    }
+    memset(&g_hangupProtocolParserTrace, 0,
+           sizeof(g_hangupProtocolParserTrace));
+    /* The request-side state watch is armed before the asynchronous response
+     * is queued.  Unrelated event-7 callbacks can run in between; they must
+     * not disarm the watch or the first client write that resets the battle
+     * state is lost.  Only the matching direct hangup response owns the end
+     * of this forensic window. */
+    if (observation != NULL && observation->hasHangupBattleStart &&
+        observation->hangupBattleStartDirect)
+    {
+        g_hangupBattleStateWatchAddress = 0;
+        g_hangupSceneModeWatchAddress = 0;
+        g_hangupBusinessDelegateWatchAddress = 0;
+    }
+}
+
+static void vm_hangup_battle_state_watch_note_pc(u32 pc)
+{
+    u32 r9 = 0;
+    u16 state = 0xffff;
+    FILE *trace;
+
+    /* HandleBattleEnterReq: the STRH at 0x01015EBE stores 3; the next
+     * instruction is 0x01015EC2.  Arm only after that real client write. */
+    if (pc != 0x01015EC2)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+    if (r9 == 0)
+        r9 = Global_R9;
+    if (r9 == 0)
+        return;
+    g_hangupBattleStateWatchAddress = r9 + 23682;
+    g_hangupBattleStateWatchWriteCount = 0;
+    g_hangupSceneModeWatchAddress = r9 + 19638;
+    g_hangupSceneModeWatchWriteCount = 0;
+    g_hangupBusinessDelegateWatchAddress = r9 + 23856;
+    g_hangupBusinessDelegateWatchWriteCount = 0;
+    g_hangupTransitionTraceStepCount = 0;
+    g_hangupBattleModuleTraceCount = 0;
+    ++g_hangupBattleStateWatchGeneration;
+    (void)uc_mem_read(MTK, g_hangupBattleStateWatchAddress,
+                      &state, sizeof(state));
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_battle_state_arm generation=%u "
+            "addr=%08x state=%u pc=%08x\n",
+            g_hangupBattleStateWatchGeneration,
+            g_hangupBattleStateWatchAddress, state, pc);
+    fflush(trace);
+    fclose(trace);
+}
+
+static void vm_hangup_transition_capture_pre_restore(u32 pc)
+{
+    if (g_hangupBattleStateWatchAddress == 0 || pc != 0x010448DE)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &g_hangupCleanupCallerLr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &g_hangupCleanupCallerR9);
+}
+
+static void vm_hangup_format_code_bytes(const u8 *bytes, u32 length,
+                                        char *out, u32 outCap)
+{
+    u32 pos = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (bytes == NULL)
+        return;
+    for (u32 i = 0; i < length && pos + 2 < outCap; ++i)
+    {
+        int written = snprintf(out + pos, outCap - pos, "%02x", bytes[i]);
+        if (written != 2)
+            break;
+        pos += 2;
+    }
+}
+
+static void vm_hangup_transition_trace_note_pc(u32 pc)
+{
+    u16 battleState = 0xffff;
+    u8 sceneMode = 0xff;
+    u32 businessDelegate = 0;
+    u32 paymentCallback = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 r0 = 0;
+    u32 r1 = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 callerModuleR9 = 0;
+    u32 callerCodeBase = 0;
+    u32 callerLocalOffset = 0xffffffffu;
+    u32 paymentLocalOffset = 0xffffffffu;
+    u32 callerCodeStart = 0;
+    u8 callerCodeBytes[32] = {0};
+    u8 paymentCodeBytes[16] = {0};
+    char callerCodeHex[sizeof(callerCodeBytes) * 2 + 1] = {0};
+    char paymentCodeHex[sizeof(paymentCodeBytes) * 2 + 1] = {0};
+    u32 stackWords[6] = {0};
+    char sceneName[33] = {0};
+    char modulePath[64] = {0};
+    u16 modulePendingMode = 0xffff;
+    u32 activeScreen = 0;
+    FILE *trace;
+
+    if (g_hangupBattleStateWatchAddress == 0 ||
+        g_hangupTransitionTraceStepCount >= 64)
+    {
+        return;
+    }
+    switch (pc)
+    {
+    case 0x01015EC2: /* HandleBattleEnterReq has committed battle state 3. */
+    case 0x010037A6: /* CleanupPaymentCbWrap entry; LR identifies the real owner. */
+    case 0x01015EE0: /* HandleBattleEnterReq calls CleanupPaymentCbWrap(5). */
+    case 0x01012DC6: /* actor move-info case 9 requests scene mode 3/4. */
+    case 0x01018296: /* scene trigger countdown requests scene mode 3/4. */
+    case 0x010448DE: /* CleanupPaymentCb entry before SetSceneFlag19638. */
+    case 0x010448E6: /* SetSceneFlag19638(5) has returned. */
+    case 0x010448F0: /* Invoke the registered payment/module cleanup callback. */
+    case 0x01003CFC: /* ProcessSceneState entry. */
+    case 0x01003D0C: /* ProcessSceneState is about to consume scene mode. */
+    case 0x0100369C: /* HandleSceneTransition entry. */
+    case 0x010036EA: /* Transition ownership branch. */
+    case 0x01003768: /* Transition module callback invocation. */
+    case 0x01036404: /* FormatSaveDataPath: R0 is the selected CBM slot. */
+    case 0x01044A12: /* LoadPayCBMAsset: R1 is the actual CBM path. */
+    case 0x0101809C: /* EnterSceneByMapName entry. */
+    case 0x01018142: /* EnterSceneByMapName requests mode 3/4. */
+        break;
+    default:
+        return;
+    }
+    (void)uc_mem_read(MTK, g_hangupBattleStateWatchAddress,
+                      &battleState, sizeof(battleState));
+    if (g_hangupSceneModeWatchAddress != 0)
+        (void)uc_mem_read(MTK, g_hangupSceneModeWatchAddress,
+                          &sceneMode, sizeof(sceneMode));
+    if (g_hangupBusinessDelegateWatchAddress != 0)
+        (void)uc_mem_read(MTK, g_hangupBusinessDelegateWatchAddress,
+                          &businessDelegate, sizeof(businessDelegate));
+    if (g_hangupBattleStateWatchAddress != 0)
+    {
+        const u32 traceR9 =
+            g_hangupBattleStateWatchAddress - 23682u;
+        (void)uc_mem_read(MTK, traceR9 + 10304u,
+                          &modulePendingMode, sizeof(modulePendingMode));
+        (void)uc_mem_read(MTK, traceR9 + 24304u,
+                          &activeScreen, sizeof(activeScreen));
+    }
+    /* CleanupPaymentCb reads the callback at R9+39732.  Derive it from the
+     * already verified request-side R9 watch instead of consulting host-side
+     * module bookkeeping, which may refer to a different screen generation. */
+    if (g_hangupBattleStateWatchAddress != 0)
+        (void)uc_mem_read(MTK,
+                          g_hangupBattleStateWatchAddress + (39732u - 23682u),
+                          &paymentCallback, sizeof(paymentCallback));
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
+    if (pc == 0x0101809C && r0 != 0)
+    {
+        u32 sceneLen = r1;
+        if (sceneLen > sizeof(sceneName) - 1)
+            sceneLen = sizeof(sceneName) - 1;
+        (void)uc_mem_read(MTK, r0, sceneName, sceneLen);
+        sceneName[sceneLen] = 0;
+    }
+    if (pc == 0x01044A12 && r1 != 0)
+    {
+        for (u32 i = 0; i + 1 < sizeof(modulePath); ++i)
+        {
+            if (uc_mem_read(MTK, r1 + i, &modulePath[i], 1) != UC_ERR_OK ||
+                modulePath[i] == 0)
+            {
+                modulePath[i] = 0;
+                break;
+            }
+        }
+        modulePath[sizeof(modulePath) - 1] = 0;
+    }
+    if ((pc == 0x010448DE || pc == 0x010448E6 || pc == 0x010448F0) &&
+        g_hangupCleanupCallerLr == lr &&
+        g_hangupCleanupCallerR9 >= VM_Memory_Pool_ADDRESS + 0x14000u &&
+        g_hangupCleanupCallerR9 < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+    {
+        callerModuleR9 = g_hangupCleanupCallerR9;
+        callerCodeBase = callerModuleR9 - 0x14000u;
+        if ((lr & ~1u) >= callerCodeBase)
+            callerLocalOffset = (lr & ~1u) - callerCodeBase;
+        if ((paymentCallback & ~1u) >= callerCodeBase)
+            paymentLocalOffset = (paymentCallback & ~1u) - callerCodeBase;
+    }
+    if (pc == 0x010448DE && vm_is_pool_entry(lr & ~1u))
+    {
+        callerCodeStart = (lr & ~1u) >= 16u ? (lr & ~1u) - 16u : 0;
+        if (callerCodeStart != 0 &&
+            uc_mem_read(MTK, callerCodeStart, callerCodeBytes,
+                        sizeof(callerCodeBytes)) == UC_ERR_OK)
+        {
+            vm_hangup_format_code_bytes(callerCodeBytes,
+                                        sizeof(callerCodeBytes),
+                                        callerCodeHex, sizeof(callerCodeHex));
+        }
+        if (vm_is_pool_entry(paymentCallback & ~1u) &&
+            uc_mem_read(MTK, paymentCallback & ~1u, paymentCodeBytes,
+                        sizeof(paymentCodeBytes)) == UC_ERR_OK)
+        {
+            vm_hangup_format_code_bytes(paymentCodeBytes,
+                                        sizeof(paymentCodeBytes),
+                                        paymentCodeHex, sizeof(paymentCodeHex));
+        }
+    }
+    ++g_hangupTransitionTraceStepCount;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_transition_step "
+            "generation=%u step=%u pc=%08x battle_state=%u "
+            "scene_mode=%u business_cb=%08x payment_cb=%08x lr=%08x sp=%08x "
+            "captured_r9=%08x module_r9=%08x code_base=%08x "
+            "lr_off=%08x payment_off=%08x code_start=%08x "
+            "caller_code=%s payment_code=%s "
+            "args=%08x/%08x/%08x/%08x stack=%08x,%08x,%08x,%08x,%08x,%08x "
+            "pending_mode=%u active_screen=%08x scene=%s module_path=%s\n",
+            g_hangupBattleStateWatchGeneration,
+            g_hangupTransitionTraceStepCount, pc, battleState,
+            sceneMode, businessDelegate, paymentCallback, lr, sp,
+            g_hangupCleanupCallerR9, callerModuleR9, callerCodeBase,
+            callerLocalOffset, paymentLocalOffset, callerCodeStart,
+            callerCodeHex[0] ? callerCodeHex : "-",
+            paymentCodeHex[0] ? paymentCodeHex : "-",
+            r0, r1, r2, r3,
+            stackWords[0], stackWords[1], stackWords[2], stackWords[3],
+            stackWords[4], stackWords[5], modulePendingMode, activeScreen,
+            sceneName[0] ? sceneName : "-",
+            modulePath[0] ? modulePath : "-");
+    fflush(trace);
+    fclose(trace);
+}
+
+static void vm_hangup_protocol_parser_trace_note_pc(u32 pc)
+{
+    u32 entry = 0;
+    u32 switchWord = 0;
+
+    if (!g_hangupProtocolParserTrace.active)
+        return;
+    switch (pc)
+    {
+    case 0x01012E72: /* net_business_dispatch_by_subcmd: packet gate returns */
+        g_hangupProtocolParserTrace.packetGuardReturned = 1;
+        break;
+    case 0x01012E80: /* event_packet_init enters */
+        g_hangupProtocolParserTrace.packetInitEntered = 1;
+        break;
+    case 0x01012EAC: /* switch (*(entry + 4)) */
+        uc_reg_read(MTK, UC_ARM_REG_R4, &entry);
+        if (entry != 0 &&
+            g_hangupProtocolParserTrace.entryCount <
+                sizeof(g_hangupProtocolParserTrace.entrySwitchWords) /
+                    sizeof(g_hangupProtocolParserTrace.entrySwitchWords[0]) &&
+            uc_mem_read(MTK, entry + 4, &switchWord,
+                        sizeof(switchWord)) == UC_ERR_OK)
+        {
+            g_hangupProtocolParserTrace.entrySwitchWords[
+                g_hangupProtocolParserTrace.entryCount++] = switchWord;
+        }
+        break;
+    case 0x01012ED0: /* case 2: actor/move */
+        g_hangupProtocolParserTrace.actorMoveCase = 1;
+        break;
+    case 0x01012EE0: /* case 4: type response */
+        g_hangupProtocolParserTrace.typeResponseCase = 1;
+        break;
+    case 0x01012F78:
+        g_hangupProtocolParserTrace.businessFollowup = 1;
+        break;
+    case 0x01012F8A:
+        g_hangupProtocolParserTrace.packetUnpackError = 1;
+        break;
+    case 0x01012F8E:
+        g_hangupProtocolParserTrace.businessFallback = 1;
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * Read-only mmBattle boundary for the post-shop hangup investigation.
+ *
+ * The mmBattle callback keeps the main CBE R9 while its code is relocated into
+ * the VM pool, so R9 cannot identify the CBM code base.  The installed business
+ * callback is LoadBattleResourceData (local 0x17AC); derive the relocation base
+ * from that confirmed entry instead.  This lets us prove whether the packet
+ * callback and native HandleBattleStartMsg(0x66CC) receive the 4/5 object.  The
+ * final snapshot also records the exact scene-node slot selected by subtype 5.
+ * Nothing in this probe changes guest memory, registers, packet bytes, or event
+ * ordering.
+ */
+static void vm_hangup_battle_module_trace_note_pc(u32 pc)
+{
+    u32 moduleR9 = 0;
+    u32 codeBase = 0;
+    u32 localPc = 0;
+    u32 businessCallback = 0;
+    u32 sp = 0;
+    u32 regs[8] = {0};
+    u32 stackWords[6] = {0};
+    u32 sceneTable = 0;
+    u32 nodeBase = 0;
+    u32 nodeX = 0;
+    u32 nodeY = 0;
+    u16 leftCount = 0xffff;
+    u16 targetIndex = 0xffff;
+    u16 subtype = 0xffff;
+    u16 ready = 0xffff;
+    u8 nodeKind = 0xff;
+    u8 nodeActive = 0xff;
+    u32 objectKind = 0xffffffffu;
+    u32 objectSubtype = 0xffffffffu;
+    static const u8 mmBattleCallbackPrologue[8] = {
+        0xf0, 0xb5, 0xff, 0xb0, 0xff, 0xb0, 0xd3, 0xb0};
+    u8 callbackPrologue[sizeof(mmBattleCallbackPrologue)] = {0};
+    FILE *trace;
+
+    /* The request-side main-CBE watch is useful for the shop module
+     * transition, but a direct scene hangup takes a different native entry
+     * and does not arm it.  The uniquely identified 4/5 callback already
+     * bounds this probe to one response, so requiring the unrelated watch
+     * would hide the control-path snapshot we need for comparison. */
+    if (!g_hangupProtocolParserTrace.active ||
+        g_hangupBattleModuleTraceCount >= 48 || !vm_is_pool_entry(pc))
+    {
+        return;
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_R9, &moduleR9);
+    if (Global_R9 == 0 ||
+        uc_mem_read(MTK, Global_R9 + 23856u, &businessCallback,
+                    sizeof(businessCallback)) != UC_ERR_OK ||
+        !vm_is_pool_entry(businessCallback & ~1u) ||
+        (businessCallback & ~1u) < 0x17ACu ||
+        uc_mem_read(MTK, businessCallback & ~1u, callbackPrologue,
+                    sizeof(callbackPrologue)) != UC_ERR_OK ||
+        memcmp(callbackPrologue, mmBattleCallbackPrologue,
+               sizeof(callbackPrologue)) != 0)
+    {
+        return;
+    }
+    codeBase = (businessCallback & ~1u) - 0x17ACu;
+    if (pc < codeBase)
+        return;
+    localPc = pc - codeBase;
+    g_hangupProtocolParserTrace.mmBattleCodeBase = codeBase;
+    if (localPc == 0x6BEEu)
+        g_hangupProtocolParserTrace.battleStartReadySeen = 1;
+    {
+        int appIndex = vm_dl_find_loaded_index_by_pc(pc);
+        u32 moduleSpBf = appIndex >= 0 ? g_vmDlLoadedApps[appIndex].spBf : 0;
+        vm_automation_note_battle_handler_pc(localPc, moduleSpBf);
+    }
+    switch (localPc)
+    {
+    case 0x17AC: /* LoadBattleResourceData callback entry. */
+    case 0x17B4: /* Event must be 7. */
+    case 0x17B6: /* Branches away when event is not 7. */
+    case 0x1810: /* Compare parsed object kind with 4. */
+    case 0x1812: /* Branches away when object kind is not 4. */
+    case 0x1820: /* About to dispatch a kind-4 object. */
+    case 0x7BD0: /* HandleServerBattleCmd entry. */
+    case 0x7DF0: /* Subtype 5/10 calls HandleBattleStartMsg. */
+    case 0x66CC: /* HandleBattleStartMsg entry. */
+    case 0x6726: /* Counts/subtype have been decoded. */
+    case 0x674E: /* Scene target index/x/y have been decoded. */
+    case 0x6792: /* Coordinate scan selected a replacement live node. */
+    case 0x67BA: /* Scene target selection is complete. */
+    case 0x6BEA: /* About to publish battle-start-ready = 1. */
+    case 0x6BEE: /* HandleBattleStartMsg return. */
+        break;
+    default:
+        return;
+    }
+
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &regs[0]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &regs[1]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &regs[2]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &regs[3]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R4, &regs[4]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R5, &regs[5]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R6, &regs[6]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R7, &regs[7]);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stackWords, sizeof(stackWords));
+    (void)uc_mem_read(MTK, moduleR9 + 13418u,
+                      &leftCount, sizeof(leftCount));
+    (void)uc_mem_read(MTK, moduleR9 + 13422u,
+                      &targetIndex, sizeof(targetIndex));
+    (void)uc_mem_read(MTK, moduleR9 + 13424u,
+                      &subtype, sizeof(subtype));
+    (void)uc_mem_read(MTK, moduleR9 + 13426u,
+                      &ready, sizeof(ready));
+    (void)uc_mem_read(MTK, moduleR9 + 13476u,
+                      &sceneTable, sizeof(sceneTable));
+    if (sceneTable != 0 && targetIndex < 25u)
+    {
+        nodeBase = sceneTable + 340u * targetIndex;
+        (void)uc_mem_read(MTK, nodeBase + 240u, &nodeX, sizeof(nodeX));
+        (void)uc_mem_read(MTK, nodeBase + 244u, &nodeY, sizeof(nodeY));
+        (void)uc_mem_read(MTK, nodeBase + 315u, &nodeKind, sizeof(nodeKind));
+        (void)uc_mem_read(MTK, nodeBase + 319u, &nodeActive, sizeof(nodeActive));
+    }
+    /* At the object switch R5 is the 88-byte parsed entry.  From the kind-4
+     * dispatcher onward the same entry is argument R1. */
+    {
+        u32 object = localPc == 0x1810 || localPc == 0x1812 ||
+                             localPc == 0x1820
+                         ? regs[5]
+                         : regs[1];
+        if (object != 0)
+        {
+            (void)uc_mem_read(MTK, object + 4u,
+                              &objectKind, sizeof(objectKind));
+            (void)uc_mem_read(MTK, object + 8u,
+                              &objectSubtype, sizeof(objectSubtype));
+        }
+    }
+
+    ++g_hangupBattleModuleTraceCount;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_mmBattle_start "
+            "generation=%u step=%u local_pc=%04x code_base=%08x "
+            "business_cb=%08x r9=%08x "
+            "args=%08x/%08x/%08x/%08x regs4567=%08x/%08x/%08x/%08x "
+            "stack=%08x,%08x,%08x,%08x,%08x,%08x "
+            "object=%u/%u "
+            "left=%u subtype=%u target=%u ready=%u scene_table=%08x "
+            "node=%08x kind=%u active=%u pos=(%u,%u)\n",
+            g_hangupBattleStateWatchGeneration,
+            g_hangupBattleModuleTraceCount,
+            localPc, codeBase, businessCallback, moduleR9,
+            regs[0], regs[1], regs[2], regs[3],
+            regs[4], regs[5], regs[6], regs[7],
+            stackWords[0], stackWords[1], stackWords[2],
+            stackWords[3], stackWords[4], stackWords[5],
+            objectKind, objectSubtype,
+            leftCount, subtype, targetIndex, ready, sceneTable,
+            nodeBase, nodeKind, nodeActive, nodeX, nodeY);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* This is deliberately separate from the event callback trace above.  The
+ * 4/5 parser has returned before BattleScene_MainLoop can consume its ready
+ * state.  IDA identifies local 0x62C as the call boundary for
+ * BattleScene_CreateCharList; reaching it proves that the native battle UI,
+ * rather than merely the wire parser, progressed beyond the fetch overlay. */
+static void vm_hangup_battle_render_trace_note_pc(u32 pc)
+{
+    u32 localPc;
+    FILE *trace;
+
+    if (!g_hangupBattleRenderTrace.active)
+    {
+        return;
+    }
+    /* BattleScene_MainLoop delegates each render to CBE's
+     * scene_runtime_tick(0x01014D30).  Its first readiness gate is independent
+     * of the battle packet: R9+0x5C64+3/+4 must both be one, otherwise it
+     * calls DrawLoadingScreen0 at 0x01014D80.  Observe that native branch
+     * directly so a missing DrawBattleSceneMain is attributed to its owner. */
+    if (pc == 0x01014D5Eu && !g_hangupBattleRenderTrace.sceneTickEntrySeen)
+    {
+        u32 r9 = 0;
+        u8 sceneFlags[5] = {0xff, 0xff, 0xff, 0xff, 0xff};
+
+        g_hangupBattleRenderTrace.sceneTickEntrySeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        if (r9 != 0)
+            (void)uc_mem_read(MTK, r9 + 0x5C64u, sceneFlags,
+                              sizeof(sceneFlags));
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_scene_tick_ready_gate "
+                    "sequence=%u pc=%08x r9=%08x flags=%u/%u/%u/%u/%u\n",
+                    g_hangupBattleRenderTrace.sequence, pc, r9,
+                    sceneFlags[0], sceneFlags[1], sceneFlags[2],
+                    sceneFlags[3], sceneFlags[4]);
+            fflush(trace);
+            fclose(trace);
+        }
+    }
+    else if (pc == 0x01014E54u &&
+             !g_hangupBattleRenderTrace.sceneTickReadySeen)
+    {
+        g_hangupBattleRenderTrace.sceneTickReadySeen = 1;
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_scene_tick_ready "
+                    "sequence=%u pc=%08x action=continue-scene-tick\n",
+                    g_hangupBattleRenderTrace.sequence, pc);
+            fflush(trace);
+            fclose(trace);
+        }
+    }
+    else if (pc == 0x01014D80u &&
+             !g_hangupBattleRenderTrace.sceneTickLoadingFallbackSeen)
+    {
+        g_hangupBattleRenderTrace.sceneTickLoadingFallbackSeen = 1;
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_scene_tick_loading_fallback "
+                    "sequence=%u pc=%08x action=DrawLoadingScreen0\n",
+                    g_hangupBattleRenderTrace.sequence, pc);
+            fflush(trace);
+            fclose(trace);
+        }
+    }
+    if (!vm_is_pool_entry(pc) || pc < g_hangupBattleRenderTrace.codeBase)
+        return;
+    localPc = pc - g_hangupBattleRenderTrace.codeBase;
+    if (!g_hangupBattleRenderTrace.firstPoolPcSeen)
+    {
+        g_hangupBattleRenderTrace.firstPoolPcSeen = 1;
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_render_first "
+                    "sequence=%u pc=%08x local_pc=%04x code_base=%08x\n",
+                    g_hangupBattleRenderTrace.sequence, pc, localPc,
+                    g_hangupBattleRenderTrace.codeBase);
+            fflush(trace);
+            fclose(trace);
+        }
+    }
+    if (localPc == 0x5FAu && !g_hangupBattleRenderTrace.mainLoopSeen)
+    {
+        u32 r9 = 0;
+        u32 sceneState = 0;
+        u32 sceneObject = 0;
+        u32 sceneBusy = 0;
+        u32 battleListSource = 0;
+        u16 modalState = 0xffff;
+        u8 charListPending = 0xff;
+        u8 loaderState = 0xff;
+        u8 battleLoadingVisible = 0xff;
+        u8 battleLoadingProgress = 0xff;
+        g_hangupBattleRenderTrace.mainLoopSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 10372u,
+                              &sceneState, sizeof(sceneState));
+            (void)uc_mem_read(MTK, r9 + 10328u,
+                              &sceneObject, sizeof(sceneObject));
+            (void)uc_mem_read(MTK, r9 + 10364u,
+                              &battleListSource, sizeof(battleListSource));
+            (void)uc_mem_read(MTK, r9 + 10303u,
+                              &charListPending, sizeof(charListPending));
+            (void)uc_mem_read(MTK, r9 + 10304u,
+                              &modalState, sizeof(modalState));
+            if (sceneObject != 0)
+                (void)uc_mem_read(MTK, sceneObject + 8u,
+                                  &sceneBusy, sizeof(sceneBusy));
+            (void)uc_mem_read(MTK, r9 + 8272u,
+                              &sceneObject, sizeof(sceneObject));
+            if (sceneObject != 0)
+                (void)uc_mem_read(MTK, sceneObject + 872u,
+                                  &loaderState, sizeof(loaderState));
+            /* mmBattle:DrawBattleChatBubble(0xA818) tests this byte before
+             * drawing the GBK literal \"获取数据...\" at 0xAAC4: zero takes
+             * the loading branch.  This is a read-only post-parser sample of
+             * the actual UI contract, not a guessed screen pointer. */
+            (void)uc_mem_read(MTK, r9 + 16480u,
+                              &battleLoadingVisible,
+                              sizeof(battleLoadingVisible));
+            (void)uc_mem_read(MTK, r9 + 16476u,
+                              &battleLoadingProgress,
+                              sizeof(battleLoadingProgress));
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_render_main_loop "
+                    "sequence=%u local_pc=%04x code_base=%08x r9=%08x "
+                    "state=%u scene_busy=%u char_list_pending=%u modal=%u "
+                    "list_source=%08x loader_state=%u "
+                    "battle_loading_visible=%u battle_loading_progress=%u\n",
+                    g_hangupBattleRenderTrace.sequence, localPc,
+                    g_hangupBattleRenderTrace.codeBase, r9, sceneState,
+                    sceneBusy, charListPending, modalState, battleListSource, loaderState,
+                    battleLoadingVisible, battleLoadingProgress);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0x656u && !g_hangupBattleRenderTrace.frameDelegateSeen)
+    {
+        u32 r0 = 0;
+        u32 r9 = 0;
+        u32 gameState = 0;
+        u32 frameDelegate = 0;
+        u8 overlayState = 0xff;
+        u8 overlayAnimation = 0xff;
+        u8 overlayTransition = 0xff;
+        u8 sceneSlotCount = 0;
+        u32 i;
+
+        g_hangupBattleRenderTrace.frameDelegateSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 8272u, &gameState,
+                              sizeof(gameState));
+            if (gameState != 0)
+            {
+                (void)uc_mem_read(MTK, gameState + 4u, &frameDelegate,
+                                  sizeof(frameDelegate));
+                (void)uc_mem_read(MTK, gameState + 1136u, &overlayState,
+                                  sizeof(overlayState));
+                (void)uc_mem_read(MTK, gameState + 1138u,
+                                  &overlayAnimation,
+                                  sizeof(overlayAnimation));
+                (void)uc_mem_read(MTK, gameState + 1140u,
+                                  &overlayTransition,
+                                  sizeof(overlayTransition));
+            }
+        }
+        if (r0 != 0)
+        {
+            for (i = 0; i < 6; ++i)
+            {
+                u32 slotObject = 0;
+                (void)uc_mem_read(MTK, r0 + 1348u + i * 196u,
+                                  &slotObject, sizeof(slotObject));
+                if (slotObject != 0)
+                    ++sceneSlotCount;
+            }
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            /* MainLoop's first normal-path operation is the game's frame
+             * delegate at gameState+4.  DrawBattleSceneMain is reached from
+             * that delegate, not by a direct CBM call, so this is the owner
+             * of the next observable lifecycle boundary. */
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_frame_delegate "
+                    "sequence=%u local_pc=%04x r0=%08x r9=%08x game=%08x "
+                    "delegate=%08x overlay=%u/%u/%u scene_slots=%u\n",
+                    g_hangupBattleRenderTrace.sequence, localPc, r0, r9,
+                    gameState, frameDelegate, overlayState, overlayAnimation,
+                    overlayTransition, sceneSlotCount);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0x622u && !g_hangupBattleRenderTrace.charListGateSeen)
+    {
+        u32 r0 = 0;
+        u32 r9 = 0;
+        g_hangupBattleRenderTrace.charListGateSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_render_gate "
+                    "sequence=%u r0=%u r9=%08x expected=1\n",
+                    g_hangupBattleRenderTrace.sequence, r0, r9);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0x71BAu &&
+        !g_hangupBattleRenderTrace.battleCompletionCheckSeen)
+    {
+        u32 r9 = 0;
+        u32 startPending = 0xffffffffu;
+        u16 startReady = 0xffffu;
+        u16 modalState = 0xffffu;
+
+        g_hangupBattleRenderTrace.battleCompletionCheckSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 13484u, &startPending,
+                              sizeof(startPending));
+            (void)uc_mem_read(MTK, r9 + 13426u, &startReady,
+                              sizeof(startReady));
+            (void)uc_mem_read(MTK, r9 + 10304u, &modalState,
+                              sizeof(modalState));
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            /* mmBattle:sub_71BA is the first owner-side completion test for
+             * HandleBattleStartMsg.  A true result authorizes MainLoop's
+             * 0x9B0/0xA62 modal handoff to BattleScene_DrawMain. */
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_start_completion "
+                    "sequence=%u local_pc=%04x r9=%08x pending=%u ready=%u "
+                    "modal=%u\n",
+                    g_hangupBattleRenderTrace.sequence, localPc, r9,
+                    startPending, startReady, modalState);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0x65Cu && !g_hangupBattleRenderTrace.postDelegateStateSeen)
+    {
+        u32 r9 = 0;
+        u32 gameState = 0;
+        u16 sceneBusy = 0xffff;
+        u16 actionPending = 0xffff;
+        u8 autoRevive = 0xff;
+        u8 actionPrompt = 0xff;
+        u8 menuPending = 0xff;
+        u8 gameLoadingGate = 0xff;
+        u8 gameOverlay = 0xff;
+        u8 gameWait = 0xff;
+        u8 inputThrottle = 0xff;
+
+        g_hangupBattleRenderTrace.postDelegateStateSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        if (r9 != 0)
+        {
+            u32 sceneObject = 0;
+            (void)uc_mem_read(MTK, r9 + 10328u, &sceneObject,
+                              sizeof(sceneObject));
+            if (sceneObject != 0)
+                (void)uc_mem_read(MTK, sceneObject + 8u, &sceneBusy,
+                                  sizeof(sceneBusy));
+            (void)uc_mem_read(MTK, r9 + 10306u, &actionPending,
+                              sizeof(actionPending));
+            (void)uc_mem_read(MTK, r9 + 13403u, &autoRevive,
+                              sizeof(autoRevive));
+            (void)uc_mem_read(MTK, r9 + 10298u, &actionPrompt,
+                              sizeof(actionPrompt));
+            (void)uc_mem_read(MTK, r9 + 10299u, &inputThrottle,
+                              sizeof(inputThrottle));
+            (void)uc_mem_read(MTK, r9 + 8272u, &gameState,
+                              sizeof(gameState));
+            if (gameState != 0)
+            {
+                (void)uc_mem_read(MTK, gameState + 985u, &menuPending,
+                                  sizeof(menuPending));
+                (void)uc_mem_read(MTK, gameState + 1133u,
+                                  &gameLoadingGate,
+                                  sizeof(gameLoadingGate));
+                (void)uc_mem_read(MTK, gameState + 1136u, &gameOverlay,
+                                  sizeof(gameOverlay));
+                (void)uc_mem_read(MTK, gameState + 1206u, &gameWait,
+                                  sizeof(gameWait));
+            }
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            /* Snapshot every MainLoop early-return guard immediately after
+             * the CBE frame delegate returns.  This identifies the first
+             * guard that prevents the subsequent sub_71BA start handoff. */
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_post_delegate "
+                    "sequence=%u local_pc=%04x r9=%08x busy=%u action=%u "
+                    "auto=%u prompt=%u menu=%u loading_gate=%u overlay=%u "
+                    "wait=%u throttle=%u\n",
+                    g_hangupBattleRenderTrace.sequence, localPc, r9,
+                    sceneBusy, actionPending, autoRevive, actionPrompt,
+                    menuPending, gameLoadingGate, gameOverlay, gameWait,
+                    inputThrottle);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if ((localPc == 0x9B0u || localPc == 0xA62u) &&
+        !g_hangupBattleRenderTrace.battleCompletionPresentSeen)
+    {
+        g_hangupBattleRenderTrace.battleCompletionPresentSeen = 1;
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_start_handoff "
+                    "sequence=%u local_pc=%04x action=modal-ready\n",
+                    g_hangupBattleRenderTrace.sequence, localPc);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0xA818u && !g_hangupBattleRenderTrace.loadingDialogDrawSeen)
+    {
+        u32 r9 = 0;
+        u32 lr = 0;
+        u8 loadingVisible = 0xff;
+        u8 loadingProgress = 0xff;
+
+        g_hangupBattleRenderTrace.loadingDialogDrawSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 16480u, &loadingVisible,
+                              sizeof(loadingVisible));
+            (void)uc_mem_read(MTK, r9 + 16476u, &loadingProgress,
+                              sizeof(loadingProgress));
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            /* IDA: mmBattle DrawBattleChatBubble 0xA818, where the zero
+             * loadingVisible branch uses the GBK \"获取数据...\" string at
+             * 0xAAC4. Record only its first post-start render invocation. */
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_loading_draw "
+                    "sequence=%u local_pc=%04x r9=%08x lr=%08x "
+                    "visible=%u progress=%u\n",
+                    g_hangupBattleRenderTrace.sequence, localPc, r9, lr,
+                    loadingVisible, loadingProgress);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc == 0x5444u && !g_hangupBattleRenderTrace.drawMainSeen)
+    {
+        u32 r0 = 0;
+        u32 r9 = 0;
+        u32 lr = 0;
+        u32 battlePhase = 0;
+        u32 modalState = 0;
+        u8 battleMode = 0xff;
+        u8 battleAnimPhase = 0xff;
+        u8 selectedSlot = 0xff;
+        u8 slotCount = 0;
+        u32 slotObject[6] = {0};
+        u32 i;
+
+        g_hangupBattleRenderTrace.drawMainSeen = 1;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
+        (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 13412u, &battlePhase,
+                              sizeof(battlePhase));
+            (void)uc_mem_read(MTK, r9 + 10304u, &modalState,
+                              sizeof(modalState));
+            (void)uc_mem_read(MTK, r9 + 13403u, &battleMode,
+                              sizeof(battleMode));
+            (void)uc_mem_read(MTK, r9 + 13401u, &battleAnimPhase,
+                              sizeof(battleAnimPhase));
+            (void)uc_mem_read(MTK, r9 + 13394u, &selectedSlot,
+                              sizeof(selectedSlot));
+        }
+        /* BattleScene_DrawMain indexes six 196-byte character slots at
+         * a1+1348.  A render that has no live slot cannot replace the
+         * preceding loading overlay, so sample the native input directly
+         * rather than infer readiness from a later UI string. */
+        if (r0 != 0)
+        {
+            for (i = 0; i < 6; ++i)
+            {
+                (void)uc_mem_read(MTK, r0 + 1348u + i * 196u,
+                                  &slotObject[i], sizeof(slotObject[i]));
+                if (slotObject[i] != 0)
+                    ++slotCount;
+            }
+        }
+        trace = fopen("logs/hangup-protocol.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_mmBattle_draw_main "
+                    "sequence=%u local_pc=%04x r0=%08x r9=%08x lr=%08x "
+                    "phase=%u modal=%u mode=%u anim_phase=%u selected=%u "
+                    "slot_count=%u slots=%08x/%08x/%08x/%08x/%08x/%08x\n",
+                    g_hangupBattleRenderTrace.sequence, localPc, r0, r9, lr,
+                    battlePhase, modalState, battleMode, battleAnimPhase,
+                    selectedSlot, slotCount, slotObject[0], slotObject[1],
+                    slotObject[2], slotObject[3], slotObject[4],
+                    slotObject[5]);
+            fflush(trace);
+            fclose(trace);
+        }
+        return;
+    }
+    if (localPc != 0x62Cu)
+        return;
+
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "[info][network] mock_hangup_mmBattle_render sequence=%u "
+                "local_pc=%04x code_base=%08x main_loop=%u action=char-list\n",
+                g_hangupBattleRenderTrace.sequence, localPc,
+                g_hangupBattleRenderTrace.codeBase,
+                g_hangupBattleRenderTrace.mainLoopSeen);
+        fflush(trace);
+        fclose(trace);
+    }
+    vm_automation_note_battle_scene_char_list(
+        g_hangupBattleRenderTrace.sequence, localPc);
+    g_hangupBattleRenderTrace.active = 0;
+}
+
+/* The multiplayer launcher sets the process directory to one player's
+ * profile, where logs/ already exists.  Keep the post-shop hangup probe
+ * outside the server log so client parser evidence cannot be confused with
+ * server-side auto-battle scheduling. */
+static void vm_net_append_hangup_protocol_trace(
+    const char *phase, const vm_net_remote_observation *observation,
+    u32 eventType, u32 responsePtr, u32 callback, u16 battleEntryState,
+    u32 activeScreen, uc_err callbackErr)
+{
+    FILE *trace;
+    u8 managerState = 0;
+    u32 managerCallback = 0;
+    u32 dispatchObject = 0;
+    u32 dispatchState = 0;
+    u32 dispatchCallback = 0;
+    u32 businessCallback = 0;
+    u32 traceR9 = Global_R9;
+    u16 watchedBattleEntryState = 0xffff;
+    u32 watchedBattleStateAddress = g_hangupBattleStateWatchAddress;
+    u32 watchedBattleStateWrites = g_hangupBattleStateWatchWriteCount;
+    u8 parserPacketInit = 0;
+    u8 parserGuardReturn = 0;
+    u8 parserUnpackError = 0;
+    u8 parserFollowup = 0;
+    u8 parserFallback = 0;
+    u8 parserActorMove = 0;
+    u8 parserTypeResponse = 0;
+    u8 parserEntryCount = 0;
+    u32 parserEntries[4] = {0};
+    u8 businessCodeBytes[32] = {0};
+    char businessCodeHex[sizeof(businessCodeBytes) * 2 + 1] = {0};
+
+    if (observation == NULL || !observation->hasHangupBattleStart)
+        return;
+    if (Global_R9 != 0)
+    {
+        /* net_wrapper_event_dispatch (0x0103489B) dispatches through these
+         * two CBE-owned callback slots.  Read them only to identify which
+         * normal parser chain receives the already queued response. */
+        (void)uc_mem_read(MTK, Global_R9 + 38280 + 12,
+                          &managerState, sizeof(managerState));
+        (void)uc_mem_read(MTK, Global_R9 + 38280 + 68,
+                          &managerCallback, sizeof(managerCallback));
+        (void)uc_mem_read(MTK, Global_R9 + 38056,
+                          &dispatchObject, sizeof(dispatchObject));
+        (void)uc_mem_read(MTK, Global_R9 + 23856,
+                          &businessCallback, sizeof(businessCallback));
+        if (vm_is_pool_entry(businessCallback & ~1u) &&
+            uc_mem_read(MTK, businessCallback & ~1u,
+                        businessCodeBytes,
+                        sizeof(businessCodeBytes)) == UC_ERR_OK)
+        {
+            vm_hangup_format_code_bytes(businessCodeBytes,
+                                        sizeof(businessCodeBytes),
+                                        businessCodeHex,
+                                        sizeof(businessCodeHex));
+        }
+        if (dispatchObject != 0)
+        {
+            (void)uc_mem_read(MTK, dispatchObject + 12,
+                              &dispatchState, sizeof(dispatchState));
+            (void)uc_mem_read(MTK, dispatchObject + 20,
+                              &dispatchCallback, sizeof(dispatchCallback));
+        }
+    }
+    if (watchedBattleStateAddress != 0)
+    {
+        (void)uc_mem_read(MTK, watchedBattleStateAddress,
+                          &watchedBattleEntryState,
+                          sizeof(watchedBattleEntryState));
+    }
+    if (g_hangupProtocolParserTrace.active && observation != NULL &&
+        g_hangupProtocolParserTrace.sequence ==
+            observation->hangupResponseSequence)
+    {
+        parserPacketInit = g_hangupProtocolParserTrace.packetInitEntered;
+        parserGuardReturn = g_hangupProtocolParserTrace.packetGuardReturned;
+        parserUnpackError = g_hangupProtocolParserTrace.packetUnpackError;
+        parserFollowup = g_hangupProtocolParserTrace.businessFollowup;
+        parserFallback = g_hangupProtocolParserTrace.businessFallback;
+        parserActorMove = g_hangupProtocolParserTrace.actorMoveCase;
+        parserTypeResponse = g_hangupProtocolParserTrace.typeResponseCase;
+        parserEntryCount = g_hangupProtocolParserTrace.entryCount;
+        memcpy(parserEntries, g_hangupProtocolParserTrace.entrySwitchWords,
+               sizeof(parserEntries));
+    }
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "[info][network] mock_hangup_response_callback phase=%s "
+            "seq=%u event=%u response=%u ptr=%08x cb=%08x "
+            "battle_entry_state=%u active_screen=%08x callback_err=%u "
+            "manager=%u/%08x dispatch=%08x:%u/%08x business_cb=%08x "
+            "business_code=%s "
+            "r9=%08x watch=%08x/%u/%u "
+            "parser=init:%u,guard:%u,unpack:%u,followup:%u,fallback:%u,"
+            "case2:%u,case4:%u,entries:%u[%u,%u,%u,%u]\n",
+            phase ? phase : "-",
+            observation->hangupResponseSequence,
+            eventType,
+            observation->hangupResponseLength,
+            responsePtr,
+            callback,
+            battleEntryState,
+            activeScreen,
+            (u32)callbackErr,
+            managerState,
+            managerCallback,
+            dispatchObject,
+            dispatchState,
+            dispatchCallback,
+            businessCallback,
+            businessCodeHex[0] ? businessCodeHex : "-",
+            traceR9,
+            watchedBattleStateAddress,
+            watchedBattleEntryState,
+            watchedBattleStateWrites,
+            parserPacketInit,
+            parserGuardReturn,
+            parserUnpackError,
+            parserFollowup,
+            parserFallback,
+            parserActorMove,
+            parserTypeResponse,
+            parserEntryCount,
+            parserEntries[0],
+            parserEntries[1],
+            parserEntries[2],
+            parserEntries[3]);
+    fflush(trace);
+    fclose(trace);
+}
+
+/*
+ * Read-only probe for the post-shop hangup stall.  The actual multiplayer
+ * launchers run this CBE_EMU client binary, so record the normal event-7
+ * callback boundary for the uniquely shaped 2/10+2/2+4/5+4/11 response.
+ * HandleBattleEnterReq (0x01015E14) writes Global_R9+23682 before sending;
+ * +24304 is the current screen pointer.  No CBE state or event ordering is
+ * modified here.
+ */
+static void scheduler_trace_hangup_battle_response_callback(
+    const char *phase, const vm_net_remote_observation *observation,
+    u32 eventType, u32 responsePtr, u32 callback, uc_err callbackErr)
+{
+    u16 battleEntryState = 0xffff;
+    u32 activeScreen = 0;
+
+    if (observation == NULL || !observation->hasHangupBattleStart)
+        return;
+    if (Global_R9 != 0)
+    {
+        (void)uc_mem_read(MTK, Global_R9 + 23682,
+                          &battleEntryState, sizeof(battleEntryState));
+        (void)uc_mem_read(MTK, Global_R9 + 24304,
+                          &activeScreen, sizeof(activeScreen));
+    }
+    printf("[info][network] mock_hangup_response_callback phase=%s "
+           "seq=%u event=%u response=%u ptr=%08x cb=%08x "
+           "battle_entry_state=%u active_screen=%08x callback_err=%u\n",
+           phase ? phase : "-",
+           observation->hangupResponseSequence,
+           eventType,
+           observation->hangupResponseLength,
+           responsePtr,
+           callback,
+           battleEntryState,
+           activeScreen,
+           (u32)callbackErr);
+    vm_net_append_hangup_protocol_trace(
+        phase, observation, eventType, responsePtr, callback,
+        battleEntryState, activeScreen, callbackErr);
+}
+
 static void scheduler_queue_net_task(u32 r0, u32 r1, u32 callback, u32 context)
 {
     (void)r0;
@@ -2455,7 +3826,15 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
+            scheduler_trace_hangup_battle_response_callback(
+                "begin", &taskRemoteObservation, taskEvent, taskR0,
+                taskCallback, UC_ERR_OK);
+            vm_hangup_protocol_parser_trace_begin(&taskRemoteObservation);
             uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
+            scheduler_trace_hangup_battle_response_callback(
+                "end", &taskRemoteObservation, taskEvent, taskR0,
+                taskCallback, err);
+            vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
             if (g_netDebugReadWindow)
             {
                 printf("[info][network] net_done slot=%u event=%u cb=%08x err=%u remaining_read=%u/%u\n",
@@ -3358,6 +4737,9 @@ static void vm_lcd_update_with_input_overlay(void)
     vm_input_draw_overlay();
 #endif
     UpdateLcd();
+    /* This is the render-complete boundary.  Scenario evidence copies the
+     * emulator-owned LCD cache here; it never samples the desktop window. */
+    vm_automation_render_complete();
 }
 
 static void vm_debug_read_guest_cstr(u32 addr, char *out, size_t outCap)
@@ -3906,6 +5288,701 @@ static void vm_autotest_release_tap(void)
     g_autotestTapReleaseWindow = 0;
 }
 
+static const char *vm_automation_stage_name(vm_automation_stage stage)
+{
+    switch (stage)
+    {
+    case VM_AUTOMATION_STAGE_BOOT_CONFIRM: return "boot-confirm";
+    case VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP: return "wait-timed-title-bootstrap";
+    case VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH: return "wait-title-login";
+    case VM_AUTOMATION_STAGE_WAIT_ROLE_LIST: return "wait-role-list";
+    case VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE: return "wait-initial-scene";
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN: return "wait-shop-open";
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN: return "wait-shop-return";
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE:
+        return "wait-shop-return-pre-hangup-capture";
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE: return "wait-hangup-battle";
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE_SCREEN: return "wait-hangup-battle-screen";
+    case VM_AUTOMATION_STAGE_PASSED: return "passed";
+    case VM_AUTOMATION_STAGE_FAILED: return "failed";
+    default: return "none";
+    }
+}
+
+static const char *vm_automation_scenario_name(void)
+{
+    switch (g_vmAutomation.scenario)
+    {
+    case VM_AUTOMATION_SCENARIO_SHOP_RETURN_HANGUP:
+        return "shop-return-hangup-v1";
+    case VM_AUTOMATION_SCENARIO_DIRECT_HANGUP:
+        return "direct-hangup-control-v1";
+    case VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE:
+        return "scene-teleport-stone-probe-v1";
+    default:
+        return "none";
+    }
+}
+
+static void vm_automation_write_result(const char *result, const char *reason)
+{
+    char path[640];
+    FILE *stream;
+    time_t now;
+
+    if (!g_vmAutomation.active || g_vmAutomation.artifactDir[0] == 0)
+        return;
+    snprintf(path, sizeof(path), "%s/result.json", g_vmAutomation.artifactDir);
+    stream = fopen(path, "wb");
+    if (stream == NULL)
+        return;
+    now = time(NULL);
+    fprintf(stream,
+            "{\n"
+            "  \"scenario\": \"%s\",\n"
+            "  \"result\": \"%s\",\n"
+            "  \"reason\": \"%s\",\n"
+            "  \"stage\": \"%s\",\n"
+            "  \"render_frames\": %u,\n"
+            "  \"input_count\": %u,\n"
+            "  \"timed_input_count\": %u,\n"
+            "  \"timestamp_unix\": %lld\n"
+            "}\n",
+            vm_automation_scenario_name(), result ? result : "unknown",
+            reason ? reason : "unknown",
+            vm_automation_stage_name(g_vmAutomation.stage),
+            g_vmAutomation.renderFrames, g_vmAutomation.inputCount,
+            g_vmAutomation.timedInputCount,
+            (long long)now);
+    fclose(stream);
+}
+
+static void vm_automation_request_capture(const char *label)
+{
+    if (!g_vmAutomation.active || label == NULL ||
+        g_vmAutomation.capturePending)
+        return;
+    snprintf(g_vmAutomation.pendingCaptureLabel,
+             sizeof(g_vmAutomation.pendingCaptureLabel), "%s", label);
+    g_vmAutomation.capturePending = 1;
+}
+
+static void vm_automation_capture_internal_lcd(void)
+{
+#ifdef CBE_CLIENT_ONLY
+    char pngPath[640];
+    char jsonPath[640];
+    FILE *metadata;
+    u32 pc = 0;
+    time_t now;
+
+    if (!g_vmAutomation.active || !g_vmAutomation.capturePending ||
+        g_vmAutomation.artifactDir[0] == 0 || Lcd_Cache_Buffer == NULL)
+        return;
+    g_vmAutomation.capturePending = 0;
+    ++g_vmAutomation.captureIndex;
+    if (strcmp(g_vmAutomation.pendingCaptureLabel,
+               "shop-return-pre-hangup") == 0)
+    {
+        /* This is deliberately set at the LCD export boundary rather than
+         * when the capture is requested.  The next input is therefore not
+         * enqueued until a complete scene frame exists that precedes it. */
+        g_vmAutomation.shopReturnPreHangupCaptured = 1;
+    }
+    snprintf(pngPath, sizeof(pngPath), "%s/frames/%03u_%s.png",
+             g_vmAutomation.artifactDir, g_vmAutomation.captureIndex,
+             g_vmAutomation.pendingCaptureLabel);
+    snprintf(jsonPath, sizeof(jsonPath), "%s/frames/%03u_%s.json",
+             g_vmAutomation.artifactDir, g_vmAutomation.captureIndex,
+             g_vmAutomation.pendingCaptureLabel);
+    if (!automation_png_write_rgb565(pngPath, Lcd_Cache_Buffer,
+                                     LCD_WIDTH, LCD_HEIGHT))
+    {
+        vm_autotest_note("automation_capture failed label=%s path=%s\n",
+                         g_vmAutomation.pendingCaptureLabel, pngPath);
+        return;
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_PC, &pc);
+    now = time(NULL);
+    metadata = fopen(jsonPath, "wb");
+    if (metadata != NULL)
+    {
+        fprintf(metadata,
+                "{\n"
+                "  \"scenario\": \"%s\",\n"
+                "  \"frame\": %u,\n"
+                "  \"resolution\": \"%ux%u\",\n"
+                "  \"pixel_format\": \"RGB565LE source; PNG RGB8 export\",\n"
+                "  \"trigger\": \"%s\",\n"
+                "  \"stage\": \"%s\",\n"
+                "  \"active_screen\": \"%08x\",\n"
+                "  \"module_base\": \"%08x\",\n"
+                "  \"pc\": \"%08x\",\n"
+                "  \"timestamp_unix\": %lld\n"
+                "}\n",
+                vm_automation_scenario_name(), g_vmAutomation.renderFrames,
+                LCD_WIDTH, LCD_HEIGHT,
+                g_vmAutomation.pendingCaptureLabel,
+                vm_automation_stage_name(g_vmAutomation.stage),
+                vmAddedScreen, g_currentScreenModuleBase, pc & ~1u,
+                (long long)now);
+        fclose(metadata);
+    }
+    vm_autotest_note("automation_capture frame=%u label=%s png=%s screen=%08x module=%08x pc=%08x\n",
+                     g_vmAutomation.renderFrames,
+                     g_vmAutomation.pendingCaptureLabel, pngPath,
+                     vmAddedScreen, g_currentScreenModuleBase, pc & ~1u);
+#endif
+}
+
+static void vm_automation_set_stage(vm_automation_stage stage, const char *reason)
+{
+    u32 gameState = 0;
+    FILE *trace;
+
+    if (!g_vmAutomation.active || g_vmAutomation.finished)
+        return;
+    g_vmAutomation.stage = stage;
+    g_vmAutomation.stageStartedMs = SDL_GetTicks();
+    g_vmAutomation.stageFrame = g_vmAutomation.renderFrames;
+    vm_autotest_note("automation_stage stage=%s reason=%s frame=%u inputs=%u\n",
+                     vm_automation_stage_name(stage), reason ? reason : "-",
+                     g_vmAutomation.renderFrames, g_vmAutomation.inputCount);
+    if ((g_vmAutomation.scenario != VM_AUTOMATION_SCENARIO_SHOP_RETURN_HANGUP &&
+         g_vmAutomation.scenario != VM_AUTOMATION_SCENARIO_DIRECT_HANGUP) ||
+        g_vmAutomationGameLoadingGateWatchAddress != 0 || Global_R9 == 0)
+    {
+        return;
+    }
+    /* This is intentionally armed at the first automation state change after
+     * the scene runtime exists, before the toolbar opens the shop.  It records
+     * all writes through the one user-authorized reproduction, but it does
+     * not observe or affect ordinary client sessions. */
+    if (uc_mem_read(MTK, Global_R9 + 8272u, &gameState,
+                    sizeof(gameState)) != UC_ERR_OK || gameState == 0)
+    {
+        return;
+    }
+    g_vmAutomationGameLoadingGateWatchAddress = gameState + 1133u;
+    g_vmAutomationGameLoadingGateWatchWriteCount = 0;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "[info][network] mock_hangup_game_loading_gate_arm "
+                "stage=%s global_r9=%08x game=%08x addr=%08x\n",
+                vm_automation_stage_name(stage), Global_R9, gameState,
+                g_vmAutomationGameLoadingGateWatchAddress);
+        fflush(trace);
+        fclose(trace);
+    }
+}
+
+static void vm_automation_finish(int passed, const char *reason)
+{
+    if (!g_vmAutomation.active || g_vmAutomation.finished)
+        return;
+    g_vmAutomation.finished = 1;
+    g_vmAutomation.stage = passed ? VM_AUTOMATION_STAGE_PASSED :
+                                   VM_AUTOMATION_STAGE_FAILED;
+    vm_automation_request_capture(passed ? "pass" : "failure");
+    vm_automation_write_result(passed ? "passed" : "failed", reason);
+    vm_autotest_note("automation_result result=%s reason=%s\n",
+                     passed ? "passed" : "failed", reason ? reason : "-");
+    /* vm_automation_render_complete asks the owned process to exit only after
+     * the requested LCD-only evidence frame has been exported. */
+}
+
+static int vm_automation_issue_key(int key, const char *trigger)
+{
+    if (!g_vmAutomation.active || g_vmAutomation.finished ||
+        g_autotestKeyReleasePending || g_autotestTapReleasePending)
+        return 0;
+    keyEvent(MR_KEY_PRESS, key);
+    g_autotestKeyReleasePending = 1;
+    g_autotestKeyReleaseMs = (SDL_GetTicks() - g_autotestStartMs) + 80u;
+    g_autotestKeyReleaseSym = key;
+    ++g_vmAutomation.inputCount;
+    vm_autotest_note("automation_input type=key key=%d trigger=%s frame=%u\n",
+                     key, trigger ? trigger : "-", g_vmAutomation.renderFrames);
+    return 1;
+}
+
+static int vm_automation_issue_tap(int x, int y, const char *trigger)
+{
+    if (!g_vmAutomation.active || g_vmAutomation.finished ||
+        g_autotestKeyReleasePending || g_autotestTapReleasePending)
+        return 0;
+    mouseEvent(MR_MOUSE_DOWN, x, y);
+    g_autotestTapReleasePending = 1;
+    g_autotestTapReleaseWindow = 0;
+    g_autotestTapReleaseMs = (SDL_GetTicks() - g_autotestStartMs) + 80u;
+    g_autotestTapReleaseX = x;
+    g_autotestTapReleaseY = y;
+    ++g_vmAutomation.inputCount;
+    vm_autotest_note("automation_input type=tap point=(%d,%d) trigger=%s frame=%u\n",
+                     x, y, trigger ? trigger : "-", g_vmAutomation.renderFrames);
+    return 1;
+}
+
+static void vm_automation_cancel_pending_timed_inputs(const char *reason)
+{
+    u32 cancelled = 0;
+
+    for (u32 i = 0; i < g_autotestActionCount; ++i)
+    {
+        if (!g_autotestActions[i].fired)
+        {
+            g_autotestActions[i].fired = 1;
+            ++cancelled;
+        }
+    }
+    if (cancelled != 0)
+        vm_autotest_note("automation_timed_input_cancelled count=%u reason=%s\n",
+                         cancelled, reason ? reason : "-");
+}
+
+static void vm_automation_note_startup_pc(u32 pc)
+{
+    /* Startup/title CBMs are allocated dynamically.  Do not use a previous
+     * process's pool address as an automation trigger.  Title advancement is
+     * instead armed by the native 18/9 update-completion object plus a later
+     * render boundary in vm_automation_tick(). */
+    (void)pc;
+}
+
+static void vm_automation_note_screen_init(u32 screen, u32 initEntry,
+                                           u32 logicEntry, u32 renderEntry)
+{
+    if (!g_vmAutomation.active)
+        return;
+    if (!g_vmAutomation.titleScreenInitialized &&
+        g_vmAutomation.titleUpdateCompleteSeen)
+    {
+        /* The first screen initialized after the startup update parser has
+         * completed is the native title menu.  This lifecycle boundary is
+         * owned by the client's existing screen manager, unlike dynamically
+         * allocated function addresses from an earlier probe. */
+        g_vmAutomation.titleScreenInitialized = 1;
+        g_vmAutomation.titleScreenInitFrame = g_vmAutomation.renderFrames;
+        vm_autotest_note("automation_title_screen_initialized screen=%08x init=%08x logic=%08x render=%08x frame=%u\n",
+                         screen, initEntry, logicEntry, renderEntry,
+                         g_vmAutomation.renderFrames);
+    }
+    if (g_vmAutomation.shopReturnSeen &&
+        !g_vmAutomation.shopReturnSceneReinitSeen &&
+        screen != 0 && screen == g_vmAutomation.initialSceneScreen &&
+        screen != g_vmAutomation.shopScreen)
+    {
+        g_vmAutomation.shopReturnSceneReinitSeen = 1;
+        g_vmAutomation.shopReturnSceneReinitFrame =
+            g_vmAutomation.renderFrames;
+        vm_autotest_note("automation_shop_return_scene_reinit screen=%08x init=%08x logic=%08x render=%08x return_seq=%u frame=%u\n",
+                         screen, initEntry, logicEntry, renderEntry,
+                         g_vmAutomation.shopReturnPacketSequence,
+                         g_vmAutomation.renderFrames);
+    }
+}
+
+static void vm_automation_note_battle_handler_pc(u32 localPc,
+                                                  u32 moduleSpBf)
+{
+    if (g_vmAutomation.active && localPc == 0x66CCu &&
+        !g_vmAutomation.battleStartHandlerSeen)
+    {
+        g_vmAutomation.battleStartHandlerSeen = 1;
+        g_vmAutomation.battleStartHandlerFrame = g_vmAutomation.renderFrames;
+        g_vmAutomation.battleModuleSpBf = moduleSpBf;
+        vm_autotest_note("automation_battle_handler local_pc=0x66cc module_spbf=%08x "
+                         "frame=%u screen=%08x this=%08x\n",
+                         moduleSpBf,
+                         g_vmAutomation.renderFrames, vmAddedScreen,
+                         g_currentScreenThis);
+    }
+}
+
+static void vm_automation_note_battle_scene_char_list(u32 sequence,
+                                                       u32 localPc)
+{
+    if (!g_vmAutomation.active || !g_vmAutomation.battleStartHandlerSeen ||
+        g_vmAutomation.battleSceneCharListSeen)
+    {
+        return;
+    }
+    g_vmAutomation.battleSceneCharListSeen = 1;
+    g_vmAutomation.battleSceneCharListFrame = g_vmAutomation.renderFrames;
+    vm_autotest_note("automation_battle_scene_char_list sequence=%u local_pc=%04x "
+                     "frame=%u screen=%08x this=%08x\n",
+                     sequence, localPc, g_vmAutomation.renderFrames,
+                     vmAddedScreen, g_currentScreenThis);
+}
+
+static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
+                                                 u32 eventType, u32 sequence)
+{
+    u32 offset = 5;
+    u8 objectCount;
+    u8 sawTaskSubset = 0;
+    u8 sawTitleUpdateComplete = 0;
+    u8 sawTitleLoginResponse = 0;
+    u8 sawShopStatus = 0;
+    u8 sawShopMoney = 0;
+    u8 sawSceneComplete = 0;
+    u8 sawHangup = 0;
+
+    if (!g_vmAutomation.active || packet == NULL || eventType != 7 ||
+        packetLen < 5 || packet[0] != 'W' || packet[1] != 'T' ||
+        (((u32)packet[2] << 8) | packet[3]) != packetLen)
+        return;
+    objectCount = packet[4];
+    for (u8 index = 0; index < objectCount; ++index)
+    {
+        u16 objectLen;
+        u8 kind;
+        u8 subtype;
+        if (offset + 6u > packetLen)
+            return;
+        objectLen = (u16)(((u16)packet[offset + 4] << 8) | packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > packetLen)
+            return;
+        kind = packet[offset + 1];
+        subtype = packet[offset + 2];
+        if (kind == 25 && subtype == 5)
+            sawTaskSubset = 1;
+        if (kind == 18 && subtype == 9)
+            sawTitleUpdateComplete = 1;
+        if (kind == 1 && subtype == 12)
+            sawTitleLoginResponse = 1;
+        if (kind == 14 && subtype == 14)
+            sawShopStatus = 1;
+        if (kind == 14 && subtype == 4)
+            sawShopMoney = 1;
+        if (kind == 30 && subtype == 2)
+            sawSceneComplete = 1;
+        if (kind == 4 && subtype == 5)
+            sawHangup = 1;
+        offset += objectLen;
+    }
+    if (offset != packetLen)
+        return;
+    if (sawTaskSubset)
+    {
+        g_vmAutomation.initialScenePacketSeen = 1;
+        g_vmAutomation.initialScenePacketFrame = g_vmAutomation.renderFrames;
+    }
+    if (sawTitleUpdateComplete && !g_vmAutomation.titleUpdateCompleteSeen)
+    {
+        g_vmAutomation.titleUpdateCompleteSeen = 1;
+        g_vmAutomation.titleUpdateFrame = g_vmAutomation.renderFrames;
+    }
+    if (sawTitleLoginResponse)
+        g_vmAutomation.titleLoginResponseSeen = 1;
+    if (sawShopStatus)
+        g_vmAutomation.shopStatusSeen = 1;
+    if (sawShopMoney)
+        g_vmAutomation.shopMoneySeen = 1;
+    if (g_vmAutomation.shopStatusSeen && g_vmAutomation.shopMoneySeen &&
+        g_vmAutomation.shopDataPacketFrame == 0)
+    {
+        g_vmAutomation.shopDataPacketFrame = g_vmAutomation.renderFrames;
+        g_vmAutomation.shopDataPacketSequence = sequence;
+    }
+    if (sawSceneComplete && g_vmAutomation.shopStatusSeen &&
+        !g_vmAutomation.shopReturnSeen)
+    {
+        /* Transport observation is deliberately not UI readiness: the guest
+         * callback still owns removal of mmShop and restoration of mmGame.
+         * Preserve this boundary so the following touch cannot be queued to
+         * the outgoing shop screen. */
+        g_vmAutomation.shopReturnSeen = 1;
+        g_vmAutomation.shopReturnPacketFrame = g_vmAutomation.renderFrames;
+        g_vmAutomation.shopReturnPacketSequence = sequence;
+    }
+    if (sawTaskSubset && g_vmAutomation.shopReturnSeen &&
+        sequence > g_vmAutomation.shopReturnPacketSequence &&
+        !g_vmAutomation.shopReturnFollowupSeen)
+    {
+        /* This 25/5 comes from the replacement scene shell, not the
+         * outgoing shop.  Arrival is still not UI readiness: the state
+         * machine also requires ScreenInit and two later render boundaries. */
+        g_vmAutomation.shopReturnFollowupSeen = 1;
+        g_vmAutomation.shopReturnFollowupFrame = g_vmAutomation.renderFrames;
+        g_vmAutomation.shopReturnFollowupSequence = sequence;
+        vm_autotest_note("automation_shop_return_followup seq=%u frame=%u\n",
+                         sequence, g_vmAutomation.renderFrames);
+    }
+    if (sawHangup)
+    {
+        char packetPath[640];
+        FILE *packetFile;
+
+        g_vmAutomation.hangupBattleResponseSeen = 1;
+        /* The shop-return and direct controls must be compared byte-for-byte
+         * before attributing a later screen-lifecycle split to the client.
+         * Persist only the uniquely identified 4/5 start response inside the
+         * isolated artifact directory; this never feeds back into transport. */
+        if (g_vmAutomation.artifactDir[0] != 0)
+        {
+            snprintf(packetPath, sizeof(packetPath),
+                     "%s/hangup-response-%u.wt", g_vmAutomation.artifactDir,
+                     sequence);
+            packetFile = fopen(packetPath, "wb");
+            if (packetFile != NULL)
+            {
+                (void)fwrite(packet, 1, packetLen, packetFile);
+                fclose(packetFile);
+                vm_autotest_note("automation_hangup_response_saved seq=%u len=%u path=%s\n",
+                                 sequence, packetLen, packetPath);
+            }
+        }
+    }
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u hangup=%u\n",
+                     sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
+                     sawSceneComplete, sawHangup);
+}
+
+static void vm_automation_tick(void)
+{
+    u32 now;
+    u32 elapsed;
+
+    if (!g_vmAutomation.active || g_vmAutomation.finished)
+        return;
+    now = SDL_GetTicks();
+    if (g_vmAutomation.totalStartedMs == 0)
+    {
+        g_vmAutomation.totalStartedMs = now;
+        g_vmAutomation.stageStartedMs = now;
+    }
+    elapsed = now - g_vmAutomation.totalStartedMs;
+    if (elapsed > g_vmAutomation.totalTimeoutMs)
+    {
+        vm_automation_finish(0, "total-timeout");
+        return;
+    }
+    {
+        u32 stageTimeoutMs =
+            g_vmAutomation.stage == VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP
+                ? 60000u : g_vmAutomation.stepTimeoutMs;
+        if (now - g_vmAutomation.stageStartedMs > stageTimeoutMs)
+        {
+            vm_automation_finish(0, "stage-timeout");
+            return;
+        }
+    }
+
+    switch (g_vmAutomation.stage)
+    {
+    case VM_AUTOMATION_STAGE_BOOT_CONFIRM:
+        if (g_vmAutomation.renderFrames >= 2 &&
+            vm_automation_issue_key('f', "two-rendered-boot-frames"))
+            vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH,
+                                    "boot-confirm-sent");
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP:
+        /* The runner declares the proven title input sequence as one-shot
+         * scheduled hardware events.  Do not infer login success from those
+         * timestamps: advancement starts only after the real initial 25/5
+         * scene packet and two further render boundaries. */
+        if (g_vmAutomation.initialScenePacketSeen &&
+            g_vmAutomation.renderFrames >= g_vmAutomation.initialScenePacketFrame + 2u)
+        {
+            vm_automation_cancel_pending_timed_inputs("initial-scene-packet-proven");
+            vm_automation_request_capture(
+                g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+                    ? "teleport-stone-scene-ready" : "scene-ready");
+            if (g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE)
+            {
+                /* This probe proves only the client-owned scene bootstrap and
+                 * captures the authored marker scene.  It deliberately does
+                 * not manufacture the next scene interaction request. */
+                vm_automation_finish(1, "initial-scene-25-5-and-rendered-frame");
+            }
+            else if (g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_DIRECT_HANGUP)
+            {
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_automation_request_capture("direct-hangup-scene");
+                if (vm_automation_issue_tap(50, 350, "scene-hangup-control"))
+                    vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE,
+                                            "direct-hangup-control-tapped");
+            }
+            else if (vm_automation_issue_tap(
+                         224, 44, "scene-toolbar-rightmost-shop-icon"))
+            {
+                /* The user has fixed the UI contract for this regression:
+                 * this is the visible, right-most scene toolbar icon, whose
+                 * native action opens mmShop.  It replaces the disproved
+                 * equipment-icon probe at (102,44); it is one hardware
+                 * event, never a coordinate sweep or a synthetic request. */
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_autotest_note("automation_scene_owner phase=initial screen=%08x this=%08x frame=%u\n",
+                                 vmAddedScreen, g_currentScreenThis,
+                                 g_vmAutomation.renderFrames);
+                vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
+                                        "rightmost-shop-icon-tapped");
+            }
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH:
+        if (g_vmAutomation.titleScreenInitialized &&
+            g_vmAutomation.renderFrames >= g_vmAutomation.titleScreenInitFrame + 2u &&
+            /* The rendered title menu's visible first row is 开始游戏.  Use
+             * its center through the existing touchscreen event queue; this
+             * is one declared target, not a candidate click sweep. */
+            vm_automation_issue_tap(120, 252,
+                                    "title-visible-start-game-row-center"))
+            vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_ROLE_LIST,
+                                    "title-start-row-tapped");
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_ROLE_LIST:
+        if (g_vmAutomation.titleLoginResponseSeen &&
+            !g_vmAutomation.titleLoginResponseCaptured)
+        {
+            vm_automation_request_capture("title-login-response");
+            g_vmAutomation.titleLoginResponseCaptured = 1;
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE:
+        if (g_vmAutomation.initialScenePacketSeen &&
+            g_vmAutomation.renderFrames >= g_vmAutomation.stageFrame + 2u)
+        {
+            vm_automation_request_capture("scene-ready");
+            if (g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_DIRECT_HANGUP)
+            {
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_automation_request_capture("direct-hangup-scene");
+                if (vm_automation_issue_tap(50, 350, "scene-hangup-control"))
+                    vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE,
+                                            "direct-hangup-control-tapped");
+            }
+            else if (vm_automation_issue_tap(
+                    224, 44, "scene-toolbar-rightmost-shop-icon"))
+            {
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_autotest_note("automation_scene_owner phase=initial screen=%08x this=%08x frame=%u\n",
+                                 vmAddedScreen, g_currentScreenThis,
+                                 g_vmAutomation.renderFrames);
+                vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
+                                        "rightmost-shop-icon-tapped");
+            }
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN:
+        /* The generic loading stack is also a non-scene screen.  Bind the
+         * shop owner only after the real 14/14 + 14/4 callback has arrived;
+         * before that point `vmAddedScreen` is still the transition screen. */
+        if (g_vmAutomation.shopStatusSeen && g_vmAutomation.shopMoneySeen &&
+            g_vmAutomation.shopScreen == 0 && vmAddedScreen != 0 &&
+            vmAddedScreen != g_vmAutomation.initialSceneScreen)
+        {
+            g_vmAutomation.shopScreen = vmAddedScreen;
+            vm_autotest_note("automation_scene_owner phase=shop screen=%08x this=%08x frame=%u\n",
+                             vmAddedScreen, g_currentScreenThis,
+                             g_vmAutomation.renderFrames);
+        }
+        if (g_vmAutomation.shopStatusSeen && g_vmAutomation.shopMoneySeen &&
+            g_vmAutomation.shopScreen != 0 &&
+            vmAddedScreen == g_vmAutomation.shopScreen &&
+            g_vmAutomation.renderFrames > g_vmAutomation.shopDataPacketFrame &&
+            vm_automation_issue_key('e', "mmShop-data-callback-rendered"))
+        {
+            vm_autotest_note("automation_shop_ready screen=%08x this=%08x response_seq=%u response_frame=%u render_frame=%u\n",
+                             vmAddedScreen, g_currentScreenThis,
+                             g_vmAutomation.shopDataPacketSequence,
+                             g_vmAutomation.shopDataPacketFrame,
+                             g_vmAutomation.renderFrames);
+            vm_automation_request_capture("shop-data-ready");
+            vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN,
+                                    "shop-back-sent");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN:
+        /* A shop return now carries 30/2+posinfo.  CBE consequently performs
+         * a true scene re-enter, so wait for its ScreenInit plus its later
+         * scene-runtime 25/5 follow-up.  This observes the natural lifecycle
+         * rather than using a fixed delay or treating packet arrival as UI
+         * readiness. */
+        if (g_vmAutomation.shopReturnSeen &&
+            g_vmAutomation.shopReturnSceneReinitSeen &&
+            g_vmAutomation.shopReturnFollowupSeen &&
+            g_vmAutomation.initialSceneScreen != 0 &&
+            g_vmAutomation.initialSceneScreen != g_vmAutomation.shopScreen &&
+            vmAddedScreen == g_vmAutomation.initialSceneScreen &&
+            g_vmAutomation.renderFrames >=
+                g_vmAutomation.shopReturnSceneReinitFrame + 2u &&
+            g_vmAutomation.renderFrames >=
+                g_vmAutomation.shopReturnFollowupFrame + 2u)
+        {
+            vm_autotest_note("automation_scene_owner phase=shop-return-settled "
+                             "screen=%08x this=%08x return_seq=%u return_frame=%u "
+                             "reinit_frame=%u followup_seq=%u followup_frame=%u render_frame=%u\n",
+                             vmAddedScreen, g_currentScreenThis,
+                             g_vmAutomation.shopReturnPacketSequence,
+                             g_vmAutomation.shopReturnPacketFrame,
+                             g_vmAutomation.shopReturnSceneReinitFrame,
+                             g_vmAutomation.shopReturnFollowupSequence,
+                             g_vmAutomation.shopReturnFollowupFrame,
+                             g_vmAutomation.renderFrames);
+            vm_automation_request_capture("shop-return-pre-hangup");
+            vm_automation_set_stage(
+                VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE,
+                "shop-return-pre-hangup-capture-requested");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE:
+        if (g_vmAutomation.shopReturnPreHangupCaptured &&
+            vm_automation_issue_tap(50, 350, "scene-hangup-control"))
+        {
+            vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE,
+                                    "hangup-control-tapped-after-pre-capture");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE:
+        if (g_vmAutomation.hangupBattleResponseSeen &&
+            g_vmAutomation.battleStartHandlerSeen)
+        {
+            /* 0x66CC proves the battle packet grammar only.  The regression
+             * remained on 获取数据 after that parser returned, so wait for
+             * BattleScene_MainLoop's real character-list creation boundary. */
+            vm_automation_set_stage(
+                VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE_SCREEN,
+                "hangup-4-5-reached-mmBattle-0x66CC");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE_SCREEN:
+        /* BattleScene_CreateCharList is not a required first-frame path:
+         * the direct control reaches BattleScene_DrawMain with populated
+         * slots without ever visiting it.  The real terminal assertion is
+         * therefore the native main-draw entry after the start handoff, which
+         * is absent on the shop-return failure because MainLoop returns at
+         * the game loading gate before sub_71BA. */
+        if (g_hangupBattleRenderTrace.drawMainSeen &&
+            g_hangupBattleRenderTrace.battleCompletionPresentSeen)
+        {
+            vm_automation_request_capture("hangup-battle-started");
+            vm_automation_finish(1,
+                                 "hangup-battle-main-draw-after-4-5");
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void vm_automation_render_complete(void)
+{
+    if (!g_vmAutomation.active)
+        return;
+    ++g_vmAutomation.renderFrames;
+    vm_automation_capture_internal_lcd();
+    if (g_vmAutomation.finished && !g_vmAutomation.capturePending &&
+        !g_vmAutomation.exitRequested)
+    {
+        g_vmAutomation.exitRequested = 1;
+        vm_request_host_quit("automation-scenario-complete");
+    }
+}
+
 static int vm_autotest_parse_u32(const char *text, u32 *value)
 {
     char *end = NULL;
@@ -4071,12 +6148,65 @@ static void vm_autotest_parse_actions(const char *script)
     }
 }
 
+static void vm_automation_init_config(int argc, char *args[])
+{
+    const char *scenario = getenv("CBE_AUTOMATION_SCENARIO");
+    const char *artifactDir = getenv("CBE_AUTOMATION_ARTIFACTS");
+    const char *titleDriver = getenv("CBE_AUTOMATION_TITLE_DRIVER");
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strncmp(args[i], "--automation-scenario=", 22) == 0)
+            scenario = args[i] + 22;
+        else if (strncmp(args[i], "--automation-artifacts=", 23) == 0)
+            artifactDir = args[i] + 23;
+        else if (strncmp(args[i], "--automation-title-driver=", 26) == 0)
+            titleDriver = args[i] + 26;
+    }
+    if (scenario == NULL)
+        return;
+    vm_automation_scenario parsedScenario = VM_AUTOMATION_SCENARIO_NONE;
+    if (strcmp(scenario, "shop-return-hangup-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_SHOP_RETURN_HANGUP;
+    else if (strcmp(scenario, "direct-hangup-control-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_DIRECT_HANGUP;
+    else if (strcmp(scenario, "scene-teleport-stone-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE;
+    else
+        return;
+    if (artifactDir == NULL || artifactDir[0] == 0 ||
+        strlen(artifactDir) >= sizeof(g_vmAutomation.artifactDir))
+    {
+        printf("[error][automation] scenario=%s requires an existing --automation-artifacts directory\n",
+               scenario);
+        return;
+    }
+    memset(&g_vmAutomation, 0, sizeof(g_vmAutomation));
+    g_vmAutomation.scenario = parsedScenario;
+    g_vmAutomation.timedTitleDriver =
+        titleDriver != NULL && strcmp(titleDriver, "timed-title-v1") == 0;
+    g_vmAutomation.stage = g_vmAutomation.timedTitleDriver
+        ? VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP
+        : VM_AUTOMATION_STAGE_BOOT_CONFIRM;
+    g_vmAutomation.active = 1;
+    g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+        ? 4u : (g_vmAutomation.timedTitleDriver ? 10u : 7u);
+    g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+        ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u);
+    g_vmAutomation.stepTimeoutMs = 15000u;
+    snprintf(g_vmAutomation.artifactDir, sizeof(g_vmAutomation.artifactDir),
+             "%s", artifactDir);
+    g_autotestEnabled = 1;
+}
+
 static void vm_autotest_init(int argc, char *args[])
 {
     const char *envAuto = getenv("CBE_AUTOTEST");
     const char *envShotMs = getenv("CBE_AUTOTEST_SHOT_MS");
     const char *envMaxMs = getenv("CBE_AUTOTEST_MAX_MS");
     const char *envActions = getenv("CBE_AUTOTEST_ACTIONS");
+
+    vm_automation_init_config(argc, args);
     if (envAuto && strcmp(envAuto, "0") != 0)
         g_autotestEnabled = 1;
     if (envShotMs)
@@ -4102,16 +6232,41 @@ static void vm_autotest_init(int argc, char *args[])
         g_autotestShotIntervalMs = 100;
     if (g_autotestEnabled)
     {
+        char statePath[640];
 #ifdef _WIN32
-        _mkdir("autotest");
-        _mkdir("autotest\\screens");
+        if (!g_vmAutomation.active)
+        {
+            _mkdir("autotest");
+            _mkdir("autotest\\screens");
+        }
 #else
-        mkdir("autotest", 0755);
-        mkdir("autotest/screens", 0755);
+        if (!g_vmAutomation.active)
+        {
+            mkdir("autotest", 0755);
+            mkdir("autotest/screens", 0755);
+        }
 #endif
-        g_autotestStateFile = fopen("autotest/state.txt", "w");
-        printf("[info][autotest] enabled shot_ms=%u max_ms=%u actions=%u\n",
-               g_autotestShotIntervalMs, g_autotestMaxMs, g_autotestActionCount);
+        if (g_vmAutomation.active)
+        {
+            snprintf(statePath, sizeof(statePath), "%s/automation.log",
+                     g_vmAutomation.artifactDir);
+            g_autotestStateFile = fopen(statePath, "wb");
+            printf("[info][automation] scenario=%s artifacts=%s max_steps=%u total_timeout_ms=%u step_timeout_ms=%u input_release_ms=80\n",
+                   vm_automation_scenario_name(), g_vmAutomation.artifactDir,
+                   g_vmAutomation.maxSteps,
+                   g_vmAutomation.totalTimeoutMs, g_vmAutomation.stepTimeoutMs);
+            vm_autotest_note("automation_start scenario=%s max_steps=%u total_timeout_ms=%u step_timeout_ms=%u input_release_ms=80\n",
+                             vm_automation_scenario_name(), g_vmAutomation.maxSteps,
+                             g_vmAutomation.totalTimeoutMs,
+                             g_vmAutomation.stepTimeoutMs);
+            vm_automation_request_capture("boot");
+        }
+        else
+        {
+            g_autotestStateFile = fopen("autotest/state.txt", "w");
+            printf("[info][autotest] enabled shot_ms=%u max_ms=%u actions=%u\n",
+                   g_autotestShotIntervalMs, g_autotestMaxMs, g_autotestActionCount);
+        }
     }
 }
 
@@ -4582,6 +6737,8 @@ static void vm_autotest_note_startup_pc(u32 pc)
     u32 netTask = 0;
     u16 waitTicks = 0;
     u32 startupObj = 0;
+
+    vm_automation_note_startup_pc(pc);
 
     if (!g_autotestEnabled || Global_R9 == 0)
         return;
@@ -6003,13 +8160,18 @@ static void vm_autotest_dump_battle_state(u32 elapsedMs)
 static void vm_autotest_save_screenshot(u32 elapsedMs)
 {
     char path[128];
-    SDL_Surface *sfc = SDL_GetWindowSurface(window);
-    if (!sfc)
+#ifdef CBE_CLIENT_ONLY
+    if (Lcd_Cache_Buffer == NULL)
         return;
-    snprintf(path, sizeof(path), "autotest/screens/%06u_%08u.bmp",
+    snprintf(path, sizeof(path), "autotest/screens/%06u_%08u.png",
              g_autotestShotIndex++, elapsedMs);
-    if (SDL_SaveBMP(sfc, path) != 0)
-        printf("[warn][autotest] save_screenshot_failed path=%s err=%s\n", path, SDL_GetError());
+    if (!automation_png_write_rgb565(path, Lcd_Cache_Buffer,
+                                     LCD_WIDTH, LCD_HEIGHT))
+        printf("[warn][autotest] save_lcd_png_failed path=%s\n", path);
+#else
+    (void)elapsedMs;
+    (void)path;
+#endif
 }
 
 static void vm_autotest_tick(void)
@@ -6026,8 +8188,9 @@ static void vm_autotest_tick(void)
 
     vm_autotest_dump_scene_tables(elapsed);
     vm_autotest_dump_battle_state(elapsed);
+    vm_automation_tick();
 
-    if (elapsed >= g_autotestNextShotMs)
+    if (!g_vmAutomation.active && elapsed >= g_autotestNextShotMs)
     {
         vm_autotest_save_screenshot(elapsed);
         g_autotestNextShotMs = elapsed + g_autotestShotIntervalMs;
@@ -6049,6 +8212,15 @@ static void vm_autotest_tick(void)
         if (action->fired || elapsed < action->atMs)
             continue;
         action->fired = 1;
+        if (g_vmAutomation.active)
+        {
+            const char *kind = action->type == VM_AUTOTEST_ACTION_TAP ? "tap" :
+                               action->type == VM_AUTOTEST_ACTION_WINDOW_TAP ? "windowtap" :
+                               action->type == VM_AUTOTEST_ACTION_HOLD_KEY ? "hold-key" : "key";
+            vm_autotest_note("automation_timed_input kind=%s planned_ms=%u actual_ms=%u a=%d b=%d one_shot=1\n",
+                             kind, action->atMs, elapsed, action->a, action->b);
+            ++g_vmAutomation.timedInputCount;
+        }
         if (action->type == VM_AUTOTEST_ACTION_TAP)
         {
             mouseEvent(MR_MOUSE_DOWN, action->a, action->b);
@@ -7511,6 +9683,8 @@ void RunArmProgram(void *param)
                     p = vm_emu_start(screenInitEntry, exitAddr);
                 else
                     p = UC_ERR_OK;
+                vm_automation_note_screen_init(screenFuncPtr, screenInitEntry,
+                                               screenLogicEntry, screenRenderEntry);
                 vm_autotest_note("screen_run kind=init caller=%08x this=%08x init=%08x logic=%08x render=%08x\n",
                                  lastAddress, screenThisPtr, screenInitEntry, screenLogicEntry, screenRenderEntry);
                 printf("ScreenInit Ok\n");
@@ -14794,6 +16968,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 {
     u32 tmp1, tmp2, tmp3, tmp4, tmp5;
 
+    vm_hangup_transition_capture_pre_restore((u32)address & ~1u);
     vm_restore_main_r9_for_rom_code((u32)address);
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
@@ -14804,6 +16979,11 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);
+    vm_hangup_protocol_parser_trace_note_pc((u32)address & ~1u);
+    vm_hangup_battle_state_watch_note_pc((u32)address & ~1u);
+    vm_hangup_transition_trace_note_pc((u32)address & ~1u);
+    vm_hangup_battle_module_trace_note_pc((u32)address & ~1u);
+    vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
 
