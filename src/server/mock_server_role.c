@@ -232,7 +232,7 @@ static bool vm_net_mock_scene_monster_admin_save(
     char query[512];
 
     if (errorOut)
-        *errorOut = "场景怪物配置无效";
+        *errorOut = "????????";
     if (scene == NULL || scene[0] == 0 ||
         (monsterId1 == 0 && monsterId2 == 0 && monsterId3 == 0))
         return false;
@@ -241,14 +241,14 @@ static bool vm_net_mock_scene_monster_admin_save(
         (monsterId3 != 0 && !vm_net_mock_monster_enemy_id_known(monsterId3)))
     {
         if (errorOut)
-            *errorOut = "怪物 ID 不在怪物目录中";
+            *errorOut = "?? ID ???????";
         return false;
     }
     if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) ==
         0)
     {
         if (errorOut)
-            *errorOut = "场景名编码失败";
+            *errorOut = "???????";
         return false;
     }
     (void)vm_net_mock_load_auto_monster_catalog();
@@ -277,7 +277,7 @@ static bool vm_net_mock_scene_monster_admin_save(
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
-            *errorOut = "场景怪物配置保存失败";
+            *errorOut = "??????????";
         return false;
     }
     g_vm_net_mock_auto_monster_catalog_loaded = false;
@@ -296,7 +296,7 @@ static bool vm_net_mock_scene_monster_admin_reset(const char *scene,
     char query[256];
 
     if (errorOut)
-        *errorOut = "场景无效";
+        *errorOut = "????";
     if (scene == NULL || scene[0] == 0 ||
         vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) ==
             0)
@@ -307,7 +307,7 @@ static bool vm_net_mock_scene_monster_admin_reset(const char *scene,
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
-            *errorOut = "恢复场景默认刷怪失败";
+            *errorOut = "??????????";
         return false;
     }
     g_vm_net_mock_auto_monster_catalog_loaded = false;
@@ -417,7 +417,7 @@ static void vm_net_mock_adjust_safe_player_pos_for_scene(const char *scene, u16 
 
 /* Near-origin coords are treated like 0: portal safe-gap math and map edges
  * leave the sprite in the top-left with no walkable path (runtime: role 158
- * c04临安府_05 at 9,29). */
+ * c04???_05 at 9,29). */
 static bool vm_net_mock_role_position_needs_edge_rescue(u16 x, u16 y)
 {
     return x == 0 || y == 0 ||
@@ -473,20 +473,31 @@ static bool vm_net_mock_role_dream_kind3_on_disk(const char *scene)
     return false;
 }
 
-/* Relocate login out of 29* when dream SCE has kind=3 so cold DF never
- * ParseMinfo's it; 使者 instance enter still loads kind=3 for 刷怪. */
+/* Relocate login out of dream/instance kind=3 shells so cold DF never
+ * ParseMinfo's them; ?? instance enter still loads kind=3 for ??.
+ * Also covers experimental twin 28????_01 (debug-0b451a redirect left
+ * roles stuck there; relocate previously only matched 29*). */
 static bool vm_net_mock_role_relocate_dream_kind3_login(
     vm_net_mock_role_state *role)
 {
     static const char kOutdoor[] =
-        "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x36"; /* c04临安府_06 */
+        "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x36"; /* c04???_06 */
+    static const char kFieldDreamTwin[] =
+        "\x32\x38\xd2\xb0\xcd\xe2\xc3\xce\xb2\xe2\x5f\x30\x31"; /* 28????_01 */
     char from[64];
     u16 x = 50;
     u16 y = 50;
+    u8 isDream29 = 0;
+    u8 isFieldTwin = 0;
 
-    if (role == NULL || role->scene[0] != '2' || role->scene[1] != '9')
+    if (role == NULL || role->scene[0] == 0)
         return false;
-    if (!vm_net_mock_role_dream_kind3_on_disk(role->scene))
+    isDream29 = (role->scene[0] == '2' && role->scene[1] == '9') ? 1u : 0u;
+    isFieldTwin =
+        (strcmp(role->scene, kFieldDreamTwin) == 0) ? 1u : 0u;
+    if (!isDream29 && !isFieldTwin)
+        return false;
+    if (isDream29 && !vm_net_mock_role_dream_kind3_on_disk(role->scene))
         return false;
     snprintf(from, sizeof(from), "%s", role->scene);
     snprintf(role->scene, sizeof(role->scene), "%s", kOutdoor);
@@ -2229,8 +2240,8 @@ static bool vm_mock_service_account_issue_guest_credentials(u32 clientId,
 }
 
 /* EXP to advance from level L -> L+1 for L=1..49.
- * Geometric progression: 200 * r^(L-1) with r≈1.2115, nudged to keep
- * integer monotonic steps, max step growth ≤ ~22%, exact 49->50 = 2_000_000,
+ * Geometric progression: 200 * r^(L-1) with r?1.2115, nudged to keep
+ * integer monotonic steps, max step growth ? ~22%, exact 49->50 = 2_000_000,
  * and sum(1..49) = 11_454_020 so stage 3 can lock total 1..70 at 120_000_000. */
 static const u32 g_vm_net_mock_role_level_up_cost_geom[] = {
     200, 240, 292, 354, 429, 520, 630, 764,
@@ -2377,8 +2388,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         0,
         0,
-        "\xd2\xbb\xc6\xb6\xc8\xe7\xcf\xb4", /* GBK: 一贫如洗 */
-        "\xc5\xcc\xb2\xf8\xb2\xbb\xd7\xe3", /* GBK: 盘缠不足 */
+        "\xd2\xbb\xc6\xb6\xc8\xe7\xcf\xb4", /* GBK: ???? */
+        "\xc5\xcc\xb2\xf8\xb2\xbb\xd7\xe3", /* GBK: ???? */
         "riches_name0.gif",
     },
     {
@@ -2387,8 +2398,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         10u * 10000u, /* 10 gold */
         0,
-        "\xd2\xc2\xca\xb3\xce\xde\xd3\xc7", /* GBK: 衣食无忧 */
-        "\xc2\xd4\xd3\xd0\xbb\xfd\xd0\xee", /* GBK: 略有积蓄 */
+        "\xd2\xc2\xca\xb3\xce\xde\xd3\xc7", /* GBK: ???? */
+        "\xc2\xd4\xd3\xd0\xbb\xfd\xd0\xee", /* GBK: ???? */
         "riches_name1.gif",
     },
     {
@@ -2397,8 +2408,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         100u * 10000u, /* 100 gold */
         0,
-        "\xc9\xfa\xb2\xc6\xd3\xd0\xb5\xc0", /* GBK: 生财有道 */
-        "\xd0\xa1\xd3\xd0\xd7\xca\xb2\xfa", /* GBK: 小有资产 */
+        "\xc9\xfa\xb2\xc6\xd3\xd0\xb5\xc0", /* GBK: ???? */
+        "\xd0\xa1\xd3\xd0\xd7\xca\xb2\xfa", /* GBK: ???? */
         "riches_name2.gif",
     },
     {
@@ -2407,8 +2418,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         500u * 10000u, /* 500 gold */
         0,
-        "\xc0\xed\xb2\xc6\xd3\xd0\xb7\xbd", /* GBK: 理财有方 */
-        "\xb2\xc6\xc2\xb7\xbd\xa5\xbf\xed", /* GBK: 财路渐宽 */
+        "\xc0\xed\xb2\xc6\xd3\xd0\xb7\xbd", /* GBK: ???? */
+        "\xb2\xc6\xc2\xb7\xbd\xa5\xbf\xed", /* GBK: ???? */
         "riches_name3.gif",
     },
     {
@@ -2417,8 +2428,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         1000u * 10000u, /* 1000 gold */
         0,
-        "\xb2\xc6\xd4\xcb\xba\xe0\xcd\xa8", /* GBK: 财运亨通 */
-        "\xc7\xae\xb2\xc6\xb7\xe1\xba\xf1", /* GBK: 钱财丰厚 */
+        "\xb2\xc6\xd4\xcb\xba\xe0\xcd\xa8", /* GBK: ???? */
+        "\xc7\xae\xb2\xc6\xb7\xe1\xba\xf1", /* GBK: ???? */
         "riches_name4.gif",
     },
     {
@@ -2427,8 +2438,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         10000u * 10000u, /* 10000 gold */
         0,
-        "\xd1\xfc\xb2\xf8\xcd\xf2\xb9\xe1", /* GBK: 腰缠万贯 */
-        "\xbb\xd3\xbd\xf0\xd3\xd0\xb6\xc8", /* GBK: 挥金有度 */
+        "\xd1\xfc\xb2\xf8\xcd\xf2\xb9\xe1", /* GBK: ???? */
+        "\xbb\xd3\xbd\xf0\xd3\xd0\xb6\xc8", /* GBK: ???? */
         "riches_name5.gif",
     },
     {
@@ -2437,8 +2448,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         50000u * 10000u, /* 50000 gold */
         0,
-        "\xbc\xd2\xb2\xc6\xcd\xf2\xb9\xe1", /* GBK: 家财万贯 */
-        "\xb2\xc6\xb8\xbb\xbe\xaa\xc8\xcb", /* GBK: 财富惊人 */
+        "\xbc\xd2\xb2\xc6\xcd\xf2\xb9\xe1", /* GBK: ???? */
+        "\xb2\xc6\xb8\xbb\xbe\xaa\xc8\xcb", /* GBK: ???? */
         "riches_name6.gif",
     },
     {
@@ -2447,8 +2458,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         100000u * 10000u, /* 100000 gold */
         0,
-        "\xb8\xbb\xc9\xcc\xbe\xde\xbc\xd6", /* GBK: 富商巨贾 */
-        "\xc9\xcc\xbc\xd6\xce\xc5\xc3\xfb", /* GBK: 商贾闻名 */
+        "\xb8\xbb\xc9\xcc\xbe\xde\xbc\xd6", /* GBK: ???? */
+        "\xc9\xcc\xbc\xd6\xce\xc5\xc3\xfb", /* GBK: ???? */
         "riches_name7.gif",
     },
     {
@@ -2457,8 +2468,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         150000u * 10000u, /* 150000 gold */
         0,
-        "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd", /* GBK: 富甲一方 */
-        "\xb2\xc6\xb9\xda\xd2\xbb\xb7\xbd", /* GBK: 财冠一方 */
+        "\xb8\xbb\xbc\xd7\xd2\xbb\xb7\xbd", /* GBK: ???? */
+        "\xb2\xc6\xb9\xda\xd2\xbb\xb7\xbd", /* GBK: ???? */
         "riches_name8.gif",
     },
     {
@@ -2467,8 +2478,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_MONEY,
         200000u * 10000u, /* 200000 gold */
         0,
-        "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa", /* GBK: 富可敌国 */
-        "\xcc\xec\xcf\xc2\xbe\xde\xb8\xbb", /* GBK: 天下巨富 */
+        "\xb8\xbb\xbf\xc9\xb5\xd0\xb9\xfa", /* GBK: ???? */
+        "\xcc\xec\xcf\xc2\xbe\xde\xb8\xbb", /* GBK: ???? */
         "riches_name9.gif",
     },
     /*
@@ -2482,8 +2493,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         0,
-        "\xb2\xbb\xbf\xb0\xd2\xbb\xbb\xf7", /* GBK: 不堪一击 */
-        "\xb3\xf5\xc8\xeb\xbd\xad\xba\xfe", /* GBK: 初入江湖 */
+        "\xb2\xbb\xbf\xb0\xd2\xbb\xbb\xf7", /* GBK: ???? */
+        "\xb3\xf5\xc8\xeb\xbd\xad\xba\xfe", /* GBK: ???? */
         "level_name0.gif",
     },
     {
@@ -2492,8 +2503,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         5,
-        "\xb3\xf5\xd1\xa7\xd5\xa7\xc1\xb7", /* GBK: 初学乍练 */
-        "\xc2\xd4\xcd\xa8\xce\xe4\xd1\xa7", /* GBK: 略通武学 */
+        "\xb3\xf5\xd1\xa7\xd5\xa7\xc1\xb7", /* GBK: ???? */
+        "\xc2\xd4\xcd\xa8\xce\xe4\xd1\xa7", /* GBK: ???? */
         "level_name1.gif",
     },
     {
@@ -2502,8 +2513,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         10,
-        "\xd0\xa1\xca\xd4\xc5\xa3\xb5\xb6", /* GBK: 小试牛刀 */
-        "\xbd\xa5\xc8\xeb\xbc\xd1\xbe\xb3", /* GBK: 渐入佳境 */
+        "\xd0\xa1\xca\xd4\xc5\xa3\xb5\xb6", /* GBK: ???? */
+        "\xbd\xa5\xc8\xeb\xbc\xd1\xbe\xb3", /* GBK: ???? */
         "level_name2.gif",
     },
     {
@@ -2512,8 +2523,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         15,
-        "\xb3\xf5\xc2\xb6\xb7\xe6\xc3\xa2", /* GBK: 初露锋芒 */
-        "\xd0\xa1\xd3\xd0\xcb\xf9\xb3\xc9", /* GBK: 小有所成 */
+        "\xb3\xf5\xc2\xb6\xb7\xe6\xc3\xa2", /* GBK: ???? */
+        "\xd0\xa1\xd3\xd0\xcb\xf9\xb3\xc9", /* GBK: ???? */
         "level_name3.gif",
     },
     {
@@ -2522,8 +2533,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         25,
-        "\xb3\xf6\xc8\xcb\xcd\xb7\xb5\xd8", /* GBK: 出人头地 */
-        "\xc9\xf9\xc3\xfb\xbd\xa5\xc6\xf0", /* GBK: 声名渐起 */
+        "\xb3\xf6\xc8\xcb\xcd\xb7\xb5\xd8", /* GBK: ???? */
+        "\xc9\xf9\xc3\xfb\xbd\xa5\xc6\xf0", /* GBK: ???? */
         "level_name4.gif",
     },
     {
@@ -2532,8 +2543,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         30,
-        "\xc3\xfb\xd5\xf0\xbd\xad\xba\xfe", /* GBK: 名震江湖 */
-        "\xc9\xf9\xc3\xfb\xd4\xb6\xd1\xef", /* GBK: 声名远扬 */
+        "\xc3\xfb\xd5\xf0\xbd\xad\xba\xfe", /* GBK: ???? */
+        "\xc9\xf9\xc3\xfb\xd4\xb6\xd1\xef", /* GBK: ???? */
         "level_name5.gif",
     },
     {
@@ -2542,8 +2553,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         40,
-        "\xbd\xad\xba\xfe\xe8\xc9\xd0\xdb", /* GBK: 江湖枭雄 */
-        "\xcd\xfe\xd5\xf0\xd2\xbb\xb7\xbd", /* GBK: 威震一方 */
+        "\xbd\xad\xba\xfe\xe8\xc9\xd0\xdb", /* GBK: ???? */
+        "\xcd\xfe\xd5\xf0\xd2\xbb\xb7\xbd", /* GBK: ???? */
         "level_name6.gif",
     },
     {
@@ -2552,8 +2563,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         45,
-        "\xc1\xcb\xc8\xbb\xd3\xda\xd0\xd8", /* GBK: 了然于胸 */
-        "\xb5\xc3\xd0\xc4\xd3\xa6\xca\xd6", /* GBK: 得心应手 */
+        "\xc1\xcb\xc8\xbb\xd3\xda\xd0\xd8", /* GBK: ???? */
+        "\xb5\xc3\xd0\xc4\xd3\xa6\xca\xd6", /* GBK: ???? */
         "level_name7.gif",
     },
     {
@@ -2562,8 +2573,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         50,
-        "\xc2\xaf\xbb\xf0\xb4\xbf\xc7\xe0", /* GBK: 炉火纯青 */
-        "\xb9\xa6\xc1\xa6\xc9\xee\xba\xf1", /* GBK: 功力深厚 */
+        "\xc2\xaf\xbb\xf0\xb4\xbf\xc7\xe0", /* GBK: ???? */
+        "\xb9\xa6\xc1\xa6\xc9\xee\xba\xf1", /* GBK: ???? */
         "level_name8.gif",
     },
     {
@@ -2572,8 +2583,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         55,
-        "\xbd\xad\xba\xfe\xcf\xc0\xd2\xfe", /* GBK: 江湖侠隐 */
-        "\xcf\xc0\xd2\xfe\xbd\xad\xba\xfe", /* GBK: 侠隐江湖 */
+        "\xbd\xad\xba\xfe\xcf\xc0\xd2\xfe", /* GBK: ???? */
+        "\xcf\xc0\xd2\xfe\xbd\xad\xba\xfe", /* GBK: ???? */
         "level_name9.gif",
     },
     {
@@ -2582,8 +2593,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         60,
-        "\xb5\xc7\xb7\xe5\xd4\xec\xbc\xab", /* GBK: 登峰造极 */
-        "\xce\xe4\xd1\xa7\xe1\xdb\xb7\xe5", /* GBK: 武学巅峰 */
+        "\xb5\xc7\xb7\xe5\xd4\xec\xbc\xab", /* GBK: ???? */
+        "\xce\xe4\xd1\xa7\xe1\xdb\xb7\xe5", /* GBK: ???? */
         "level_name10.gif",
     },
     {
@@ -2592,8 +2603,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         65,
-        "\xb3\xac\xd4\xbd\xbc\xab\xcf\xde", /* GBK: 超越极限 */
-        "\xb3\xac\xb7\xb2\xc8\xeb\xca\xa5", /* GBK: 超凡入圣 */
+        "\xb3\xac\xd4\xbd\xbc\xab\xcf\xde", /* GBK: ???? */
+        "\xb3\xac\xb7\xb2\xc8\xeb\xca\xa5", /* GBK: ???? */
         "level_name11.gif",
     },
     {
@@ -2602,8 +2613,8 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         VM_NET_MOCK_DESIGNATION_KIND_LEVEL,
         0,
         70,
-        "\xbf\xaa\xc9\xbd\xb1\xc7\xd7\xe6", /* GBK: 开山鼻祖 */
-        "\xd2\xbb\xb4\xfa\xd7\xda\xca\xa6", /* GBK: 一代宗师 */
+        "\xbf\xaa\xc9\xbd\xb1\xc7\xd7\xe6", /* GBK: ???? */
+        "\xd2\xbb\xb4\xfa\xd7\xda\xca\xa6", /* GBK: ???? */
         "level_name12.gif",
     },
 
@@ -2706,7 +2717,7 @@ static u32 vm_net_mock_role_guild_info(const vm_net_mock_role_state *role,
     }
     else
     {
-        snprintf(nameOut, nameOutSize, "%s", "\xce\xde\xb0\xef\xc5\xc9"); /* GBK: 无帮派 */
+        snprintf(nameOut, nameOutSize, "%s", "\xce\xde\xb0\xef\xc5\xc9"); /* GBK: ??? */
     }
     if (overrideName != NULL && overrideName[0] != 0)
         snprintf(nameOut, nameOutSize, "%s", overrideName);
@@ -2745,7 +2756,7 @@ static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
     return (u16)value;
 }
 
-/* Server battle attack primary: 天机=力量, 幻剑=敏捷, 鬼道=智慧. */
+/* Server battle attack primary: ??=??, ??=??, ??=??. */
 static u32 vm_net_mock_role_job_primary_attr(u32 job, u32 strength, u32 agility,
                                               u32 wisdom)
 {
@@ -2804,7 +2815,7 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
         return;
     if (level == 0)
         level = 1;
-    /* JianghuOL.CBE:0x0100FFEA — ldrsh item+0x110 (durability); cmp #0 / ble
+    /* JianghuOL.CBE:0x0100FFEA � ldrsh item+0x110 (durability); cmp #0 / ble
      * skips the equip bonus when current durability is <= 0. */
     service = vm_net_mock_role_service_state_get(role);
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
@@ -2831,18 +2842,18 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
         if (enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         scaled = item->bonus;
-        /* 强化基础缩放只作用于护甲/攻击（CBE 每级路径）；气血/法力不参与。 */
+        /* ????????????/???CBE ????????/?????? */
         scaled.attack =
             vm_net_mock_equipment_bonus_scale(scaled.attack, enhanceLevel);
         scaled.armor =
             vm_net_mock_equipment_bonus_scale(scaled.armor, enhanceLevel);
         /* scaled.hp = vm_net_mock_equipment_bonus_scale(scaled.hp, enhanceLevel); */
         /* scaled.mp = vm_net_mock_equipment_bonus_scale(scaled.mp, enhanceLevel); */
-        /* 其余列保持装备表基值；品质里程碑见下方 add_unlocked_milestones。 */
+        /* ??????????????????? add_unlocked_milestones? */
         vm_net_mock_equipment_bonus_add(bonus, &scaled);
         /*
-         * 强化附加 UI 的品质定值里程碑也要进人物属性：unlock<=L 的词条
-         * （暴击=Q+1 等）累加到 bonus；气血%/法力% 按装备基值×百分数。
+         * ???? UI ????????????????unlock<=L ???
+         * ???=Q+1 ????? bonus???%/??% ?????�????
          */
         vm_net_mock_equipment_bonus_add_unlocked_milestones(bonus, item,
                                                             enhanceLevel);
@@ -2876,7 +2887,7 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->baseEndurance = vm_net_mock_role_derived_attr(level, job, 3);
     stats->baseCharm = vm_net_mock_role_derived_attr(level, job, 4);
     /*
-     * Primary attrs feed skill coeff damage (鬼道: wisdom×智慧系数).
+     * Primary attrs feed skill coeff damage (??: wisdom�????).
      * Cap at 65535 to match client actor halfwords (u16).
      */
     stats->strength =
@@ -2892,14 +2903,14 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->maxHp = 90 + level * 8 + stats->endurance * 2 + equipment.hp;
     stats->maxMp = 70 + level * 9 + stats->wisdom * 3 + equipment.mp;
     /*
-     * Server battle authority only. Property-panel 物攻 is actor+0x130 from
-     * weapon item+0xFA apply (JianghuOL.CBE:0x0101002E); 护甲 is +0x132 from
+     * Server battle authority only. Property-panel ?? is actor+0x130 from
+     * weapon item+0xFA apply (JianghuOL.CBE:0x0101002E); ?? is +0x132 from
      * actorinfo word[4] + armor item+0xF8. Mid-session level-up (0x01017FB6)
-     * adds flat job HP/MP/力/敏 — not these derivatives. See
-     * docs/re/2026-06-28-player-attribute-model.md §Client Authority.
+     * adds flat job HP/MP/?/? � not these derivatives. See
+     * docs/re/2026-06-28-player-attribute-model.md �Client Authority.
      *
-     * Battle attack uses job primary (天机力 / 幻剑敏 / 鬼道智), not always
-     * strength — see docs/re/2026-07-31-battle-attack-job-primary-attr.md.
+     * Battle attack uses job primary (??? / ??? / ???), not always
+     * strength � see docs/re/2026-07-31-battle-attack-job-primary-attr.md.
      */
     stats->attack =
         6 + level * 2 +
@@ -2908,9 +2919,9 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
             2 +
         equipment.attack / 3;
     stats->defense = 4 + level + stats->endurance / 2 + equipment.armor / 5;
-    /* 命中 = 101 底值 + 装备命中列；闪避/暴击/抗性仍只取装备列。
-     * hitChance = clamp(hit - dodge, 5, 95)，所以裸装 101 对怪物闪躲 0
-     * 会顶到 95% 命中上限。 */
+    /* ?? = 101 ?? + ????????/??/?????????
+     * hitChance = clamp(hit - dodge, 5, 95)????? 101 ????? 0
+     * ??? 95% ????? */
     stats->hit = vm_net_mock_add_capped_u32(101u, equipment.hit);
     stats->dodge = equipment.dodge;
     stats->crit = equipment.crit;
@@ -2959,7 +2970,7 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
         stats->agility, modifier->agility);
     stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
         stats->wisdom, modifier->wisdom);
-    /* Attack tracks job-primary/2 (天机力 / 幻剑敏 / 鬼道智). Hit/dodge/crit/
+    /* Attack tracks job-primary/2 (??? / ??? / ???). Hit/dodge/crit/
      * resist are equipment-only base stats, so only skill.dsh direct combat
      * deltas apply on those. */
     primaryAfter = vm_net_mock_role_job_primary_attr(
@@ -3161,21 +3172,21 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries_builtin[] =
     {  4,  2, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
     {  6,  7, VM_NET_MOCK_MONSTER_BEAST, 29, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     {  9,  3, VM_NET_MOCK_MONSTER_BEAST, 25, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* SCE combat actor outside automonster.dsh: 猪王独牙 (野猪林). */
+    /* SCE combat actor outside automonster.dsh: ???? (???). */
     { 12, 10, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 13, 12, VM_NET_MOCK_MONSTER_BOSS, 32, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 15, 55, VM_NET_MOCK_MONSTER_REPTILE, 34, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 18, 38, VM_NET_MOCK_MONSTER_ELEMENTAL, 36, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 19, 28, VM_NET_MOCK_MONSTER_BOSS, 37, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* SCE combat actor outside automonster.dsh: 炽热火灵 (泰山). */
+    /* SCE combat actor outside automonster.dsh: ???? (??). */
     { 21, 10, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
     { 22, 12, VM_NET_MOCK_MONSTER_SPIRIT, 53, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* task.dsh type-2 kill target: 冥火麒麟【燎天】 (task 5004). */
+    /* task.dsh type-2 kill target: ???????? (task 5004). */
     { 23, 40, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 镇狱明王. */
+    /* SCE combat actor outside automonster.dsh: ????. */
     { 24, 28, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 25,  4, VM_NET_MOCK_MONSTER_UNDEAD, 43, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* SCE combat actor outside automonster.dsh: 深渊鬼王. */
+    /* SCE combat actor outside automonster.dsh: ????. */
     { 26, 12, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 28,  7, VM_NET_MOCK_MONSTER_FLYING, 45, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 29,  8, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
@@ -3184,12 +3195,12 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries_builtin[] =
     { 32, 10, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     { 34, 11, VM_NET_MOCK_MONSTER_UNDEAD, 51, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 36, 14, VM_NET_MOCK_MONSTER_STONE, 52, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* task.dsh type-2 kill target: 火凤凰 (task 112). */
+    /* task.dsh type-2 kill target: ??? (task 112). */
     { 38, 30, VM_NET_MOCK_MONSTER_FLYING, 0, 0},
     { 40, 20, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 41, 20, VM_NET_MOCK_MONSTER_SLIME, 55, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 42, 22, VM_NET_MOCK_MONSTER_ELEMENTAL, 56, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* task.dsh type-2 kill target: 火蝮蛇 (task 407). */
+    /* task.dsh type-2 kill target: ??? (task 407). */
     { 44, 40, VM_NET_MOCK_MONSTER_REPTILE, 0, 0},
     { 45, 22, VM_NET_MOCK_MONSTER_SPIRIT, 58, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 47, 27, VM_NET_MOCK_MONSTER_HUMANOID, 63, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
@@ -3211,7 +3222,7 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries_builtin[] =
     { 69, 24, VM_NET_MOCK_MONSTER_UNDEAD, 70, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 70, 24, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 71, 23, VM_NET_MOCK_MONSTER_STONE, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 长生将军. */
+    /* SCE combat actor outside automonster.dsh: ????. */
     { 72,  8, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
     { 73,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     { 74,  5, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
@@ -3220,20 +3231,20 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries_builtin[] =
     { 77,  4, VM_NET_MOCK_MONSTER_UNDEAD, 28, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 78,  9, VM_NET_MOCK_MONSTER_UNDEAD, 50, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 79, 11, VM_NET_MOCK_MONSTER_STONE, 49, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
-    /* SCE combat actor outside automonster.dsh: 千年岩精. */
+    /* SCE combat actor outside automonster.dsh: ????. */
     { 80, 14, VM_NET_MOCK_MONSTER_STONE, 0, 0},
     { 81, 13, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
     { 82, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     { 83, 15, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
     { 84, 17, VM_NET_MOCK_MONSTER_SPIRIT, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 绿焰怪. */
+    /* SCE combat actor outside automonster.dsh: ???. */
     { 85, 17, VM_NET_MOCK_MONSTER_ELEMENTAL, 0, 0},
     { 86, 17, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
     { 87, 17, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 小龙女 (场景首领). */
+    /* SCE combat actor outside automonster.dsh: ??? (????). */
     { 88, 18, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 89, 18, VM_NET_MOCK_MONSTER_SOLDIER, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 拜月教主. */
+    /* SCE combat actor outside automonster.dsh: ????. */
     { 90, 20, VM_NET_MOCK_MONSTER_BOSS, 0, 0},
     { 91, 21, VM_NET_MOCK_MONSTER_INSECT, 0, 0},
     { 92, 23, VM_NET_MOCK_MONSTER_SLIME, 57, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
@@ -3241,10 +3252,10 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries_builtin[] =
     { 97, 36, VM_NET_MOCK_MONSTER_ELEMENTAL, 65, VM_NET_MOCK_TASK_MATERIAL_DROP_RATE},
     { 98, 38, VM_NET_MOCK_MONSTER_SLIME, 0, 0},
     { 99, 39, VM_NET_MOCK_MONSTER_BEAST, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 尸鬼王. */
+    /* SCE combat actor outside automonster.dsh: ???. */
     {100, 40, VM_NET_MOCK_MONSTER_UNDEAD, 0, 0},
     {101, 39, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
-    /* SCE combat actor outside automonster.dsh: 云石鬼. */
+    /* SCE combat actor outside automonster.dsh: ???. */
     {102, 40, VM_NET_MOCK_MONSTER_STONE, 0, 0},
     {103, 40, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
     {104, 41, VM_NET_MOCK_MONSTER_HUMANOID, 0, 0},
@@ -3912,7 +3923,7 @@ static bool vm_net_mock_monster_catalog_extra_row(void *contextValue,
              displayName);
     snprintf(g_vm_net_mock_monster_custom_sources[slot],
              sizeof(g_vm_net_mock_monster_custom_sources[slot]), "%s",
-             sourceLabel[0] != 0 ? sourceLabel : "自定义怪物");
+             sourceLabel[0] != 0 ? sourceLabel : "?????");
     if (actorResource[0] != 0)
     {
         snprintf(g_vm_net_mock_monster_custom_actors[slot],
@@ -4108,7 +4119,7 @@ static bool vm_net_mock_monster_admin_save(
     bool transactionStarted = false;
 
     if (errorOut)
-        *errorOut = "怪物属性无效";
+        *errorOut = "??????";
     if (row == NULL || row->enemyId == 0 || row->level == 0 ||
         row->level > 0xffu || row->family > VM_NET_MOCK_MONSTER_BOSS ||
         row->hp == 0 || row->mp == 0 || row->attack == 0 ||
@@ -4127,14 +4138,14 @@ static bool vm_net_mock_monster_admin_save(
          strlen(row->actorResource) >= sizeof(row->actorResource)))
     {
         if (errorOut)
-            *errorOut = "战斗 Actor 资源名无效";
+            *errorOut = "?? Actor ?????";
         return false;
     }
     index = vm_net_mock_monster_catalog_index(row->enemyId);
     if (index < 0)
     {
         if (errorOut)
-            *errorOut = "怪物目录中不存在该 ID";
+            *errorOut = "????????? ID";
         return false;
     }
     for (u8 i = 0; i < row->dropCount; ++i)
@@ -4144,7 +4155,7 @@ static bool vm_net_mock_monster_admin_save(
             vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
         {
             if (errorOut)
-                *errorOut = "掉落物品 ID 或概率无效";
+                *errorOut = "???? ID ?????";
             return false;
         }
         for (u8 previous = 0; previous < i; ++previous)
@@ -4152,7 +4163,7 @@ static bool vm_net_mock_monster_admin_save(
             if (row->drops[previous].itemId == row->drops[i].itemId)
             {
                 if (errorOut)
-                    *errorOut = "同一怪物不能重复配置相同掉落物品";
+                    *errorOut = "????????????????";
                 return false;
             }
         }
@@ -4174,7 +4185,7 @@ static bool vm_net_mock_monster_admin_save(
                             actorHex, sizeof(actorHex)) == 0)
     {
         if (errorOut)
-            *errorOut = "战斗 Actor 编码失败";
+            *errorOut = "?? Actor ????";
         return false;
     }
 
@@ -4273,7 +4284,7 @@ mysql_failed:
     printf("[error][mock-admin] monster_save_failed id=%u drops=%u error=%s\n",
            row->enemyId, row->dropCount, mysqlError);
     if (errorOut)
-        *errorOut = "怪物配置保存失败，请检查服务端 MySQL 日志";
+        *errorOut = "??????????????? MySQL ??";
     return false;
 }
 
@@ -4288,13 +4299,13 @@ static bool vm_net_mock_monster_admin_reset(u32 enemyId,
     bool transactionStarted = false;
 
     if (errorOut)
-        *errorOut = "怪物目录中不存在该 ID";
+        *errorOut = "????????? ID";
     if (index < 0)
         return false;
     if (g_vm_net_mock_monster_custom[index])
     {
         if (errorOut)
-            *errorOut = "自定义怪物请使用删除，而不是恢复默认";
+            *errorOut = "??????????????????";
         return false;
     }
     if (!g_vm_net_mock_monster_db_valid)
@@ -4334,7 +4345,7 @@ mysql_failed:
     printf("[error][mock-admin] monster_reset_failed id=%u error=%s\n",
            enemyId, mysqlError);
     if (errorOut)
-        *errorOut = "恢复怪物默认失败，请检查服务端 MySQL 日志";
+        *errorOut = "??????????????? MySQL ??";
     return false;
 }
 
@@ -4360,11 +4371,11 @@ static bool vm_net_mock_monster_admin_create(
     char nameHex[96];
     char sourceHex[160];
     char actorHex[160];
-    const char *sourceLabel = "自定义怪物";
+    const char *sourceLabel = "?????";
     bool transactionStarted = false;
 
     if (errorOut)
-        *errorOut = "怪物属性无效";
+        *errorOut = "??????";
     if (row == NULL || row->enemyId == 0 || row->enemyId > 0xffffu ||
         row->level == 0 || row->level > 0xffu ||
         row->family > VM_NET_MOCK_MONSTER_BOSS || row->hp == 0 ||
@@ -4392,14 +4403,14 @@ static bool vm_net_mock_monster_admin_create(
     if (vm_net_mock_monster_catalog_index(row->enemyId) >= 0)
     {
         if (errorOut)
-            *errorOut = "怪物 ID 已存在";
+            *errorOut = "?? ID ???";
         return false;
     }
     if (vm_net_mock_monster_custom_count() >= VM_NET_MOCK_MONSTER_CUSTOM_MAX ||
         g_vm_net_mock_monster_catalog_count >= VM_NET_MOCK_MONSTER_CATALOG_MAX)
     {
         if (errorOut)
-            *errorOut = "自定义怪物数量已达上限";
+            *errorOut = "???????????";
         return false;
     }
     for (u8 i = 0; i < row->dropCount; ++i)
@@ -4409,7 +4420,7 @@ static bool vm_net_mock_monster_admin_create(
             vm_net_mock_find_shop_catalog_item(row->drops[i].itemId) == NULL)
         {
             if (errorOut)
-                *errorOut = "掉落物品 ID 或概率无效";
+                *errorOut = "???? ID ?????";
             return false;
         }
     }
@@ -4424,7 +4435,7 @@ static bool vm_net_mock_monster_admin_create(
                             actorHex, sizeof(actorHex)) == 0)
     {
         if (errorOut)
-            *errorOut = "怪物名称或 Actor 编码失败";
+            *errorOut = "????? Actor ????";
         return false;
     }
     if (!vm_mysql_exec("START TRANSACTION"))
@@ -4466,7 +4477,7 @@ static bool vm_net_mock_monster_admin_create(
     if (!vm_net_mock_monster_db_load())
     {
         if (errorOut)
-            *errorOut = "怪物已写入数据库，但重新加载目录失败";
+            *errorOut = "??????????????????";
         return false;
     }
     vm_net_mock_monster_resource_labels_invalidate();
@@ -4486,7 +4497,7 @@ mysql_failed:
     printf("[error][mock-admin] monster_create_failed id=%u error=%s\n",
            row->enemyId, mysqlError);
     if (errorOut)
-        *errorOut = "新增怪物失败，请检查服务端 MySQL 日志";
+        *errorOut = "????????????? MySQL ??";
     return false;
 }
 
@@ -4498,7 +4509,7 @@ static bool vm_net_mock_monster_admin_delete_custom(u32 enemyId,
     bool transactionStarted = false;
 
     if (errorOut)
-        *errorOut = "只能删除自定义怪物";
+        *errorOut = "?????????";
     g_vm_net_mock_monster_db_loaded = false;
     if (!vm_net_mock_monster_db_load())
     {
@@ -4529,7 +4540,7 @@ static bool vm_net_mock_monster_admin_delete_custom(u32 enemyId,
     if (!vm_net_mock_monster_db_load())
     {
         if (errorOut)
-            *errorOut = "怪物已删除，但重新加载目录失败";
+            *errorOut = "???????????????";
         return false;
     }
     vm_net_mock_monster_resource_labels_invalidate();
@@ -4546,7 +4557,7 @@ mysql_failed:
     printf("[error][mock-admin] monster_delete_custom_failed id=%u error=%s\n",
            enemyId, mysqlError);
     if (errorOut)
-        *errorOut = "删除自定义怪物失败，请检查服务端 MySQL 日志";
+        *errorOut = "???????????????? MySQL ??";
     return false;
 }
 
@@ -4629,15 +4640,15 @@ static u32 vm_net_mock_battle_role_defense_default(void)
  *   physical mitigation = damage_after_defense(raw, defense)
  *   spell mitigation   = damage_after_resist(raw, resist)
  *     resist is a percent reduction, clamped to 70%
- *     (wisdomCoeff dominant among 力/敏/智系数)
+ *     (wisdomCoeff dominant among ?/?/???)
  *   Player hit = 101 + equipment.hit; dodge/crit/resist = equipment columns only
  *   Monster resist defaults to 0 (CBE_BATTLE_MONSTER_RESIST)
- *   Monster defense defaults to 0 for player→enemy mitigation
+ *   Monster defense defaults to 0 for player?enemy mitigation
  *     (CBE_BATTLE_ENEMY_DEFENSE / CBE_BATTLE_SKILL_ENEMY_DEFENSE)
- *   鬼道法术忽略闪躲（智慧主导技能跳过 hit/dodge 掷骰）
+ *   ????????????????? hit/dodge ???
  * Miss/dodge returns damage 0; actioninfo keeps a child with valueA=0 and
- * child_flag=3 (「闪躲」). Crit sets child_flag=2 (「暴击」).
- * Hit that would mitigate to 0 still floors to 1 (破防保底); do not coerce miss.
+ * child_flag=3 (????). Crit sets child_flag=2 (????).
+ * Hit that would mitigate to 0 still floors to 1 (????); do not coerce miss.
  * Env: CBE_BATTLE_DISABLE_COMBAT_ROLLS=1 restores always-hit pre-roll path;
  *      CBE_BATTLE_FORCE_HIT / FORCE_MISS / FORCE_CRIT override rolls.
  */
@@ -4709,8 +4720,8 @@ static u32 vm_net_mock_battle_hit_chance(u32 hit, u32 dodge)
 /*
  * mmBattleMstarWqvga.cbm VA 0x24f6 (callers 0x504c/0x511c/0x53fe):
  *   ldrb r0, [slot+2]  ; action child_flag
- *   bl   0x24f6        ; if flag==2 copy 「暴击」, if flag==3 copy 「闪躲」
- * Evidence: ADR at 0x2506→「闪躲」, 0x250c→「暴击」; cmp r2,#2 / cmp r2,#3.
+ *   bl   0x24f6        ; if flag==2 copy ????, if flag==3 copy ????
+ * Evidence: ADR at 0x2506?????, 0x250c?????; cmp r2,#2 / cmp r2,#3.
  */
 enum
 {
@@ -4782,7 +4793,7 @@ static bool vm_net_mock_battle_roll_crit(u32 crit)
     if (vm_net_mock_battle_combat_rolls_disabled())
         return false;
     forceCrit = vm_net_mock_env_u32("CBE_BATTLE_FORCE_CRIT", 2);
-    /* 0=never, 1=always, 2=unset → roll */
+    /* 0=never, 1=always, 2=unset ? roll */
     if (forceCrit == 0)
         return false;
     if (forceCrit == 1)
@@ -4833,7 +4844,7 @@ static bool vm_net_mock_battle_skill_is_magical(
            skill->wisdomCoeff >= skill->agilityCoeff;
 }
 
-/* 鬼道 (job 3) 法术：智慧系数主导的进攻技能忽略目标闪躲。 */
+/* ?? (job 3) ????????????????????? */
 static bool vm_net_mock_battle_skill_ignores_dodge(
     const vm_net_mock_skill_catalog_item *skill)
 {
@@ -4941,7 +4952,7 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     vm_net_mock_monster_secondary_combat_stats(monsterStats.level, NULL, &monsterDodge,
                                               NULL, &monsterResist);
     magical = vm_net_mock_battle_skill_is_magical(skill);
-    /* Player evidence: 鬼道法术伤害忽略闪躲；智慧主导技能跳过命中/闪躲检定。 */
+    /* Player evidence: ?????????????????????/????? */
     if (!vm_net_mock_battle_skill_ignores_dodge(skill) &&
         !vm_net_mock_battle_roll_hit(playerStats.hit, monsterDodge))
     {
@@ -5459,7 +5470,7 @@ static bool vm_net_mock_role_item_effect_is_valid(
     if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
     {
         /* Duration from item.dsh; ATK percent is the documented interpretation
-         * of "明显/巨幅提升" stored in multiplier (829=30, 830=60). */
+         * of "??/????" stored in multiplier (829=30, 830=60). */
         return (effect->itemId == 829 && effect->multiplier == 30) ||
                (effect->itemId == 830 && effect->multiplier == 60);
     }
@@ -7303,7 +7314,7 @@ static bool vm_net_mock_role_battle_insight_resume_on_login(
         role, VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT);
 }
 
-/* item.dsh describes 战斗心得 as a one-hour, +20% experience status. Its
+/* item.dsh describes ???? as a one-hour, +20% experience status. Its
  * multiplier column therefore denotes an additive percentage for this kind,
  * unlike the factor stored for experience cards. */
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
@@ -7397,7 +7408,7 @@ static const char k_vm_net_mock_exp_card_tip_max_duration[] =
  * and leftover must stay <= 8h.  Different multipliers reject without consume.
  * Battle insight may still stack duration.  Combat pills reject a second use
  * until expiry.  Effects live in account_role_item_effects and are not cleared
- * on disconnect — pausable kinds freeze duration offline and resume on login. */
+ * on disconnect � pausable kinds freeze duration offline and resume on login. */
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
@@ -8328,7 +8339,7 @@ static bool vm_net_mock_select_active_role(u32 roleId)
             /*
              * Only at role-select (not every normalize): leave 29* when the
              * dream SCE has kind=3 so cold login skips ParseMinfo; instance
-             * enter later may set scene back to 29* for 刷怪.
+             * enter later may set scene back to 29* for ??.
              */
             relocated = vm_net_mock_role_relocate_dream_kind3_login(
                 &g_vm_net_mock_role_db.roles[i]);
@@ -8674,7 +8685,7 @@ static bool vm_net_mock_role_set_timeline_position(const char *scene,
 /*
  * Player warehouse is relational state outside the binary role snapshot, same
  * rationale as timed item effects.  UI entry is mall durable pass 834 + the
- * proven 26/1 NPC-service dialog path (取回/存入), not unresolved 钱庄 WT.
+ * proven 26/1 NPC-service dialog path (??/??), not unresolved ?? WT.
  */
 static bool vm_net_mock_warehouse_prepare_schema(void)
 {
@@ -8934,7 +8945,7 @@ static bool vm_net_mock_equip_sell_item_is_sellable(u32 itemId)
 
 /*
  * Permanent sell: remove one backpack equipment row and credit full shop/equip
- * catalog 价值 (not discard's floor(price/10)).
+ * catalog ?? (not discard's floor(price/10)).
  */
 static bool vm_net_mock_equip_sell_backpack_seq(vm_net_mock_role_state *role,
                                                 u16 backpackSeq,

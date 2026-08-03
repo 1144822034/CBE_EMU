@@ -270,6 +270,24 @@ static u32 vm_net_mock_apply_remote_observation(
                g_vm_scene_allow_one_map_stone_completion_reenter ? 1u : 0u,
                g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
                observation->sceneSubtype);
+        /* #region agent log */
+        if (target.scene[0] == '2' && target.scene[1] == '9')
+        {
+            char dataBuf[220];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"serial\":%u,\"subtype\":%u,\"scene\":\"%.40s\","
+                     "\"x\":%u,\"y\":%u,\"block_dream\":%u,\"gate\":%u,"
+                     "\"this\":%u,\"sce\":\"%.40s\"}",
+                     g_vm_net_mock_last_scene_change_target_serial,
+                     observation->sceneSubtype, target.scene, target.x,
+                     target.y,
+                     g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
+                     (u32)g_vm_dream_enter_scene_gate, g_currentScreenThis,
+                     g_lastSceLoadName);
+            agent_dbg191169_log("E", "network-client.c:scene_target",
+                                "dream_remote_scene_target", dataBuf);
+        }
+        /* #endregion */
     }
 
     if (observation->sceneCompleteAfterCallback &&

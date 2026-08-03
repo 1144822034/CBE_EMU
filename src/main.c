@@ -7118,6 +7118,302 @@ static void vm_autotest_save_screenshot(u32 elapsedMs)
         printf("[warn][autotest] save_screenshot_failed path=%s err=%s\n", path, SDL_GetError());
 }
 
+/* Prefer live-node actorId=1; R9+0x5C8E stays 0 on outdoor ready shells. */
+static bool vm_autotest_read_player_map_pos(u16 *outX, u16 *outY)
+{
+    u32 sceneNodeBase = 0;
+    u16 fallbackX = 0;
+    u16 fallbackY = 0;
+    u32 i = 0;
+
+    if (outX == NULL || outY == NULL || Global_R9 == 0)
+        return false;
+    *outX = 0;
+    *outY = 0;
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C8E, &fallbackX, sizeof(fallbackX));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5C90, &fallbackY, sizeof(fallbackY));
+    (void)uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase,
+                      sizeof(sceneNodeBase));
+    if (sceneNodeBase != 0)
+    {
+        for (i = 0; i < 8; ++i)
+        {
+            u32 node = sceneNodeBase + i * 340u;
+            u32 actorId = 0;
+            u16 x = 0;
+            u16 y = 0;
+            u8 active = 0;
+            u8 nodeKind = 0;
+
+            if (uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId)) !=
+                    UC_ERR_OK ||
+                uc_mem_read(MTK, node + 0x18, &x, sizeof(x)) != UC_ERR_OK ||
+                uc_mem_read(MTK, node + 0x1A, &y, sizeof(y)) != UC_ERR_OK ||
+                uc_mem_read(MTK, node + 0x13F, &active, sizeof(active)) !=
+                    UC_ERR_OK ||
+                uc_mem_read(MTK, node + 0x13B, &nodeKind, sizeof(nodeKind)) !=
+                    UC_ERR_OK)
+            {
+                continue;
+            }
+            if (actorId == 1u && active != 0 && x != 0 && y != 0)
+            {
+                *outX = x;
+                *outY = y;
+                return true;
+            }
+            (void)nodeKind;
+        }
+    }
+    if (fallbackX != 0 && fallbackY != 0)
+    {
+        *outX = fallbackX;
+        *outY = fallbackY;
+        return true;
+    }
+    return false;
+}
+
+static bool vm_autotest_scene_has_actor(u32 wantActorId)
+{
+    u32 sceneNodeBase = 0;
+    u32 i = 0;
+
+    if (wantActorId == 0 || Global_R9 == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase,
+                    sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+    {
+        return false;
+    }
+    for (i = 0; i < 8; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 actorId = 0;
+        u8 active = 0;
+
+        if (uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId)) !=
+                UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0x13F, &active, sizeof(active)) !=
+                UC_ERR_OK)
+        {
+            continue;
+        }
+        if (actorId == wantActorId && active != 0)
+            return true;
+    }
+    return false;
+}
+
+static void vm_autotest_dream_encounter_schedule_walk(u32 elapsed, u16 curX,
+                                                     u16 curY, u32 targetX,
+                                                     u32 targetY)
+{
+    int dx = (int)targetX - (int)curX;
+    int dy = (int)targetY - (int)curY;
+    u32 t = elapsed + 400u;
+    u32 holdX = 0;
+    u32 holdY = 0;
+
+    /* ~40ms/tile; long holds overshoot past 使者 (debug-0b451a → 329,222). */
+    if (dx > 2)
+        holdX = (u32)(dx * 40);
+    else if (dx < -2)
+        holdX = (u32)((-dx) * 40);
+    if (dy > 2)
+        holdY = (u32)(dy * 40);
+    else if (dy < -2)
+        holdY = (u32)((-dy) * 40);
+    if (holdX > 6000u)
+        holdX = 6000u;
+    if (holdY > 6000u)
+        holdY = 6000u;
+    if (dx > 2)
+        vm_autotest_add_hold_key(t, (int)'d', holdX);
+    else if (dx < -2)
+        vm_autotest_add_hold_key(t, (int)'a', holdX);
+    t += holdX + 200u;
+    if (dy > 2)
+        vm_autotest_add_hold_key(t, (int)'s', holdY);
+    else if (dy < -2)
+        vm_autotest_add_hold_key(t, (int)'w', holdY);
+}
+
+/*
+ * Encounter walk (CBE_DREAM_ENCOUNTER_WALK=1):
+ *   1) outdoor c04 after login relocate → walk to 使者 (145,305) + key f
+ *      so NPC OPEN→ENTER enters 29* (not poll/cold-login).
+ *   2) dream ready → walk to kind=3 (65,84) for 4/1.
+ */
+static void vm_autotest_dream_encounter_walk_tick(u32 elapsed)
+{
+    static u8 outdoorArmed = 0;
+    static u8 messengerTalked = 0;
+    static u8 dreamArmed = 0;
+    static u32 lastSkipLogMs = 0;
+    static u32 lastOutdoorNudgeMs = 0;
+    const char *env = getenv("CBE_DREAM_ENCOUNTER_WALK");
+    u16 curX = 0;
+    u16 curY = 0;
+    u8 dreamSce = 0;
+    u8 outdoorSce = 0;
+    int nearMessenger = 0;
+
+    if (env == NULL || env[0] != '1' || !g_autotestEnabled || Global_R9 == 0)
+        return;
+    if (dreamArmed)
+        return;
+    dreamSce = (g_lastSceLoadName[0] == '2' && g_lastSceLoadName[1] == '9')
+                   ? 1u
+                   : 0u;
+    if (!dreamSce &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        g_vm_net_mock_last_scene_change_target.scene[0] == '2' &&
+        g_vm_net_mock_last_scene_change_target.scene[1] == '9')
+    {
+        dreamSce = 1u;
+    }
+    outdoorSce = (g_lastSceLoadName[0] == 'c' && g_lastSceLoadName[1] == '0' &&
+                  g_lastSceLoadName[2] == '4')
+                     ? 1u
+                     : 0u;
+    if (!outdoorSce &&
+        g_vm_net_mock_last_scene_change_target_valid &&
+        g_vm_net_mock_last_scene_change_target.scene[0] == 'c' &&
+        g_vm_net_mock_last_scene_change_target.scene[1] == '0' &&
+        g_vm_net_mock_last_scene_change_target.scene[2] == '4')
+    {
+        outdoorSce = 1u;
+    }
+    if (!vm_autotest_read_player_map_pos(&curX, &curY))
+        return;
+    /* Outdoor ready: 使者 30406 live-node present after login relocate. */
+    if (!outdoorSce && !dreamSce && elapsed >= 22000u &&
+        vm_autotest_scene_has_actor(30406u) && curX >= 40 && curY >= 150)
+    {
+        outdoorSce = 1u;
+    }
+
+    nearMessenger = (curX >= 130 && curX <= 160 && curY >= 290 && curY <= 320)
+                        ? 1
+                        : 0;
+    if (outdoorSce && !dreamSce && elapsed >= 24000u && !messengerTalked)
+    {
+        u32 messengerX = 145;
+        u32 messengerY = 305;
+
+        if (nearMessenger)
+        {
+            u32 t = elapsed + 300u;
+            messengerTalked = 1;
+            outdoorArmed = 1;
+            /* #region agent log */
+            {
+                char dataBuf[160];
+                snprintf(dataBuf, sizeof(dataBuf),
+                         "{\"cur\":[%u,%u],\"elapsed\":%u,\"phase\":\"talk\"}",
+                         curX, curY, elapsed);
+                agent_dbg191169_log("N", "main.c:autotest",
+                                    "dream_encounter_walk_messenger_talk",
+                                    dataBuf);
+            }
+            /* #endregion */
+            vm_autotest_add_hold_key(t, (int)'f', 150);
+            vm_autotest_add_hold_key(t + 700u, (int)'f', 150);
+            vm_autotest_add_hold_key(t + 1400u, (int)'f', 150);
+            vm_autotest_add_hold_key(t + 2100u, (int)'f', 150);
+            vm_autotest_add_hold_key(t + 2800u, (int)'f', 150);
+            return;
+        }
+        if (!outdoorArmed || elapsed - lastOutdoorNudgeMs >= 7000u)
+        {
+            outdoorArmed = 1;
+            lastOutdoorNudgeMs = elapsed;
+            vm_autotest_note("dream_encounter_walk_messenger pos=(%u,%u) "
+                             "target=(%u,%u) elapsed=%u sce=%s\n",
+                             curX, curY, messengerX, messengerY, elapsed,
+                             g_lastSceLoadName);
+            /* #region agent log */
+            {
+                char dataBuf[200];
+                snprintf(dataBuf, sizeof(dataBuf),
+                         "{\"cur\":[%u,%u],\"target\":[%u,%u],\"elapsed\":%u,"
+                         "\"phase\":\"messenger-nudge\"}",
+                         curX, curY, messengerX, messengerY, elapsed);
+                agent_dbg191169_log("N", "main.c:autotest",
+                                    "dream_encounter_walk_messenger", dataBuf);
+            }
+            /* #endregion */
+            vm_autotest_dream_encounter_schedule_walk(elapsed, curX, curY,
+                                                      messengerX, messengerY);
+        }
+        return;
+    }
+
+    if (!dreamArmed && dreamSce && elapsed >= 28000u)
+    {
+        u32 targetX = 65;
+        u32 targetY = 84;
+
+        if (curX == 0 || curY == 0 || curX > 220 || curY > 220)
+        {
+            if (elapsed - lastSkipLogMs >= 5000u)
+            {
+                lastSkipLogMs = elapsed;
+                /* #region agent log */
+                {
+                    char dataBuf[160];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"elapsed\":%u,\"cur\":[%u,%u],"
+                             "\"reason\":\"pos-out-of-dream\"}",
+                             elapsed, curX, curY);
+                    agent_dbg191169_log("N", "main.c:autotest",
+                                        "dream_encounter_walk_skip", dataBuf);
+                }
+                /* #endregion */
+            }
+            return;
+        }
+        dreamArmed = 1;
+        vm_autotest_note("dream_encounter_walk_arm pos=(%u,%u) target=(%u,%u) "
+                         "elapsed=%u sce=%s\n",
+                         curX, curY, targetX, targetY, elapsed,
+                         g_lastSceLoadName);
+        /* #region agent log */
+        {
+            char dataBuf[200];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"cur\":[%u,%u],\"target\":[%u,%u],\"elapsed\":%u,"
+                     "\"phase\":\"kind3\"}",
+                     curX, curY, targetX, targetY, elapsed);
+            agent_dbg191169_log("N", "main.c:autotest",
+                                "dream_encounter_walk_arm", dataBuf);
+        }
+        /* #endregion */
+        vm_autotest_dream_encounter_schedule_walk(elapsed, curX, curY, targetX,
+                                                  targetY);
+        return;
+    }
+
+    if (!outdoorArmed && !dreamArmed && elapsed >= 20000u &&
+        elapsed - lastSkipLogMs >= 10000u)
+    {
+        lastSkipLogMs = elapsed;
+        /* #region agent log */
+        {
+            char dataBuf[180];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"elapsed\":%u,\"sce\":\"%.40s\",\"cur\":[%u,%u],"
+                     "\"reason\":\"await-outdoor-or-dream\"}",
+                     elapsed, g_lastSceLoadName, curX, curY);
+            agent_dbg191169_log("N", "main.c:autotest",
+                                "dream_encounter_walk_skip", dataBuf);
+        }
+        /* #endregion */
+    }
+}
+
 static void vm_autotest_tick(void)
 {
     if (!g_autotestEnabled)
@@ -7132,6 +7428,7 @@ static void vm_autotest_tick(void)
 
     vm_autotest_dump_scene_tables(elapsed);
     vm_autotest_dump_battle_state(elapsed);
+    vm_autotest_dream_encounter_walk_tick(elapsed);
 
     if (elapsed >= g_autotestNextShotMs)
     {
@@ -8953,10 +9250,53 @@ void RunArmProgram(void *param)
                     }
                     /* #region agent log */
                     {
-                        char dataBuf[220];
+                        char dataBuf[420];
+                        const char *tgt =
+                            g_vm_net_mock_last_scene_change_target_valid
+                                ? g_vm_net_mock_last_scene_change_target.scene
+                                : "-";
+                        u32 base60 = 0, base64 = 0, slot60 = 0, slot64 = 0;
+                        u32 mc18_60 = 0, mc18_64 = 0;
+                        u32 bmapPtr = 0;
+                        char bmapName[48];
+                        bmapName[0] = 0;
+                        if (Global_R9 != 0 && p == UC_ERR_OK)
+                        {
+                            u32 scr = Global_R9 + 0x5c64u;
+                            uc_mem_read(MTK, scr + 0x60u, &base60, 4);
+                            uc_mem_read(MTK, scr + 0x64u, &base64, 4);
+                            uc_mem_read(MTK, scr + 0x74u, &bmapPtr, 4);
+                            if (bmapPtr != 0)
+                                vm_read_path_string(bmapPtr, bmapName,
+                                                    sizeof(bmapName));
+                            if (base60 != 0)
+                            {
+                                uc_mem_read(MTK, base60 + 0x600u + 0x1cu,
+                                            &slot60, 4);
+                                g_agent_watch_mapctrl_slot60 =
+                                    base60 + 0x600u + 0x1cu;
+                                if (slot60 != 0)
+                                    uc_mem_read(MTK, slot60 + 0x18u, &mc18_60,
+                                                4);
+                            }
+                            if (base64 != 0)
+                            {
+                                uc_mem_read(MTK, base64 + 0x600u + 0x1cu,
+                                            &slot64, 4);
+                                g_agent_watch_mapctrl_slot64 =
+                                    base64 + 0x600u + 0x1cu;
+                                if (slot64 != 0)
+                                    uc_mem_read(MTK, slot64 + 0x18u, &mc18_64,
+                                                4);
+                            }
+                        }
                         snprintf(dataBuf, sizeof(dataBuf),
                                  "{\"caller\":%u,\"this\":%u,\"init\":%u,"
-                                 "\"block_dream\":%u,\"hot518\":%u,\"emu_err\":%u}",
+                                 "\"block_dream\":%u,\"hot518\":%u,\"emu_err\":%u,"
+                                 "\"sce\":\"%.40s\",\"target\":\"%.40s\","
+                                 "\"base60\":%u,\"slot60\":%u,\"mc18_60\":%u,"
+                                 "\"base64\":%u,\"slot64\":%u,\"mc18_64\":%u,"
+                                 "\"bmapPtr\":%u,\"bmap\":\"%.40s\"}",
                                  lastAddress, screenThisPtr, screenInitEntry,
                                  g_vm_scene_block_dream_completion_reenter
                                      ? 1u
@@ -8965,7 +9305,9 @@ void RunArmProgram(void *param)
                                   0x05180000u)
                                      ? 1u
                                      : 0u,
-                                 (unsigned)p);
+                                 (unsigned)p, g_lastSceLoadName, tgt, base60,
+                                 slot60, mc18_60, base64, slot64, mc18_64,
+                                 bmapPtr, bmapName[0] ? bmapName : "(empty)");
                         agent_dbg191169_log(
                             "L", "main.c:ScreenInit",
                             (p == UC_ERR_OK) ? "screen_init_ok" : "screen_init_fail",
@@ -16522,6 +16864,442 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;
+
+    /* #region agent log */
+    {
+        u32 pc = (u32)address & ~1u;
+        /*
+         * CBE forensics (江湖OL.cbe):
+         * - 0x01014E54: if [screen+1]==1, mapctrl=*( [screen+0x60] + 0x600 + 0x1c );
+         *   then blx scene.vt+4 -> SetMapCtrlViewport (historic lr=0x01014E77).
+         * - 0x01046C2C: str r1,[scene+0x1C30]; ldrh from r1+0x40 (fault@0x40 => r1==0).
+         * - 0x0100629A: SCE2 loader stores mapctrl into obj+0x600+0x1c.
+         */
+        if (pc == 0x01014E5Cu || pc == 0x01046C2Cu || pc == 0x0100629Au ||
+            pc == 0x01017DF6u || pc == 0x01017EE6u || pc == 0x010136B0u ||
+            pc == 0x0100017Cu || pc == 0x0100D6E2u || pc == 0x010136A8u ||
+            pc == 0x0100D7C6u || pc == 0x0100D8C4u || pc == 0x0100DB48u ||
+            pc == 0x0101366Au || pc == 0x0100F6E6u || pc == 0x0100F702u ||
+            pc == 0x0100F094u || pc == 0x0100F6A0u || pc == 0x0100DA42u ||
+            pc == 0x0100DA00u || pc == 0x0100F0F4u || pc == 0x0100F604u)
+        {
+            u32 r0 = 0, r1 = 0, r4 = 0, r5 = 0, r6 = 0, lr = 0;
+            u8 flag1 = 0;
+            u32 mapBase = 0, mapCtrl = 0, sceneMap = 0;
+            u32 base60 = 0, base64 = 0, slot60 = 0, slot64 = 0;
+            u32 mc18 = 0, mc40 = 0, sceMatch = 0;
+            char dataBuf[560];
+            u32 blockDream = 0;
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4);
+            uc_reg_read(uc, UC_ARM_REG_R5, &r5);
+            uc_reg_read(uc, UC_ARM_REG_R6, &r6);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            if (Global_R9 != 0)
+                g_agent_watch_screeninit_fptr = Global_R9 + 0x5c50u;
+            if (pc == 0x01014E5Cu && r4 != 0)
+            {
+                uc_mem_read(uc, r4 + 1u, &flag1, 1);
+                uc_mem_read(uc, r4 + 0x60u, &mapBase, 4);
+                if (mapBase != 0)
+                    uc_mem_read(uc, mapBase + 0x600u + 0x1cu, &mapCtrl, 4);
+            }
+            else if ((pc == 0x01017DF6u || pc == 0x01017EE6u) && r0 != 0)
+            {
+                /* CBE: +0x60 path @0x01017DF6; +0x64 path @0x01017EE6 */
+                uc_mem_read(uc, r0 + 0x1cu, &mapCtrl, 4);
+                mapBase = r0 - 0x600u;
+                if (r4 != 0)
+                {
+                    uc_mem_read(uc, r4 + 1u, &flag1, 1);
+                    uc_mem_read(uc, r4 + 0x60u, &base60, 4);
+                    uc_mem_read(uc, r4 + 0x64u, &base64, 4);
+                    if (base60 != 0)
+                    {
+                        uc_mem_read(uc, base60 + 0x600u + 0x1cu, &slot60, 4);
+                        g_agent_watch_mapctrl_slot60 =
+                            base60 + 0x600u + 0x1cu;
+                    }
+                    if (base64 != 0)
+                    {
+                        uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                        g_agent_watch_mapctrl_slot64 =
+                            base64 + 0x600u + 0x1cu;
+                    }
+                }
+                if (mapCtrl != 0)
+                {
+                    uc_mem_read(uc, mapCtrl + 0x18u, &mc18, 4);
+                    uc_mem_read(uc, mapCtrl + 0x40u, &mc40, 2);
+                }
+            }
+            else if (pc == 0x01046C2Cu && r0 != 0)
+            {
+                uc_mem_read(uc, r0 + 0x1C30u, &sceneMap, 4);
+                mapCtrl = r1;
+                if (mapCtrl != 0)
+                {
+                    uc_mem_read(uc, mapCtrl + 0x18u, &mc18, 4);
+                    uc_mem_read(uc, mapCtrl + 0x40u, &mc40, 2);
+                }
+            }
+            else if (pc == 0x0100629Au)
+            {
+                mapCtrl = r0; /* value about to be stored into [r5+0x600+0x1c] */
+                mapBase = r5;
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                    if (mapBase != 0 && mapBase == base60)
+                        sceMatch = 60u;
+                    else if (mapBase != 0 && mapBase == base64)
+                        sceMatch = 64u;
+                    if (base60 != 0)
+                        uc_mem_read(uc, base60 + 0x600u + 0x1cu, &slot60, 4);
+                    if (base64 != 0)
+                        uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                }
+                if (mapCtrl != 0)
+                    uc_mem_read(uc, mapCtrl + 0x18u, &mc18, 4);
+            }
+            else if (pc == 0x0100017Cu)
+            {
+                /* Factory just created [screen+0x64]; r0=new base, r4=screen. */
+                mapBase = r0;
+                base64 = r0;
+                if (r4 != 0)
+                    uc_mem_read(uc, r4 + 0x60u, &base60, 4);
+                if (base64 != 0)
+                {
+                    uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                    g_agent_watch_mapctrl_slot64 = base64 + 0x600u + 0x1cu;
+                }
+                if (base60 != 0)
+                {
+                    uc_mem_read(uc, base60 + 0x600u + 0x1cu, &slot60, 4);
+                    g_agent_watch_mapctrl_slot60 = base60 + 0x600u + 0x1cu;
+                }
+            }
+            else if (pc == 0x0100D6E2u || pc == 0x0100D7C6u ||
+                     pc == 0x0100D8C4u || pc == 0x0100DB48u ||
+                     pc == 0x0101366Au)
+            {
+                /* Map-loader checkpoints + pre-blx-loop: track fptr death. */
+                u32 r9 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R9, &r9);
+                mapBase = (pc == 0x0100D6E2u) ? r0 : r5;
+                if (pc == 0x0100D7C6u)
+                    mapCtrl = r0; /* just stored */
+                if (pc == 0x0100D8C4u)
+                    mapCtrl = r0; /* arg to 0x0100D144 */
+                if (Global_R9 != 0 || r9 != 0)
+                {
+                    u32 base = Global_R9 ? Global_R9 : r9;
+                    u32 scr = base + 0x5c64u;
+                    u32 fptr = 0;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                    g_agent_watch_screeninit_fptr = base + 0x5c50u;
+                    uc_mem_read(uc, g_agent_watch_screeninit_fptr, &fptr, 4);
+                    sceneMap = fptr;
+                    mc18 = g_agent_watch_screeninit_fptr;
+                    mc40 = r9;
+                    if (mapBase != 0 && mapBase == base60)
+                        sceMatch = 60u;
+                    else if (mapBase != 0 && mapBase == base64)
+                        sceMatch = 64u;
+                    if (base60 != 0)
+                    {
+                        uc_mem_read(uc, base60 + 0x600u + 0x1cu, &slot60, 4);
+                        g_agent_watch_mapctrl_slot60 =
+                            base60 + 0x600u + 0x1cu;
+                    }
+                    if (base64 != 0)
+                    {
+                        uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                        g_agent_watch_mapctrl_slot64 =
+                            base64 + 0x600u + 0x1cu;
+                    }
+                }
+            }
+            else if (pc == 0x0100F094u)
+            {
+                /* SCE field/portal parser entry (feeds type 0x12 -> +0x74). */
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    u32 namePtr = 0;
+                    char bname[48];
+                    bname[0] = 0;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                    uc_mem_read(uc, scr + 0x74u, &namePtr, 4);
+                    mc18 = namePtr;
+                    if (namePtr != 0)
+                        vm_read_path_string(namePtr, bname, sizeof(bname));
+                    if (bname[0])
+                        snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                                 "%s", bname);
+                }
+            }
+            else if (pc == 0x0100F0F4u)
+            {
+                /* After reading record type into r7; cmp r7,#5 follows. */
+                u32 r7 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R7, &r7);
+                flag1 = (u8)(r7 & 0xffu);
+                mapCtrl = r7;
+                sceMatch = r6; /* field-count / aux from prior read */
+                mapBase = r0;
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                }
+            }
+            else if (pc == 0x0100F604u)
+            {
+                /* cmp r7,#4 — only type 4 reaches F6A0/F6E6 battle-name path. */
+                u32 r7 = 0;
+                uc_reg_read(uc, UC_ARM_REG_R7, &r7);
+                flag1 = (u8)(r7 & 0xffu);
+                mapCtrl = r7;
+                sceMatch = 4u;
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                }
+            }
+            else if (pc == 0x0100F6A0u)
+            {
+                /* str r0,[screen,#0x74] after type==0x12 string get. */
+                char bname[48];
+                bname[0] = 0;
+                mapBase = r0;
+                mapCtrl = r1;
+                if (r0 != 0)
+                    vm_read_path_string(r0, bname, sizeof(bname));
+                sceMatch = 0x12u;
+                if (bname[0])
+                    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                             "%s", bname);
+                else
+                    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                             "%s", "(empty-type12)");
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                }
+            }
+            else if (pc == 0x0100DA00u || pc == 0x0100DA42u)
+            {
+                /*
+                 * Loader branch: ldrb [name]; cmp #0x62 ('b');
+                 * non-b -> bl scene_node_find_or_create (0x0100EFC4).
+                 */
+                u32 namePtr = 0;
+                u8 first = 0;
+                char bname[48];
+                bname[0] = 0;
+                if (pc == 0x0100DA00u)
+                {
+                    /* r0 already loaded from [sp,#0x70] by prior insn; re-read */
+                    u32 sp = 0;
+                    uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                    uc_mem_read(uc, sp + 0x70u, &namePtr, 4);
+                    mapBase = namePtr;
+                    if (namePtr != 0)
+                    {
+                        uc_mem_read(uc, namePtr, &first, 1);
+                        vm_read_path_string(namePtr, bname, sizeof(bname));
+                    }
+                    flag1 = first;
+                    mapCtrl = (u32)first;
+                }
+                else
+                {
+                    sceMatch = 1u; /* about to bl EFC4 */
+                    mapBase = r0;
+                    mapCtrl = r1;
+                }
+                if (bname[0])
+                    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                             "%s", bname);
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                    if (base64 != 0)
+                        uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                }
+            }
+            else if (pc == 0x0100F6E6u || pc == 0x0100F702u)
+            {
+                /*
+                 * Battle-map gate: ldr r0,[r6,#0x74]; ldrb r1,[r0];
+                 * if name empty skip; else ldr r0,[r6,#0x64]; bl 0x010352AE.
+                 * Name is typically b_29... / b_01... battle SCE leaf.
+                 */
+                u32 namePtr = 0;
+                u8 first = 0;
+                char bname[48];
+                bname[0] = 0;
+                if (pc == 0x0100F6E6u && r6 != 0)
+                {
+                    uc_mem_read(uc, r6 + 0x74u, &namePtr, 4);
+                    mapBase = namePtr;
+                    if (namePtr != 0)
+                    {
+                        uc_mem_read(uc, namePtr, &first, 1);
+                        vm_read_path_string(namePtr, bname, sizeof(bname));
+                    }
+                    flag1 = first;
+                    mapCtrl = (u32)first;
+                }
+                else if (pc == 0x0100F702u)
+                {
+                    mapBase = r0; /* [screen+0x64] map object */
+                    if (r6 != 0)
+                        uc_mem_read(uc, r6 + 0x74u, &namePtr, 4);
+                    if (namePtr != 0)
+                        vm_read_path_string(namePtr, bname, sizeof(bname));
+                    sceMatch = 64u;
+                }
+                if (Global_R9 != 0)
+                {
+                    u32 scr = Global_R9 + 0x5c64u;
+                    uc_mem_read(uc, scr + 0x60u, &base60, 4);
+                    uc_mem_read(uc, scr + 0x64u, &base64, 4);
+                    if (base64 != 0)
+                        uc_mem_read(uc, base64 + 0x600u + 0x1cu, &slot64, 4);
+                }
+                mc18 = namePtr;
+                if (bname[0])
+                    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                             "%s", bname);
+                else
+                    snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName),
+                             "%s", "(empty-bmap)");
+            }
+            else if (pc == 0x010136A8u || pc == 0x010136B0u)
+            {
+                /* CBE: ldr r6,[r1,#8] @0x010136A8; blx r6 @0x010136B0.
+                 * r1 = Global_R9+0x5c48; fptr slot = +0x5c50. */
+                mapBase = r1;
+                if (r1 != 0)
+                    uc_mem_read(uc, r1 + 8u, &mapCtrl, 4);
+                else
+                    mapCtrl = r6;
+                if (Global_R9 != 0)
+                {
+                    u32 fptr = 0;
+                    g_agent_watch_screeninit_fptr = Global_R9 + 0x5c50u;
+                    uc_mem_read(uc, g_agent_watch_screeninit_fptr, &fptr, 4);
+                    sceneMap = fptr;
+                    mc18 = g_agent_watch_screeninit_fptr;
+                }
+            }
+#if defined(CBE_CLIENT_ONLY)
+            blockDream = g_vm_scene_block_dream_completion_reenter ? 1u : 0u;
+#endif
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"pc\":%u,\"lr\":%u,\"r0\":%u,\"r1\":%u,\"r4\":%u,"
+                     "\"r5\":%u,\"r6\":%u,\"flag1\":%u,\"mapBase\":%u,"
+                     "\"mapCtrl\":%u,\"sceneMap\":%u,\"base60\":%u,"
+                     "\"slot60\":%u,\"base64\":%u,\"slot64\":%u,"
+                     "\"mc18\":%u,\"mc40\":%u,\"sceMatch\":%u,"
+                     "\"sce\":\"%.40s\",\"this\":%u,\"block_dream\":%u}",
+                     pc, lr, r0, r1, r4, r5, r6, (u32)flag1, mapBase, mapCtrl,
+                     sceneMap, base60, slot60, base64, slot64, mc18, mc40,
+                     sceMatch, g_lastSceLoadName, g_currentScreenThis,
+                     blockDream);
+            {
+                const char *msg = "cbe_mapctrl_probe";
+                const char *hid = "C";
+                if (pc == 0x010136B0u || pc == 0x010136A8u)
+                {
+                    msg = "cbe_screeninit_blx_r6";
+                    hid = "P";
+                }
+                else if (pc == 0x0100D6E2u)
+                {
+                    msg = "cbe_map_loader_enter";
+                    hid = "Q";
+                }
+                else if (pc == 0x0100D7C6u)
+                {
+                    msg = "cbe_map_loader_after_str";
+                    hid = "Q";
+                }
+                else if (pc == 0x0100D8C4u)
+                {
+                    msg = "cbe_map_loader_before_d144";
+                    hid = "W";
+                }
+                else if (pc == 0x0100DB48u)
+                {
+                    msg = "cbe_map_loader_return";
+                    hid = "W";
+                }
+                else if (pc == 0x0101366Au)
+                {
+                    msg = "cbe_screeninit_pre_blx_loop";
+                    hid = "W";
+                }
+                else if (pc == 0x0100F094u)
+                {
+                    msg = "cbe_sce_portal_parse_enter";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100F0F4u)
+                {
+                    msg = "cbe_sce_record_type";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100F604u)
+                {
+                    msg = "cbe_sce_type4_check";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100F6A0u)
+                {
+                    msg = "cbe_battle_name_store74";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100DA00u)
+                {
+                    msg = "cbe_loader_mapname_bcheck";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100DA42u)
+                {
+                    msg = "cbe_loader_call_efc4";
+                    hid = "Y";
+                }
+                else if (pc == 0x0100F6E6u)
+                {
+                    msg = "cbe_battle_map_gate";
+                    hid = "X";
+                }
+                else if (pc == 0x0100F702u)
+                {
+                    msg = "cbe_battle_map_load64";
+                    hid = "X";
+                }
+                agent_dbg191169_log(hid, "main.c:cbe_mapctrl", msg, dataBuf);
+            }
+        }
+    }
+    /* #endregion */
 
 #ifdef GDB_SERVER_SUPPORT
     tmp2 = gdbTarget.simulate_pc_count;

@@ -6,6 +6,14 @@
 /* #region agent log */
 #ifndef AGENT_DBG191169_LOG_DEFINED
 #define AGENT_DBG191169_LOG_DEFINED
+/* Watch [base60/64 + 0x600 + 0x1c] writes that fill battle/scene mapctrl. */
+static u32 g_agent_watch_mapctrl_slot60 = 0;
+static u32 g_agent_watch_mapctrl_slot64 = 0;
+static u32 g_agent_watch_mapctrl_logs = 0;
+/* ScreenInit blx target lives at *(Global_R9 + 0x5c50); catch corruptors. */
+static u32 g_agent_watch_screeninit_fptr = 0;
+static u32 g_agent_watch_screeninit_fptr_logs = 0;
+static u32 g_agent_watch_screeninit_fptr_last = 0;
 static void agent_dbg191169_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson)
 {
@@ -98,6 +106,62 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ++g_vmInputWatchWriteCount;
         }
     }
+    /* #region agent log */
+    if (type == UC_MEM_WRITE)
+    {
+        u32 addr32 = (u32)address;
+        if (size >= 4 && g_agent_watch_mapctrl_logs < 48 &&
+            ((g_agent_watch_mapctrl_slot60 != 0 &&
+              addr32 == g_agent_watch_mapctrl_slot60) ||
+             (g_agent_watch_mapctrl_slot64 != 0 &&
+              addr32 == g_agent_watch_mapctrl_slot64)))
+        {
+            u32 pc = 0, lr = 0;
+            char dataBuf[220];
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"addr\":%u,\"value\":%u,\"pc\":%u,\"lr\":%u,"
+                     "\"slot\":%u,\"size\":%u}",
+                     addr32, (u32)value, pc, lr,
+                     (addr32 == g_agent_watch_mapctrl_slot64) ? 64u : 60u,
+                     size);
+            agent_dbg191169_log("Q", "hookRam.c:mapctrl_slot_write",
+                                "cbe_mapctrl_slot_write", dataBuf);
+            g_agent_watch_mapctrl_logs++;
+        }
+        /* Wide overlap: only emit when slot word changes or direct hit. */
+        if (g_agent_watch_screeninit_fptr != 0 &&
+            g_agent_watch_screeninit_fptr_logs < 64)
+        {
+            u32 watch = g_agent_watch_screeninit_fptr;
+            u32 w0 = watch - 256u;
+            u32 w1 = watch + 64u;
+            u32 end = addr32 + (size ? size : 1u);
+            if (addr32 < w1 && end > w0)
+            {
+                u32 pc = 0, lr = 0, cur = 0, hit = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                uc_mem_read(uc, watch, &cur, 4);
+                hit = (addr32 <= watch && end > watch) ? 1u : 0u;
+                if (hit || cur != g_agent_watch_screeninit_fptr_last)
+                {
+                    char dataBuf[260];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"addr\":%u,\"value\":%u,\"pc\":%u,\"lr\":%u,"
+                             "\"size\":%u,\"slot\":%u,\"cur\":%u,\"hit\":%u}",
+                             addr32, (u32)value, pc, lr, size, watch, cur,
+                             hit);
+                    agent_dbg191169_log("V", "hookRam.c:screeninit_fptr_write",
+                                        "cbe_screeninit_fptr_write", dataBuf);
+                    g_agent_watch_screeninit_fptr_logs++;
+                    g_agent_watch_screeninit_fptr_last = cur;
+                }
+            }
+        }
+    }
+    /* #endregion */
     // if (type == UC_MEM_WRITE && ((address == 0x10353C0)))
     // {
     //     printf("write[%x:", address);
@@ -153,6 +217,88 @@ bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_
                  (u32)address, pc, lr, r0, r1, r2, r5, r6, (u32)type);
         agent_dbg191169_log("A", "hookRam.c:hookRamErrorBack", "mem_fault",
                             dataBuf);
+        /* Tile-render fault after stale +0x64 SetMapCtrl (dream post-outdoor). */
+        if (pc == 0x01005474u)
+        {
+            u32 r4b = 0, table18 = 0, mc1c = 0;
+            char tileBuf[200];
+            uc_reg_read(uc, UC_ARM_REG_R4, &r4b);
+            if (r4b != 0)
+            {
+                uc_mem_read(uc, r4b + 0x18u, &table18, 4);
+                uc_mem_read(uc, r4b + 0x1cu, &mc1c, 4);
+            }
+            snprintf(tileBuf, sizeof(tileBuf),
+                     "{\"r4\":%u,\"table18\":%u,\"mc1c\":%u,"
+                     "\"fault\":%u,\"lr\":%u}",
+                     r4b, table18, mc1c, (u32)address, lr);
+            agent_dbg191169_log("R", "hookRam.c:tile_fault",
+                                "cbe_tile_render_fault", tileBuf);
+        }
+        /* Dump live-node slots near SetMapCtrlViewport faults (dream battle). */
+        if (pc == 0x01046C48u || pc == 0x01046c48u)
+        {
+            extern u32 Global_R9;
+            u32 sceneNodeBase = 0;
+            char nodeBuf[320];
+            /* CBE: historic caller lr=0x01014E77 loads mapctrl from
+             * *( [r4+0x60] + 0x600 + 0x1c ) before blx vt+4. */
+            {
+                u32 r4b = 0, mapBase = 0, mapCtrl = 0, sceneMap = 0;
+                u8 flag1 = 0;
+                char chainBuf[280];
+                uc_reg_read(uc, UC_ARM_REG_R4, &r4b);
+                if (r4b != 0)
+                {
+                    uc_mem_read(uc, r4b + 1u, &flag1, 1);
+                    uc_mem_read(uc, r4b + 0x60u, &mapBase, 4);
+                    if (mapBase != 0)
+                        uc_mem_read(uc, mapBase + 0x600u + 0x1cu, &mapCtrl, 4);
+                }
+                if (r0 != 0)
+                    uc_mem_read(uc, r0 + 0x1C30u, &sceneMap, 4);
+                snprintf(chainBuf, sizeof(chainBuf),
+                         "{\"lr\":%u,\"r0\":%u,\"r1_after_add40\":%u,\"r4\":%u,"
+                         "\"flag1\":%u,\"mapBase\":%u,\"slot_mapCtrl\":%u,"
+                         "\"scene_1C30\":%u}",
+                         lr, r0, r1, r4b, (u32)flag1, mapBase, mapCtrl,
+                         sceneMap);
+                agent_dbg191169_log("C", "hookRam.c:setmapctrl_chain",
+                                    "cbe_setmapctrl_fault_chain", chainBuf);
+            }
+            if (Global_R9 != 0 &&
+                uc_mem_read(uc, Global_R9 + 0x5CB0, &sceneNodeBase,
+                            sizeof(sceneNodeBase)) == UC_ERR_OK &&
+                sceneNodeBase != 0)
+            {
+                u32 i;
+                for (i = 0; i < 25u; ++i)
+                {
+                    u32 node = sceneNodeBase + i * 340u;
+                    u32 actorId = 0;
+                    u16 x = 0, y = 0;
+                    u8 nodeKind = 0, active = 0;
+                    u32 battleX = 0, battleY = 0, battleHp = 0;
+                    uc_mem_read(uc, node + 0x64, &actorId, sizeof(actorId));
+                    uc_mem_read(uc, node + 0x18, &x, sizeof(x));
+                    uc_mem_read(uc, node + 0x1A, &y, sizeof(y));
+                    uc_mem_read(uc, node + 0x13B, &nodeKind, sizeof(nodeKind));
+                    uc_mem_read(uc, node + 0x13F, &active, sizeof(active));
+                    uc_mem_read(uc, node + 0xF0, &battleX, sizeof(battleX));
+                    uc_mem_read(uc, node + 0xF4, &battleY, sizeof(battleY));
+                    uc_mem_read(uc, node + 0xB4, &battleHp, sizeof(battleHp));
+                    if (actorId == 0 && active == 0 && nodeKind == 0)
+                        continue;
+                    snprintf(nodeBuf, sizeof(nodeBuf),
+                             "{\"i\":%u,\"actor\":%u,\"kind\":%u,\"active\":%u,"
+                             "\"pos\":[%u,%u],\"bpos\":[%u,%u],\"hp\":%u}",
+                             i, actorId, nodeKind, active, x, y, battleX,
+                             battleY, battleHp);
+                    agent_dbg191169_log("N", "hookRam.c:live_node",
+                                        "dream_fault_live_node", nodeBuf);
+                }
+            }
+        }
     }
     /* #endregion */
     uc_emu_stop(uc);

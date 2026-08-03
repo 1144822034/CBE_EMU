@@ -12290,8 +12290,16 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                 ? activeSession->sceneVisibleScene
                 : vm_net_mock_current_scene_name();
 
-        requestedEnemyId = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
-            remapScene, wireEnemyId, posx, posy);
+        /*
+         * forceNonScene (instance / dream followup 4/10) must keep the armed
+         * enemy id.  Remap on dream turned wirekeep#200 → real#203 inside the
+         * followup builder (debug-0b451a challenge_battle_start real=203).
+         */
+        if (!forceNonSceneStart)
+            requestedEnemyId = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
+                remapScene, wireEnemyId, posx, posy);
+        else
+            requestedEnemyId = wireEnemyId;
         enemyWireId = vm_net_mock_resolve_battle_enemy_id(
             wireEnemyId, &enemyTable, enemyTableIds);
         /* #region agent log */
@@ -12319,89 +12327,11 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         }
         /* #endregion */
         /*
-         * Dream/FB 29* only: duplicate wire #200 + real remap cannot use
-         * subtype-5 (wrong live row / SetMapCtrlViewport null / no mmBattle).
-         * Outdoor scenes keep normal 25/12+4/5 even when bindings remap.
-         *
-         * Same-packet lone 4/10 on the 4/1 data response is also gated
-         * (JianghuOL.CBE:0x01012F8E) — client stays on the map shell and
-         * SCR_Render hits SetMapCtrlViewport null (0x01046C48 / access 0x40).
-         * Deliver via existing instance-challenge HAS_FOLLOWUP take (primary
-         * moveinfo-ack or empty WT, followup pure 4/10).  Enter-scene paths
-         * untouched.
+         * Hyp M REJECTED (debug-0b451a messenger-enter self-test): late
+         * 27/12-ack primary + followup 4/10 on dream 4/1 still ran hot518
+         * ScreenInit (emu_err=11 / lr=0x010136B3).  Same class as post-enter
+         * 27/12-ack.  Do not reintroduce any 27/12 on dream encounter.
          */
-        if (useSceneMonsterStart && wireEnemyId != 0 &&
-            requestedEnemyId != wireEnemyId &&
-            remapScene != NULL &&
-            ((remapScene[0] == '2' && remapScene[1] == '9') ||
-             (remapScene[0] == 'b' && remapScene[1] == '_' &&
-              remapScene[2] == '2' && remapScene[3] == '9')))
-        {
-            if (activeSession != NULL)
-            {
-                u32 primaryPos = 5;
-                u8 primaryObjects = 0;
-
-                activeSession->instanceChallengeBattlePending = true;
-                activeSession->instanceChallengeBattleWireCount = 0;
-                activeSession->instanceChallengeTick = g_schedulerTick;
-                activeSession->instanceChallengeActorId = wireEnemyId;
-                activeSession->instanceChallengeEnemyId = requestedEnemyId;
-                activeSession->instanceChallengeX =
-                    (u16)((posx != 0) ? posx : 1u);
-                activeSession->instanceChallengeY =
-                    (u16)((posy != 0) ? posy : 1u);
-                snprintf(activeSession->instanceChallengeScene,
-                         sizeof(activeSession->instanceChallengeScene),
-                         "%s", remapScene);
-
-                if (hasMoveinfo)
-                {
-                    if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(
-                            out, outCap, &primaryPos))
-                    {
-                        return 0;
-                    }
-                    primaryObjects = 1;
-                }
-                vm_net_mock_finish_wt_packet(out, primaryPos, primaryObjects);
-                printf("[info][network] mock_challenge_battle_remap_pure_subtype10 "
-                       "wire=%u real=%u scene=%s pos=(%u,%u) primary=%u "
-                       "battle_delivery=data-followup "
-                       "evidence=dream-fb-only-same-packet-4/10-gated-"
-                       "0x01012F8E-SetMapCtrlViewport-0x40\n",
-                       wireEnemyId, requestedEnemyId, remapScene,
-                       activeSession->instanceChallengeX,
-                       activeSession->instanceChallengeY,
-                       primaryPos);
-                vm_autotest_note("mock_challenge_battle_remap_pure_subtype10 "
-                                "wire=%u real=%u battle_delivery=data-followup\n",
-                                wireEnemyId, requestedEnemyId);
-                /* #region agent log */
-                {
-                    char dataBuf[160];
-                    snprintf(dataBuf, sizeof(dataBuf),
-                             "{\"wire\":%u,\"real\":%u,\"primary\":%u,"
-                             "\"objects\":%u,\"path\":\"followup-4/10\"}",
-                             wireEnemyId, requestedEnemyId, primaryPos,
-                             (u32)primaryObjects);
-                    agent_dbg191169_log("E", "mock_server_battle.c:4/1",
-                                        "remap_pure_subtype10_armed", dataBuf);
-                }
-                /* #endregion */
-                return primaryPos;
-            }
-            useSceneMonsterStart = false;
-            battleStartSubtype = 10;
-            seedSceneMonsterMoveinfo = false;
-            sceneMonsterTargetSource = "remap-pure-subtype10";
-            printf("[info][network] mock_challenge_battle_remap_pure_subtype10 "
-                   "wire=%u real=%u scene=%s evidence="
-                   "fallback-same-packet-no-session "
-                   "dream-fb-only\n",
-                   wireEnemyId, requestedEnemyId,
-                   remapScene ? remapScene : "-");
-        }
         if (useSceneMonsterStart && activeSession != NULL && wireEnemyId != 0 &&
             index < 25 && posx != 0 && posy != 0)
         {
@@ -12425,10 +12355,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         }
         moveinfoEnemyId = wireEnemyId;
     }
-    /*
-     * Remapped pure 4/10 must not carry 25/12 (or trailing moveinfo ack):
-     * same lone-object contract as forceNonSceneStart.
-     */
+    /* Scene-monster start: clear leftover 斗/banner before subtype-5. */
     if (!forceNonSceneStart && useSceneMonsterStart)
     {
         if (!vm_net_mock_append_info_banner_clear12_object(out, outCap, &pos))
@@ -12702,6 +12629,22 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                prefillPlayerTemplate ? 1u : 0u,
                prefillEnemyTemplate ? 1u : 0u,
                responseObjectCount);
+        /* #region agent log */
+        {
+            char dataBuf[240];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"wire\":%u,\"real\":%u,\"subtype\":%u,\"scene_start\":%u,"
+                     "\"index\":%u,\"posx\":%u,\"posy\":%u,\"objects\":%u,"
+                     "\"resp\":%u,\"source\":\"%.40s\"}",
+                     id, requestedEnemyId, battleStartSubtype,
+                     useSceneMonsterStart ? 1u : 0u, sceneMonsterIndex,
+                     sceneMonsterPosX, sceneMonsterPosY, responseObjectCount,
+                     pos, sceneMonsterTargetSource ? sceneMonsterTargetSource
+                                                   : "-");
+            agent_dbg191169_log("A", "mock_server_battle.c:4/1",
+                                "challenge_battle_start_packet", dataBuf);
+        }
+        /* #endregion */
         if (g_mockBattleAutoPrefer != 0 && teamBattlePartyCount < 2)
         {
             printf("[info][network] mock_challenge_battle_auto prefer=1 last=%u "

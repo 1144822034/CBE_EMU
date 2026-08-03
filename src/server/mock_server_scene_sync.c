@@ -4249,7 +4249,104 @@ static u32 vm_net_mock_build_instance_enter_response(
                seed->actorId, target.scene, target.x, target.y,
                seed->challengeEnemyId, pos);
     }
+    /* #region agent log */
+    if (target.scene[0] == '2' && target.scene[1] == '9')
+    {
+        char dataBuf[280];
+        const char *from =
+            (session != NULL &&
+             vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+                ? session->sceneVisibleScene
+                : "-";
+        snprintf(dataBuf, sizeof(dataBuf),
+                 "{\"actor\":%u,\"from\":\"%.40s\",\"to\":\"%.40s\","
+                 "\"drain\":%u,\"drain_scene\":\"%.40s\",\"resp\":%u,"
+                 "\"x\":%u,\"y\":%u,\"clear_rem\":%u}",
+                 seed->actorId, from, target.scene, (u32)drainRemaining,
+                 drainScene[0] ? drainScene : "-", pos, target.x, target.y,
+                 (session != NULL) ? (u32)session->mapStoneLoadingClearRemaining
+                                  : 0u);
+        agent_dbg191169_log("E", "mock_server_scene_sync.c:enter",
+                            "dream_instance_enter", dataBuf);
+    }
+    /* #endregion */
     return pos;
+}
+
+/*
+ * CBE_DREAM_ENCOUNTER_SMOKE=1: never poll-deliver 30/1 (hot518 ScreenInit
+ * fail, debug-0b451a).  Login still relocates 29*→c04; client walks to 使者
+ * and OPEN_INSTANCE is upgraded to ENTER on the NPC request path.  This poll
+ * only observes outdoor→dream ready.  Mutually exclusive with REENTER smoke.
+ */
+static u32 vm_net_mock_dream_encounter_smoke_poll(u8 *out, u32 outCap)
+{
+    static u8 phase = 0;
+    static u32 boundClientId = 0;
+    vm_mock_service_client_session *session = NULL;
+    const char *env = getenv("CBE_DREAM_ENCOUNTER_SMOKE");
+    const char *scene = NULL;
+    u8 outdoorLinan = 0;
+
+    (void)out;
+    (void)outCap;
+    if (env == NULL || env[0] != '1')
+        return 0;
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL)
+        return 0;
+    if (boundClientId != 0 && boundClientId != session->clientId)
+        phase = 0;
+    boundClientId = session->clientId;
+    scene = session->sceneVisibleScene;
+    outdoorLinan =
+        (session->sceneVisibleReady && !session->sceneVisiblePending &&
+         scene[0] == 'c' && scene[1] == '0' && scene[2] == '4' &&
+         (!session->mapStoneLoadingClearPending ||
+          session->mapStoneLoadingClearRemaining == 0u))
+            ? 1u
+            : 0u;
+
+    if (phase == 0 && outdoorLinan)
+    {
+        phase = 1;
+        printf("[info][smoke] dream_encounter_smoke outdoor_ready scene=%s "
+               "action=await-messenger-npc-enter "
+               "evidence=debug-0b451a-no-poll-30-1\n",
+               scene);
+        /* #region agent log */
+        {
+            char dataBuf[120];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"phase\":\"await-messenger\"}",
+                     scene);
+            agent_dbg191169_log("N", "mock_server_scene_sync.c:smoke",
+                                "dream_encounter_smoke_outdoor_ready", dataBuf);
+        }
+        /* #endregion */
+        return 0;
+    }
+
+    if (phase == 1 && session->sceneVisibleReady &&
+        !session->sceneVisiblePending && scene[0] == '2' && scene[1] == '9')
+    {
+        phase = 3;
+        printf("[info][smoke] dream_encounter_smoke dream_ready scene=%s "
+               "action=await-client-walk-4/1 path=messenger-npc-enter\n",
+               scene);
+        /* #region agent log */
+        {
+            char dataBuf[120];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"path\":\"messenger-npc\"}", scene);
+            agent_dbg191169_log("N", "mock_server_scene_sync.c:smoke",
+                                "dream_encounter_smoke_ready", dataBuf);
+        }
+        /* #endregion */
+        return 0;
+    }
+
+    return 0;
 }
 
 /*
@@ -4268,6 +4365,10 @@ static u32 vm_net_mock_dream_reenter_smoke_poll(u8 *out, u32 outCap)
     bool outdoorReady = false;
 
     if (env == NULL || env[0] != '1' || out == NULL || outCap < 5)
+        return 0;
+    /* Prefer encounter smoke when both set. */
+    if (getenv("CBE_DREAM_ENCOUNTER_SMOKE") != NULL &&
+        getenv("CBE_DREAM_ENCOUNTER_SMOKE")[0] == '1')
         return 0;
     session = vm_mock_service_get_active_client_session();
     if (session == NULL)
@@ -5560,6 +5661,49 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                      "\xbc\xb6\xa1\xa3"); /* 级。 */
             dialogText = dialogTextStorage;
         }
+        else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE &&
+                 getenv("CBE_DREAM_ENCOUNTER_SMOKE") != NULL &&
+                 getenv("CBE_DREAM_ENCOUNTER_SMOKE")[0] == '1' &&
+                 value == 30406u &&
+                 session != NULL &&
+                 session->sceneVisibleReady && !session->sceneVisiblePending &&
+                 session->sceneVisibleScene[0] == 'c' &&
+                 session->sceneVisibleScene[1] == '0' &&
+                 session->sceneVisibleScene[2] == '4' &&
+                 instanceSeed->instanceScene[0] == '2' &&
+                 instanceSeed->instanceScene[1] == '9')
+        {
+            /*
+             * Smoke: first 使者 OPEN becomes ENTER on the NPC request CBMR
+             * (not scene poll).  Poll 30/1 faults hot518 ScreenInit.
+             */
+            u32 transferLen = vm_net_mock_build_instance_enter_response(
+                instanceSeed, out, outCap);
+            if (transferLen != 0)
+            {
+                printf("[info][smoke] dream_encounter_smoke messenger_enter "
+                       "actor=%u from=%s to=%s resp=%u "
+                       "path=npc-OPEN-as-ENTER "
+                       "evidence=debug-0b451a-messenger-not-poll\n",
+                       instanceSeed->actorId, session->sceneVisibleScene,
+                       instanceSeed->instanceScene, transferLen);
+                /* #region agent log */
+                {
+                    char dataBuf[160];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"actor\":%u,\"resp\":%u,"
+                             "\"path\":\"npc-OPEN-as-ENTER\"}",
+                             instanceSeed->actorId, transferLen);
+                    agent_dbg191169_log(
+                        "N", "mock_server_scene_sync.c:npc",
+                        "dream_encounter_smoke_messenger_enter", dataBuf);
+                }
+                /* #endregion */
+                return transferLen;
+            }
+            dialogText =
+                "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xb5\xe3\xce\xb4\xc5\xe4\xd6\xc3\xa1\xa3"; /* 副本传送点未配置。 */
+        }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE)
         {
             /*
@@ -5572,6 +5716,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             bool toDream29 =
                 instanceSeed->instanceScene[0] == '2' &&
                 instanceSeed->instanceScene[1] == '9';
+            const char *encounterSmoke = getenv("CBE_DREAM_ENCOUNTER_SMOKE");
+            bool smokeHoldDream =
+                encounterSmoke != NULL && encounterSmoke[0] == '1' &&
+                session != NULL &&
+                vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+                session->sceneVisibleScene[0] == '2' &&
+                session->sceneVisibleScene[1] == '9' &&
+                !toDream29;
             bool gateWaitClear =
                 toDream29 &&
                 session != NULL &&
@@ -5583,11 +5735,39 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     session->mapStoneLoadingClearScene,
                     instanceSeed->instanceScene);
             /*
+             * Encounter smoke cold-logs into 29*; autotest key:f can open the
+             * exit 使者 and leave, then hot reenter faults 518 ScreenInit
+             * (debug-0b451a dream_keep_kind3 → screen_init_fail).  Hold exit.
+             */
+            if (smokeHoldDream)
+            {
+                action = "instance-enter-smoke-hold-dream";
+                dialogText =
+                    "\xd3\xf6\xb9\xd6\xd1\xd0\xca\xd4\xd6\xd0\xa3\xac"
+                    "\xc7\xeb\xce\xde\xcd\xcb\xb3\xf6\xa1\xa3"; /* 遇怪测试中，请勿退出。 */
+                printf("[info][smoke] dream_encounter_smoke hold_exit "
+                       "actor=%u from=%s to=%s "
+                       "evidence=debug-0b451a-exit-then-hot-reenter-fail\n",
+                       instanceSeed->actorId, session->sceneVisibleScene,
+                       instanceSeed->instanceScene);
+                /* #region agent log */
+                {
+                    char dataBuf[160];
+                    snprintf(dataBuf, sizeof(dataBuf),
+                             "{\"actor\":%u,\"action\":\"hold-exit\"}",
+                             instanceSeed->actorId);
+                    agent_dbg191169_log("N", "mock_server_scene_sync.c:npc",
+                                        "dream_encounter_smoke_hold_exit",
+                                        dataBuf);
+                }
+                /* #endregion */
+            }
+            /*
              * After dream→outdoor, leave arms outdoor clear + settle_required.
              * Gate while that clear remains; cold SCE resync on enter replaces
              * the old force-second-settle cycle (still hit 518c, debug-191169).
              */
-            if (gateWaitClear)
+            else if (gateWaitClear)
             {
                 action = "instance-enter-gate-wait-clear";
                 dialogText =

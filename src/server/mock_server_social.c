@@ -1982,6 +1982,12 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         vm_mock_service_client_session *dreamSession =
             vm_mock_service_get_active_client_session();
 
+        /*
+         * No 27/12 (ack or +posinfo): debug-0b451a showed
+         * dream_post_enter_27_12_ack resp=254 → second ScreenInit
+         * mem_fault lr=0x010136b3 / emu_err=11 (enter crash).  Keep
+         * loading_clear_only family; encounter battle shell is unresolved.
+         */
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
             return 0;
         objectCount += 1;
@@ -2015,7 +2021,7 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         printf("[info][network] mock_dream_post_enter_no_27_12 scene=%s "
                "pos=(%u,%u) objects=%u resp=%u "
                "action=25/5+27/11+27/4+7/42+arm-poll-clear "
-               "evidence=debug-0b451a-272-same-suppressed-dream-reenter\n",
+               "evidence=debug-0b451a-27/12-ack-enter-crash\n",
                target.scene, target.x, target.y, objectCount, pos);
         /* #region agent log */
         {
@@ -2390,6 +2396,25 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
 static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen,
                                                    u8 kind, u8 subtype);
 
+static bool vm_net_mock_is_lone_wt_kind_subtype_request(const u8 *request,
+                                                         u32 requestLen,
+                                                         u8 kind,
+                                                         u8 subtype)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (object.major != 1 || object.kind != kind || object.subtype != subtype)
+        return false;
+    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen;
+}
+
 static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(const u8 *request,
                                                                               u32 requestLen,
                                                                               u8 *out,
@@ -2397,25 +2422,81 @@ static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(co
 {
     u32 len = 0;
     vm_net_mock_scene_change_target target;
+    bool isShort25_5 = false;
+    bool isLone25_5 = false;
+    u8 dreamScene = 0;
 
-    if (!g_vm_net_mock_teleport_stone_direct_enter_pending ||
-        !g_vm_net_mock_last_scene_change_target_valid ||
-        !vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5))
+    isShort25_5 =
+        vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5);
+    isLone25_5 =
+        !isShort25_5 &&
+        vm_net_mock_is_lone_wt_kind_subtype_request(request, requestLen, 0x19, 5);
+    /*
+     * Dream DF ScreenInit may clear direct_enter_pending before the lone
+     * 25/5 arrives (debug-0b451a: unimplemented 1/25/5 returned).  Still
+     * accept lone/short 25/5 when the live/pending scene is 29*.
+     */
     {
-        return 0;
+        const char *liveScene = vm_net_mock_current_scene_name();
+        u8 dreamLive =
+            (liveScene != NULL && liveScene[0] == '2' && liveScene[1] == '9')
+                ? 1u
+                : 0u;
+        u8 dreamPending =
+            (g_vm_net_mock_last_scene_change_target_valid &&
+             g_vm_net_mock_last_scene_change_target.scene[0] == '2' &&
+             g_vm_net_mock_last_scene_change_target.scene[1] == '9')
+                ? 1u
+                : 0u;
+
+        if ((!g_vm_net_mock_teleport_stone_direct_enter_pending &&
+             !dreamLive && !dreamPending) ||
+            (!isShort25_5 && !isLone25_5))
+        {
+            return 0;
+        }
     }
 
-    target = g_vm_net_mock_last_scene_change_target;
+    /*
+     * debug-0b451a: after dream DF ScreenInit the client sometimes emits a
+     * lone 1/25/5 with payload (not the 9-byte empty short).  Old gate required
+     * short+target_valid → miss → unimplemented tip「1/25/5」and delayed
+     * post-enter.  Accept lone 25/5; if target_valid was cleared early, still
+     * dream-ack when pending scene is 29*.
+     */
+    if (g_vm_net_mock_last_scene_change_target_valid)
+        target = g_vm_net_mock_last_scene_change_target;
+    else
+    {
+        const char *liveScene = vm_net_mock_current_scene_name();
+
+        memset(&target, 0, sizeof(target));
+        if (g_vm_net_mock_last_completed_scene_change_target_valid &&
+            vm_net_mock_scene_name_is_safe(
+                g_vm_net_mock_last_completed_scene_change_target.scene) &&
+            g_vm_net_mock_last_completed_scene_change_target.scene[0] == '2' &&
+            g_vm_net_mock_last_completed_scene_change_target.scene[1] == '9')
+        {
+            target = g_vm_net_mock_last_completed_scene_change_target;
+        }
+        else if (liveScene != NULL && liveScene[0] == '2' &&
+                 liveScene[1] == '9' &&
+                 vm_net_mock_scene_name_is_safe(liveScene))
+        {
+            snprintf(target.scene, sizeof(target.scene), "%s", liveScene);
+        }
+    }
+    dreamScene = (target.scene[0] == '2' && target.scene[1] == '9') ? 1u : 0u;
     /*
      * Dream instance re-enter already delivered plain 30/1 and DF ScreenInit.
      * Calling build_scene_default_event_response here appends another
      * scene-enter object (resp≈449), triggers a second load, mark_completed,
      * and clears target_valid — then WT 2/3 falls into completed_repeat_ack
      * instead of dream loading_clear_only and the loading bar sticks.
-     * Dream-only: short 25/5 result=4, keep pending+target for 2/3.
+     * Dream-only: 25/5 result=4, keep pending+target for 2/3.
      * Outdoor map-stone / transfer short 25/5 path unchanged.
      */
-    if (target.scene[0] == '2' && target.scene[1] == '9')
+    if (dreamScene)
     {
         u32 pos = 5;
         u32 objectStart = 0;
@@ -2431,16 +2512,35 @@ static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(co
         objectCount += 1;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         printf("[info][network] mock_teleport_stone_direct_enter_ack "
-               "scene=%s pos=(%u,%u) keep_pending=1 resp=%u "
-               "action=dream-short-25/5-no-second-enter "
-               "evidence=post-instance-30/1-must-not-reemit-enter\n",
-               target.scene, target.x, target.y, pos);
+               "scene=%s pos=(%u,%u) keep_pending=1 resp=%u req_len=%u "
+               "short=%u lone=%u target_valid=%u "
+               "action=dream-25/5-no-second-enter "
+               "evidence=debug-0b451a-lone-25/5-was-unimplemented\n",
+               target.scene, target.x, target.y, pos, requestLen,
+               isShort25_5 ? 1u : 0u, isLone25_5 ? 1u : 0u,
+               g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u);
+        /* #region agent log */
+        {
+            char dataBuf[200];
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"scene\":\"%.40s\",\"resp\":%u,\"req_len\":%u,"
+                     "\"short\":%u,\"lone\":%u,\"target_valid\":%u}",
+                     target.scene, pos, requestLen,
+                     isShort25_5 ? 1u : 0u, isLone25_5 ? 1u : 0u,
+                     g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u);
+            agent_dbg191169_log("I", "mock_server_social.c:direct_enter_ack",
+                                "dream_direct_enter_25_5_ack", dataBuf);
+        }
+        /* #endregion */
         vm_autotest_note("mock_teleport_stone_direct_enter_ack scene=%s "
                          "keep_pending=1 response=25/5-result4-only "
                          "action=dream-no-second-30/1\n",
                          target.scene);
         return pos;
     }
+
+    if (!g_vm_net_mock_last_scene_change_target_valid)
+        return 0;
 
     len = vm_net_mock_build_scene_default_event_response(out, outCap);
     if (len == 0)
@@ -6008,7 +6108,10 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
     {
-        u32 smokeLen = vm_net_mock_dream_reenter_smoke_poll(out, outCap);
+        u32 smokeLen = vm_net_mock_dream_encounter_smoke_poll(out, outCap);
+        if (smokeLen != 0)
+            return smokeLen;
+        smokeLen = vm_net_mock_dream_reenter_smoke_poll(out, outCap);
         if (smokeLen != 0)
             return smokeLen;
     }
