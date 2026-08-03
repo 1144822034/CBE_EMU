@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'scene-teleport-stone-probe-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'scene-teleport-stone-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -98,7 +98,7 @@ try {
     & $php $fixture seed $database $fixtureProfile | Tee-Object -FilePath (Join-Path $runDir 'fixture.log') -Append
     if ($LASTEXITCODE -ne 0) { throw 'fixture seed failed' }
 
-    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT')) {
+    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT','CBE_BATTLE_ENEMY_COUNT','CBE_BATTLE_ENEMY_HP')) {
         $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
     $env:CBE_MYSQL_HOST = if ($env:CBE_AUTOMATION_MYSQL_HOST) { $env:CBE_AUTOMATION_MYSQL_HOST } else { '127.0.0.1' }
@@ -107,6 +107,17 @@ try {
     $env:CBE_MYSQL_PASSWORD = $env:CBE_AUTOMATION_MYSQL_PASSWORD
     $env:CBE_MYSQL_DATABASE = $database
     $env:CBE_RESOURCE_ROOT = $resourceRoot
+    # These are per-run service fixtures, not user-server configuration.  The
+    # cancel case keeps three high-HP targets alive until the native cancel
+    # button is dispatched; the terminal case exercises the original three
+    # one-hit enemies and must reach the next hangup round without a tap.
+    if ($Scenario -eq 'hangup-auto-cancel-v1') {
+        $env:CBE_BATTLE_ENEMY_COUNT = '3'
+        $env:CBE_BATTLE_ENEMY_HP = '100'
+    } elseif ($Scenario -eq 'hangup-auto-terminal-v1') {
+        $env:CBE_BATTLE_ENEMY_COUNT = '3'
+        $env:CBE_BATTLE_ENEMY_HP = '20'
+    }
 
     $serverProcess = Start-Process -FilePath $server -WorkingDirectory $runDir -PassThru `
         -ArgumentList "--mock-service-only", "--mock-service-bind=127.0.0.1", "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$resourceRoot" `
