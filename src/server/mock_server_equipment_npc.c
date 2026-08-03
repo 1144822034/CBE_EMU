@@ -7385,20 +7385,6 @@ static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
                freshShell ? "1/1/6-actorinfo" : "1/1/14",
                via ? via : "-",
                responseLen);
-        /* #region agent log */
-        {
-            char dataBuf[200];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"fresh_shell\":%u,\"resp\":%u,\"rem\":%u,"
-                     "\"via\":\"%.24s\",\"scene\":\"%.40s\"}",
-                     freshShell ? 1u : 0u, responseLen,
-                     session->pendingMapActorVitalsSyncRemaining,
-                     via ? via : "-",
-                     session->sceneVisibleScene);
-            agent_dbg191169_log("G", "mock_server_equipment_npc.c:vitals",
-                                "map_actor_vitals_sync", dataBuf);
-        }
-        /* #endregion */
         return responseLen;
     }
 }

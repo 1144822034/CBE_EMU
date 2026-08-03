@@ -246,18 +246,6 @@ static u32 vm_net_mock_build_unimplemented_handler_notice_response(
     printf("[warn][network] mock_unimplemented_handler_notice tip=%s resp=%u "
            "delivery=25/12+1/3/3 evidence=reject-notice-contract\n",
            tip, pos);
-    /* #region agent log */
-    {
-        char dataBuf[140];
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"valid\":%u,\"major\":%u,\"kind\":%u,\"subtype\":%u,"
-                 "\"resp\":%u}",
-                 tipObjectValid ? 1u : 0u, (u32)object.major, (u32)object.kind,
-                 (u32)object.subtype, pos);
-        agent_dbg191169_log("I", "mock_server_dispatch.c:unimplemented",
-                            "unimplemented_handler_notice", dataBuf);
-    }
-    /* #endregion */
     return pos;
 }
 

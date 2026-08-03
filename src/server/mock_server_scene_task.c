@@ -531,6 +531,71 @@ static bool vm_net_mock_sce_has_fb_decor_table(const u8 *data, u32 len)
     return false;
 }
 
+/*
+ * Dream/peach battle+exit portal (CBE F094):
+ *   type=4  aux aux count=4  03 00 12 00 <b_*.sce>  01 00 15 … 16 … 17 …
+ * Legacy dream stub used an extra leading type=1 word:
+ *   01 00 04 00 0e 00 26 00 04 00 03 00 12 00 …
+ * Only top-level type=4 reaches store74/load64 (debug-0b451a).
+ */
+#define VM_NET_MOCK_SCE_BATTLE_PORTAL_EOF_PAD_BYTES 64u
+
+static bool vm_net_mock_sce_named_portal_is_type4_hdr(const u8 *data, u32 off)
+{
+    return vm_net_mock_read_le16_at(data, off) == 4 &&
+           vm_net_mock_read_le16_at(data, off + 6u) == 4;
+}
+
+static bool vm_net_mock_sce_named_portal_is_legacy_type1_hdr(const u8 *data,
+                                                             u32 off)
+{
+    return vm_net_mock_read_le16_at(data, off) == 1 &&
+           vm_net_mock_read_le16_at(data, off + 2u) == 4 &&
+           vm_net_mock_read_le16_at(data, off + 4u) == 0x0eu;
+}
+
+static bool vm_net_mock_sce_named_portal_fields_end(const u8 *data, u32 len,
+                                                    u32 start, u32 *endOut)
+{
+    u32 pos = 0;
+    u16 field = 0;
+    u16 value = 0;
+    char tmp[96];
+
+    if (endOut)
+        *endOut = 0;
+    if (data == NULL || start + 12u > len)
+        return false;
+    if (vm_net_mock_sce_named_portal_is_type4_hdr(data, start))
+        pos = start + 8u;
+    else if (vm_net_mock_sce_named_portal_is_legacy_type1_hdr(data, start))
+        pos = start + 10u;
+    else
+        return false;
+    if (!vm_net_mock_read_sce_string_field(data, len, &pos, 0x12u, tmp,
+                                           sizeof(tmp)) ||
+        !vm_net_mock_str_ends_with(tmp, ".sce"))
+    {
+        return false;
+    }
+    if (!vm_net_mock_read_sce_scalar_token(data, len, &pos, &field, &value) ||
+        field != 0x15u)
+    {
+        return false;
+    }
+    if (!vm_net_mock_read_sce_string_field(data, len, &pos, 0x16u, tmp,
+                                           sizeof(tmp)) ||
+        !vm_net_mock_read_sce_string_field(data, len, &pos, 0x17u, tmp,
+                                           sizeof(tmp)) ||
+        !vm_net_mock_str_ends_with(tmp, ".sce"))
+    {
+        return false;
+    }
+    if (endOut)
+        *endOut = pos;
+    return true;
+}
+
 static bool vm_net_mock_sce_find_named_portal_start(const u8 *data, u32 len,
                                                     u32 *startOut)
 {
@@ -545,19 +610,18 @@ static bool vm_net_mock_sce_find_named_portal_start(const u8 *data, u32 len,
         u32 pos = 0;
         char target[64];
 
-        if (vm_net_mock_read_le16_at(data, off) != 1 ||
-            vm_net_mock_read_le16_at(data, off + 2) != 4 ||
-            vm_net_mock_read_le16_at(data, off + 4) != 0x0e)
-        {
+        if (vm_net_mock_sce_named_portal_is_type4_hdr(data, off))
+            pos = off + 8u;
+        else if (vm_net_mock_sce_named_portal_is_legacy_type1_hdr(data, off))
+            pos = off + 10u;
+        else
             continue;
-        }
-        pos = off + 10u;
         if (pos + 5u > len || vm_net_mock_read_le16_at(data, pos) != 3 ||
-            vm_net_mock_read_le16_at(data, pos + 2) != 0x12)
+            vm_net_mock_read_le16_at(data, pos + 2u) != 0x12)
         {
             continue;
         }
-        pos += 4;
+        pos += 4u;
         if (!vm_net_mock_read_sce_len_string(data, len, &pos, target,
                                              sizeof(target)) ||
             !vm_net_mock_str_ends_with(target, ".sce"))
@@ -569,6 +633,79 @@ static bool vm_net_mock_sce_find_named_portal_start(const u8 *data, u32 len,
         return true;
     }
     return false;
+}
+
+/*
+ * Keep admin/combat rewrites on the proven dream contract:
+ * top-level type=4 + field 0x12 battle SCE + 8 zero F094 records after EOF
+ * so ScreenInit does not dirty-read a fake type=4 (debug-0b451a).
+ * Outdoor maps that still have records after the portal are left alone aside
+ * from optional type1→type4 promotion when the portal is terminal.
+ */
+static bool vm_net_mock_sce_normalize_battle_named_portal(u8 *data, u32 *lenInOut,
+                                                          u32 cap,
+                                                          const char **errorOut)
+{
+    u32 start = 0;
+    u32 end = 0;
+    u32 len = 0;
+    u32 i = 0;
+    bool tailOnlyZeros = true;
+
+    if (errorOut)
+        *errorOut = "战斗传送记录规范化失败";
+    if (data == NULL || lenInOut == NULL)
+        return false;
+    len = *lenInOut;
+    if (!vm_net_mock_sce_find_named_portal_start(data, len, &start) ||
+        !vm_net_mock_sce_named_portal_fields_end(data, len, start, &end))
+    {
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    if (vm_net_mock_sce_named_portal_is_legacy_type1_hdr(data, start))
+    {
+        if (len < start + 2u)
+            return false;
+        memmove(data + start, data + start + 2u, len - (start + 2u));
+        len -= 2u;
+        end -= 2u;
+        if (!vm_net_mock_sce_named_portal_is_type4_hdr(data, start))
+        {
+            if (errorOut)
+                *errorOut = "梦境传送头无法升为 type=4";
+            return false;
+        }
+    }
+    for (i = end; i < len; ++i)
+    {
+        if (data[i] != 0)
+        {
+            tailOnlyZeros = false;
+            break;
+        }
+    }
+    if (!tailOnlyZeros)
+    {
+        *lenInOut = len;
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    len = end;
+    if (len + VM_NET_MOCK_SCE_BATTLE_PORTAL_EOF_PAD_BYTES > cap)
+    {
+        if (errorOut)
+            *errorOut = "战斗传送 EOF 填充缓冲区不足";
+        return false;
+    }
+    memset(data + len, 0, VM_NET_MOCK_SCE_BATTLE_PORTAL_EOF_PAD_BYTES);
+    len += VM_NET_MOCK_SCE_BATTLE_PORTAL_EOF_PAD_BYTES;
+    *lenInOut = len;
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
 }
 
 static bool vm_net_mock_sce_combat_spawn_fill_from_catalog(
@@ -732,10 +869,19 @@ static bool vm_net_mock_path_bytes_contain(const char *path, const char *needle)
 
 /*
  * WT18/7 authority is web/fs extensionless leaf.  Inject/admin may leave
- * bin/*.sce with e_ghostfire while web/fs stays stock-278 — login then
- * installs stock and 使者 reenter uptodate-keeps it (debug-191169).  Before
- * publish, copy any kind3 donor onto every stock twin in web+bin.
+ * bin/*.sce with kind=3 while web/fs stays stock-278 — login then installs
+ * stock (debug-191169).  Before publish, copy a kind3 donor onto stock twins.
+ *
+ * Kind3 marker is any outdoor-style `e_*.actor` (ghostfire or catalog
+ * sprites).  Do not use ghostfire-only: that let an old bin ghostfire twin
+ * overwrite a freshly saved catalog-actor SCE.
  */
+static bool vm_net_mock_dream_sce_path_has_kind3_combat(const char *path)
+{
+    return vm_net_mock_path_bytes_contain(path, "e_") &&
+           vm_net_mock_path_bytes_contain(path, ".actor");
+}
+
 static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene)
 {
     char leaf[96];
@@ -745,10 +891,10 @@ static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene)
     char binSce[288];
     const char *dot = NULL;
     const char *donor = NULL;
-    bool webBareGf = false;
-    bool webSceGf = false;
-    bool binBareGf = false;
-    bool binSceGf = false;
+    bool webBareK3 = false;
+    bool webSceK3 = false;
+    bool binBareK3 = false;
+    bool binSceK3 = false;
     u32 healed = 0;
 
     if (scene == NULL || scene[0] != '2' || scene[1] != '9')
@@ -761,47 +907,59 @@ static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene)
     snprintf(webSce, sizeof(webSce), "../web/fs/JHOnlineData/%s.sce", leaf);
     snprintf(binBare, sizeof(binBare), "JHOnlineData/%s", leaf);
     snprintf(binSce, sizeof(binSce), "JHOnlineData/%s.sce", leaf);
-    webBareGf = vm_net_mock_path_bytes_contain(webBare, "e_ghostfire");
-    webSceGf = vm_net_mock_path_bytes_contain(webSce, "e_ghostfire");
-    binBareGf = vm_net_mock_path_bytes_contain(binBare, "e_ghostfire");
-    binSceGf = vm_net_mock_path_bytes_contain(binSce, "e_ghostfire");
-    if (webSceGf)
+    webBareK3 = vm_net_mock_dream_sce_path_has_kind3_combat(webBare);
+    webSceK3 = vm_net_mock_dream_sce_path_has_kind3_combat(webSce);
+    binBareK3 = vm_net_mock_dream_sce_path_has_kind3_combat(binBare);
+    binSceK3 = vm_net_mock_dream_sce_path_has_kind3_combat(binSce);
+    /*
+     * Prefer web (admin write / WT18 authority) over bin when both have
+     * kind3, so a stale ghostfire bin cannot clobber catalog sprites.
+     */
+    if (webSceK3)
         donor = webSce;
-    else if (webBareGf)
+    else if (webBareK3)
         donor = webBare;
-    else if (binSceGf)
+    else if (binSceK3)
         donor = binSce;
-    else if (binBareGf)
+    else if (binBareK3)
         donor = binBare;
     else
         return;
-    if (!webBareGf && vm_net_mock_copy_file_raw(donor, webBare))
-        healed += 1u;
-    if (!webSceGf && vm_net_mock_copy_file_raw(donor, webSce))
-        healed += 1u;
-    if (!binBareGf && vm_net_mock_copy_file_raw(donor, binBare))
-        healed += 1u;
-    if (!binSceGf && vm_net_mock_copy_file_raw(donor, binSce))
-        healed += 1u;
+    /*
+     * Web donor (admin save): always refresh bin twins so stale ghostfire
+     * bin cannot remain the WT/local authority on the next heal.
+     * Bin-only donor: only fill missing/stock web twins.
+     */
+    if (donor == webSce || donor == webBare)
+    {
+        if ((!webBareK3 || strcmp(donor, webBare) != 0) &&
+            vm_net_mock_copy_file_raw(donor, webBare))
+            healed += 1u;
+        if ((!webSceK3 || strcmp(donor, webSce) != 0) &&
+            vm_net_mock_copy_file_raw(donor, webSce))
+            healed += 1u;
+        if (vm_net_mock_copy_file_raw(donor, binBare))
+            healed += 1u;
+        if (vm_net_mock_copy_file_raw(donor, binSce))
+            healed += 1u;
+    }
+    else
+    {
+        if (!webBareK3 && vm_net_mock_copy_file_raw(donor, webBare))
+            healed += 1u;
+        if (!webSceK3 && vm_net_mock_copy_file_raw(donor, webSce))
+            healed += 1u;
+        if (!binBareK3 && vm_net_mock_copy_file_raw(donor, binBare))
+            healed += 1u;
+        if (!binSceK3 && vm_net_mock_copy_file_raw(donor, binSce))
+            healed += 1u;
+    }
     if (healed == 0u)
         return;
     printf("[info][network] mock_dream_sce_heal_kind3 scene=%s donor=%s "
            "healed=%u action=sync-web-bin-twins "
            "evidence=debug-191169-web-fs-stock-278-vs-bin-kind3\n",
            leaf, donor, healed);
-    /* #region agent log */
-    {
-        char dataBuf[220];
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"scene\":\"%.48s\",\"donor\":\"%.64s\",\"healed\":%u,"
-                 "\"webBareGf\":%u,\"webSceGf\":%u,\"binBareGf\":%u,"
-                 "\"binSceGf\":%u}",
-                 leaf, donor, healed, webBareGf ? 1u : 0u, webSceGf ? 1u : 0u,
-                 binBareGf ? 1u : 0u, binSceGf ? 1u : 0u);
-        agent_dbg191169_log("H", "mock_server_scene_task.c:heal",
-                            "dream_sce_heal_kind3", dataBuf);
-    }
-    /* #endregion */
     /*
      * Republish so catalog named.version tracks the healed bytes.  Without
      * this, WT18/7 uptodate can keep a prior stamp (debug-191169).
@@ -1099,58 +1257,11 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
         }
         vm_net_mock_sce_combat_spawn_resolve_map_companion(&spawn);
         /*
-         * FB decor family (梦境 / b_29*): stock SCE never places outdoor
-         * combat actors such as e_fireG on these maps.  Proven map sprites
-         * are e_ghostfireB/G (inject v3).  Force map visuals to that pair;
-         * wire id #200.  Catalog displayName stays on the SCE nameplate;
-         * battle stats come from the binding real id.
+         * FB / dream: keep catalog primary + dual companion for map sprites
+         * (same as outdoor).  Wire id stays #200 for ParseMinfo; real id in
+         * bindings.  Former force e_ghostfireB/G hid directory actors
+         * (user: 地图精灵按怪物目录 ID).
          */
-        if (fbScene)
-        {
-            snprintf(spawn.actorResource, sizeof(spawn.actorResource), "%s",
-                     "e_ghostfireB.actor");
-            snprintf(spawn.actorResource2, sizeof(spawn.actorResource2), "%s",
-                     "e_ghostfireG.actor");
-            spawn.visualHint = 0;
-            /*
-             * Dream 29*: hot 518 reenter ParseMinfo faults on some admin
-             * placements (backup y=149/184) while inject v3b cluster
-             * (135,49)/(65,84)/(107,254) reenters Ok (debug-191169).  Snap
-             * each saved point to the nearest proven-safe coordinate so
-             * 使者再进 keeps map spawns without stock-SCE swap.
-             */
-            if (scene[0] == '2' && scene[1] == '9')
-            {
-                static const u16 kDreamSafeX[3] = {135u, 65u, 107u};
-                static const u16 kDreamSafeY[3] = {49u, 84u, 254u};
-                u32 best = 0;
-                u32 bestDist = 0xffffffffu;
-                u32 si = 0;
-                u16 ox = spawn.x;
-                u16 oy = spawn.y;
-
-                for (si = 0; si < 3u; ++si)
-                {
-                    int dx = (int)spawn.x - (int)kDreamSafeX[si];
-                    int dy = (int)spawn.y - (int)kDreamSafeY[si];
-                    u32 dist = (u32)(dx * dx + dy * dy);
-                    if (dist < bestDist)
-                    {
-                        bestDist = dist;
-                        best = si;
-                    }
-                }
-                spawn.x = kDreamSafeX[best];
-                spawn.y = kDreamSafeY[best];
-                if (ox != spawn.x || oy != spawn.y)
-                {
-                    printf("[info][network] mock_dream_spawn_snap_safe "
-                           "scene=%s from=(%u,%u) to=(%u,%u) slot=%u "
-                           "evidence=hot-518-kind3-coord-safe-cluster\n",
-                           scene, ox, oy, spawn.x, spawn.y, best);
-                }
-            }
-        }
         wireActorId = vm_net_mock_sce_combat_spawn_pick_map_wire_id(
             realActorId, fbScene, spawn.actorResource, &fillError);
         if (wireActorId == 0)
@@ -1164,14 +1275,12 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
         }
         spawn.actorId = wireActorId;
         /*
-         * FB / remapped wire rows: SCE field 0x0F must stay the stock wire
-         * nameplate (e.g. #200 → 幽冥鬼火).  Writing catalog custom names
-         * (梦魇) into the nameplate keeps ParseMinfo past resource open but
-         * crashes mmGame ScreenInit (PC jump to unmapped 0x4ad5542,
-         * evidence 2026-07-31).  Custom name/stats remain on the binding
-         * real id for battle remap only.
+         * FB / remapped wire: field 0x0E stays wire-safe (#200 on FB).
+         * Map sprites + displayName come from the catalog real id (filled
+         * above).  Only fill a missing nameplate from the wire stock row.
          */
-        if (fbScene || wireActorId != realActorId)
+        if ((fbScene || wireActorId != realActorId) &&
+            spawn.displayName[0] == 0)
         {
             char stockName[32];
             const char *stockActor = NULL;
@@ -1179,19 +1288,18 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
             u8 stockV1 = 0;
 
             memset(stockName, 0, sizeof(stockName));
-            if (fbScene && wireActorId == 200u)
-            {
-                /* GBK from 25华山洞窟_01 wire#200 (not catalog 梦魇/幽冥). */
-                snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
-                         "\xc1\xb6\xd3\xfc\xb9\xed\xbb\xf0");
-            }
-            else if (vm_net_mock_monster_battle_left_appearance(
-                         wireActorId, stockName, sizeof(stockName), &stockV0,
-                         &stockV1, &stockActor) &&
-                     stockName[0] != 0)
+            if (vm_net_mock_monster_battle_left_appearance(
+                    wireActorId, stockName, sizeof(stockName), &stockV0,
+                    &stockV1, &stockActor) &&
+                stockName[0] != 0)
             {
                 snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
                          stockName);
+            }
+            else if (fbScene && wireActorId == 200u)
+            {
+                snprintf(spawn.displayName, sizeof(spawn.displayName), "%s",
+                         "\xc1\xb6\xd3\xfc\xb9\xed\xbb\xf0");
             }
         }
         if (!vm_net_mock_ensure_actor_resource_published(spawn.actorResource,
@@ -1238,8 +1346,35 @@ static bool vm_net_mock_sce_combat_spawn_admin_save_all(
 
     if (!vm_net_mock_sce_payload_replace_range(
             data, &len, VM_NET_MOCK_SCE_EDIT_DECODE_MAX, replaceStart,
-            replaceEnd, block, blockLen) ||
-        !vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError) ||
+            replaceEnd, block, blockLen))
+    {
+        free(data);
+        free(located);
+        free(block);
+        if (errorOut)
+            *errorOut = "地图刷怪点拼接失败";
+        return false;
+    }
+    /*
+     * FB/dream: keep type=4 battle portal + EOF zero records so admin save
+     * cannot regress to type=1 soft-fail / post-EOF ScreenInit crash.
+     */
+    if (fbScene)
+    {
+        const char *normError = NULL;
+
+        if (!vm_net_mock_sce_normalize_battle_named_portal(
+                data, &len, VM_NET_MOCK_SCE_EDIT_DECODE_MAX, &normError))
+        {
+            free(data);
+            free(located);
+            free(block);
+            if (errorOut)
+                *errorOut = normError ? normError : "梦境战斗传送规范化失败";
+            return false;
+        }
+    }
+    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError) ||
         !vm_net_mock_publish_scene_resource(scene, &publishError))
     {
         free(data);
@@ -1852,32 +1987,8 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
         printf("[info][network] mock_scene_combat_spawn_remap scene=%s "
                "pos=(%u,%u) wire=%u real=%u source=wire-unique\n",
                scene, posx, posy, wireActorId, wireOnly);
-        /* #region agent log */
-        {
-            char dataBuf[192];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"posx\":%u,\"posy\":%u,"
-                     "\"wire\":%u,\"real\":%u,\"slots\":1,\"source\":"
-                     "\"wire-unique\"}",
-                     scene, posx, posy, wireActorId, wireOnly);
-            agent_dbg191169_log("C", "mock_server_scene_task.c:remap",
-                                "combat_spawn_remap_unique", dataBuf);
-        }
-        /* #endregion */
         return wireOnly;
     }
-    /* #region agent log */
-    if (wireOnlyCount != 0u)
-    {
-        char dataBuf[192];
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"scene\":\"%.40s\",\"posx\":%u,\"posy\":%u,"
-                 "\"wire\":%u,\"slots\":%u,\"source\":\"no-remap\"}",
-                 scene ? scene : "", posx, posy, wireActorId, wireOnlyCount);
-        agent_dbg191169_log("C", "mock_server_scene_task.c:remap",
-                            "combat_spawn_remap_miss", dataBuf);
-    }
-    /* #endregion */
     return wireActorId;
 }
 
@@ -8698,8 +8809,10 @@ static bool vm_net_mock_ranking_ensure_pk_points_column(void)
 
 static const char *vm_net_mock_ranking_board_order_column(u8 type)
 {
+    /* type0 等级榜: sort by total exp so same-level progress ranks correctly.
+     * Display metric stays level (see ranking_board_metric). */
     if (type == 0)
-        return "level";
+        return "exp";
     if (type == 1)
         return "money";
     return "pk_points";
@@ -8779,7 +8892,8 @@ static u32 vm_net_mock_ranking_board_metric(u8 type, const vm_net_mock_ranking_r
     if (row == NULL)
         return 0;
     /* Tab names are orderlist entries; type indexes that table.
-     * type0=level, type1=money, type2=pk_points (UI label "PK点数为:"). */
+     * type0 sorted by exp, score shown as level; type1=money;
+     * type2=pk_points (UI label "PK点数为:"). */
     if (type == 0)
         return row->level;
     if (type == 1)

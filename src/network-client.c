@@ -27,28 +27,6 @@ typedef int vm_client_socket;
 #include <stdio.h>
 #include <time.h>
 
-/* #region agent log */
-#ifndef AGENT_DBG191169_LOG_DEFINED
-#define AGENT_DBG191169_LOG_DEFINED
-static void agent_dbg191169_log(const char *hypothesisId, const char *location,
-                                const char *message, const char *dataJson)
-{
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
-    if (fp == NULL)
-        return;
-    fprintf(fp,
-            "{\"sessionId\":\"0b451a\",\"runId\":\"encounter-repreflight\","
-            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
-            "\"data\":%s,\"timestamp\":%lld}\n",
-            hypothesisId ? hypothesisId : "",
-            location ? location : "",
-            message ? message : "",
-            dataJson ? dataJson : "{}",
-            (long long)time(NULL) * 1000LL);
-    fclose(fp);
-}
-#endif
-/* #endregion */
 
 enum
 {
@@ -270,24 +248,6 @@ static u32 vm_net_mock_apply_remote_observation(
                g_vm_scene_allow_one_map_stone_completion_reenter ? 1u : 0u,
                g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
                observation->sceneSubtype);
-        /* #region agent log */
-        if (target.scene[0] == '2' && target.scene[1] == '9')
-        {
-            char dataBuf[220];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"serial\":%u,\"subtype\":%u,\"scene\":\"%.40s\","
-                     "\"x\":%u,\"y\":%u,\"block_dream\":%u,\"gate\":%u,"
-                     "\"this\":%u,\"sce\":\"%.40s\"}",
-                     g_vm_net_mock_last_scene_change_target_serial,
-                     observation->sceneSubtype, target.scene, target.x,
-                     target.y,
-                     g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
-                     (u32)g_vm_dream_enter_scene_gate, g_currentScreenThis,
-                     g_lastSceLoadName);
-            agent_dbg191169_log("E", "network-client.c:scene_target",
-                                "dream_remote_scene_target", dataBuf);
-        }
-        /* #endregion */
     }
 
     if (observation->sceneCompleteAfterCallback &&
@@ -2296,22 +2256,6 @@ static void vm_net_mock_async_drain_completions(void)
                 s_successLogSuppressed += 1u;
             }
         }
-        /* #region agent log */
-        if (completion->responseLen >= 5u &&
-            (completion->kind != VM_CLIENT_JOB_SCENE_POLL ||
-             completion->responseLen >= 40u))
-        {
-            char dataBuf[160];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"connect\":%u,\"event\":%u,\"resp\":%u,\"followup\":%u,"
-                     "\"poll\":%u}",
-                     completion->connectId, completion->eventType,
-                     completion->responseLen, completion->followupLen,
-                     completion->kind == VM_CLIENT_JOB_SCENE_POLL ? 1u : 0u);
-            agent_dbg191169_log("D", "network-client.c:deliver",
-                                "queue_data_primary", dataBuf);
-        }
-        /* #endregion */
         if (completion->followupLen != 0 && completion->followup != NULL)
         {
             u32 followupPtr = vm_net_mock_sync_buffer_to_vm(completion->followup,
@@ -2323,16 +2267,6 @@ static void vm_net_mock_async_drain_completions(void)
                                           channel->callback, channel->context);
                 printf("[info][network] queue_data_followup connect=%u event=7 resp=%u\n",
                        completion->connectId, completion->followupLen);
-                /* #region agent log */
-                {
-                    char dataBuf[96];
-                    snprintf(dataBuf, sizeof(dataBuf),
-                             "{\"connect\":%u,\"resp\":%u}",
-                             completion->connectId, completion->followupLen);
-                    agent_dbg191169_log("E", "network-client.c:deliver",
-                                        "queue_data_followup", dataBuf);
-                }
-                /* #endregion */
             }
         }
         if (completion->closeAfterData)

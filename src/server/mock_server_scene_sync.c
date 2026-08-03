@@ -4177,17 +4177,6 @@ static u32 vm_net_mock_build_instance_enter_response(
                "stock_install=0 keep_kind3=1 "
                "evidence=debug-191169-hot-safe-kind3-coords\n",
                seed->actorId, session->sceneVisibleScene, target.scene);
-        /* #region agent log */
-        {
-            char dataBuf[160];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"from\":\"%.48s\",\"to\":\"%.48s\","
-                     "\"action\":\"keep_kind3\"}",
-                     session->sceneVisibleScene, target.scene);
-            agent_dbg191169_log("Z", "mock_server_scene_sync.c:exit",
-                                "dream_keep_kind3", dataBuf);
-        }
-        /* #endregion */
     }
     if (session != NULL &&
         target.scene[0] == '2' && target.scene[1] == '9')
@@ -4249,27 +4238,16 @@ static u32 vm_net_mock_build_instance_enter_response(
                seed->actorId, target.scene, target.x, target.y,
                seed->challengeEnemyId, pos);
     }
-    /* #region agent log */
+    /*
+     * Drain path often skips WT 2/3 (which marks scene ready).  Without this,
+     * poll clear stays armed for 29* while sceneVisible is still outdoor and
+     * was cancelled as scene-mismatch (debug-0b451a stuck bar).
+     */
     if (target.scene[0] == '2' && target.scene[1] == '9')
     {
-        char dataBuf[280];
-        const char *from =
-            (session != NULL &&
-             vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
-                ? session->sceneVisibleScene
-                : "-";
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"actor\":%u,\"from\":\"%.40s\",\"to\":\"%.40s\","
-                 "\"drain\":%u,\"drain_scene\":\"%.40s\",\"resp\":%u,"
-                 "\"x\":%u,\"y\":%u,\"clear_rem\":%u}",
-                 seed->actorId, from, target.scene, (u32)drainRemaining,
-                 drainScene[0] ? drainScene : "-", pos, target.x, target.y,
-                 (session != NULL) ? (u32)session->mapStoneLoadingClearRemaining
-                                  : 0u);
-        agent_dbg191169_log("E", "mock_server_scene_sync.c:enter",
-                            "dream_instance_enter", dataBuf);
+        (void)vm_mock_service_mark_active_session_scene_ready_from_role(
+            target.scene, "npc-instance-dream-enter");
     }
-    /* #endregion */
     return pos;
 }
 
@@ -4314,16 +4292,6 @@ static u32 vm_net_mock_dream_encounter_smoke_poll(u8 *out, u32 outCap)
                "action=await-messenger-npc-enter "
                "evidence=debug-0b451a-no-poll-30-1\n",
                scene);
-        /* #region agent log */
-        {
-            char dataBuf[120];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"phase\":\"await-messenger\"}",
-                     scene);
-            agent_dbg191169_log("N", "mock_server_scene_sync.c:smoke",
-                                "dream_encounter_smoke_outdoor_ready", dataBuf);
-        }
-        /* #endregion */
         return 0;
     }
 
@@ -4334,15 +4302,6 @@ static u32 vm_net_mock_dream_encounter_smoke_poll(u8 *out, u32 outCap)
         printf("[info][smoke] dream_encounter_smoke dream_ready scene=%s "
                "action=await-client-walk-4/1 path=messenger-npc-enter\n",
                scene);
-        /* #region agent log */
-        {
-            char dataBuf[120];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"path\":\"messenger-npc\"}", scene);
-            agent_dbg191169_log("N", "mock_server_scene_sync.c:smoke",
-                                "dream_encounter_smoke_ready", dataBuf);
-        }
-        /* #endregion */
         return 0;
     }
 
@@ -4800,21 +4759,6 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
            session->instanceChallengeScene, ageTicks,
            session->instanceChallengeBattleWireCount,
            priorWireCount >= 1 ? 1u : 0u, responseLen);
-    /* #region agent log */
-    {
-        char dataBuf[192];
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"actor\":%u,\"enemy\":%u,\"age\":%u,\"wire_count\":%u,"
-                 "\"retry\":%u,\"resp\":%u,\"scene\":\"%.40s\"}",
-                 session->instanceChallengeActorId,
-                 session->instanceChallengeEnemyId, ageTicks,
-                 session->instanceChallengeBattleWireCount,
-                 priorWireCount >= 1 ? 1u : 0u, responseLen,
-                 session->instanceChallengeScene);
-        agent_dbg191169_log("E", "mock_server_scene_sync.c:take",
-                            "challenge_battle_wire_followup", dataBuf);
-    }
-    /* #endregion */
     if (session->instanceChallengeBattleWireCount >= 2)
     {
         /* Second (final) delivery: drop retry arm; battle session stays armed. */
@@ -5687,18 +5631,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                        "evidence=debug-0b451a-messenger-not-poll\n",
                        instanceSeed->actorId, session->sceneVisibleScene,
                        instanceSeed->instanceScene, transferLen);
-                /* #region agent log */
-                {
-                    char dataBuf[160];
-                    snprintf(dataBuf, sizeof(dataBuf),
-                             "{\"actor\":%u,\"resp\":%u,"
-                             "\"path\":\"npc-OPEN-as-ENTER\"}",
-                             instanceSeed->actorId, transferLen);
-                    agent_dbg191169_log(
-                        "N", "mock_server_scene_sync.c:npc",
-                        "dream_encounter_smoke_messenger_enter", dataBuf);
-                }
-                /* #endregion */
                 return transferLen;
             }
             dialogText =
@@ -5750,17 +5682,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                        "evidence=debug-0b451a-exit-then-hot-reenter-fail\n",
                        instanceSeed->actorId, session->sceneVisibleScene,
                        instanceSeed->instanceScene);
-                /* #region agent log */
-                {
-                    char dataBuf[160];
-                    snprintf(dataBuf, sizeof(dataBuf),
-                             "{\"actor\":%u,\"action\":\"hold-exit\"}",
-                             instanceSeed->actorId);
-                    agent_dbg191169_log("N", "mock_server_scene_sync.c:npc",
-                                        "dream_encounter_smoke_hold_exit",
-                                        dataBuf);
-                }
-                /* #endregion */
             }
             /*
              * After dream→outdoor, leave arms outdoor clear + settle_required.

@@ -516,17 +516,6 @@ static bool vm_net_mock_role_relocate_dream_kind3_login(
            "action=outdoor-login-keep-dream-kind3-for-instance "
            "evidence=debug-191169-cold-kind3-screen_init_fail\n",
            role->roleId, from, role->scene, role->x, role->y);
-    /* #region agent log */
-    {
-        char dataBuf[200];
-        snprintf(dataBuf, sizeof(dataBuf),
-                 "{\"role\":%u,\"from\":\"%.48s\",\"to\":\"%.48s\","
-                 "\"x\":%u,\"y\":%u}",
-                 role->roleId, from, role->scene, role->x, role->y);
-        agent_dbg191169_log("L", "mock_server_role.c:relocate",
-                            "dream_kind3_login_relocate", dataBuf);
-    }
-    /* #endregion */
     return true;
 }
 

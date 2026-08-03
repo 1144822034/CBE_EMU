@@ -2189,6 +2189,7 @@ typedef struct
     vm_mock_admin_portal_kind kind;
     char targetScene[64];
     char displayName[64];
+    char battleMapSce[64];
     u16 entryId;
     u16 targetEntryId;
     u16 spawnX;
@@ -2576,6 +2577,8 @@ static bool vm_mock_admin_parse_sce_named_portal_at(
     u16 tileY = 0;
     u16 tileWidth = 0;
     u16 tileHeight = 0;
+    u16 fieldCount = 0;
+    char battleOrPrompt[128];
 
     if (data == NULL || portal == NULL || off + 12 > len)
         return false;
@@ -2583,9 +2586,62 @@ static bool vm_mock_admin_parse_sce_named_portal_at(
     portal->kind = VM_MOCK_ADMIN_PORTAL_NAMED;
     portal->entryId = 0xffff;
     portal->targetEntryId = 0xffff;
+    memset(battleOrPrompt, 0, sizeof(battleOrPrompt));
     kind = vm_net_mock_read_le16_at(data, pos);
     pos += 2;
-    if (kind == 4)
+    /*
+     * Proven dream/peach F094 battle portal (debug-0b451a):
+     *   04 00 <auxX> <auxY> 04 00 03 00 12 00 <b_*.sce> 01 00 15 … 16 … 17 …
+     * Legacy stub: 01 00 04 00 0e 00 26 00 04 00 03 00 12 00 …
+     */
+    if (kind == 4 && off + 12u <= len &&
+        vm_net_mock_read_le16_at(data, off + 6u) == 4 &&
+        vm_net_mock_read_le16_at(data, off + 8u) == 3 &&
+        vm_net_mock_read_le16_at(data, off + 10u) == 0x12)
+    {
+        tileX = vm_net_mock_read_le16_at(data, off + 2u);
+        tileY = vm_net_mock_read_le16_at(data, off + 4u);
+        fieldCount = vm_net_mock_read_le16_at(data, off + 6u);
+        tileWidth = 4u;
+        tileHeight = 4u;
+        pos = off + 8u;
+        if (fieldCount == 0 ||
+            !vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
+                                                 battleOrPrompt,
+                                                 sizeof(battleOrPrompt)))
+        {
+            return false;
+        }
+        if (vm_net_mock_str_ends_with(battleOrPrompt, ".sce"))
+        {
+            snprintf(portal->battleMapSce, sizeof(portal->battleMapSce), "%s",
+                     battleOrPrompt);
+        }
+    }
+    else if (kind == 1 && off + 14u <= len &&
+             vm_net_mock_read_le16_at(data, off + 2u) == 4 &&
+             vm_net_mock_read_le16_at(data, off + 8u) == 4 &&
+             vm_net_mock_read_le16_at(data, off + 10u) == 3 &&
+             vm_net_mock_read_le16_at(data, off + 12u) == 0x12)
+    {
+        tileX = vm_net_mock_read_le16_at(data, off + 4u);
+        tileY = vm_net_mock_read_le16_at(data, off + 6u);
+        tileWidth = 4u;
+        tileHeight = 4u;
+        pos = off + 10u;
+        if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
+                                                 battleOrPrompt,
+                                                 sizeof(battleOrPrompt)))
+        {
+            return false;
+        }
+        if (vm_net_mock_str_ends_with(battleOrPrompt, ".sce"))
+        {
+            snprintf(portal->battleMapSce, sizeof(portal->battleMapSce), "%s",
+                     battleOrPrompt);
+        }
+    }
+    else if (kind == 4)
     {
         if (pos + 8 > len)
             return false;
@@ -2594,6 +2650,37 @@ static bool vm_mock_admin_parse_sce_named_portal_at(
         tileWidth = vm_net_mock_read_le16_at(data, pos + 4);
         tileHeight = vm_net_mock_read_le16_at(data, pos + 6);
         pos += 8;
+        if (tileWidth == 0 || tileHeight == 0)
+            return false;
+        if (pos + 3 <= len && vm_net_mock_read_le16_at(data, pos) == 0x12)
+        {
+            pos += 2;
+            if (!vm_net_mock_read_sce_len_string(data, len, &pos, battleOrPrompt,
+                                                 sizeof(battleOrPrompt)))
+            {
+                return false;
+            }
+            if (vm_net_mock_str_ends_with(battleOrPrompt, ".sce"))
+            {
+                snprintf(portal->battleMapSce, sizeof(portal->battleMapSce),
+                         "%s", battleOrPrompt);
+            }
+        }
+        else if (pos + 5 <= len && vm_net_mock_read_le16_at(data, pos) == 3 &&
+                 vm_net_mock_read_le16_at(data, pos + 2) == 0x12)
+        {
+            if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
+                                                     battleOrPrompt,
+                                                     sizeof(battleOrPrompt)))
+            {
+                return false;
+            }
+            if (vm_net_mock_str_ends_with(battleOrPrompt, ".sce"))
+            {
+                snprintf(portal->battleMapSce, sizeof(portal->battleMapSce),
+                         "%s", battleOrPrompt);
+            }
+        }
     }
     else
     {
@@ -2604,32 +2691,22 @@ static bool vm_mock_admin_parse_sce_named_portal_at(
         tileWidth = vm_net_mock_read_le16_at(data, pos + 6);
         tileHeight = vm_net_mock_read_le16_at(data, pos + 8);
         pos += 10;
-    }
-    if (tileWidth == 0 || tileHeight == 0)
-        return false;
-
-    /* Named portals optionally carry a field-0x12 interaction prompt. */
-    if (kind == 4 && pos + 3 <= len &&
-        vm_net_mock_read_le16_at(data, pos) == 0x12)
-    {
-        char ignoredPrompt[128];
-        pos += 2;
-        if (!vm_net_mock_read_sce_len_string(data, len, &pos,
-                                             ignoredPrompt,
-                                             sizeof(ignoredPrompt)))
-        {
+        if (tileWidth == 0 || tileHeight == 0)
             return false;
-        }
-    }
-    else if (pos + 5 <= len && vm_net_mock_read_le16_at(data, pos) == 3 &&
-             vm_net_mock_read_le16_at(data, pos + 2) == 0x12)
-    {
-        char ignoredPrompt[128];
-        if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
-                                                 ignoredPrompt,
-                                                 sizeof(ignoredPrompt)))
+        if (pos + 5 <= len && vm_net_mock_read_le16_at(data, pos) == 3 &&
+            vm_net_mock_read_le16_at(data, pos + 2) == 0x12)
         {
-            return false;
+            if (!vm_mock_admin_read_sce_string_field(data, len, &pos, 0x12,
+                                                     battleOrPrompt,
+                                                     sizeof(battleOrPrompt)))
+            {
+                return false;
+            }
+            if (vm_net_mock_str_ends_with(battleOrPrompt, ".sce"))
+            {
+                snprintf(portal->battleMapSce, sizeof(portal->battleMapSce),
+                         "%s", battleOrPrompt);
+            }
         }
     }
     if (!vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x15,
@@ -3912,7 +3989,7 @@ static void vm_mock_admin_render_content_page(char *response,
             {
                 vm_mock_admin_text_appendf(
                     &page,
-                    " · 入口 -- → %u · 区域 (%u,%u)-(%u,%u)\"><span class=\"portal-label\">",
+                    " · 入口 -- → %u · 区域 (%u,%u)-(%u,%u)",
                     portal->targetEntryId, portal->left, portal->top,
                     portal->right, portal->bottom);
             }
@@ -3920,10 +3997,19 @@ static void vm_mock_admin_render_content_page(char *response,
             {
                 vm_mock_admin_text_appendf(
                     &page,
-                    " · 入口 %u → %u · 区域 (%u,%u)-(%u,%u)\"><span class=\"portal-label\">",
+                    " · 入口 %u → %u · 区域 (%u,%u)-(%u,%u)",
                     portal->entryId, portal->targetEntryId,
                     portal->left, portal->top, portal->right, portal->bottom);
             }
+            if (portal->battleMapSce[0] != 0)
+            {
+                char battleUtf8[192];
+                vm_net_mock_gbk_label_to_utf8(portal->battleMapSce, battleUtf8,
+                                              sizeof(battleUtf8));
+                vm_mock_admin_text_appendf(&page, " · 战斗图 ");
+                vm_mock_admin_text_append_html(&page, battleUtf8);
+            }
+            vm_mock_admin_text_appendf(&page, "\"><span class=\"portal-label\">");
             if (displayNameUtf8[0] != 0)
             {
                 vm_mock_admin_text_append_html(&page, displayNameUtf8);
@@ -4066,6 +4152,14 @@ static void vm_mock_admin_render_content_page(char *response,
                 vm_mock_admin_text_appendf(&page, " → ");
             }
             vm_mock_admin_text_append_html(&page, targetSceneUtf8);
+            if (portal->battleMapSce[0] != 0)
+            {
+                char battleUtf8[192];
+                vm_net_mock_gbk_label_to_utf8(portal->battleMapSce, battleUtf8,
+                                              sizeof(battleUtf8));
+                vm_mock_admin_text_appendf(&page, " · 战斗图 ");
+                vm_mock_admin_text_append_html(&page, battleUtf8);
+            }
             if (portal->entryId == 0xffff)
             {
                 vm_mock_admin_text_appendf(
@@ -4172,10 +4266,11 @@ static void vm_mock_admin_render_content_page(char *response,
             "<div class=\"preview\" style=\"margin-bottom:16px\"><div class=\"preview-head\">"
             "<strong>地图刷怪点</strong><span class=\"badge\">SCE kind=3 · %u%s</span></div>"
             "<p class=\"foot\" style=\"margin:0 0 8px\">写入本地 SCE 战斗点并发布 WT18/7；决定地图上能否看到/踩到怪。"
-            "填怪物目录中的 ID（含自定义）；开战属性取自该 ID。"
-            "梦境 FB 图：SCE 线号固定 #200，地图精灵固定 ghostfire，"
-            "<strong>名牌也固定线号存量名</strong>（如幽冥鬼火）——自定义名写进 SCE 会在进图 ScreenInit 闪退。"
-            "自定义「梦魇」等只作用于开战 remap。保存会发布场景与内嵌 .map。</p>"
+            "填怪物目录中的 ID（含自定义）；开战属性与地图精灵取自该 ID 的 Actor。"
+            "梦境 FB 图：SCE 线号仍固定 #200（ParseMinfo）；"
+            "<strong>名牌/地图精灵使用怪物目录显示名与 Actor</strong>；"
+            "开战 leftId/leftName 用真实目录 ID/名。"
+            "保存会发布场景与内嵌 .map。</p>"
             "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-scene-combat-spawns\">"
             "<input type=\"hidden\" name=\"scene\" value=\"",
             previewCombatCount,
@@ -4259,8 +4354,57 @@ static void vm_mock_admin_render_content_page(char *response,
             "<div class=\"preview\" style=\"margin-bottom:16px\"><div class=\"preview-head\">"
             "<strong>传送点编辑</strong><span class=\"badge\">边缘传送 %u</span></div>"
             "<p class=\"foot\" style=\"margin:0 0 8px\">修改会重写 SCE 并发布资源；客户端需重新下载场景。"
-            "落脚点写入目标场景中相同 entryId 的 spawn。</p><div class=\"portal-edit\">",
+            "落脚点写入目标场景中相同 entryId 的 spawn。"
+            "梦境/FB 具名传送的 <code>type=4</code> 战斗图字段（0x12=<code>b_*.sce</code>）"
+            "与 EOF 空记录由「地图刷怪点」保存时自动规范化，勿改回 type=1。</p>"
+            "<div class=\"portal-edit\">",
             edgePortalCount);
+        for (u32 i = 0; i < previewPortalCount; ++i)
+        {
+            const vm_mock_admin_scene_portal *portal = &previewPortalRows[i];
+            char targetUtf8[192];
+            char nameUtf8[192];
+            char battleUtf8[192];
+
+            if (portal->kind != VM_MOCK_ADMIN_PORTAL_NAMED)
+                continue;
+            memset(targetUtf8, 0, sizeof(targetUtf8));
+            memset(nameUtf8, 0, sizeof(nameUtf8));
+            memset(battleUtf8, 0, sizeof(battleUtf8));
+            vm_net_mock_gbk_label_to_utf8(portal->targetScene, targetUtf8,
+                                          sizeof(targetUtf8));
+            vm_net_mock_gbk_label_to_utf8(portal->displayName, nameUtf8,
+                                          sizeof(nameUtf8));
+            if (portal->battleMapSce[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(portal->battleMapSce, battleUtf8,
+                                              sizeof(battleUtf8));
+            vm_mock_admin_text_appendf(
+                &page,
+                "<div class=\"portal-card\"><h3>具名/战斗传送（只读）");
+            if (nameUtf8[0] != 0)
+            {
+                vm_mock_admin_text_appendf(&page, " · ");
+                vm_mock_admin_text_append_html(&page, nameUtf8);
+            }
+            vm_mock_admin_text_appendf(&page, " → ");
+            vm_mock_admin_text_append_html(&page, targetUtf8);
+            vm_mock_admin_text_appendf(
+                &page,
+                "</h3><p class=\"foot\" style=\"margin:0\">exit %u · 区域 (%u,%u)-(%u,%u)",
+                portal->targetEntryId, portal->left, portal->top, portal->right,
+                portal->bottom);
+            if (battleUtf8[0] != 0)
+            {
+                vm_mock_admin_text_appendf(&page, " · 战斗图 <code>");
+                vm_mock_admin_text_append_html(&page, battleUtf8);
+                vm_mock_admin_text_appendf(&page, "</code>");
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(&page, " · 战斗图（无）");
+            }
+            vm_mock_admin_text_appendf(&page, "</p></div>");
+        }
         for (u32 i = 0; i < previewPortalCount; ++i)
         {
             const vm_mock_admin_scene_portal *portal = &previewPortalRows[i];

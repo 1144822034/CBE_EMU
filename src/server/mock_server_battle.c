@@ -12302,30 +12302,6 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             requestedEnemyId = wireEnemyId;
         enemyWireId = vm_net_mock_resolve_battle_enemy_id(
             wireEnemyId, &enemyTable, enemyTableIds);
-        /* #region agent log */
-        {
-            char dataBuf[280];
-            u8 dreamScene =
-                (remapScene != NULL &&
-                 ((remapScene[0] == '2' && remapScene[1] == '9') ||
-                  (remapScene[0] == 'b' && remapScene[1] == '_' &&
-                   remapScene[2] == '2' && remapScene[3] == '9')))
-                    ? 1u
-                    : 0u;
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"wire\":%u,\"real\":%u,"
-                     "\"index\":%u,\"posx\":%u,\"posy\":%u,"
-                     "\"use_scene\":%u,\"dream\":%u,\"remap\":%u,"
-                     "\"has_moveinfo\":%u}",
-                     remapScene ? remapScene : "",
-                     wireEnemyId, requestedEnemyId, index, posx, posy,
-                     useSceneMonsterStart ? 1u : 0u, dreamScene,
-                     (requestedEnemyId != wireEnemyId) ? 1u : 0u,
-                     hasMoveinfo ? 1u : 0u);
-            agent_dbg191169_log("B", "mock_server_battle.c:4/1",
-                                "dream_encounter_remap_probe", dataBuf);
-        }
-        /* #endregion */
         /*
          * Hyp M REJECTED (debug-0b451a messenger-enter self-test): late
          * 27/12-ack primary + followup 4/10 on dream 4/1 still ran hot518
@@ -12629,22 +12605,6 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                prefillPlayerTemplate ? 1u : 0u,
                prefillEnemyTemplate ? 1u : 0u,
                responseObjectCount);
-        /* #region agent log */
-        {
-            char dataBuf[240];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"wire\":%u,\"real\":%u,\"subtype\":%u,\"scene_start\":%u,"
-                     "\"index\":%u,\"posx\":%u,\"posy\":%u,\"objects\":%u,"
-                     "\"resp\":%u,\"source\":\"%.40s\"}",
-                     id, requestedEnemyId, battleStartSubtype,
-                     useSceneMonsterStart ? 1u : 0u, sceneMonsterIndex,
-                     sceneMonsterPosX, sceneMonsterPosY, responseObjectCount,
-                     pos, sceneMonsterTargetSource ? sceneMonsterTargetSource
-                                                   : "-");
-            agent_dbg191169_log("A", "mock_server_battle.c:4/1",
-                                "challenge_battle_start_packet", dataBuf);
-        }
-        /* #endregion */
         if (g_mockBattleAutoPrefer != 0 && teamBattlePartyCount < 2)
         {
             printf("[info][network] mock_challenge_battle_auto prefer=1 last=%u "

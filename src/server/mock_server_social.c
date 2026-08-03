@@ -1798,13 +1798,29 @@ static bool vm_net_mock_is_scene_change_post_enter_followup_request(const u8 *re
 {
     u32 offset = 4;
     vm_net_mock_request_object object;
+    bool sawFb11 = false;
+    bool sawFb4 = false;
+    bool sawBooks = false;
+    bool sawSkillBooks = false;
+    bool sawExtra25_5 = false;
+    u32 count = 0;
 
+    /*
+     * Classic outdoor: 25/5 + 2/3{map*} + 27/11 + 7/42 (len≈75 for 29*).
+     * Dream/instance DF follow-up (debug-0b451a): objs=5 / len=80 with one
+     * extra empty companion after 7/42.  Runtime kinds were
+     * `25/5 + 2/3 + 27/11 + 7/42 + 25/5` (not 27/4).  Also allow optional
+     * 27/4 or 12/1 seen on related completion families.  Old exact-4 matcher
+     * missed → unimplemented tip「1/25/5」while pending blocked mmgame.
+     */
     if (request == NULL || requestLen < 30)
         return false;
     if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
         return false;
-    if (object.major != 1 || object.kind != 0x19 || object.subtype != 5 || object.payloadLen != 0)
+    if (object.major != 1 || object.kind != 0x19 || object.subtype != 5 ||
+        object.payloadLen != 0)
         return false;
+    ++count;
     if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
         return false;
     if (object.major != 1 || object.kind != 2 || object.subtype != 3)
@@ -1815,17 +1831,52 @@ static bool vm_net_mock_is_scene_change_post_enter_followup_request(const u8 *re
     {
         return false;
     }
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    ++count;
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        ++count;
+        if (count > 5)
+            return false;
+        if (object.major != 1)
+            return false;
+        if (object.kind == 0x1b && object.subtype == 11 && object.payloadLen == 0)
+        {
+            if (sawFb11)
+                return false;
+            sawFb11 = true;
+        }
+        else if (object.kind == 0x1b && object.subtype == 4)
+        {
+            if (sawFb4)
+                return false;
+            sawFb4 = true;
+        }
+        else if (object.kind == 7 && object.subtype == 42 && object.payloadLen == 0)
+        {
+            if (sawBooks)
+                return false;
+            sawBooks = true;
+        }
+        else if (object.kind == 0x0c && object.subtype == 1 && object.payloadLen == 0)
+        {
+            if (sawSkillBooks)
+                return false;
+            sawSkillBooks = true;
+        }
+        else if (object.kind == 0x19 && object.subtype == 5 && object.payloadLen == 0)
+        {
+            /* Trailing duplicate scene-default keep-alive coalesced into the
+             * post-enter WT (debug-0b451a kinds=...+1/25/5:0). */
+            if (sawExtra25_5)
+                return false;
+            sawExtra25_5 = true;
+        }
+        else
+            return false;
+    }
+    if (offset != requestLen || !sawFb11 || !sawBooks || count < 4)
         return false;
-    if (object.major != 1 || object.kind != 0x1b || object.subtype != 11)
-        return false;
-    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    if (object.major != 1 || object.kind != 7 || object.subtype != 42)
-        return false;
-    if (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
-        return false;
-    return offset == requestLen;
+    return true;
 }
 
 static bool vm_net_mock_is_actor_other_scene_change_post_enter_request(const u8 *request, u32 requestLen)
@@ -2023,17 +2074,6 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
                "action=25/5+27/11+27/4+7/42+arm-poll-clear "
                "evidence=debug-0b451a-27/12-ack-enter-crash\n",
                target.scene, target.x, target.y, objectCount, pos);
-        /* #region agent log */
-        {
-            char dataBuf[160];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"objects\":%u,\"resp\":%u,"
-                     "\"path\":\"no-27/12\"}",
-                     target.scene, (u32)objectCount, pos);
-            agent_dbg191169_log("H", "mock_server_social.c:post_enter",
-                                "dream_post_enter_no_27_12", dataBuf);
-        }
-        /* #endregion */
         return pos;
     }
 
@@ -2519,19 +2559,6 @@ static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(co
                target.scene, target.x, target.y, pos, requestLen,
                isShort25_5 ? 1u : 0u, isLone25_5 ? 1u : 0u,
                g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u);
-        /* #region agent log */
-        {
-            char dataBuf[200];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"scene\":\"%.40s\",\"resp\":%u,\"req_len\":%u,"
-                     "\"short\":%u,\"lone\":%u,\"target_valid\":%u}",
-                     target.scene, pos, requestLen,
-                     isShort25_5 ? 1u : 0u, isLone25_5 ? 1u : 0u,
-                     g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u);
-            agent_dbg191169_log("I", "mock_server_social.c:direct_enter_ack",
-                                "dream_direct_enter_25_5_ack", dataBuf);
-        }
-        /* #endregion */
         vm_autotest_note("mock_teleport_stone_direct_enter_ack scene=%s "
                          "keep_pending=1 response=25/5-result4-only "
                          "action=dream-no-second-30/1\n",
@@ -2540,11 +2567,15 @@ static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(co
     }
 
     if (!g_vm_net_mock_last_scene_change_target_valid)
+    {
         return 0;
+    }
 
     len = vm_net_mock_build_scene_default_event_response(out, outCap);
     if (len == 0)
+    {
         return 0;
+    }
 
     printf("[info][network] mock_teleport_stone_direct_enter_ack scene=%s pos=(%u,%u) keep_pending=1 resp=%u\n",
            target.scene, target.x, target.y, len);
@@ -5733,16 +5764,6 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
      */
     if (session->mmShopShellActive)
     {
-        /* #region agent log */
-        {
-            char dataBuf[96];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"reason\":\"mmShop\",\"rem\":%u}",
-                     (u32)session->mapStoneLoadingClearRemaining);
-            agent_dbg191169_log("F", "mock_server_social.c:clear",
-                                "loading_clear_hold", dataBuf);
-        }
-        /* #endregion */
         return 0;
     }
     /*
@@ -5766,37 +5787,6 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
              g_vm_net_mock_teleport_stone_direct_enter_pending) ||
             (!dream29Clear && g_vm_net_mock_last_scene_change_target_valid))
         {
-            /* #region agent log */
-            if (dream29Clear)
-            {
-                static u32 s_holdLogTick = 0;
-                if (s_holdLogTick == 0 ||
-                    g_schedulerTick - s_holdLogTick >= 30u)
-                {
-                    char dataBuf[220];
-                    s_holdLogTick = g_schedulerTick;
-                    snprintf(dataBuf, sizeof(dataBuf),
-                             "{\"reason\":\"transfer-hold\",\"dream\":1,"
-                             "\"pending\":%u,\"deferred\":%u,\"direct\":%u,"
-                             "\"target_valid\":%u,\"rem\":%u,"
-                             "\"scene\":\"%.40s\"}",
-                             session->sceneVisiblePending ? 1u : 0u,
-                             g_vm_net_mock_teleport_stone_deferred_enter_valid
-                                 ? 1u
-                                 : 0u,
-                             g_vm_net_mock_teleport_stone_direct_enter_pending
-                                 ? 1u
-                                 : 0u,
-                             g_vm_net_mock_last_scene_change_target_valid
-                                 ? 1u
-                                 : 0u,
-                             (u32)session->mapStoneLoadingClearRemaining,
-                             session->mapStoneLoadingClearScene);
-                    agent_dbg191169_log("F", "mock_server_social.c:clear",
-                                        "loading_clear_hold", dataBuf);
-                }
-            }
-            /* #endregion */
             return 0;
         }
     }
@@ -5856,18 +5846,21 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
     if (currentScene == NULL ||
         !vm_net_mock_scene_names_equal_loose(currentScene, sceneBuf))
     {
-        /* #region agent log */
+        /*
+         * Outdoor→29* drain arms dream clear before sceneVisible flips.
+         * Cancelling rem>0 drops ResetDownloadState and sticks the bar
+         * (debug-0b451a: clear=29* visible=c04临安 after ScreenInit Ok).
+         */
+        bool dreamClear =
+            sceneBuf[0] == '2' && sceneBuf[1] == '9';
+        bool visibleNotDream =
+            currentScene != NULL &&
+            !(currentScene[0] == '2' && currentScene[1] == '9');
+        if (dreamClear && visibleNotDream &&
+            session->mapStoneLoadingClearRemaining > 0u)
         {
-            char dataBuf[200];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"reason\":\"scene-mismatch\",\"clear\":\"%.40s\","
-                     "\"visible\":\"%.40s\",\"rem\":%u}",
-                     sceneBuf, currentScene ? currentScene : "-",
-                     (u32)session->mapStoneLoadingClearRemaining);
-            agent_dbg191169_log("F", "mock_server_social.c:clear",
-                                "loading_clear_cancel", dataBuf);
+            return 0;
         }
-        /* #endregion */
         vm_mock_service_session_cancel_map_stone_loading_clear(
             session, "scene-mismatch");
         return 0;
@@ -5894,18 +5887,6 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
                    session->clientId, sceneBuf, ageTicks,
                    (u32)session->mapStoneLoadingClearRemaining, pos,
                    waitWt6Timeout ? " reason=wait_wt6-timeout" : "");
-            /* #region agent log */
-            {
-                char dataBuf[160];
-                snprintf(dataBuf, sizeof(dataBuf),
-                         "{\"scene\":\"%.40s\",\"age\":%u,\"rem\":%u,"
-                         "\"resp\":%u,\"final\":0}",
-                         sceneBuf, ageTicks,
-                         (u32)session->mapStoneLoadingClearRemaining, pos);
-                agent_dbg191169_log("F", "mock_server_social.c:clear",
-                                    "loading_clear_ok", dataBuf);
-            }
-            /* #endregion */
         }
         else
         {
@@ -5926,17 +5907,6 @@ static u32 vm_net_mock_build_pending_map_stone_loading_clear_response(
                        "age_ticks=%u remaining=0 resp=%u evidence=30/2-no-posinfo-after-map-stone-2/3\n",
                        session->clientId, sceneBuf, ageTicks, pos);
             }
-            /* #region agent log */
-            {
-                char dataBuf[160];
-                snprintf(dataBuf, sizeof(dataBuf),
-                         "{\"scene\":\"%.40s\",\"age\":%u,\"rem\":0,"
-                         "\"resp\":%u,\"final\":1}",
-                         sceneBuf, ageTicks, pos);
-                agent_dbg191169_log("F", "mock_server_social.c:clear",
-                                    "loading_clear_ok", dataBuf);
-            }
-            /* #endregion */
         }
     }
     return pos;
@@ -7574,22 +7544,23 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
     if (enemyId == 0)
         enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
     /*
-     * Custom catalog ids are not Battle.cbm enemy templates.  Subtype-10
-     * leftId must be a wire-safe stock id (FB bindings → #200); HP/name stats
-     * still come from the real enemyId below.
+     * Trial (user 2026-08-03): send real catalog id as subtype-10 leftId
+     * (e.g. 204) instead of wire-safe #200.  Name/HP still from real enemyId.
+     * If Battle.cbm lacks a template for custom ids, expect portrait/crash —
+     * revert to wire leftId with runtime evidence.
      */
     if (vm_net_mock_monster_catalog_is_custom(enemyId))
     {
         u32 wireId = vm_net_mock_sce_combat_spawn_wire_for_real(
             vm_net_mock_current_scene_name(), enemyId);
-        if (wireId != 0 && wireId != enemyId)
-            appearanceEnemyId = wireId;
-        else
-            appearanceEnemyId = VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB;
+        if (wireId == 0)
+            wireId = VM_NET_MOCK_SCE_COMBAT_MAP_WIRE_FB;
+        /* Keep appearanceEnemyId = enemyId (real) for leftId/rightId. */
+        appearanceEnemyId = enemyId;
         memset(monsterName, 0, sizeof(monsterName));
         monsterActorResource = NULL;
         monsterAppearance = vm_net_mock_monster_battle_left_appearance(
-            appearanceEnemyId, monsterName, sizeof(monsterName), NULL, NULL,
+            enemyId, monsterName, sizeof(monsterName), NULL, NULL,
             &monsterActorResource);
         leftNameDefault =
             (monsterAppearance && monsterName[0] != 0) ? monsterName : "Monster";
@@ -7624,9 +7595,9 @@ static u32 vm_net_mock_build_battle_start_info_blob(u8 *out, u32 outCap,
      *
      * Left name = display GBK.  visual defaults to 0/1 (crash-safe 女天机
      * portrait).  0/0 null-derefs; SCE field-16 mis-maps to player jobs.
-     * Catalog actor logged only.  Custom enemies keep wire-safe leftId.
+     * Catalog actor logged only.  Trial: custom enemies use real leftId.
      */
-    printf("[info][network] mock_battle_start_info enemy=%u wire=%u name=%s "
+    printf("[info][network] mock_battle_start_info enemy=%u leftId=%u name=%s "
            "display=%s visual=%u/%u appearance=%u actor=%s\n",
            enemyId,
            appearanceEnemyId,

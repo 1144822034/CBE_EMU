@@ -27,28 +27,6 @@
 #include "../mysql-client.h"
 #include "../md5.h"
 
-/* #region agent log */
-#ifndef AGENT_DBG191169_LOG_DEFINED
-#define AGENT_DBG191169_LOG_DEFINED
-static void agent_dbg191169_log(const char *hypothesisId, const char *location,
-                                const char *message, const char *dataJson)
-{
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
-    if (fp == NULL)
-        return;
-    fprintf(fp,
-            "{\"sessionId\":\"0b451a\",\"runId\":\"encounter-repreflight\","
-            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
-            "\"data\":%s,\"timestamp\":%lld}\n",
-            hypothesisId ? hypothesisId : "",
-            location ? location : "",
-            message ? message : "",
-            dataJson ? dataJson : "{}",
-            (long long)time(NULL) * 1000LL);
-    fclose(fp);
-}
-#endif
-/* #endregion */
 
 typedef struct
 {
@@ -4378,32 +4356,6 @@ static u32 vm_net_mock_build_update_chunk_response_for_subtype(const u8 *request
            responseVersion,
            sourcePathUtf8,
            pos);
-    /* #region agent log */
-    if (responseSubtype == 7 && haveRequestName && requestName[0] == '2' &&
-        requestName[1] == '9')
-    {
-        bool gf = false;
-        u32 i = 0;
-        for (i = 0; i + 11u <= updateLen; ++i)
-        {
-            if (memcmp(updateData + i, "e_ghostfire", 11) == 0)
-            {
-                gf = true;
-                break;
-            }
-        }
-        {
-            char dataBuf[200];
-            snprintf(dataBuf, sizeof(dataBuf),
-                     "{\"file\":\"%.48s\",\"total\":%u,\"version\":%u,"
-                     "\"ghostfire\":%u,\"path\":\"%.80s\"}",
-                     payloadNameUtf8, updateLen, responseVersion,
-                     gf ? 1u : 0u, sourcePathUtf8);
-            agent_dbg191169_log("H", "mock_server_core.c:update_chunk",
-                                "dream_update_chunk", dataBuf);
-        }
-    }
-    /* #endregion */
     if (responseSubtype == 7 && start + chunkLen >= updateLen)
     {
         const char *doneName =
