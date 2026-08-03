@@ -58,11 +58,11 @@ r2 dump @ state+0x80: +0x10 orderlist array = 0
 
 当前 tab：`等级榜` / `财富榜` / `PK榜`（文案仍可能非官方原词）。
 
-| type | 排序/分数字段 | myorder 语义 |
-| --- | --- | --- |
-| 0 | `level` | 名次（UI：当前排名:第） |
-| 1 | `money` | 名次 |
-| 2 | `account_roles.pk_points` | PK 点数（UI：PK点数为:） |
+| type | 排序字段 | 显示分数 | myorder 语义 |
+| --- | --- | --- | --- |
+| 0 | `exp` DESC（总经验多者在前；并列 `role_id` ASC） | `level` | 名次（UI：当前排名:第） |
+| 1 | `money` | `money` | 名次 |
+| 2 | `account_roles.pk_points` | `pk_points` | PK 点数（UI：PK点数为:） |
 
 `pk_points` 默认 0；切磋胜负如何累加仍 `unresolved`，但不再回退到 money。
 
@@ -72,4 +72,4 @@ r2 dump @ state+0x80: +0x10 orderlist array = 0
 - 每条 orderlist：`seq_put_u8(index)` + `seq_put_string(tab)`
 - topplayerinfo 保持 tagged i32 + 两个字符串
 - 启动/查询时 `ALTER` 兼容补齐 `account_roles.pk_points`
-- type0/1/2 分别用 level/money/pk_points 排序与显示
+- type0 按 `exp` 排序、分数仍显示 `level`；type1/2 仍为 money/pk_points

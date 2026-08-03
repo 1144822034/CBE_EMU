@@ -51,4 +51,44 @@
 ## 未决
 
 - subtype-10 立绘仍是 `0/1` 玩家肖像回退；真立绘另证。
-- 冷登录直进梦境踩 remap 同走 followup 管道；若仍崩再取证同包 vs followup。
+
+## 回归（2026-08-02 / debug-0b451a）
+
+进图修复后（无 27/12 post_enter + 无 fresh_shell 1/1/6）踩怪：
+
+```text
+dream_encounter_remap_probe wire=200 real=203 remap=1
+remap_pure_subtype10_armed path=followup-4/10 primary=5 objects=0
+challenge_battle_wire_followup resp=117 (×2)
+queue_data_followup resp=117
+mem_fault fault=64 pc=0x01046C48
+```
+
+**再证伪** HAS_FOLLOWUP `4/10`。
+
+### outdoor-like + remap vitals 仍崩
+
+```text
+dream_remap_outdoor_like path=outdoor-like-4/5
+challenge_battle_start_packet subtype=5 scene_start=1 resp=203
+  source=request-live-node-dream-remap-vitals wire=200 real=203
+mem_fault fault=64 pc=0x01046C48
+```
+
+**再证伪**「wire 走 live-node、real 只供 vitals」的 subtype-5。  
+与上文「无 remap 的存量 `#200` 仍可 `4/5`」一致：梦境热壳上 **开战身份必须 wire==real**。
+
+现行：`dream_wire_keep` —— 丢弃 real remap，全程 `#200` + `25/12+2/2+4/5`。  
+自定义 `real=203` 属性记 unresolved。
+
+### wire-keep outdoor-like 仍崩
+
+```text
+dream_wire_keep_outdoor_like path=outdoor-like-4/5
+challenge_battle_start_packet subtype=5 scene_start=1 resp=209
+  source=request-live-node-dream-wire-keep wire=200 real=200
+mem_fault fault=64 pc=0x01046C48
+```
+
+**再证伪**「仅 wire≠real」。对比分析见 `docs/re/2026-08-02-dream-vs-outdoor-encounter.md`：
+崩溃在 `SetMapCtrlViewport`（场景壳），不是战斗立绘空指针 —— 梦境热壳未切入 mmBattle。

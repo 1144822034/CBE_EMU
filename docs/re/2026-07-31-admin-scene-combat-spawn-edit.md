@@ -18,8 +18,8 @@
 3. 每条刷怪点：
    - **后台 / 战斗真实 ID** ← 怪物目录（含自定义）  
    - **SCE field `0x0E` 线号** ← ParseMinfo 安全键：FB 固定 `#200`；户外优先户外存量 ID / 同主 Actor 模板，否则 `#200`  
-   - **SCE 显示名** ← **线号存量名**（FB `#200`=幽冥鬼火）；自定义名写进 field `0x0F` 会在 mmGame ScreenInit 崩（见下）  
-   - **地图精灵**：FB 强制 `e_ghostfireB/G`；户外按目录主 Actor + dual 模板  
+   - **SCE 显示名** ← 怪物目录显示名（field `0x0F`；type-4/EOF 稳定后可用）  
+   - **地图精灵**：目录主 Actor + dual 模板（不再强制 ghostfire；线号仍 FB=`#200`）  
 4. MySQL `server_scene_combat_spawns`：`(scene,slot) → x,y,wire_actor_id,real_actor_id`  
 5. 碰撞开战：请求里的 wire id + 坐标 → remap 到 `real_actor_id` 再取属性  
 6. 写回并 publish 场景、内嵌 `.map`、Actor 依赖  
