@@ -2756,13 +2756,19 @@ static u32 vm_net_mock_role_job_primary_attr(u32 job, u32 strength, u32 agility,
     return strength;
 }
 
-static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level, u32 job)
+/*
+ * Panel 魅力 (EXTRA132 → actor+0x84) is item-driven (flowers / 花), not
+ * level/job growth or money. Until a persisted role charm + use-item path
+ * exists, seed 0 so unequipped panels match 幻剑/鬼道 (and 天机 without 花).
+ * CBE mid-session level-up still mutates +0x84 locally; next login reseeds.
+ */
+static u16 vm_net_mock_role_charm(const vm_net_mock_role_state *role, u32 level,
+                                  u32 job)
 {
-    u32 money = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
-    u32 value = vm_net_mock_role_derived_attr(level, job, 4) + money / 100000;
-    if (value > 999)
-        value = 999;
-    return (u16)value;
+    (void)role;
+    (void)level;
+    (void)job;
+    return (u16)vm_net_mock_env_u32("CBE_ACTOR_CHARM", 0);
 }
 
 static u32 vm_net_mock_cap_u32(u32 value, u32 cap)
@@ -2874,7 +2880,8 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->baseAgility = vm_net_mock_role_derived_attr(level, job, 1);
     stats->baseWisdom = vm_net_mock_role_derived_attr(level, job, 2);
     stats->baseEndurance = vm_net_mock_role_derived_attr(level, job, 3);
-    stats->baseCharm = vm_net_mock_role_derived_attr(level, job, 4);
+    /* Charm is not a job growth column; see vm_net_mock_role_charm. */
+    stats->baseCharm = vm_net_mock_role_charm(role, level, job);
     /*
      * Primary attrs feed skill coeff damage (??: wisdom�????).
      * Cap at 65535 to match client actor halfwords (u16).
@@ -2886,11 +2893,17 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->wisdom =
         vm_net_mock_cap_u32(stats->baseWisdom + equipment.wisdom, 65535);
     stats->endurance = vm_net_mock_cap_u32(stats->baseEndurance, 65535);
-    stats->charm =
-        vm_net_mock_cap_u32(vm_net_mock_role_charm(role, level, job), 65535);
+    stats->charm = vm_net_mock_cap_u32(stats->baseCharm, 65535);
 
+    /*
+     * HP/MP pools use job growth bases only.  Equipment 智慧 must not feed
+     * maxMp (帽子 +16 智慧×3 曾把战斗/HUD 法力抬高数百); 气血%/法力% and
+     * flat HP/MP live in equipment.hp/mp via collect milestones.  Client
+     * wear-apply percent path also multiplies the bare actor pool, not
+     * wisdom-scaled MP.
+     */
     stats->maxHp = 90 + level * 8 + stats->endurance * 2 + equipment.hp;
-    stats->maxMp = 70 + level * 9 + stats->wisdom * 3 + equipment.mp;
+    stats->maxMp = 70 + level * 9 + stats->baseWisdom * 3 + equipment.mp;
     /*
      * Server battle authority only. Property-panel ?? is actor+0x130 from
      * weapon item+0xFA apply (JianghuOL.CBE:0x0101002E); ?? is +0x132 from
@@ -2926,12 +2939,15 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->resist = vm_net_mock_cap_u32(stats->resist, 9999);
 }
 
-static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change)
+static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change,
+                                                         u32 max_value)
 {
+    if (max_value == 0)
+        max_value = 9999u;
     if (change >= 0)
     {
         uint64_t raised = (uint64_t)value + (uint32_t)change;
-        return raised > 9999u ? 9999u : (u32)raised;
+        return raised > max_value ? max_value : (u32)raised;
     }
     {
         u32 reduction = (u32)(0 - change);
@@ -2954,11 +2970,11 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
     primaryBefore = vm_net_mock_role_job_primary_attr(
         stats->job, stats->strength, stats->agility, stats->wisdom);
     stats->strength = vm_net_mock_battle_apply_signed_stat_change(
-        stats->strength, modifier->strength);
+        stats->strength, modifier->strength, 9999u);
     stats->agility = vm_net_mock_battle_apply_signed_stat_change(
-        stats->agility, modifier->agility);
+        stats->agility, modifier->agility, 9999u);
     stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
-        stats->wisdom, modifier->wisdom);
+        stats->wisdom, modifier->wisdom, 9999u);
     /* Attack tracks job-primary/2 (??? / ??? / ???). Hit/dodge/crit/
      * resist are equipment-only base stats, so only skill.dsh direct combat
      * deltas apply on those. */
@@ -2966,19 +2982,19 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
         stats->job, stats->strength, stats->agility, stats->wisdom);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
         stats->attack, (int32_t)(primaryAfter / 2) -
-                      (int32_t)(primaryBefore / 2));
+                      (int32_t)(primaryBefore / 2), 9999u);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
-        stats->attack, modifier->attack);
+        stats->attack, modifier->attack, 9999u);
     stats->defense = vm_net_mock_battle_apply_signed_stat_change(
-        stats->defense, modifier->defense);
+        stats->defense, modifier->defense, 9999u);
     stats->crit = vm_net_mock_battle_apply_signed_stat_change(
-        stats->crit, modifier->crit);
+        stats->crit, modifier->crit, 9999u);
     stats->hit = vm_net_mock_battle_apply_signed_stat_change(
-        stats->hit, modifier->hit);
+        stats->hit, modifier->hit, 9999u);
     stats->dodge = vm_net_mock_battle_apply_signed_stat_change(
-        stats->dodge, modifier->dodge);
+        stats->dodge, modifier->dodge, 9999u);
     stats->resist = vm_net_mock_battle_apply_signed_stat_change(
-        stats->resist, modifier->resist);
+        stats->resist, modifier->resist, 9999u);
 }
 
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
@@ -4557,7 +4573,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_defense(u32 baseDefense)
     if (idx >= 3 || g_mockBattleEnemyAilments[idx].stat.remainingRounds == 0)
         return baseDefense;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseDefense, g_mockBattleEnemyAilments[idx].stat.defense);
+        baseDefense, g_mockBattleEnemyAilments[idx].stat.defense, 9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_attack(u32 baseAttack)
@@ -4568,7 +4584,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_attack(u32 baseAttack)
         return baseAttack;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseAttack, g_mockBattleEnemyAilments[idx].stat.attack +
-                        g_mockBattleEnemyAilments[idx].stat.strength / 2);
+                        g_mockBattleEnemyAilments[idx].stat.strength / 2, 9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_hit(u32 baseHit)
@@ -4579,7 +4595,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_hit(u32 baseHit)
         return baseHit;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseHit, g_mockBattleEnemyAilments[idx].stat.hit +
-                     g_mockBattleEnemyAilments[idx].stat.agility * 2);
+                     g_mockBattleEnemyAilments[idx].stat.agility * 2, 9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_resist(u32 baseResist)
@@ -4590,7 +4606,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_resist(u32 baseResist)
         return baseResist;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseResist, g_mockBattleEnemyAilments[idx].stat.resist +
-                        g_mockBattleEnemyAilments[idx].stat.wisdom / 2);
+                        g_mockBattleEnemyAilments[idx].stat.wisdom / 2, 9999u);
 }
 
 static void vm_net_mock_battle_role_stats_current(vm_net_mock_player_stats *statsOut)
@@ -6667,6 +6683,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
     const u32 *new_ids,
     u32 mapping_count,
     bool full_snapshot,
+    u32 scope_role_id,
     const vm_net_mock_role_item_effect *timed_effect)
 {
     char account_hex[129];
@@ -6695,12 +6712,12 @@ static bool vm_net_mock_role_db_save_relational_ex(
         db->activeRoleId = 0;
     if (!full_snapshot)
     {
+        scoped_role_id = scope_role_id != 0 ? scope_role_id : db->activeRoleId;
         if (db->roleCount == 0 ||
-            db->activeRoleId == 0)
+            scoped_role_id == 0)
         {
             return false;
         }
-        scoped_role_id = db->activeRoleId;
         bool found = false;
         for (u32 i = 0; i < db->roleCount; ++i)
         {
@@ -7080,6 +7097,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         new_ids,
         mapping_count,
         full_snapshot,
+        0,
         timed_effect);
 }
 
@@ -9719,14 +9737,22 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
 
     if (equippedItemIdOut)
         *equippedItemIdOut = itemId;
+    /*
+     * HandleItemOperationResponse(7/8 type=3) writes response seq into
+     * item+276.  Unequip/swap requests only carry that seq (no itemId) —
+     * BuildGameEventPacket subtype 8 emits {type,seq}.  Login equipment
+     * rows and 7/9 body use seq=slot+1; returning the old backpack seq
+     * makes multi-slot unequip hit ambiguous-seq / not-found.
+     */
     if (equippedSeqOut)
-        *equippedSeqOut = seq;
+        *equippedSeqOut = (u16)(slot + 1u);
     if (slotOut)
         *slotOut = slot;
     if (oldItemIdOut)
         *oldItemIdOut = oldItemId;
     if (reasonOut)
         *reasonOut = "ok";
+    (void)seq;
     (void)remaining;
     return true;
 }

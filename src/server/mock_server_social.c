@@ -264,6 +264,33 @@ static u32 vm_net_mock_build_group_type1_response(const u8 *request, u32 request
         session != NULL && session->shopSceneNpcReseedPending && team != NULL;
 
     /*
+     * mmShop→mmGame often emits 5/10 before WT6/1.  Runtime (debug-a1d304):
+     * exit group_type1 saw shop_reseed=0/mmShop=0 and never logged
+     * shop_return_rehydrate — client flashed, then live=0 login actorinfo.
+     * Finish rehydrate on this first 5/10 so poll 30/2 / grid reseed / shop17
+     * clear are not stuck waiting for a WT6 that never arrives after the crash.
+     */
+    if (session != NULL && hasType1 &&
+        (session->shopSceneNpcReseedPending || session->mmShopShellActive))
+    {
+        const char *shopScene = vm_net_mock_current_scene_name();
+        if (!vm_net_mock_scene_name_is_safe(shopScene) &&
+            vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+            shopScene = session->sceneVisibleScene;
+        g_netMockBackpackGridSeededRoleId = 0;
+        if (vm_net_mock_scene_name_is_safe(shopScene))
+        {
+            
+            vm_mock_service_finish_shop_return_rehydrate(
+                session,
+                shopScene,
+                session->awaitsBattleRevivalConfirm);
+        }
+    }
+
+    
+
+    /*
      * mmShop discards mmGame; the client's first 5/10 often arrives before
      * shop-return 30/1.  Emitting the full party roster there makes
      * scene_draw_team_member_status_list draw teammate avatars on a shell
@@ -5970,7 +5997,23 @@ static u32 vm_net_mock_try_deliver_pending_shop_return_scene_enter(
      * LoadSceneDataFromStream → ParseMinfoAndSpawnNPCs so kind-2 combat nodes
      * exist again.  append_scene_enter also re-arms 27/11 pending for the next
      * WT6/1 follow-up after this re-enter.
+     *
+     * Coolmall host peel leaves entry root (outdoor destroyed for mall).
+     * Lone 30/1 is for mmGame shell still present; from root prepend the
+     * same resource family as menu「脱离卡死」current-scene reload.
      */
+    if (session->coolmallOpenWaitMap)
+    {
+        if (!vm_net_mock_append_scene_resource_followup_objects(
+                out, outCap, &pos, &objectCount, scene,
+                true, true, true, true, false, false, false))
+        {
+            printf("[warn][mock-service] shop_return_scene_enter_build_failed "
+                   "client=%08x scene=%s reason=coolmall-resources via=%s\n",
+                   session->clientId, scene, via ? via : "-");
+            return 0;
+        }
+    }
     if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos,
                                                          scene, x, y))
     {
@@ -6092,7 +6135,15 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     /*
      * After mmShop, rebuild kind-2 combat nodes with deferred 30/1 before any
      * other poll payload.  Must not wait on sceneVisibleReady.
+     * Consume coolmall open_request first so tear-recovery 30/1 can arm on
+     * this same poll cycle's next pass (flag→pending before deliver).
      */
+    {
+        vm_mock_service_client_session *coolSess =
+            vm_mock_service_get_active_client_session();
+        if (coolSess != NULL)
+            vm_mock_service_session_arm_coolmall_open_from_host_flag(coolSess);
+    }
     teamBattleResponseLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
         out, outCap, "scene-poll");
     if (teamBattleResponseLen != 0)
@@ -6170,6 +6221,11 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      */
     teamBattleResponseLen =
         vm_net_mock_build_pending_equip_sell_dialog_response(
+            out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen =
+        vm_net_mock_build_pending_coolmall_dialog_response(
             out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;

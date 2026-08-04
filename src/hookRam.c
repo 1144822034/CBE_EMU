@@ -102,6 +102,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 bool hookRamErrorBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t size, int64_t value, u32 data)
 {
     printf("地址无法访问:%x type:%d size:%u value:%llx\n", address, type, size, value);
+    
     dumpCpuInfo();
     int regs[] = {
         UC_ARM_REG_R0,

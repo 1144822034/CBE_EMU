@@ -265,9 +265,25 @@ static void vm_mock_admin_render_monster_page(char *response,
         vm_mock_admin_text_appendf(&page, "任务／特殊挑战目录");
     vm_mock_admin_text_appendf(
         &page,
-        "</span><span class=\"chip\">类型：%s</span></div><form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-monster\"><input type=\"hidden\" name=\"monster_id\" value=\"%u\"><div class=\"group\"><h2>基础配置</h2><div class=\"fields\"><label class=\"field\"><span>怪物 ID（只读）</span><input value=\"%u\" readonly></label><label class=\"field\"><span>等级</span><input type=\"number\" name=\"level\" min=\"1\" max=\"255\" value=\"%u\" required></label><label class=\"field\"><span>怪物类型</span>",
+        "</span><span class=\"chip\">类型：%s</span></div>"
+        "<form method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"save-monster\">"
+        "<input type=\"hidden\" name=\"monster_id\" value=\"%u\">"
+        "<div class=\"group\"><h2>基础配置</h2><div class=\"fields\">"
+        "<label class=\"field\"><span>怪物 ID（只读）</span>"
+        "<input value=\"%u\" readonly></label>"
+        "<label class=\"field\"><span>显示名称</span>"
+        "<input name=\"display_name\" maxlength=\"31\" value=\"",
         vm_mock_admin_monster_family_name(edit->family), edit->enemyId,
-        edit->enemyId, edit->level);
+        edit->enemyId);
+    vm_mock_admin_text_append_html(&page, nameUtf8);
+    vm_mock_admin_text_appendf(
+        &page,
+        "\" required></label>"
+        "<label class=\"field\"><span>等级</span>"
+        "<input type=\"number\" name=\"level\" min=\"1\" max=\"255\" value=\"%u\" required></label>"
+        "<label class=\"field\"><span>怪物类型</span>",
+        edit->level);
     vm_mock_admin_render_monster_family_select(&page, edit->family);
     vm_mock_admin_text_appendf(
         &page,
@@ -291,10 +307,12 @@ static void vm_mock_admin_render_monster_page(char *response,
     vm_mock_admin_render_monster_drop_rows(&page, edit);
     vm_mock_admin_text_appendf(
         &page,
-        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。%s</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>",
+        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。"
+        "显示名称写入目录表；地图刷怪点名牌需在场景设计里重新保存刷怪点后才会刷新。"
+        "%s</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>",
         edit->custom
-            ? "自定义怪物请务必配置战斗 Actor；名称与 Actor 均写入目录表。"
-            : "怪物显示名来自真实 SCE，只读；战斗 Actor 可覆盖 SCE 默认值。");
+            ? "自定义怪物请务必配置战斗 Actor。"
+            : "战斗 Actor 可覆盖 SCE 默认值。");
     vm_mock_admin_render_item_picker_modal(&page);
     if (edit->custom)
     {

@@ -1570,7 +1570,7 @@ static u32 vm_net_mock_battle_enemy_modified_defense(u32 baseDefense, u8 enemyIn
         g_mockBattleEnemyAilments[enemyIndex].stat.remainingRounds == 0)
         return baseDefense;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseDefense, g_mockBattleEnemyAilments[enemyIndex].stat.defense);
+        baseDefense, g_mockBattleEnemyAilments[enemyIndex].stat.defense, 9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_modified_attack(u32 baseAttack, u8 enemyIndex)
@@ -1579,8 +1579,10 @@ static u32 vm_net_mock_battle_enemy_modified_attack(u32 baseAttack, u8 enemyInde
         g_mockBattleEnemyAilments[enemyIndex].stat.remainingRounds == 0)
         return baseAttack;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseAttack, g_mockBattleEnemyAilments[enemyIndex].stat.attack +
-                        g_mockBattleEnemyAilments[enemyIndex].stat.strength / 2);
+        baseAttack,
+        g_mockBattleEnemyAilments[enemyIndex].stat.attack +
+            g_mockBattleEnemyAilments[enemyIndex].stat.strength / 2,
+        9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_modified_hit(u32 baseHit, u8 enemyIndex)
@@ -1589,8 +1591,10 @@ static u32 vm_net_mock_battle_enemy_modified_hit(u32 baseHit, u8 enemyIndex)
         g_mockBattleEnemyAilments[enemyIndex].stat.remainingRounds == 0)
         return baseHit;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseHit, g_mockBattleEnemyAilments[enemyIndex].stat.hit +
-                     g_mockBattleEnemyAilments[enemyIndex].stat.agility * 2);
+        baseHit,
+        g_mockBattleEnemyAilments[enemyIndex].stat.hit +
+            g_mockBattleEnemyAilments[enemyIndex].stat.agility * 2,
+        9999u);
 }
 
 static u32 vm_net_mock_battle_enemy_modified_resist(u32 baseResist, u8 enemyIndex)
@@ -1599,8 +1603,10 @@ static u32 vm_net_mock_battle_enemy_modified_resist(u32 baseResist, u8 enemyInde
         g_mockBattleEnemyAilments[enemyIndex].stat.remainingRounds == 0)
         return baseResist;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseResist, g_mockBattleEnemyAilments[enemyIndex].stat.resist +
-                        g_mockBattleEnemyAilments[enemyIndex].stat.wisdom / 2);
+        baseResist,
+        g_mockBattleEnemyAilments[enemyIndex].stat.resist +
+            g_mockBattleEnemyAilments[enemyIndex].stat.wisdom / 2,
+        9999u);
 }
 
 /* Tick DoTs and age enemy silence/debuff. Returns bitmask of slots that died. */
@@ -5636,6 +5642,8 @@ static void vm_mock_service_team_battle_finish_operation(
            hspSourceCount,
            team->battleFinished ? 1 : 0);
     vm_mock_service_team_battle_clear_operation_context();
+    if (team->battleFinished)
+        vm_mock_service_team_battle_release_if_settled(team, "finish-operation");
 }
 
 static int vm_mock_service_team_battle_pick_flush_member(
@@ -6009,6 +6017,7 @@ static void vm_mock_service_team_battle_flush_round_if_ready(
                team->battleRoundSerial,
                team->battleMemberLeftMask,
                reason ? reason : "none");
+        vm_mock_service_team_battle_release_if_settled(team, "abort-no-alive");
         return;
     }
     if ((u8)(team->battleRoundActedMask & aliveMask) != aliveMask)
@@ -6067,6 +6076,8 @@ static void vm_mock_service_team_battle_flush_round_if_ready(
            team->battleFinished ? 1 : 0,
            reason ? reason : "none",
            responseLen);
+    if (team->battleFinished)
+        vm_mock_service_team_battle_release_if_settled(team, "round-flush-finished");
 }
 
 static void vm_mock_service_team_battle_note_member_exit(
@@ -7650,10 +7661,15 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
             if (rawDamage == 0)
                 rawDamage = sourceStats.attack ? sourceStats.attack : 1;
             {
-                uint64_t skillBoosted =
-                    (uint64_t)rawDamage *
-                    (100ull + VM_NET_MOCK_BATTLE_JOB_SKILL_ATTACK_BONUS_PERCENT) /
+                u32 primary = vm_net_mock_role_job_primary_attr(
+                    sourceStats.job, sourceStats.strength, sourceStats.agility,
+                    sourceStats.wisdom);
+                u32 bonusPct = vm_net_mock_battle_job_skill_primary_bonus_percent(
+                    sourceStats.job);
+                uint64_t primaryBonus =
+                    ((uint64_t)(primary ? primary : 1u) * (uint64_t)bonusPct) /
                     100ull;
+                uint64_t skillBoosted = (uint64_t)rawDamage + primaryBonus;
                 rawDamage = skillBoosted > 0xffffffffull ? 0xffffffffu
                                                          : (u32)skillBoosted;
             }
@@ -7662,22 +7678,35 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
         {
             rawDamage = sourceStats.attack ? sourceStats.attack : 1;
         }
-        if (magical)
+        if (operate > 2 && skill != NULL)
         {
+            /* Offensive skills (physical + magical) use resist % mitigation. */
             mitigation = targetStats.resist;
             rawDamage = vm_net_mock_env_u32_if_set(
                 "CBE_DUEL_SKILL_DAMAGE",
                 vm_net_mock_damage_after_resist(rawDamage, mitigation));
+            if (vm_net_mock_battle_skill_is_single_target_offensive(skill))
+            {
+                u32 naReference = vm_net_mock_damage_after_defense(
+                    sourceStats.attack ? sourceStats.attack : 1u,
+                    targetStats.defense);
+                rawDamage = vm_net_mock_battle_soft_boost_single_skill_vs_na(
+                    rawDamage, naReference, skill);
+            }
         }
         else
         {
             mitigation = targetStats.defense;
             rawDamage = vm_net_mock_env_u32_if_set(
-                operate > 2 ? "CBE_DUEL_SKILL_DAMAGE" : "CBE_DUEL_DAMAGE",
+                "CBE_DUEL_DAMAGE",
                 vm_net_mock_damage_after_defense(rawDamage, mitigation));
         }
         if (rawDamage == 0)
             rawDamage = 1;
+        if (operate > 2 && skill != NULL)
+            rawDamage = vm_net_mock_battle_apply_skill_damage_variance(rawDamage);
+        else
+            rawDamage = vm_net_mock_battle_apply_damage_variance(rawDamage);
         critical = vm_net_mock_battle_roll_crit(sourceStats.crit);
         if (critical)
         {
@@ -8381,10 +8410,18 @@ static u32 vm_net_mock_build_duel_terminal_phase_response(
     duel->terminalPendingMask &= (u8)~observerBit;
     if (duel->terminalPendingMask == 0)
     {
-        holdTicks = vm_net_mock_env_u32("CBE_DUEL_EXIT_REDELIVER_TICKS", 300);
-        if (holdTicks < 90)
-            holdTicks = 90;
-        duel->releaseNotBeforeTick = g_schedulerTick + holdTicks;
+        /*
+         * Session sparExitRedeliverUntilTick already covers operate-side exit
+         * redelivery after the slot is free.  Keeping releaseNotBefore tied to
+         * EXIT_REDELIVER (default 300) blocked rematch accept (duel_begin
+         * failed → accepted=0 / spar-result=2) while invites still queued.
+         * Short grace only absorbs same-tick operate races.
+         */
+        holdTicks = vm_net_mock_env_u32("CBE_DUEL_RELEASE_GRACE_TICKS", 8);
+        if (holdTicks > 30)
+            holdTicks = 30;
+        duel->releaseNotBeforeTick =
+            holdTicks == 0 ? 0 : (g_schedulerTick + holdTicks);
     }
     printf("[info][mock-service] duel_terminal_deliver serial=%u observer=%08x "
            "remaining=%02x resp=%u dead=%u exit=4/8+4/11+4/9 recover_hp=%u "
@@ -9146,6 +9183,7 @@ static u32 vm_net_mock_build_pending_team_battle_action_response(
     if ((vm_mock_service_team_battle_absent_mask(team) & memberBit) != 0)
     {
         vm_mock_service_team_battle_mark_member_events_delivered(team, memberBit);
+        vm_mock_service_team_battle_release_if_settled(team, "absent-events-retired");
         return 0;
     }
     for (u8 i = 0; i < VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX; ++i)
@@ -9227,6 +9265,7 @@ static u32 vm_net_mock_build_pending_team_battle_action_response(
     event->deliveredMask = (u8)(event->deliveredMask | memberBit);
     if (event->deliveredMask == fullMask)
         event->valid = false;
+    vm_mock_service_team_battle_release_if_settled(team, "action-events-settled");
     return pos;
 }
 
@@ -9515,11 +9554,11 @@ static void vm_net_mock_battle_auto_pull_team_vitals(void)
         return;
     team = vm_mock_service_team_find_for_client(session->clientId);
     /*
-     * Finished shared fights keep battleActive until the next begin_battle.
-     * Pulling their dead enemyhp over a fresh reset_enemy_hp seed made the
-     * next challenge start with enemyhp=0 and prefer arm pending=0 (fight 3).
+     * Finished shared fights keep battleActive only while 4/6 (or 4/5 start)
+     * is still owed.  release_if_settled clears the latch afterward so spar /
+     * presence / hangup do not see a stale "in team battle".
      */
-    if (team == NULL || !team->battleActive || team->battleFinished ||
+    if (team == NULL || !vm_mock_service_team_battle_in_progress(team) ||
         !vm_mock_service_team_battle_contains_client(team, session->clientId))
     {
         return;
@@ -9633,8 +9672,9 @@ static bool vm_net_mock_active_session_in_team_battle(void)
      * (pendingArmed never rearms).  Manual operate also hits the finished-fight
      * branch in synchronized_team_battle and returns no real 4/6.
      * See docs/re/2026-08-01-hangup-stuck-after-teammate-leave.md.
+     * Also blocks spar duel_begin if gated on battleActive alone.
      */
-    return team != NULL && team->battleActive && !team->battleFinished &&
+    return vm_mock_service_team_battle_in_progress(team) &&
            vm_mock_service_team_battle_contains_client(team, session->clientId);
 }
 
@@ -12307,6 +12347,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
          * 27/12-ack primary + followup 4/10 on dream 4/1 still ran hot518
          * ScreenInit (emu_err=11 / lr=0x010136B3).  Same class as post-enter
          * 27/12-ack.  Do not reintroduce any 27/12 on dream encounter.
+         *
+         * User/runtime: dream foot encounter must stay subtype-5 (live-node).
+         * Do NOT force subtype-10 on wire≠real here.
          */
         if (useSceneMonsterStart && activeSession != NULL && wireEnemyId != 0 &&
             index < 25 && posx != 0 && posy != 0)
@@ -12627,8 +12670,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                          g_mockBattleRoleMpMax,
                          vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MP", stats.mp),
                          vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack),
-                         vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", 0),
-                         /* effective combat def; catalog stats.defense unused */
+                         vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense),
                          vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP", stats.exp),
                          vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD", stats.gold),
                          sceneMonsterIndex, sceneMonsterPosX, sceneMonsterPosY,

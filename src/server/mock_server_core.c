@@ -104,6 +104,9 @@ static void vm_mock_service_session_arm_warehouse_pass_dialog(void);
 static u32 vm_net_mock_take_equip_sell_dialog_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
 static void vm_mock_service_session_arm_equip_sell_pass_dialog(void);
+static u32 vm_net_mock_take_coolmall_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session);
+static void vm_mock_service_session_arm_coolmall_dialog(void);
 static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
 static void vm_net_mock_clear_instance_challenge_battle_pending(
@@ -3259,9 +3262,6 @@ static void vm_net_mock_save_tempdata(const u8 *data, u32 len)
     fclose(fp);
 }
 
-
-
-
 static void vm_net_log_handled_packet(const char *source, const u8 *request, u32 requestLen, u32 responseLen)
 {
     (void)request;
@@ -3444,54 +3444,6 @@ static void vm_net_read_active_ui_name(char *out, size_t outCap)
     vm_net_read_guest_ascii_label(uiObj + 1141, out, outCap);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 static void vm_fixup_current_node_visual_res_if_ready(u32 pc, const char *label)
 {
     static u32 s_sceneVisualResFixupLimitCount = 0;
@@ -3560,14 +3512,6 @@ static void vm_fixup_current_node_visual_res_if_ready(u32 pc, const char *label)
     }
 }
 
-
-
-
-
-
-
-
-
 static bool vm_should_skip_portal_move_entry_append(u32 pc)
 {
     static u32 s_portalMoveEntrySkipLimitCount = 0;
@@ -3621,24 +3565,6 @@ static bool vm_should_skip_portal_move_entry_append(u32 pc)
     return true;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 static void vm_scene_seed_status_meter_displaymax_fallback(u32 pc)
 {
     u32 hudState = 0;
@@ -3687,7 +3613,6 @@ static void vm_scene_seed_status_meter_displaymax_fallback(u32 pc)
 
 }
 
-
 static bool vm_is_scene_bootstrap_loading_overlay_caller(u32 lr)
 {
     switch (lr & ~1u)
@@ -3708,35 +3633,6 @@ static bool vm_is_scene_bootstrap_loading_overlay_caller(u32 lr)
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
     u32 currentR9 = 0;
@@ -3750,7 +3646,6 @@ static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t
         vm_dl_note_sp_bf(currentR9, "pool-exec");
     }
 }
-
 
 static u32 vm_net_mock_build_response_from_rules(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -4625,9 +4520,10 @@ enum
 
 enum
 {
-    /* server_dynamic_npcs.npc_kind.  Zero keeps every existing task/dialog
-     * NPC compatible; non-zero values add one packet-driven service entry to
-     * the normal 26/1 dialog. */
+    /* server_dynamic_npcs.npc_kind + npc_service_mask.
+     * Zero kind / empty mask = task-only dialog.  Bits 1..MAX in
+     * npc_service_mask enable multiple root action=1 entries on 26/1.
+     * npc_kind stays the lowest enabled bit for legacy single-kind paths. */
     VM_NET_MOCK_NPC_KIND_NORMAL = 0,
     VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT = 1,
     VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR = 2,
@@ -4636,6 +4532,9 @@ enum
     VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT = 5,
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE,
+    /* Bits 1..MAX inclusive; bit 0 (NORMAL) is never stored. */
+    VM_NET_MOCK_NPC_SERVICE_MASK_ALL =
+        ((1u << (VM_NET_MOCK_NPC_KIND_MAX + 1)) - 1u) & ~1u,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
     VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7,
     /*
@@ -4682,6 +4581,14 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_MENU           0xf1010000u /* | page */
 #define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_BASE           0xf2000000u /* | backpack seq */
 #define VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE      0xf3000000u /* | backpack seq */
+/* Coolmall: 商城按钮 → NPC 26/1 (武器/防具/药品), pay wcoin / 酷宝 text. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL             0xf4000001u
+#define VM_NET_MOCK_NPC_SERVICE_COOLMALL_MORE             0xf4000002u
+#define VM_NET_MOCK_NPC_SERVICE_COOLMALL_TYPE_BASE        0xf4100000u /* | subtype 5..13 */
+#define VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE        0xf4200000u /* | (page<<8)|subtype */
+#define VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE         0xf5000000u /* | itemId */
+#define VM_NET_MOCK_NPC_SERVICE_COOLMALL_VIEW_BASE        0xf5100000u /* | itemId */
+#define VM_NET_MOCK_COOLMALL_PAGE_ITEMS                   5u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
 #define VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES            199u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
@@ -5101,6 +5008,9 @@ static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static bool vm_net_mock_role_db_save(const char *reason);
+/* Persist one role by role_id (not only activeRoleId).  Admin money/wcoin
+ * paths must use this when the selected role may differ from active. */
+static bool vm_net_mock_role_db_save_role(const char *reason, u32 roleId);
 /* Mark durable role rows dirty without MySQL.  Transport flushes after CBMR
  * (or on disconnect / heartbeat expire).  Prefer this on hot multiplayer paths
  * that previously held the protocol lock across DELETE+INSERT. */
@@ -5116,6 +5026,7 @@ static bool vm_net_mock_role_db_save_relational_ex(
     const u32 *new_ids,
     u32 mapping_count,
     bool full_snapshot,
+    u32 scope_role_id,
     const vm_net_mock_role_item_effect *timed_effect);
 static bool vm_mock_service_mysql_authority_prepare(void);
 static bool vm_mock_service_mysql_authority_seal(void);
@@ -5216,4 +5127,8 @@ static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
+static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh,
+                                          bool publishOverlay);
+/* mallLoadingClear=true: live bare + publishOverlay=false + attr-word cap. */
+static u32 vm_net_mock_build_actor_info_mall_loading_clear(u8 *out, u32 outCap);
 

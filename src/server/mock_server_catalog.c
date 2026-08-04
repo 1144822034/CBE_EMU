@@ -2506,15 +2506,13 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
  * There is no wire type for 「抗性」 in this table (resist = actorinfo
  * word[5]→+0x12c).
  *
- * Wear-apply jump 0x010100CE indexes by wire type:
- *   0→+0x122 1→+0x124 2→+0x130 3→+0x132 4→+0x128 5→+0x12a 6→+0x12e
- *   7/9→HP pool  8/10→MP pool.  No jump writes +0x12c.
- *
- * Login panel evidence (role34): paint column is
- * 力/敏/物攻/护甲/闪躲/命中/暴击/抗性 at those offsets; word[2]=命中,
- * word[5]=抗性. Remap enhance wire so milestones land correctly; detail
- * names then follow the *wire* byte name (unresolved vs official).
- * 命中 stays wire 7 (detail name) — panel value comes from actorinfo.
+ * Wear-apply jump 0x01010030 (same wire byte) is:
+ *   1→+0x84(魅) 2→+0x122(力) 3→+0x124(敏) 4→+0x130(攻) 5→+0x132(甲)
+ *   6→+0x128 7→+0x12a 8→+0x12e 9/11→HP 10/12→MP; no store to +0x126 智.
+ * Name-table types and jump targets disagree for 力/敏/智.  Do NOT remap
+ * wire bytes to jump indices: that made 剑+16 detail show「敏捷」、刃+16
+ * show「智慧」while 杖(wire=3) looked correct.  Emit name-table types for
+ * detail; panel 力/敏/智 after equip come from live 1/1/14 actorinfo.
  *
  * Each equip slot has 4 milestone lines at +4/+8/+12/+16.
  * Entries marked [P] are provisional balance fill (replace when confirmed).
@@ -2548,26 +2546,13 @@ enum
 };
 
 /*
- * Detail UI 0x01032118: "(+%d)%s+%d" uses unlock + 1-based name table
- * (1力量 2敏捷 3智慧 4物攻 5护甲 6躲闪 7命中 8暴击 9气血 10法力).
- *
- * Wear-apply jump 0x010100D0 is a DIFFERENT 0-based map
- * (0力 1敏 2物攻 3护甲 4躲 5命 6暴). Emitting jump indices made
- * 护甲→type3 paint as 智慧、法力%→type8 paint as 暴击, and unlock=255
- * paint as (+255). Official detail contract uses name-table types.
- *
- * Jump apply with name types lands on the wrong actor halfwords; panel
- * authority stays actorinfo bare + fec6 dsh + F8/FA. Milestone flats for
- * battle/server stats remain in collect_equipment_bonus.
- *
- * After milestones (and when 1<=L<4 with no milestone block), also emit
- * M(L)-base 护甲/物攻 lines when dsh base>0 so the player can see how much
- * enhance added. unlock=1 (not 255 — that painted as (+255)). Real armor/
- * attack numbers still come from F8 / weapon+0xFA scale, not these lines.
+ * Detail UI 0x01032118 uses the wire type against the 1-based name table.
+ * Keep semantic == wire for 力/敏/智 so 剑/刃/杖 +16 detail names match
+ * equip.dsh 类别 7/8/9 (力/敏/智).
  */
 static u8 vm_net_mock_equip_enhance_wire_type(u8 semanticType)
 {
-    return semanticType; /* name-table type for detail (+N)名称 */
+    return semanticType;
 }
 
 /* Keep real 4/8/12/16 so detail shows (+4) not (+255). */
@@ -2710,16 +2695,16 @@ static u8 vm_net_mock_equip_quality_table_tier(u8 quality)
 static const vm_net_mock_equip_enhance_attr_def *
 vm_net_mock_equip_enhance_attrs_for_slot(u8 slot, u8 *countOut);
 
-/* Weapon +16 primary by equip.dsh 类别: 7力 / 8敏 / 9智. */
+/* Weapon +16 primary by equip.dsh 类别: 7剑→力 / 8刃(匕)→敏 / 9杖→智. */
 static u8 vm_net_mock_weapon_enhance_primary_type(u8 category)
 {
     switch (category)
     {
-    case 8:
+    case 8: /* 刃 / 匕首 */
         return VM_NET_MOCK_EQUIP_ATTR_AGILITY;
-    case 9:
+    case 9: /* 杖 */
         return VM_NET_MOCK_EQUIP_ATTR_WISDOM;
-    case 7:
+    case 7: /* 剑 */
     default:
         return VM_NET_MOCK_EQUIP_ATTR_STRENGTH;
     }
@@ -2979,14 +2964,21 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
                     u8 realUnlock = (u8)((i + 1u) * 4u);
                     u8 type = vm_net_mock_equip_enhance_milestone_type(
                         equip, i, defs[i].type);
+                    u16 wireValue;
                     unlocks[attrCount] = vm_net_mock_equip_enhance_wire_unlock(
                         type, realUnlock);
                     types[attrCount] =
                         vm_net_mock_equip_enhance_wire_type(type);
                     flags[attrCount] = defs[i].flag;
-                    values[attrCount] =
-                        vm_net_mock_equip_enhance_milestone_value(
-                            equip, realUnlock, type, defs[i].flag);
+                    /*
+                     * Keep percent on the wire for flag=1 (详情 +25%).
+                     * Wear-apply 0x0100FED8 seeds HP/MP from actor pools, then
+                     * for mode=1 does pool * percent / 100 (0x0101010A).
+                     * Emitting the precomputed flat (e.g. 232) with flag=1 made
+                     * detail show +232% and applied pool*232/100.
+                     */
+                    values[attrCount] = vm_net_mock_equip_enhance_milestone_value(
+                        equip, realUnlock, type, defs[i].flag);
                     attrCount++;
                 }
             }
@@ -3338,6 +3330,27 @@ static bool vm_net_mock_build_shop_iteminfo_page_blob(u8 *out, u32 outCap, u32 *
     return true;
 }
 
+static bool vm_net_mock_append_shop_catalog_page_empty_object(u8 *out, u32 outCap, u32 *pos,
+                                                              u8 subtype)
+{
+    u32 objectStart = 0;
+    u8 itemInfo[4];
+    u32 itemInfoLen = 0;
+
+    /* row_count=0 only — mmShop:0x9DE still consumes the page object. */
+    if (!vm_net_mock_seq_put_u8(itemInfo, sizeof(itemInfo), &itemInfoLen, 0))
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 14, subtype, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u32(out, outCap, pos, "totalnum", 0))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
 static bool vm_net_mock_append_shop_catalog_page_object(u8 *out, u32 outCap, u32 *pos,
                                                         u8 subtype, u32 pageIndex,
                                                         u32 *totalOut, u32 *rowCountOut,
@@ -3408,8 +3421,9 @@ static bool vm_net_mock_append_shop_money4_object(u8 *out, u32 outCap, u32 *pos)
     return true;
 }
 
-static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u32 *pos,
-                                                         u32 *actorInfoLenOut)
+static bool vm_net_mock_append_shop_actor_state14_object_ex(u8 *out, u32 outCap, u32 *pos,
+                                                            u32 *actorInfoLenOut,
+                                                            bool publishOverlay)
 {
     u32 objectStart = 0;
     u8 actorInfo[512];
@@ -3419,7 +3433,18 @@ static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u3
         *actorInfoLenOut = 0;
 
     memset(actorInfo, 0, sizeof(actorInfo));
-    actorInfoLen = vm_net_mock_build_actor_info(actorInfo, sizeof(actorInfo));
+    /*
+     * mmShop / map vitals / equip refresh all hit parse_actorinfo(a2!=0).
+     * Must use the live field subset — full login blob desyncs six words.
+     * publishOverlay=false for mall loading-clear only (not attr authority);
+     * that path also caps paint-8 words (see build_actor_info_ex).
+     */
+    if (publishOverlay)
+        actorInfoLen = vm_net_mock_build_actor_info_ex(actorInfo, sizeof(actorInfo),
+                                                       true, true);
+    else
+        actorInfoLen = vm_net_mock_build_actor_info_mall_loading_clear(
+            actorInfo, sizeof(actorInfo));
     if (actorInfoLen == 0 || actorInfoLen > 0xffff)
         return false;
 
@@ -3437,6 +3462,13 @@ static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u3
     if (actorInfoLenOut)
         *actorInfoLenOut = actorInfoLen;
     return true;
+}
+
+static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u32 *pos,
+                                                         u32 *actorInfoLenOut)
+{
+    return vm_net_mock_append_shop_actor_state14_object_ex(out, outCap, pos,
+                                                           actorInfoLenOut, true);
 }
 
 static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
@@ -7741,13 +7773,20 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
         }
         *objectCount = (u8)(*objectCount + 1);
         /*
-         * Do NOT append 1/1/14 with the full login actorinfo blob here.
-         * parse_actorinfo_response(a2!=0) skips several u32 reads (base HP/MP,
-         * EXTRA132, trailing strings) without consuming them — a full blob
-         * desyncs the stream and corrupts later halfwords.  Battle/map vitals
-         * refresh uses the same 1/1/14 path with the live-update contract;
-         * login property authority is subtype-6 actorinfo + wear apply.
+         * After 7/7 rows: overlay + tip only.  No mmGame 1/1/14 (mall crash,
+         * debug-a1d304 / 2026-07-28-post-battle-shop-open-vitals-crash).
          */
+        if (equipmentRows > 0 &&
+            !vm_mock_service_session_append_login_equip_wear_sync(
+                out, outCap, pos, objectCount, equipmentRows))
+        {
+            printf("[error][network] mock_group_type1_backpack_step_failed "
+                   "role=%u step=login-equip-wear-sync "
+                   "evidence=overlay-tip-after-7/7\n",
+                   role->roleId);
+            return false;
+        }
+        
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;

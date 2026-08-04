@@ -248,6 +248,13 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     return true;
 }
 
+/* Defined after vm_mock_service_client_session (equip response is earlier). */
+static void vm_net_mock_item_equip_arm_vitals_after_gear_change(void);
+/* #region agent log */
+/* Count non-fresh map 1/1/14 delivers (equip path arms these). */
+static u32 g_agent_dbg_equip_vitals_delivered = 0;
+/* #endregion */
+
 static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestLen,
                                                  u8 *out, u32 outCap)
 {
@@ -261,6 +268,10 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
     u8 result = 0;
     u32 pos = 5;
     u32 objectStart = 0;
+    u8 objectCount = 0;
+    bool vitalsArmed = false;
+    bool actorinfoAppended = false;
+    u32 actorInfoLen = 0;
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -301,9 +312,26 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
     if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq", seq ? seq : parsed.seq))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    objectCount = 1;
 
-    printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s resp=7/8 evidence=JianghuOL.CBE:0x01033544\n",
+    /*
+     * 7/8 moves the row and re-runs wear-apply (0x010337c0 → 0x0100FED8).
+     * Do NOT append same-packet live 1/1/14: that object is mmShop:0x9DE's
+     * actor-state family.  Injecting it on mmGame then opening the mall
+     * flashes the client (debug-a1d304 stopped after shop_open; same class as
+     * docs/re/2026-07-28-post-battle-shop-open-vitals-crash.md).  Panel attrs
+     * come from publish_panel_attr_overlay + host realign.
+     */
+    if (result == 1 && role != NULL)
+    {
+        vm_net_mock_player_stats stEq;
+        memset(&stEq, 0, sizeof(stEq));
+        vm_net_mock_role_build_player_stats(role, &stEq);
+        vm_net_mock_publish_panel_attr_overlay(&stEq);
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x01033544+0x0100FED8+0x0100FA88(live)\n",
            parsed.type,
            parsed.itemId,
            parsed.seq,
@@ -312,8 +340,12 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
            slot,
            oldItemId,
            result,
-           reason ? reason : "-");
-    vm_autotest_note("mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s response=7/8 evidence=JianghuOL.CBE:0x01033544(type3-result-seq)\n",
+           reason ? reason : "-",
+           vitalsArmed ? 1u : 0u,
+           actorinfoAppended ? 1u : 0u,
+           actorInfoLen,
+           actorinfoAppended ? "7/8+1/1/14" : "7/8");
+    vm_autotest_note("mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u response=%s evidence=JianghuOL.CBE:0x01033544+0x0100FA88(live)\n",
                      parsed.type,
                      parsed.itemId,
                      parsed.seq,
@@ -322,7 +354,10 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
                      slot,
                      oldItemId,
                      result,
-                     reason ? reason : "-");
+                     reason ? reason : "-",
+                     vitalsArmed ? 1u : 0u,
+                     actorinfoAppended ? 1u : 0u,
+                     actorinfoAppended ? "7/8+1/1/14" : "7/8");
     return pos;
 }
 
@@ -361,22 +396,46 @@ static u32 vm_net_mock_build_item_equip_swap_response(const u8 *request,
     /* JianghuOL.CBE:0x01033544 subtype 9 reads only result.  On success the
      * client itself moves body -> backpack (with bag's sequence), moves bag
      * into the equipment slot, invokes the UI callback, and clears the wait. */
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 9, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
     {
-        return 0;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+        u8 objectCount = 0;
+        bool actorinfoAppended = false;
+        u32 actorInfoLen = 0;
 
-    printf("[info][network] mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s resp=7/9 evidence=JianghuOL.CBE:0x010328D4+0x01033544\n",
-           parsed.bodySeq, parsed.backpackSeq,
-           parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot, result,
-           reason ? reason : "-");
-    vm_autotest_note("mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s response=7/9 evidence=JianghuOL.CBE:0x010328D4(body-bag)+0x01033544(result-only)\n",
-                     parsed.bodySeq, parsed.backpackSeq,
-                     parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot,
-                     result, reason ? reason : "-");
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 9,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount = 1;
+        /* Same as 7/8: overlay only — no mmGame 1/1/14 after gear swap. */
+        if (result == 1)
+        {
+            vm_net_mock_role_state *swapRole = vm_net_mock_active_role();
+            if (swapRole != NULL)
+            {
+                vm_net_mock_player_stats stSwap;
+                memset(&stSwap, 0, sizeof(stSwap));
+                vm_net_mock_role_build_player_stats(swapRole, &stSwap);
+                vm_net_mock_publish_panel_attr_overlay(&stSwap);
+            }
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+        printf("[info][network] mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x010328D4+0x01033544+0x0100FA88(live)\n",
+               parsed.bodySeq, parsed.backpackSeq,
+               parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot, result,
+               reason ? reason : "-",
+               actorinfoAppended ? 1u : 0u, actorInfoLen,
+               actorinfoAppended ? "7/9+1/1/14" : "7/9");
+        vm_autotest_note("mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s actorinfo=%u response=%s evidence=JianghuOL.CBE:0x010328D4+0x0100FA88(live)\n",
+                         parsed.bodySeq, parsed.backpackSeq,
+                         parsed.hasActorOtherCompanion ? 1u : 0u, itemId, oldItemId, slot,
+                         result, reason ? reason : "-",
+                         actorinfoAppended ? 1u : 0u,
+                         actorinfoAppended ? "7/9+1/1/14" : "7/9");
+    }
     return pos;
 }
 
@@ -2977,6 +3036,21 @@ typedef struct vm_mock_service_client_session
      */
     bool mmShopShellActive;
     /*
+     * Count of shop-actor-query14 acks while mmShopShellActive.
+     * mmShop exit (0xdc0c) re-calls sub_162C and waits for *[r9+0x2868]+0x10==0.
+     * Early acks (trailing after scene-combo / double open14): status+money only.
+     * Late acks after shell age: capped live 1/1/14 loading-clear for exit.
+     */
+    u8 shopActorQueryAckCount;
+    /* scheduler tick when mmShopShellActive rose; ages trailing vs exit. */
+    u32 mmShopShellArmedTick;
+    /*
+     * 1 = marked by scene-interaction combo (trailing open14 expects
+     * status+money).  2 = marked by shop-actor-query14 first open (next
+     * already_open is exit 0x162C and needs actor loading-clear).
+     */
+    u8 mmShopOpenMarkSource;
+    /*
      * Nonempty type-21 catalog deferred until after shop-return shell poll
      * 30/2.  Same-packet 27/11 on WT6/1 races mmGame ScreenInit (临安府_01
      * 2026-07-28: clear×5+26/0 still stuck; empty-npc maps skip 27/11 and OK).
@@ -3257,6 +3331,16 @@ typedef struct vm_mock_service_client_session
     u32 equipSellDialogTick;
     bool equipSellBrowseValid;
     u16 equipSellBrowsePage;
+    /*
+     * Coolmall (商城按钮 → 26/1, no pass item, no mmShop browse).
+     * Mirror 839 wire/poll; currency is wcoin / 酷宝 text.
+     */
+    bool coolmallSessionArmed;
+    bool coolmallDialogPending;
+    bool coolmallOpenWaitMap;
+    u32 coolmallDialogTick;
+    u8 coolmallBrowseSubtype; /* 5..13 mall page subtype */
+    u16 coolmallBrowsePage;
     /* Skill trainer list page (26/1 OPEN_SKILLS_BASE | page). */
     u16 skillBrowsePage;
     /* After warehouse deposit, client main bag still holds the row until a
@@ -3287,6 +3371,14 @@ typedef struct vm_mock_service_client_session
     bool quickRepairEquipSyncPending;
     u8 quickRepairEquipSyncPhase; /* 1=7/7-type2 2=26/0 */
     u32 quickRepairEquipSyncTick;
+    /*
+     * Login wear sync: bare actorinfo + 7/7 rows first; after ~2s drip one
+     * simulated 7/8 per equipped slot, then system tip + full HP/MP live 1/1/14.
+     */
+    bool loginEquipWearSyncPending;
+    u32 loginEquipWearSyncEarliestTick;
+    u8 loginEquipWearSyncNextSlot; /* 0..SLOT_COUNT, then finalize */
+    u8 loginEquipWearSyncRows;
     /* Practise panel (修炼信息): 7/21 opengold result is stored as the client
      * isgold byte (JianghuOL.CBE:0x0102CBFE).  Session-scoped until offline
      * cultivation hours are modeled in the role DB. */
@@ -3325,6 +3417,11 @@ typedef struct vm_mock_service_client_session
 } vm_mock_service_client_session;
 
 static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
+static void vm_mock_service_session_arm_map_actor_vitals_sync(
+    vm_mock_service_client_session *session,
+    u16 bagClearSeq,
+    u32 bagClearRemaining,
+    bool freshShellEnter);
 
 static bool vm_mock_service_session_dream_force_cold_sce(void)
 {
@@ -4550,6 +4647,34 @@ static void vm_mock_service_session_arm_equip_sell_pass_dialog(void)
            session->clientId);
 }
 
+static void vm_mock_service_session_arm_coolmall_dialog(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    FILE *fp;
+
+    if (session == NULL)
+        return;
+    session->coolmallSessionArmed = true;
+    session->coolmallDialogPending = true;
+    session->coolmallDialogTick = g_schedulerTick;
+    session->coolmallBrowseSubtype = 0;
+    session->coolmallBrowsePage = 0;
+    /*
+     * Host reads this flag to reject mmShop AddScreen so the guest never
+     * stays on the W-coin mall UI (debug-a1d304 exit stuck / SCR).
+     */
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_redirect.flag", "wb");
+    if (fp != NULL)
+    {
+        fputs("1\n", fp);
+        fclose(fp);
+    }
+    printf("[info][mock-service] coolmall_dialog_arm client=%08x "
+           "evidence=mall-button-no-pass-26/1\n",
+           session->clientId);
+}
+
 static void vm_mock_service_session_arm_task_prompt_refresh(const char *scene)
 {
     vm_mock_service_client_session *session =
@@ -4806,6 +4931,68 @@ static void vm_mock_service_clear_stale_map_transfer_for_shop(
 /* After poll 30/2 / moveinfo-live: let ScreenInit settle before kind-2 30/1. */
 #define VM_MOCK_SHOP_RETURN_KIND2_DELAY_TICKS 8u
 
+static bool vm_mock_service_mmshop_shell_is_active(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->mmShopShellActive;
+}
+
+/* Returns 1-based ack ordinal while shop shell is active; 0 if inactive. */
+static u32 vm_mock_service_shop_actor_query_ack_ordinal(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->mmShopShellActive)
+        return 0;
+    if (session->shopActorQueryAckCount < 255)
+        session->shopActorQueryAckCount++;
+    return session->shopActorQueryAckCount;
+}
+
+/*
+ * First open14 family-4 already cleared loading.  Seed ack=1 so the exit
+ * 0x162C query is ordinal>=2 and may carry 1/1/14 loading-clear
+ * (session field comment: first ack status+money; later acks actor clear).
+ */
+static void vm_mock_service_shop_actor_query_seed_first_open_ack(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->mmShopShellActive)
+        return;
+    if (session->shopActorQueryAckCount < 1)
+        session->shopActorQueryAckCount = 1;
+}
+
+/* Trailing open14 only after scene-combo mark (not sole open14→exit). */
+static int vm_mock_service_mmshop_open14_is_combo_trailing(u32 ackOrd)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->mmShopShellActive)
+        return 0;
+    /* First already_open after combo: dual-open guard. */
+    return session->mmShopOpenMarkSource == 1 && ackOrd == 1;
+}
+
+static void vm_mock_service_shop_open14_trace(const char *line)
+{
+    FILE *fp;
+
+    if (line == NULL || line[0] == 0)
+        return;
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/shop_open14_trace.log", "a");
+    if (fp == NULL)
+        return;
+    fprintf(fp, "%s\n", line);
+    fclose(fp);
+}
+
 static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *source)
 {
     vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
@@ -4829,7 +5016,23 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
     session->shopSceneNpcReseedPending = true;
     snprintf(session->shopSceneNpcReseedScene,
              sizeof(session->shopSceneNpcReseedScene), "%s", scene);
+    /* Only reset on inactive→active; re-mark (info14/page) must keep ack ordinal. */
+    if (!session->mmShopShellActive)
+    {
+        session->shopActorQueryAckCount = 0;
+        session->mmShopShellArmedTick = g_schedulerTick;
+        if (source != NULL &&
+            (strstr(source, "scene-interaction") != NULL ||
+             strstr(source, "scene-interaction-followup") != NULL))
+            session->mmShopOpenMarkSource = 1;
+        else
+            session->mmShopOpenMarkSource = 2;
+    }
     session->mmShopShellActive = true;
+    /*
+     * Hold login wear drip while mmShop is up; poll builder already no-ops
+     * when mmShopShellActive.  Do not cancel — resume after shop-return.
+     */
     /*
      * Opening mmShop proves the map shell is walkable enough for the client.
      * Drop leftover map-stone / teleport lifecycle so exit post-catalog 30/2
@@ -4849,6 +5052,7 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
                                                           "shop-open");
     session->shopReturnWarmNpcDelivered = false;
     session->shopReturnKind2Completed = false;
+    
     vm_mock_service_session_cancel_map_actor_vitals_sync(session,
                                                         "shop-open");
     if (changed)
@@ -7223,6 +7427,78 @@ static void vm_mock_service_session_cancel_map_actor_vitals_sync(
     session->pendingRevivalBagClearRemaining = 0;
 }
 
+static void vm_net_mock_item_equip_arm_vitals_after_gear_change(void)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (role == NULL || session == NULL)
+        return;
+    session->onlineHp = role->hp;
+    session->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+    session->onlineMp = role->mp;
+    session->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+    vm_mock_service_session_arm_map_actor_vitals_sync(session, 0, 0, false);
+}
+
+static bool vm_mock_service_session_append_login_equip_wear_sync(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u8 equipmentRows)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_player_stats st;
+    u32 liveLen = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || equipmentRows == 0)
+        return false;
+    if (role == NULL)
+        return false;
+
+    /*
+     * Unsolicited 7/8 stuck login.  Do NOT append live 1/1/14 here: that
+     * object is mmShop:0x9DE's actor-state family.  Login→mmGame 1/1/14 then
+     * mall open flashes (debug-a1d304: shop_open then silence; same class as
+     * 2026-07-28-post-battle-shop-open-vitals-crash).  Overlay + tip only.
+     * Login fresh actorinfo already carries equipment-inclusive HP/MP pools.
+     */
+    memset(&st, 0, sizeof(st));
+    vm_net_mock_role_build_player_stats(role, &st);
+    vm_net_mock_publish_panel_attr_overlay(&st);
+    if (st.maxHp > 0)
+        role->hp = st.maxHp;
+    if (st.maxMp > 0)
+        role->mp = st.maxMp;
+    role->hpMax = st.maxHp ? st.maxHp : role->hp;
+    role->mpMax = st.maxMp ? st.maxMp : role->mp;
+    if (session != NULL)
+    {
+        session->onlineHp = role->hp;
+        session->onlineHpMax = role->hpMax;
+        session->onlineMp = role->mp;
+        session->onlineMpMax = role->mpMax;
+        session->loginEquipWearSyncPending = false;
+        session->loginEquipWearSyncEarliestTick = 0;
+        session->loginEquipWearSyncNextSlot = 0;
+        session->loginEquipWearSyncRows = 0;
+        (void)vm_mock_service_session_enqueue_system_message(
+            session,
+            /* 装备属性已同步 */
+            "\xd7\xb0\xb1\xb8\xca\xf4\xd0\xd4\xd2\xd1\xcd\xac\xb2\xbd");
+    }
+    (void)liveLen;
+    (void)out;
+    (void)outCap;
+    printf("[info][mock-service] login_equip_wear_sync_once client=%08x "
+           "rows=%u wear_7_8=0 live_len=0 hp=%u/%u mp=%u/%u str=%u atk=%u "
+           "tip=equip-attrs-synced evidence=overlay-tip-no-mmGame-1/1/14\n",
+           session ? session->clientId : 0, (unsigned)equipmentRows, role->hp,
+           role->hpMax, role->mp, role->mpMax, st.strength, st.attack);
+    
+    return true;
+}
+
 static void vm_mock_service_session_arm_map_actor_vitals_sync(
     vm_mock_service_client_session *session,
     u16 bagClearSeq,
@@ -7398,6 +7674,7 @@ static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
                freshShell ? "1/1/6-actorinfo" : "1/1/14",
                via ? via : "-",
                responseLen);
+        
         return responseLen;
     }
 }
@@ -7472,6 +7749,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     }
     session->roleOnline = false;
     session->onlinePresenceValid = false;
+    
     session->onlineRoleId = 0;
     session->onlineRoleName[0] = 0;
     session->onlineRoleTitle[0] = 0;
@@ -7489,6 +7767,9 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedScene[0] = 0;
     session->mmShopShellActive = false;
+    session->shopActorQueryAckCount = 0;
+    session->mmShopShellArmedTick = 0;
+    session->mmShopOpenMarkSource = 0;
     session->shopReturnTeamPeersPending = false;
     session->pendingShopReturnSceneEnter = false;
     session->pendingShopReturnSceneEnterEarliestTick = 0;
@@ -7607,6 +7888,12 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->warehouseDialogTick = 0;
     session->equipSellSessionArmed = false;
     session->equipSellDialogPending = false;
+    session->coolmallSessionArmed = false;
+    session->coolmallDialogPending = false;
+    session->coolmallDialogTick = 0;
+    session->coolmallOpenWaitMap = false;
+    session->coolmallBrowseSubtype = 0;
+    session->coolmallBrowsePage = 0;
     session->equipSellDialogTick = 0;
     session->equipSellBrowseValid = false;
     session->equipSellBrowsePage = 0;
@@ -7626,6 +7913,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->quickRepairEquipSyncPending = false;
     session->quickRepairEquipSyncPhase = 0;
     session->quickRepairEquipSyncTick = 0;
+    session->loginEquipWearSyncPending = false;
+    session->loginEquipWearSyncEarliestTick = 0;
+    session->loginEquipWearSyncNextSlot = 0;
+    session->loginEquipWearSyncRows = 0;
     vm_mock_service_session_clear_auto_timers(session);
     if (session->accountId[0] != 0 &&
         g_vm_net_mock_warehouse.loaded &&
@@ -7698,6 +7989,7 @@ static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
                    session->clientId,
                    session->onlineRoleId,
                    session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-");
+            
             vm_mock_service_account_flush_for_session(session, "account-login-takeover");
             vm_mock_service_session_mark_offline(session, "account-login-takeover");
             vm_mock_service_session_unbind_account(session);
@@ -8421,6 +8713,7 @@ static void vm_mock_service_finish_shop_return_rehydrate(
      * 802/803 which cannot rely on mmShop local insert alone).
      */
     g_netMockBackpackGridSeededRoleId = 0;
+    
     /*
      * Drop stale deferred kind-2 arms.  Empty-NPC maps re-arm after loading
      * clear finishes (or moveinfo-live cancels the clear early).
@@ -8428,6 +8721,9 @@ static void vm_mock_service_finish_shop_return_rehydrate(
     vm_mock_service_session_cancel_shop_return_kind2_reenter(
         session, "shop-return-rehydrate");
     session->mmShopShellActive = false;
+    session->shopActorQueryAckCount = 0;
+    session->mmShopShellArmedTick = 0;
+    session->mmShopOpenMarkSource = 0;
     /*
      * One-shot shop-return provenance.  Empty type-21 maps deliberately leave
      * shopSceneNpcReseedPending set through lifecycle seed (npcnum==0), so
@@ -9522,6 +9818,8 @@ typedef struct
      * flag.  It authorizes replacing a persisted completed (state 3) row only
      * after this NPC has actually offered the task to the active session. */
     bool taskRepeatable;
+    /* 0 = unlimited daily accepts for server-managed task NPCs. */
+    u16 taskDailyAcceptLimit;
     u32 challengeEnemyId;
     u16 x;
     u16 y;
@@ -9530,6 +9828,10 @@ typedef struct
     u16 instanceX;
     u16 instanceY;
     u16 instanceMinLevel;
+    /* Optional task gate before instance teleport (0 = none). */
+    u32 teleportRequireTaskId;
+    /* Bits 1..KIND_MAX: multi-service root entries on 26/1. */
+    u32 serviceMask;
     char actorResource[64];
     char displayName[32];
     char scriptName[64];

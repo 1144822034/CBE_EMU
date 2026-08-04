@@ -2376,6 +2376,12 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
         return;
     }
 #endif
+    /*
+     * 江湖商城: truncate mmShop 14/* / 1/1/14 uplink (do not forward), then
+     * host simulates 右软返回 and poll-delivers coolmall 26/1.
+     */
+    if (vm_host_coolmall_try_truncate_mall_send(request, readLen))
+        return;
     if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, request, readLen))
     {
         printf("[warn][network] client queue full/reject connect=%u len=%u "

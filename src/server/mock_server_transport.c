@@ -1028,6 +1028,7 @@ static void *vm_mock_persist_worker_main(void *opaque)
                 NULL,
                 0,
                 false,
+                0,
                 NULL);
         }
         pthread_mutex_unlock(&g_vm_mock_persist_write_mutex);
@@ -1199,6 +1200,7 @@ static void vm_mock_service_persist_try_enqueue_account(
             NULL,
             0,
             false,
+            0,
             NULL);
         pthread_mutex_unlock(&g_vm_mock_persist_write_mutex);
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
@@ -1374,6 +1376,9 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
                     flushReason = "client-disconnect-position+inventory";
                 vm_net_mock_role_db_save(flushReason);
             }
+            /* Must clear mid-transfer before capture — same as session flush. */
+            vm_mock_service_clear_inflight_scene_transfer_globals(
+                "client-disconnect");
             vm_mock_service_account_capture(accountState);
         }
         vm_mock_service_clear_request_local_scratch("client_disconnect");
@@ -1656,6 +1661,25 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             if (followupLen != 0)
                 responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP;
         }
+        else if (responseLen != 0 &&
+                 passSession != NULL &&
+                 passSession->coolmallDialogPending &&
+                 passSession->coolmallDialogTick == g_schedulerTick)
+        {
+            /*
+             * Same-TCP second CBMR as warehouse 834.  Host must keep mmShop up
+             * until primary 14/* (resp≈188) is net_fire'd, then dismiss before
+             * this followup 26/1 runs (debug-a1d304: flag-file dismiss raced
+             * ahead of queue_data 188; poll 145 never reached the client).
+             */
+            followupLen = vm_net_mock_take_coolmall_dialog_wire_followup(
+                followupBuffer, sizeof(followupBuffer), passSession);
+            if (followupLen != 0)
+                responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_HAS_FOLLOWUP;
+        }
+        /*
+         * Instance-challenge followup below.
+         */
         else if (passSession != NULL &&
                  passSession->instanceChallengeBattlePending)
         {
@@ -1829,7 +1853,13 @@ enum
      * (client data-session reuse).  Keep short: long idle holds starve the
      * accept queue under multiplayer.  Poll path returns 2 and skips this.
      */
-    VM_MOCK_SERVICE_SESSION_IDLE_MS = 200,
+    /*
+     * client_out evidence (debug-0b451a): with 200ms idle the server closes
+     * before the next human action; every NPC/dialog request then fails
+     * stage=send on reused=1 and pays ~250ms reconnect.  Keep workers free,
+     * but allow a short keep-alive window for interactive play.
+     */
+    VM_MOCK_SERVICE_SESSION_IDLE_MS = 3000,
     /* Dedicated admin workers so game CBMS backlog cannot starve :19091. */
     VM_MOCK_ADMIN_WORKER_DEFAULT = 2,
     VM_MOCK_ADMIN_WORKER_MIN = 1,
@@ -2011,6 +2041,9 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
             {
                 u32 sessionFrames = 0;
                 u32 sessionStartMs = workerStartMs;
+                u32 acceptQueueWaitMs = queueWaitMs;
+                int lastFrameRc = 0;
+                const char *endReason = "none";
 
                 for (;;)
                 {
@@ -2021,9 +2054,11 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
                         worker->responseBuffer,
                         sizeof(g_netMockResponse),
                         queueWaitMs);
+                    lastFrameRc = frameRc;
                     if (frameRc <= 0)
                     {
                         ok = 0;
+                        endReason = (sessionFrames == 0) ? "malformed" : "next-frame-fail";
                         if (sessionFrames == 0)
                         {
                             printf("[warn][mock-service] dropped malformed request worker=%u sequence=%u queue_wait_ms=%u\n",
@@ -2035,20 +2070,29 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
                     ++sessionFrames;
                     /* Explicit disconnect (rc==2) ends the TCP session. */
                     if (frameRc == 2)
+                    {
+                        endReason = "explicit-end";
                         break;
+                    }
                     if (!vm_mock_service_socket_wait_readable(
                             job.socket, (u32)VM_MOCK_SERVICE_SESSION_IDLE_MS))
+                    {
+                        endReason = "idle-timeout";
                         break;
+                    }
                     /* Subsequent frames are not charged the original accept wait. */
                     queueWaitMs = 0;
                 }
-                if (sessionFrames > 1)
                 {
                     u32 holdMs = scheduler_get_tick_ms();
                     holdMs = holdMs >= sessionStartMs ? holdMs - sessionStartMs : 0;
-                    printf("[info][mock-service] session_reuse worker=%u sequence=%u frames=%u hold_ms=%u\n",
-                           worker->workerId, job.sequence, sessionFrames, holdMs);
-                    fflush(stdout);
+                    if (sessionFrames > 1)
+                    {
+                        printf("[info][mock-service] session_reuse worker=%u sequence=%u frames=%u hold_ms=%u end=%s\n",
+                               worker->workerId, job.sequence, sessionFrames, holdMs,
+                               endReason);
+                        fflush(stdout);
+                    }
                 }
             }
         }

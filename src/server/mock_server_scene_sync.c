@@ -5664,6 +5664,238 @@ static u32 vm_net_mock_build_pending_equip_sell_dialog_response(
     return pos;
 }
 
+static const char *vm_net_mock_coolmall_subtype_name(u8 subtype)
+{
+    switch (subtype)
+    {
+    case 5:
+        return "\xc3\xd8\xb1\xa6\xb5\xc0\xbe\xdf"; /* 秘宝道具 */
+    case 6:
+        return "\xc9\xf1\xb1\xf8\xc0\xfb\xc6\xf7"; /* 神兵利器 */
+    case 7:
+        return "\xd2\xc2\xb7\xfe"; /* 衣服 */
+    case 8:
+        return "\xbf\xe3\xd7\xd3"; /* 裤子 */
+    case 9:
+        return "\xc3\xb1\xd7\xd3"; /* 帽子 */
+    case 10:
+        return "\xd0\xac\xd7\xd3"; /* 鞋子 */
+    case 11:
+        return "\xca\xf8\xd1\xfc"; /* 束腰 */
+    case 12:
+        return "\xc5\xfb\xb7\xe7"; /* 披风 */
+    case 13:
+        return "\xca\xce\xc6\xb7"; /* 饰品 */
+    default:
+        return "\xc9\xcc\xc6\xb7"; /* 商品 */
+    }
+}
+
+static bool vm_net_mock_append_coolmall_root_dialog_object(u8 *out, u32 outCap,
+                                                           u32 *pos, bool morePage)
+{
+    u8 dialog[1024];
+    u32 dialogLen = 0;
+    u32 objectStart = 0;
+    u8 i = 0;
+    static const u8 rootTypes[] = {5, 6, 7, 8, 9, 10};
+    static const u8 moreTypes[] = {11, 12, 13};
+    const u8 *types = morePage ? moreTypes : rootTypes;
+    u8 typeCount = morePage ? (u8)sizeof(moreTypes) : (u8)sizeof(rootTypes);
+    u8 optionCount = (u8)(typeCount + 1u); /* types + 更多/返回 */
+
+    if (out == NULL || pos == NULL)
+        return false;
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_seq_put_string(
+            dialog, sizeof(dialog), &dialogLen,
+            morePage
+                ? "\xc7\xeb\xd1\xa1\xd4\xf1\xc9\xcc\xc6\xb7\xc0\xe0\xd0\xcd\xa3\xba"
+                : "\xbf\xe1\xb1\xa6\xc9\xcc\xb3\xc7\xa3\xac\xc7\xeb\xd1\xa1\xd4\xf1\xc0\xe0\xd0\xcd\xa3\xba") ||
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, optionCount))
+        return false;
+    for (i = 0; i < typeCount; ++i)
+    {
+        if (!vm_net_mock_append_npc_service_dialog_option(
+                dialog, sizeof(dialog), &dialogLen,
+                vm_net_mock_coolmall_subtype_name(types[i]), 1,
+                VM_NET_MOCK_NPC_SERVICE_COOLMALL_TYPE_BASE | types[i],
+                "\xbf\xe1\xb1\xa6"))
+            return false;
+    }
+    if (!morePage)
+    {
+        if (!vm_net_mock_append_npc_service_dialog_option(
+                dialog, sizeof(dialog), &dialogLen, "\xb8\xfc\xb6\xe0", 1,
+                VM_NET_MOCK_NPC_SERVICE_COOLMALL_MORE,
+                "\xca\xf8\xd1\xfc\x2f\xc5\xfb\xb7\xe7\x2f\xca\xce\xc6\xb7"))
+            return false;
+    }
+    else if (!vm_net_mock_append_npc_service_dialog_option(
+                 dialog, sizeof(dialog), &dialogLen, "\xb7\xb5\xbb\xd8", 1,
+                 VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL,
+                 "\xbf\xe1\xb1\xa6\xc9\xcc\xb3\xc7"))
+    {
+        return false;
+    }
+    if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "hidebtn", 0) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "dialog", dialog,
+                                    (u16)dialogLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+static u32 vm_net_mock_build_coolmall_root_dialog_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_coolmall_root_dialog_object(out, outCap, &pos, false))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_take_coolmall_dialog_wire_followup(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL || !session->coolmallDialogPending)
+        return 0;
+    pos = vm_net_mock_build_coolmall_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->coolmallDialogPending = false;
+    session->coolmallDialogTick = 0;
+    session->coolmallOpenWaitMap = false;
+    printf("[info][network] mock_coolmall_dialog_wire client=%08x resp=%u "
+           "evidence=second-CBMR-lone-26/1-after-mall-truncate\n",
+           session->clientId, pos);
+    return pos;
+}
+
+static void vm_mock_service_session_arm_coolmall_open_from_host_flag(
+    vm_mock_service_client_session *session)
+{
+    FILE *fp;
+    int openReq = 0;
+    vm_net_mock_role_state *role;
+    const char *scene = NULL;
+
+    if (session == NULL)
+        return;
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_open_request.flag",
+               "rb");
+    if (fp == NULL)
+        return;
+    openReq = fgetc(fp);
+    fclose(fp);
+    if (openReq != '1')
+        return;
+
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_open_request.flag",
+               "wb");
+    if (fp != NULL)
+    {
+        fputs("0\n", fp);
+        fclose(fp);
+    }
+
+    role = vm_net_mock_active_role();
+    session->coolmallSessionArmed = true;
+    session->coolmallDialogPending = true;
+    session->coolmallOpenWaitMap = false;
+    session->coolmallDialogTick = g_schedulerTick;
+    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
+        scene = role->scene;
+    else if (vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+        scene = session->sceneVisibleScene;
+    else if (vm_net_mock_scene_name_is_safe(session->onlineScene))
+        scene = session->onlineScene;
+    if (scene != NULL)
+    {
+        session->mmShopShellActive = false;
+        session->shopActorQueryAckCount = 0;
+        session->mmShopShellArmedTick = 0;
+        session->mmShopOpenMarkSource = 0;
+        session->shopReturnKind2Completed = false;
+        vm_mock_service_session_cancel_shop_return_loading_clear(
+            session, "coolmall-open-unstuck");
+        vm_mock_service_session_cancel_shop_return_kind2_reenter(
+            session, "coolmall-open-unstuck-rearm");
+        vm_mock_service_session_arm_shop_return_kind2_reenter(
+            session, scene, "coolmall-open-unstuck");
+        session->pendingShopReturnSceneEnterEarliestTick = g_schedulerTick;
+        session->coolmallOpenWaitMap = true;
+        printf("[info][mock-service] coolmall_open_unstuck_30_1 "
+               "client=%08x scene=%s wait_map=1\n",
+               session->clientId, scene);
+    }
+    printf("[info][mock-service] coolmall_open_from_host_reject "
+           "client=%08x\n",
+           session->clientId);
+}
+
+static u32 vm_net_mock_build_pending_coolmall_dialog_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *session)
+{
+    u32 ageTicks = 0;
+    u32 pos = 0;
+
+    if (out == NULL || session == NULL)
+        return 0;
+
+    /*
+     * Host wrote open_request.flag after peel-to-root.  Prefer arming here so
+     * the same poll can also deliver deferred 30/1 (checked earlier once
+     * pending is set — next poll if this runs after kind2 slot).
+     */
+    vm_mock_service_session_arm_coolmall_open_from_host_flag(session);
+
+    if (!session->coolmallDialogPending)
+        return 0;
+    ageTicks = g_schedulerTick - session->coolmallDialogTick;
+    /*
+     * Truncate/keep-map: age>=3.  Unstick+30/1: wait for EnterScene to push
+     * outdoor before NPC 酷宝 (host also re-requests when map ready).
+     */
+    if (session->coolmallOpenWaitMap)
+    {
+        if (ageTicks < 48u)
+            return 0;
+        /* Hold 26/1 while kind2 enter still pending. */
+        if (session->pendingShopReturnSceneEnter)
+            return 0;
+    }
+    else if (ageTicks < 3u)
+        return 0;
+    if (ageTicks > (30u * 1000u / VM_SCHED_FRAME_MS))
+    {
+        printf("[warn][mock-service] coolmall_dialog_drop client=%08x age_ticks=%u\n",
+               session->clientId, ageTicks);
+        session->coolmallDialogPending = false;
+        session->coolmallDialogTick = 0;
+        session->coolmallOpenWaitMap = false;
+        return 0;
+    }
+    pos = vm_net_mock_build_coolmall_root_dialog_response(out, outCap);
+    if (pos == 0)
+        return 0;
+    session->coolmallDialogPending = false;
+    session->coolmallDialogTick = 0;
+    session->coolmallOpenWaitMap = false;
+    printf("[info][network] mock_coolmall_dialog_deliver client=%08x age_ticks=%u "
+           "resp=%u evidence=26/1-poll-npc-dialog\n",
+           session->clientId, ageTicks, pos);
+    
+    return pos;
+}
+
 /*
  * Warehouse deposit bag peel mirrors NPC-buy busy contract
  * (docs/re/2026-07-25-npc-purchase-progress-stuck.md):
@@ -6785,6 +7017,287 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             }
         }
     }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL ||
+             serviceValue == VM_NET_MOCK_NPC_SERVICE_COOLMALL_MORE ||
+             (serviceValue & 0xff000000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_COOLMALL_TYPE_BASE ||
+             (serviceValue & 0xff000000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE ||
+             (serviceValue & 0xff000000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE ||
+             (serviceValue & 0xff000000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_COOLMALL_VIEW_BASE)
+    {
+        u8 subtype = 0;
+        u32 page = 0;
+        u32 total = 0;
+        u32 start = 0;
+        bool fillList = false;
+        bool morePage = (serviceValue == VM_NET_MOCK_NPC_SERVICE_COOLMALL_MORE);
+        bool isType = (serviceValue & 0xff000000u) ==
+                      VM_NET_MOCK_NPC_SERVICE_COOLMALL_TYPE_BASE;
+        bool isPage = (serviceValue & 0xff000000u) ==
+                      VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE;
+        bool isBuy = (serviceValue & 0xff000000u) ==
+                     VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE;
+        bool isView = (serviceValue & 0xff000000u) ==
+                      VM_NET_MOCK_NPC_SERVICE_COOLMALL_VIEW_BASE;
+        const vm_net_mock_shop_catalog_item *buyItem = NULL;
+        const vm_net_mock_equipment_catalog_item *viewEquipment = NULL;
+        bool showDetail = false;
+
+        action = "coolmall";
+        if (session != NULL)
+            session->coolmallSessionArmed = true;
+
+        if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL || morePage)
+        {
+            static const u8 rootTypes[] = {5, 6, 7, 8, 9, 10};
+            static const u8 moreTypes[] = {11, 12, 13};
+            const u8 *types = morePage ? moreTypes : rootTypes;
+            u8 typeCount = morePage ? (u8)sizeof(moreTypes) : (u8)sizeof(rootTypes);
+
+            dialogText = morePage
+                             ? "\xc7\xeb\xd1\xa1\xd4\xf1\xc9\xcc\xc6\xb7\xc0\xe0\xd0\xcd\xa3\xba"
+                             : "\xbf\xe1\xb1\xa6\xc9\xcc\xb3\xc7\xa3\xac\xc7\xeb\xd1\xa1\xd4\xf1\xc0\xe0\xd0\xcd\xa3\xba";
+            for (u8 i = 0; i < typeCount &&
+                           optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                 ++i)
+            {
+                optionNames[optionCount] =
+                    vm_net_mock_coolmall_subtype_name(types[i]);
+                optionDescriptions[optionCount] = "\xbf\xe1\xb1\xa6";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_COOLMALL_TYPE_BASE | types[i];
+                ++optionCount;
+            }
+            if (!morePage &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] = "\xb8\xfc\xb6\xe0";
+                optionDescriptions[optionCount] =
+                    "\xca\xf8\xd1\xfc\x2f\xc5\xfb\xb7\xe7\x2f\xca\xce\xc6\xb7";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_COOLMALL_MORE;
+                ++optionCount;
+            }
+            else if (morePage &&
+                     optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] = "\xb7\xb5\xbb\xd8";
+                optionDescriptions[optionCount] =
+                    "\xbf\xe1\xb1\xa6\xc9\xcc\xb3\xc7";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL;
+                ++optionCount;
+            }
+        }
+        else if (isBuy || isView)
+        {
+            buyItem = vm_net_mock_find_shop_catalog_item(value);
+            if (session != NULL && session->coolmallBrowseSubtype >= 5 &&
+                session->coolmallBrowseSubtype <= 13)
+            {
+                subtype = session->coolmallBrowseSubtype;
+                page = session->coolmallBrowsePage;
+            }
+            if (buyItem != NULL && buyItem->isEquip)
+                viewEquipment =
+                    vm_net_mock_find_equipment_catalog_item(buyItem->itemId);
+
+            if (isView && buyItem != NULL && buyItem->isEquip &&
+                viewEquipment != NULL &&
+                vm_net_mock_npc_shop_format_equipment_detail(
+                    dialogTextStorage, sizeof(dialogTextStorage), buyItem,
+                    viewEquipment, 0))
+            {
+                dialogText = dialogTextStorage;
+                showDetail = true;
+                optionNames[optionCount] =
+                    "\xb9\xba\xc2\xf2\xb8\xc3\xd7\xb0\xb1\xb8";
+                {
+                    u32 unitPrice = vm_net_mock_shop_effective_unit_price(
+                        buyItem->itemId, buyItem->price);
+                    snprintf(optionDescriptionStorage[optionCount],
+                             sizeof(optionDescriptionStorage[optionCount]),
+                             "%u%s", unitPrice, "\xbf\xe1\xb1\xa6");
+                }
+                optionDescriptions[optionCount] =
+                    optionDescriptionStorage[optionCount];
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE | buyItem->itemId;
+                ++optionCount;
+                if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+                {
+                    optionNames[optionCount] = "\xb7\xb5\xbb\xd8";
+                    optionDescriptions[optionCount] =
+                        vm_net_mock_coolmall_subtype_name(subtype ? subtype : 6);
+                    optionValues[optionCount] =
+                        VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE |
+                        ((page & 0xffu) << 8) | (subtype ? subtype : 6u);
+                    ++optionCount;
+                }
+            }
+            else if (isBuy)
+            {
+                u32 unitPrice = 0;
+
+                if (buyItem == NULL || !buyItem->enabled)
+                {
+                    dialogText =
+                        "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3";
+                    fillList = (subtype >= 5 && subtype <= 13);
+                }
+                else
+                {
+                    unitPrice = vm_net_mock_shop_effective_unit_price(
+                        buyItem->itemId, buyItem->price);
+                    if (role->wcoin < unitPrice)
+                    {
+                        dialogText =
+                            "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3";
+                        fillList = (subtype >= 5 && subtype <= 13);
+                    }
+                    else if (!vm_net_mock_role_add_backpack_item_to_role(
+                                 role, buyItem->itemId, 1, 0, &backpackAddSeq,
+                                 buyItem->isEquip ? "coolmall-equip-buy"
+                                                  : "coolmall-item-buy"))
+                    {
+                        dialogText =
+                            "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3";
+                        fillList = (subtype >= 5 && subtype <= 13);
+                    }
+                    else
+                    {
+                        role->wcoin -= unitPrice;
+                        /* Deduct after grant succeeds — fix order: deduct first then grant with rollback */
+                        backpackAddItemId = buyItem->itemId;
+                        backpackAddCount = 1;
+                        appendBackpackAdd = true;
+                        result = 1;
+                        snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                                 "%s%u%s",
+                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3\xc9\xfa\xd3\xe0\xbf\xe1\xb1\xa6\xa3\xba",
+                                 role->wcoin, "\xa1\xa3");
+                        dialogText = dialogTextStorage;
+                        fillList = (subtype >= 5 && subtype <= 13);
+                        printf("[info][network] mock_coolmall_buy role=%u item=%u "
+                               "price=%u wcoin=%u\n",
+                               role->roleId, buyItem->itemId, unitPrice,
+                               role->wcoin);
+                    }
+                }
+            }
+            else
+            {
+                dialogText =
+                    "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3";
+                fillList = (subtype >= 5 && subtype <= 13);
+            }
+        }
+        else if (isType || isPage)
+        {
+            if (isPage)
+            {
+                subtype = (u8)(value & 0xffu);
+                page = (value >> 8) & 0xffu;
+            }
+            else
+            {
+                subtype = (u8)(value & 0xffu);
+                page = 0;
+            }
+            if (subtype < 5 || subtype > 13)
+            {
+                dialogText =
+                    "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3";
+            }
+            else
+            {
+                fillList = true;
+                if (session != NULL)
+                {
+                    session->coolmallBrowseSubtype = subtype;
+                    session->coolmallBrowsePage = (u16)page;
+                }
+            }
+        }
+
+        if (fillList && !showDetail && subtype >= 5 && subtype <= 13)
+        {
+            total = vm_net_mock_shop_page_filtered_total(subtype);
+            if (page * VM_NET_MOCK_COOLMALL_PAGE_ITEMS >= total && total > 0)
+                page = (total - 1u) / VM_NET_MOCK_COOLMALL_PAGE_ITEMS;
+            start = page * VM_NET_MOCK_COOLMALL_PAGE_ITEMS;
+            if (session != NULL)
+            {
+                session->coolmallBrowseSubtype = subtype;
+                session->coolmallBrowsePage = (u16)page;
+            }
+            if (result != 1)
+                dialogText =
+                    "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa3\xba";
+            for (u32 ordinal = start;
+                 ordinal < total &&
+                 ordinal < start + VM_NET_MOCK_COOLMALL_PAGE_ITEMS &&
+                 optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS - 2u;
+                 ++ordinal)
+            {
+                const vm_net_mock_shop_catalog_item *item =
+                    vm_net_mock_shop_page_item_at(subtype, ordinal);
+                u32 unitPrice = 0;
+
+                if (item == NULL)
+                    break;
+                unitPrice = vm_net_mock_shop_effective_unit_price(item->itemId,
+                                                                  item->price);
+                optionNames[optionCount] = item->name;
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]), "%u%s",
+                         unitPrice, "\xbf\xe1\xb1\xa6");
+                optionDescriptions[optionCount] =
+                    optionDescriptionStorage[optionCount];
+                optionValues[optionCount] =
+                    item->isEquip
+                        ? (VM_NET_MOCK_NPC_SERVICE_COOLMALL_VIEW_BASE |
+                           item->itemId)
+                        : (VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE |
+                           item->itemId);
+                ++optionCount;
+            }
+            if (page > 0 &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] = "\xc9\xcf\xd2\xbb\xd2\xb3";
+                optionDescriptions[optionCount] =
+                    vm_net_mock_coolmall_subtype_name(subtype);
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE |
+                    (((page - 1u) & 0xffu) << 8) | subtype;
+                ++optionCount;
+            }
+            if (start + VM_NET_MOCK_COOLMALL_PAGE_ITEMS < total &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] = "\xcf\xc2\xd2\xbb\xd2\xb3";
+                optionDescriptions[optionCount] =
+                    vm_net_mock_coolmall_subtype_name(subtype);
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_COOLMALL_PAGE_BASE |
+                    (((page + 1u) & 0xffu) << 8) | subtype;
+                ++optionCount;
+            }
+            if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] = "\xb7\xb5\xbb\xd8";
+                optionDescriptions[optionCount] =
+                    "\xbf\xe1\xb1\xa6\xc9\xcc\xb3\xc7";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_COOLMALL;
+                ++optionCount;
+            }
+        }
+    }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON)
     {
         static const u8 weaponSelectors[] = {8, 9, 10};
@@ -6843,6 +7356,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE;
         bool showLevelBandMenu = false;
         bool showItemDetail = false;
+        const char *currencyUnit =
+            (session != NULL && session->coolmallSessionArmed)
+                ? "\xbf\xe1\xb1\xa6"  /* 酷宝 */
+                : "\xcd\xad";         /* 铜 */
 
         action = buyRequest ? (legacyWeaponBuy ? "weapon-buy" : "shop-buy")
                             : (viewRequest ? "shop-view" : "shop-category");
@@ -6938,10 +7455,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 dialogText =
                     "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3"; /* 该商品已下架。 */
             }
-            else if (role->money < buyItem->price)
+            else if ((session != NULL && session->coolmallSessionArmed)
+                         ? (role->wcoin < buyItem->price)
+                         : (role->money < buyItem->price))
             {
                 dialogText =
-                    "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 铜钱不足，无法购买。 */
+                    (session != NULL && session->coolmallSessionArmed)
+                        ? "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3" /* 酷宝不足，无法购买。 */
+                        : "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 铜钱不足，无法购买。 */
             }
             else
             {
@@ -6951,13 +7472,22 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                  * rolled back with a sync save instead of refunding only money
                  * in RAM after a partial grant. */
                 vm_net_mock_role_state purchaseBefore = *role;
-                role->money -= buyItem->price;
+                bool payWcoin =
+                    session != NULL && session->coolmallSessionArmed;
+
+                if (payWcoin)
+                    role->wcoin -= buyItem->price;
+                else
+                    role->money -= buyItem->price;
                 if (!vm_net_mock_role_add_backpack_item_to_role(
                         role, buyItem->itemId, 1, 0, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy"))
                 {
-                    role->money += buyItem->price;
+                    if (payWcoin)
+                        role->wcoin += buyItem->price;
+                    else
+                        role->money += buyItem->price;
                     if (g_vm_net_mock_backpack_add_fail_kind ==
                         VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL)
                     {
@@ -7046,7 +7576,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 "\xb9\xba\xc2\xf2\xb8\xc3\xd7\xb0\xb1\xb8"; /* 购买该装备 */
             snprintf(optionDescriptionStorage[optionCount],
                      sizeof(optionDescriptionStorage[optionCount]),
-                     "%u%s", buyItem->price, "\xcd\xad"); /* ...铜 */
+                     "%u%s", buyItem->price, currencyUnit);
             optionDescriptions[optionCount] =
                 optionDescriptionStorage[optionCount];
             optionValues[optionCount] =
@@ -7140,7 +7670,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 /* Mall-like: select row → view attrs → buy on detail page. */
                 snprintf(optionNameStorage[optionCount],
                          sizeof(optionNameStorage[optionCount]), "%s %u%s",
-                         item->name, item->price, "\xcd\xad"); /* ...铜 */
+                         item->name, item->price, currencyUnit);
                 snprintf(optionDescriptionStorage[optionCount],
                          sizeof(optionDescriptionStorage[optionCount]),
                          "Lv.%u %s", levelRequired,
@@ -7156,7 +7686,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 snprintf(optionNameStorage[optionCount],
                          sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
                          "\xb9\xba\xc2\xf2", item->name, item->price,
-                         "\xcd\xad"); /* 购买...铜 */
+                         currencyUnit);
                 snprintf(optionDescriptionStorage[optionCount],
                          sizeof(optionDescriptionStorage[optionCount]),
                          "%s Lv.%u", item->name, levelRequired);

@@ -1067,9 +1067,62 @@ static u32 vm_net_mock_build_nearby_guild_invite_response(const u8 *request, u32
 static u32 vm_net_mock_build_nearby_trade_request_response(const u8 *request, u32 requestLen,
                                                             u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_nearby_social_action_ack_response(
-        request, requestLen, out, outCap, vm_net_mock_is_nearby_trade_request,
-        "trade-request", VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE, true);
+    vm_net_mock_scene_role_seed targetSeed;
+    vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
+    const char *sourceAccountId = g_vm_mock_service_active_account_id;
+    const char *scene = vm_net_mock_current_scene_name();
+    const char *targetScope = "nearby";
+    const char *reason = "ok";
+    u32 actorId = 0;
+    u32 pos = 5;
+    bool queued = false;
+
+    memset(&targetSeed, 0, sizeof(targetSeed));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_nearby_trade_request(request, requestLen, &actorId) ||
+        (!vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+         (targetScope = "friend",
+          !vm_net_mock_find_friend_role_seed_by_role_id(actorId, &targetSeed))))
+    {
+        return 0;
+    }
+    if (sourceSession != NULL && sourceRole != NULL && targetSeed.session != NULL &&
+        sourceSession->clientId != targetSeed.session->clientId)
+    {
+        if (vm_mock_service_session_trade_blocks_invite(sourceSession->clientId) ||
+            vm_mock_service_session_trade_blocks_invite(targetSeed.session->clientId))
+        {
+            reason = "active-trade";
+            printf("[warn][network] mock_trade_request_busy actor=%u source=%08x "
+                   "target=%08x reason=active-trade\n",
+                   actorId, sourceSession->clientId,
+                   targetSeed.session->clientId);
+        }
+        else
+        {
+            queued = vm_mock_service_session_enqueue_social_notice(
+                targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TRADE_INVITE, 0,
+                sourceSession, sourceRole, sourceAccountId);
+            reason = queued ? "queued" : "queue-full-or-modal";
+        }
+    }
+    else
+    {
+        reason = "invalid-target";
+    }
+    /* Sender already showed "request sent"; transport ack stays empty WT. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
+    printf("[info][network] mock_nearby_trade-request actor=%u scope=%s target=%s "
+           "scene=%s queued=%u reason=%s transport_ack=empty-wt resp=%u\n",
+           actorId,
+           targetScope,
+           targetSeed.roleName ? targetSeed.roleName : "Player",
+           scene ? scene : "-",
+           queued ? 1u : 0u,
+           reason,
+           pos);
+    return pos;
 }
 
 static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 requestLen,
@@ -1114,16 +1167,35 @@ static u32 vm_net_mock_build_nearby_team_invite_response(const u8 *request, u32 
         {
             reason = "team-full";
         }
-        else if (vm_mock_service_team_find_for_client(targetSeed.session->clientId) != NULL)
-        {
-            reason = "target-in-team";
-        }
         else
         {
-            queued = vm_mock_service_session_enqueue_social_notice(
-                targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE, 0,
-                sourceSession, sourceRole, sourceAccountId);
-            reason = queued ? "queued" : "notice-queue-full";
+            vm_mock_service_team *targetTeam =
+                vm_mock_service_team_find_for_client(targetSeed.session->clientId);
+            /* Solo leftovers (memberCount<2) are not a real party; do not
+             * block invites the way a multi-member roster must. */
+            if (targetTeam != NULL && targetTeam->active &&
+                targetTeam->memberCount >= 2)
+            {
+                reason = "target-in-team";
+            }
+            else
+            {
+                if (targetTeam != NULL && targetTeam->active &&
+                    targetTeam->memberCount < 2)
+                {
+                    printf("[info][mock-service] team_disband leader=%08x/%u "
+                           "reason=invite-clear-solo-orphan target=%08x/%u\n",
+                           targetTeam->leaderClientId,
+                           targetSeed.session->onlineRoleId,
+                           targetSeed.session->clientId,
+                           targetSeed.session->onlineRoleId);
+                    memset(targetTeam, 0, sizeof(*targetTeam));
+                }
+                queued = vm_mock_service_session_enqueue_social_notice(
+                    targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_INVITE, 0,
+                    sourceSession, sourceRole, sourceAccountId);
+                reason = queued ? "queued" : "notice-queue-full";
+            }
         }
     }
     else
@@ -1233,34 +1305,57 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     }
     source = vm_mock_service_find_client_session(responder->teamInviteSourceClientId);
     if (result == 1 && source != NULL && source->roleOnline &&
-        source->clientId != responder->clientId &&
-        vm_mock_service_team_find_for_client(responder->clientId) == NULL)
+        source->clientId != responder->clientId)
     {
-        team = vm_mock_service_team_find_for_client(source->clientId);
-        if (team == NULL)
-            team = vm_mock_service_team_create(source);
-        if (team != NULL && vm_mock_service_team_is_leader(team, source->clientId) &&
-            vm_mock_service_team_add_member(team, responder))
+        vm_mock_service_team *responderTeam =
+            vm_mock_service_team_find_for_client(responder->clientId);
+        if (responderTeam != NULL && responderTeam->active &&
+            responderTeam->memberCount < 2)
         {
-            /* Build the joiner 5/3 before notifying peers.  If encoding fails,
-             * roll the membership back so leader notices are not queued against
-             * a team the accepter never received. */
-            if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
-                                                                     team, responder))
+            printf("[info][mock-service] team_disband leader=%08x/%u "
+                   "reason=invite-reply-clear-solo-orphan\n",
+                   responderTeam->leaderClientId, responder->onlineRoleId);
+            memset(responderTeam, 0, sizeof(*responderTeam));
+            responderTeam = NULL;
+        }
+        if (responderTeam == NULL)
+        {
+            team = vm_mock_service_team_find_for_client(source->clientId);
+            if (team == NULL)
+                team = vm_mock_service_team_create(source);
+            if (team != NULL && vm_mock_service_team_is_leader(team, source->clientId) &&
+                vm_mock_service_team_add_member(team, responder))
             {
-                printf("[warn][network] mock_team_invite_reply_roster_fail "
-                       "source=%08x target=%08x members=%u action=rollback\n",
-                       source->clientId, responder->clientId,
-                       team->memberCount);
-                (void)vm_mock_service_team_remove_member(responder, "invite-reply-roster-fail");
-                team = NULL;
-                pos = 5;
+                /* Build the joiner 5/3 before notifying peers.  If encoding fails,
+                 * roll the membership back so leader notices are not queued against
+                 * a team the accepter never received. */
+                if (!vm_net_mock_append_team_joiner_leader_roster_object(out, outCap, &pos,
+                                                                         team, responder))
+                {
+                    printf("[warn][network] mock_team_invite_reply_roster_fail "
+                           "source=%08x target=%08x members=%u action=rollback\n",
+                           source->clientId, responder->clientId,
+                           team->memberCount);
+                    (void)vm_mock_service_team_remove_member(responder, "invite-reply-roster-fail");
+                    team = NULL;
+                    pos = 5;
+                }
+                else
+                {
+                    accepted = true;
+                    vm_mock_service_team_enqueue_member_join_for_peers(
+                        team, source->clientId, responder->clientId, responder);
+                }
             }
-            else
+            else if (team != NULL && team->active && team->memberCount < 2)
             {
-                accepted = true;
-                vm_mock_service_team_enqueue_member_join_for_peers(
-                    team, source->clientId, responder->clientId, responder);
+                /* create succeeded but add failed (e.g. dream ban): do not leave
+                 * the inviter stuck in a solo slot that blocks later invites. */
+                printf("[info][mock-service] team_disband leader=%08x/%u "
+                       "reason=invite-reply-add-failed-clear-solo\n",
+                       team->leaderClientId, source->onlineRoleId);
+                memset(team, 0, sizeof(*team));
+                team = NULL;
             }
         }
     }
@@ -1398,16 +1493,31 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
         !inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
         inviter->sceneVisiblePending || responder->sceneVisiblePending ||
         !vm_mock_service_session_scene_is_visible(responder,
-                                                  inviter->sceneVisibleScene) ||
-        vm_mock_service_duel_find_for_client(inviter->clientId, NULL) != NULL ||
+                                                  inviter->sceneVisibleScene))
+    {
+        return NULL;
+    }
+    /* Rematch while prior duel is finished-hold-only must reclaim the slot. */
+    vm_mock_service_duel_clear_finished_hold_for_client(inviter->clientId,
+                                                       "rematch-begin-inviter");
+    vm_mock_service_duel_clear_finished_hold_for_client(responder->clientId,
+                                                       "rematch-begin-responder");
+    if (vm_mock_service_duel_find_for_client(inviter->clientId, NULL) != NULL ||
         vm_mock_service_duel_find_for_client(responder->clientId, NULL) != NULL)
     {
         return NULL;
     }
+    /* New start must not fight leftover exit-operate redelivery. */
+    inviter->sparExitRedeliverUntilTick = 0;
+    responder->sparExitRedeliverUntilTick = 0;
+    inviter->sparBattleReadyPending = false;
+    responder->sparBattleReadyPending = false;
     inviterTeam = vm_mock_service_team_find_for_client(inviter->clientId);
     responderTeam = vm_mock_service_team_find_for_client(responder->clientId);
-    if ((inviterTeam != NULL && inviterTeam->battleActive) ||
-        (responderTeam != NULL && responderTeam->battleActive))
+    if ((inviterTeam != NULL &&
+         vm_mock_service_team_battle_in_progress(inviterTeam)) ||
+        (responderTeam != NULL &&
+         vm_mock_service_team_battle_in_progress(responderTeam)))
     {
         return NULL;
     }
@@ -1615,10 +1725,22 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
         targetSeed.session != NULL &&
         targetSeed.session->clientId != sourceSession->clientId)
     {
-        queued = vm_mock_service_session_enqueue_social_notice(
-            targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE, 0,
-            sourceSession, sourceRole, sourceAccountId);
-        result = queued ? 1 : 3; /* target state cannot accept another modal. */
+        if (vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
+            vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId))
+        {
+            result = 3; /* busy / cannot accept another modal. */
+            printf("[warn][network] mock_spar_request_busy actor=%u source=%08x "
+                   "target=%08x reason=active-duel\n",
+                   actorId, sourceSession->clientId,
+                   targetSeed.session->clientId);
+        }
+        else
+        {
+            queued = vm_mock_service_session_enqueue_social_notice(
+                targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE, 0,
+                sourceSession, sourceRole, sourceAccountId);
+            result = queued ? 1 : 3; /* target state cannot accept another modal. */
+        }
     }
 
     /* Subtype 14 accepts result=1 without presenting another message; the
@@ -1748,6 +1870,12 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
     if (accepted && readyIncluded)
     {
         duel = vm_mock_service_duel_begin(source, responder);
+        if (duel == NULL)
+        {
+            printf("[warn][network] mock_spar_reply_begin_failed source=%08x "
+                   "target=%08x ready_inline=1 evidence=duel-slot-or-scene-busy\n",
+                   source->clientId, responder->clientId);
+        }
         accepted = duel != NULL;
     }
     if (source != NULL)
@@ -2119,7 +2247,12 @@ static u32 vm_net_mock_build_trade_invite_reply_response(const u8 *request, u32 
         trade = vm_mock_service_trade_begin(sourceSession, responderSession);
         tradeStarted = trade != NULL;
         if (!tradeStarted)
+        {
             result = 2;
+            printf("[warn][network] mock_trade_reply_begin_failed source=%08x "
+                   "target=%08x evidence=active-or-offer-pending-trade\n",
+                   sourceSession->clientId, responderSession->clientId);
+        }
     }
     if (sourceSession != NULL)
     {

@@ -31,6 +31,14 @@ static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
 static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
                                                           u32 remaining);
 
+/* After login equipment 7/7: same-packet aggregated live wear attrs. */
+static bool vm_mock_service_session_append_login_equip_wear_sync(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u8 equipmentRows);
+
+/* Publish aggregated panel attrs for host realign (login has no FA wear). */
+static void vm_net_mock_publish_panel_attr_overlay(
+    const vm_net_mock_player_stats *stats);
+
 #include "mock_server_catalog.c"
 
 /* Sync MySQL writers in role.c (position / full role_db_save) must invalidate
@@ -64,6 +72,7 @@ static void vm_net_mock_dream_sce_hot_reenter_restore_admin(void);
 static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene);
 
 #include "mock_server_equipment_npc.c"
+#include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"

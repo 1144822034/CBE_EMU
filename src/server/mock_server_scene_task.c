@@ -2396,6 +2396,120 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_tasks_ensure_daily_accept_limit_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_tasks' "
+            "AND COLUMN_NAME='daily_accept_limit'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "ADD COLUMN daily_accept_limit SMALLINT UNSIGNED NOT NULL DEFAULT 0 "
+            "COMMENT '0=unlimited daily accepts; N=max accepts per local day' "
+            "AFTER repeatable"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_task_schema "
+           "migration=daily-accept-limit-column action=applied\n");
+    return true;
+}
+
+static bool vm_net_mock_npc_task_daily_ensure_table(void)
+{
+    return vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS account_role_npc_task_daily ("
+        "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "role_id INT UNSIGNED NOT NULL,"
+        "scene VARBINARY(64) NOT NULL,"
+        "actor_id INT UNSIGNED NOT NULL,"
+        "task_id INT UNSIGNED NOT NULL,"
+        "day_ymd INT UNSIGNED NOT NULL,"
+        "accept_count INT UNSIGNED NOT NULL DEFAULT 0,"
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+        "ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(account_id,role_id,scene,actor_id,task_id,day_ymd),"
+        "CONSTRAINT fk_account_role_npc_task_daily_role "
+        "FOREIGN KEY(account_id,role_id) REFERENCES account_roles(account_id,role_id) "
+        "ON DELETE CASCADE) ENGINE=InnoDB");
+}
+
+static bool vm_net_mock_dynamic_npc_ensure_service_mask_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npcs' "
+            "AND COLUMN_NAME='npc_service_mask'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npcs "
+            "ADD COLUMN npc_service_mask INT UNSIGNED NOT NULL DEFAULT 0 "
+            "COMMENT 'bits 1..6 = enabled root services; 0=derive from npc_kind' "
+            "AFTER npc_kind"))
+    {
+        return false;
+    }
+    if (!vm_mysql_exec(
+            "UPDATE server_dynamic_npcs SET npc_service_mask="
+            "CASE WHEN npc_kind BETWEEN 1 AND 6 THEN (1 << npc_kind) ELSE 0 END "
+            "WHERE npc_service_mask=0 AND npc_kind BETWEEN 1 AND 6"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_schema migration=service-mask-column action=applied\n");
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_instances_ensure_teleport_require_task_column(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND "
+            "TABLE_NAME='server_dynamic_npc_instances' AND "
+            "COLUMN_NAME='teleport_require_task_id'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_instances "
+            "ADD COLUMN teleport_require_task_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "COMMENT '0=always show teleport; else show after this task completed(state3)' "
+            "AFTER minimum_level"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_instance_schema "
+           "migration=teleport-require-task-column action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                        unsigned int columnCount,
                                        const char *const *values,
@@ -2404,11 +2518,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[12];
+    u32 number[15];
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 17 ||
+    if (context == NULL || columnCount != 20 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -2427,13 +2541,17 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
         !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]) ||
         !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[7]) || number[7] > 1u ||
-        !vm_net_mock_dynamic_npc_decode_hex(values[12], lengths[12],
+        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[8]) || number[8] > 0xffffu ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[13], lengths[13],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[8]) || number[8] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[9]) || number[9] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[11]) || number[11] > 0xffu)
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[11]) || number[11] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[12]) || number[12] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[13]) ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[14]) ||
+        (number[14] & ~VM_NET_MOCK_NPC_SERVICE_MASK_ALL) != 0)
     {
         if (context != NULL)
             ++context->skipped;
@@ -2448,10 +2566,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.enabled = number[5] != 0;
     row.seed.taskId = number[6];
     row.seed.taskRepeatable = number[7] != 0;
-    row.seed.instanceX = (u16)number[8];
-    row.seed.instanceY = (u16)number[9];
-    row.seed.challengeEnemyId = number[10];
-    row.seed.instanceMinLevel = (u16)number[11];
+    row.seed.taskDailyAcceptLimit = (u16)number[8];
+    row.seed.instanceX = (u16)number[9];
+    row.seed.instanceY = (u16)number[10];
+    row.seed.challengeEnemyId = number[11];
+    row.seed.instanceMinLevel = (u16)number[12];
+    row.seed.teleportRequireTaskId = number[13];
+    row.seed.serviceMask = number[14];
+    vm_net_mock_npc_normalize_service_fields(&row.seed);
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -2461,7 +2583,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_net_mock_str_ends_with(row.seed.actorResource, ".actor") ||
         (row.seed.scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(row.seed.scriptName, ".xse")) ||
-        (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+        (vm_net_mock_npc_has_service(&row.seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) &&
          ((row.seed.instanceScene[0] == 0 && row.seed.challengeEnemyId == 0) ||
           (row.seed.instanceScene[0] != 0 &&
            (!vm_net_mock_scene_name_is_safe(row.seed.instanceScene) ||
@@ -2469,6 +2591,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
             !vm_net_mock_scene_resource_exists(row.seed.instanceScene))) ||
           (row.seed.challengeEnemyId != 0 &&
            !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId)) ||
+          (row.seed.teleportRequireTaskId != 0 &&
+           row.seed.instanceScene[0] == 0) ||
           row.seed.instanceMinLevel == 0)) ||
         !vm_net_mock_open_server_data_resource(row.seed.actorResource, ".actor",
                                                NULL, NULL, 0) ||
@@ -2519,22 +2643,27 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
                 "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
                 "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
                 "npc_kind SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+                "npc_service_mask INT UNSIGNED NOT NULL DEFAULT 0,"
                 "orientation SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
                 "actor_resource VARBINARY(64) NOT NULL,display_name VARBINARY(32) NOT NULL,"
                 "script_name VARBINARY(64) NOT NULL DEFAULT '',enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
                 "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
                 "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
                 "PRIMARY KEY(scene,actor_id)) ENGINE=InnoDB") ||
+            !vm_net_mock_dynamic_npc_ensure_service_mask_column() ||
             !vm_mysql_exec(
                 "CREATE TABLE IF NOT EXISTS server_dynamic_npc_tasks ("
                 "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
                 "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+                "daily_accept_limit SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
                 "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
                 "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
                 "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
                 "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
                 "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
             !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
+            !vm_net_mock_dynamic_npc_tasks_ensure_daily_accept_limit_column() ||
+            !vm_net_mock_npc_task_daily_ensure_table() ||
             !vm_mysql_exec(
                 "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
                 "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -2543,21 +2672,26 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
                 "target_y SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
                 "challenge_enemy_id SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
                 "minimum_level TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+                "teleport_require_task_id INT UNSIGNED NOT NULL DEFAULT 0,"
                 "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
                 "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
                 "PRIMARY KEY(scene,actor_id),"
                 "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
                 "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
+            !vm_net_mock_dynamic_npc_instances_ensure_teleport_require_task_column() ||
             !vm_mysql_query(
                 "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
                 "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
                 "COALESCE(server_dynamic_npc_tasks.task_id,0),"
                 "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
+                "COALESCE(server_dynamic_npc_tasks.daily_accept_limit,0),"
                 "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
                 "COALESCE(server_dynamic_npc_instances.target_x,0),"
                 "COALESCE(server_dynamic_npc_instances.target_y,0),"
                 "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
-                "COALESCE(server_dynamic_npc_instances.minimum_level,1) "
+                "COALESCE(server_dynamic_npc_instances.minimum_level,1),"
+                "COALESCE(server_dynamic_npc_instances.teleport_require_task_id,0),"
+                "COALESCE(server_dynamic_npcs.npc_service_mask,0) "
                 "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
                 "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
                 "USING(scene,actor_id) ORDER BY scene,actor_id",
@@ -2660,7 +2794,7 @@ static bool vm_net_mock_select_instance_challenge_enemy_for_scene(
         const vm_net_mock_scene_npcinfo_seed *seed = &row->seed;
 
         if (!row->enabled ||
-            seed->kind != VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
+            !vm_net_mock_npc_has_service(seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
             seed->challengeEnemyId == 0 ||
             seed->instanceScene[0] == 0 ||
             !vm_net_mock_scene_names_equal_loose(scene, seed->instanceScene) ||
@@ -2683,7 +2817,7 @@ static bool vm_net_mock_select_instance_challenge_enemy_for_scene(
         const vm_net_mock_scene_npcinfo_seed *seed = &row->seed;
 
         if (!row->enabled ||
-            seed->kind != VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
+            !vm_net_mock_npc_has_service(seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
             seed->challengeEnemyId == 0 ||
             !vm_net_mock_scene_names_equal_loose(scene, row->scene) ||
             !vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId))
@@ -2741,6 +2875,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     char query[2048];
     int existing = -1;
     vm_net_mock_dynamic_npc_override row;
+    vm_net_mock_scene_npcinfo_seed normalized;
 
     if (errorOut)
         *errorOut = "invalid dynamic npc";
@@ -2750,16 +2885,26 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = vm_mysql_last_error();
         return false;
     }
-    if (!vm_net_mock_scene_name_is_safe(scene) || seed == NULL ||
+    if (seed == NULL)
+    {
+        if (errorOut)
+            *errorOut = "NPC fields are invalid or the server Actor/XSE resource is unavailable";
+        return false;
+    }
+    normalized = *seed;
+    vm_net_mock_npc_normalize_service_fields(&normalized);
+    seed = &normalized;
+    if (!vm_net_mock_scene_name_is_safe(scene) ||
         seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
         seed->kind > VM_NET_MOCK_NPC_KIND_MAX ||
+        (seed->serviceMask & ~VM_NET_MOCK_NPC_SERVICE_MASK_ALL) != 0 ||
         seed->displayName[0] == 0 || strlen(seed->displayName) >= 30 ||
         seed->actorResource[0] == 0 || strlen(seed->actorResource) >= 30 ||
         strlen(seed->scriptName) >= 32 ||
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
-        (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+        (vm_net_mock_npc_has_service(seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) &&
          ((seed->instanceScene[0] == 0 && seed->challengeEnemyId == 0) ||
           (seed->instanceScene[0] != 0 &&
            (!vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
@@ -2767,6 +2912,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             !vm_net_mock_scene_resource_exists(seed->instanceScene))) ||
           (seed->challengeEnemyId != 0 &&
            !vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId)) ||
+          (seed->teleportRequireTaskId != 0 &&
+           seed->instanceScene[0] == 0) ||
           seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
           seed->challengeEnemyId > 0xffffu ||
           seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||
@@ -2813,30 +2960,33 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         return false;
     }
     snprintf(query, sizeof(query),
-             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
-             "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',%u) "
+             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,npc_service_mask,orientation,actor_resource,display_name,script_name,enabled) "
+             "VALUES(X'%s',%u,%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',%u) "
              "ON DUPLICATE KEY UPDATE pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
-             "npc_kind=VALUES(npc_kind),orientation=VALUES(orientation),"
+             "npc_kind=VALUES(npc_kind),npc_service_mask=VALUES(npc_service_mask),"
+             "orientation=VALUES(orientation),"
              "actor_resource=VALUES(actor_resource),display_name=VALUES(display_name),"
              "script_name=VALUES(script_name),enabled=VALUES(enabled)",
              sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
-             seed->orientation, actorHex, nameHex, scriptHex, enabled ? 1u : 0u);
+             seed->serviceMask, seed->orientation, actorHex, nameHex, scriptHex,
+             enabled ? 1u : 0u);
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
         return false;
     }
-    if (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+    if (vm_net_mock_npc_has_service(seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE))
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
-                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level,teleport_require_task_id) "
+                 "VALUES(X'%s',%u,X'%s',%u,%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
                  "target_scene=VALUES(target_scene),target_x=VALUES(target_x),target_y=VALUES(target_y),"
-                 "challenge_enemy_id=VALUES(challenge_enemy_id),minimum_level=VALUES(minimum_level)",
+                 "challenge_enemy_id=VALUES(challenge_enemy_id),minimum_level=VALUES(minimum_level),"
+                 "teleport_require_task_id=VALUES(teleport_require_task_id)",
                  sceneHex, seed->actorId, instanceSceneHex, seed->instanceX,
                  seed->instanceY, seed->challengeEnemyId,
-                 seed->instanceMinLevel);
+                 seed->instanceMinLevel, seed->teleportRequireTaskId);
     }
     else
     {
@@ -2853,11 +3003,13 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (seed->taskId != 0)
     {
         snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) "
-                 "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
-                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable)",
+                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable,daily_accept_limit) "
+                 "VALUES(X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable),"
+                 "daily_accept_limit=VALUES(daily_accept_limit)",
                  sceneHex, seed->actorId, seed->taskId,
-                 seed->taskRepeatable ? 1u : 0u);
+                 seed->taskRepeatable ? 1u : 0u,
+                 (u32)seed->taskDailyAcceptLimit);
     }
     else
     {
@@ -2881,12 +3033,14 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
-           scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
-           seed->taskId, seed->taskRepeatable ? 1u : 0u, seed->x, seed->y,
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u mask=0x%x task=%u repeatable=%u daily_limit=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u teleport_task=%u actor_res=%s script=%s\n",
+           scene, seed->actorId, enabled ? 1u : 0u, seed->kind, seed->serviceMask,
+           seed->taskId, seed->taskRepeatable ? 1u : 0u,
+           (u32)seed->taskDailyAcceptLimit, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
-           seed->instanceMinLevel, seed->actorResource,
+           seed->instanceMinLevel, seed->teleportRequireTaskId,
+           seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
     return true;
 }
@@ -2937,6 +3091,615 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     return true;
 }
 
+typedef struct
+{
+    char scene[64];
+    u32 dailyLimit;
+    u32 goldCost;
+    u32 kubaoCost;
+    bool found;
+} vm_net_mock_instance_enter_rule;
+
+static bool vm_net_mock_instance_enter_rules_ensure_tables(void)
+{
+    return vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_instance_enter_rules ("
+               "scene VARBINARY(64) NOT NULL,"
+               "daily_limit INT UNSIGNED NOT NULL DEFAULT 0,"
+               "gold_cost INT UNSIGNED NOT NULL DEFAULT 0,"
+               "kubao_cost INT UNSIGNED NOT NULL DEFAULT 0,"
+               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+               "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB") &&
+           vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_instance_enter_daily ("
+               "account_id VARBINARY(64) NOT NULL,"
+               "role_id INT UNSIGNED NOT NULL,"
+               "scene VARBINARY(64) NOT NULL,"
+               "day_ymd INT UNSIGNED NOT NULL,"
+               "enter_count INT UNSIGNED NOT NULL DEFAULT 0,"
+               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+               "ON UPDATE CURRENT_TIMESTAMP,"
+               "PRIMARY KEY(account_id,role_id,scene,day_ymd)) ENGINE=InnoDB") &&
+           vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_scene_display_names ("
+               "scene VARBINARY(64) NOT NULL,"
+               "display_name VARBINARY(32) NOT NULL,"
+               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+               "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB");
+}
+
+static u32 vm_net_mock_local_day_ymd(void)
+{
+    time_t now = time(NULL);
+    struct tm *tmNow = localtime(&now);
+    if (tmNow == NULL)
+        return 0;
+    return (u32)((tmNow->tm_year + 1900) * 10000 + (tmNow->tm_mon + 1) * 100 +
+                 tmNow->tm_mday);
+}
+
+static bool vm_net_mock_npc_task_daily_count_row(void *contextValue,
+                                                  unsigned int columnCount,
+                                                  const char *const *values,
+                                                  const size_t *lengths)
+{
+    u32 *countOut = (u32 *)contextValue;
+    u32 used = 0;
+
+    (void)columnCount;
+    if (countOut == NULL || values == NULL || lengths == NULL || values[0] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &used))
+        return false;
+    *countOut = used;
+    return true;
+}
+
+static u32 vm_net_mock_npc_task_daily_accept_count(u32 roleId,
+                                                    const char *scene,
+                                                    u32 actorId,
+                                                    u32 taskId)
+{
+    char accountHex[160];
+    char sceneHex[192];
+    char query[768];
+    u32 used = 0;
+    u32 dayYmd = vm_net_mock_local_day_ymd();
+
+    if (roleId == 0 || taskId == 0 || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) || dayYmd == 0 ||
+        !vm_net_mock_npc_task_daily_ensure_table() ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return 0;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT accept_count FROM account_role_npc_task_daily "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND "
+             "scene=UNHEX('%s') AND actor_id=%u AND task_id=%u AND day_ymd=%u "
+             "LIMIT 1",
+             accountHex, roleId, sceneHex, actorId, taskId, dayYmd);
+    if (!vm_mysql_query(query, vm_net_mock_npc_task_daily_count_row, &used))
+        return 0;
+    return used;
+}
+
+static bool vm_net_mock_npc_task_daily_accept_under_limit(
+    u32 roleId, const char *scene, u32 actorId, u32 taskId, u32 dailyLimit)
+{
+    if (dailyLimit == 0)
+        return true;
+    return vm_net_mock_npc_task_daily_accept_count(roleId, scene, actorId,
+                                                   taskId) < dailyLimit;
+}
+
+static bool vm_net_mock_npc_task_daily_accept_increment(u32 roleId,
+                                                         const char *scene,
+                                                         u32 actorId,
+                                                         u32 taskId)
+{
+    char accountHex[160];
+    char sceneHex[192];
+    char query[896];
+    u32 dayYmd = vm_net_mock_local_day_ymd();
+
+    if (roleId == 0 || taskId == 0 || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) || dayYmd == 0 ||
+        !vm_net_mock_npc_task_daily_ensure_table() ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_npc_task_daily("
+             "account_id,role_id,scene,actor_id,task_id,day_ymd,accept_count) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,UNHEX('%s'),%u,%u,%u,1) "
+             "ON DUPLICATE KEY UPDATE accept_count=accept_count+1",
+             accountHex, roleId, sceneHex, actorId, taskId, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][network] npc_task_daily_inc_fail role=%u scene=%s "
+               "actor=%u task=%u day=%u error=%s\n",
+               roleId, scene, actorId, taskId, dayYmd, vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][network] npc_task_daily_inc role=%u scene=%s actor=%u "
+           "task=%u day=%u\n",
+           roleId, scene, actorId, taskId, dayYmd);
+    return true;
+}
+
+static bool vm_net_mock_npc_task_binding_allows_reoffer(
+    bool taskRepeatable, u32 dailyAcceptLimit)
+{
+    /* daily_accept_limit>0 also authorizes re-offer after state=3, so a
+     * “每天 N 次” binding does not also require the legacy repeatable flag. */
+    return taskRepeatable || dailyAcceptLimit != 0;
+}
+
+static bool vm_net_mock_instance_enter_rule_row(void *contextValue,
+                                                 int columnCount,
+                                                 char **values, unsigned long *lengths)
+{
+    vm_net_mock_instance_enter_rule *rule =
+        (vm_net_mock_instance_enter_rule *)contextValue;
+    u32 daily = 0;
+    u32 gold = 0;
+    u32 kubao = 0;
+
+    /* MySQL text protocol values are length-prefixed, NOT NUL-terminated.
+     * Never use strlen/strtoul on values[] — always use lengths[] parsers. */
+    if (rule == NULL || values == NULL || lengths == NULL || columnCount < 3 ||
+        values[0] == NULL || values[1] == NULL || values[2] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &daily) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &gold) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &kubao))
+        return false;
+    rule->dailyLimit = daily;
+    rule->goldCost = gold;
+    rule->kubaoCost = kubao;
+    rule->found = true;
+    return true;
+}
+
+static bool vm_net_mock_instance_enter_rule_load(const char *scene,
+                                                 vm_net_mock_instance_enter_rule *ruleOut)
+{
+    char sceneHex[192];
+    char query[384];
+    char dbg[256];
+
+    if (ruleOut == NULL)
+        return false;
+    memset(ruleOut, 0, sizeof(*ruleOut));
+    if (scene == NULL || scene[0] == 0 ||
+        !vm_net_mock_instance_enter_rules_ensure_tables())
+        return false;
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        printf("[warn][mock-admin] instance_enter_rule_load hex_fail scene_len=%u\n",
+               (u32)strlen(scene));
+        return false;
+    }
+    snprintf(ruleOut->scene, sizeof(ruleOut->scene), "%s", scene);
+    snprintf(query, sizeof(query),
+             "SELECT daily_limit,gold_cost,kubao_cost "
+             "FROM server_instance_enter_rules WHERE scene=UNHEX('%s') LIMIT 1",
+             sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_instance_enter_rule_row, ruleOut))
+    {
+        printf("[warn][mock-admin] instance_enter_rule_load query_fail "
+               "scene=%s error=%s\n",
+               scene, vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][mock-admin] instance_enter_rule_load scene=%s found=%u "
+           "daily=%u gold=%u kubao=%u\n",
+           scene, ruleOut->found ? 1u : 0u, ruleOut->dailyLimit, ruleOut->goldCost,
+           ruleOut->kubaoCost);
+    return true;
+}
+
+static bool vm_net_mock_instance_enter_daily_count_row(void *contextValue,
+                                                       int columnCount,
+                                                       char **values,
+                                                       unsigned long *lengths)
+{
+    u32 *countOut = (u32 *)contextValue;
+    u32 used = 0;
+
+    (void)columnCount;
+    if (countOut == NULL || values == NULL || lengths == NULL || values[0] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &used))
+        return false;
+    *countOut = used;
+    return true;
+}
+
+/*
+ * Returns NULL on success (deducted).  Otherwise a static GBK tip string.
+ * No rule / all-zero costs+limit ⇒ allow without deduct.
+ */
+static const char *vm_net_mock_instance_enter_try_consume(
+    vm_mock_service_client_session *session, vm_net_mock_role_state *role,
+    const char *targetScene)
+{
+    vm_net_mock_instance_enter_rule rule;
+    char accountHex[160];
+    char sceneHex[160];
+    char query[640];
+    u32 dayYmd = 0;
+    u32 used = 0;
+    u32 goldCopper = 0;
+    u32 moneyBefore = 0;
+    u32 wcoinBefore = 0;
+    static const char tipQuota[] =
+        "\xbd\xf8\xc8\xeb\xb4\xce\xca\xfd\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xa1\xa3"; /* 进入次数不足，无法进入副本。 */
+    static const char tipGold[] =
+        "\xbd\xf0\xb1\xd2\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xa1\xa3"; /* 金币不足，无法进入副本。 */
+    static const char tipKubao[] =
+        "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xa1\xa3"; /* 酷宝不足，无法进入副本。 */
+
+    if (session == NULL || role == NULL || targetScene == NULL ||
+        targetScene[0] == 0 || session->accountId[0] == 0)
+        return NULL;
+    if (!vm_net_mock_instance_enter_rule_load(targetScene, &rule) || !rule.found)
+        return NULL;
+    if (rule.dailyLimit == 0 && rule.goldCost == 0 && rule.kubaoCost == 0)
+        return NULL;
+
+    dayYmd = vm_net_mock_local_day_ymd();
+    if (dayYmd == 0)
+        return tipQuota;
+    if (vm_mysql_hex_encode(session->accountId, strlen(session->accountId),
+                            accountHex, sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(targetScene, strlen(targetScene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+        return tipQuota;
+
+    snprintf(query, sizeof(query),
+             "SELECT enter_count FROM server_instance_enter_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND "
+             "scene=UNHEX('%s') AND day_ymd=%u LIMIT 1",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    used = 0;
+    (void)vm_mysql_query(query, vm_net_mock_instance_enter_daily_count_row, &used);
+    if (rule.dailyLimit != 0 && used >= rule.dailyLimit)
+        return tipQuota;
+
+    goldCopper = rule.goldCost * (u32)VM_NET_MOCK_MONEY_COPPER_PER_GOLD;
+    if (rule.goldCost != 0 && role->money < goldCopper)
+        return tipGold;
+    if (rule.kubaoCost != 0 && role->wcoin < rule.kubaoCost)
+        return tipKubao;
+
+    moneyBefore = role->money;
+    wcoinBefore = role->wcoin;
+    if (goldCopper != 0)
+        role->money -= goldCopper;
+    if (rule.kubaoCost != 0)
+        role->wcoin -= rule.kubaoCost;
+    if (goldCopper != 0 || rule.kubaoCost != 0)
+        vm_net_mock_role_mark_inventory_dirty("instance-enter-cost");
+
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_instance_enter_daily("
+             "account_id,role_id,scene,day_ymd,enter_count) "
+             "VALUES(UNHEX('%s'),%u,UNHEX('%s'),%u,1) "
+             "ON DUPLICATE KEY UPDATE enter_count=enter_count+1",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        role->money = moneyBefore;
+        role->wcoin = wcoinBefore;
+        printf("[error][network] instance_enter_daily_fail role=%u scene=%s "
+               "error=%s\n",
+               role->roleId, targetScene, vm_mysql_last_error());
+        return tipQuota;
+    }
+    printf("[info][network] instance_enter_consume role=%u scene=%s "
+           "day=%u used=%u/%u gold=%u kubao=%u money=%u->%u wcoin=%u->%u\n",
+           role->roleId, targetScene, dayYmd, used + 1u, rule.dailyLimit,
+           rule.goldCost, rule.kubaoCost, moneyBefore, role->money, wcoinBefore,
+           role->wcoin);
+    return NULL;
+}
+
+static bool vm_net_mock_instance_enter_rule_admin_save(const char *scene,
+                                                       u32 dailyLimit,
+                                                       u32 goldCost,
+                                                       u32 kubaoCost,
+                                                       const char **errorOut)
+{
+    char sceneHex[192];
+    char query[512];
+    char dbg[256];
+
+    if (errorOut)
+        *errorOut = "保存失败";
+    if (scene == NULL || scene[0] == 0 ||
+        !vm_net_mock_instance_enter_rules_ensure_tables())
+        return false;
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_instance_enter_rules("
+             "scene,daily_limit,gold_cost,kubao_cost) "
+             "VALUES(UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "daily_limit=VALUES(daily_limit),gold_cost=VALUES(gold_cost),"
+             "kubao_cost=VALUES(kubao_cost)",
+             sceneHex, dailyLimit, goldCost, kubaoCost);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] instance_enter_rule_save scene=%s daily=%u "
+           "gold=%u kubao=%u\n",
+           scene, dailyLimit, goldCost, kubaoCost);
+    return true;
+}
+
+static bool vm_net_mock_scene_display_name_load_row(void *contextValue,
+                                                    int columnCount,
+                                                    char **values,
+                                                    unsigned long *lengths)
+{
+    char *out = NULL;
+    size_t outCap = 0;
+    size_t nameLen = 0;
+    void **pack = (void **)contextValue;
+
+    (void)columnCount;
+    if (pack == NULL || values == NULL || lengths == NULL || values[0] == NULL)
+        return false;
+    out = (char *)pack[0];
+    outCap = (size_t)(uintptr_t)pack[1];
+    if (out == NULL || outCap == 0)
+        return false;
+    memset(out, 0, outCap);
+    /* lengths[] required: MySQL text protocol values are not NUL-terminated. */
+    if (!vm_mysql_hex_decode(values[0], lengths[0], out, outCap - 1, &nameLen))
+        return false;
+    out[nameLen] = 0;
+    pack[2] = (void *)(uintptr_t)1;
+    return true;
+}
+
+/*
+ * Dream/FB maps show the named-portal field 0x16 label on the client
+ * (e.g. 梦境空间三层).  Admin "地图显示名称" must rewrite that SCE field and
+ * publish WT18/7 — MySQL alone is not what the client paints.
+ */
+static bool vm_net_mock_scene_display_name_patch_sce(const char *scene,
+                                                     const char *displayName,
+                                                     u32 *patchedOut,
+                                                     const char **errorOut)
+{
+    enum { kMaxNamed = 16 };
+    u8 *data = NULL;
+    u8 fieldBuf[96];
+    u32 nameOffs[kMaxNamed];
+    u32 nameEnds[kMaxNamed];
+    u32 len = 0;
+    u32 start = 0;
+    u32 pos = 0;
+    u32 fieldPos = 0;
+    u32 found = 0;
+    u32 patched = 0;
+    u16 field = 0;
+    u16 value = 0;
+    char tmp[96];
+    const char *writeError = NULL;
+    const char *publishError = NULL;
+    char dbg[192];
+
+    if (patchedOut)
+        *patchedOut = 0;
+    if (errorOut)
+        *errorOut = "场景显示名写入失败";
+    if (scene == NULL || scene[0] == 0 || displayName == NULL ||
+        displayName[0] == 0 || strlen(displayName) > 31u)
+    {
+        return false;
+    }
+    data = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    if (data == NULL)
+    {
+        if (errorOut)
+            *errorOut = "场景显示名内存不足";
+        return false;
+    }
+    len = vm_net_mock_load_scene_resource(scene, data,
+                                          VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    if (len == 0 ||
+        !vm_net_mock_sce_find_named_portal_start(data, len, &start))
+    {
+        free(data);
+        if (patchedOut)
+            *patchedOut = 0;
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+
+    memset(nameOffs, 0, sizeof(nameOffs));
+    memset(nameEnds, 0, sizeof(nameEnds));
+    for (u32 off = start; off + 20u <= len && found < kMaxNamed; ++off)
+    {
+        if (!vm_net_mock_sce_named_portal_is_type4_hdr(data, off) &&
+            !vm_net_mock_sce_named_portal_is_legacy_type1_hdr(data, off))
+        {
+            continue;
+        }
+        if (vm_net_mock_sce_named_portal_is_type4_hdr(data, off))
+            pos = off + 8u;
+        else
+            pos = off + 10u;
+        if (pos + 5u > len || vm_net_mock_read_le16_at(data, pos) != 3 ||
+            vm_net_mock_read_le16_at(data, pos + 2u) != 0x12)
+        {
+            continue;
+        }
+        if (!vm_net_mock_read_sce_string_field(data, len, &pos, 0x12u, tmp,
+                                               sizeof(tmp)) ||
+            !vm_net_mock_str_ends_with(tmp, ".sce") ||
+            !vm_net_mock_read_sce_scalar_token(data, len, &pos, &field, &value) ||
+            field != 0x15u)
+        {
+            continue;
+        }
+        nameOffs[found] = pos;
+        if (!vm_net_mock_read_sce_string_field(data, len, &pos, 0x16u, tmp,
+                                               sizeof(tmp)))
+        {
+            continue;
+        }
+        nameEnds[found] = pos;
+        ++found;
+        /* Skip past this portal body so the next scan does not re-hit it. */
+        off = pos > 0 ? pos - 1u : off;
+    }
+
+    if (found == 0)
+    {
+        free(data);
+        if (patchedOut)
+            *patchedOut = 0;
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+
+    /* Replace from the end so earlier offsets stay valid. */
+    for (u32 i = found; i > 0; --i)
+    {
+        u32 idx = i - 1u;
+        fieldPos = 0;
+        memset(fieldBuf, 0, sizeof(fieldBuf));
+        if (!vm_net_mock_sce_write_string_field(fieldBuf, sizeof(fieldBuf),
+                                                &fieldPos, 0x16u, displayName) ||
+            !vm_net_mock_sce_payload_replace_range(
+                data, &len, VM_NET_MOCK_SCE_EDIT_DECODE_MAX, nameOffs[idx],
+                nameEnds[idx], fieldBuf, fieldPos))
+        {
+            free(data);
+            if (errorOut)
+                *errorOut = "场景传送名牌替换失败";
+            return false;
+        }
+        ++patched;
+    }
+
+    if (!vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError) ||
+        !vm_net_mock_publish_scene_resource(scene, &publishError))
+    {
+        free(data);
+        if (errorOut)
+            *errorOut = publishError ? publishError :
+                        (writeError ? writeError : "场景显示名发布失败");
+        return false;
+    }
+    free(data);
+    if (patchedOut)
+        *patchedOut = patched;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] scene_display_name_sce_patch scene=%s "
+           "name_bytes=%u patched=%u\n",
+           scene, (u32)strlen(displayName), patched);
+    return true;
+}
+
+static bool vm_net_mock_scene_display_name_admin_save(const char *scene,
+                                                      const char *displayName,
+                                                      const char **errorOut)
+{
+    char sceneHex[160];
+    char nameHex[96];
+    char query[512];
+    char nameTrim[32];
+    size_t nameLen = 0;
+    u32 patched = 0;
+    const char *sceError = NULL;
+    char dbg[192];
+
+    if (errorOut)
+        *errorOut = "保存失败";
+    if (scene == NULL || scene[0] == 0 || displayName == NULL ||
+        displayName[0] == 0 ||
+        !vm_net_mock_instance_enter_rules_ensure_tables())
+        return false;
+    memset(nameTrim, 0, sizeof(nameTrim));
+    nameLen = strlen(displayName);
+    if (nameLen >= sizeof(nameTrim))
+        nameLen = sizeof(nameTrim) - 1u;
+    /* MySQL VARBINARY(32); SCE portal label also keep ≤31. */
+    if (nameLen > 31u)
+        nameLen = 31u;
+    memcpy(nameTrim, displayName, nameLen);
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0 ||
+        vm_mysql_hex_encode(nameTrim, nameLen, nameHex, sizeof(nameHex)) == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_scene_display_names(scene,display_name) "
+             "VALUES(UNHEX('%s'),UNHEX('%s')) ON DUPLICATE KEY UPDATE "
+             "display_name=VALUES(display_name)",
+             sceneHex, nameHex);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (!vm_net_mock_scene_display_name_patch_sce(scene, nameTrim, &patched,
+                                                   &sceError))
+    {
+        if (errorOut)
+            *errorOut = sceError ? sceError : "场景显示名写入失败";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] scene_display_name_save scene=%s name_bytes=%u "
+           "sce_patched=%u\n",
+           scene, (u32)nameLen, patched);
+    return true;
+}
+
+static bool vm_net_mock_scene_display_name_load(const char *scene, char *out,
+                                                size_t outCap)
+{
+    void *pack[3];
+    char sceneHex[160];
+    char query[320];
+
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    pack[0] = out;
+    pack[1] = (void *)(uintptr_t)outCap;
+    pack[2] = (void *)(uintptr_t)0;
+    if (scene == NULL || scene[0] == 0 ||
+        !vm_net_mock_instance_enter_rules_ensure_tables())
+        return false;
+    if (vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "SELECT HEX(display_name) FROM server_scene_display_names "
+             "WHERE scene=UNHEX('%s') LIMIT 1",
+             sceneHex);
+    (void)vm_mysql_query(query, vm_net_mock_scene_display_name_load_row, pack);
+    return pack[2] != 0 && out[0] != 0;
+}
+
 static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(
     const char *scene,
     vm_net_mock_scene_npcinfo_seed *seeds,
@@ -2960,6 +3723,8 @@ static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(
         seed.x = 338;
         seed.y = 125;
         seed.kind = VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR;
+        seed.serviceMask =
+            vm_net_mock_npc_service_mask_from_kind(VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR);
         snprintf(seed.actorResource, sizeof(seed.actorResource), "%s", "n_blacksmith.actor");
         snprintf(seed.displayName, sizeof(seed.displayName), "%s", "\xc5\xb7\xd2\xb1\xd7\xd3"); /* 欧冶子 */
         seeds[count++] = seed;

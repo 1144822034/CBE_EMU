@@ -302,6 +302,27 @@ static u32 g_appMainEntry = 0;
 static u32 g_appExitEntry = 0;
 static u8 g_wpayMockFlowActive = 0;
 static u8 g_wpayCancelKeysRemaining = 0;
+static u8 g_coolmallCancelKeysRemaining = 0;
+/* After mall reject / menu intercept: open 26/1 once tick >= this. */
+static u32 g_coolmallDialogAfterExitTick = 0;
+/* While set: coolmall shop primary is in-flight; dismiss mmShop after it fires. */
+static u8 g_coolmallDismissAfterShopNet = 0;
+/* While set: do not restore downloadSnapshot state=2 on net_fire (covers 26/1). */
+static u8 g_coolmallGuardNetDeliver = 0;
+/*
+ * Left-soft main menu highlight tracker.
+ * CBE @0x0101AD2E + chat shortcut (社交聊天 = down×2 = idx 2):
+ *   0 系统设置 1 个性功能 2 社交聊天 3 帮派家族 4 玩家信息 5 江湖商城
+ */
+enum { VM_JH_MENU_IDX_COOLMALL = 5 };
+static u8 g_jhMainMenuOpen = 0;
+static u8 g_jhMainMenuIndex = 0;
+/* Armed after menu-OK swallow: exit menu then poll 26/1 (never refuse remove). */
+static u8 g_coolmallKeepMapArmed = 0;
+/* Outdoor torn for 江湖商城: allow mmShop init/send but suppress W-mall render. */
+static u8 g_coolmallSuppressMmShopRender = 0;
+/* After unstick: wait for outdoor shell then request 26/1. */
+static u8 g_coolmallAwaitMapThenDialog = 0;
 /* Cached from Ctrl softkey-bar draw; used for main-HUD left-soft → chat shortcut. */
 static u8 g_softkeyLeftCache[128];
 static u8 g_softkeyCenterCache[128];
@@ -326,6 +347,14 @@ static void agent_dbg0b451a_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson);
 static void agent_dbg0b451a_on_dream_sce(const char *name);
 static void agent_dbg0b451a_poll_timer_remain(const char *reason);
+static void vm_host_realign_attr_panel_value_rows(void);
+#if defined(CBE_CLIENT_ONLY)
+static void vm_host_clear_download_busy(const char *reason);
+/* Drop mmShop mall uplink and simulate 右软/返回; defined after coolmall helpers. */
+static int vm_host_coolmall_try_truncate_mall_send(const u8 *req, u32 len);
+#endif
+/* Used from net_fire before definition (client + server TU). */
+static void vm_host_coolmall_dismiss_after_shop_net(u32 respLen);
 
 #define VM_SCREEN_EXIT_DESTROY 0
 #define VM_SCREEN_EXIT_PAUSE 1
@@ -700,8 +729,6 @@ static bool vm_lcd_looks_like_fillrect_compat(u32 r0, u32 r1, u32 r2, u32 r3)
            h <= LCD_HEIGHT;
 }
 
-
-
 static u32 vm_cd_rect_point(u32 left, u32 top, u32 right, u32 bottom, u32 x, u32 y)
 {
     int px = (int)(int16_t)(x & 0xffff);
@@ -713,9 +740,6 @@ static u32 vm_cd_rect_point(u32 left, u32 top, u32 right, u32 bottom, u32 x, u32
 
     return (r >= px && l <= px && b >= py && t <= py) ? 1u : 0u;
 }
-
-
-
 
 static void vm_lcd_draw_line(int x0, int y0, int x1, int y1, u16 color)
 {
@@ -1013,7 +1037,6 @@ static void scheduler_normalize_startup_screen_state(void)
     {
     }
 }
-
 
 static uc_err vm_emu_start(u32 begin, u32 until);
 static bool vm_is_pool_entry(u32 entry);
@@ -2376,7 +2399,6 @@ static u32 scheduler_count_active_net_tasks(void)
     return active;
 }
 
-
 static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
 {
     static u32 s_netQueueObserveCount = 0;
@@ -2557,15 +2579,6 @@ static uc_err scheduler_flush_login_tail42_if_needed(const char *reason)
     return err;
 }
 
-
-
-
-
-
-
-
-
-
 static uc_err scheduler_dispatch_net_tasks(void)
 {
     u32 activeBefore = scheduler_count_active_net_tasks();
@@ -2604,10 +2617,49 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             if (taskEvent == 7)
             {
-                if (task->downloadSnapshotValid && task->downloadSnapshotState == 2)
+                u8 snapState = task->downloadSnapshotState;
+                u8 busy = 0xff;
+                u8 dlState = 0xff;
+                int skipRestore = 0;
+
+                if (Global_R9)
+                {
+                    uc_mem_read(MTK, Global_R9 + 21808, &busy, 1);
+                    uc_mem_read(MTK, Global_R9 + 0x9584, &dlState, 1);
+                }
+                /*
+                 * Coolmall 26/1: never re-arm DoLoading snapshot around the
+                 * dialog callback — that left the progress bar over the UI.
+                 * While AwaitMapThenDialog, scene-enter 30/1 MUST keep the
+                 * normal busy/DoLoading contract (clearing busy here = 卡加载).
+                 */
+                if (g_coolmallGuardNetDeliver &&
+                    !g_coolmallAwaitMapThenDialog &&
+                    task->downloadSnapshotValid && snapState == 2)
+                {
+                    skipRestore = 1;
+                }
+                if (!skipRestore && task->downloadSnapshotValid &&
+                    task->downloadSnapshotState == 2)
                 {
                     u32 downloadBase = Global_R9 + 0x9584;
-                    uc_mem_write(MTK, downloadBase, task->downloadSnapshot, sizeof(task->downloadSnapshot));
+                    uc_mem_write(MTK, downloadBase, task->downloadSnapshot,
+                                 sizeof(task->downloadSnapshot));
+                }
+                if (g_coolmallGuardNetDeliver && !g_coolmallAwaitMapThenDialog)
+                {
+#if defined(CBE_CLIENT_ONLY)
+                    /* Only strip busy for dialog-class delivers, not scene enter. */
+                    if (taskR1 >= 90u && taskR1 <= 200u)
+                        vm_host_clear_download_busy("coolmall-before-net-fire");
+#endif
+                    printf("[info][coolmall] net_fire guard r1=%u snap=%u "
+                           "busy=%u dl=%u skipRestore=%d await_map=%u\n",
+                           taskR1, (unsigned)snapState, (unsigned)busy,
+                           (unsigned)dlState, skipRestore,
+                           (unsigned)g_coolmallAwaitMapThenDialog);
+                    if (taskR1 >= 90u && taskR1 <= 200u)
+                        g_coolmallGuardNetDeliver = 0;
                 }
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
@@ -2619,6 +2671,18 @@ static uc_err scheduler_dispatch_net_tasks(void)
                        i, taskEvent, taskCallback, err,
                        g_netMockResponseOffset, g_netMockResponseLen);
             }
+            /*
+             * After shop primary (≈188) parses on mmShop, pop before followup
+             * 26/1 (≈145) so the dialog lands on the map shell.
+             */
+            if (err == UC_ERR_OK && taskEvent == 7 &&
+                g_coolmallDismissAfterShopNet &&
+                taskR1 >= 150u && taskR1 <= 250u)
+                vm_host_coolmall_dismiss_after_shop_net(taskR1);
+            if (err == UC_ERR_OK && taskEvent == 7 &&
+                g_coolmallGuardNetDeliver &&
+                taskR1 >= 100u && taskR1 <= 160u)
+                g_coolmallGuardNetDeliver = 0;
             g_netTaskDispatchDepth--;
             g_netTaskDispatchSlot = -1;
             if (err == UC_ERR_OK)
@@ -3423,6 +3487,12 @@ static void vm_host_clear_download_busy(const char *reason)
      */
     uc_mem_write(MTK, r9 + 21808, &zero, 1);
     uc_mem_write(MTK, r9 + 21804, &zero, 1);
+    /*
+     * DoLoading also arms R9+0x9584 download-manager state.  Restoring a
+     * queued net event's snapshot with state==2 re-raises the bar and can
+     * hide an unsolicited coolmall 26/1 (debug-a1d304: resp=145 queued, no UI).
+     */
+    uc_mem_write(MTK, r9 + 0x9584, &zero, 1);
     printf("[info][screen] download_busy_clear reason=%s r9=%08x "
            "evidence=ResetDownloadState:0x0103993C\n",
            reason ? reason : "-", r9);
@@ -3796,7 +3866,387 @@ static int vm_lcd_measure_current_string_render_width(const u8 *gbkText)
     return mesureStringRenderWidthWithGbkWidth((char *)gbkText, vm_lcd_current_gbk_width());
 }
 
-/* #region agent log */
+static void vm_host_write_attr_panel_row(u32 valueBase, u16 stride, u32 row,
+                                         u32 value)
+{
+    char buf[24];
+    u8 blank[32];
+    u32 dst;
+    u32 n;
+
+    if (valueBase == 0 || stride < 2u || stride > 24u || row >= 20u)
+        return;
+    dst = valueBase + row * (u32)stride;
+    memset(blank, 0, sizeof(blank));
+    (void)uc_mem_write(MTK, dst, blank, stride);
+    n = (u32)snprintf(buf, sizeof(buf), "%u", value);
+    if (n >= sizeof(buf))
+        n = (u32)sizeof(buf) - 1u;
+    if (n >= stride)
+        n = stride - 1u;
+    (void)uc_mem_write(MTK, dst, buf, n + 1u);
+}
+
+/*
+ * mmShop.cbm relocates (0x0518xxxx or 0x0502dxxx).  Same VA window also hosts
+ * the outdoor/map shell (client_out destroy=502db6f init=502eba5) — do NOT
+ * match the whole 0x0502* range or map enter is rejected as "mall".
+ */
+static int vm_host_screen_destroy_looks_like_mmshop(u32 screen)
+{
+    u32 destroyEntry;
+    u32 initEntry;
+
+    if (screen == 0)
+        return 0;
+    destroyEntry = vm_get_var(screen + 4) & ~1u;
+    initEntry = vm_get_var(screen) & ~1u;
+    if (destroyEntry >= 0x05180000u && destroyEntry < 0x051A0000u)
+        return 1;
+    /* Exact runtime pair from client_out mall open. */
+    if (destroyEntry == 0x0502d217u || initEntry == 0x0502dcb9u)
+        return 1;
+    /*
+     * Reloc drift: mmShop init-destroy delta is 0xaa2; map shell is larger
+     * (502eba5-502db6f=0x1036).
+     */
+    if (destroyEntry >= 0x05020000u && destroyEntry < 0x05040000u &&
+        initEntry > destroyEntry && (initEntry - destroyEntry) == 0xaa2u)
+        return 1;
+    return 0;
+}
+
+/* Outdoor/mmGame shell: keep this on stack for coolmall 26/1. */
+static int vm_host_screen_looks_like_outdoor_map(u32 screen)
+{
+    u32 destroyEntry;
+    u32 initEntry;
+
+    if (screen == 0)
+        return 0;
+    destroyEntry = vm_get_var(screen + 4) & ~1u;
+    initEntry = vm_get_var(screen) & ~1u;
+    if (destroyEntry == 0x0502db6fu || initEntry == 0x0502eba5u)
+        return 1;
+    if (destroyEntry >= 0x05020000u && destroyEntry < 0x05040000u &&
+        initEntry > destroyEntry && (initEntry - destroyEntry) == 0x1036u)
+        return 1;
+    return 0;
+}
+
+static int vm_host_stack_has_outdoor_map(void)
+{
+    u32 i;
+
+    for (i = 0; i < g_screenStackCount; i++)
+    {
+        if (vm_host_screen_looks_like_outdoor_map(g_screenStack[i]))
+            return 1;
+    }
+    return 0;
+}
+
+static int vm_host_attr_value_base_usable(u32 valueBase, u16 stride)
+{
+    u8 save = 0;
+    u8 probe = 0x5Au;
+
+    if (valueBase < 0x05000000u || valueBase >= 0x06000000u)
+        return 0;
+    if (stride < 2u || stride > 24u)
+        return 0;
+    if (uc_mem_read(MTK, valueBase, &save, 1) != UC_ERR_OK)
+        return 0;
+    if (uc_mem_write(MTK, valueBase, &probe, 1) != UC_ERR_OK)
+        return 0;
+    (void)uc_mem_write(MTK, valueBase, &save, 1);
+    return 1;
+}
+
+/*
+ * Server publishes aggregated panel attrs when actorinfo / wear sync / equip
+ * runs.  Login cannot FA-apply; fill wear-only zeros from here.  Prefer live
+ * actor halfwords when non-zero (real 7/8 wear already applied).
+ */
+#define CBE_PANEL_ATTR_OVERLAY_PATH \
+    "d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_panel_attr_overlay.txt"
+
+static int vm_host_read_panel_attr_overlay(u16 *str, u16 *agi, u16 *wis,
+                                           u16 *atk, u16 *armor, u16 *dodge,
+                                           u16 *hit, u16 *crit, u16 *resist,
+                                           u16 *charm, u32 *genOut)
+{
+    FILE *fp;
+    unsigned gen = 0, s = 0, a = 0, w = 0, at = 0, ar = 0, d = 0, h = 0, c = 0,
+             r = 0, ch = 0, hp = 0, mp = 0;
+
+    if (str == NULL || agi == NULL || wis == NULL || atk == NULL || armor == NULL ||
+        dodge == NULL || hit == NULL || crit == NULL || resist == NULL || charm == NULL)
+        return 0;
+    fp = fopen(CBE_PANEL_ATTR_OVERLAY_PATH, "r");
+    if (fp == NULL)
+        return 0;
+    if (fscanf(fp, "%u %u %u %u %u %u %u %u %u %u %u %u %u", &gen, &s, &a, &w,
+               &at, &ar, &d, &h, &c, &r, &ch, &hp, &mp) < 11)
+    {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    *str = (u16)(s > 65535u ? 65535u : s);
+    *agi = (u16)(a > 65535u ? 65535u : a);
+    *wis = (u16)(w > 65535u ? 65535u : w);
+    *atk = (u16)(at > 65535u ? 65535u : at);
+    *armor = (u16)(ar > 65535u ? 65535u : ar);
+    *dodge = (u16)(d > 65535u ? 65535u : d);
+    *hit = (u16)(h > 65535u ? 65535u : h);
+    *crit = (u16)(c > 65535u ? 65535u : c);
+    *resist = (u16)(r > 65535u ? 65535u : r);
+    *charm = (u16)(ch > 65535u ? 65535u : ch);
+    if (genOut != NULL)
+        *genOut = gen;
+    (void)hp;
+    (void)mp;
+    return 1;
+}
+
+/* Set at wear-apply epilogue: 5CAC combat halfwords look unequipped. */
+static int g_agent_wear_combat_bare = 0;
+
+static void vm_host_realign_attr_panel_value_rows(void)
+{
+    u32 actorA = 0;
+    u32 actorB = 0;
+    u32 valueBase = 0;
+    u16 stride = 0;
+    u16 strA = 0, agiA = 0, wisA = 0;
+    u16 strB = 0, agiB = 0, wisB = 0, atk = 0, armor = 0, dodge = 0, hit = 0,
+        crit = 0, resist = 0;
+    u16 str = 0, agi = 0, wis = 0;
+    u32 charmA = 0, charmB = 0, charm84 = 0;
+    /* Bare 三围 = last painted values while combat was bare (panel strings only). */
+    static u16 s_bareStr = 0, s_bareAgi = 0, s_bareWis = 0;
+    static int s_haveBare = 0;
+    static u16 s_lastStr = 0, s_lastAgi = 0, s_lastWis = 0;
+    static int s_lastWearBare = -1;
+    /* #region agent log */
+    static u32 s_realignLogs = 0;
+    static u32 s_skipLogs = 0;
+    char row10[24], row11[24], row12[24], row13[24];
+    char row14[24], row15[24], row16[24], row17[24], row18[24];
+    char dataBuf[768];
+    /* #endregion */
+
+    if (Global_R9 == 0 || MTK == NULL)
+        return;
+    /*
+     * Wear-apply writes FA/F8/jumps to R9+0x5CAC.  Do NOT uc_mem_write actor
+     * halfwords (debug-a1d304: shop exit died with no rehydrate; host writes
+     * during mmShop teardown are the prime suspect).  Panel strings only.
+     * Skip entirely while mmShop owns the top screen or mid-destroy.
+     */
+    if (g_activeScreenRemovedThisFrame)
+        return;
+    if (vmAddedScreen != 0 && vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen))
+    {
+        
+        return;
+    }
+    if (uc_mem_read(MTK, Global_R9 + 0x5CA4u, &actorA, sizeof(actorA)) !=
+            UC_ERR_OK ||
+        uc_mem_read(MTK, Global_R9 + 0x5CACu, &actorB, sizeof(actorB)) !=
+            UC_ERR_OK ||
+        uc_mem_read(MTK, Global_R9 + 0x6390, &valueBase, sizeof(valueBase)) !=
+            UC_ERR_OK ||
+        uc_mem_read(MTK, Global_R9 + 0x631E, &stride, sizeof(stride)) !=
+            UC_ERR_OK)
+    {
+        return;
+    }
+    if (valueBase == 0)
+        return;
+    if (!vm_host_attr_value_base_usable(valueBase, stride))
+    {
+        
+        return;
+    }
+    if (actorA != 0)
+    {
+        if (uc_mem_read(MTK, actorA + 0x84u, &charmA, sizeof(charmA)) !=
+                UC_ERR_OK ||
+            uc_mem_read(MTK, actorA + 0x122u, &strA, sizeof(strA)) !=
+                UC_ERR_OK)
+            return;
+        (void)uc_mem_read(MTK, actorA + 0x124u, &agiA, sizeof(agiA));
+        (void)uc_mem_read(MTK, actorA + 0x126u, &wisA, sizeof(wisA));
+    }
+    if (actorB != 0)
+    {
+        if (uc_mem_read(MTK, actorB + 0x130u, &atk, sizeof(atk)) != UC_ERR_OK)
+            return;
+        (void)uc_mem_read(MTK, actorB + 0x84u, &charmB, sizeof(charmB));
+        (void)uc_mem_read(MTK, actorB + 0x122u, &strB, sizeof(strB));
+        (void)uc_mem_read(MTK, actorB + 0x124u, &agiB, sizeof(agiB));
+        (void)uc_mem_read(MTK, actorB + 0x126u, &wisB, sizeof(wisB));
+        (void)uc_mem_read(MTK, actorB + 0x132u, &armor, sizeof(armor));
+        (void)uc_mem_read(MTK, actorB + 0x128u, &dodge, sizeof(dodge));
+        (void)uc_mem_read(MTK, actorB + 0x12au, &hit, sizeof(hit));
+        (void)uc_mem_read(MTK, actorB + 0x12eu, &crit, sizeof(crit));
+        (void)uc_mem_read(MTK, actorB + 0x12cu, &resist, sizeof(resist));
+    }
+    else if (actorA != 0)
+    {
+        (void)uc_mem_read(MTK, actorA + 0x130u, &atk, sizeof(atk));
+        (void)uc_mem_read(MTK, actorA + 0x132u, &armor, sizeof(armor));
+        (void)uc_mem_read(MTK, actorA + 0x128u, &dodge, sizeof(dodge));
+        (void)uc_mem_read(MTK, actorA + 0x12au, &hit, sizeof(hit));
+        (void)uc_mem_read(MTK, actorA + 0x12eu, &crit, sizeof(crit));
+        (void)uc_mem_read(MTK, actorA + 0x12cu, &resist, sizeof(resist));
+        strB = strA;
+        agiB = agiA;
+        wisB = wisA;
+        charmB = charmA;
+    }
+
+    charm84 = charmA;
+    str = strA;
+    agi = agiA;
+    wis = wisA;
+    if (actorA != 0 && actorB != 0 && actorA != actorB)
+    {
+        int charmDelta = (int)charmB - (int)charmA;
+        int strDelta = (int)strB - (int)strA;
+        int agiDelta = (int)agiB - (int)agiA;
+        int next;
+        /*
+         * debug-a1d304: bare→gear transition painted 219/146 then 219/164;
+         * unequip restored 146 when bare snapshot was the prior bare paint.
+         */
+        if (s_lastWearBare == 1 && !g_agent_wear_combat_bare)
+        {
+            s_bareStr = s_lastStr;
+            s_bareAgi = s_lastAgi;
+            s_bareWis = s_lastWis;
+            s_haveBare = 1;
+        }
+        if (g_agent_wear_combat_bare)
+        {
+            /*
+             * Unequipped: 5CA4 login baseline is bare.  Prefer captured bare
+             * paint; else A.  Do not keep full-seed A (debug-a1d304 unequip
+             * painted 2195 after server returned 219).
+             */
+            if (s_haveBare && (s_bareStr | s_bareAgi | s_bareWis) != 0)
+            {
+                str = s_bareStr;
+                agi = s_bareAgi;
+                wis = s_bareWis;
+            }
+            else
+            {
+                str = strA;
+                agi = agiA;
+                wis = wisA;
+            }
+        }
+        else if (s_haveBare && (s_bareStr | s_bareAgi | s_bareWis) != 0)
+        {
+            next = (int)s_bareStr + (charmDelta > 0 ? charmDelta : 0);
+            str = (next < 0) ? 0u : (next > 65535 ? (u16)65535u : (u16)next);
+            next = (int)s_bareAgi + (strDelta > 0 ? strDelta : 0);
+            agi = (next < 0) ? 0u : (next > 65535 ? (u16)65535u : (u16)next);
+            next = (int)s_bareWis + (agiDelta > 0 ? agiDelta : 0);
+            wis = (next < 0) ? 0u : (next > 65535 ? (u16)65535u : (u16)next);
+        }
+        else
+        {
+            next = (int)strA + charmDelta;
+            if (next > (int)strA && strA > strB)
+                str = strA;
+            else
+                str = (next < 0) ? 0u
+                                 : (next > 65535 ? (u16)65535u : (u16)next);
+            next = (int)agiA + strDelta;
+            if (next > (int)agiA && agiA > agiB)
+                agi = agiA;
+            else
+                agi = (next < 0) ? 0u
+                                 : (next > 65535 ? (u16)65535u : (u16)next);
+            next = (int)wisA + agiDelta;
+            if (next > (int)wisA && wisA > wisB)
+                wis = wisA;
+            else
+                wis = (next < 0) ? 0u
+                                 : (next > 65535 ? (u16)65535u : (u16)next);
+        }
+        charm84 = charmA;
+    }
+    else
+    {
+        str = strB ? strB : strA;
+        agi = agiB ? agiB : agiA;
+        wis = wisB ? wisB : wisA;
+        if (actorB != 0)
+            charm84 = charmB;
+    }
+    s_lastStr = str;
+    s_lastAgi = agi;
+    s_lastWis = wis;
+    s_lastWearBare = g_agent_wear_combat_bare;
+
+    /*
+     * Overlay is panel authority when present (published on actorinfo / equip).
+     * debug-a1d304 unequip: overlay str=219 but sticky strA/B=2195; zero-fill
+     * kept 2195. Prefer overlay for all panel rows (strings only).
+     */
+    {
+        u16 ovStr = 0, ovAgi = 0, ovWis = 0, ovAtk = 0, ovArmor = 0, ovDodge = 0,
+            ovHit = 0, ovCrit = 0, ovResist = 0, ovCharm = 0;
+        u32 ovGen = 0;
+        u16 beforeStr = str, beforeAtk = atk, beforeArmor = armor;
+        int ovOk = vm_host_read_panel_attr_overlay(
+            &ovStr, &ovAgi, &ovWis, &ovAtk, &ovArmor, &ovDodge, &ovHit, &ovCrit,
+            &ovResist, &ovCharm, &ovGen);
+        if (ovOk)
+        {
+            str = ovStr;
+            agi = ovAgi;
+            wis = ovWis;
+            atk = ovAtk;
+            armor = ovArmor;
+            dodge = ovDodge;
+            hit = ovHit;
+            crit = ovCrit;
+            resist = ovResist;
+            if (ovCharm != 0 || charm84 == 0)
+                charm84 = ovCharm;
+            s_lastStr = str;
+            s_lastAgi = agi;
+            s_lastWis = wis;
+            
+        }
+    }
+
+    
+    if ((actorA == 0 && actorB == 0) || valueBase == 0)
+        return;
+    if (stride < 4 || stride > 24)
+        stride = 20;
+
+    vm_host_write_attr_panel_row(valueBase, stride, 5u, charm84);
+    vm_host_write_attr_panel_row(valueBase, stride, 10u, str);
+    vm_host_write_attr_panel_row(valueBase, stride, 11u, agi);
+    vm_host_write_attr_panel_row(valueBase, stride, 12u, wis);
+    vm_host_write_attr_panel_row(valueBase, stride, 13u, atk);
+    vm_host_write_attr_panel_row(valueBase, stride, 14u, armor);
+    vm_host_write_attr_panel_row(valueBase, stride, 15u, dodge);
+    vm_host_write_attr_panel_row(valueBase, stride, 16u, hit);
+    vm_host_write_attr_panel_row(valueBase, stride, 17u, crit);
+    vm_host_write_attr_panel_row(valueBase, stride, 18u, resist);
+
+    
+}
+
 /*
  * Emulator-side HUD countdown forensics (IDA unavailable): catch HH:MM draw /
  * sprintf, then scan Global_R9 neighborhood for matching remaining minutes.
@@ -3818,6 +4268,12 @@ static void agent_dbg0b451a_log(const char *hypothesisId, const char *location,
             dataJson ? dataJson : "{}",
             (long long)time(NULL) * 1000LL);
     fclose(fp);
+}
+
+void agent_dbg0b451a_note_active_role(u32 roleId)
+{
+    /* Title 1/1/6 role-select binder for dream HUD forensics. */
+    (void)roleId;
 }
 
 static int agent_dbg0b451a_parse_hhmm(const char *text, u32 *minutesOut)
@@ -4189,7 +4645,7 @@ static void agent_dbg0b451a_on_dream_sce(const char *name)
     g_agent_dream_hud_watch = 1;
     /* Re-enter after eject recreates/resets timer to ~29285; allow poke again. */
     g_agent_timer_remain_poke_done = 0;
-    g_agent_timer_obj = 0;
+        g_agent_timer_obj = 0;
     g_agent_timer_last_remain = 0xffffffffu;
     if (g_lastSceLoadName[0] == '-' || g_lastSceLoadName[0] == 0)
         snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName), "%s", name);
@@ -5305,11 +5761,299 @@ static void vm_host_pump_wpay_cancel_keys(void)
     g_wpayCancelKeysRemaining--;
 }
 
+static int vm_host_coolmall_redirect_flag_armed(void)
+{
+    FILE *fp =
+        fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_redirect.flag",
+              "rb");
+    int c;
+
+    if (fp == NULL)
+        return 0;
+    c = fgetc(fp);
+    fclose(fp);
+    return c == '1';
+}
+
+static void vm_host_clear_coolmall_redirect_flag(void)
+{
+    FILE *fp =
+        fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_redirect.flag",
+              "wb");
+    if (fp != NULL)
+    {
+        fputs("0\n", fp);
+        fclose(fp);
+    }
+}
+
+static void vm_host_queue_coolmall_mmshop_cancel(void)
+{
+    /* Clear DoLoading / leftover mall chrome on the parent map shell. */
+    if (g_coolmallCancelKeysRemaining < 8u)
+        g_coolmallCancelKeysRemaining = 8u;
+}
+
+/* Host refused mmShop AddScreen — ask local mock-server to poll-deliver 26/1. */
+static void vm_host_request_coolmall_dialog(void)
+{
+    FILE *fp =
+        fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_coolmall_open_request.flag",
+              "wb");
+    if (fp != NULL)
+    {
+        fputs("1\n", fp);
+        fclose(fp);
+    }
+}
+
+static void vm_host_keyq_reset(void);
+static void vm_host_keyq_push(u8 skey, u8 press, u8 pre_delay);
+static void vm_host_arm_coolmall_exit_then_dialog(void);
+static void vm_host_pump_coolmall_after_exit(void);
+static int vm_host_coolmall_intercept_jh_mall_menu_key(u32 skey, u32 press);
+static void vm_host_coolmall_open_npc_keep_map(const char *reason);
+
+static int vm_host_caller_looks_like_mmshop(u32 caller)
+{
+    /*
+     * client_out: map enter caller=0502ee48 and mall caller=0502dfb2 share the
+     * same CBM window — caller VA alone cannot identify mmShop.  Keep the
+     * helper for probes; reject path must use destroy/init signature.
+     */
+    (void)caller;
+    return 0;
+}
+
+static void vm_host_pump_coolmall_mmshop_cancel(void)
+{
+    if (g_coolmallCancelKeysRemaining == 0)
+        return;
+#if defined(CBE_CLIENT_ONLY)
+    /*
+     * Reject clears busy, then 0105a814 ScreenInit can re-arm r9+21808 while
+     * DoLoading package is still half-open — re-clear until the bar drains.
+     */
+    {
+        u8 busy = 0;
+        if (Global_R9 != 0 &&
+            uc_mem_read(MTK, Global_R9 + 21808, &busy, 1) == UC_ERR_OK &&
+            busy != 0)
+        {
+            vm_host_clear_download_busy("coolmall-cancel-pump");
+        }
+    }
+#endif
+    if (g_coolmallCancelKeysRemaining & 1u)
+        EnqueueVMEvent(VM_EVENT_KEYBOARD, 13, 1);
+    else
+        EnqueueVMEvent(VM_EVENT_KEYBOARD, 13, 0);
+    g_coolmallCancelKeysRemaining--;
+}
+
+/*
+ * Softkeys never closed mmShop after empty-catalog redirect (client_out:
+ * dismiss logged twice, user still on destroy=502d217 until window_close).
+ * Pop the host stack and resume parent without running mmShop destroy (exit
+ * crash class).  Re-arm open_request so 26/1 can land on the map shell.
+ */
+static int vm_host_pop_mmshop_for_coolmall(u32 screen)
+{
+    u32 newTop = 0;
+    u32 newTopParam = 0;
+    u32 newTopModule = 0;
+    u32 newTopDp = 0;
+
+    if (screen == 0 || g_screenStackCount < 2)
+        return 0;
+    if (!vm_screen_stack_remove(screen, &newTop, &newTopParam, &newTopModule,
+                                &newTopDp))
+        return 0;
+    vmAddedScreen = newTop;
+    g_currentScreenThis = newTop != 0 ? (newTop - 0x18u) : 0;
+    g_currentScreenModuleBase = newTopModule;
+    if (newTopModule)
+        vm_dl_note_sp_bf(newTopModule, "coolmall-pop-mmshop");
+    g_currentScreenDataPackage = newTopDp;
+    vm_restore_data_package(newTopDp);
+    vm_set_var(VM_SCREEN_nextSubTScreen_ADDRESS, newTop);
+    g_screenResumeExisting = 1;
+    g_screenEnterExistingNoCallback = 0;
+    g_screenExitMode = VM_SCREEN_EXIT_SKIP;
+    g_screenRemovedWithoutNext = 0;
+    screenStructChange = 1;
+    return 1;
+}
+
+/* After mall truncate arms coolmall, arm deferred dismiss (not immediate pop). */
+static void vm_host_try_dismiss_mmshop_for_coolmall(void)
+{
+    /* Disabled with W-mall restore — never host-pop mmShop. */
+    if (vm_host_coolmall_redirect_flag_armed())
+        vm_host_clear_coolmall_redirect_flag();
+}
+
+static void vm_host_coolmall_dismiss_after_shop_net(u32 respLen)
+{
+    /* Disabled with W-mall restore. */
+    (void)respLen;
+    g_coolmallDismissAfterShopNet = 0;
+}
+
 static int vm_softkey_eq_gbk(const u8 *text, const u8 *gbk, size_t n)
 {
     if (text == NULL || gbk == NULL)
         return 0;
     return memcmp(text, gbk, n) == 0 && text[n] == 0;
+}
+
+static int vm_host_softkey_is_main_menu_chrome(void)
+{
+    static const u8 kMenu[] = {0xB2, 0xCB, 0xB5, 0xA5};     /* 菜单 */
+    static const u8 kSelect[] = {0xD1, 0xA1, 0xD4, 0xF1};   /* 选择 */
+    static const u8 kOk[] = {0xC8, 0xB7, 0xB6, 0xA8};       /* 确定 */
+    static const u8 kBack[] = {0xB7, 0xB5, 0xBB, 0xD8};     /* 返回 */
+
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kSelect, sizeof(kSelect)))
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kOk, sizeof(kOk)))
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyCenterCache, kOk, sizeof(kOk)))
+        return 1;
+    /* Menu list open: left no longer 菜单, right still 返回. */
+    if (g_softkeyLeftCache[0] != 0 &&
+        !vm_softkey_eq_gbk(g_softkeyLeftCache, kMenu, sizeof(kMenu)) &&
+        vm_softkey_eq_gbk(g_softkeyRightCache, kBack, sizeof(kBack)))
+        return 1;
+    return 0;
+}
+
+/*
+ * WQVGA main-menu list → row index.  江湖商城 is row 5.
+ * Touch selects without keyboard OK, so idx stayed 0 and outdoor was torn.
+ */
+static int vm_host_coolmall_menu_row_from_touch_y(u32 y, u8 *rowOut)
+{
+    const u32 listTop = 64u;
+    const u32 listBottom = 340u;
+    const u32 rows = 6u;
+    u32 row;
+
+    if (rowOut)
+        *rowOut = 0;
+    if (y < listTop || y > listBottom)
+        return 0;
+    row = (y - listTop) * rows / (listBottom - listTop + 1u);
+    if (row >= rows)
+        row = rows - 1u;
+    if (rowOut)
+        *rowOut = (u8)row;
+    return 1;
+}
+
+/*
+ * Touch on main-menu「江湖商城」: swallow and keep outdoor (脱离卡死 also
+ * requires mmGame still alive — tear+poll 30/1 cannot rebuild it).
+ */
+static int vm_host_coolmall_intercept_jh_mall_menu_touch(u32 touchType, u32 packedXy)
+{
+    /* Disabled: restore W-mall; touch hijack caused refuse/crash paths. */
+    (void)touchType;
+    (void)packedXy;
+    return 0;
+}
+
+/*
+ * Direct unstick from coolmall mmShop/transition trap.
+ * Outdoor was already destroyed for mall enter — host-pop of mmShop alone
+ * leaves DoLoading transition over root (client_out: await-map timeout on
+ * 0105a814).  Peel to entry root, then open_request arms 脱离卡死-class
+ * same-scene 30/1 so mmGame rebuilds before NPC 26/1.
+ */
+static void vm_host_coolmall_unstick_then_npc(const char *reason)
+{
+    int popped = 0;
+    int peeledToRoot = 0;
+
+    g_coolmallDismissAfterShopNet = 0;
+    g_coolmallKeepMapArmed = 0;
+    g_jhMainMenuOpen = 0;
+    g_jhMainMenuIndex = 0;
+    vm_host_keyq_reset();
+
+    /* Pop mmShop if still on top. */
+    if (vmAddedScreen != 0 && g_screenStackCount >= 2 &&
+        vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen))
+        popped |= vm_host_pop_mmshop_for_coolmall(vmAddedScreen);
+
+    if (vm_host_stack_has_outdoor_map())
+    {
+        /* Outdoor paused under chrome: peel transition only. */
+        if (g_screenStackCount >= 2 && vmAddedScreen != 0 &&
+            !vm_host_screen_looks_like_outdoor_map(vmAddedScreen))
+        {
+            u32 topDestroy = vm_get_var(vmAddedScreen + 4) & ~1u;
+            if (topDestroy == 0x01044a55u || topDestroy == 0x01044a54u)
+                popped |= vm_host_pop_mmshop_for_coolmall(vmAddedScreen);
+        }
+    }
+    else
+    {
+        /*
+         * No outdoor under stack (normal mall tear).  Stuck transition cannot
+         * be cleared by shop-return 30/2 — peel to root for scene re-enter.
+         */
+        while (g_screenStackCount >= 2 && vmAddedScreen != 0 &&
+               !vm_screen_is_entry_root(vmAddedScreen))
+        {
+            if (!vm_host_pop_mmshop_for_coolmall(vmAddedScreen))
+                break;
+            popped = 1;
+            peeledToRoot = 1;
+        }
+    }
+
+    g_coolmallSuppressMmShopRender = 0;
+    g_coolmallAwaitMapThenDialog = 1;
+    /* Do NOT arm GuardNetDeliver here — it clears busy and kills 30/1 DoLoading. */
+    g_coolmallGuardNetDeliver = 0;
+    /* Kind2 / 30/1 needs a few frames after open_request. */
+    g_coolmallDialogAfterExitTick = g_schedulerTick + 40u;
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_clear_download_busy("coolmall-unstick");
+#endif
+    vm_host_request_coolmall_dialog();
+    printf("[info][coolmall] unstick then NPC reason=%s popped=%d "
+           "peel_root=%d depth=%u screen=%08x tick=%u\n",
+           reason != NULL ? reason : "-", popped, peeledToRoot,
+           (unsigned)g_screenStackCount, vmAddedScreen,
+           g_coolmallDialogAfterExitTick);
+}
+
+/*
+ * Refuse mall tear: first 右软退出菜单, only later poll-deliver 26/1.
+ * Do NOT clear download busy or request dialog here — mid-refuse that caused
+ * SCR_Render UC_ERR_MAP at pc=0x0100593C (client_out addr=0x20).
+ */
+static void vm_host_coolmall_open_npc_keep_map(const char *reason)
+{
+    g_jhMainMenuOpen = 0;
+    g_jhMainMenuIndex = 0;
+    g_coolmallKeepMapArmed = 1;
+    g_coolmallCancelKeysRemaining = 0;
+    g_coolmallDismissAfterShopNet = 0;
+    g_coolmallGuardNetDeliver = 0;
+    vm_host_keyq_reset();
+    /* Exit menu (返回); pump opens 酷宝商城 after HUD is stable. */
+    vm_host_keyq_push(13, 1, 2);
+    vm_host_keyq_push(13, 0, 4);
+    vm_host_keyq_push(13, 1, 10);
+    vm_host_keyq_push(13, 0, 4);
+    g_coolmallDialogAfterExitTick = g_schedulerTick + 18u;
+    printf("[info][coolmall] keep-map exit-menu then dialog reason=%s "
+           "depth=%u screen=%08x tick=%u\n",
+           reason != NULL ? reason : "-", (unsigned)g_screenStackCount,
+           vmAddedScreen, g_coolmallDialogAfterExitTick);
 }
 
 /*
@@ -5392,6 +6136,192 @@ static void vm_host_pump_key_queue(void)
         vm_host_keyq_reset();
 }
 
+/*
+ * Main-menu 江湖商城 = index 5.  Swallow OK so the client never starts
+ * DF/DoLoading/mmShop; close menu with 右软 then 26/1.
+ * debug-a1d304: index==0 never intercepted while mmShop still opened — wrong row.
+ */
+static int vm_host_coolmall_intercept_jh_mall_menu_key(u32 skey, u32 press)
+{
+    /*
+     * 2026-08-04: coolmall redirect / refuse-outdoor caused crash & menu stuck.
+     * Restore normal W-mall (mmShop) until a safe keep-map path exists.
+     */
+    (void)skey;
+    (void)press;
+    return 0;
+}
+
+/*
+ * Fallback after mmShop was pushed: pop shells then 26/1.  Prefer immediate
+ * open_request when already on map HUD — delayed pump never ran after the
+ * old AddScreen-reject hang (debug-a1d304: fireAt set, flag never written).
+ */
+static void vm_host_arm_coolmall_exit_then_dialog(void)
+{
+    u32 trans = vmAddedScreen;
+    u32 transDestroy = trans != 0 ? (vm_get_var(trans + 4) & ~1u) : 0;
+    int popped = 0;
+    int needRightSoft = 0;
+
+    g_jhMainMenuOpen = 0;
+    g_coolmallCancelKeysRemaining = 0;
+    vm_host_keyq_reset();
+    if (trans != 0 && g_screenStackCount >= 2 &&
+        vm_host_screen_destroy_looks_like_mmshop(trans))
+        popped = vm_host_pop_mmshop_for_coolmall(trans);
+    /* Pop transition only while outdoor/mmGame remains underneath. */
+    while (g_screenStackCount >= 2 && vmAddedScreen != 0 &&
+           vm_host_stack_has_outdoor_map())
+    {
+        u32 topDestroy = vm_get_var(vmAddedScreen + 4) & ~1u;
+        if (topDestroy != 0x01044a55u && topDestroy != 0x01044a54u)
+            break;
+        if (vm_host_screen_looks_like_outdoor_map(vmAddedScreen))
+            break;
+        popped |= vm_host_pop_mmshop_for_coolmall(vmAddedScreen);
+    }
+    needRightSoft = (g_screenStackCount >= 2);
+    if (needRightSoft)
+    {
+        vm_host_keyq_push(13, 1, 2);
+        vm_host_keyq_push(13, 0, 6);
+        g_coolmallDialogAfterExitTick = g_schedulerTick + 14u;
+    }
+    else
+    {
+        g_coolmallDialogAfterExitTick = g_schedulerTick + 2u;
+        /* Immediate flag so poll can deliver even if frames are sparse. */
+        g_coolmallGuardNetDeliver = 1;
+        vm_host_request_coolmall_dialog();
+    }
+    printf("[info][coolmall] arm exit-menu then dialog popped=%d "
+           "trans=%08x destroy=%08x at tick=%u now=%u depth=%u soft=%d "
+           "req_now=%d\n",
+           popped, trans, transDestroy, g_coolmallDialogAfterExitTick,
+           g_schedulerTick, (unsigned)g_screenStackCount, needRightSoft,
+           needRightSoft ? 0 : 1);
+}
+
+#if defined(CBE_CLIENT_ONLY)
+/*
+ * WT object walk must match mock_server_core: first object at offset 4
+ * (request[4]=major).  Offset 5 wrongly treated [4] as objCount and missed
+ * 14/14+14/4 mall opens.
+ */
+static int vm_host_coolmall_wt_has(const u8 *req, u32 len, u8 kind, u8 subtype)
+{
+    u32 off = 4;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return 0;
+    while (off + 5u <= len)
+    {
+        u8 k = req[off + 1];
+        u8 s = req[off + 2];
+        u16 olen = (u16)(((u16)req[off + 3] << 8) | req[off + 4]);
+
+        if (olen < 5 || off + olen > len)
+            break;
+        if (k == kind && s == subtype)
+            return 1;
+        off += olen;
+    }
+    return 0;
+}
+
+/*
+ * Truncate 江湖商城 mmShop open uplink: do not enqueue to server; simulate
+ * 右软(返回) / pop shell; arm coolmall 26/1 via open_request after exit.
+ */
+static int vm_host_coolmall_try_truncate_mall_send(const u8 *req, u32 len)
+{
+    /* Disabled: restore normal W-mall uplink to server. */
+    (void)req;
+    (void)len;
+    return 0;
+}
+#endif /* CBE_CLIENT_ONLY */
+
+static void vm_host_pump_coolmall_after_exit(void)
+{
+    /*
+     * W-mall restore: never host-pop / open_request during normal mmShop exit.
+     * Leftover AwaitMap/DialogAfterExitTick from coolmall experiments caused
+     * stray pops and root-screen stalls.
+     */
+    g_coolmallAwaitMapThenDialog = 0;
+    g_coolmallDialogAfterExitTick = 0;
+    g_coolmallKeepMapArmed = 0;
+    g_coolmallGuardNetDeliver = 0;
+    g_coolmallDismissAfterShopNet = 0;
+    g_coolmallSuppressMmShopRender = 0;
+}
+
+#if defined(CBE_CLIENT_ONLY)
+/*
+ * Server arms bin/cbe_mmshop_loading_clear.flag on every already_open ack
+ * (status+money).  Clear mmShop 0x162C loading at *(r9+0x2868)+0x10 and the
+ * download-busy pair so 「正在和服务器通信」 can drop.  Pump after net
+ * dispatch as well — flag is written by the remote server before the
+ * response is delivered.
+ */
+static void vm_host_clear_mmshop_loading_now(const char *reason)
+{
+    u32 r9;
+    u32 bottom = 0;
+    u8 zero = 0;
+
+    if (vmAddedScreen == 0 ||
+        !vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen))
+    {
+        printf("[warn][screen] mmshop_loading_clear skip reason=%s "
+               "screen=%08x not-mmshop\n",
+               reason ? reason : "-", vmAddedScreen);
+        return;
+    }
+    r9 = vm_read_current_pool_r9();
+    if (r9 == 0)
+        r9 = Global_R9;
+    if (r9 == 0)
+        return;
+    uc_mem_read(MTK, r9 + 10344u, &bottom, sizeof(bottom));
+    if (bottom != 0)
+        uc_mem_write(MTK, bottom + 16u, &zero, 1);
+    /* Same pair ResetDownloadState clears — bar text 正在和服务器通信. */
+    uc_mem_write(MTK, r9 + 21808u, &zero, 1);
+    uc_mem_write(MTK, r9 + 21804u, &zero, 1);
+    uc_mem_write(MTK, r9 + 0x9584u, &zero, 1);
+    printf("[info][screen] mmshop_loading_clear reason=%s r9=%08x bottom=%08x "
+           "evidence=r9+0x2868+0x10+download-busy\n",
+           reason ? reason : "-", r9, bottom);
+}
+
+static void vm_host_pump_mmshop_loading_clear_flag(void)
+{
+    FILE *fp;
+    u8 flag = 0;
+
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_mmshop_loading_clear.flag",
+               "rb");
+    if (fp == NULL)
+        return;
+    if (fread(&flag, 1, 1, fp) != 1)
+        flag = 0;
+    fclose(fp);
+    if (flag != '1' && flag != 1)
+        return;
+    fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_mmshop_loading_clear.flag",
+               "w");
+    if (fp != NULL)
+    {
+        fputs("0\n", fp);
+        fclose(fp);
+    }
+    vm_host_clear_mmshop_loading_now("flag");
+}
+#endif
+
 static uc_err scheduler_tick(void)
 {
 #ifdef CBE_PLATFORM_ANDROID
@@ -5405,7 +6335,13 @@ static uc_err scheduler_tick(void)
     g_schedulerTick++;
     currentTime = clock();
     vm_host_pump_wpay_cancel_keys();
+    vm_host_try_dismiss_mmshop_for_coolmall();
+    vm_host_pump_coolmall_mmshop_cancel();
     vm_host_pump_key_queue();
+    vm_host_pump_coolmall_after_exit();
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_pump_mmshop_loading_clear_flag();
+#endif
     uc_err err = scheduler_dispatch_timers();
     if (err != UC_ERR_OK)
         return err;
@@ -5416,6 +6352,10 @@ static uc_err scheduler_tick(void)
     err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
         return err;
+#if defined(CBE_CLIENT_ONLY)
+    /* Flag may arrive with the shop-exit response just dispatched above. */
+    vm_host_pump_mmshop_loading_clear_flag();
+#endif
     vm_screen_root_exit_maybe_request();
     return UC_ERR_OK;
 }
@@ -5497,6 +6437,18 @@ void keyEvent(int type, int key)
     int isPress = type == 4 ? 1 : 0;
     if (skey != -1)
     {
+        
+        /*
+         * Track/swallow 江湖商城 here (all keyboard sources).  Frame-loop
+         * intercept alone never logged (touch or other dispatch path).
+         */
+        if (isPress && vm_host_coolmall_intercept_jh_mall_menu_key(
+                           (u32)skey, (u32)isPress))
+        {
+            /* Swallow OK: still enqueue release later from physical key if any. */
+            if (skey == 14)
+                return;
+        }
         /* Chat/map shortcuts are Android UI digit keys ('6'/'4'), not softkey remap. */
         EnqueueVMEvent(VM_EVENT_KEYBOARD, skey, isPress);
     }
@@ -7410,11 +8362,13 @@ static void vm_autotest_note_shop_parser_pc(u32 pc)
     static u32 seenItemId = 0;
     static u32 seenName = 0;
     static u32 seenDone = 0;
+    static u32 agentEntry = 0;
+    static u32 agentDone = 0;
     u32 base = g_currentScreenModuleBase;
     u32 off = 0;
     u32 r9 = 0;
 
-    if (!g_autotestEnabled || base == 0 || pc < base)
+    if (base == 0 || pc < base)
         return;
     off = pc - base;
     if (off != 0x7BC && off != 0x898 && off != 0x8D0 &&
@@ -7426,6 +8380,11 @@ static void vm_autotest_note_shop_parser_pc(u32 pc)
     uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
     if (r9 == 0)
         r9 = base;
+
+    
+
+    if (!g_autotestEnabled)
+        return;
 
     if (off == 0x7BC && seenEntry < 8)
     {
@@ -8888,7 +9847,6 @@ static bool vm_cbe_load_and_start(const char *cbe_path_utf8)
 }
 #endif
 
-
 static int vm_ascii_stricmp(const char *a, const char *b)
 {
     unsigned char ca;
@@ -9347,7 +10305,6 @@ static void vm_lcd_init_rotation_config(int argc, char *args[])
            LcdGetWindowWidth(), LcdGetWindowHeight());
 }
 
-
 static void vm_persist_ensure_dir(void)
 {
 #ifdef _WIN32
@@ -9740,7 +10697,6 @@ static u32 vm_storage_date(u32 namePtr, u32 buffer, u32 len, u32 isRead)
     return vm_set_call_result(savedLen == effectiveLen ? 1 : 0);
 }
 
-
 static u32 vm_nv_read(u32 reqPtr)
 {
     if (reqPtr == 0)
@@ -10118,6 +11074,41 @@ void RunArmProgram(void *param)
                 printf("ScreenResume skipped by isInQuit\n");
                 g_screenEnterExistingNoCallback = 0;
             }
+            else if (g_coolmallDialogAfterExitTick != 0 &&
+                     ((screenDestoryEntry & ~1u) == 0x01044a55u ||
+                      (screenInitEntry & ~1u) == 0x01044a47u))
+            {
+                /*
+                 * Mall reject pops the menu shell, but DoLoading may still
+                 * promote ScreenInit of 0105a814 — skip it while exiting.
+                 */
+                printf("[info][coolmall] skip menu shell ScreenInit screen=%08x "
+                       "during exit-then-dialog depth=%u\n",
+                       screenFuncPtr, (unsigned)g_screenStackCount);
+                
+                if (g_screenStackCount >= 2)
+                    (void)vm_host_pop_mmshop_for_coolmall(screenFuncPtr);
+#if defined(CBE_CLIENT_ONLY)
+                vm_host_clear_download_busy("coolmall-skip-menu-init");
+#endif
+                p = UC_ERR_OK;
+                ranScreenInitPath = false;
+                continue;
+            }
+            else if (vm_host_screen_destroy_looks_like_mmshop(screenFuncPtr))
+            {
+                /* Normal W-mall ScreenInit (coolmall suppress/redirect off). */
+                ranScreenInitPath = true;
+                if (screenInitEntry)
+                    p = vm_emu_start(screenInitEntry, exitAddr);
+                else
+                    p = UC_ERR_OK;
+                if (p == UC_ERR_OK)
+                    printf("ScreenInit Ok\n");
+                else
+                    printf("SCR_Init异常 emu_err=%u init=%08x\n", (unsigned)p,
+                           screenInitEntry);
+            }
             else
             {
                 ranScreenInitPath = true;
@@ -10310,6 +11301,7 @@ void RunArmProgram(void *param)
                     vm_event *evt = DequeueVMEvent();
                     if (evt != NULL)
                     {
+                        int swallowCoolmallTouch = 0;
                         if (evt->event == VM_EVENT_INPUT_CHAR || evt->event == VM_EVENT_INPUT_BACKSPACE || evt->event == VM_EVENT_INPUT_DONE)
                         {
                             p = scheduler_dispatch_input_event(evt);
@@ -10335,8 +11327,12 @@ void RunArmProgram(void *param)
                                 simulateTouchDrag = evt->r0 == MR_MOUSE_MOVE;
                                 simulateTouchX = evt->r1 & 0xffff;
                                 simulateTouchY = (evt->r1 >> 16) & 0xffff;
+                                if (vm_host_coolmall_intercept_jh_mall_menu_touch(
+                                        evt->r0, evt->r1))
+                                    swallowCoolmallTouch = 1;
                             }
-                            if (screenThisPtr && screenLogicEntry)
+                            if (!swallowCoolmallTouch && screenThisPtr &&
+                                screenLogicEntry)
                             {
                                 u32 eventType = 0;
                                 u32 eventArg = 0;
@@ -10416,7 +11412,14 @@ void RunArmProgram(void *param)
                         uc_reg_write(MTK, UC_ARM_REG_LR, &thumbExitAddr);
                         scheduler_prepare_screen_call(screenThisPtr);
                         uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
-                        p = vm_emu_start(screenRenderEntry, exitAddr);
+                        if (g_coolmallSuppressMmShopRender &&
+                            vm_host_screen_destroy_looks_like_mmshop(screenFuncPtr))
+                        {
+                            /* Do not paint W-coin mall chrome. */
+                            p = UC_ERR_OK;
+                        }
+                        else
+                            p = vm_emu_start(screenRenderEntry, exitAddr);
                         if (p != UC_ERR_OK)
                         {
                             dumpCpuInfo();
@@ -10477,6 +11480,7 @@ void RunArmProgram(void *param)
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_Destory异常\n");
+                            
                             break;
                         }
                     }
@@ -10504,6 +11508,7 @@ void RunArmProgram(void *param)
                         if (p != UC_ERR_OK)
                         {
                             printf("SCR_Destory异常\n");
+                            
                             break;
                         }
                     }
@@ -10533,6 +11538,8 @@ void RunArmProgram(void *param)
         printf("模拟错误：(未处理)%s\n", uc_strerror(p));
     else
         printf("程序已正常退出\n");
+
+    
 
     dumpCpuInfo();
     g_vmThreadFinished = 1;
@@ -15466,6 +16473,26 @@ static bool hook_vm_manager_screen_func(u32 address)
             vm_set_call_result(0);
             goto screen_func_return;
         }
+        /*
+         * Probe mmShop AddScreen only.  Rejecting here mid-DoLoading freezes
+         * the client; ScreenInit skip owns the coolmall redirect.
+         */
+        {
+            u32 destroyProbe = tmp1 != 0 ? vm_get_var(tmp1 + 4) : 0;
+            int matchDestroy = tmp1 != 0 &&
+                               vm_host_screen_destroy_looks_like_mmshop(tmp1);
+            int matchCaller = vm_host_caller_looks_like_mmshop(lastAddress);
+            
+            /*
+             * Do NOT reject mmShop at AddScreen.  client_out/debug-a1d304:
+             * reject+pop mid-DoLoading freezes the emu (no further ticks, no
+             * open_request, user stuck).  Let AddScreen succeed so DoLoading
+             * returns; ScreenInit path skips paint, pops, then opens 26/1.
+             */
+            (void)matchDestroy;
+            (void)matchCaller;
+            (void)destroyProbe;
+        }
         if (idx == 4)
         {
             tmp2 = 0;
@@ -15506,6 +16533,7 @@ static bool hook_vm_manager_screen_func(u32 address)
     {
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
+        /* Coolmall refuse-outdoor disabled — restore normal W-mall tear/enter. */
         int removeIndex = vm_screen_stack_find_related(tmp1);
         bool removingCurrent = removeIndex >= 0 && g_screenStack[(u32)removeIndex] == vmAddedScreen;
         u32 removedThis = removingCurrent ? g_currentScreenThis : 0;
@@ -17717,6 +18745,33 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);
     vm_autotest_note_shop_parser_pc((u32)address & ~1u);
     vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
+    /* Attr panel: observe wear; realign only on InitSceneViewport open. */
+    if (((u32)address & ~1u) == 0x01010224u)
+    {
+        
+        
+        /*
+         * Do NOT realign here.  Wear often runs with attr-panel valueBase still
+         * cached in R9+0x6390 after the page was closed (S8 vb=0 but realign
+         * still wrote via stale mapped pointer → heap corruption → mall flash,
+         * debug-a1d304).  Panel refresh only on InitSceneViewport (login-style
+         * open of the attribute page).
+         */
+        
+    }
+    if (((u32)address & ~1u) == 0x01022426u)
+    {
+        /*
+         * Property page fills valueBase here.  Apply overlay for wear-only
+         * rows (物攻 etc.) — login six words lack FA/jump attrs.
+         */
+        u32 vb = 0;
+        if (Global_R9 != 0)
+            (void)uc_mem_read(MTK, Global_R9 + 0x6390, &vb, sizeof(vb));
+        
+        if (vb != 0)
+        vm_host_realign_attr_panel_value_rows();
+    }
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);
@@ -18012,7 +19067,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     if (vm_is_manager_func_stub_address((u32)address))
         return;
-
 
 #ifdef GDB_SERVER_SUPPORT
     tmp2 = gdbTarget.simulate_pc_count;
