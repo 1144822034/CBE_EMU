@@ -51,6 +51,18 @@ attack = 6 + level * 2 + jobPrimary / 2 + equipment.attack / 3
 
 文件：`src/server/mock_server_role.c`；模型说明：`2026-06-28-player-attribute-model.md`。
 
+## 2026-08-03 公式再改
+
+产品约定改为全额累加（详见 `2026-08-03-battle-attack-formula-full-primary.md`）：
+
+```text
+attack = jobPrimary + equipment.attack + strength   (cap 99999)
+```
+
+> **2026-08-04 修订**：现行去掉额外 `+ strength`；战斗 buff 为 `Δattack = ΔjobPrimary`（另加 skill 直接攻击变化）。见 `2026-08-04-three-job-balance-pass1.md`。
+
+战斗内 buff（历史）：`Δattack = ΔjobPrimary + Δstrength`（天机 primary==strength 时力量变化 ×2）。
+
 ## 未改
 
 - 面板物攻 halfword（仍仅武器）。
@@ -60,13 +72,13 @@ attack = 6 + level * 2 + jobPrimary / 2 + equipment.attack / 3
 ## 验证
 
 - `make -j2`
-- 幻剑：穿纯敏防具（如皮甲 `敏捷变化>0`、`攻击=0`）→ 同目标普攻飘字应上升约 `Δ敏/2` 再经防御曲线。
-- 天机：只加力量装 → 普攻仍涨；只加敏捷装 → 普攻不应因敏上涨。
-- 鬼道：加智慧装 → 普攻上涨；技能仍主要吃智慧系数。
-- 战斗内加力/敏/智 buff：仅当前职业主属性的变化应带动 `attack` 的 `/2` 派生。
+- 幻剑：穿纯敏防具 → 同目标普攻飘字约 `+Δ敏`（再经防御曲线）。
+- 天机：只加力量装 → 普攻约 `+2×Δ力`；只加敏捷装 → 普攻不因敏上涨。
+- 鬼道：加智慧装 → `+Δ智`；加力量装 → `+Δ力`。
+- 战斗内加力/敏/智 buff：主属性与力量变化按上式全额带动 `attack`。
 
 ## 残留风险
 
-- 无原始服务端公式证据；本轮是产品约定对齐职业主属性。
-- 鬼道普攻吃智慧后，高智角色普攻会明显抬升；若需「法师普攻弱」需另定契约。
-- 天机技能仍可能低于带高 `equipment.attack` 的普攻（技能不含武器攻击）。
+- 无原始服务端公式证据；本轮是产品约定。
+- 天机力量双计、鬼道普攻吃智+力后数值会明显高于旧 `/2`/`/3` 模型。
+- 天机技能仍可能相对普攻偏弱（技能不含武器攻击）。

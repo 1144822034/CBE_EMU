@@ -76,7 +76,8 @@ Runtime/server boundary:
 - `vm_net_mock_battle_enemy_damage_to_role()`: monster attack against player
   defense from the unified player attribute model.
 - `vm_net_mock_damage_after_defense()`: soft mitigation
-  `attack * 100 / (100 + defense)`, minimum `1`.
+  `(attack*100+def/2)/(100+def)`, floor at `attack*35/100` (armor ≤65%
+  block), then if `def/2 < attack` add `(attack - def/2) * 2`.
 
 The existing environment overrides remain useful for focused experiments:
 

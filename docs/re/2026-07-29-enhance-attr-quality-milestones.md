@@ -28,7 +28,8 @@
 现对每件穿戴装在 `M(L)` 之后调用
 `vm_net_mock_equipment_bonus_add_unlocked_milestones`：凡 `unlock<=L` 的
 品质定值词条写入 bonus（进 `actorinfo` / 战斗）。气血%/法力% 为
-`装备基值 × 百分数 / 100`。
+`人物基础生命/法力 × 百分数 / 100`（2026-08-03；见
+`2026-08-03-enhance-hp-mp-pct-character-base.md`）。
 
 ## 代码
 

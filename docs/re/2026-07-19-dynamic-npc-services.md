@@ -32,9 +32,11 @@
 - `4`：防具商人（含腰带）；
 - `5`：药品商人。
 
-非零类型在 NPC 原有任务选项之外增加一个 `action=1` 服务入口。服务子菜单仍
-返回合法的 `26/1` 对话对象，并使用 `0xE1` 到 `0xE9` 高字节的私有 value
-命名空间。所有低 24 位商品或技能 ID 在状态变更前重新对照 DSH 目录校验。
+非零 `npc_service_mask` 位在 NPC 原有任务选项之外各增加一个 `action=1` 服务
+入口（可多选）；`npc_kind` 仍保存最低置位种类以兼容旧路径。详见
+`2026-08-03-npc-multi-service-options.md`。服务子菜单仍返回合法的 `26/1`
+对话对象，并使用 `0xE1` 到 `0xE9` 高字节的私有 value 命名空间。所有低 24
+位商品或技能 ID 在状态变更前重新对照 DSH 目录校验。
 
 武器商人先显示剑、匕首、法杖三个子类，避免目录按 ID 排序后前七行全部是剑。
 防具商人显示头盔、衣甲、披风、腰带、护腿、鞋靴和戒指七个子类。药品商人
@@ -81,10 +83,12 @@ next_skill=111 next_level=3 next_price=160 ...
 
 ## 后台与数据库
 
-Web 动态 NPC 管理页把原来的任意数字“类型”改为六项下拉选择，保存接口也限制
-范围为 0..5。完整新库使用 `server/mysql/schema.sql`；已有数据库执行
-`server/mysql/migrate_add_npc_services.sql`。运行时仍执行同等的
-`CREATE TABLE IF NOT EXISTS`，但迁移脚本保留完整外键约束。
+Web 动态 NPC 管理页的服务选项为多选（武器／修理／技能／防具／药品／副本向导）；
+保存写入 `npc_service_mask`，并以最低置位回写 `npc_kind`。完整新库使用
+`server/mysql/schema.sql`；已有数据库执行
+`server/mysql/migrate_add_npc_services.sql` 与
+`server/mysql/migrate_add_npc_service_mask.sql`。运行时仍执行同等的
+`CREATE TABLE IF NOT EXISTS` 与列补齐，迁移脚本保留完整外键约束。
 
 ## 验证
 

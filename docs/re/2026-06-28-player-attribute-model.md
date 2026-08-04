@@ -152,9 +152,9 @@ Equipment bonuses only apply when:
 The existing job tables remain the base model:
 
 ```text
-job 1: strength 12 +3/L, agility  8 +2/L, wisdom  7 +1/L, endurance 11 +3/L, charm 3 +1/L
-job 2: strength  9 +2/L, agility 14 +3/L, wisdom  8 +2/L, endurance  8 +2/L, charm 4 +1/L
-job 3: strength  7 +1/L, agility  9 +2/L, wisdom 15 +4/L, endurance  7 +2/L, charm 5 +1/L
+job 1: strength 12 +3/L, agility  8 +2/L, wisdom  7 +1/L, endurance 11 +3/L
+job 2: strength  9 +2/L, agility 14 +3/L, wisdom  8 +2/L, endurance  8 +2/L
+job 3: strength  7 +1/L, agility  9 +2/L, wisdom 15 +4/L, endurance  7 +2/L
 ```
 
 The increment uses `(level - 1)`, so level 1 is exactly the base row.
@@ -166,11 +166,20 @@ strength = baseStrength + equipment.strength
 agility  = baseAgility  + equipment.agility
 wisdom   = baseWisdom   + equipment.wisdom
 endurance = baseEndurance
-charm = baseCharm + money / 100000
+charm    = persisted item total (flowers / 花); default 0 at login
 ```
 
 `equip.dsh` does not currently expose an endurance column, so endurance remains
 level/job based until a recovered item field proves otherwise.
+
+### 魅力 (2026-08-04)
+
+Product contract: 魅力 only rises from using flower items (花), not from
+level/job tables or `money/100000`. Login `EXTRA132` therefore seeds **0**
+(override `CBE_ACTOR_CHARM` / `CBE_ACTOR_EXTRA132` for tests). Role-DB
+persistence and the flower use-item handler remain `unresolved`. CBE
+mid-session level-up still writes flat deltas into `actor+0x84`; the next
+login reseeds from the server.
 
 ## Derived Combat Stats (server battle model)
 
@@ -179,9 +188,9 @@ Panel 物攻/护甲 follow the client table above. Mock **battle** still derives
 ```text
 maxHp   = 90 + level * 8 + endurance * 2 + equipment.hp
 maxMp   = 70 + level * 9 + wisdom * 3 + equipment.mp
-attack  = 6 + level * 2 + jobPrimary / 2 + equipment.attack / 3
+attack  = jobPrimary + equipment.attack   (cap 99999)
 defense = 4 + level + endurance / 2 + equipment.armor / 5
-hit     = equipment.hit
+hit     = 101 + equipment.hit
 dodge   = equipment.dodge
 crit    = equipment.crit
 resist  = equipment.resist
@@ -198,6 +207,12 @@ job 3 鬼道 → wisdom
 See `2026-07-31-battle-attack-job-primary-attr.md`. Panel 物攻 remains
 weapon-only (`item+0xFA`); this change is server battle authority only.
 
+2026-08-03: battle attack dropped the level base and `/2`/`/3` folds.
+2026-08-04: removed the extra `+ strength` term so 天机 no longer
+double-counts strength; attack is only `jobPrimary + equipment.attack`.
+Skill raw adds jobPrimary×pct by job (鬼道45 / 幻剑35 / 天机25). Soft-boost tiers:
+wisdom 122% NA / strength·agility 115% NA.
+
 These feed battle start / hit rolls / soft mitigation only. Do not remap panel
 halfwords to “力量→血、敏捷→甲、主属性→攻” without new client evidence;
 mid-session level-up uses flat job rates, not those derivatives.
@@ -205,29 +220,40 @@ mid-session level-up uses flat job rates, not those derivatives.
 Rationale (battle model):
 
 - equipment primary attributes are visible at full value on the panel path;
-- weapon attack and armor fold into **server** combat at a reduced rate;
+- weapon attack folds into **server** combat at full catalog value;
 - HP/MP scale with level for persistence readability;
-- hit / dodge / crit / resist are equipment-only (including enhance milestones);
+- hit / dodge / crit / resist are equipment-only (including enhance milestones)
+  aside from the hit floor of 101;
 - normal-attack damage scales with the job’s damage primary so agility / wisdom
-  gear affects 幻剑 / 鬼道 auto-attacks the same way strength gear affects 天机.
+  gear affects 幻剑 / 鬼道 auto-attacks the same way strength gear affects 天机;
+  attack is jobPrimary + weapon attack only (no extra strength term).
 
 ## Defense Formula
 
-Damage now uses a soft mitigation curve:
+Damage now uses a soft mitigation curve, then a soft-capped pierce bonus:
 
 ```text
-damage = max(1, attack * 100 / (100 + defense))
+soft   = (attack * 100 + defense/2) / (100 + defense)
+soft   = max(soft, attack * 35 / 100)           # armor blocks ≤65%
+pierceRaw = (attack - defense/2) * 2            # if attack > defense/2
+pierceCap = attack * 25 / 100
+pierce = pierceRaw * pierceCap / (pierceRaw + pierceCap)   # asymptotic soft cap
+damage = soft + pierce
 ```
 
-Spell damage uses resist as a flat percent reduction (cap 70%):
+2026-08-04: pierce no longer adds full `(atk-def/2)*2` (that reached ~3× attack on
+low-def foes). It now approaches 25% of attack, so typical normal attacks land
+near ~1.0–1.25× attack while high defense still pulls the soft term down.
+
+Spell / offensive-skill damage uses resist as a flat percent reduction (cap 70%):
 
 ```text
 damage = raw * (100 - min(resist, 70)) / 100
 ```
 
 命中后若减免到 0，进攻路径仍保底为 1；未命中保持 0。
-This avoids the old `attack - defense` cliff where a small stat mismatch could
-collapse damage to `1`, while still making defense meaningful at all levels.
+Armor soft mitigation cannot drop physical normal-attack damage below 35% of
+attack (2026-08-03).
 
 ## Skill Damage
 
@@ -237,12 +263,13 @@ Battle skills use `skill.dsh` instead of the normal attack value:
 base = abs(生命变化) for offensive rows
 bonus = (strength * 力量系数 + agility * 敏捷系数 + wisdom * 智慧系数) / 100
 raw = base + bonus
-damage = max(base, raw * 100 / (100 + enemy_defense))
+damage = max(base, raw * (100 - min(resist, 70)) / 100)
 ```
 
+Physical and magical offensive skills share resist mitigation (2026-08-03).
 This keeps the DSH promise like `造成至少30点单体法术伤害` true while still letting
-player attributes and monster defense matter. Normal attack remains
-`vm_net_mock_battle_player_damage_to_enemy()`.
+player attributes and target resist matter. Normal attack remains
+`vm_net_mock_battle_player_damage_to_enemy()` (defense soft curve + pierce).
 
 ## Implementation Points
 

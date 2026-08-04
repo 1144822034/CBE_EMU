@@ -1,26 +1,33 @@
-# 职业技能统一 +5% 攻击加成（2026-07-31）
+# 职业技能主属性加成（2026-07-31 / 2026-08-04 修订）
 
-## 契约
+## 契约（现行）
 
-所有玩家职业**进攻技能**在系数结算后的原始伤害上再乘 `105/100`：
+所有玩家职业**进攻技能**在系数结算后，再叠加上职业主属性按职业分档：
 
 ```text
 raw = |生命变化| + (力×力系 + 敏×敏系 + 智×智系)/100
-raw = raw * (100 + 5) / 100
-再经丹药攻击%、抗性/防御、暴击
+raw = raw + jobPrimary * pct / 100
+  天机 pct=25, 幻剑 pct=35, 鬼道 pct=45
+再经丹药攻击%、抗性、单体软拉升、波动、暴击
 ```
 
-治疗/自身 buff 等非伤害技能不走该路径，不受影响。普攻不乘此加成。
+`jobPrimary`：天机力量 / 幻剑敏捷 / 鬼道智慧（含装备与战斗 buff）。
+
+治疗/自身 buff 等非伤害技能不走该路径。普攻不加此项。
+
+## 历史
+
+- 2026-07-31：曾对 raw 乘 `105/100`。
+- 2026-08-04 早：改为 `+ attack×15%`。
+- 2026-08-04 平衡：改为统一 `+ jobPrimary×15%`。
+- 2026-08-04：改为分档 鬼道45% / 幻剑35% / 天机25%（天机血防厚，技能加成低于幻剑）。
 
 ## 修改点
 
-- `mock_server_role.c`：`VM_NET_MOCK_BATTLE_JOB_SKILL_ATTACK_BONUS_PERCENT=5`，
-  应用于 `vm_net_mock_battle_player_skill_damage_to_enemy`
-- `mock_server_battle.c`：决斗技能伤害同一倍率
-
-与战斗丹药攻击%可叠乘。
+- `mock_server_role.c`：`vm_net_mock_battle_job_skill_primary_bonus_percent`
+- `mock_server_battle.c`：决斗同构
 
 ## 验证
 
-同一技能、同一属性下伤害约为改前的 1.05 倍（未斩杀、未暴击时）。
+同技能下相对「无此项」约多 `floor(jobPrimary×pct/100)`。
 `make -j2`

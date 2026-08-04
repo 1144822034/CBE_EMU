@@ -24,12 +24,16 @@ hit/dodge/crit/resist (player) = equipment columns only（含强化附加）
 hitChance = clamp(attacker.hit - defender.dodge, 5, 95)
 critChance = clamp(attacker.crit, 0, 100)
 critDamage = round(damage * 1.5)   # 至少 +1
-physical: damage_after_defense(raw, defense)
-spell:    damage = raw * (100 - min(resist, 70)) / 100
+normal attack: damage_after_defense(raw, defense)
+  soft = (raw*100 + def/2) / (100+def)
+  soft = max(soft, raw * 35 / 100)   # armor blocks ≤65%
+  if def/2 < raw: soft += (raw - def/2) * 2
+offensive skill (physical + spell): damage_after_resist(raw, resist)
+  damage = raw * (100 - min(resist, 70)) / 100
 ```
 
-法术判定：`skill.dsh` 中 `智慧系数` 非零且 ≥ `力量系数`、`敏捷系数`（如绯炎幻法）。
-玩家确认：**鬼道法术伤害忽略闪躲**——智慧主导进攻技能不做命中/闪躲掷骰，仍受抗性减免与暴击影响；普攻与物技照常检定闪躲。
+法术判定：`skill.dsh` 中 `智慧系数` 非零且 ≥ `力量系数`、`敏捷系数`（如绯炎幻法）——仅用于**忽略闪躲**；
+进攻技能减伤一律走抗性（2026-08-03）。玩家确认：**鬼道法术伤害忽略闪躲**；普攻与物技照常检定闪躲。
 
 怪物次级属性（暂无 `automonster` 列；抗性同样按百分比、上限 70% 减免）：
 
