@@ -1512,11 +1512,7 @@ static bool vm_net_mock_role_migrate_exp_curve(vm_net_mock_role_state *role,
 {
     u32 oldExp = 0;
     u32 oldLevel = 1;
-    u32 oldStart = 0;
-    u32 oldNext = 0;
     u32 newLevel = 1;
-    u32 newStart = 0;
-    u32 newNext = 0;
     u32 newExp = 0;
 
     if (oldLevelOut)
@@ -1524,35 +1520,19 @@ static bool vm_net_mock_role_migrate_exp_curve(vm_net_mock_role_state *role,
     if (role == NULL)
         return false;
     oldExp = role->exp;
-    oldLevel = vm_net_mock_role_legacy_level_from_exp(oldExp);
+    /* The persisted EXP field is cumulative and is the authoritative measure
+     * of progression.  The old level is diagnostics only: preserving it and
+     * mapping an old per-level percentage makes a level-162/1.3M-EXP role
+     * become level 70 even though 1.3M total EXP is far below the new cap. */
+    oldLevel = role->level;
+    if (oldLevel == 0)
+        oldLevel = vm_net_mock_role_legacy_level_from_exp(oldExp);
     if (oldLevelOut)
         *oldLevelOut = oldLevel;
-    newLevel = oldLevel;
-    if (newLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
-        newLevel = VM_NET_MOCK_ROLE_LEVEL_CAP;
-    newStart = vm_net_mock_role_level_start_exp(newLevel);
-    newExp = newStart;
-
-    /* A role that already exceeded the new maximum is retained at the cap;
-     * there is deliberately no hidden level-71 progress. */
-    if (newLevel < VM_NET_MOCK_ROLE_LEVEL_CAP)
-    {
-        oldStart = vm_net_mock_role_legacy_level_start_exp(oldLevel);
-        oldNext = vm_net_mock_role_legacy_level_start_exp(oldLevel + 1);
-        newNext = vm_net_mock_role_level_start_exp(newLevel + 1);
-        if (oldStart != 0xffffffffu && oldNext > oldStart &&
-            newNext != 0xffffffffu && newNext > newStart && oldExp >= oldStart)
-        {
-            unsigned long long oldProgress = oldExp - oldStart;
-            unsigned long long oldInterval = oldNext - oldStart;
-            unsigned long long newInterval = newNext - newStart;
-            unsigned long long mappedProgress =
-                (oldProgress * newInterval + oldInterval / 2ull) / oldInterval;
-            if (mappedProgress >= newInterval)
-                mappedProgress = newInterval - 1ull;
-            newExp += (u32)mappedProgress;
-        }
-    }
+    newExp = oldExp;
+    if (newExp > vm_net_mock_role_exp_cap())
+        newExp = vm_net_mock_role_exp_cap();
+    newLevel = vm_net_mock_role_level_from_exp(newExp);
     role->exp = newExp;
     role->level = newLevel;
     return oldExp != newExp || oldLevel != newLevel;
@@ -5870,9 +5850,10 @@ static void vm_net_mock_role_db_load(void)
         {
             vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
             u32 oldLevel = 0;
+            u32 oldExp = role->exp;
 
             (void)vm_net_mock_role_migrate_exp_curve(role, &oldLevel);
-            if (oldLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+            if (oldExp > vm_net_mock_role_exp_cap())
                 ++expCurveCappedRoles;
             ++expCurveMigratedRoles;
         }
@@ -5881,7 +5862,7 @@ static void vm_net_mock_role_db_load(void)
          * retries safely on the next load instead of partially migrating an
          * account. */
         needsSave = true;
-        vm_autotest_note("mock_role_exp_curve_migrate version=6->7 account=%s roles=%u capped=%u level49_cost=2000000 level70_cost=200000000 cap_exp=%u\n",
+        vm_autotest_note("mock_role_exp_curve_migrate version=6->7 account=%s roles=%u exp_capped=%u strategy=preserve-cumulative-exp level49_cost=2000000 level70_cost=200000000 cap_exp=%u\n",
                          g_vm_mock_service_active_account_id ?
                          g_vm_mock_service_active_account_id : "-",
                          expCurveMigratedRoles, expCurveCappedRoles,
