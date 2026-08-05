@@ -4193,12 +4193,16 @@ enum
      * storage may retain more rows for a future migration, but no client
      * packet may advertise a larger usable grid. */
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
-    /* 30/21 encodes each ordinary backpack row as u32 item id, i16 sequence,
-     * u32 quantity and the 11-byte common item-extra block.  The same
-     * client-visible 64-row bound also covers the shorter 17/1 list rows. */
-    VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES = 27,
+    /* ParseEquipAttributes consumes an 11-byte common header plus up to four
+     * 13-byte stage attributes.  The tagged stream maximum is therefore 63
+     * bytes; this is shared by backpack, equipment and task award rows. */
+    VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 63,
+    /* 30/21 encodes u32 item id, i16 sequence, u32 quantity and common
+     * equipment attributes.  The 64-row client bound also covers 17/1. */
+    VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES =
+        6 + 4 + 6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
     VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES =
-        VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
+        3 + VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
         VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
     VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
@@ -4241,6 +4245,7 @@ enum
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
     VM_NET_MOCK_ROLE_LEVEL_CAP = 70,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
+    VM_NET_MOCK_BATTLE_DROP_RESULT_MAX = 8,
     VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
@@ -4260,6 +4265,46 @@ enum
     VM_NET_MOCK_ROLE_DEATH_REVIVE_MP_PERCENT = 30,
     VM_NET_MOCK_ROLE_INITIAL_X = 224,
     VM_NET_MOCK_ROLE_INITIAL_Y = 132
+};
+
+/* Keep every producer of ParseEquipAttributes streams tied to the same
+ * tagged-wire bounds.  A sequence element costs three bytes for u8, four for
+ * i16, and six for u32.  The one common-extra bound above includes all four
+ * staged enhancement attributes. */
+enum
+{
+    VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES = 3,
+    VM_NET_MOCK_ITEMINFO_I16_BYTES = 4,
+    VM_NET_MOCK_ITEMINFO_U32_BYTES = 6,
+    VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
+        VM_NET_MOCK_ITEMINFO_I16_BYTES +
+        2 * VM_NET_MOCK_ITEMINFO_U32_BYTES +
+        VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
+    VM_NET_MOCK_EQUIPMENT_SYNC_ITEMINFO_ROW_BYTES =
+        VM_NET_MOCK_ITEMINFO_I16_BYTES +
+        2 * VM_NET_MOCK_ITEMINFO_U32_BYTES +
+        VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
+    VM_NET_MOCK_EQUIPMENT_LOGIN_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
+        VM_NET_MOCK_EQUIP_SLOT_COUNT *
+        VM_NET_MOCK_EQUIPMENT_SYNC_ITEMINFO_ROW_BYTES,
+    VM_NET_MOCK_NEARBY_EQUIPINFO_ROW_BYTES =
+        VM_NET_MOCK_ITEMINFO_U32_BYTES +
+        VM_NET_MOCK_ITEMINFO_I16_BYTES +
+        VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
+    VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES =
+        VM_NET_MOCK_EQUIP_SLOT_COUNT *
+        VM_NET_MOCK_NEARBY_EQUIPINFO_ROW_BYTES,
+    VM_NET_MOCK_BATTLE_DROP_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
+        VM_NET_MOCK_BATTLE_DROP_RESULT_MAX *
+        VM_NET_MOCK_EQUIPMENT_SYNC_ITEMINFO_ROW_BYTES,
+    /* 6/4 awardinfo has EXP and money (two tagged u32s), followed by one
+     * item-use row.  Its maximum is exactly 94 bytes. */
+    VM_NET_MOCK_TASK_AWARDINFO_MAX_BYTES =
+        2 * VM_NET_MOCK_ITEMINFO_U32_BYTES +
+        VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES
 };
 
 /* Equipped-item login records use their slot number plus one as a client

@@ -933,7 +933,7 @@ static u32 vm_net_mock_build_nearby_equip_view_response(const u8 *request, u32 r
                                                          u8 *out, u32 outCap)
 {
     vm_net_mock_scene_role_seed targetSeed;
-    u8 equipInfo[VM_NET_MOCK_EQUIP_SLOT_COUNT * 11];
+    u8 equipInfo[VM_NET_MOCK_NEARBY_EQUIPINFO_MAX_BYTES];
     u32 objectStart = 0;
     u32 actorId = 0;
     u32 pos = 5;

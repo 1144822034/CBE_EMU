@@ -3771,7 +3771,7 @@ static bool vm_net_mock_append_backpack_item_remove7_objects(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u16 seq, u32 itemId,
     u32 remaining)
 {
-    u8 itemInfo[64];
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
     u8 countInfo[32];
     u32 itemInfoLen = 0;
     u32 countInfoLen = 0;
@@ -4963,7 +4963,10 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u8 reportedProgress2 = 0;
     u8 taskInfo[512];
     u32 taskInfoLen = 0;
-    u8 awardInfo[64];
+    /* `awardinfo` is a one-row sequence.  A reward equipment row carrying
+     * four enhancement-stage attributes is 94 bytes, exceeding the historical
+     * 64-byte local buffer before the normal 6/4 parser can receive it. */
+    u8 awardInfo[VM_NET_MOCK_TASK_AWARDINFO_MAX_BYTES];
     u32 awardInfoLen = 0;
     u16 committedRewardSeq = 0;
     u32 pos = 5;

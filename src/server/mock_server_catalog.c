@@ -3699,8 +3699,6 @@ typedef struct
     u32 count;
 } vm_net_mock_battle_drop_result;
 
-#define VM_NET_MOCK_BATTLE_DROP_RESULT_MAX 8u
-
 /* The client-side 7/7 type=1 stream starts with a row count and can safely
  * consume several normal additive item rows.  Keep this builder shared so
  * battle rewards and ordinary single-item operations use the exact same
@@ -3749,7 +3747,7 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
 static bool vm_net_mock_append_backpack_item_add7_object(
     u8 *out, u32 outCap, u32 *pos, u16 seq, u32 itemId, u32 count)
 {
-    u8 itemInfo[64];
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u32 objectStart = 0;
 
@@ -4513,7 +4511,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     bool applied = false;
     bool reservoirItem = false;
     bool capacityExpanded = false;
-    u8 itemInfo[64];
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u8 countInfo[32];
     u32 countInfoLen = 0;
@@ -5014,7 +5012,7 @@ static bool vm_net_mock_append_equipment_login_object(
     u8 *out, u32 outCap, u32 *pos, u8 *rowCountOut)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u8 itemInfo[512];
+    u8 itemInfo[VM_NET_MOCK_EQUIPMENT_LOGIN_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u32 objectStart = 0;
     u8 rowCount = 0;
