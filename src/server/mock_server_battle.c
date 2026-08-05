@@ -4430,7 +4430,7 @@ static bool vm_net_mock_append_battle_drop_refresh7_if_needed(u8 *out, u32 outCa
 {
     u32 objectStart = 0;
     u8 dropRowCount = g_vm_net_mock_battle_rewarded_drop_result_count;
-    u8 itemInfo[512];
+    u8 itemInfo[VM_NET_MOCK_BATTLE_DROP_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
 
     if (g_mockBattleOperateSessionSerial == 0 ||
