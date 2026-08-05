@@ -1970,10 +1970,100 @@ static bool vm_net_mock_task_definition_available(
     return prerequisite != NULL && prerequisite->state == 3;
 }
 
-/* The CBE action=4 follow-up (6/10 then 6/11) only identifies a task.  Record
- * the offer that generated it on the service session, so repeatability remains
- * scoped to its NPC binding rather than becoming a global task-id bypass. */
-static void vm_net_mock_task_offer_context_reset(void)
+/* Keep the acceptance predicate authoritative, but expose its first failed
+ * precondition through a normal GBK UI message instead of collapsing every
+ * rejection to a silent result=1. This helper performs no writes. */
+static const char *vm_net_mock_task_definition_unavailable_reason(
+    const vm_net_mock_task_definition *task,
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_task_state_list_row *states,
+    u32 stateCount,
+    bool allowCompletedRepeat,
+    const char **reasonCodeOut,
+    char *out,
+    size_t outCap)
+{
+    const vm_net_mock_task_state_list_row *persisted = NULL;
+    const vm_net_mock_task_state_list_row *prerequisite = NULL;
+
+    if (reasonCodeOut != NULL)
+        *reasonCodeOut = NULL;
+    if (out == NULL || outCap == 0)
+        return NULL;
+    out[0] = 0;
+    if (task == NULL)
+    {
+        if (reasonCodeOut != NULL)
+            *reasonCodeOut = "task-missing";
+        snprintf(out, outCap,
+                 "\xC8\xCE\xCE\xF1\xCA\xFD\xBE\xDD\xB2\xBB\xB4\xE6\xD4\xDA\xBB\xF2\xD2\xD1\xB9\xD8\xB1\xD5\xA1\xA3"); /* 任务数据不存在或已关闭。 */
+        return out;
+    }
+    if (role == NULL)
+    {
+        if (reasonCodeOut != NULL)
+            *reasonCodeOut = "role-missing";
+        snprintf(out, outCap,
+                 "\xC8\xCE\xCE\xF1\xD7\xB4\xCC\xAC\xCE\xB4\xBE\xCD\xD0\xF7\xA3\xAC\xC7\xEB\xD6\xD8\xD0\xC2\xBD\xF8\xC8\xEB\xB3\xA1\xBE\xB0\xA1\xA3"); /* 任务状态未就绪，请重新进入场景。 */
+        return out;
+    }
+    if (role->level < task->level)
+    {
+        if (reasonCodeOut != NULL)
+            *reasonCodeOut = "level";
+        snprintf(out, outCap,
+                 "\xB5\xC8\xBC\xB6\xB2\xBB\xD7\xE3\xA3\xAC\xB4\xEF\xB5\xBD%u\xBC\xB6\xBA\xF3\xBF\xC9\xBD\xD3\xC8\xA1\xC8\xCE\xCE\xF1\xA1\xA3", /* 等级不足，达到%u级后可接取任务。 */
+                 task->level);
+        return out;
+    }
+    persisted = vm_net_mock_task_state_list_find(states, stateCount,
+                                                  task->taskId);
+    if (persisted != NULL &&
+        !(allowCompletedRepeat && persisted->state == 3))
+    {
+        if (persisted->state == 1)
+        {
+            if (reasonCodeOut != NULL)
+                *reasonCodeOut = "active";
+            snprintf(out, outCap,
+                     "\xB8\xC3\xC8\xCE\xCE\xF1\xD2\xD1\xBE\xAD\xBD\xD3\xC8\xA1\xA1\xA3"); /* 该任务已经接取。 */
+        }
+        else if (persisted->state == 2)
+        {
+            if (reasonCodeOut != NULL)
+                *reasonCodeOut = "submittable";
+            snprintf(out, outCap,
+                     "\xC8\xCE\xCE\xF1\xD2\xD1\xCD\xEA\xB3\xC9\xA3\xAC\xC7\xEB\xC7\xB0\xCD\xF9\xBD\xBB\xB8\xB6NPC\xCC\xE1\xBD\xBB\xA1\xA3"); /* 任务已完成，请前往交付NPC提交。 */
+        }
+        else
+        {
+            if (reasonCodeOut != NULL)
+                *reasonCodeOut = "completed";
+            snprintf(out, outCap,
+                     "\xB8\xC3\xC8\xCE\xCE\xF1\xD2\xD1\xBE\xAD\xCD\xEA\xB3\xC9\xA1\xA3"); /* 该任务已经完成。 */
+        }
+        return out;
+    }
+    if (task->prerequisiteTaskId != 0)
+    {
+        prerequisite = vm_net_mock_task_state_list_find(
+            states, stateCount, task->prerequisiteTaskId);
+        if (prerequisite == NULL || prerequisite->state != 3)
+        {
+            if (reasonCodeOut != NULL)
+                *reasonCodeOut = "prerequisite";
+            snprintf(out, outCap,
+                     "\xC7\xEB\xCF\xC8\xCD\xEA\xB3\xC9\xC7\xB0\xD6\xC3\xC8\xCE\xCE\xF1\xA1\xA3"); /* 请先完成前置任务。 */
+            return out;
+        }
+    }
+    return NULL;
+}
+
+/* The CBE action=4 follow-up carries only a task id. Preserve the prior NPC
+ * dialog authorization on the service session: offer context owns 6/11 and
+ * submit context owns 6/4. */
+static void vm_net_mock_task_interaction_context_reset(void)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
@@ -1985,9 +2075,10 @@ static void vm_net_mock_task_offer_context_reset(void)
     }
 }
 
-static void vm_net_mock_task_offer_context_record(u32 taskId, u32 actorId,
-                                                   bool repeatable,
-                                                   const char *scene)
+static void vm_net_mock_task_interaction_context_record(u32 taskId, u32 actorId,
+                                                         bool repeatable,
+                                                         u8 interaction,
+                                                         const char *scene)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
@@ -1995,6 +2086,8 @@ static void vm_net_mock_task_offer_context_record(u32 taskId, u32 actorId,
     vm_mock_service_task_offer_context *slot = NULL;
 
     if (session == NULL || role == NULL || taskId == 0 || actorId == 0 ||
+        (interaction != VM_MOCK_SERVICE_TASK_INTERACTION_OFFER &&
+         interaction != VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT) ||
         !vm_net_mock_scene_name_is_safe(scene))
     {
         return;
@@ -2003,7 +2096,8 @@ static void vm_net_mock_task_offer_context_record(u32 taskId, u32 actorId,
     {
         vm_mock_service_task_offer_context *candidate =
             &session->taskOfferContexts[i];
-        if (candidate->taskId == taskId && candidate->roleId == role->roleId)
+        if (candidate->taskId == taskId && candidate->roleId == role->roleId &&
+            candidate->interaction == interaction)
         {
             slot = candidate;
             break;
@@ -2018,6 +2112,7 @@ static void vm_net_mock_task_offer_context_record(u32 taskId, u32 actorId,
     slot->taskId = taskId;
     slot->actorId = actorId;
     slot->repeatable = repeatable;
+    slot->interaction = interaction;
     snprintf(slot->scene, sizeof(slot->scene), "%s", scene);
 }
 
@@ -2041,12 +2136,50 @@ static bool vm_net_mock_task_offer_context_consume(u32 taskId,
         vm_mock_service_task_offer_context *context =
             &session->taskOfferContexts[i];
         if (context->taskId != taskId || context->roleId != role->roleId ||
+            context->interaction != VM_MOCK_SERVICE_TASK_INTERACTION_OFFER ||
             strcmp(context->scene, scene) != 0)
         {
             continue;
         }
         if (repeatableOut != NULL)
             *repeatableOut = context->repeatable;
+        memset(context, 0, sizeof(*context));
+        return true;
+    }
+    return false;
+}
+
+/* A 6/4 submit packet contains no actor id. Its accepted predecessor must be
+ * the state-2 submit action from this same scene and role, not merely any NPC
+ * which happens to share the task's offer binding. */
+static bool vm_net_mock_task_submit_context_consume(u32 taskId,
+                                                     u32 *actorIdOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    const char *scene = vm_net_mock_current_scene_name();
+
+    if (actorIdOut != NULL)
+        *actorIdOut = 0;
+    if (session == NULL || role == NULL || taskId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX; ++i)
+    {
+        vm_mock_service_task_offer_context *context =
+            &session->taskOfferContexts[i];
+
+        if (context->taskId != taskId || context->roleId != role->roleId ||
+            context->interaction != VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT ||
+            strcmp(context->scene, scene) != 0)
+        {
+            continue;
+        }
+        if (actorIdOut != NULL)
+            *actorIdOut = context->actorId;
         memset(context, 0, sizeof(*context));
         return true;
     }
@@ -2776,63 +2909,28 @@ static const char *vm_net_mock_task_prompt_receiver_for_scene(
     char *resolved,
     size_t resolvedCap)
 {
-    vm_net_mock_scene_npcinfo_seed seeds[VM_NET_MOCK_SCENE_NPCINFO_MAX];
-    u32 seedCount = 0;
-
     if (resolved != NULL && resolvedCap != 0)
         resolved[0] = 0;
-    if (task == NULL || resolved == NULL || resolvedCap == 0 ||
-        !vm_net_mock_scene_name_is_safe(scene))
-    {
-        return task ? task->receiver : "";
-    }
+    /* `task.dsh` gives every valid task a declared receiver. Scene-slot
+     * selection controls visibility only; it must never replace the owner of
+     * an active task with its offer NPC when a receiver is not selected. */
+    (void)scene;
+    return task != NULL ? task->receiver : "";
+}
 
-    memset(seeds, 0, sizeof(seeds));
-    seedCount = vm_net_mock_select_scene_npcinfo_seeds(
-        scene, seeds, VM_NET_MOCK_SCENE_NPCINFO_MAX, NULL, NULL);
-
-    /* Preserve the original receiver whenever that actor really exists in the
-     * current scene.  Admin-bound tasks can intentionally use another NPC;
-     * their runtime row must carry that visible node name or the client's
-     * node+68 comparison can never assign the grey/normal question mark. */
-    for (u32 i = 0; i < seedCount; ++i)
-    {
-        if (task->receiver[0] != 0 &&
-            strcmp(seeds[i].displayName, task->receiver) == 0)
-        {
-            return task->receiver;
-        }
-    }
-    for (u32 i = 0; i < seedCount; ++i)
-    {
-        if (seeds[i].taskId == task->taskId && seeds[i].displayName[0] != 0)
-        {
-            snprintf(resolved, resolvedCap, "%s", seeds[i].displayName);
-            return resolved;
-        }
-    }
-    for (u32 i = 0; i < seedCount; ++i)
-    {
-        vm_net_mock_xse_summary summary;
-
-        memset(&summary, 0, sizeof(summary));
-        if (seeds[i].scriptName[0] == 0 ||
-            !vm_net_mock_load_xse_summary(seeds[i].scriptName, &summary))
-        {
-            continue;
-        }
-        for (u32 refIndex = 0; refIndex < summary.taskRefCount; ++refIndex)
-        {
-            const vm_net_mock_xse_task_ref *ref = &summary.taskRefs[refIndex];
-            if (ref->taskId == task->taskId && (ref->active || ref->completed) &&
-                seeds[i].displayName[0] != 0)
-            {
-                snprintf(resolved, resolvedCap, "%s", seeds[i].displayName);
-                return resolved;
-            }
-        }
-    }
-    return task->receiver;
+/* A dynamic binding owns offers. Delivery is exclusively the task definition's
+ * declared receiver, so prompt-slot fallback and XSE offer aliases cannot
+ * authorize a different NPC to submit it. */
+static bool vm_net_mock_task_delivery_matches_scene_npc(
+    const vm_net_mock_task_definition *task,
+    const vm_net_mock_scene_npcinfo_seed *seed,
+    const char *scene)
+{
+    if (task == NULL || task->receiver[0] == 0 || seed == NULL ||
+        seed->displayName[0] == 0)
+        return false;
+    (void)scene;
+    return strcmp(task->receiver, seed->displayName) == 0;
 }
 
 static bool vm_net_mock_append_catalog_task_candidate_record(
@@ -3001,7 +3099,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
     if (matchedSeed != NULL)
-        vm_net_mock_task_offer_context_reset();
+        vm_net_mock_task_interaction_context_reset();
     dialogText = vm_net_mock_npc_dialog_text(actorId);
     memset(&taskState, 0, sizeof(taskState));
     memset(&xseSummary, 0, sizeof(xseSummary));
@@ -3114,6 +3212,67 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
 
+    /* Offer bindings are one-to-one with NPCs, whereas delivery belongs to
+     * each task's receiver. Scan active task rows separately so an NPC may
+     * deliver an earlier task while offering a later task in the same chain. */
+    if (matchedSeed != NULL && activeRole != NULL)
+    {
+        for (u32 stateIndex = 0;
+             stateIndex < allTaskStateCount &&
+             optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX;
+             ++stateIndex)
+        {
+            const vm_net_mock_task_state_list_row *persisted =
+                &allTaskStates[stateIndex];
+            const vm_net_mock_task_definition *task =
+                vm_net_mock_task_catalog_find_by_id(persisted->taskId);
+            u8 state = persisted->state;
+            bool duplicate = false;
+            bool requirementsDone = false;
+
+            if (task == NULL || (state != 1 && state != 2) ||
+                !vm_net_mock_task_delivery_matches_scene_npc(task, matchedSeed,
+                                                              scene))
+            {
+                continue;
+            }
+            for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
+            {
+                if (optionTasks[optionIndex] != NULL &&
+                    optionTasks[optionIndex]->taskId == task->taskId)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            requirementsDone =
+                persisted->progress1 >= task->requirementCount1 &&
+                persisted->progress2 >= task->requirementCount2;
+            if (state == 1 && requirementsDone &&
+                vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
+            {
+                state = 2;
+                if (completedTaskCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+                    completedTaskIds[completedTaskCount++] = task->taskId;
+            }
+            if (state == 2 && !duplicate &&
+                optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+            {
+                optionTasks[optionCount] = task;
+                optionSubmits[optionCount] = true;
+                optionCount += 1;
+            }
+            if (state == 1)
+                dialogText = task->activeDialog[0] != 0
+                                 ? task->activeDialog
+                                 : "\xc8\xce\xce\xf1\xbb\xb9\xd4\xda\xbd\xf8\xd0\xd0\xd6\xd0\xa3\xac\xc7\xeb\xcd\xea\xb3\xc9\xc4\xbf\xb1\xea\xba\xf3\xd4\xd9\xc0\xb4\xa1\xa3";
+            else
+                dialogText = task->completedDialog[0] != 0
+                                 ? task->completedDialog
+                                 : "\xc8\xce\xce\xf1\xd2\xd1\xbe\xad\xcd\xea\xb3\xc9\xa3\xac\xbf\xc9\xd2\xd4\xcc\xe1\xbd\xbb\xc1\xcb\xa1\xa3";
+        }
+    }
+
     if (xseSummary.loaded && xseSummary.taskRefCount == 1)
     {
         bool hasOffer = false;
@@ -3146,6 +3305,11 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         u8 progress1 = persisted ? persisted->progress1 : 0;
         u8 progress2 = persisted ? persisted->progress2 : 0;
         bool duplicate = false;
+        bool deliveryMatches = false;
+        bool directOfferAvailable = false;
+        char unavailableTaskText[128];
+
+        memset(unavailableTaskText, 0, sizeof(unavailableTaskText));
 
         for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
         {
@@ -3156,32 +3320,34 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 break;
             }
         }
-        if (task != NULL && state == 1 &&
-            progress1 >= task->requirementCount1 &&
-            progress2 >= task->requirementCount2 &&
-            vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
+        deliveryMatches = vm_net_mock_task_delivery_matches_scene_npc(
+            task, matchedSeed, scene);
+        if (task != NULL && (state == 0 ||
+                             (state == 3 && matchedSeed->taskRepeatable)))
         {
-            state = 2;
-            if (completedTaskCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
-                completedTaskIds[completedTaskCount++] = task->taskId;
+            directOfferAvailable = vm_net_mock_task_definition_available(
+                task, activeRole, allTaskStates, allTaskStateCount,
+                matchedSeed->taskRepeatable);
         }
-        if (task != NULL && !duplicate && optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+        if (task != NULL && !duplicate &&
+            optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
         {
-            if ((state == 0 ||
-                 (state == 3 && matchedSeed->taskRepeatable)) &&
-                vm_net_mock_task_definition_available(task, activeRole,
-                                                      allTaskStates,
-                                                      allTaskStateCount,
-                                                      matchedSeed->taskRepeatable))
+            if (deliveryMatches && state == 1 &&
+                progress1 >= task->requirementCount1 &&
+                progress2 >= task->requirementCount2 &&
+                vm_net_mock_task_state_store(activeRole->roleId, task->taskId, 2))
+            {
+                state = 2;
+                if (completedTaskCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
+                    completedTaskIds[completedTaskCount++] = task->taskId;
+            }
+            if (directOfferAvailable)
             {
                 optionTasks[optionCount] = task;
                 optionSubmits[optionCount] = false;
                 optionCount += 1;
-                vm_net_mock_task_offer_context_record(
-                    task->taskId, matchedSeed->actorId,
-                    matchedSeed->taskRepeatable, scene);
             }
-            else if (state == 2)
+            else if (state == 2 && deliveryMatches)
             {
                 optionTasks[optionCount] = task;
                 optionSubmits[optionCount] = true;
@@ -3190,15 +3356,28 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
         if (task != NULL)
         {
-            if (state == 0 || (state == 3 && matchedSeed->taskRepeatable))
+            if (directOfferAvailable)
                 dialogText = task->offerDialog[0] != 0
                                  ? task->offerDialog
                                  : "\xce\xd2\xd5\xe2\xc0\xef\xd3\xd0\xd2\xbb\xcf\xee\xc8\xce\xce\xf1\xa3\xac\xc4\xe3\xd4\xb8\xd2\xe2\xb0\xef\xc3\xa6\xc2\xf0\xa3\xbf";
+            /* Do not fabricate an action when the authoritative predicate
+             * declined this offer.  The regular NPC-dialog field is the
+             * parser-backed place to explain why this actor has no task
+             * option; only use it when no other XSE task action is present. */
+            else if (optionCount == 0 &&
+                     (state == 0 ||
+                      (state == 3 && matchedSeed->taskRepeatable)) &&
+                     vm_net_mock_task_definition_unavailable_reason(
+                         task, activeRole, allTaskStates, allTaskStateCount,
+                         matchedSeed->taskRepeatable, NULL,
+                         unavailableTaskText,
+                         sizeof(unavailableTaskText)) != NULL)
+                dialogText = unavailableTaskText;
             else if (state == 1)
                 dialogText = task->activeDialog[0] != 0
                                  ? task->activeDialog
                                  : "\xc8\xce\xce\xf1\xbb\xb9\xd4\xda\xbd\xf8\xd0\xd0\xd6\xd0\xa3\xac\xc7\xeb\xcd\xea\xb3\xc9\xc4\xbf\xb1\xea\xba\xf3\xd4\xd9\xc0\xb4\xa1\xa3";
-            else
+            else if (state == 2 && deliveryMatches)
                 dialogText = task->completedDialog[0] != 0
                                  ? task->completedDialog
                                  : "\xc8\xce\xce\xf1\xd2\xd1\xbe\xad\xcd\xea\xb3\xc9\xa3\xac\xbf\xc9\xd2\xd4\xcc\xe1\xbd\xbb\xc1\xcb\xa1\xa3";
@@ -3350,6 +3529,24 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_packet(out, pos,
                                  (u8)(1u + (taskCompletedNow ? 1u : 0u) +
                                       completedTaskCount));
+    /* The later action=4 task request contains only task id. Record exactly
+     * the options in the delivered dialog after every packet object has been
+     * built, preserving whether that id was authorized for acceptance or
+     * submission by this clicked actor. */
+    for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
+    {
+        const vm_net_mock_task_definition *task = optionTasks[optionIndex];
+        bool repeatable = !optionSubmits[optionIndex] && matchedSeed != NULL &&
+                          matchedSeed->taskId == task->taskId &&
+                          matchedSeed->taskRepeatable;
+
+        vm_net_mock_task_interaction_context_record(
+            task->taskId, actorId, repeatable,
+            optionSubmits[optionIndex]
+                ? VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT
+                : VM_MOCK_SERVICE_TASK_INTERACTION_OFFER,
+            scene);
+    }
 
     printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u npc_kind=%u service_action=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
            actorId,
@@ -4737,6 +4934,12 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
 
 static bool vm_net_mock_append_info_banner_result5_object(u8 *out, u32 outCap,
                                                           u32 *pos);
+static bool vm_net_mock_append_info_banner_text11_object(u8 *out, u32 outCap,
+                                                         u32 *pos,
+                                                         const char *info);
+static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap,
+                                                    u32 *pos,
+                                                    const char *sceneOverride);
 static u32 vm_net_mock_build_single_object_request(
     const vm_net_mock_request_object *object, u8 *out, u32 outCap);
 static bool vm_net_mock_append_response_objects(
@@ -4770,10 +4973,16 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     bool hasInfoBannerPrefix = false;
     bool hasInfoBannerTail = false;
     bool hasProgressStateTail = false;
+    bool taskAcceptBlockedByBackpack = false;
+    bool taskAcceptOfferStillAvailable = false;
+    bool taskAcceptNeedsCandidateRefresh = false;
+    bool taskAcceptOfferContext = false;
     const vm_net_mock_task_definition *taskDefinition = NULL;
     char detailText[256];
     char destinationText[128];
     char promptReceiver[32];
+    char taskAcceptFailureInfo[128];
+    const char *taskAcceptFailureCode = NULL;
     const char *action = NULL;
     const char *evidence = "JianghuOL.CBE:0x0104726C";
 
@@ -4880,6 +5089,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     memset(detailText, 0, sizeof(detailText));
     memset(destinationText, 0, sizeof(destinationText));
     memset(promptReceiver, 0, sizeof(promptReceiver));
+    memset(taskAcceptFailureInfo, 0, sizeof(taskAcceptFailureInfo));
 
     if (hasProgressStateTail)
     {
@@ -5007,6 +5217,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         static const char submitSuccessText[] =
             "\xc8\xce\xce\xf1\xcc\xe1\xbd\xbb\xb3\xc9\xb9\xa6\xa3\xa1"; /* 任务提交成功！ */
         bool committed = false;
+        bool submitContextValid = false;
 
         if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                                  "taskid", &taskId))
@@ -5019,7 +5230,15 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         activeRole = vm_net_mock_active_role();
         if (activeRole == NULL)
             return 0;
-        if (vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
+        /* Case 4 carries only a task id. For catalog tasks consume the
+         * preceding dialog's receiver-bound submit authorization before a
+         * state-2 row may award anything. The synthetic test task predates
+         * that catalogue contract and retains its existing isolated path. */
+        submitContextValid = taskDefinition == NULL ||
+                             vm_net_mock_task_submit_context_consume(
+                                 taskId, NULL);
+        if (submitContextValid &&
+            vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
             taskState.found && taskState.state == 2 &&
             ((taskDefinition != NULL &&
               vm_net_mock_task_commit_reward(activeRole, taskDefinition,
@@ -5028,6 +5247,13 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
               vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
         {
             committed = true;
+        }
+        if (!committed && taskDefinition != NULL && !submitContextValid)
+        {
+            printf("[info][network] mock_task_submit_rejected task=%u role=%u "
+                   "reason=delivery-context scene=%s\n",
+                   taskId, activeRole->roleId,
+                   vm_net_mock_current_scene_name());
         }
         /* net_handle_task_response_dispatch(0x0104726C) case 4 is the normal
          * submit result and uses result=1 for success.  Subtype 16 belongs to
@@ -5235,24 +5461,66 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             responseSubtype = 11;
             if (taskDefinition != NULL)
             {
+                bool definitionAvailable = false;
+                bool backpackCanReceive = false;
+
                 offeredByNpc = vm_net_mock_task_offer_context_consume(
                     taskId, &repeatableOffer);
+                taskAcceptOfferContext = offeredByNpc;
                 canAccept = vm_net_mock_task_state_list_load(
                     activeRole->roleId, false, allStates,
                     VM_NET_MOCK_TASK_CATALOG_MAX, &allStateCount);
-                if (canAccept)
+                if (!canAccept)
+                {
+                    taskAcceptFailureCode = "state-read";
+                    snprintf(taskAcceptFailureInfo,
+                             sizeof(taskAcceptFailureInfo),
+                             "\xC8\xCE\xCE\xF1\xD7\xB4\xCC\xAC\xB6\xC1\xC8\xA1"
+                             "\xCA\xA7\xB0\xDC\xA3\xAC\xC7\xEB\xC9\xD4\xBA\xF3\xD6\xD8"
+                             "\xCA\xD4\xA1\xA3"); /* 任务状态读取失败，请稍后重试。 */
+                }
+                else
                 {
                     previousState = vm_net_mock_task_state_list_find(
                         allStates, allStateCount, taskId);
                     replacingCompletedState = offeredByNpc && repeatableOffer &&
                                               previousState != NULL &&
                                               previousState->state == 3;
-                    canAccept = vm_net_mock_task_definition_available(
+                    definitionAvailable = vm_net_mock_task_definition_available(
                         taskDefinition, activeRole, allStates, allStateCount,
-                        replacingCompletedState) &&
-                                vm_net_mock_task_backpack_can_receive(
-                                    activeRole, taskDefinition->givenItemId,
-                                    taskDefinition->givenItemCount, NULL);
+                        replacingCompletedState);
+                    if (!definitionAvailable)
+                    {
+                        (void)vm_net_mock_task_definition_unavailable_reason(
+                            taskDefinition, activeRole, allStates,
+                            allStateCount, replacingCompletedState,
+                            &taskAcceptFailureCode, taskAcceptFailureInfo,
+                            sizeof(taskAcceptFailureInfo));
+                    }
+                    else
+                    {
+                        backpackCanReceive = vm_net_mock_task_backpack_can_receive(
+                            activeRole, taskDefinition->givenItemId,
+                            taskDefinition->givenItemCount, NULL);
+                        /* The client clears its interaction prompt while the
+                         * NPC offer flow is open.  Retain only the fact that
+                         * this exact offer was still authoritative; the final
+                         * candidate record is rebuilt after a failed accept. */
+                        taskAcceptOfferStillAvailable = offeredByNpc;
+                        taskAcceptBlockedByBackpack =
+                            taskDefinition->givenItemId != 0 &&
+                            taskDefinition->givenItemCount != 0 &&
+                            !backpackCanReceive;
+                        if (taskAcceptBlockedByBackpack)
+                        {
+                            taskAcceptFailureCode = "backpack";
+                            snprintf(taskAcceptFailureInfo,
+                                     sizeof(taskAcceptFailureInfo),
+                                     "\xB1\xB3\xB0\xFC\xBF\xD5\xBC\xE4\xB2\xBB\xD7\xE3\xA3\xAC"
+                                     "\xCE\xDE\xB7\xA8\xBD\xD3\xC8\xA1\xC8\xCE\xCE\xF1\xA1\xA3"); /* 背包空间不足，无法接取任务。 */
+                        }
+                    }
+                    canAccept = definitionAvailable && backpackCanReceive;
                 }
             }
             else
@@ -5281,6 +5549,14 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             {
                 result = 1;
             }
+            if (result != 0 && taskAcceptFailureInfo[0] == 0)
+            {
+                taskAcceptFailureCode = "persist";
+                snprintf(taskAcceptFailureInfo,
+                         sizeof(taskAcceptFailureInfo),
+                         "\xC8\xCE\xCE\xF1\xBD\xD3\xC8\xA1\xCA\xA7\xB0\xDC\xA3\xAC"
+                         "\xC7\xEB\xC9\xD4\xBA\xF3\xD6\xD8\xCA\xD4\xA1\xA3"); /* 任务接取失败，请稍后重试。 */
+            }
             if (result == 0 &&
                 !((taskId == VM_NET_MOCK_TEST_TASK_ID &&
                    vm_net_mock_append_test_task_record(taskInfo, sizeof(taskInfo),
@@ -5304,6 +5580,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             {
                 return 0;
             }
+            taskAcceptNeedsCandidateRefresh =
+                result != 0 && taskAcceptOfferStillAvailable;
             if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6, 11,
                                              &objectStart) ||
                 !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
@@ -5345,6 +5623,42 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
             return 0;
         responseObjectCount += 1;
+    }
+    if (object.subtype == 11 && result != 0 &&
+        taskAcceptFailureInfo[0] != 0)
+    {
+        /* `6/11 result=1` preserves task-state atomicity.  The client has a
+         * native 25/11 parser for a result-8 GBK info banner.  It follows the
+         * failed task result and the request-tail 25/5 acknowledgement, so it
+         * cannot be mistaken for a successful accept. */
+        if (!vm_net_mock_append_info_banner_text11_object(
+                out, outCap, &pos, taskAcceptFailureInfo))
+        {
+            return 0;
+        }
+        responseObjectCount += 1;
+        printf("[info][network] mock_task_accept_rejected task=%u role=%u "
+               "reason=%s offer_context=%u backpack_full=%u "
+               "response_objects=%u\n",
+               taskId, activeRole ? activeRole->roleId : 0,
+               taskAcceptFailureCode ? taskAcceptFailureCode : "unknown",
+               taskAcceptOfferContext ? 1u : 0u,
+               taskAcceptBlockedByBackpack ? 1u : 0u,
+               responseObjectCount);
+    }
+    if (taskAcceptNeedsCandidateRefresh)
+    {
+        /* `6/14 action=0` is the parser-backed candidate refresh.  Its case
+         * calls scene_refresh_interact_prompt_types after deserializing the
+         * rows, restoring the NPC exclamation mark from current authority. */
+        if (!vm_net_mock_append_taskaction14_object(out, outCap, &pos, NULL))
+            return 0;
+        responseObjectCount += 1;
+        printf("[info][network] mock_task_accept_restore_candidates task=%u role=%u "
+               "result=%u request_info_tail=%u backpack_full=%u response_objects=%u\n",
+               taskId, activeRole ? activeRole->roleId : 0,
+               result, hasInfoBannerTail ? 1u : 0u,
+               taskAcceptBlockedByBackpack ? 1u : 0u, responseObjectCount);
     }
     vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
     printf("[info][network] mock_task action=%s task=%u role=%u request_subtype=%u response_subtype=%u request_state=%u result=%u request_info_prefix=%u request_info_tail=%u response_objects=%u taskinfo_len=%u resp=%u evidence=%s\n",
