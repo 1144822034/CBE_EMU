@@ -287,7 +287,8 @@ static bool vm_net_mock_append_scene_resource_followup_objects_ex(u8 *out, u32 o
     if (includeSkillBooks)
     {
         u8 added = 0;
-        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, pos, &added))
+        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, pos, &added,
+                                                          true))
             return false;
         *objectCount = (u8)(*objectCount + added);
     }
@@ -1083,7 +1084,8 @@ static u32 vm_net_mock_build_compact_scene_skill_default_response(const u8 *requ
 
     if (outCap < pos || !vm_net_mock_is_compact_scene_resource_followup_request(request, requestLen))
         return 0;
-    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount))
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount,
+                                                      false))
         return 0;
     if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
         return 0;
@@ -2388,7 +2390,8 @@ static u32 vm_net_mock_build_login_tail_skill_response(u8 *out, u32 outCap)
     u8 objectCount = 0;
     if (outCap < pos)
         return 0;
-    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount))
+    if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &objectCount,
+                                                      false))
         return 0;
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);

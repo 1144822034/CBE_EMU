@@ -2768,6 +2768,28 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
     return true;
 }
 
+static bool vm_net_mock_seq_put_item_compact_extra(u8 *out, u32 outCap,
+                                                    u32 *pos,
+                                                    u8 enhanceLevel,
+                                                    u8 enhanceMaxLevel)
+{
+    /*
+     * 30/21 and the 17/1 row used during scene startup are item-instance
+     * seeds, delivered inside larger bootstrap responses.  Their
+     * ParseEquipAttributes(0x010185C2) reader defines zero stage attributes
+     * as a valid compact row after current/max enhancement.
+     *
+     * Full +4/+8/+12/+16 metadata must not be repeated for every backpack
+     * equipment row in either bootstrap packet.  The detailed 17/1 backpack
+     * response and the 7/7 equipped response retain
+     * vm_net_mock_seq_put_item_common_extra(), so the client still receives
+     * and consumes the complete stage data where it is needed.
+     */
+    return vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel) &&
+           vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel) &&
+           vm_net_mock_seq_put_u8(out, outCap, pos, 0);
+}
+
 static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
                                                       u32 *pos, u32 itemId)
 {
@@ -2782,9 +2804,9 @@ static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
         vm_net_mock_item_common_extra_enhance_cap(itemId));
 }
 
-static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
-                                                     const vm_net_mock_role_state *role,
-                                                     u32 *blobLenOut, u32 *rowCountOut)
+static bool vm_net_mock_build_backpack_iteminfo_blob_with_stage_attrs(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
+    bool includeStageAttrs, u32 *blobLenOut, u32 *rowCountOut)
 {
     u32 pos = 0;
     u8 itemCount = vm_net_mock_role_backpack_count(role);
@@ -2803,12 +2825,17 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
             continue;
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
             return false;
-        if (!vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos,
-                item->itemId,
-                (u8)SDL_min(item->enhanceLevel,
-                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
+        if (includeStageAttrs
+                ? !vm_net_mock_seq_put_item_common_extra(
+                      out, outCap, &pos, item->itemId,
+                      (u8)SDL_min(item->enhanceLevel,
+                                  VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                      vm_net_mock_item_common_extra_enhance_cap(item->itemId))
+                : !vm_net_mock_seq_put_item_compact_extra(
+                      out, outCap, &pos,
+                      (u8)SDL_min(item->enhanceLevel,
+                                  VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                      vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
         {
             return false;
         }
@@ -2946,9 +2973,8 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        if (!vm_net_mock_seq_put_item_common_extra(
+        if (!vm_net_mock_seq_put_item_compact_extra(
                 out, outCap, &pos,
-                item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
@@ -3370,6 +3396,14 @@ static bool vm_net_mock_get_object_tagged_number_entry(
     if (valueOut)
         *valueOut = value;
     return true;
+}
+
+static bool vm_net_mock_build_backpack_iteminfo_blob(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
+    u32 *blobLenOut, u32 *rowCountOut)
+{
+    return vm_net_mock_build_backpack_iteminfo_blob_with_stage_attrs(
+        out, outCap, role, true, blobLenOut, rowCountOut);
 }
 
 static bool vm_net_mock_item_id_is_active_backpack_row(u32 itemId)
@@ -4849,7 +4883,8 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
     return pos;
 }
 
-static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos)
+static bool vm_net_mock_append_backpack_items_object_with_stage_attrs(
+    u8 *out, u32 outCap, u32 *pos, bool includeStageAttrs)
 {
     u32 objectStart = 0;
     u8 itemInfo[VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES];
@@ -4862,8 +4897,9 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
     if (out == NULL || pos == NULL)
         return false;
     memset(itemInfo, 0, sizeof(itemInfo));
-    if (!vm_net_mock_build_backpack_iteminfo_blob(itemInfo, sizeof(itemInfo), role,
-                                                 &itemInfoLen, &rowCount))
+    if (!vm_net_mock_build_backpack_iteminfo_blob_with_stage_attrs(
+            itemInfo, sizeof(itemInfo), role, includeStageAttrs,
+            &itemInfoLen, &rowCount))
         return false;
     if (itemInfoLen == 0 || itemInfoLen > 0xffff)
         return false;
@@ -4876,19 +4912,26 @@ static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *p
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
 
-    printf("[info][network] mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u\n",
+    printf("[info][network] mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u layout=%s\n",
            role ? role->roleId : 0,
            capacity,
            rowCount,
            vm_net_mock_role_backpack_count(role),
-           itemInfoLen);
-    vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u evidence=mmGame:0x418C+mmShop:sub_9DE\n",
+           itemInfoLen, includeStageAttrs ? "detail" : "bootstrap-compact");
+    vm_autotest_note("mock_backpack_items role=%u capacity=%u rows=%u stored_rows=%u iteminfo_len=%u layout=%s evidence=mmGame:0x418C+mmShop:sub_9DE\n",
                      role ? role->roleId : 0,
                      capacity,
                      rowCount,
                      vm_net_mock_role_backpack_count(role),
-                     itemInfoLen);
+                     itemInfoLen, includeStageAttrs ? "detail" : "bootstrap-compact");
     return true;
+}
+
+static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap,
+                                                      u32 *pos)
+{
+    return vm_net_mock_append_backpack_items_object_with_stage_attrs(
+        out, outCap, pos, true);
 }
 
 static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos,
@@ -4927,7 +4970,7 @@ static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos
 static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
-    u8 itemInfo[VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES];
+    u8 itemInfo[VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
     u32 gridCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();

@@ -943,6 +943,12 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             vm_mock_service_capture_session_presence(requestMeta.clientId);
             vm_mock_service_expire_stale_online_sessions();
             responseLen = vm_net_mock_build_scene_sync_poll_response(responseBuffer, responseCap);
+            if (responseLen != 0)
+            {
+                vm_net_mock_audit_wt_response_contract(
+                    "scene-sync-poll", logAccountId, responseBuffer, responseLen,
+                    VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX, 19);
+            }
             vm_mock_service_account_capture(accountState);
         }
         g_vm_mock_service_active_account = NULL;
@@ -1122,6 +1128,13 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     handledValid = g_netLastHandledValid != 0;
     if (handledValid)
         snprintf(handledSource, sizeof(handledSource), "%s", g_netLastHandledSource);
+    if (responseEventType == 7 && responseLen != 0)
+    {
+        vm_net_mock_audit_wt_response_contract(
+            handledValid ? handledSource : "-", logAccountId,
+            responseBuffer, responseLen, VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX,
+            19);
+    }
     if (closeAfterData)
         responseFlags |= VM_MOCK_SERVICE_RESPONSE_FLAG_CLOSE_AFTER_DATA;
 
