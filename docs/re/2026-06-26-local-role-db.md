@@ -11,9 +11,9 @@ Current contract:
 - allow 0 persisted roles after deleting the last role; the title client then
   displays only its create-role sentinel row
 - persist HP, MP, money, scene, position, level, total EXP, and backpack items
-- derive level from cumulative EXP thresholds: level 2 starts at 100 EXP,
-  level 3 at 300 EXP, level 4 at 600 EXP, and each next level costs 100 more
-  than the previous level
+- derive level from the capped cumulative EXP threshold table: reaching level
+  49 costs 2,000,000 EXP for that level, reaching level 70 costs 200,000,000,
+  and level 70 is the maximum
 - grant battle rewards through the monster stat table; poison slime currently
   grants 5 EXP and 5 copper
 - keep position and backpack state in the selected role row; do not use legacy
@@ -120,7 +120,7 @@ Header:
 
 ```text
 magic      "JHR1"
-version    3
+version    7
 activeRoleId
 roleCount
 roles[5]
@@ -170,12 +170,11 @@ nextBackpackSeq = 1
 equippedItemIds[0] = 1001
 ```
 
-Version 1 role DB files are upgraded in-place to version 4 by copying existing
-role fields, keeping an empty backpack for each role, and assigning starter
-equipment. Version 2 and 3 files migrate to version 4 by keeping the existing
-backpack/equipment rows while normalizing the old default `40`-slot backpack to
-the new `20`-slot baseline whenever that does not discard occupied rows. The
-old `nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
+Version 1–6 role rows are migrated to version 7 before normalization.  The
+existing item/equipment migrations remain intact; version 6's linear EXP is
+also converted by preserving the character's level and current-level progress
+percentage, with values above 70 retained at the new level cap. The old
+`nvram/jhol_mock_player_pos.bin` mirror is no longer read or written.
 
 ## Server Behavior
 

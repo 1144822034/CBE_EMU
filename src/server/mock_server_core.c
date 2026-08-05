@@ -4233,11 +4233,13 @@ enum
     /* Version 6 makes equipment a durable instance: item id, enhancement and
      * current/max durability travel together whether the instance is worn or
      * in the backpack.  Version 5 and older stored only worn item ids. */
-    VM_NET_MOCK_ROLE_DB_VERSION = 6,
+    /* Version 7 changes the persisted EXP curve.  EXP is a cumulative value,
+     * so version-6 rows must be migrated before their level is normalized. */
+    VM_NET_MOCK_ROLE_DB_VERSION = 7,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
-    VM_NET_MOCK_ROLE_EXP_PER_LEVEL = 100,
+    VM_NET_MOCK_ROLE_LEVEL_CAP = 70,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
     VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,

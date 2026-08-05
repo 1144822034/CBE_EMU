@@ -21,3 +21,12 @@
 [info][mock-service] listening=127.0.0.1:19090
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency workers=4 queue=128 state_model=serialized-legacy-context
+[info][mock-admin] request worker=2 sequence=2 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][mock-admin] request worker=3 sequence=4 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
+[info][admin] login_success failed_attempts_reset=1
+[info][network] mock_shop_catalog total=1715 items=230 equips=1485 first=1001 source=item.dsh/equip.dsh
+[info][mock-admin] shop_item_db_load rows=1492 skipped=0
+[info][mock-admin] request worker=2 sequence=6 result=1 queue_wait_ms=0 state_wait_ms=40 process_ms=27
+[info][mock-admin] request worker=3 sequence=12 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=103
+[info][mock-admin] request worker=4 sequence=15 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=105
+[info][mock-admin] request worker=1 sequence=17 result=0 queue_wait_ms=0 state_wait_ms=13 process_ms=113

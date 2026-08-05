@@ -1387,7 +1387,91 @@ static bool vm_mock_service_account_issue_guest_credentials(u32 clientId,
     return false;
 }
 
+/* EXP is persisted as a cumulative total.  The table is therefore the total
+ * EXP at which the indexed level starts, rather than a client-side display
+ * table.  Its adjacent differences form a deterministic exponential curve:
+ * reaching level 49 costs exactly 2,000,000 EXP and reaching the level-70 cap
+ * costs exactly 200,000,000 EXP.  Keeping the values literal avoids a
+ * platform-dependent floating-point calculation during login or settlement. */
+static const u32 g_vm_net_mock_role_level_start_exp[VM_NET_MOCK_ROLE_LEVEL_CAP + 1] = {
+    0, 0, 67, 150, 254, 383, 544, 744, 993, 1303,
+    1689, 2170, 2769, 3515, 4443, 5599, 7038, 8830, 11062, 13841,
+    17301, 21610, 26975, 33656, 41975, 52334, 65233, 81295, 101295, 126199,
+    157209, 195823, 243905, 303777, 378329, 471161, 586755, 730692, 909922, 1133099,
+    1410998, 1757037, 2187924, 2724463, 3392560, 4224472, 5260367, 6550260, 8156431, 10156431,
+    12646825, 15747857, 19609252, 24417450, 30404605, 37859792, 47142970, 58702356, 73096069, 91019079,
+    113336759, 141126669, 175730584, 218819278, 272473194, 339282894, 422474137, 526063631, 655052966, 815670110,
+    1015670110
+};
+
+static u32 vm_net_mock_role_exp_cap(void)
+{
+    return g_vm_net_mock_role_level_start_exp[VM_NET_MOCK_ROLE_LEVEL_CAP];
+}
+
 static u32 vm_net_mock_role_level_start_exp(u32 level)
+{
+    if (level <= 1)
+        return 0;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        return 0xffffffffu;
+    return g_vm_net_mock_role_level_start_exp[level];
+}
+
+static u32 vm_net_mock_role_level_from_exp(u32 exp)
+{
+    u32 level = 1;
+
+    for (u32 nextLevel = 2; nextLevel <= VM_NET_MOCK_ROLE_LEVEL_CAP; ++nextLevel)
+    {
+        if (exp < g_vm_net_mock_role_level_start_exp[nextLevel])
+            break;
+        level = nextLevel;
+    }
+    return level;
+}
+
+static u32 vm_net_mock_role_last_level_exp(u32 exp)
+{
+    return vm_net_mock_role_level_start_exp(vm_net_mock_role_level_from_exp(exp));
+}
+
+static u32 vm_net_mock_role_next_level_start_exp(u32 exp)
+{
+    u32 level = vm_net_mock_role_level_from_exp(exp);
+
+    /* At the level cap there is no next interval.  The title's EXP widgets
+     * receive an equal start/end threshold plus 100 percent, rather than a
+     * synthetic level 71 or an overflowing unsigned value. */
+    if (level >= VM_NET_MOCK_ROLE_LEVEL_CAP)
+        return vm_net_mock_role_exp_cap();
+    return vm_net_mock_role_level_start_exp(level + 1);
+}
+
+static u32 vm_net_mock_role_exp_percent(u32 exp)
+{
+    u32 level = vm_net_mock_role_level_from_exp(exp);
+    u32 levelStart = vm_net_mock_role_level_start_exp(level);
+    u32 nextLevelStart = vm_net_mock_role_next_level_start_exp(exp);
+    u32 levelSize = 0;
+    u32 current = 0;
+
+    if (level >= VM_NET_MOCK_ROLE_LEVEL_CAP)
+        return 100;
+    if (exp <= levelStart)
+        return 0;
+    if (nextLevelStart <= levelStart || nextLevelStart == 0xffffffffu)
+        return 100;
+
+    current = exp - levelStart;
+    levelSize = nextLevelStart - levelStart;
+    return (u32)(((unsigned long long)current * 100ull) / levelSize);
+}
+
+/* Version-6 and earlier role rows used a linear interval: reaching level N
+ * cost 100 * (N - 1).  Retain that decoder only for the one-time database/file
+ * migration below; live gameplay must exclusively use the capped curve. */
+static u32 vm_net_mock_role_legacy_level_start_exp(u32 level)
 {
     unsigned long long a = (unsigned long long)(level - 1);
     unsigned long long b = (unsigned long long)level;
@@ -1402,64 +1486,76 @@ static u32 vm_net_mock_role_level_start_exp(u32 level)
     if (a != 0 && b > 0xffffffffull / a)
         return 0xffffffffu;
     startExp = a * b;
-    if (startExp > 0xffffffffull / VM_NET_MOCK_ROLE_EXP_PER_LEVEL)
+    if (startExp > 0xffffffffull / 100ull)
         return 0xffffffffu;
-    startExp *= VM_NET_MOCK_ROLE_EXP_PER_LEVEL;
-    if (startExp > 0xffffffffull)
-        return 0xffffffffu;
-    return (u32)startExp;
+    return (u32)(startExp * 100ull);
 }
 
-static u32 vm_net_mock_role_level_from_exp(u32 exp)
+static u32 vm_net_mock_role_legacy_level_from_exp(u32 exp)
 {
     u32 level = 1;
 
     for (;;)
     {
         u32 nextLevel = level + 1;
-        u32 nextLevelStart;
+        u32 nextStart = vm_net_mock_role_legacy_level_start_exp(nextLevel);
 
-        if (nextLevel == 0)
-            break;
-        nextLevelStart = vm_net_mock_role_level_start_exp(nextLevel);
-        if (nextLevelStart == 0xffffffffu || exp < nextLevelStart)
+        if (nextLevel == 0 || nextStart == 0xffffffffu || exp < nextStart)
             break;
         level = nextLevel;
     }
-
     return level;
 }
 
-static u32 vm_net_mock_role_last_level_exp(u32 exp)
+static bool vm_net_mock_role_migrate_exp_curve(vm_net_mock_role_state *role,
+                                                u32 *oldLevelOut)
 {
-    return vm_net_mock_role_level_start_exp(vm_net_mock_role_level_from_exp(exp));
-}
+    u32 oldExp = 0;
+    u32 oldLevel = 1;
+    u32 oldStart = 0;
+    u32 oldNext = 0;
+    u32 newLevel = 1;
+    u32 newStart = 0;
+    u32 newNext = 0;
+    u32 newExp = 0;
 
-static u32 vm_net_mock_role_next_level_start_exp(u32 exp)
-{
-    u32 level = vm_net_mock_role_level_from_exp(exp);
-    u32 nextLevel = level + 1;
+    if (oldLevelOut)
+        *oldLevelOut = 0;
+    if (role == NULL)
+        return false;
+    oldExp = role->exp;
+    oldLevel = vm_net_mock_role_legacy_level_from_exp(oldExp);
+    if (oldLevelOut)
+        *oldLevelOut = oldLevel;
+    newLevel = oldLevel;
+    if (newLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        newLevel = VM_NET_MOCK_ROLE_LEVEL_CAP;
+    newStart = vm_net_mock_role_level_start_exp(newLevel);
+    newExp = newStart;
 
-    if (nextLevel == 0)
-        return 0xffffffffu;
-    return vm_net_mock_role_level_start_exp(nextLevel);
-}
-
-static u32 vm_net_mock_role_exp_percent(u32 exp)
-{
-    u32 levelStart = vm_net_mock_role_last_level_exp(exp);
-    u32 nextLevelStart = vm_net_mock_role_next_level_start_exp(exp);
-    u32 levelSize = 0;
-    u32 current = 0;
-
-    if (exp <= levelStart)
-        return 0;
-    if (nextLevelStart <= levelStart || nextLevelStart == 0xffffffffu)
-        return 100;
-
-    current = exp - levelStart;
-    levelSize = nextLevelStart - levelStart;
-    return (u32)(((unsigned long long)current * 100ull) / levelSize);
+    /* A role that already exceeded the new maximum is retained at the cap;
+     * there is deliberately no hidden level-71 progress. */
+    if (newLevel < VM_NET_MOCK_ROLE_LEVEL_CAP)
+    {
+        oldStart = vm_net_mock_role_legacy_level_start_exp(oldLevel);
+        oldNext = vm_net_mock_role_legacy_level_start_exp(oldLevel + 1);
+        newNext = vm_net_mock_role_level_start_exp(newLevel + 1);
+        if (oldStart != 0xffffffffu && oldNext > oldStart &&
+            newNext != 0xffffffffu && newNext > newStart && oldExp >= oldStart)
+        {
+            unsigned long long oldProgress = oldExp - oldStart;
+            unsigned long long oldInterval = oldNext - oldStart;
+            unsigned long long newInterval = newNext - newStart;
+            unsigned long long mappedProgress =
+                (oldProgress * newInterval + oldInterval / 2ull) / oldInterval;
+            if (mappedProgress >= newInterval)
+                mappedProgress = newInterval - 1ull;
+            newExp += (u32)mappedProgress;
+        }
+    }
+    role->exp = newExp;
+    role->level = newLevel;
+    return oldExp != newExp || oldLevel != newLevel;
 }
 
 static const char *vm_net_mock_default_role_name(void)
@@ -2044,12 +2140,24 @@ static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp)
 {
     u32 oldLevel = 1;
     u32 newLevel = 1;
+    u32 expCap = vm_net_mock_role_exp_cap();
+    u32 acceptedExp = 0;
 
     if (role == NULL || addExp == 0)
         return false;
 
     oldLevel = vm_net_mock_role_level_from_exp(role->exp);
-    role->exp = vm_net_mock_add_capped_u32(role->exp, addExp);
+    if (role->exp >= expCap)
+    {
+        role->exp = expCap;
+        role->level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+        vm_net_mock_role_sync_derived_vitals(role);
+        return false;
+    }
+    acceptedExp = expCap - role->exp;
+    if (addExp < acceptedExp)
+        acceptedExp = addExp;
+    role->exp += acceptedExp;
     newLevel = vm_net_mock_role_level_from_exp(role->exp);
     role->level = newLevel;
     vm_net_mock_role_sync_derived_vitals(role);
@@ -3527,6 +3635,8 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     else if (role->backpackCapacity > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+    if (role->exp > vm_net_mock_role_exp_cap())
+        role->exp = vm_net_mock_role_exp_cap();
     role->level = vm_net_mock_role_level_from_exp(role->exp);
     if (!vm_net_mock_designation_is_unlocked(role, vm_net_mock_designation_by_id(role->designationId)))
         role->designationId = vm_net_mock_role_best_designation(role)->id;
@@ -4494,6 +4604,7 @@ typedef struct
     bool found;
     bool invalid;
     bool equipmentInstanceBackfillNeeded;
+    bool expCurveMigrationNeeded;
     u8 seenRoleMask;
     u8 roleRows;
 } vm_mock_mysql_role_load_context;
@@ -4607,7 +4718,8 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &format_version) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &active_role_id) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &role_count) ||
-        (format_version != 5 && format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
+        (format_version != 5 && format_version != 6 &&
+         format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         if (context != NULL)
@@ -4618,8 +4730,8 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
     context->database->version = VM_NET_MOCK_ROLE_DB_VERSION;
     context->database->activeRoleId = active_role_id;
     context->database->roleCount = role_count;
-    context->equipmentInstanceBackfillNeeded =
-        format_version != VM_NET_MOCK_ROLE_DB_VERSION;
+    context->equipmentInstanceBackfillNeeded = format_version == 5;
+    context->expCurveMigrationNeeded = format_version < VM_NET_MOCK_ROLE_DB_VERSION;
     context->found = true;
     return true;
 }
@@ -4806,7 +4918,8 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
 }
 
 static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
-                                                       bool *backfill_needed_out)
+                                                       bool *backfill_needed_out,
+                                                       bool *exp_curve_migration_out)
 {
     char account_hex[129];
     char query[2048];
@@ -4815,6 +4928,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         *found_out = false;
     if (backfill_needed_out)
         *backfill_needed_out = false;
+    if (exp_curve_migration_out)
+        *exp_curve_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
     if (!vm_net_mock_role_prepare_equipment_instance_schema())
@@ -4861,6 +4976,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         *found_out = true;
     if (backfill_needed_out)
         *backfill_needed_out = context.equipmentInstanceBackfillNeeded;
+    if (exp_curve_migration_out)
+        *exp_curve_migration_out = context.expCurveMigrationNeeded;
     return true;
 }
 
@@ -4869,6 +4986,7 @@ typedef struct
     vm_net_mock_role_db_file *database;
     bool found;
     bool invalid;
+    bool expCurveMigrationNeeded;
 } vm_mock_mysql_payload_load_context;
 
 static bool vm_mock_mysql_role_payload_row(void *context_value,
@@ -4885,13 +5003,15 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &format_version) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &active_role_id) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &role_count) || values[3] == NULL ||
-        (format_version != 5 && format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
+        (format_version != 5 && format_version != 6 &&
+         format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         if (context)
             context->invalid = true;
         return true;
     }
+    context->expCurveMigrationNeeded = format_version < VM_NET_MOCK_ROLE_DB_VERSION;
     if (format_version == VM_NET_MOCK_ROLE_DB_VERSION)
     {
         if (!vm_mysql_hex_decode(values[3], lengths[3], context->database,
@@ -4905,6 +5025,22 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
             context->invalid = true;
             return true;
         }
+    }
+    else if (format_version == 6)
+    {
+        vm_net_mock_role_db_file legacy;
+        memset(&legacy, 0, sizeof(legacy));
+        if (!vm_mysql_hex_decode(values[3], lengths[3], &legacy, sizeof(legacy),
+                                 &payload_len) ||
+            payload_len != sizeof(legacy) || memcmp(legacy.magic, "JHR1", 4) != 0 ||
+            legacy.version != format_version || legacy.activeRoleId != active_role_id ||
+            legacy.roleCount != role_count)
+        {
+            context->invalid = true;
+            return true;
+        }
+        *context->database = legacy;
+        context->database->version = VM_NET_MOCK_ROLE_DB_VERSION;
     }
     else
     {
@@ -4927,20 +5063,23 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
         for (u32 i = 0; i < legacy.roleCount; ++i)
             vm_net_mock_role_copy_from_v5(&context->database->roles[i],
                                           &legacy.roles[i]);
-        vm_autotest_note("mock_role_db_migrate version=5->6 source=payload-backup roles=%u active=%u\n",
+        vm_autotest_note("mock_role_db_migrate version=5->7 source=payload-backup roles=%u active=%u\n",
                          legacy.roleCount, legacy.activeRoleId);
     }
     context->found = true;
     return true;
 }
 
-static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out)
+static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out,
+                                                           bool *exp_curve_migration_out)
 {
     char account_hex[129];
     char query[512];
     vm_mock_mysql_payload_load_context context;
     if (found_out)
         *found_out = false;
+    if (exp_curve_migration_out)
+        *exp_curve_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
     memset(&context, 0, sizeof(context));
@@ -4952,6 +5091,8 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out)
         return false;
     if (found_out)
         *found_out = context.found;
+    if (exp_curve_migration_out)
+        *exp_curve_migration_out = context.expCurveMigrationNeeded;
     return true;
 }
 
@@ -5489,12 +5630,17 @@ static void vm_net_mock_role_db_load(void)
     bool loadedFromMysql = false;
     bool loadedFromPayload = false;
     bool mysqlEquipmentInstanceBackfill = false;
+    bool mysqlExpCurveMigration = false;
+    bool payloadExpCurveMigration = false;
+    bool expCurveMigrationNeeded = false;
     bool needsSave = false;
     u32 migratedOldIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     u32 migratedNewIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     u32 migratedIdCount = 0;
     u32 backpackNamespaceMigratedRoles = 0;
     u32 backpackNamespaceRemappedRows = 0;
+    u32 expCurveMigratedRoles = 0;
+    u32 expCurveCappedRoles = 0;
 
     if (g_vm_net_mock_role_db_loaded)
         return;
@@ -5508,7 +5654,8 @@ static void vm_net_mock_role_db_load(void)
     memset(migratedOldIds, 0, sizeof(migratedOldIds));
     memset(migratedNewIds, 0, sizeof(migratedNewIds));
     if (!vm_net_mock_role_db_load_mysql_relational(&loadedFromMysql,
-                                                    &mysqlEquipmentInstanceBackfill))
+                                                    &mysqlEquipmentInstanceBackfill,
+                                                    &mysqlExpCurveMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=relational error=%s\n",
                          g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
@@ -5517,7 +5664,8 @@ static void vm_net_mock_role_db_load(void)
         return;
     }
     if (!loadedFromMysql && !vm_mock_service_mysql_authority_is_sealed() &&
-        !vm_net_mock_role_db_load_mysql_payload_backup(&loadedFromPayload))
+        !vm_net_mock_role_db_load_mysql_payload_backup(&loadedFromPayload,
+                                                        &payloadExpCurveMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=payload-backup error=%s\n",
                          g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
@@ -5529,10 +5677,14 @@ static void vm_net_mock_role_db_load(void)
     if (loadedFromMysql && mysqlEquipmentInstanceBackfill)
     {
         needsSave = true;
-        vm_autotest_note("mock_role_db_migrate version=5->6 source=relational account=%s\n",
+        vm_autotest_note("mock_role_db_migrate version=5->7 source=relational account=%s\n",
                          g_vm_mock_service_active_account_id ?
                          g_vm_mock_service_active_account_id : "-");
     }
+    if (loadedFromMysql && mysqlExpCurveMigration)
+        expCurveMigrationNeeded = true;
+    if (loadedFromPayload && payloadExpCurveMigration)
+        expCurveMigrationNeeded = true;
 
     vm_net_mock_role_db_path(path, sizeof(path));
     if (path[0] == 0)
@@ -5552,11 +5704,16 @@ static void vm_net_mock_role_db_load(void)
             memcpy(&loaded, fileBuf, sizeof(loaded));
         if (readLen == sizeof(loaded) &&
             memcmp(loaded.magic, "JHR1", 4) == 0 &&
-            loaded.version == VM_NET_MOCK_ROLE_DB_VERSION &&
+            (loaded.version == 6 || loaded.version == VM_NET_MOCK_ROLE_DB_VERSION) &&
             loaded.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
         {
+            if (loaded.version < VM_NET_MOCK_ROLE_DB_VERSION)
+                expCurveMigrationNeeded = true;
             g_vm_net_mock_role_db = loaded;
+            g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
             loadedFromFile = true;
+            if (expCurveMigrationNeeded)
+                needsSave = true;
         }
         else if (readLen == sizeof(equipmentInstanceLegacyFile))
         {
@@ -5578,7 +5735,8 @@ static void vm_net_mock_role_db_load(void)
                                                   &equipmentInstanceLegacyFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=5->6 source=file roles=%u active=%u\n",
+                expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=5->7 source=file roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -5600,7 +5758,8 @@ static void vm_net_mock_role_db_load(void)
                                                   &equippedBackpackFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=3->6 roles=%u active=%u\n",
+                expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=3->7 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -5622,7 +5781,8 @@ static void vm_net_mock_role_db_load(void)
                                                   &shopWcoinFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=4->6 roles=%u active=%u\n",
+                expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=4->7 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -5644,7 +5804,8 @@ static void vm_net_mock_role_db_load(void)
                                                   &backpackFile.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=2->6 roles=%u active=%u\n",
+                expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=2->7 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -5666,7 +5827,8 @@ static void vm_net_mock_role_db_load(void)
                                                   &legacy.roles[i]);
                 loadedFromFile = true;
                 needsSave = true;
-                vm_autotest_note("mock_role_db_migrate version=1->6 roles=%u active=%u\n",
+                expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=1->7 roles=%u active=%u\n",
                                  g_vm_net_mock_role_db.roleCount,
                                  g_vm_net_mock_role_db.activeRoleId);
             }
@@ -5693,6 +5855,29 @@ static void vm_net_mock_role_db_load(void)
         g_vm_net_mock_role_db.roleCount = 0;
         g_vm_net_mock_role_db.activeRoleId = 0;
         needsSave = true;
+    }
+    if (expCurveMigrationNeeded)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+            u32 oldLevel = 0;
+
+            (void)vm_net_mock_role_migrate_exp_curve(role, &oldLevel);
+            if (oldLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+                ++expCurveCappedRoles;
+            ++expCurveMigratedRoles;
+        }
+        /* The format marker is only advanced in the same transaction that
+         * writes the remapped cumulative EXP values.  A failed save therefore
+         * retries safely on the next load instead of partially migrating an
+         * account. */
+        needsSave = true;
+        vm_autotest_note("mock_role_exp_curve_migrate version=6->7 account=%s roles=%u capped=%u level49_cost=2000000 level70_cost=200000000 cap_exp=%u\n",
+                         g_vm_mock_service_active_account_id ?
+                         g_vm_mock_service_active_account_id : "-",
+                         expCurveMigratedRoles, expCurveCappedRoles,
+                         vm_net_mock_role_exp_cap());
     }
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
