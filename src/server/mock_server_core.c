@@ -3680,6 +3680,193 @@ static void vm_net_mock_finish_wt_packet(u8 *out, u32 pos, u8 objectCount)
     out[4] = objectCount;
 }
 
+/*
+ * event_packet_parse_WT(0x0103467A) runs before any event-7 business handler.
+ * It has ten packet-object slots, and each normal response object has nineteen
+ * field slots in ParseDMenuResponse(0x01033B9A).  Keep this audit at the wire
+ * owner instead of trying to infer a malformed response from a later screen or
+ * parser crash.  It is deliberately read-only: a failed audit is still sent so
+ * the original client failure remains observable while the exact first broken
+ * boundary is recorded.
+ */
+static void vm_net_mock_audit_wt_response_contract(const char *source,
+                                                   const char *accountId,
+                                                   const u8 *packet,
+                                                   u32 packetLen,
+                                                   u8 objectLimit,
+                                                   u8 fieldLimit)
+{
+    u32 declaredLen = 0;
+    u32 offset = 5;
+    u8 headerObjectCount = 0;
+    u32 parsedObjectCount = 0;
+    u32 maxFieldCount = 0;
+    char objectSummary[256];
+    u32 summaryLen = 0;
+    const char *reason = NULL;
+    u8 errorMajor = 0;
+    u8 errorKind = 0;
+    u8 errorSubtype = 0;
+    u32 errorOffset = 0;
+    u32 errorField = 0;
+
+    memset(objectSummary, 0, sizeof(objectSummary));
+    if (packet == NULL || packetLen < 5)
+    {
+        printf("[error][network] mock_wt_contract source=%s account=%s "
+               "status=invalid reason=short-packet packet=%u\n",
+               source ? source : "-", accountId ? accountId : "-", packetLen);
+        return;
+    }
+    if (packet[0] != 'W' || packet[1] != 'T')
+        return;
+
+    declaredLen = ((u32)packet[2] << 8) | packet[3];
+    headerObjectCount = packet[4];
+    if (declaredLen != packetLen)
+    {
+        reason = "packet-length";
+        errorOffset = 2;
+        goto invalid;
+    }
+
+    while (offset < declaredLen)
+    {
+        u32 objectStart = offset;
+        u32 objectLen = 0;
+        u32 objectEnd = 0;
+        u32 fieldOffset = 0;
+        u32 fieldCount = 0;
+        int written;
+
+        /* ParseDMenuResponse treats the protocol's one-byte 0x63 object as
+         * its own completed object.  It is not expected in normal responses,
+         * but modelling it here keeps this audit faithful to the client. */
+        if (packet[offset] == 99)
+        {
+            written = snprintf(objectSummary + summaryLen,
+                               sizeof(objectSummary) - summaryLen,
+                               "%s99:1#0",
+                               parsedObjectCount ? "," : "");
+            if (written > 0)
+            {
+                u32 advance = (u32)written;
+                summaryLen += advance < sizeof(objectSummary) - summaryLen
+                                  ? advance
+                                  : (u32)sizeof(objectSummary) - summaryLen - 1;
+            }
+            ++parsedObjectCount;
+            ++offset;
+            if (parsedObjectCount > objectLimit)
+            {
+                reason = "object-limit";
+                errorOffset = objectStart;
+                goto invalid;
+            }
+            continue;
+        }
+
+        if (declaredLen - offset < 6)
+        {
+            reason = "object-header-truncated";
+            errorOffset = offset;
+            goto invalid;
+        }
+        errorMajor = packet[offset];
+        errorKind = packet[offset + 1];
+        errorSubtype = packet[offset + 2];
+        objectLen = ((u32)packet[offset + 4] << 8) | packet[offset + 5];
+        if (objectLen < 6 || objectLen > declaredLen - offset)
+        {
+            reason = "object-length";
+            errorOffset = offset;
+            goto invalid;
+        }
+        objectEnd = offset + objectLen;
+        fieldOffset = offset + 6;
+        while (fieldOffset < objectEnd)
+        {
+            u32 nameLen = packet[fieldOffset];
+            u32 valueLen = 0;
+
+            if (nameLen > objectEnd - fieldOffset - 1 ||
+                objectEnd - fieldOffset - 1 - nameLen < 2)
+            {
+                reason = "field-name-or-length";
+                errorOffset = fieldOffset;
+                errorField = fieldCount;
+                goto invalid;
+            }
+            valueLen = ((u32)packet[fieldOffset + 1 + nameLen] << 8) |
+                       packet[fieldOffset + 2 + nameLen];
+            if (valueLen > objectEnd - fieldOffset - 3 - nameLen)
+            {
+                reason = "field-value-length";
+                errorOffset = fieldOffset;
+                errorField = fieldCount;
+                goto invalid;
+            }
+            fieldOffset += 3 + nameLen + valueLen;
+            ++fieldCount;
+            if (fieldCount > fieldLimit)
+            {
+                reason = "field-limit";
+                errorOffset = fieldOffset;
+                errorField = fieldCount;
+                goto invalid;
+            }
+        }
+        if (fieldCount > maxFieldCount)
+            maxFieldCount = fieldCount;
+        written = snprintf(objectSummary + summaryLen,
+                           sizeof(objectSummary) - summaryLen,
+                           "%s%u/%u/%u:%u#%u",
+                           parsedObjectCount ? "," : "",
+                           errorMajor, errorKind, errorSubtype,
+                           objectLen, fieldCount);
+        if (written > 0)
+        {
+            u32 advance = (u32)written;
+            summaryLen += advance < sizeof(objectSummary) - summaryLen
+                              ? advance
+                              : (u32)sizeof(objectSummary) - summaryLen - 1;
+        }
+        ++parsedObjectCount;
+        offset = objectEnd;
+        if (parsedObjectCount > objectLimit)
+        {
+            reason = "object-limit";
+            errorOffset = objectStart;
+            goto invalid;
+        }
+    }
+
+    if (parsedObjectCount != headerObjectCount)
+    {
+        printf("[error][network] mock_wt_contract source=%s account=%s "
+               "status=invalid reason=object-count packet=%u declared=%u "
+               "header_objects=%u parsed_objects=%u max_fields=%u objects=%s\n",
+               source ? source : "-", accountId ? accountId : "-",
+               packetLen, declaredLen, headerObjectCount, parsedObjectCount,
+               maxFieldCount, objectSummary[0] ? objectSummary : "-");
+        return;
+    }
+
+    /* The audit is intentionally silent on valid traffic.  Its normal-path
+     * evidence was collected for the present investigation; retaining only
+     * contract violations keeps runtime logs useful under regular play. */
+    return;
+
+invalid:
+    printf("[error][network] mock_wt_contract source=%s account=%s "
+           "status=invalid reason=%s packet=%u declared=%u header_objects=%u "
+           "parsed_objects=%u object=%u/%u/%u offset=%u field=%u objects=%s\n",
+           source ? source : "-", accountId ? accountId : "-",
+           reason ? reason : "-", packetLen, declaredLen, headerObjectCount,
+           parsedObjectCount, errorMajor, errorKind, errorSubtype,
+           errorOffset, errorField, objectSummary[0] ? objectSummary : "-");
+}
+
 static u8 vm_net_mock_env_u8(const char *name, u8 fallback)
 {
     const char *spec = getenv(name);
@@ -4174,6 +4361,8 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
 
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_backpack_items_object_with_stage_attrs(
+    u8 *out, u32 outCap, u32 *pos, bool includeStageAttrs);
 static bool vm_net_mock_append_role_skills_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_fb_target_empty11_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_scene_npcs11_once_or_empty(u8 *out, u32 outCap, u32 *pos,
@@ -4195,15 +4384,24 @@ enum
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
     /* ParseEquipAttributes consumes an 11-byte common header plus up to four
      * 13-byte stage attributes.  The tagged stream maximum is therefore 63
-     * bytes; this is shared by backpack, equipment and task award rows. */
+     * bytes; the compact bootstrap header remains 11 bytes. */
+    VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES = 11,
     VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 63,
-    /* 30/21 encodes u32 item id, i16 sequence, u32 quantity and common
-     * equipment attributes.  The 64-row client bound also covers 17/1. */
+    /* HandleItemGridResponse (30/21) is the login bootstrap grid.  Its
+     * ParseEquipAttributes reader explicitly accepts attr-count=0, so this
+     * packet carries the fixed instance header only.  Detailed stage records
+     * are sent by the later 17/1 backpack list and 7/7 equipment list. */
     VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES =
-        6 + 4 + 6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
+        6 + 4 + 6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES,
+    VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES =
+        VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
+        VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
+    /* 17/1 is a detail list and can carry all four staged attributes. */
+    VM_NET_MOCK_BACKPACK_LIST_ITEMINFO_ROW_BYTES =
+        6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
     VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES =
         3 + VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
-        VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
+        VM_NET_MOCK_BACKPACK_LIST_ITEMINFO_ROW_BYTES,
     VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
     VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
     VM_NET_MOCK_BACKPACK_LEGACY_MAX_ITEMS = 40,

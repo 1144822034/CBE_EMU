@@ -352,7 +352,9 @@ static bool vm_net_mock_append_role_skills_object(u8 *out, u32 outCap, u32 *pos)
     return true;
 }
 
-static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32 *pos, u8 *addedCount)
+static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap,
+                                                         u32 *pos, u8 *addedCount,
+                                                         bool compactBackpack)
 {
     if (addedCount == NULL)
         return false;
@@ -365,7 +367,8 @@ static bool vm_net_mock_append_login_tail_skill_objects(u8 *out, u32 outCap, u32
         return false;
     *addedCount = (u8)(*addedCount + 1);
 
-    if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
+    if (!vm_net_mock_append_backpack_items_object_with_stage_attrs(
+            out, outCap, pos, !compactBackpack))
         return false;
     *addedCount = (u8)(*addedCount + 1);
     return true;
@@ -1049,7 +1052,8 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     if (needSkill)
     {
         u8 added = 0;
-        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &added))
+        if (!vm_net_mock_append_login_tail_skill_objects(out, outCap, &pos, &added,
+                                                          false))
             return 0;
         objectCount = (u8)(objectCount + added);
     }
