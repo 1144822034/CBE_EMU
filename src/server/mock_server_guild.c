@@ -897,7 +897,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, 0,
+                out, outCap, &pos, itemId, 0,
                 vm_net_mock_item_common_extra_enhance_cap(itemId)))
         {
             return false;
@@ -914,7 +914,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, 0,
+                out, outCap, &pos, itemId, 0,
                 vm_net_mock_item_common_extra_enhance_cap(itemId)))
         {
             return false;
@@ -2241,6 +2241,7 @@ static bool vm_net_mock_append_trade_offer_object(
                                          &itemInfoLen, "")) ||
             !vm_net_mock_seq_put_item_common_extra(itemInfo, sizeof(itemInfo),
                                                    &itemInfoLen,
+                                                   item->itemId,
                                                    (u8)SDL_min(
                                                        item->enhanceLevel,
                                                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),

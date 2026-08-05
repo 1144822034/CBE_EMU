@@ -210,6 +210,10 @@ typedef enum
      * It deliberately stops at the native scene boundary; it does not fake a
      * 16/1 request or call the mmGame action callback directly. */
     VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE,
+    /* Opens the visible equipment toolbar icon exactly once after the native
+     * scene boundary, then waits for CalcEquipStatBonus' read-only table
+     * capture.  It is a data-forensics scenario, not a synthetic stat test. */
+    VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE,
     /* Isolated battle regressions.  Both begin with the same native scene
      * hangup control as the direct control; the first presses the visible
      * battle auto-cancel target, the second waits for a three-enemy round to
@@ -225,6 +229,7 @@ typedef enum
     VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH,
     VM_AUTOMATION_STAGE_WAIT_ROLE_LIST,
     VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE,
+    VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
     VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
     VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN,
     VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE,
@@ -267,6 +272,8 @@ typedef struct
     u8 hangupAutoVisibleCaptured;
     u8 battleStartHandlerSeen;
     u8 battleSceneCharListSeen;
+    u8 equipmentEnhanceDetailTapSent;
+    u8 equipmentEnhanceConfirmTapSent;
     u8 capturePending;
     u8 captureLabelIndex;
     u8 exitRequested;
@@ -294,6 +301,7 @@ typedef struct
     u32 shopReturnFollowupSequence;
     u32 battleStartHandlerFrame;
     u32 battleSceneCharListFrame;
+    u32 equipmentEnhanceDetailTapFrame;
     u32 battleModuleSpBf;
     u32 hangupBattleResponseCount;
     u32 captureIndex;
@@ -307,6 +315,9 @@ typedef struct
 } vm_automation_state;
 
 static vm_automation_state g_vmAutomation;
+static u8 g_vmEquipmentEnhanceRulesCaptured = 0;
+u32 g_vmEquipmentEnhanceRulesWatchAddress = 0;
+u32 g_vmEquipmentEnhanceRulesWatchWriteCount = 0;
 static const char *vm_automation_scenario_name(void);
 static void vm_automation_note_startup_pc(u32 pc);
 static void vm_automation_note_screen_init(u32 screen, u32 initEntry,
@@ -601,6 +612,7 @@ static bool vm_host_file_exists(const char *path);
 static bool vm_net_mock_current_screen_is_battle(void);
 static void vm_autotest_note_role_attr_page_pc(u32 pc);
 static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 len);
+static void vm_autotest_arm_equipment_enhance_rules_watch(void);
 static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc);
 static bool vm_net_mock_append_battle_terminal_subtype8_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_battle_terminal_case4_object(u8 *out, u32 outCap, u32 *pos);
@@ -5321,6 +5333,8 @@ static const char *vm_automation_stage_name(vm_automation_stage stage)
     case VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH: return "wait-title-login";
     case VM_AUTOMATION_STAGE_WAIT_ROLE_LIST: return "wait-role-list";
     case VM_AUTOMATION_STAGE_WAIT_INITIAL_SCENE: return "wait-initial-scene";
+    case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
+        return "wait-equipment-enhance-rules";
     case VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN: return "wait-shop-open";
     case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN: return "wait-shop-return";
     case VM_AUTOMATION_STAGE_WAIT_SHOP_RETURN_PRE_HANGUP_CAPTURE:
@@ -5349,6 +5363,8 @@ static const char *vm_automation_scenario_name(void)
         return "direct-hangup-control-v1";
     case VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE:
         return "scene-teleport-stone-probe-v1";
+    case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE:
+        return "equipment-enhance-rules-probe-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL:
         return "hangup-auto-cancel-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL:
@@ -5955,6 +5971,23 @@ static void vm_automation_tick(void)
                  * not manufacture the next scene interaction request. */
                 vm_automation_finish(1, "initial-scene-25-5-and-rendered-frame");
             }
+            else if (g_vmAutomation.scenario ==
+                     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE)
+            {
+                /* (102,44) is the previously verified scene equipment
+                 * toolbar target.  Deliver one ordinary touch only after
+                 * scene ownership and two render boundaries; success still
+                 * requires the later client CalcEquipStatBonus PC capture. */
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_automation_request_capture("equipment-enhance-probe-scene");
+                if (vm_automation_issue_tap(102, 44,
+                                            "scene-toolbar-equipment-icon"))
+                {
+                    vm_automation_set_stage(
+                        VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
+                        "equipment-toolbar-tapped");
+                }
+            }
             else if (vm_automation_scenario_uses_direct_hangup())
             {
                 g_vmAutomation.initialSceneScreen = vmAddedScreen;
@@ -6012,6 +6045,19 @@ static void vm_automation_tick(void)
                     vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_HANGUP_BATTLE,
                                             "direct-hangup-control-tapped");
             }
+            else if (g_vmAutomation.scenario ==
+                     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE)
+            {
+                g_vmAutomation.initialSceneScreen = vmAddedScreen;
+                vm_automation_request_capture("equipment-enhance-probe-scene");
+                if (vm_automation_issue_tap(102, 44,
+                                            "scene-toolbar-equipment-icon"))
+                {
+                    vm_automation_set_stage(
+                        VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
+                        "equipment-toolbar-tapped");
+                }
+            }
             else if (vm_automation_issue_tap(
                     224, 44, "scene-toolbar-rightmost-shop-icon"))
             {
@@ -6022,6 +6068,47 @@ static void vm_automation_tick(void)
                 vm_automation_set_stage(VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN,
                                         "rightmost-shop-icon-tapped");
             }
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
+        /* The first touch has already opened the native equipment list.  Its
+         * render path does not calculate an individual item's enhanced
+         * attack/armor yet; after that state has crossed two real render
+         * boundaries, select the visible equipped-weapon slot once. */
+        if (!g_vmAutomation.equipmentEnhanceDetailTapSent &&
+            g_vmAutomation.renderFrames >= g_vmAutomation.stageFrame + 2u)
+        {
+            vm_automation_request_capture("equipment-enhance-list-rendered");
+            if (vm_automation_issue_tap(166, 127,
+                                        "equipment-visible-weapon-slot"))
+            {
+                g_vmAutomation.equipmentEnhanceDetailTapSent = 1;
+                g_vmAutomation.equipmentEnhanceDetailTapFrame =
+                    g_vmAutomation.renderFrames;
+            }
+        }
+        /* Selection itself proves that the native item-detail path has run,
+         * but it does not request the equipment action menu.  Press the one
+         * visible Confirm control only after the detail has rendered.  This
+         * is the documented client route into its 强化 action; it is not a
+         * direct handler invocation or synthetic 1/29 request. */
+        else if (g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                 !g_vmAutomation.equipmentEnhanceConfirmTapSent &&
+                 g_vmAutomation.renderFrames >=
+                     g_vmAutomation.equipmentEnhanceDetailTapFrame + 2u)
+        {
+            vm_automation_request_capture("equipment-enhance-detail-rendered");
+            if (vm_automation_issue_tap(34, 382,
+                                        "equipment-detail-confirm-action-menu"))
+            {
+                g_vmAutomation.equipmentEnhanceConfirmTapSent = 1;
+            }
+        }
+        else if (g_vmEquipmentEnhanceRulesCaptured)
+        {
+            vm_automation_request_capture("equipment-enhance-rules-captured");
+            vm_automation_finish(1,
+                                 "client-calcequipstatbonus-table-captured");
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_SHOP_OPEN:
@@ -6387,6 +6474,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_DIRECT_HANGUP;
     else if (strcmp(scenario, "scene-teleport-stone-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE;
+    else if (strcmp(scenario, "equipment-enhance-rules-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE;
     else if (strcmp(scenario, "hangup-auto-cancel-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL;
     else if (strcmp(scenario, "hangup-auto-terminal-v1") == 0)
@@ -6409,7 +6498,7 @@ static void vm_automation_init_config(int argc, char *args[])
         : VM_AUTOMATION_STAGE_BOOT_CONFIRM;
     g_vmAutomation.active = 1;
     g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-        ? 4u : (g_vmAutomation.timedTitleDriver ? 12u : 9u);
+        ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u);
     g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
         ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u);
     g_vmAutomation.stepTimeoutMs = 15000u;
@@ -6892,22 +6981,74 @@ static void vm_autotest_note_attr_value_write(const char *source, u32 dst, u32 l
  * rather than reproduced in the service: until its sixteen entries are read
  * from the running Jianghu client, a server-side enhancement formula would be
  * a guess.  This is diagnostic-only and is gated by CBE_AUTOTEST; it performs
- * guest-memory reads only and never changes CBE state.
+ * guest-memory reads only and never changes CBE state.  The hook observes
+ * the primary-loop setup at 0x01028B5C, which both ordinary weapon/armor
+ * callers and the optional secondary calculation share.
  */
+static void vm_autotest_arm_equipment_enhance_rules_watch(void)
+{
+    u32 itemCtrl = 0;
+
+    /* This runs after the normal ROM R9 restoration.  Arming on the first
+     * observable item controller lets the memory hook see a startup-time
+     * initialization, which the later CalcEquipStatBonus consumer cannot. */
+    if (!g_autotestEnabled || MTK == NULL ||
+        g_vmEquipmentEnhanceRulesWatchAddress != 0 || Global_R9 == 0)
+    {
+        return;
+    }
+    if (uc_mem_read(MTK, Global_R9 + 0x54AC, &itemCtrl,
+                    sizeof(itemCtrl)) != UC_ERR_OK || itemCtrl == 0)
+    {
+        return;
+    }
+    g_vmEquipmentEnhanceRulesWatchAddress = itemCtrl + 0x584;
+    vm_autotest_note("equipment_enhance_rules_pointer_watch_arm global_r9=%08x item_ctrl=%08x address=%08x\\n",
+                     Global_R9, itemCtrl,
+                     g_vmEquipmentEnhanceRulesWatchAddress);
+}
+
 static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
 {
     static u32 reportedTable = 0;
+    static u32 entryCount = 0;
     u32 itemCtrl = 0;
     u32 ruleTable = 0;
     u32 baseStat = 0;
     u32 enhanceLevel = 0;
+    uc_err itemCtrlRead = UC_ERR_OK;
+    uc_err ruleTableRead = UC_ERR_OK;
 
-    if (!g_autotestEnabled || Global_R9 == 0 || pc != 0x01028BCE)
+    /* 0x01028B5C is reached by the calculator's primary loop on every
+     * invocation.  The former 0x01028BCE is inside its optional secondary
+     * calculation (`a6 == 1`) and is therefore not reached by normal scene
+     * weapon/armor reconstruction. */
+    if (!g_autotestEnabled || pc != 0x01028B5C)
         return;
-    if (uc_mem_read(MTK, Global_R9 + 0x54AC, &itemCtrl, sizeof(itemCtrl)) != UC_ERR_OK ||
-        itemCtrl == 0 ||
-        uc_mem_read(MTK, itemCtrl + 0x584, &ruleTable, sizeof(ruleTable)) != UC_ERR_OK ||
-        ruleTable == 0 || ruleTable == reportedTable)
+    ++entryCount;
+    if (entryCount == 1)
+    {
+        vm_autotest_note("equipment_enhance_rules_entry pc=%08x global_r9=%08x\n",
+                         pc, Global_R9);
+    }
+    if (Global_R9 == 0)
+        return;
+    itemCtrlRead = uc_mem_read(MTK, Global_R9 + 0x54AC,
+                               &itemCtrl, sizeof(itemCtrl));
+    if (itemCtrlRead == UC_ERR_OK && itemCtrl != 0)
+    {
+        ruleTableRead = uc_mem_read(MTK, itemCtrl + 0x584,
+                                    &ruleTable, sizeof(ruleTable));
+    }
+    if (entryCount == 1)
+    {
+        vm_autotest_note("equipment_enhance_rules_pointer_probe ctrl_read=%d ctrl=%08x table_read=%d table=%08x\n",
+                         (int)itemCtrlRead, itemCtrl, (int)ruleTableRead,
+                         ruleTable);
+    }
+    if (itemCtrlRead != UC_ERR_OK || itemCtrl == 0 ||
+        ruleTableRead != UC_ERR_OK || ruleTable == 0 ||
+        ruleTable == reportedTable)
     {
         return;
     }
@@ -6937,6 +7078,7 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
         vm_autotest_note("equipment_enhance_rule index=%u flat=%u percent=%d raw=%02x%02x%02x%02x\\n",
                          i, raw[0], (int)percent, raw[0], raw[1], raw[2], raw[3]);
     }
+    g_vmEquipmentEnhanceRulesCaptured = 1;
 }
 
 static void vm_autotest_note_startup_pc(u32 pc)
@@ -17189,6 +17331,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     vm_hangup_transition_capture_pre_restore((u32)address & ~1u);
     vm_restore_main_r9_for_rom_code((u32)address);
+    vm_autotest_arm_equipment_enhance_rules_watch();
     vm_autotest_note_startup_pc((u32)address & ~1u);
     vm_autotest_note_scene_actor_parser_pc((u32)address & ~1u);
     vm_autotest_note_backpack_parser_pc((u32)address & ~1u);

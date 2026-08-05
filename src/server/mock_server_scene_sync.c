@@ -2715,6 +2715,7 @@ static bool vm_net_mock_build_task_awardinfo(
         !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
         !vm_net_mock_seq_put_item_common_extra(
             out, outCap, &pos,
+            task->rewardItemId,
             (u8)SDL_min(rewardItem->enhanceLevel,
                         VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
             vm_net_mock_item_common_extra_enhance_cap(task->rewardItemId)))

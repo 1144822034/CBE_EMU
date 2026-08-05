@@ -2019,6 +2019,228 @@ static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId)
     return item != NULL ? item->durabilityMax : 0;
 }
 
+/*
+ * Enhancement attribute contract
+ * ------------------------------
+ *
+ * scene_rebuild_status_meter_node(0x0100FED8) calls
+ * CalcEquipStatBonus(0x01028B34) for the physical attack of a weapon and
+ * for the armour of every other equipment slot.  The client calculator adds
+ * one entry per enhancement level:
+ *
+ *     flat_u8 + floor(percent_i16 * base_stat / 100)
+ *
+ * The following sixteen entries are recovered from that calculator and from
+ * independent +4/+12/+16 equipment samples.  In particular they reproduce
+ * 武林神胫 1653 armour -> 2327 at +4, 绒丝袍 1122 armour -> 3024 at +12,
+ * 圣诞魔杖 374 attack -> 1076 at +12, and 梦境魔杖 529 attack -> 2103 at
+ * +16.  They are not the enhancement-screen material/price rows.
+ */
+typedef struct
+{
+    u8 flat;
+    u8 percent;
+} vm_net_mock_equipment_enhance_primary_rule;
+
+static const vm_net_mock_equipment_enhance_primary_rule
+    g_vm_net_mock_equipment_enhance_primary_rules[
+        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL] = {
+            {2, 10}, {3, 10}, {4, 10}, {5, 10},
+            {7, 14}, {8, 16}, {9, 14}, {10, 16},
+            {14, 14}, {15, 16}, {16, 14}, {17, 16},
+            {20, 22}, {23, 24}, {26, 26}, {28, 28}};
+
+enum
+{
+    VM_NET_MOCK_EQUIP_ATTR_STRENGTH = 1,
+    VM_NET_MOCK_EQUIP_ATTR_AGILITY = 2,
+    VM_NET_MOCK_EQUIP_ATTR_WISDOM = 3,
+    VM_NET_MOCK_EQUIP_ATTR_ATTACK = 4,
+    VM_NET_MOCK_EQUIP_ATTR_ARMOR = 5,
+    VM_NET_MOCK_EQUIP_ATTR_DODGE = 6,
+    VM_NET_MOCK_EQUIP_ATTR_HIT = 7,
+    VM_NET_MOCK_EQUIP_ATTR_CRIT = 8,
+    VM_NET_MOCK_EQUIP_ATTR_HP = 9,
+    VM_NET_MOCK_EQUIP_ATTR_MP = 10
+};
+
+typedef struct
+{
+    u8 threshold;
+    u8 type;
+    u8 mode;
+    u16 value;
+} vm_net_mock_equipment_enhance_attr;
+
+static u16 vm_net_mock_equipment_enhance_attr_value(u32 value)
+{
+    return (u16)SDL_min(value, 0x7fffu);
+}
+
+static u16 vm_net_mock_equipment_enhance_stage_value(u8 type,
+                                                       u8 levelRequired)
+{
+    u32 level = levelRequired == 0 ? 1u : levelRequired;
+
+    switch (type)
+    {
+    case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
+        return vm_net_mock_equipment_enhance_attr_value(level * 2u -
+                                                         (level > 3 ? 6u : 0u));
+    case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
+        return vm_net_mock_equipment_enhance_attr_value(level * 6u + 135u);
+    case VM_NET_MOCK_EQUIP_ATTR_HP:
+        return vm_net_mock_equipment_enhance_attr_value(level * 8u + 20u);
+    case VM_NET_MOCK_EQUIP_ATTR_MP:
+        return vm_net_mock_equipment_enhance_attr_value(level * 6u + 30u);
+    case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
+        return vm_net_mock_equipment_enhance_attr_value(level * 2u + 10u);
+    case VM_NET_MOCK_EQUIP_ATTR_CRIT:
+    case VM_NET_MOCK_EQUIP_ATTR_HIT:
+    case VM_NET_MOCK_EQUIP_ATTR_DODGE:
+        return (u16)(1u + (level + 10u) / 20u);
+    default:
+        return 0;
+    }
+}
+
+static void vm_net_mock_equipment_enhancement_stage_types(u8 slot,
+                                                           u8 out[4])
+{
+    static const u8 kStageTypes[VM_NET_MOCK_EQUIP_SLOT_COUNT][4] = {
+        /* weapon */ {VM_NET_MOCK_EQUIP_ATTR_CRIT, VM_NET_MOCK_EQUIP_ATTR_ATTACK,
+                      VM_NET_MOCK_EQUIP_ATTR_HIT, VM_NET_MOCK_EQUIP_ATTR_WISDOM},
+        /* helmet */ {VM_NET_MOCK_EQUIP_ATTR_WISDOM, VM_NET_MOCK_EQUIP_ATTR_ARMOR,
+                      VM_NET_MOCK_EQUIP_ATTR_DODGE, VM_NET_MOCK_EQUIP_ATTR_MP},
+        /* chest  */ {VM_NET_MOCK_EQUIP_ATTR_MP, VM_NET_MOCK_EQUIP_ATTR_ARMOR,
+                      VM_NET_MOCK_EQUIP_ATTR_HP, VM_NET_MOCK_EQUIP_ATTR_DODGE},
+        /* cloak  */ {VM_NET_MOCK_EQUIP_ATTR_CRIT, VM_NET_MOCK_EQUIP_ATTR_HIT,
+                      VM_NET_MOCK_EQUIP_ATTR_DODGE, VM_NET_MOCK_EQUIP_ATTR_HP},
+        /* belt   */ {VM_NET_MOCK_EQUIP_ATTR_HP, VM_NET_MOCK_EQUIP_ATTR_ARMOR,
+                      VM_NET_MOCK_EQUIP_ATTR_HIT, VM_NET_MOCK_EQUIP_ATTR_MP},
+        /* leg    */ {VM_NET_MOCK_EQUIP_ATTR_ATTACK, VM_NET_MOCK_EQUIP_ATTR_ARMOR,
+                      VM_NET_MOCK_EQUIP_ATTR_HIT, VM_NET_MOCK_EQUIP_ATTR_HP},
+        /* boot   */ {VM_NET_MOCK_EQUIP_ATTR_DODGE, VM_NET_MOCK_EQUIP_ATTR_HIT,
+                      VM_NET_MOCK_EQUIP_ATTR_ARMOR, VM_NET_MOCK_EQUIP_ATTR_HP},
+        /* ring   */ {VM_NET_MOCK_EQUIP_ATTR_ATTACK, VM_NET_MOCK_EQUIP_ATTR_HP,
+                      VM_NET_MOCK_EQUIP_ATTR_CRIT, VM_NET_MOCK_EQUIP_ATTR_HIT}};
+
+    if (out == NULL)
+        return;
+    if (slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        slot = 0;
+    memcpy(out, kStageTypes[slot], sizeof(kStageTypes[slot]));
+}
+
+static u8 vm_net_mock_equipment_enhancement_collect_attrs(
+    const vm_net_mock_equipment_catalog_item *equipment,
+    vm_net_mock_equipment_enhance_attr *out,
+    u8 outCap)
+{
+    u8 types[4];
+    u8 count = 0;
+
+    if (equipment == NULL || out == NULL || outCap == 0)
+        return 0;
+    vm_net_mock_equipment_enhancement_stage_types(equipment->slot, types);
+    for (u8 stage = 0; stage < 4 && count < outCap; ++stage)
+    {
+        out[count].threshold = (u8)((stage + 1u) * 4u);
+        out[count].type = types[stage];
+        out[count].mode = 0;
+        out[count].value = vm_net_mock_equipment_enhance_stage_value(
+            types[stage], equipment->levelRequired);
+        ++count;
+    }
+
+    return count;
+}
+
+static u32 vm_net_mock_equipment_enhancement_primary_bonus(
+    const vm_net_mock_equipment_catalog_item *equipment,
+    u8 enhanceLevel)
+{
+    u32 base = 0;
+    u32 result = 0;
+    u8 levels = (u8)SDL_min(enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+
+    if (equipment == NULL || levels == 0)
+        return 0;
+    base = equipment->slot == 0 ? equipment->bonus.attack
+                                : equipment->bonus.armor;
+    if (base == 0)
+        return 0;
+    for (u8 i = 0; i < levels; ++i)
+    {
+        const vm_net_mock_equipment_enhance_primary_rule *rule =
+            &g_vm_net_mock_equipment_enhance_primary_rules[i];
+        result += (u32)rule->flat + (base * (u32)rule->percent) / 100u;
+    }
+    return result;
+}
+
+static void vm_net_mock_equipment_enhancement_add_bonus(
+    const vm_net_mock_equipment_catalog_item *equipment,
+    u8 enhanceLevel,
+    vm_net_mock_equipment_bonus *bonus)
+{
+    vm_net_mock_equipment_enhance_attr attrs[4];
+    u8 attrCount = 0;
+    u32 primary = 0;
+
+    if (equipment == NULL || bonus == NULL)
+        return;
+    primary = vm_net_mock_equipment_enhancement_primary_bonus(equipment,
+                                                               enhanceLevel);
+    if (equipment->slot == 0)
+        bonus->attack += primary;
+    else
+        bonus->armor += primary;
+    attrCount = vm_net_mock_equipment_enhancement_collect_attrs(
+        equipment, attrs, 4);
+    for (u8 i = 0; i < attrCount; ++i)
+    {
+        if (enhanceLevel < attrs[i].threshold)
+            continue;
+        switch (attrs[i].type)
+        {
+        case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
+            bonus->strength += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_AGILITY:
+            bonus->agility += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
+            bonus->wisdom += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
+            bonus->attack += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
+            bonus->armor += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_DODGE:
+            bonus->dodge += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_HIT:
+            bonus->hit += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_CRIT:
+            bonus->crit += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_HP:
+            bonus->hp += attrs[i].value;
+            break;
+        case VM_NET_MOCK_EQUIP_ATTR_MP:
+            bonus->mp += attrs[i].value;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,
                                                      u32 levelRequired, u32 stack,
                                                      u32 consumeMode, u32 durationMinutes,
@@ -2504,6 +2726,7 @@ static void vm_net_mock_format_shop17_ids(u32 maxRows, char *out, u32 outCap)
 
 static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
                                                    u32 *pos,
+                                                   u32 itemId,
                                                    u8 enhanceLevel,
                                                    u8 enhanceMaxLevel)
 {
@@ -2514,11 +2737,35 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
      * from item+286 for the visible "+N" suffix.  It only consumes attr
      * slots when attr-count is nonzero, so zero-attr rows stop here.
      */
+    const vm_net_mock_equipment_catalog_item *equipment =
+        vm_net_mock_find_equipment_catalog_item(itemId);
+    vm_net_mock_equipment_enhance_attr attrs[4];
+    u8 attrCount = 0;
+
+    if (equipment != NULL)
+        attrCount = vm_net_mock_equipment_enhancement_collect_attrs(
+            equipment, attrs, 4);
+
     if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel))
         return false;
     if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceMaxLevel))
         return false;
-    return vm_net_mock_seq_put_u8(out, outCap, pos, 0);
+    if (!vm_net_mock_seq_put_u8(out, outCap, pos, attrCount))
+        return false;
+    for (u8 i = 0; i < attrCount; ++i)
+    {
+        /* ParseEquipAttributes(0x010185C2): threshold, stat type, mode,
+         * signed 16-bit value.  mode=0 is the confirmed fixed-value path;
+         * it avoids inventing any percentage semantics for stage bonuses. */
+        if (!vm_net_mock_seq_put_u8(out, outCap, pos, attrs[i].threshold) ||
+            !vm_net_mock_seq_put_u8(out, outCap, pos, attrs[i].type) ||
+            !vm_net_mock_seq_put_u8(out, outCap, pos, attrs[i].mode) ||
+            !vm_net_mock_seq_put_i16(out, outCap, pos, attrs[i].value))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
@@ -2531,7 +2778,7 @@ static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
      * destination capacity, not fields to send when attr-count is zero.
      */
     return vm_net_mock_seq_put_item_common_extra(
-        out, outCap, pos, 0,
+        out, outCap, pos, itemId, 0,
         vm_net_mock_item_common_extra_enhance_cap(itemId));
 }
 
@@ -2558,6 +2805,7 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
             return false;
         if (!vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos,
+                item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
@@ -2661,7 +2909,7 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
             if (!vm_net_mock_seq_put_u32(out, outCap, &pos, item->itemId))
                 return false;
             if (!vm_net_mock_seq_put_item_common_extra(
-                    out, outCap, &pos, 0,
+                    out, outCap, &pos, item->itemId, 0,
                     vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
                 return false;
             ++emitted;
@@ -2700,6 +2948,7 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
             return false;
         if (!vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos,
+                item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
@@ -3435,7 +3684,7 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(
-            out, outCap, &pos, 0,
+            out, outCap, &pos, itemId, 0,
             vm_net_mock_item_common_extra_enhance_cap(itemId)))
         return false;
 
@@ -3478,7 +3727,7 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, 0,
+                out, outCap, &pos, rows[i].itemId, 0,
                 vm_net_mock_item_common_extra_enhance_cap(rows[i].itemId)))
         {
             return false;
@@ -3592,6 +3841,7 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, durability) ||
             !vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos,
+                itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL))
