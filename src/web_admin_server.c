@@ -1683,16 +1683,45 @@ static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
     for (u32 i = 0; i < taskCount; ++i)
     {
         char nameUtf8[128];
+        const vm_net_mock_task_definition *prerequisite = NULL;
         if (!tasks[i].enabled)
             continue;
         memset(nameUtf8, 0, sizeof(nameUtf8));
         vm_net_mock_gbk_label_to_utf8(tasks[i].name,
                                       nameUtf8, sizeof(nameUtf8));
+        if (tasks[i].prerequisiteTaskId != 0)
+        {
+            for (u32 j = 0; j < taskCount; ++j)
+            {
+                if (tasks[j].taskId == tasks[i].prerequisiteTaskId)
+                {
+                    prerequisite = &tasks[j];
+                    break;
+                }
+            }
+        }
         vm_mock_admin_text_appendf(
             page, "<option value=\"%u\"%s>%u · ", tasks[i].taskId,
             currentTaskId == tasks[i].taskId ? " selected" : "",
             tasks[i].taskId);
         vm_mock_admin_text_append_html(page, nameUtf8);
+        vm_mock_admin_text_appendf(page, "（等级 %u", tasks[i].level);
+        if (tasks[i].prerequisiteTaskId != 0)
+        {
+            vm_mock_admin_text_appendf(page, "，前置：%u",
+                                       tasks[i].prerequisiteTaskId);
+            if (prerequisite != NULL)
+            {
+                char prerequisiteUtf8[128];
+                memset(prerequisiteUtf8, 0, sizeof(prerequisiteUtf8));
+                vm_net_mock_gbk_label_to_utf8(
+                    prerequisite->name, prerequisiteUtf8,
+                    sizeof(prerequisiteUtf8));
+                vm_mock_admin_text_appendf(page, " · ");
+                vm_mock_admin_text_append_html(page, prerequisiteUtf8);
+            }
+        }
+        vm_mock_admin_text_appendf(page, "）");
         vm_mock_admin_text_appendf(page, "</option>");
     }
     vm_mock_admin_text_appendf(page, "</select>");
@@ -3588,7 +3617,7 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
                                         row->seed.scriptName);
         vm_mock_admin_text_appendf(&page,
-            "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
+            "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空；会校验等级与前置任务）</span>");
         vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
         vm_mock_admin_text_appendf(&page,
             "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\"%s>完成后不可再次接取</option><option value=\"1\"%s>完成后允许再次接取</option></select></label>",
@@ -3645,7 +3674,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
     vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
     vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空）</span>");
+        "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空；会校验等级与前置任务）</span>");
     vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
         "</label><label class=\"field\" style=\"margin-top:8px\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\" selected>完成后不可再次接取</option><option value=\"1\">完成后允许再次接取</option></select></label>");
@@ -4431,6 +4460,15 @@ static void vm_mock_admin_render_task_page(char *response,
         vm_net_mock_gbk_label_to_utf8(edit.offerDialog, offerUtf8, sizeof(offerUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.activeDialog, activeUtf8, sizeof(activeUtf8));
         vm_net_mock_gbk_label_to_utf8(edit.completedDialog, completedUtf8, sizeof(completedUtf8));
+        /* A lone dash is the legacy "no NPC dialog override" placeholder.
+         * Keep it out of the editable value so an untouched task clearly
+         * represents the empty/default-dialog state. */
+        if (strcmp(offerUtf8, "-") == 0)
+            offerUtf8[0] = 0;
+        if (strcmp(activeUtf8, "-") == 0)
+            activeUtf8[0] = 0;
+        if (strcmp(completedUtf8, "-") == 0)
+            completedUtf8[0] = 0;
     }
 
     vm_mock_admin_text_appendf(&page,

@@ -2047,7 +2047,9 @@ typedef struct
 
 enum
 {
-    VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX = 10
+    VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX = 10,
+    VM_MOCK_SERVICE_TASK_INTERACTION_OFFER = 1,
+    VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT = 2
 };
 
 typedef struct
@@ -2056,6 +2058,7 @@ typedef struct
     u32 taskId;
     u32 actorId;
     bool repeatable;
+    u8 interaction;
     char scene[64];
 } vm_mock_service_task_offer_context;
 
@@ -2156,8 +2159,8 @@ typedef struct vm_mock_service_client_session
     u32 sceneHangupRestartNotBeforeTick;
     char sceneHangupScene[64];
     /* The native action=4 task path carries only task_id after the NPC dialog.
-     * Retain the server-observed offer source so a completed task cannot be
-     * reaccepted by forging the later 6/11 request. */
+     * Retain the server-observed offer/submit source so a later 6/11 accept or
+     * 6/4 submit cannot silently lose the NPC that authorized it. */
     vm_mock_service_task_offer_context
         taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     char scenePendingScene[64];
