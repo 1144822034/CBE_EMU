@@ -157,6 +157,16 @@ try {
         . 'backpack_item_count,designation_id,next_backpack_seq) '
         . 'VALUES(?,?,0,?,1,1,20,5,1250,120,120,100,100,100000,1000,?,?,?,0,0,1)'
     )->execute([$account, $roleId, 'AutoHangup', $scene, $posX, $posY]);
+    /* Keep one real, durable equip.dsh weapon on the isolated role.  Besides
+     * matching a normal new-character state, this makes the client execute
+     * its native CalcEquipStatBonus path during scene status reconstruction.
+     * The automation probe only reads that client-owned enhancement table;
+     * it does not synthesize a result or modify any production role. */
+    $db->prepare(
+        'INSERT INTO account_role_equipment('
+        . 'account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) '
+        . 'VALUES(?,?,?,?,?,?,?)'
+    )->execute([$account, $roleId, 0, 1001, 0, 50, 50]);
     $db->commit();
     echo "seeded guest00001 role=810001 profile=$profile in isolated automation database\n";
 } catch (Throwable $error) {

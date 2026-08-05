@@ -1951,6 +1951,14 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
         if (item->levelRequired > level)
             continue;
         vm_net_mock_equipment_bonus_add(bonus, &item->bonus);
+        /* Match scene_rebuild_status_meter_node: the direct equip.dsh fields
+         * apply first, then the per-level primary growth and any unlocked
+         * +4/+8/+12/+16 attribute rows. */
+        vm_net_mock_equipment_enhancement_add_bonus(
+            item,
+            (u8)SDL_min(equipped->enhanceLevel,
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            bonus);
     }
 }
 

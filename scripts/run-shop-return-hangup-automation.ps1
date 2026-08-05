@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'scene-teleport-stone-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )

@@ -28,6 +28,10 @@ extern u32 g_vmAutomationBattlePhaseWatchAddress;
 extern u32 g_vmAutomationBattleAutoFlagWatchWriteCount;
 extern u32 g_vmAutomationBattleOverlayWatchWriteCount;
 extern u32 g_vmAutomationBattlePhaseWatchWriteCount;
+/* Armed by a CBE code-hook only after the client creates its own item
+ * controller.  This remains an observation-only memory watch. */
+extern u32 g_vmEquipmentEnhanceRulesWatchAddress;
+extern u32 g_vmEquipmentEnhanceRulesWatchWriteCount;
 
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
@@ -233,6 +237,43 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
     }
     if (type == UC_MEM_WRITE)
     {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = g_vmEquipmentEnhanceRulesWatchAddress;
+
+        if (watchStart != 0 && start < watchStart + sizeof(u32) &&
+            end > watchStart)
+        {
+            if (g_vmEquipmentEnhanceRulesWatchWriteCount < 16)
+            {
+                u32 pc = 0;
+                u32 lr = 0;
+                u32 sp = 0;
+                u32 savedLr = 0;
+                u32 callerLr = 0;
+                u32 r0 = 0;
+                u32 r1 = 0;
+                uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+                uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+                uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+                uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+                uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+                if (sp != 0)
+                {
+                    (void)uc_mem_read(uc, sp, &savedLr, sizeof(savedLr));
+                    /* AllocBufIfNull saves r4,r5,r7,lr before it calls the
+                     * zeroing helper, so its own caller is four words above
+                     * the helper's saved LR. */
+                    (void)uc_mem_read(uc, sp + 16u, &callerLr,
+                                      sizeof(callerLr));
+                }
+                printf("[info][automation] equipment_enhance_rules_pointer_write count=%u pc=%08x lr=%08x saved_lr=%08x caller_lr=%08x sp=%08x last=%08x addr=%08x size=%u value=%llx r0=%08x r1=%08x\\n",
+                       g_vmEquipmentEnhanceRulesWatchWriteCount + 1, pc,
+                       lr, savedLr, callerLr, sp, lastAddress, start, size, value,
+                       r0, r1);
+            }
+            ++g_vmEquipmentEnhanceRulesWatchWriteCount;
+        }
         vm_automation_trace_battle_watch_write(
             uc, address, size, value, "auto-flag",
             g_vmAutomationBattleAutoFlagWatchAddress, sizeof(u8),
