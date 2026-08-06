@@ -4984,6 +4984,10 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                                                         u32 count,
                                                         u16 *seqOut,
                                                         const char *reason);
+/* Multi-item transactions such as chest opening must compose consume/add
+ * operations against one projected role and persist only the final snapshot. */
+static bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
+    vm_net_mock_role_state *role, u32 itemId, u32 count, u16 *seqOut);
 static bool vm_net_mock_role_add_backpack_item(u32 itemId, u32 count, u16 *seqOut);
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(vm_net_mock_role_state *role,
                                                                             u32 itemId,
@@ -4997,6 +5001,12 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
                                                    u16 seq,
                                                    u32 count,
                                                    u32 *remainingOut);
+/* The same parser-proven 7/7 type=2 + 7/11 removal pair is used by NPC
+ * services and item use.  Chest opening needs it once for the chest and once
+ * for its matching key. */
+static bool vm_net_mock_append_backpack_item_remove7_objects(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u16 seq, u32 itemId,
+    u32 remaining);
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
