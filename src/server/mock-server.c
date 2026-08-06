@@ -23,6 +23,14 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
 static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
     const vm_net_mock_request_object *object, u16 *positionXOut);
 
+/* Chest configuration belongs to the catalog, while durable world-chat
+ * storage and live delivery belong to the social service.  A successful
+ * chest opening calls this narrow bridge only after the role mutation has
+ * committed, so an uncommitted draw can never become a public announcement. */
+static bool vm_mock_world_chat_publish_chest_reward(
+    const char *openerName, u32 chestItemId, const char *chestNameGbk,
+    u32 rewardItemId, const char *rewardNameGbk, u32 rewardCount);
+
 #include "mock_server_catalog.c"
 #include "mock_server_role.c"
 #include "mock_server_ranking.c"
