@@ -3308,6 +3308,107 @@ static bool vm_mock_world_chat_store(
     return true;
 }
 
+/* Defined with the scene-presence lifecycle helpers later in this module. */
+static bool vm_mock_service_session_presence_is_recent(
+    const vm_mock_service_client_session *session);
+
+static bool vm_mock_world_chat_build_chest_reward_message(
+    const char *openerName, const char *chestNameGbk,
+    const char *rewardNameGbk, u32 rewardCount,
+    char *messageOut, size_t messageOutCap)
+{
+    static const char prefixGbk[] =
+        "\xB9\xA7\xCF\xB2\xCD\xE6\xBC\xD2\xA1\xBE"; /* 恭喜玩家【 */
+    static const char openedGbk[] =
+        "\xA1\xBF\xBF\xAA\xC6\xF4"; /* 】开启 */
+    static const char receivedGbk[] =
+        "\xBB\xF1\xB5\xC3"; /* 获得 */
+    static const char multiplierGbk[] = "\xA1\xC1"; /* × */
+    int written = 0;
+
+    if (messageOut == NULL || messageOutCap == 0)
+        return false;
+    messageOut[0] = 0;
+    if (openerName == NULL || openerName[0] == 0 ||
+        chestNameGbk == NULL || chestNameGbk[0] == 0 ||
+        rewardNameGbk == NULL || rewardNameGbk[0] == 0 || rewardCount == 0)
+    {
+        return false;
+    }
+    if (rewardCount == 1)
+    {
+        written = snprintf(messageOut, messageOutCap, "%s%s%s%s%s",
+                           prefixGbk, openerName, openedGbk, chestNameGbk,
+                           receivedGbk);
+        if (written > 0 && (size_t)written < messageOutCap)
+            written += snprintf(messageOut + written,
+                                messageOutCap - (size_t)written, "%s",
+                                rewardNameGbk);
+    }
+    else
+    {
+        written = snprintf(messageOut, messageOutCap, "%s%s%s%s%s%s%s%u",
+                           prefixGbk, openerName, openedGbk, chestNameGbk,
+                           receivedGbk, rewardNameGbk, multiplierGbk,
+                           rewardCount);
+    }
+    if (written <= 0 || (size_t)written >= messageOutCap)
+    {
+        messageOut[0] = 0;
+        return false;
+    }
+    return true;
+}
+
+/* World broadcasts are authored by the system but retained with the opener's
+ * role id so the existing recent-world-message query, which rejects a zero
+ * role id, can replay the announcement to later logins.  The supplied opener
+ * name is deliberately part of the message body: it makes the notice remain
+ * unambiguous while the visible sender stays “系统”. */
+static bool vm_mock_world_chat_publish_chest_reward(
+    const char *openerName, u32 chestItemId, const char *chestNameGbk,
+    u32 rewardItemId, const char *rewardNameGbk, u32 rewardCount)
+{
+    static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
+    vm_mock_service_client_session *source =
+        vm_mock_service_get_active_client_session();
+    vm_mock_service_client_session *target =
+        g_vm_mock_service_client_sessions;
+    char message[82];
+    u32 recipients = 0;
+
+    if (source == NULL || source->onlineRoleId == 0 ||
+        !vm_mock_world_chat_build_chest_reward_message(
+            openerName, chestNameGbk, rewardNameGbk, rewardCount,
+            message, sizeof(message)))
+    {
+        return false;
+    }
+    /* Persist before exposing the event.  This is identical to player world
+     * chat's store-before-delivery contract and lets the normal login history
+     * replay carry the same announcement to a later observer. */
+    if (!vm_mock_world_chat_store(source, systemNameGbk, message))
+        return false;
+
+    while (target != NULL)
+    {
+        if ((target == source ||
+             (target->roleOnline && target->onlinePresenceValid &&
+              vm_mock_service_session_presence_is_recent(target))) &&
+            vm_mock_service_session_enqueue_chat_notice_identity(
+                target, VM_MOCK_CHAT_TYPE_WORLD, 0, source->onlineRoleId,
+                systemNameGbk, message))
+        {
+            ++recipients;
+        }
+        target = target->next;
+    }
+    printf("[info][network] mock_chest_world_broadcast source=%08x/%u chest=%u reward=%u count=%u recipients=%u storage=mysql delivery=scene-sync-poll\n",
+           source->clientId, source->onlineRoleId, chestItemId, rewardItemId,
+           rewardCount, recipients);
+    return true;
+}
+
 static bool vm_mock_world_chat_history_row(
     void *contextValue,
     unsigned int columnCount,

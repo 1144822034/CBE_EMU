@@ -118,6 +118,10 @@ typedef struct
     u32 itemId;
     u32 count;
     u32 weight;
+    /* The flag is configured per reward row rather than per chest.  A chest
+     * can therefore keep routine drops quiet while announcing only a rare
+     * configured result. */
+    u8 worldBroadcast;
 } vm_net_mock_chest_reward;
 
 typedef struct
@@ -1762,6 +1766,60 @@ typedef struct
     bool invalid;
 } vm_net_mock_chest_db_load_context;
 
+typedef struct
+{
+    bool found;
+    bool invalid;
+} vm_net_mock_chest_schema_column_context;
+
+static bool vm_net_mock_chest_schema_column_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_chest_schema_column_context *context =
+        (vm_net_mock_chest_schema_column_context *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 1 ||
+        values == NULL || lengths == NULL || values[0] == NULL ||
+        lengths[0] == 0)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* Existing deployments already have the chest table.  CREATE TABLE IF NOT
+ * EXISTS cannot add the new flag retrospectively, so make the migration
+ * explicit and MySQL-5.x compatible before selecting the six-column row. */
+static bool vm_net_mock_chest_admin_ensure_world_broadcast_column(void)
+{
+    vm_net_mock_chest_schema_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_chest_rewards' "
+            "AND COLUMN_NAME='world_broadcast'",
+            vm_net_mock_chest_schema_column_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (context.found)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_chest_rewards ADD COLUMN world_broadcast "
+            "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER weight"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] chest_reward_schema migration=world-broadcast action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_chest_db_row(void *contextValue,
                                      unsigned int columnCount,
                                      const char *const *values,
@@ -1774,20 +1832,22 @@ static bool vm_net_mock_chest_db_row(void *contextValue,
     u32 itemId = 0;
     u32 count = 0;
     u32 weight = 0;
+    u32 worldBroadcast = 0;
     int chestIndex = -1;
     vm_net_mock_chest_admin_row *chest = NULL;
 
-    if (context == NULL || columnCount != 5 ||
+    if (context == NULL || columnCount != 6 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &chestItemId) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &rewardOrder) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &itemId) ||
         !vm_mock_mysql_parse_u32(values[3], lengths[3], &count) ||
         !vm_mock_mysql_parse_u32(values[4], lengths[4], &weight) ||
+        !vm_mock_mysql_parse_u32(values[5], lengths[5], &worldBroadcast) ||
         (chestIndex = vm_net_mock_chest_kind_index(chestItemId)) < 0 ||
         rewardOrder == 0 || rewardOrder > VM_NET_MOCK_CHEST_REWARD_MAX ||
         itemId == 0 || count == 0 ||
         count > VM_NET_MOCK_CHEST_REWARD_COUNT_MAX || weight == 0 ||
-        weight > VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX)
+        weight > VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX || worldBroadcast > 1)
     {
         if (context != NULL)
         {
@@ -1819,6 +1879,8 @@ static bool vm_net_mock_chest_db_row(void *contextValue,
     chest->rewards[chest->rewardCount].itemId = itemId;
     chest->rewards[chest->rewardCount].count = count;
     chest->rewards[chest->rewardCount].weight = weight;
+    chest->rewards[chest->rewardCount].worldBroadcast =
+        worldBroadcast ? 1 : 0;
     ++chest->rewardCount;
     ++context->loaded;
     return true;
@@ -1842,12 +1904,14 @@ static bool vm_net_mock_chest_admin_db_load(void)
             "item_id INT UNSIGNED NOT NULL,"
             "item_count INT UNSIGNED NOT NULL,"
             "weight INT UNSIGNED NOT NULL,"
+            "world_broadcast TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(chest_item_id,reward_order),"
             "KEY idx_server_chest_rewards_item(item_id)) ENGINE=InnoDB") ||
+        !vm_net_mock_chest_admin_ensure_world_broadcast_column() ||
         !vm_mysql_query(
-            "SELECT chest_item_id,reward_order,item_id,item_count,weight "
+            "SELECT chest_item_id,reward_order,item_id,item_count,weight,world_broadcast "
             "FROM server_chest_rewards ORDER BY chest_item_id,reward_order",
             vm_net_mock_chest_db_row, &context) ||
         context.invalid)
@@ -1902,6 +1966,7 @@ static bool vm_net_mock_chest_admin_save(
             reward->count > VM_NET_MOCK_CHEST_REWARD_COUNT_MAX ||
             reward->weight == 0 ||
             reward->weight > VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX ||
+            reward->worldBroadcast > 1 ||
             vm_net_mock_find_shop_catalog_item(reward->itemId) == NULL)
         {
             if (errorOut)
@@ -1951,10 +2016,11 @@ static bool vm_net_mock_chest_admin_save(
 
         snprintf(query, sizeof(query),
                  "INSERT INTO server_chest_rewards("
-                 "chest_item_id,reward_order,item_id,item_count,weight) "
-                 "VALUES(%u,%u,%u,%u,%u)",
+                 "chest_item_id,reward_order,item_id,item_count,weight,world_broadcast) "
+                 "VALUES(%u,%u,%u,%u,%u,%u)",
                  row->chestItemId, (u32)i + 1u, reward->itemId,
-                 reward->count, reward->weight);
+                 reward->count, reward->weight,
+                 reward->worldBroadcast ? 1u : 0u);
         if (!vm_mysql_exec(query))
             goto mysql_failed;
     }
@@ -5116,6 +5182,24 @@ static const vm_net_mock_chest_reward *vm_net_mock_chest_draw_reward(
     return NULL;
 }
 
+static const char *vm_net_mock_chest_world_broadcast_name_gbk(u32 chestItemId)
+{
+    /* The catalog/editor labels are UTF-8 source strings, whereas chat
+     * payloads are GBK.  Keep the packet-facing identity beside the chest ids
+     * instead of forwarding a UTF-8 source literal to the client. */
+    switch (chestItemId)
+    {
+    case 522:
+        return "\xC7\xE0\xCD\xAD\xB1\xA6\xCF\xE4"; /* 青铜宝箱 */
+    case 523:
+        return "\xB0\xD7\xD2\xF8\xB1\xA6\xCF\xE4"; /* 白银宝箱 */
+    case 524:
+        return "\xBB\xC6\xBD\xF0\xB1\xA6\xCF\xE4"; /* 黄金宝箱 */
+    default:
+        return NULL;
+    }
+}
+
 /*
  * Client contract:
  * - JianghuOL.CBE:0x01033544 consumes 1/7/1 only for the pending item-use
@@ -5138,6 +5222,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     vm_net_mock_backpack_item_state *keyItem = NULL;
     const vm_net_mock_chest_admin_row *chest = NULL;
     const vm_net_mock_chest_reward *reward = NULL;
+    const vm_net_mock_shop_catalog_item *rewardCatalogItem = NULL;
     vm_net_mock_backpack_item_state *rewardItem = NULL;
     vm_net_mock_role_state before;
     vm_net_mock_role_state projected;
@@ -5188,8 +5273,9 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                                                          "Matching key required");
 
     reward = vm_net_mock_chest_draw_reward(chest, role, &totalWeight, &draw);
-    if (reward == NULL ||
-        vm_net_mock_find_shop_catalog_item(reward->itemId) == NULL)
+    rewardCatalogItem = reward == NULL ? NULL :
+        vm_net_mock_find_shop_catalog_item(reward->itemId);
+    if (rewardCatalogItem == NULL)
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest reward configuration is invalid");
 
@@ -5250,14 +5336,31 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest opening could not be saved");
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+    if (reward->worldBroadcast &&
+        !vm_mock_world_chat_publish_chest_reward(
+            role->name[0] ? role->name : "Player",
+            chest->chestItemId,
+            vm_net_mock_chest_world_broadcast_name_gbk(chest->chestItemId),
+            reward->itemId, rewardCatalogItem->name,
+            reward->count))
+    {
+        /* The role transaction has committed at this point.  World notices
+         * are a secondary durable channel, so do not claim an opening failed
+         * or roll it back merely because that independent history write is
+         * unavailable.  The warning records the first failed contract. */
+        printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
+               chest->chestItemId, reward->itemId, role->roleId);
+    }
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
-           reward->weight, totalWeight, draw);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
+           reward->weight, totalWeight, draw,
+           reward->worldBroadcast ? 1u : 0u);
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
-                     reward->count, reward->weight, totalWeight);
+                     reward->count, reward->weight, totalWeight,
+                     reward->worldBroadcast ? 1u : 0u);
     return pos;
 }
 
