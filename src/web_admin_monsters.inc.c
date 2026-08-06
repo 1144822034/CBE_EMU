@@ -205,7 +205,7 @@ static void vm_mock_admin_render_monster_page(char *response,
     vm_mock_admin_render_monster_drop_rows(&page, edit);
     vm_mock_admin_text_appendf(
         &page,
-        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。怪物名称来自真实 SCE，只读；调整等级或类型不会擅自覆盖手工填写的战斗数值。</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>");
+        "</div><p class=\"hint\">保存后立即影响普通场景战斗、副本挑战、挂机战斗和结算。怪物名称来自真实 SCE，只读；调整等级或类型不会擅自覆盖手工填写的战斗数值。首领为单体高强度战斗，其血量、攻击和防御按同等级最低职业的组队战斗基线计算；任何玩家都可挑战，但同级单人不应能以常规战斗完成击杀。</p><div class=\"actions\"><button type=\"submit\">保存怪物属性</button></div></form>");
     vm_mock_admin_render_item_picker_modal(&page);
     if (edit->overridden)
     {

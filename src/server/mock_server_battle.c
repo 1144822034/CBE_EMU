@@ -6459,6 +6459,14 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     sceneMonsterPosX = posx;
     sceneMonsterPosY = posy;
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(id);
+    /* A boss is one durable opponent.  Group play is encouraged by its
+     * authoritative stats rather than by refusing an otherwise valid combat
+     * request; never let the normal random encounter roll clone it. */
+    if (vm_net_mock_monster_family_for_enemy(requestedEnemyId) ==
+        VM_NET_MOCK_MONSTER_BOSS)
+    {
+        battleEnemyCount = 1;
+    }
     g_vm_net_mock_battle_enemy_id_current = requestedEnemyId;
     enemyWireId = vm_net_mock_resolve_battle_enemy_id(requestedEnemyId, &enemyTable, enemyTableIds);
     /*
