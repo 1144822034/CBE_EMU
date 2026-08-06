@@ -216,7 +216,7 @@ static void vm_mock_admin_render_monster_page(char *response,
     }
     vm_mock_admin_text_appendf(
         &page,
-        "<script>(()=>{const q=document.getElementById('monster-search'),rows=[...document.querySelectorAll('#monster-list .monster')];if(!q)return;q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();for(const row of rows)row.hidden=v&&!row.dataset.key.toLowerCase().includes(v);});})();</script></section></div></main></body></html>");
+        "</section></div></main></body></html>");
     if (page.truncated)
         snprintf(response, responseCap,
                  "<!doctype html><meta charset=\"utf-8\"><p>怪物管理页面超过大小限制。</p>");
