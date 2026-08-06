@@ -14,7 +14,11 @@
 
 enum
 {
-    VM_MOCK_ADMIN_REQUEST_MAX = 8192,
+    /* Headers stay deliberately bounded.  Form bodies are allocated after
+     * Content-Length has been parsed, so catalog editors are not constrained
+     * by this header-buffer size. */
+    VM_MOCK_ADMIN_HEADER_MAX = 8192,
+    VM_MOCK_ADMIN_REQUEST_BODY_MAX = 1024 * 1024,
     VM_MOCK_ADMIN_RESPONSE_MAX = 524288,
     VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 100,
     VM_MOCK_USER_SESSION_MAX = 64
@@ -500,6 +504,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupTaskRewards=()=>{const box=document.querySelector('#task-reward-list'),add=document.querySelector('#task-reward-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-task-reward-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-task-reward-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-task-reward-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),quantity=row.querySelector('[data-task-reward-count]'),type=row.querySelector('[data-task-reward-type]');if(input)input.value='0';if(quantity)quantity.value='0';if(type)type.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
     "const setupChestRewards=()=>{for(const box of document.querySelectorAll('[data-chest-reward-list]')){const form=box.closest('form'),add=form&&form.querySelector('[data-chest-reward-add]'),rows=[...box.querySelectorAll('[data-chest-reward-row]')];if(!form||!add||!rows.length)continue;const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const shown=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=shown(),total=active.reduce((sum,row)=>sum+Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0),0);active.forEach((row,index)=>{const number=row.querySelector('[data-chest-reward-index]'),probability=row.querySelector('[data-chest-reward-probability]'),weight=Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0);if(number)number.textContent='#'+(index+1);if(probability)probability.textContent=total&&weight?(weight*100/total).toFixed(2)+'%':'—';});add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 添加奖励（${active.length}/${rows.length}）`;};const showNext=()=>{const next=rows.find(row=>row.hidden);if(!next)return;next.hidden=false;sync(next);update();};add.addEventListener('click',showNext);for(const row of rows){for(const field of row.querySelectorAll('[data-chest-reward-count],[data-chest-reward-weight]'))field.addEventListener('input',update);const remove=row.querySelector('[data-chest-reward-remove]');if(!remove)continue;remove.addEventListener('click',()=>{const item=row.querySelector('[data-item-picker-input]'),count=row.querySelector('[data-chest-reward-count]'),weight=row.querySelector('[data-chest-reward-weight]');if(item)item.value='0';if(count)count.value='0';if(weight)weight.value='0';row.hidden=true;sync(row);if(!shown().length){const first=rows[0];first.hidden=false;sync(first);}update();});}update();}};"
     "const setupChestTabs=()=>{const root=document.querySelector('[data-chest-editor-root]');if(!root)return;const editors=[...root.querySelectorAll('[data-chest-editor]')],buttons=[...document.querySelectorAll('[data-chest-select]')];if(!editors.length||!buttons.length)return;const select=(requested,writeUrl)=>{const editor=editors.find(current=>current.dataset.chestEditor===String(requested))||editors[0],selected=editor.dataset.chestEditor;root.dataset.chestSelected=selected;for(const current of editors)current.hidden=current!==editor;for(const button of buttons){const active=button.dataset.chestSelect===selected;button.classList.toggle('on',active);button.setAttribute('aria-pressed',active?'true':'false');}if(writeUrl){const url=new URL(window.location.href);url.searchParams.set('chest',selected);history.replaceState(null,'',url);}};for(const button of buttons)button.addEventListener('click',()=>select(button.dataset.chestSelect,true));select(root.dataset.chestSelected,false);};"
+    "const setupMonsterSearch=()=>{const input=document.querySelector('#monster-search'),list=document.querySelector('#monster-list');if(!input||!list||input.dataset.monsterSearchBound==='1')return;input.dataset.monsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLowerCase();for(const row of list.querySelectorAll('.monster')){const key=(row.dataset.key||'').toLowerCase();row.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
     "const setupUpdateResourcePicker=()=>{const source=document.querySelector('#update-resource-select'),form=source&&source.closest('form'),open=document.querySelector('#update-resource-picker-open'),modal=document.querySelector('#update-resource-picker-modal'),close=document.querySelector('#update-resource-picker-close'),suffix=document.querySelector('#update-resource-suffix'),search=document.querySelector('#update-resource-search'),list=document.querySelector('#update-resource-list'),count=document.querySelector('#update-resource-count'),empty=document.querySelector('#update-resource-empty'),error=document.querySelector('#update-resource-error'),label=document.querySelector('[data-update-resource-label]');if(!source||!form||!open||!modal||!close||!suffix||!search||!list||!count||!empty||!error||!label)return;const options=[...source.options].filter(option=>option.value),suffixOf=text=>{const dot=text.lastIndexOf('.');return dot>=0&&dot<text.length-1?text.slice(dot+1).toLowerCase():'(无后缀)';},choices=[];const suffixes=[...new Set(options.map(option=>suffixOf(option.value)))].sort((a,b)=>a.localeCompare(b));for(const value of suffixes){const option=document.createElement('option');option.value=value;option.textContent=value==='(无后缀)'?value:`.${value}`;suffix.append(option);}const updateLabel=()=>{const selected=options.find(option=>option.value===source.value);label.textContent=selected?selected.textContent:'请选择要发布的资源';};for(const option of options){const button=document.createElement('button');button.type='button';button.className='resource-choice';button.dataset.suffix=suffixOf(option.value);button.dataset.search=option.textContent.toLowerCase();const title=document.createElement('strong');title.textContent=option.textContent;const meta=document.createElement('span');meta.textContent=button.dataset.suffix==='(无后缀)'?'无后缀':`.${button.dataset.suffix}`;button.append(title,meta);button.addEventListener('click',()=>{source.value=option.value;updateLabel();error.textContent='';hide();});choices.push(button);list.append(button);}const apply=()=>{const wanted=suffix.value,keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=(wanted==='all'||choice.dataset.suffix===wanted)&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 个资源`;empty.hidden=shown!==0;};const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};function hide(){modal.hidden=true;document.body.classList.remove('modal-open');open.focus();}open.addEventListener('click',show);close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});suffix.addEventListener('change',apply);search.addEventListener('input',apply);form.addEventListener('submit',event=>{if(source.value)return;event.preventDefault();error.textContent='请先选择要发布的资源';show();});updateLabel();apply();};"
     "const setupActorPicker=()=>{const source=document.querySelector('#actor-picker-options'),modal=document.querySelector('#actor-picker-modal'),close=document.querySelector('#actor-picker-close'),search=document.querySelector('#actor-picker-search'),list=document.querySelector('#actor-picker-list'),count=document.querySelector('#actor-result-count'),empty=document.querySelector('#actor-picker-empty'),error=document.querySelector('#actor-picker-error'),selects=[...document.querySelectorAll('select.actor-resource-select')];if(!source||!modal||!close||!search||!list||!count||!empty||!error||!selects.length)return;const options=[...source.options].filter(option=>option.value),optionByValue=new Map(options.map(option=>[option.value,option]));let active=null;const triggers=new Map(),choices=[];const update=select=>{const trigger=triggers.get(select);if(!trigger)return;const option=optionByValue.get(select.value),selected=select.options[select.selectedIndex],label=trigger.querySelector('[data-actor-picker-label]');if(label)label.textContent=option?option.textContent:(selected&&selected.textContent?selected.textContent:(select.value?`不可用资源：${select.value}`:'请选择 Actor 资源'));};for(const select of selects){const field=select.closest('.actor-picker-field'),trigger=field&&field.querySelector('[data-actor-picker-open]');if(!trigger)continue;triggers.set(select,trigger);trigger.addEventListener('click',()=>show(select));select.addEventListener('change',()=>update(select));update(select);}const previewBase=new URL('actor-preview.svg',window.location.href).href;for(const option of options){const button=document.createElement('button'),image=document.createElement('img'),title=document.createElement('strong');button.type='button';button.className='actor-choice';button.dataset.search=option.textContent.toLowerCase();image.loading='lazy';image.alt=option.textContent+' 预览';image.src=previewBase+'?actor='+encodeURIComponent(option.value);image.addEventListener('error',()=>{image.hidden=true;});title.textContent=option.textContent;button.append(image,title);button.addEventListener('click',()=>{if(!active)return;active.value=option.value;update(active);error.textContent='';hide();});choices.push(button);list.append(button);}const apply=()=>{const keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 个 Actor`;empty.hidden=shown!==0;};const show=select=>{active=select;modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=active&&triggers.get(active);if(trigger)trigger.focus();}close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});search.addEventListener('input',apply);for(const form of document.querySelectorAll('.npc form'))form.addEventListener('submit',event=>{const missing=[...form.querySelectorAll('select.actor-resource-select')].find(select=>!select.value);if(!missing)return;event.preventDefault();error.textContent='请先选择一个可用的 Actor 资源';show(missing);});apply();};"
     "const setupNpcKinds=()=>{for(const form of document.querySelectorAll('.npc form')){"
@@ -521,6 +526,7 @@ static const char g_vm_mock_admin_script[] =
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupMonsterDrops();setupTaskRewards();setupActorPicker();setupNpcKinds();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "document.addEventListener('DOMContentLoaded',()=>{"
     "setupAccountList();"
+    "setupMonsterSearch();"
     "keep('.scene-list','cbe-admin-scenes-scroll');"
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
@@ -6755,55 +6761,20 @@ static void vm_mock_user_redirect_message(vm_mock_service_socket client,
     vm_mock_admin_send_location(client, location, NULL);
 }
 
-static int vm_mock_admin_handle_client(vm_mock_service_socket client)
+/* The request dispatcher only sees a complete, NUL-terminated request.  Its
+ * caller owns the allocated buffer so all existing response branches can
+ * return normally without leaking a large form body. */
+static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
+                                          char *request,
+                                          size_t headerLen,
+                                          u32 contentLength)
 {
-    char request[VM_MOCK_ADMIN_REQUEST_MAX + 1];
     char method[12];
     char target[1024];
     char version[16];
-    char *headerEnd = NULL;
     char *query = NULL;
     char *body = NULL;
     char *response = NULL;
-    size_t received = 0;
-    size_t headerLen = 0;
-    u32 contentLength = 0;
-    int timeoutMs = VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS;
-
-#ifdef _WIN32
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeoutMs, sizeof(timeoutMs));
-#else
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeoutMs, sizeof(timeoutMs));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeoutMs, sizeof(timeoutMs));
-#endif
-    memset(request, 0, sizeof(request));
-    while (received < VM_MOCK_ADMIN_REQUEST_MAX)
-    {
-        int rc = recv(client, request + received,
-                      (int)(VM_MOCK_ADMIN_REQUEST_MAX - received), 0);
-        if (rc <= 0)
-            break;
-        received += (size_t)rc;
-        request[received] = 0;
-        headerEnd = strstr(request, "\r\n\r\n");
-        if (headerEnd == NULL)
-            continue;
-        headerLen = (size_t)(headerEnd - request) + 4;
-        if (!vm_mock_admin_parse_content_length(request, headerLen, &contentLength) ||
-            contentLength > VM_MOCK_ADMIN_REQUEST_MAX - headerLen)
-        {
-            vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL, "请求长度无效。\n");
-            return 0;
-        }
-        if (received >= headerLen + contentLength)
-            break;
-    }
-    if (headerEnd == NULL || received < headerLen + contentLength)
-    {
-        vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL, "请求不完整。\n");
-        return 0;
-    }
     if (!vm_mock_admin_request_has_allowed_origin(request, headerLen))
     {
         vm_mock_admin_send_response(client, "403 Forbidden", NULL, NULL,
@@ -7457,6 +7428,104 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
     }
     vm_mock_admin_send_response(client, "404 Not Found", NULL, NULL, "页面不存在。\n");
     return 0;
+}
+
+static bool vm_mock_admin_request_total_length(size_t headerLen,
+                                               u32 contentLength,
+                                               size_t *totalLenOut)
+{
+    size_t bodyLen = (size_t)contentLength;
+
+    if (totalLenOut == NULL || headerLen > VM_MOCK_ADMIN_HEADER_MAX ||
+        bodyLen > VM_MOCK_ADMIN_REQUEST_BODY_MAX)
+        return false;
+    *totalLenOut = headerLen + bodyLen;
+    return true;
+}
+
+/* Receive headers into a small fixed buffer, then size the request allocation
+ * from Content-Length.  This keeps the HTTP framing limit separate from the
+ * form payload size used by large editor pages such as chest rewards. */
+static int vm_mock_admin_handle_client(vm_mock_service_socket client)
+{
+    char headers[VM_MOCK_ADMIN_HEADER_MAX + 1];
+    char *headerEnd = NULL;
+    char *request = NULL;
+    size_t received = 0;
+    size_t headerLen = 0;
+    size_t totalLen = 0;
+    u32 contentLength = 0;
+    int timeoutMs = VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS;
+    int result = 0;
+
+#ifdef _WIN32
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeoutMs,
+               sizeof(timeoutMs));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeoutMs,
+               sizeof(timeoutMs));
+#else
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeoutMs, sizeof(timeoutMs));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeoutMs, sizeof(timeoutMs));
+#endif
+    memset(headers, 0, sizeof(headers));
+    while (received < VM_MOCK_ADMIN_HEADER_MAX)
+    {
+        int rc = recv(client, headers + received,
+                      (int)(VM_MOCK_ADMIN_HEADER_MAX - received), 0);
+
+        if (rc <= 0)
+            break;
+        received += (size_t)rc;
+        headers[received] = 0;
+        headerEnd = strstr(headers, "\r\n\r\n");
+        if (headerEnd != NULL)
+            break;
+    }
+    if (headerEnd == NULL)
+    {
+        vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL,
+                                    "请求头不完整或过长。\n");
+        return 0;
+    }
+    headerLen = (size_t)(headerEnd - headers) + 4u;
+    if (!vm_mock_admin_parse_content_length(headers, headerLen, &contentLength) ||
+        !vm_mock_admin_request_total_length(headerLen, contentLength, &totalLen))
+    {
+        vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL,
+                                    "请求长度无效。\n");
+        return 0;
+    }
+    request = (char *)malloc(totalLen + 1u);
+    if (request == NULL)
+    {
+        vm_mock_admin_send_response(client, "500 Internal Server Error", NULL,
+                                    NULL, "内存不足。\n");
+        return 0;
+    }
+    if (received > totalLen)
+        received = totalLen;
+    memcpy(request, headers, received);
+    while (received < totalLen)
+    {
+        int rc = recv(client, request + received, (int)(totalLen - received), 0);
+
+        if (rc <= 0)
+            break;
+        received += (size_t)rc;
+    }
+    if (received != totalLen)
+    {
+        vm_mock_admin_send_response(client, "400 Bad Request", NULL, NULL,
+                                    "请求不完整。\n");
+        goto done;
+    }
+    request[totalLen] = 0;
+    result = vm_mock_admin_dispatch_request(client, request, headerLen,
+                                             contentLength);
+
+done:
+    free(request);
+    return result;
 }
 
 static vm_mock_service_socket vm_mock_admin_open_listener(const char *bindHost, u16 port)

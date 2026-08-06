@@ -3839,8 +3839,8 @@ static bool vm_net_mock_item_id_is_active_backpack_row(u32 itemId)
     return vm_net_mock_role_find_backpack_item(role, itemId, 0) != NULL;
 }
 
-static bool vm_net_mock_parse_item_use_request(const u8 *request, u32 requestLen,
-                                               vm_net_mock_item_use_request *parsedOut)
+static bool vm_net_mock_parse_item_use_request(
+    const u8 *request, u32 requestLen, vm_net_mock_item_use_request *parsedOut)
 {
     u32 offset = 4;
     vm_net_mock_request_object object;
@@ -3860,13 +3860,16 @@ static bool vm_net_mock_parse_item_use_request(const u8 *request, u32 requestLen
         return false;
     if (offset != requestLen)
         return false;
-    if (object.major != 1 || object.kind != 7 || object.subtype != 1 || object.payloadLen == 0)
+    if (object.major != 1 || object.kind != 7 || object.subtype != 1 ||
+        object.payloadLen == 0)
         return false;
 
     (void)vm_net_mock_get_object_u8_field(object.payload, object.payloadLen, "type", &parsed.type);
-    if (!vm_net_mock_get_object_u16_field(object.payload, object.payloadLen, "seq", &parsed.seq))
+    if (!vm_net_mock_get_object_u16_field(object.payload, object.payloadLen,
+                                          "seq", &parsed.seq))
     {
-        if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "seq", &value) &&
+        if (vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                                "seq", &value) &&
             value <= 0xffffu)
         {
             parsed.seq = (u16)value;
@@ -4947,19 +4950,96 @@ static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const c
     return pos;
 }
 
-/* A chest uses the ordinary item-use request, so its detector must resolve
- * the selected sequence against the active backpack before taking precedence
- * over the broad 1/7/1 consumable handler. */
+typedef struct
+{
+    u32 chestItemId;
+    u16 chestSeq;
+    u16 keySeq;
+    u32 count;
+    u8 itemUseType;
+} vm_net_mock_chest_open_request;
+
+/*
+ * Native chest-open packet captured from guest00024:
+ *
+ *   WT 7/15 { box: tagged-u16(backpack sequence),
+ *             key: tagged-u16(backpack sequence) }
+ *
+ * `box` and `key` are not item IDs.  They identify the exact instances that
+ * the client selected, so the server must validate both rows before it draws
+ * a reward.  Keep this decoder local to chest opening; unknown 7/15 packets
+ * remain unhandled instead of becoming generic consumable requests.
+ */
+static bool vm_net_mock_parse_chest_open_request(
+    const u8 *request, u32 requestLen,
+    vm_net_mock_chest_open_request *parsedOut,
+    u8 *requestSubtypeOut)
+{
+    vm_net_mock_chest_open_request parsed;
+    vm_net_mock_item_use_request itemUse;
+    vm_net_mock_request_object object;
+    u32 offset = 4;
+    u32 boxSeq = 0;
+    u32 keySeq = 0;
+
+    memset(&parsed, 0, sizeof(parsed));
+    memset(&itemUse, 0, sizeof(itemUse));
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    if (requestSubtypeOut)
+        *requestSubtypeOut = 0;
+
+    if (request != NULL && requestLen >= 9 && request[0] == 'W' &&
+        request[1] == 'T' &&
+        vm_net_mock_next_request_object(request, requestLen, &offset,
+                                        &object) &&
+        offset == requestLen && object.major == 1 && object.kind == 7 &&
+        object.subtype == 15 &&
+        vm_net_mock_get_object_tagged_number_entry(
+            object.payload, object.payloadLen, "box", &boxSeq) &&
+        vm_net_mock_get_object_tagged_number_entry(
+            object.payload, object.payloadLen, "key", &keySeq) &&
+        boxSeq != 0 && boxSeq <= 0xffffu && keySeq != 0 &&
+        keySeq <= 0xffffu)
+    {
+        parsed.chestSeq = (u16)boxSeq;
+        parsed.keySeq = (u16)keySeq;
+        parsed.count = 1;
+        parsed.itemUseType = 1;
+        if (parsedOut)
+            *parsedOut = parsed;
+        if (requestSubtypeOut)
+            *requestSubtypeOut = 15;
+        return true;
+    }
+    if (!vm_net_mock_parse_item_use_request(request, requestLen, &itemUse))
+        return false;
+
+    parsed.chestItemId = itemUse.itemId;
+    parsed.chestSeq = itemUse.seq;
+    parsed.count = itemUse.count;
+    parsed.itemUseType = itemUse.type;
+    if (parsedOut)
+        *parsedOut = parsed;
+    if (requestSubtypeOut)
+        *requestSubtypeOut = 1;
+    return true;
+}
+
+/* Resolve the selected sequence against the active backpack before taking
+ * precedence over the broad `1/7/1` consumable handler. */
 static bool vm_net_mock_is_chest_open_request(const u8 *request, u32 requestLen)
 {
-    vm_net_mock_item_use_request parsed;
+    vm_net_mock_chest_open_request parsed;
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *item = NULL;
 
-    if (!vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
+    if (!vm_net_mock_parse_chest_open_request(request, requestLen, &parsed,
+                                              NULL))
         return false;
     role = vm_net_mock_active_role();
-    item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, parsed.seq);
+    item = vm_net_mock_role_find_backpack_item(role, parsed.chestItemId,
+                                               parsed.chestSeq);
     return item != NULL && vm_net_mock_chest_kind_index(item->itemId) >= 0;
 }
 
@@ -5052,7 +5132,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                                                  u32 requestLen,
                                                  u8 *out, u32 outCap)
 {
-    vm_net_mock_item_use_request parsed;
+    vm_net_mock_chest_open_request parsed;
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *chestItem = NULL;
     vm_net_mock_backpack_item_state *keyItem = NULL;
@@ -5072,15 +5152,17 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     u32 objectStart = 0;
     u8 objectCount = 0;
     u8 itemUseType = 1;
+    u8 requestSubtype = 0;
 
     if (out == NULL || outCap < pos ||
-        !vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
+        !vm_net_mock_parse_chest_open_request(request, requestLen, &parsed,
+                                              &requestSubtype))
     {
         return 0;
     }
     role = vm_net_mock_active_role();
-    chestItem = vm_net_mock_role_find_backpack_item(role, parsed.itemId,
-                                                     parsed.seq);
+    chestItem = vm_net_mock_role_find_backpack_item(role, parsed.chestItemId,
+                                                     parsed.chestSeq);
     if (role == NULL || chestItem == NULL ||
         (chestIndex = vm_net_mock_chest_kind_index(chestItem->itemId)) < 0)
     {
@@ -5097,8 +5179,11 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     if (chest->rewardCount == 0)
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest reward pool is not configured");
-    keyItem = vm_net_mock_role_find_backpack_item(role, chest->keyItemId, 0);
-    if (keyItem == NULL || keyItem->count == 0)
+    keyItem = vm_net_mock_role_find_backpack_item(role,
+                                                   parsed.keySeq ? 0 : chest->keyItemId,
+                                                   parsed.keySeq);
+    if (keyItem == NULL || keyItem->itemId != chest->keyItemId ||
+        keyItem->count == 0)
         return vm_net_mock_build_item_use_hint_response(out, outCap,
                                                          "Matching key required");
 
@@ -5132,7 +5217,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest reward state is invalid");
 
-    itemUseType = parsed.type ? parsed.type : 1;
+    itemUseType = parsed.itemUseType ? parsed.itemUseType : 1;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1,
                                      &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
@@ -5165,14 +5250,14 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest opening could not be saved");
     }
-    printf("[info][network] mock_chest_open chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
-           chest->chestItemId, chest->keyItemId, chestItem->seq, keyItem->seq,
-           reward->itemId, rewardSeq, reward->count, reward->weight,
-           totalWeight, draw);
-    vm_autotest_note("mock_chest_open chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
-                     chest->chestItemId, chest->keyItemId, chestItem->seq,
-                     keyItem->seq, reward->itemId, rewardSeq, reward->count,
-                     reward->weight, totalWeight);
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+           requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
+           keyItem->seq, reward->itemId, rewardSeq, reward->count,
+           reward->weight, totalWeight, draw);
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
+                     requestSubtype, chest->chestItemId, chest->keyItemId,
+                     chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
+                     reward->count, reward->weight, totalWeight);
     return pos;
 }
 
