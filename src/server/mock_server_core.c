@@ -4427,6 +4427,10 @@ enum
     VM_NET_MOCK_ROLE_LEVEL_CAP = 70,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
     VM_NET_MOCK_BATTLE_DROP_RESULT_MAX = 8,
+    /* 6/4 awardinfo carries a u8 row count.  Keep task rewards below the
+     * battle-row ceiling so the server, admin and client-safe wire builder
+     * share one bounded multi-item contract. */
+    VM_NET_MOCK_TASK_REWARD_ITEM_MAX = 8,
     VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_BATTLE_POISON_SLIME_ID = 105,
     VM_NET_MOCK_BATTLE_POISON_SLIME_EXP = 5,
@@ -4481,11 +4485,15 @@ enum
         VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
         VM_NET_MOCK_BATTLE_DROP_RESULT_MAX *
         VM_NET_MOCK_EQUIPMENT_SYNC_ITEMINFO_ROW_BYTES,
-    /* 6/4 awardinfo has EXP and money (two tagged u32s), followed by one
-     * item-use row.  Its maximum is exactly 94 bytes. */
+    /* 6/4 awardinfo has EXP and money (two tagged u32s), followed by the
+     * case-4 item-add sequence.  The client reads its u8 row count and then
+     * every item-use row, so reserve the configured bounded task maximum. */
     VM_NET_MOCK_TASK_AWARDINFO_MAX_BYTES =
         2 * VM_NET_MOCK_ITEMINFO_U32_BYTES +
-        VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES
+        VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES +
+        VM_NET_MOCK_TASK_REWARD_ITEM_MAX *
+        (VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES -
+         VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES)
 };
 
 /* Equipped-item login records use their slot number plus one as a client

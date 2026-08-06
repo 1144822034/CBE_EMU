@@ -497,7 +497,9 @@ static const char g_vm_mock_admin_script[] =
     "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=document.querySelector(`[data-item-picker-open=\"${activeId}\"]`);if(trigger)trigger.focus();}"
     "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',apply);search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});apply();};"
     "const setupMonsterDrops=()=>{const box=document.querySelector('#monster-drop-list'),add=document.querySelector('#monster-drop-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-drop-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-drop-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-drop-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),rate=row.querySelector('[data-drop-rate]');if(input)input.value='0';if(rate)rate.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
+    "const setupTaskRewards=()=>{const box=document.querySelector('#task-reward-list'),add=document.querySelector('#task-reward-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-task-reward-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-task-reward-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-task-reward-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),quantity=row.querySelector('[data-task-reward-count]'),type=row.querySelector('[data-task-reward-type]');if(input)input.value='0';if(quantity)quantity.value='0';if(type)type.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
     "const setupUpdateResourcePicker=()=>{const source=document.querySelector('#update-resource-select'),form=source&&source.closest('form'),open=document.querySelector('#update-resource-picker-open'),modal=document.querySelector('#update-resource-picker-modal'),close=document.querySelector('#update-resource-picker-close'),suffix=document.querySelector('#update-resource-suffix'),search=document.querySelector('#update-resource-search'),list=document.querySelector('#update-resource-list'),count=document.querySelector('#update-resource-count'),empty=document.querySelector('#update-resource-empty'),error=document.querySelector('#update-resource-error'),label=document.querySelector('[data-update-resource-label]');if(!source||!form||!open||!modal||!close||!suffix||!search||!list||!count||!empty||!error||!label)return;const options=[...source.options].filter(option=>option.value),suffixOf=text=>{const dot=text.lastIndexOf('.');return dot>=0&&dot<text.length-1?text.slice(dot+1).toLowerCase():'(无后缀)';},choices=[];const suffixes=[...new Set(options.map(option=>suffixOf(option.value)))].sort((a,b)=>a.localeCompare(b));for(const value of suffixes){const option=document.createElement('option');option.value=value;option.textContent=value==='(无后缀)'?value:`.${value}`;suffix.append(option);}const updateLabel=()=>{const selected=options.find(option=>option.value===source.value);label.textContent=selected?selected.textContent:'请选择要发布的资源';};for(const option of options){const button=document.createElement('button');button.type='button';button.className='resource-choice';button.dataset.suffix=suffixOf(option.value);button.dataset.search=option.textContent.toLowerCase();const title=document.createElement('strong');title.textContent=option.textContent;const meta=document.createElement('span');meta.textContent=button.dataset.suffix==='(无后缀)'?'无后缀':`.${button.dataset.suffix}`;button.append(title,meta);button.addEventListener('click',()=>{source.value=option.value;updateLabel();error.textContent='';hide();});choices.push(button);list.append(button);}const apply=()=>{const wanted=suffix.value,keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=(wanted==='all'||choice.dataset.suffix===wanted)&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 个资源`;empty.hidden=shown!==0;};const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};function hide(){modal.hidden=true;document.body.classList.remove('modal-open');open.focus();}open.addEventListener('click',show);close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});suffix.addEventListener('change',apply);search.addEventListener('input',apply);form.addEventListener('submit',event=>{if(source.value)return;event.preventDefault();error.textContent='请先选择要发布的资源';show();});updateLabel();apply();};"
+    "const setupActorPicker=()=>{const source=document.querySelector('#actor-picker-options'),modal=document.querySelector('#actor-picker-modal'),close=document.querySelector('#actor-picker-close'),search=document.querySelector('#actor-picker-search'),list=document.querySelector('#actor-picker-list'),count=document.querySelector('#actor-result-count'),empty=document.querySelector('#actor-picker-empty'),error=document.querySelector('#actor-picker-error'),selects=[...document.querySelectorAll('select.actor-resource-select')];if(!source||!modal||!close||!search||!list||!count||!empty||!error||!selects.length)return;const options=[...source.options].filter(option=>option.value),optionByValue=new Map(options.map(option=>[option.value,option]));let active=null;const triggers=new Map(),choices=[];const update=select=>{const trigger=triggers.get(select);if(!trigger)return;const option=optionByValue.get(select.value),selected=select.options[select.selectedIndex],label=trigger.querySelector('[data-actor-picker-label]');if(label)label.textContent=option?option.textContent:(selected&&selected.textContent?selected.textContent:(select.value?`不可用资源：${select.value}`:'请选择 Actor 资源'));};for(const select of selects){const field=select.closest('.actor-picker-field'),trigger=field&&field.querySelector('[data-actor-picker-open]');if(!trigger)continue;triggers.set(select,trigger);trigger.addEventListener('click',()=>show(select));select.addEventListener('change',()=>update(select));update(select);}const previewBase=new URL('actor-preview.svg',window.location.href).href;for(const option of options){const button=document.createElement('button'),image=document.createElement('img'),title=document.createElement('strong');button.type='button';button.className='actor-choice';button.dataset.search=option.textContent.toLowerCase();image.loading='lazy';image.alt=option.textContent+' 预览';image.src=previewBase+'?actor='+encodeURIComponent(option.value);image.addEventListener('error',()=>{image.hidden=true;});title.textContent=option.textContent;button.append(image,title);button.addEventListener('click',()=>{if(!active)return;active.value=option.value;update(active);error.textContent='';hide();});choices.push(button);list.append(button);}const apply=()=>{const keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=!keyword||choice.dataset.search.includes(keyword);choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 个 Actor`;empty.hidden=shown!==0;};const show=select=>{active=select;modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=active&&triggers.get(active);if(trigger)trigger.focus();}close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});search.addEventListener('input',apply);for(const form of document.querySelectorAll('.npc form'))form.addEventListener('submit',event=>{const missing=[...form.querySelectorAll('select.actor-resource-select')].find(select=>!select.value);if(!missing)return;event.preventDefault();error.textContent='请先选择一个可用的 Actor 资源';show(missing);});apply();};"
     "const setupNpcKinds=()=>{for(const form of document.querySelectorAll('.npc form')){"
     "const kind=form.querySelector('select[name=kind]');const fields=form.querySelector('.instance-fields');"
     "if(!kind||!fields)continue;const apply=()=>{const show=kind.value==='6';"
@@ -514,14 +516,14 @@ static const char g_vm_mock_admin_script[] =
     "const reset=()=>{const wanted=input.value.trim();if(wanted===query&&count())return;query=wanted;next=0;more=true;revision++;load(true);};"
     "form.addEventListener('submit',event=>{event.preventDefault();clearTimeout(timer);reset();});input.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(reset,220);});list.addEventListener('scroll',()=>{if(list.scrollTop+list.clientHeight>=list.scrollHeight-72)load(false);},{passive:true});"
     "if(!count())load(true);else updateStatus(`已显示 ${count()} 个账号${more?'，向下滚动加载更多':''}`);};"
-    "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupMonsterDrops();setupNpcKinds();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
+    "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupMonsterDrops();setupTaskRewards();setupActorPicker();setupNpcKinds();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
     "document.addEventListener('DOMContentLoaded',()=>{"
     "setupAccountList();"
     "keep('.scene-list','cbe-admin-scenes-scroll');"
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
-    "setupItemPicker();setupMonsterDrops();setupUpdateResourcePicker();setupNpcKinds();setupPartialNavigation();});"
+    "setupItemPicker();setupMonsterDrops();setupTaskRewards();setupUpdateResourcePicker();setupActorPicker();setupNpcKinds();setupPartialNavigation();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -1497,7 +1499,7 @@ static void vm_mock_admin_render_actor_select(
         }
     }
     vm_mock_admin_text_appendf(
-        page, "<select name=\"actor_resource\" required>");
+        page, "<div class=\"actor-picker-field\"><select class=\"actor-resource-select\" name=\"actor_resource\" required hidden>");
     if (currentActor != NULL && currentActor[0] != 0 && !currentFound)
     {
         vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>");
@@ -1528,7 +1530,46 @@ static void vm_mock_admin_render_actor_select(
     }
     if (selectableCount == 0)
         vm_mock_admin_text_appendf(page, "<option value=\"\" disabled>未找到 Actor 资源</option>");
-    vm_mock_admin_text_appendf(page, "</select>");
+    vm_mock_admin_text_appendf(
+        page,
+        "</select><button class=\"actor-picker-trigger\" type=\"button\" data-actor-picker-open aria-haspopup=\"dialog\" aria-controls=\"actor-picker-modal\"><span data-actor-picker-label>请选择 Actor 资源</span><small>搜索与预览</small></button></div>");
+}
+
+static void vm_mock_admin_render_actor_picker_modal(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *actorFiles,
+    u32 actorCount)
+{
+    u32 selectableCount = 0;
+
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(page, "<select id=\"actor-picker-options\" hidden>");
+    for (u32 i = 0; i < actorCount; ++i)
+    {
+        char actorUtf8[128];
+
+        if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
+                actorFiles[i].name))
+        {
+            continue;
+        }
+        memset(actorUtf8, 0, sizeof(actorUtf8));
+        vm_mock_admin_resource_name_to_utf8(actorFiles[i].name, actorUtf8,
+                                             sizeof(actorUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, actorFiles[i].name);
+        vm_mock_admin_text_appendf(page, "\">");
+        vm_mock_admin_text_append_html(page,
+                                       actorUtf8[0] ? actorUtf8 : actorFiles[i].name);
+        vm_mock_admin_text_appendf(page, "</option>");
+        ++selectableCount;
+    }
+    vm_mock_admin_text_appendf(page,
+        "</select><div id=\"actor-picker-modal\" class=\"actor-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"actor-picker-title\" hidden><div class=\"actor-picker-panel\"><div class=\"actor-picker-head\"><div><h3 id=\"actor-picker-title\">选择 Actor 资源</h3><p>仅显示可安全用于动态 NPC 的 Actor；缩略图由服务端资源预览生成。</p></div><button id=\"actor-picker-close\" class=\"actor-picker-close\" type=\"button\" aria-label=\"关闭\">×</button></div><div class=\"actor-picker-tools\"><label><span>搜索资源名称</span><input id=\"actor-picker-search\" type=\"search\" placeholder=\"例如 n_man、woman、guard\" autocomplete=\"off\"></label></div><div class=\"actor-result-bar\"><span id=\"actor-result-count\"></span><span id=\"actor-picker-error\" class=\"actor-picker-error\"></span></div><div id=\"actor-picker-list\" class=\"actor-picker-list\"></div><p id=\"actor-picker-empty\" class=\"actor-picker-empty\" hidden>没有符合条件的 Actor 资源。</p></div></div>");
+    if (selectableCount == 0)
+    {
+        printf("[warn][mock-admin] actor_picker_catalog_empty source=server-resource-root\n");
+    }
 }
 
 static void vm_mock_admin_render_xse_select(
@@ -3324,6 +3365,7 @@ static void vm_mock_admin_render_content_page(char *response,
         ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-help{grid-column:1/-1;margin:0;color:#7a2e0e;font-size:12px}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
+        ".actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
@@ -3699,7 +3741,9 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_text_appendf(&page,
         "<div class=\"actions\"><button type=\"submit\">增加 NPC</button></div></form></div>"
         "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。装备回收商人仅列出背包中的装备，并按装备基础价值的 50% 回收为铜钱；已装备在角色身上的物品不会出现在回收列表。副本向导可独立启用场景传送、守关怪挑战或同时启用两者，并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
-        "</div></section></div></main></body></html>");
+        "</div>");
+    vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
+    vm_mock_admin_text_appendf(&page, "</section></div></main></body></html>");
 
     if (page.truncated)
     {
@@ -4435,6 +4479,52 @@ static void vm_mock_admin_render_task_requirement_select(
     vm_mock_admin_text_appendf(page, "</select>");
 }
 
+static void vm_mock_admin_render_task_reward_rows(
+    vm_mock_admin_text *page, const vm_net_mock_task_definition *task)
+{
+    u8 visibleCount = 1;
+
+    if (page == NULL || task == NULL)
+        return;
+    if (task->rewardItemNum != 0)
+        visibleCount = task->rewardItemNum;
+    vm_mock_admin_text_appendf(page,
+        "<div id=\"task-reward-list\" class=\"task-reward-list\">");
+    for (u8 slot = 0; slot < VM_NET_MOCK_TASK_REWARD_ITEM_MAX; ++slot)
+    {
+        char pickerId[48];
+        char fieldName[48];
+        char label[64];
+        u32 itemId = slot < task->rewardItemNum
+                         ? task->rewardItems[slot].itemId
+                         : 0;
+        u32 itemCount = slot < task->rewardItemNum
+                            ? task->rewardItems[slot].count
+                            : 0;
+        u8 itemType = slot < task->rewardItemNum
+                          ? task->rewardItems[slot].itemType
+                          : 0;
+
+        snprintf(pickerId, sizeof(pickerId), "task-reward-item-%u", slot);
+        snprintf(fieldName, sizeof(fieldName), "reward_item_id_%u", slot);
+        snprintf(label, sizeof(label), "奖励物品 %u", (u32)slot + 1);
+        vm_mock_admin_text_appendf(
+            page, "<div class=\"task-reward-row\" data-task-reward-row%s>",
+            slot < visibleCount ? "" : " hidden");
+        vm_mock_admin_render_item_picker_field(page, pickerId, fieldName,
+                                               label, itemId, false);
+        vm_mock_admin_text_appendf(
+            page,
+            "<label class=\"field\"><span>数量</span><input type=\"number\" name=\"reward_item_count_%u\" min=\"0\" max=\"4294967295\" value=\"%u\" data-task-reward-count></label>"
+            "<label class=\"field\"><span>类型</span><input type=\"number\" name=\"reward_item_type_%u\" min=\"0\" max=\"255\" value=\"%u\" data-task-reward-type></label>"
+            "<button class=\"secondary task-reward-remove\" type=\"button\" data-task-reward-remove>移除</button></div>",
+            slot, itemCount, slot, itemType);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</div><div class=\"actions task-reward-actions\"><button id=\"task-reward-add\" class=\"secondary\" type=\"button\">＋ 添加奖励物品</button></div>");
+}
+
 static void vm_mock_admin_render_task_page(char *response,
                                            size_t responseCap,
                                            const char *query)
@@ -4527,7 +4617,7 @@ static void vm_mock_admin_render_task_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>江湖OL 任务管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.task-catalog{display:flex;flex-direction:column;min-height:0;overflow:hidden}.task-catalog-head{flex:none}.task-catalog-head .button{display:block;margin-bottom:14px}.task-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
-        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
+        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.task-reward-list{display:grid;gap:9px}.task-reward-row{display:grid;grid-template-columns:minmax(220px,1.7fr) 120px 100px auto;gap:10px;align-items:end;padding:10px;border:1px solid #eaecf0;border-radius:7px;background:#f9fafb}.task-reward-actions{justify-content:flex-start;margin-top:10px}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields,.task-reward-row{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><style>@media(max-width:900px){.task-catalog{max-height:300px}.task-list{max-height:none}}</style>"
         "<div class=\"grid\"><aside class=\"card task-catalog\"><div class=\"task-catalog-head\"><a class=\"button%s\" data-admin-select%s href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2></div><div class=\"task-list\" data-admin-list>",
@@ -4574,7 +4664,13 @@ static void vm_mock_admin_render_task_page(char *response,
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>任务名称（最多31字节）</span><input name=\"name\" maxlength=\"31\" value=\""); vm_mock_admin_text_append_html(&page, nameUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>发布者（最多15字节）</span><input name=\"giver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, giverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label><label class=\"field\"><span>交付者（最多15字节）</span><input name=\"receiver\" maxlength=\"15\" value=\""); vm_mock_admin_text_append_html(&page, receiverUtf8); vm_mock_admin_text_appendf(&page, "\" required></label>");
     vm_mock_admin_text_appendf(&page, "</div><div class=\"group\"><h2>任务目标</h2><div class=\"fields\"><label class=\"field\"><span>条件一类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type1", edit.requirementType1); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件一目标 ID</span><input id=\"task-requirement-1\" type=\"number\" name=\"requirement_id1\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId1); vm_mock_admin_render_item_picker_button(&page, "task-requirement-1", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件一数量</span><input type=\"number\" name=\"requirement_count1\" min=\"0\" max=\"255\" value=\"%u\"></label>", edit.requirementCount1);
     vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>条件二类型</span>"); vm_mock_admin_render_task_requirement_select(&page, "requirement_type2", edit.requirementType2); vm_mock_admin_text_appendf(&page, "</label><div class=\"field\"><span>条件二目标 ID</span><input id=\"task-requirement-2\" type=\"number\" name=\"requirement_id2\" min=\"0\" max=\"4294967295\" value=\"%u\" data-item-picker-input>", edit.requirementId2); vm_mock_admin_render_item_picker_button(&page, "task-requirement-2", "收集物品时点击选择"); vm_mock_admin_text_appendf(&page, "</div><label class=\"field\"><span>条件二数量</span><input type=\"number\" name=\"requirement_count2\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field wide\"><span>目标说明（最多95字节）</span><textarea name=\"goal\" maxlength=\"95\">", edit.requirementCount2); vm_mock_admin_text_append_html(&page, goalUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div>");
-    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\">"); vm_mock_admin_render_item_picker_field(&page, "task-given-item", "given_item_id", "接取给予物品", edit.givenItemId, false); vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label>", edit.givenItemCount, edit.rewardExp, edit.rewardMoney); vm_mock_admin_render_item_picker_field(&page, "task-reward-item", "reward_item_id", "奖励物品", edit.rewardItemId, false); vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>奖励物品数量</span><input type=\"number\" name=\"reward_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励物品类型</span><input type=\"number\" name=\"reward_item_type\" min=\"0\" max=\"255\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.rewardItemCount, edit.rewardItemType); vm_mock_admin_text_append_html(&page, rewardUtf8); vm_mock_admin_text_appendf(&page, "\"></label></div></div>");
+    vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>给予物品与奖励</h2><div class=\"fields\">");
+    vm_mock_admin_render_item_picker_field(&page, "task-given-item", "given_item_id", "接取给予物品", edit.givenItemId, false);
+    vm_mock_admin_text_appendf(&page, "<label class=\"field\"><span>给予数量</span><input type=\"number\" name=\"given_item_count\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励经验</span><input type=\"number\" name=\"reward_exp\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励铜钱</span><input type=\"number\" name=\"reward_money\" min=\"0\" max=\"4294967295\" value=\"%u\"></label><label class=\"field\"><span>奖励说明（最多31字节）</span><input name=\"reward_text\" maxlength=\"31\" value=\"", edit.givenItemCount, edit.rewardExp, edit.rewardMoney);
+    vm_mock_admin_text_append_html(&page, rewardUtf8);
+    vm_mock_admin_text_appendf(&page, "\"></label></div><h2 style=\"margin-top:16px\">奖励物品</h2><p class=\"hint\">可配置最多 %u 项不同物品；提交任务时会按客户端原生 awardinfo 多行流一次性入包。装备、神仙壶和逍遥壶每项数量必须为 1。</p>", VM_NET_MOCK_TASK_REWARD_ITEM_MAX);
+    vm_mock_admin_render_task_reward_rows(&page, &edit);
+    vm_mock_admin_text_appendf(&page, "</div>");
     vm_mock_admin_text_appendf(&page, "<div class=\"group\"><h2>NPC 对话</h2><p class=\"hint\">NPC 绑定该任务后按未接、进行中、可提交三种状态显示；留空时使用服务端安全默认文案。</p><div class=\"fields\"><label class=\"field wide\"><span>可接取时</span><textarea name=\"offer_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, offerUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>进行中</span><textarea name=\"active_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, activeUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label><label class=\"field wide\"><span>可提交时</span><textarea name=\"completed_dialog\" maxlength=\"255\">"); vm_mock_admin_text_append_html(&page, completedUtf8); vm_mock_admin_text_appendf(&page, "</textarea></label></div></div><p class=\"hint\">条件类型 1 为收集物品、2 为击败怪物；只有“收集物品”条件应使用目录选择器。两项都为 0 时，接取后再次与交付 NPC 对话即可完成。名称长度按客户端 GBK 字节槽校验。</p><div class=\"actions\"><button type=\"submit\">保存任务</button></div></form>");
     vm_mock_admin_render_item_picker_modal(&page);
     if (!createNew && edit.overridden)
@@ -5342,11 +5438,43 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
     VM_TASK_FORM_U32("given_item_count", givenItemCount);
     VM_TASK_FORM_U32("reward_exp", rewardExp);
     VM_TASK_FORM_U32("reward_money", rewardMoney);
-    VM_TASK_FORM_U32("reward_item_id", rewardItemId);
-    VM_TASK_FORM_U32("reward_item_count", rewardItemCount);
-    VM_TASK_FORM_U8("reward_item_type", rewardItemType);
 #undef VM_TASK_FORM_U8
 #undef VM_TASK_FORM_U32
+    for (u8 slot = 0; slot < VM_NET_MOCK_TASK_REWARD_ITEM_MAX; ++slot)
+    {
+        char itemField[48];
+        char countField[48];
+        char typeField[48];
+        u32 itemId = 0;
+        u32 itemCount = 0;
+        u32 itemType = 0;
+
+        snprintf(itemField, sizeof(itemField), "reward_item_id_%u", slot);
+        snprintf(countField, sizeof(countField), "reward_item_count_%u", slot);
+        snprintf(typeField, sizeof(typeField), "reward_item_type_%u", slot);
+        if (!vm_mock_admin_form_u32(body, itemField, 0xffffffffu, &itemId) ||
+            !vm_mock_admin_form_u32(body, countField, 0xffffffffu, &itemCount) ||
+            !vm_mock_admin_form_u32(body, typeField, 0xffu, &itemType))
+        {
+            vm_mock_admin_redirect_tasks(client, taskId, "error",
+                                         "任务奖励表单字段不完整或数值越界");
+            return;
+        }
+        if (itemId == 0 && itemCount == 0)
+            continue;
+        if (itemId == 0 || itemCount == 0 ||
+            task.rewardItemNum >= VM_NET_MOCK_TASK_REWARD_ITEM_MAX)
+        {
+            vm_mock_admin_redirect_tasks(client, taskId, "error",
+                                         "每项任务奖励都必须同时选择物品和数量");
+            return;
+        }
+        task.rewardItems[task.rewardItemNum].itemId = itemId;
+        task.rewardItems[task.rewardItemNum].count = itemCount;
+        task.rewardItems[task.rewardItemNum].itemType = (u8)itemType;
+        ++task.rewardItemNum;
+    }
+    vm_net_mock_task_reward_items_sync_legacy(&task);
     if (task.requirementType1 > 2 || task.requirementType2 > 2 ||
         !vm_mock_admin_utf8_to_gbk_task_text(nameUtf8, task.name,
                                              sizeof(task.name), false) ||
@@ -5372,8 +5500,6 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
     }
     if ((task.givenItemId != 0 &&
          vm_net_mock_find_shop_catalog_item(task.givenItemId) == NULL) ||
-        (task.rewardItemId != 0 &&
-         vm_net_mock_find_shop_catalog_item(task.rewardItemId) == NULL) ||
         (task.requirementType1 == 1 && task.requirementId1 != 0 &&
          vm_net_mock_find_shop_catalog_item(task.requirementId1) == NULL) ||
         (task.requirementType2 == 1 && task.requirementId2 != 0 &&
@@ -5383,6 +5509,29 @@ static void vm_mock_admin_handle_task_action(vm_mock_service_socket client,
             client, taskId, "error",
             "任务中的物品 ID 不在物品目录中");
         return;
+    }
+    for (u8 rewardIndex = 0; rewardIndex < task.rewardItemNum;
+         ++rewardIndex)
+    {
+        if (vm_net_mock_find_shop_catalog_item(
+                task.rewardItems[rewardIndex].itemId) == NULL)
+        {
+            vm_mock_admin_redirect_tasks(
+                client, taskId, "error",
+                "任务奖励中的物品 ID 不在物品目录中");
+            return;
+        }
+        if ((vm_net_mock_find_equipment_catalog_item(
+                 task.rewardItems[rewardIndex].itemId) != NULL ||
+             vm_net_mock_backpack_item_id_uses_reservoir_count(
+                 task.rewardItems[rewardIndex].itemId)) &&
+            task.rewardItems[rewardIndex].count != 1)
+        {
+            vm_mock_admin_redirect_tasks(
+                client, taskId, "error",
+                "装备、神仙壶和逍遥壶必须按每项数量 1 配置奖励");
+            return;
+        }
     }
     if (!vm_net_mock_task_admin_save(&task, &error))
     {

@@ -324,6 +324,19 @@ CREATE TABLE IF NOT EXISTS `server_tasks` (
   KEY `idx_server_tasks_enabled` (`enabled`, `task_id`)
 ) ENGINE=InnoDB;
 
+-- A task.dsh-compatible first reward remains mirrored in server_tasks.  This
+-- relation is authoritative when rows exist and preserves the deterministic
+-- award order consumed by the client's 6/4 awardinfo parser.
+CREATE TABLE IF NOT EXISTS `server_task_reward_items` (
+  `task_id` INT UNSIGNED NOT NULL,
+  `reward_order` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL,
+  `item_type` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY (`task_id`, `reward_order`),
+  KEY `idx_server_task_reward_items_item` (`item_id`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `role_id_sequence` (
   `role_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
