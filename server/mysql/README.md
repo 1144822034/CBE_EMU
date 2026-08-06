@@ -47,6 +47,16 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_task_
 不会导入或改写；后台只保存编辑覆盖项和新增任务。服务启动时也会自动执行同等的
 `CREATE TABLE IF NOT EXISTS`。
 
+已有数据库升级到“任务可奖励多个物品”时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_task_multi_rewards.sql
+```
+
+脚本新增 `server_task_reward_items`，不会修改已有任务或角色数据。没有该表行的
+任务仍使用 `server_tasks.reward_item_*` 或原版 `task.dsh` 的单项奖励；后台保存过
+的任务会把全部奖励按顺序写入新表。服务启动也会自动创建该表。
+
 已有动态 NPC 任务绑定增加“完成后可重复接取”开关时，先停止 mock-service，且仅在
 `server_dynamic_npc_tasks` 尚无 `repeatable` 列时执行：
 
@@ -229,7 +239,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `account_role_backpack`：按角色和背包槽保存物品实例、数量、强化等级和当前/最大耐久；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
 - `account_role_training_books`：921 修炼天书的按账号、角色、背包序号持久化的标题、说明、等级与经验实例数据。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
-- `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
+- `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、首项奖励和三阶段 NPC 对话。
+- `server_task_reward_items`：任务的有序多项物品奖励；存在记录时覆盖 `server_tasks` 的首项奖励兼容字段。
 - `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。

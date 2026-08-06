@@ -420,6 +420,13 @@ enum
 
 typedef struct
 {
+    u32 itemId;
+    u32 count;
+    u8 itemType;
+} vm_net_mock_task_reward_item;
+
+typedef struct
+{
     u32 taskId;
     bool enabled;
     bool builtin;
@@ -441,6 +448,14 @@ typedef struct
     u32 rewardItemId;
     u32 rewardItemCount;
     u8 rewardItemType;
+    /* The legacy fields above remain the first reward for task.dsh and
+     * server_tasks compatibility.  New MySQL reward rows are authoritative
+     * when present and are serialized as the native multi-row 6/4 awardinfo
+     * sequence consumed by the task callback. */
+    u8 rewardItemNum;
+    vm_net_mock_task_reward_item
+        rewardItems[VM_NET_MOCK_TASK_REWARD_ITEM_MAX];
+    bool rewardItemsOverridden;
     char name[32];
     /* Preserve the task.dsh name as an XSE marker alias when the admin edits
      * the player-facing title of a built-in task. */
@@ -542,6 +557,76 @@ static int vm_net_mock_task_catalog_raw_index(u32 taskId)
     return -1;
 }
 
+static void vm_net_mock_task_reward_items_from_legacy(
+    vm_net_mock_task_definition *task)
+{
+    if (task == NULL)
+        return;
+    memset(task->rewardItems, 0, sizeof(task->rewardItems));
+    task->rewardItemNum = 0;
+    task->rewardItemsOverridden = false;
+    if (task->rewardItemId != 0 && task->rewardItemCount != 0)
+    {
+        task->rewardItems[0].itemId = task->rewardItemId;
+        task->rewardItems[0].count = task->rewardItemCount;
+        task->rewardItems[0].itemType = task->rewardItemType;
+        task->rewardItemNum = 1;
+    }
+}
+
+static void vm_net_mock_task_reward_items_sync_legacy(
+    vm_net_mock_task_definition *task)
+{
+    if (task == NULL)
+        return;
+    if (task->rewardItemNum == 0)
+    {
+        task->rewardItemId = 0;
+        task->rewardItemCount = 0;
+        task->rewardItemType = 0;
+        return;
+    }
+    task->rewardItemId = task->rewardItems[0].itemId;
+    task->rewardItemCount = task->rewardItems[0].count;
+    task->rewardItemType = task->rewardItems[0].itemType;
+}
+
+static bool vm_net_mock_task_reward_items_are_valid(
+    const vm_net_mock_task_definition *task)
+{
+    if (task == NULL || task->rewardItemNum > VM_NET_MOCK_TASK_REWARD_ITEM_MAX)
+        return false;
+    for (u8 i = 0; i < task->rewardItemNum; ++i)
+    {
+        if (task->rewardItems[i].itemId == 0 ||
+            task->rewardItems[i].count == 0)
+        {
+            return false;
+        }
+        /* Equipment and vitality flasks are durable individual backpack
+         * instances.  One awardinfo row identifies one sequence, so a
+         * multi-instance grant must be expressed as separate future rows,
+         * never as a misleading stack count on the first instance. */
+        if ((vm_net_mock_find_equipment_catalog_item(
+                 task->rewardItems[i].itemId) != NULL ||
+             vm_net_mock_backpack_item_id_uses_reservoir_count(
+                 task->rewardItems[i].itemId)) &&
+            task->rewardItems[i].count != 1)
+        {
+            return false;
+        }
+        for (u8 previous = 0; previous < i; ++previous)
+        {
+            if (task->rewardItems[previous].itemId ==
+                task->rewardItems[i].itemId)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool vm_net_mock_task_definition_is_valid(
     const vm_net_mock_task_definition *task)
 {
@@ -558,6 +643,7 @@ static bool vm_net_mock_task_definition_is_valid(
            strlen(task->activeDialog) < sizeof(task->activeDialog) &&
            strlen(task->completedDialog) < sizeof(task->completedDialog) &&
            task->requirementType1 <= 2 && task->requirementType2 <= 2 &&
+           vm_net_mock_task_reward_items_are_valid(task) &&
            task->prerequisiteTaskId != task->taskId;
 }
 
@@ -619,6 +705,10 @@ static bool vm_net_mock_task_catalog_db_row(
     task.rewardItemId = number[16];
     task.rewardItemCount = number[17];
     task.rewardItemType = (u8)number[18];
+    /* server_tasks predates the separate multi-reward relation.  Seed its
+     * single legacy reward first; the ordered relation below replaces it only
+     * when rows actually exist for this task. */
+    vm_net_mock_task_reward_items_from_legacy(&task);
     if (!vm_net_mock_dynamic_npc_decode_hex(values[19], lengths[19],
                                              task.name, sizeof(task.name)) ||
         !vm_net_mock_dynamic_npc_decode_hex(values[20], lengths[20],
@@ -656,11 +746,78 @@ static bool vm_net_mock_task_catalog_db_row(
     return true;
 }
 
+typedef struct
+{
+    u32 loaded;
+    u32 taskCount;
+    u32 skipped;
+} vm_net_mock_task_reward_catalog_db_context;
+
+static bool vm_net_mock_task_reward_catalog_db_row(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_net_mock_task_reward_catalog_db_context *context =
+        (vm_net_mock_task_reward_catalog_db_context *)contextValue;
+    u32 number[5];
+    int index = -1;
+    vm_net_mock_task_definition *task = NULL;
+
+    memset(number, 0, sizeof(number));
+    if (context == NULL || columnCount != 5)
+        return false;
+    for (u32 i = 0; i < 5; ++i)
+    {
+        if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &number[i]))
+        {
+            ++context->skipped;
+            return true;
+        }
+    }
+    if (number[0] == 0 || number[1] >= VM_NET_MOCK_TASK_REWARD_ITEM_MAX ||
+        number[2] == 0 || number[3] == 0 || number[4] > 0xffu ||
+        vm_net_mock_find_shop_catalog_item(number[2]) == NULL)
+    {
+        ++context->skipped;
+        return true;
+    }
+    index = vm_net_mock_task_catalog_raw_index(number[0]);
+    if (index < 0)
+    {
+        ++context->skipped;
+        return true;
+    }
+    task = &g_vm_net_mock_task_catalog[index];
+    if (!task->rewardItemsOverridden)
+    {
+        memset(task->rewardItems, 0, sizeof(task->rewardItems));
+        task->rewardItemNum = 0;
+        task->rewardItemsOverridden = true;
+        ++context->taskCount;
+    }
+    /* The primary key and ORDER BY make contiguous slots a storage contract.
+     * Reject holes rather than silently moving reward order in a live task. */
+    if (number[1] != task->rewardItemNum)
+    {
+        ++context->skipped;
+        return true;
+    }
+    task->rewardItems[task->rewardItemNum].itemId = number[2];
+    task->rewardItems[task->rewardItemNum].count = number[3];
+    task->rewardItems[task->rewardItemNum].itemType = (u8)number[4];
+    ++task->rewardItemNum;
+    vm_net_mock_task_reward_items_sync_legacy(task);
+    ++context->loaded;
+    return true;
+}
+
 static bool vm_net_mock_task_catalog_apply_db(void)
 {
     vm_net_mock_task_catalog_db_context context;
+    vm_net_mock_task_reward_catalog_db_context rewardContext;
 
     memset(&context, 0, sizeof(context));
+    memset(&rewardContext, 0, sizeof(rewardContext));
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_tasks ("
             "task_id INT UNSIGNED NOT NULL,enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -674,20 +831,31 @@ static bool vm_net_mock_task_catalog_apply_db(void)
             "offer_dialog VARBINARY(255) NOT NULL DEFAULT '',active_dialog VARBINARY(255) NOT NULL DEFAULT '',completed_dialog VARBINARY(255) NOT NULL DEFAULT '',"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(task_id),KEY idx_server_tasks_enabled(enabled,task_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_task_reward_items ("
+            "task_id INT UNSIGNED NOT NULL,reward_order TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,item_count INT UNSIGNED NOT NULL,"
+            "item_type TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "PRIMARY KEY(task_id,reward_order),KEY idx_server_task_reward_items_item(item_id)) ENGINE=InnoDB") ||
         !vm_mysql_query(
             "SELECT task_id,enabled,level,difficulty,classification,"
             "requirement_type1,requirement_count1,requirement_id1,requirement_type2,requirement_count2,requirement_id2,"
             "prerequisite_task_id,given_item_id,given_item_count,reward_exp,reward_money,reward_item_id,reward_item_count,reward_item_type,"
             "HEX(name),HEX(giver),HEX(receiver),HEX(goal),HEX(reward_text),HEX(offer_dialog),HEX(active_dialog),HEX(completed_dialog) "
             "FROM server_tasks ORDER BY task_id",
-            vm_net_mock_task_catalog_db_row, &context))
+            vm_net_mock_task_catalog_db_row, &context) ||
+        !vm_mysql_query(
+            "SELECT task_id,reward_order,item_id,item_count,item_type "
+            "FROM server_task_reward_items ORDER BY task_id,reward_order",
+            vm_net_mock_task_reward_catalog_db_row, &rewardContext))
     {
         printf("[error][mock-admin] task_catalog_db_load failed error=%s\n",
                vm_mysql_last_error());
         return false;
     }
-    printf("[info][mock-admin] task_catalog_db_load rows=%u overridden=%u custom=%u skipped=%u\n",
-           context.loaded, context.overridden, context.custom, context.skipped);
+    printf("[info][mock-admin] task_catalog_db_load rows=%u overridden=%u custom=%u skipped=%u reward_rows=%u reward_tasks=%u reward_skipped=%u\n",
+           context.loaded, context.overridden, context.custom, context.skipped,
+           rewardContext.loaded, rewardContext.taskCount, rewardContext.skipped);
     return true;
 }
 
@@ -793,6 +961,7 @@ static bool vm_net_mock_load_task_catalog(void)
         task.enabled = true;
         task.builtin = true;
         task.overridden = false;
+        vm_net_mock_task_reward_items_from_legacy(&task);
         vm_net_mock_copy_bounded_field(task.name, sizeof(task.name), values[1], valueLens[1]);
         snprintf(task.sourceName, sizeof(task.sourceName), "%s", task.name);
         vm_net_mock_copy_bounded_field(task.giver, sizeof(task.giver), values[5], valueLens[5]);
@@ -952,6 +1121,7 @@ static bool vm_net_mock_task_catalog_reload(void)
 static bool vm_net_mock_task_admin_save(
     const vm_net_mock_task_definition *task, const char **errorOut)
 {
+    vm_net_mock_task_definition normalizedTask;
     char nameHex[sizeof(task->name) * 2 + 1];
     char giverHex[sizeof(task->giver) * 2 + 1];
     char receiverHex[sizeof(task->receiver) * 2 + 1];
@@ -962,9 +1132,15 @@ static bool vm_net_mock_task_admin_save(
     char completedHex[sizeof(task->completedDialog) * 2 + 1];
     char query[8192];
     u32 activeCount = 0;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "invalid task definition";
+    if (task == NULL)
+        return false;
+    normalizedTask = *task;
+    vm_net_mock_task_reward_items_sync_legacy(&normalizedTask);
+    task = &normalizedTask;
     if (!vm_net_mock_load_task_catalog() ||
         !vm_net_mock_task_definition_is_valid(task))
     {
@@ -1033,7 +1209,37 @@ static bool vm_net_mock_task_admin_save(
         task->rewardItemCount, task->rewardItemType,
         nameHex, giverHex, receiverHex, goalHex, rewardTextHex,
         offerHex, activeHex, completedHex);
-    if (!vm_mysql_exec(query) || !vm_net_mock_task_catalog_reload())
+    if (!vm_mysql_exec("START TRANSACTION"))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    transactionStarted = true;
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_task_reward_items WHERE task_id=%u",
+             task->taskId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    for (u8 rewardIndex = 0; rewardIndex < task->rewardItemNum;
+         ++rewardIndex)
+    {
+        const vm_net_mock_task_reward_item *reward =
+            &task->rewardItems[rewardIndex];
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_task_reward_items(task_id,reward_order,item_id,item_count,item_type) "
+                 "VALUES(%u,%u,%u,%u,%u)",
+                 task->taskId, rewardIndex, reward->itemId,
+                 reward->count, reward->itemType);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    if (!vm_net_mock_task_catalog_reload())
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
@@ -1045,6 +1251,13 @@ static bool vm_net_mock_task_admin_save(
            task->taskId, task->enabled ? 1u : 0u,
            task->builtin ? 1u : 0u, task->name);
     return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_task_admin_delete_override(u32 taskId,
@@ -1084,9 +1297,21 @@ static bool vm_net_mock_task_admin_delete_override(u32 taskId,
                             : vm_mysql_last_error();
         return false;
     }
+    if (!vm_mysql_exec("START TRANSACTION"))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_task_reward_items WHERE task_id=%u", taskId);
+    if (!vm_mysql_exec(query))
+        goto failed;
     snprintf(query, sizeof(query), "DELETE FROM server_tasks WHERE task_id=%u",
              taskId);
-    if (!vm_mysql_exec(query) || !vm_net_mock_task_catalog_reload())
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    if (!vm_net_mock_task_catalog_reload())
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
@@ -1096,6 +1321,12 @@ static bool vm_net_mock_task_admin_delete_override(u32 taskId,
         *errorOut = "ok";
     printf("[info][mock-admin] task_override_delete task=%u\n", taskId);
     return true;
+
+failed:
+    (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_xse_ascii_identifier(const u8 *data, u32 len, u32 *pos,
@@ -2569,28 +2800,89 @@ static bool vm_net_mock_task_grant_accept_item(
                                               task->givenItemCount, NULL);
 }
 
+/* Capacity must be evaluated for the complete award, after task materials are
+ * removed.  Checking each reward against the original backpack independently
+ * lets a full backpack accept two distinct rewards even though it only has
+ * one released slot.  The same in-memory mutation primitive used by bundled
+ * shop operations gives this preflight the exact stack/equipment/reservoir
+ * semantics of the real commit. */
+static bool vm_net_mock_task_backpack_can_receive_rewards(
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_task_definition *task)
+{
+    vm_net_mock_role_state projected;
+    u32 consumedIds[2] = {0, 0};
+    u32 consumedCounts[2] = {0, 0};
+    u32 consumedSlots = 0;
+
+    if (role == NULL || task == NULL ||
+        !vm_net_mock_task_reward_items_are_valid(task))
+    {
+        return false;
+    }
+    projected = *role;
+    if (task->requirementType1 == 1 && task->requirementId1 != 0 &&
+        task->requirementCount1 != 0)
+    {
+        consumedIds[consumedSlots] = task->requirementId1;
+        consumedCounts[consumedSlots++] = task->requirementCount1;
+    }
+    if (task->requirementType2 == 1 && task->requirementId2 != 0 &&
+        task->requirementCount2 != 0)
+    {
+        if (consumedSlots != 0 && consumedIds[0] == task->requirementId2)
+            consumedCounts[0] += task->requirementCount2;
+        else
+        {
+            consumedIds[consumedSlots] = task->requirementId2;
+            consumedCounts[consumedSlots++] = task->requirementCount2;
+        }
+    }
+    for (u32 i = 0; i < consumedSlots; ++i)
+    {
+        if (!vm_net_mock_role_consume_backpack_item(
+                &projected, consumedIds[i], 0, consumedCounts[i], NULL))
+        {
+            return false;
+        }
+    }
+    for (u8 i = 0; i < task->rewardItemNum; ++i)
+    {
+        if (!vm_net_mock_role_add_backpack_item_to_role_in_memory(
+                &projected, task->rewardItems[i].itemId,
+                task->rewardItems[i].count, NULL))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool vm_net_mock_task_commit_reward(
     vm_net_mock_role_state *role, const vm_net_mock_task_definition *task,
-    u16 *rewardSeqOut)
+    u16 rewardSeqOut[VM_NET_MOCK_TASK_REWARD_ITEM_MAX],
+    u8 *rewardCountOut)
 {
     u32 consumedIds[2] = {0, 0};
     u32 consumedCounts[2] = {0, 0};
     u32 consumedSlots = 0;
-    u16 rewardSeq = 0;
-    bool rewardAdded = false;
+    vm_net_mock_role_state before;
 
     if (rewardSeqOut != NULL)
-        *rewardSeqOut = 0;
+        memset(rewardSeqOut, 0,
+               VM_NET_MOCK_TASK_REWARD_ITEM_MAX * sizeof(*rewardSeqOut));
+    if (rewardCountOut != NULL)
+        *rewardCountOut = 0;
     if (role == NULL || task == NULL)
         return false;
     if (!vm_net_mock_task_role_has_required_items(role, task) ||
-        !vm_net_mock_task_backpack_can_receive(role, task->rewardItemId,
-                                               task->rewardItemCount, task))
+        !vm_net_mock_task_backpack_can_receive_rewards(role, task))
     {
         return false;
     }
     if (!vm_net_mock_task_state_store(role->roleId, task->taskId, 3))
         return false;
+    before = *role;
 
     if (task->requirementType1 == 1 && task->requirementId1 != 0 &&
         task->requirementCount1 != 0)
@@ -2616,24 +2908,25 @@ static bool vm_net_mock_task_commit_reward(
         if (!vm_net_mock_role_consume_backpack_item(role, consumedIds[i], 0,
                                                     consumedCounts[i], NULL))
         {
-            for (u32 restored = 0; restored < i; ++restored)
-                (void)vm_net_mock_role_add_backpack_item(consumedIds[restored],
-                                                         consumedCounts[restored], NULL);
+            *role = before;
             (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
             return false;
         }
     }
-    rewardAdded = task->rewardItemId == 0 || task->rewardItemCount == 0 ||
-                  vm_net_mock_role_add_backpack_item(task->rewardItemId,
-                                                     task->rewardItemCount,
-                                                     &rewardSeq);
-    if (!rewardAdded)
+    for (u8 i = 0; i < task->rewardItemNum; ++i)
     {
-        for (u32 i = 0; i < consumedSlots; ++i)
-            (void)vm_net_mock_role_add_backpack_item(consumedIds[i],
-                                                     consumedCounts[i], NULL);
-        (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
-        return false;
+        u16 rewardSeq = 0;
+        if (!vm_net_mock_role_add_backpack_item_to_role_in_memory(
+                role, task->rewardItems[i].itemId,
+                task->rewardItems[i].count, &rewardSeq) ||
+            rewardSeq == 0)
+        {
+            *role = before;
+            (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+            return false;
+        }
+        if (rewardSeqOut != NULL)
+            rewardSeqOut[i] = rewardSeq;
     }
 
     (void)vm_net_mock_role_add_exp(role, task->rewardExp);
@@ -2641,13 +2934,18 @@ static bool vm_net_mock_task_commit_reward(
                       ? 0xffffffffu
                       : role->money + task->rewardMoney;
     vm_net_mock_role_normalize(role);
-    vm_net_mock_role_db_save("task-commit");
-    if (rewardSeqOut != NULL)
-        *rewardSeqOut = rewardSeq;
-    printf("[info][network] mock_task_reward task=%u role=%u exp=%u money=%u item=%u item_type=%u count=%u consumed=%u\n",
+    if (!vm_net_mock_role_db_save("task-commit"))
+    {
+        *role = before;
+        (void)vm_net_mock_task_state_store(role->roleId, task->taskId, 2);
+        return false;
+    }
+    if (rewardCountOut != NULL)
+        *rewardCountOut = task->rewardItemNum;
+    printf("[info][network] mock_task_reward task=%u role=%u exp=%u money=%u items=%u first_item=%u first_type=%u first_count=%u consumed=%u\n",
            task->taskId, role->roleId, task->rewardExp, task->rewardMoney,
-           task->rewardItemId, task->rewardItemType, task->rewardItemCount,
-           consumedSlots);
+           task->rewardItemNum, task->rewardItemId, task->rewardItemType,
+           task->rewardItemCount, consumedSlots);
     return true;
 }
 
@@ -2658,14 +2956,13 @@ static bool vm_net_mock_task_commit_reward(
 static bool vm_net_mock_build_task_awardinfo(
     u8 *out, u32 outCap, u32 *blobLenOut,
     vm_net_mock_role_state *role,
-    const vm_net_mock_task_definition *task, u16 rewardSeq)
+    const vm_net_mock_task_definition *task,
+    const u16 rewardSeqs[VM_NET_MOCK_TASK_REWARD_ITEM_MAX],
+    u8 rewardCount)
 {
-    const vm_net_mock_backpack_item_state *rewardItem = NULL;
     u32 pos = 0;
     u32 rewardExp = task != NULL ? task->rewardExp : 0;
     u32 rewardMoney = task != NULL ? task->rewardMoney : 0;
-    u32 incrementalCount = 0;
-    bool isReservoir = false;
 
     if (blobLenOut != NULL)
         *blobLenOut = 0;
@@ -2677,8 +2974,7 @@ static bool vm_net_mock_build_task_awardinfo(
         return false;
     }
 
-    if (task == NULL || task->rewardItemId == 0 ||
-        task->rewardItemCount == 0)
+    if (task == NULL || rewardCount == 0)
     {
         if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 0))
             return false;
@@ -2686,44 +2982,49 @@ static bool vm_net_mock_build_task_awardinfo(
         return true;
     }
 
-    rewardItem = vm_net_mock_role_find_backpack_item(
-        role, task->rewardItemId, rewardSeq);
-    if (rewardSeq == 0 || rewardItem == NULL || rewardItem->count == 0)
-    {
-        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u row=%p row_count=%u reason=missing-reward-row\n",
-               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
-               (const void *)rewardItem, rewardItem ? rewardItem->count : 0);
+    if (rewardCount != task->rewardItemNum ||
+        rewardCount > VM_NET_MOCK_TASK_REWARD_ITEM_MAX || rewardSeqs == NULL)
         return false;
-    }
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rewardCount))
+        return false;
+    for (u8 i = 0; i < rewardCount; ++i)
+    {
+        const vm_net_mock_task_reward_item *configured = &task->rewardItems[i];
+        const vm_net_mock_backpack_item_state *rewardItem =
+            vm_net_mock_role_find_backpack_item(role, configured->itemId,
+                                                rewardSeqs[i]);
+        u32 incrementalCount = 0;
+        bool isReservoir =
+            vm_net_mock_backpack_item_id_uses_reservoir_count(configured->itemId);
 
-    isReservoir =
-        vm_net_mock_backpack_item_id_uses_reservoir_count(task->rewardItemId);
-    /* Ordinary rows are merged client-side by the amount just awarded.  The
-     * two flask rows are non-stackable reservoirs, so the new row must carry
-     * its initialized HP/MP pool while its visible stack remains one. */
-    incrementalCount = isReservoir ? rewardItem->count : task->rewardItemCount;
-    if (incrementalCount == 0 || incrementalCount > 0x7fffffffu)
-    {
-        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u row_count=%u incremental=%u reason=unsupported-count\n",
-               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
-               rewardItem->count, incrementalCount);
-        return false;
-    }
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1) ||
-        !vm_net_mock_seq_put_i16(out, outCap, &pos, rewardSeq) ||
-        !vm_net_mock_seq_put_u32(out, outCap, &pos, task->rewardItemId) ||
-        !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
-        !vm_net_mock_seq_put_item_common_extra(
-            out, outCap, &pos,
-            task->rewardItemId,
-            (u8)SDL_min(rewardItem->enhanceLevel,
-                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-            vm_net_mock_item_common_extra_enhance_cap(task->rewardItemId)))
-    {
-        printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u incremental=%u pos=%u cap=%u reason=serialize\n",
-               task->taskId, role->roleId, task->rewardItemId, rewardSeq,
-               incrementalCount, pos, outCap);
-        return false;
+        if (rewardSeqs[i] == 0 || configured->itemId == 0 ||
+            configured->count == 0 || rewardItem == NULL ||
+            rewardItem->count == 0)
+        {
+            printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u row=%u item=%u reward_seq=%u reason=missing-reward-row\n",
+                   task->taskId, role->roleId, i, configured->itemId,
+                   rewardSeqs[i]);
+            return false;
+        }
+        /* Ordinary rows use this award's delta.  Reservoirs are independent
+         * containers, whose client-side count is their initialized pool. */
+        incrementalCount = isReservoir ? rewardItem->count : configured->count;
+        if (incrementalCount == 0 || incrementalCount > 0x7fffffffu ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, rewardSeqs[i]) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, configured->itemId) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, incrementalCount) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, configured->itemId,
+                (u8)SDL_min(rewardItem->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                vm_net_mock_item_common_extra_enhance_cap(
+                    configured->itemId)))
+        {
+            printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u row=%u item=%u reward_seq=%u pos=%u cap=%u reason=serialize\n",
+                   task->taskId, role->roleId, i, configured->itemId,
+                   rewardSeqs[i], pos, outCap);
+            return false;
+        }
     }
     *blobLenOut = pos;
     return true;
@@ -4963,12 +5264,12 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u8 reportedProgress2 = 0;
     u8 taskInfo[512];
     u32 taskInfoLen = 0;
-    /* `awardinfo` is a one-row sequence.  A reward equipment row carrying
-     * four enhancement-stage attributes is 94 bytes, exceeding the historical
-     * 64-byte local buffer before the normal 6/4 parser can receive it. */
+    /* Case 4 reads a bounded multi-row awardinfo sequence.  Each row can be
+     * an equipment record carrying all enhancement-stage attributes. */
     u8 awardInfo[VM_NET_MOCK_TASK_AWARDINFO_MAX_BYTES];
     u32 awardInfoLen = 0;
-    u16 committedRewardSeq = 0;
+    u16 committedRewardSeqs[VM_NET_MOCK_TASK_REWARD_ITEM_MAX];
+    u8 committedRewardCount = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 1;
@@ -5090,6 +5391,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     memset(&taskState, 0, sizeof(taskState));
     memset(taskInfo, 0, sizeof(taskInfo));
     memset(awardInfo, 0, sizeof(awardInfo));
+    memset(committedRewardSeqs, 0, sizeof(committedRewardSeqs));
     memset(detailText, 0, sizeof(detailText));
     memset(destinationText, 0, sizeof(destinationText));
     memset(promptReceiver, 0, sizeof(promptReceiver));
@@ -5246,7 +5548,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             taskState.found && taskState.state == 2 &&
             ((taskDefinition != NULL &&
               vm_net_mock_task_commit_reward(activeRole, taskDefinition,
-                                             &committedRewardSeq)) ||
+                                             committedRewardSeqs,
+                                             &committedRewardCount)) ||
              (taskDefinition == NULL &&
               vm_net_mock_task_state_store(activeRole->roleId, taskId, 3))))
         {
@@ -5277,7 +5580,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             u32 totalExp = activeRole->exp;
             if (!vm_net_mock_build_task_awardinfo(
                     awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
-                    taskDefinition, committedRewardSeq) ||
+                    taskDefinition, committedRewardSeqs,
+                    committedRewardCount) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", 100) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", 100) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", totalExp) ||

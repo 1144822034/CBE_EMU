@@ -8,39 +8,16 @@
 [error][mock-service] equipment_instance_stack_unresolved role=10337 item=13402 seq=18 count=5 capacity=20
 [error][mock-service] equipment_instance_stack_unresolved role=10337 item=11101 seq=20 count=3 capacity=20
 [error][mock-service] equipment_instance_stack_unresolved role=10394 item=13402 seq=18 count=3 capacity=20
-[info][mock-admin] task_catalog_db_load rows=17 overridden=14 custom=3 skipped=0
-[info][network] mock_task_catalog source=task.dsh+mysql rows=136 declared_rows=138 path=../web/fs/JHOnlineData/task.dsh
+[info][mock-admin] task_catalog_db_load rows=16 overridden=14 custom=2 skipped=1 reward_rows=0 reward_tasks=0 reward_skipped=0
+[info][network] mock_task_catalog source=task.dsh+mysql rows=135 declared_rows=138 path=../web/fs/JHOnlineData/task.dsh
 [info][network] mock_xse_validate script=task0.xse strings=17 task_refs=2 direct_dialogs=5 offer_len=0 completed_len=0 idle_len=75
 [info][network] mock_xse_validate script=04¡Ÿ∞≤∫˙Ï≥.xse strings=11 task_refs=1 direct_dialogs=4 offer_len=72 completed_len=44 idle_len=48
 [info][network] mock_xse_validate script=06“∞÷Ì¡÷¡÷≥Â.xse strings=19 task_refs=2 direct_dialogs=7 offer_len=0 completed_len=0 idle_len=60
 [info][network] mock_xse_validate script=–≈œ‰.xse strings=1 task_refs=0 direct_dialogs=1 offer_len=0 completed_len=0 idle_len=28
 [info][network] mock_xse_catalog_validate loaded=4 expected=4 task_refs=5 source=web/fs/JHOnlineData evidence=XSE0+task.dsh
-[info][mock-admin] named_resource_batch_publish files=2 catalog_rows=13 delivery=WT18/7 source=server-authoritative
-[info][mock-admin] dynamic_npc_resource_lazy_publish actor=FB_NPC.actor dependencies=1 trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7
-[info][mock-admin] named_resource_batch_publish files=2 catalog_rows=15 delivery=WT18/7 source=server-authoritative
-[info][mock-admin] dynamic_npc_resource_lazy_publish actor=n_woman1.actor dependencies=1 trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7
-[info][mock-admin] named_resource_batch_publish files=2 catalog_rows=17 delivery=WT18/7 source=server-authoritative
-[info][mock-admin] dynamic_npc_resource_lazy_publish actor=n_magemaster.actor dependencies=1 trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7
-[info][mock-admin] named_resource_batch_publish files=2 catalog_rows=19 delivery=WT18/7 source=server-authoritative
-[info][mock-admin] dynamic_npc_resource_lazy_publish actor=n_swordmaster.actor dependencies=1 trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7
-[info][mock-admin] named_resource_batch_publish files=2 catalog_rows=21 delivery=WT18/7 source=server-authoritative
-[info][mock-admin] dynamic_npc_resource_lazy_publish actor=n_assissonmaster.actor dependencies=1 trigger=dynamic-npc-catalog delivery=client-file-miss-WT18/7
 [info][mock-admin] dynamic_npc_db_load rows=17 skipped=0 quarantined=0
 [info][network] mock_scene_npc_exact_validate scene=c00≈Ó¿≥œ…µ∫_01 rows=2 total=2 guojing=0 policy=exact-scene-only
 [info][network] mock_scene_npc_service_validate scene=00≈Ó¿≥œ…µ∫_02 rows=3 total=3 blacksmith=1 monkey=1 test_task_npc=0 policy=production-catalog-only
 [info][mock-service] listening=127.0.0.1:19090
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency workers=4 queue=128 state_model=serialized-legacy-context
-[info][mock-admin] request worker=1 sequence=1 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=0
-[info][admin] login_success failed_attempts_reset=1
-[info][network] mock_shop_catalog total=1715 items=230 equips=1485 first=1001 source=item.dsh/equip.dsh
-[info][mock-admin] shop_item_db_load rows=1500 skipped=0
-[error][network] mock_ranking_page_query_failed type=0 page=0 role=10221 error=no MySQL error detail
-[info][network] mock_update_version request=18/9 result=0x01 identity=f197ad82 source=delivery-ledger configured=1/0/0/0
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=0 chunk=4096 total=46098 crc=71084 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=4096 chunk=4096 total=46098 crc=149331 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=8192 chunk=4096 total=46098 crc=188917 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=12288 chunk=4096 total=46098 crc=233790 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=16384 chunk=4096 total=46098 crc=287920 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=20480 chunk=4096 total=46098 crc=334281 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
-[info][network] mock_update_chunk subtype=6 file=mmTitleMstarWqvga.cbm start=24576 chunk=4096 total=46098 crc=350449 version=1 path=../web/fs/JHOnlineData/mmTitleMstarWqvga.cbm resp=4158
