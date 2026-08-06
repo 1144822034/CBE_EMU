@@ -2402,23 +2402,6 @@ static u32 vm_alloc_host_string(const char *text)
 #endif
 }
 
-static bool vm_net_mock_has_installed_update(void)
-{
-    long installedSize = vm_net_mock_file_size("JHOnlineData/MMORPGTempcbm");
-    long gameSize = vm_net_mock_file_size("JHOnlineData/mmGameMstarWqvga.cbm");
-    if (!vm_net_mock_file_has_min_size("JHOnlineData/mmorpg_updateversioncbm", 40))
-        return false;
-
-    /*
-     * A clean resource release writes the real mmGame module but does not create
-     * the network-update temp name. Treat that as installed; otherwise the
-     * version response advertises an update and the client loops on WT 18/6.
-     */
-    if (gameSize >= 1024)
-        return true;
-    return installedSize >= 1024;
-}
-
 static bool vm_net_mock_buffer_has_nonzero(const u8 *data, u32 len)
 {
     for (u32 i = 0; i < len; ++i)
