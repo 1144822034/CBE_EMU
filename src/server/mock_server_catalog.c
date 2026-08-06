@@ -96,7 +96,30 @@ typedef struct
     u8 isEquip;
     u8 category;
     u8 enabled;
+    /* Store placement is independent from item.dsh/equip.dsh category.  The
+     * latter drives client item semantics and equipment slots, so an admin
+     * must never have to rewrite it merely to change a mall page. */
+    u8 shopSection;
 } vm_net_mock_shop_catalog_item;
+
+enum
+{
+    VM_NET_MOCK_SHOP_SECTION_AUTO = 0,
+    VM_NET_MOCK_SHOP_SECTION_SECRET = 1,
+    VM_NET_MOCK_SHOP_SECTION_NORMAL = 2
+};
+
+static bool vm_net_mock_shop_item_is_secret_treasure(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    if (item == NULL || item->isEquip)
+        return false;
+    if (item->shopSection == VM_NET_MOCK_SHOP_SECTION_SECRET)
+        return true;
+    if (item->shopSection == VM_NET_MOCK_SHOP_SECTION_NORMAL)
+        return false;
+    return item->category == 14;
+}
 
 typedef struct
 {
@@ -1668,6 +1691,59 @@ typedef struct
     u32 skipped;
 } vm_net_mock_shop_admin_load_context;
 
+typedef struct
+{
+    bool found;
+    bool invalid;
+} vm_net_mock_shop_admin_schema_column_context;
+
+static bool vm_net_mock_shop_admin_schema_column_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_shop_admin_schema_column_context *context =
+        (vm_net_mock_shop_admin_schema_column_context *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 1 ||
+        values[0] == NULL || lengths[0] == 0)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+/* Existing deployments already have server_shop_items.  Create-table cannot
+ * add this column retrospectively, so probe information_schema before the
+ * portable MySQL-5.x ALTER. */
+static bool vm_net_mock_shop_admin_ensure_section_column(void)
+{
+    vm_net_mock_shop_admin_schema_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_shop_items' "
+            "AND COLUMN_NAME='shop_section'",
+            vm_net_mock_shop_admin_schema_column_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (context.found)
+        return true;
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_shop_items ADD COLUMN shop_section "
+            "TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER enabled"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] shop_item_schema migration=shop-section action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_shop_admin_db_row(void *contextValue,
                                           unsigned int columnCount,
                                           const char *const *values,
@@ -1678,12 +1754,15 @@ static bool vm_net_mock_shop_admin_db_row(void *contextValue,
     u32 itemId = 0;
     u32 price = 0;
     u32 enabled = 0;
+    u32 shopSection = 0;
     vm_net_mock_shop_catalog_item *item = NULL;
 
-    if (context == NULL || columnCount != 3 ||
+    if (context == NULL || columnCount != 4 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &itemId) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &price) || price == 0 ||
-        !vm_mock_mysql_parse_u32(values[2], lengths[2], &enabled) || enabled > 1)
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &enabled) || enabled > 1 ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &shopSection) ||
+        shopSection > VM_NET_MOCK_SHOP_SECTION_NORMAL)
     {
         if (context != NULL)
             ++context->skipped;
@@ -1704,6 +1783,7 @@ static bool vm_net_mock_shop_admin_db_row(void *contextValue,
     }
     item->price = price;
     item->enabled = enabled ? 1 : 0;
+    item->shopSection = (u8)shopSection;
     ++context->loaded;
     return true;
 }
@@ -1722,11 +1802,13 @@ static bool vm_net_mock_shop_admin_db_load(void)
             "CREATE TABLE IF NOT EXISTS server_shop_items ("
             "item_id INT UNSIGNED NOT NULL,price INT UNSIGNED NOT NULL,"
             "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "shop_section TINYINT UNSIGNED NOT NULL DEFAULT 0,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(item_id)) ENGINE=InnoDB") ||
+        !vm_net_mock_shop_admin_ensure_section_column() ||
         !vm_mysql_query(
-            "SELECT item_id,price,enabled FROM server_shop_items ORDER BY item_id",
+            "SELECT item_id,price,enabled,shop_section FROM server_shop_items ORDER BY item_id",
             vm_net_mock_shop_admin_db_row, &context))
     {
         printf("[error][mock-admin] shop_item_db_load failed error=%s\n",
@@ -1740,7 +1822,7 @@ static bool vm_net_mock_shop_admin_db_load(void)
 }
 
 static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
-                                        const char **errorOut)
+                                        u8 shopSection, const char **errorOut)
 {
     vm_net_mock_shop_catalog_item *item = NULL;
     char query[512];
@@ -1758,7 +1840,8 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
             return false;
         }
     }
-    if (itemId == 0 || price == 0)
+    if (itemId == 0 || price == 0 ||
+        shopSection > VM_NET_MOCK_SHOP_SECTION_NORMAL)
         return false;
     for (u32 i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
     {
@@ -1774,10 +1857,17 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
             *errorOut = "商品目录中不存在该物品";
         return false;
     }
+    if (item->isEquip && shopSection != VM_NET_MOCK_SHOP_SECTION_AUTO)
+    {
+        if (errorOut)
+            *errorOut = "装备商城分区由穿戴部位决定";
+        return false;
+    }
     snprintf(query, sizeof(query),
-             "INSERT INTO server_shop_items(item_id,price,enabled) VALUES(%u,%u,%u) "
-             "ON DUPLICATE KEY UPDATE price=VALUES(price),enabled=VALUES(enabled)",
-             itemId, price, enabled ? 1u : 0u);
+             "INSERT INTO server_shop_items(item_id,price,enabled,shop_section) VALUES(%u,%u,%u,%u) "
+             "ON DUPLICATE KEY UPDATE price=VALUES(price),enabled=VALUES(enabled),"
+             "shop_section=VALUES(shop_section)",
+             itemId, price, enabled ? 1u : 0u, shopSection);
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
@@ -1786,10 +1876,11 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
     }
     item->price = price;
     item->enabled = enabled ? 1 : 0;
+    item->shopSection = shopSection;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] shop_item_save item=%u price=%u enabled=%u\n",
-           itemId, price, enabled ? 1u : 0u);
+    printf("[info][mock-admin] shop_item_save item=%u price=%u enabled=%u section=%u\n",
+           itemId, price, enabled ? 1u : 0u, shopSection);
     return true;
 }
 
@@ -2567,7 +2658,7 @@ static bool vm_net_mock_shop_page_item_matches_subtype(u8 subtype,
     switch (subtype)
     {
     case 5:  /* 秘宝道具 */
-        return !item->isEquip && item->category == 14;
+        return vm_net_mock_shop_item_is_secret_treasure(item);
     case 6:  /* 神兵利器 -> 武器 */
         return slot == 0;
     case 7:  /* 衣服 */

@@ -1939,7 +1939,7 @@ static bool vm_net_mock_is_shop_buy14_request(const u8 *request, u32 requestLen,
     return true;
 }
 
-static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
+static bool vm_net_mock_shop_calculate_cost(u8 type, u32 itemId, u32 count,
                                             u32 *unitPriceOut, u32 *costOut)
 {
     const vm_net_mock_shop_catalog_item *item = vm_net_mock_find_shop_catalog_item(itemId);
@@ -1959,7 +1959,13 @@ static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
         *unitPriceOut = unitPrice;
     if (costOut)
         *costOut = cost;
-    return item != NULL && item->enabled;
+    /* Type 2 is the premium-store purchase branch consumed by
+     * mmShopMstarWqvga.cbm:sub_9DE.  Its item must belong to the same
+     * server-owned secret listing that generated the visible page; this keeps
+     * an item removed from that page from remaining purchasable through a
+     * stale/crafted 14/2 request. */
+    return item != NULL && item->enabled &&
+           (type != 2 || vm_net_mock_shop_item_is_secret_treasure(item));
 }
 
 typedef struct
@@ -2135,7 +2141,8 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
         return 0;
 
     role = vm_net_mock_active_role();
-    knownItem = vm_net_mock_shop_calculate_cost(itemId, count, &unitPrice, &cost);
+    knownItem = vm_net_mock_shop_calculate_cost(type, itemId, count,
+                                                &unitPrice, &cost);
     wcoinBefore = vm_net_mock_shop_wcoin_balance();
     wcoinAfter = wcoinBefore;
     directExpand = vm_net_mock_shop_item_is_direct_backpack_expand(type, itemId);

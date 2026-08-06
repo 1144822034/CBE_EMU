@@ -235,7 +235,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
-- `server_shop_items`：后台覆盖的商品价格和上下架状态；没有记录的物品继续使用 DSH 默认价格并默认上架。
+- `server_shop_items`：后台覆盖的商品价格、上下架状态和商城分区。`shop_section=0` 使用 DSH 默认分区，`1` 放入秘宝道具，`2` 强制作为普通商品；没有记录的物品继续使用 DSH 默认价格并默认上架。
 - `server_monsters`：后台保存的怪物等级、类型、战斗属性、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 
