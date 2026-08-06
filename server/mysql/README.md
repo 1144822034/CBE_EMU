@@ -122,6 +122,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_shop_
 脚本只新增商品价格和上下架覆盖表，不会修改 `item.dsh`、`equip.dsh`
 或角色背包数据。服务启动时也会自动执行同等的 `CREATE TABLE IF NOT EXISTS`。
 
+已有数据库增加宝箱奖池管理时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_chest_rewards.sql
+```
+
+脚本只新增 `server_chest_rewards`。青铜、白银、黄金宝箱及其钥匙的对应关系来自
+`item.dsh`，但客户端资源不含官方奖池或概率，故不会写入猜测的默认掉落。请在后台
+`/admin-418yz6/?tab=chests` 配置每个宝箱的物品、数量与相对权重；未配置时开箱不会
+消耗宝箱或钥匙。服务启动也会自动创建该表。
+
 已有数据库升级到怪物管理功能时执行：
 
 ```powershell
@@ -247,6 +258,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `guild_members`：角色与帮派的一对一成员关系及职位。
 - `guild_applications`：待处理、已同意或已拒绝的入帮申请。
 - `server_shop_items`：后台覆盖的商品价格、上下架状态和商城分区。`shop_section=0` 使用 DSH 默认分区，`1` 放入秘宝道具，`2` 强制作为普通商品；没有记录的物品继续使用 DSH 默认价格并默认上架。
+- `server_chest_rewards`：青铜、白银、黄金宝箱的有序奖池。一次开箱按同一宝箱全部行的相对 `weight` 抽取恰好一项，`item_count` 为该项数量；没有行时不开箱、不消耗。
 - `server_monsters`：后台保存的怪物等级、类型、战斗属性、奖励和掉落覆盖；没有记录的怪物继续使用服务端目录默认公式。
 - `account_role_state_payload_backup`：旧二进制快照的只读迁移备份，不参与正常保存。
 

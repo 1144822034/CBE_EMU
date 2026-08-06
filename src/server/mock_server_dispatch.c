@@ -864,6 +864,23 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    if (vm_net_mock_is_chest_open_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_chest_open_response(
+            request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-chest-open", request,
+                                      requestLen, hookedLen);
+            return hookedLen;
+        }
+        /* The detector resolved an actual chest sequence.  Do not fall
+         * through to generic 7/1 consumption if its own checked builder
+         * cannot construct a response: that would consume a chest without a
+         * selected MySQL reward. */
+        return 0;
+    }
+
     hookedLen = vm_net_mock_build_item_use_response(request, requestLen, out, outCap);
     if (hookedLen)
     {

@@ -102,6 +102,46 @@ typedef struct
     u8 shopSection;
 } vm_net_mock_shop_catalog_item;
 
+/* item.dsh defines the three chest and key identities, but deliberately does
+ * not contain reward rows or rates. Those are online-service authority and
+ * are therefore stored in MySQL rather than inferred from client resources. */
+enum
+{
+    VM_NET_MOCK_CHEST_KIND_COUNT = 3,
+    VM_NET_MOCK_CHEST_REWARD_MAX = 120,
+    VM_NET_MOCK_CHEST_REWARD_COUNT_MAX = 99,
+    VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX = 1000000
+};
+
+typedef struct
+{
+    u32 itemId;
+    u32 count;
+    u32 weight;
+} vm_net_mock_chest_reward;
+
+typedef struct
+{
+    u32 chestItemId;
+    u32 keyItemId;
+    u8 rewardCount;
+    vm_net_mock_chest_reward rewards[VM_NET_MOCK_CHEST_REWARD_MAX];
+} vm_net_mock_chest_admin_row;
+
+typedef struct
+{
+    u32 chestItemId;
+    u32 keyItemId;
+    const char *name;
+    const char *keyName;
+} vm_net_mock_chest_kind;
+
+static const vm_net_mock_chest_kind g_vm_net_mock_chest_kinds[
+    VM_NET_MOCK_CHEST_KIND_COUNT] = {
+        {522u, 813u, "青铜宝箱", "青铜钥匙"},
+        {523u, 814u, "白银宝箱", "白银钥匙"},
+        {524u, 815u, "黄金宝箱", "黄金钥匙"}};
+
 enum
 {
     VM_NET_MOCK_SHOP_SECTION_AUTO = 0,
@@ -186,6 +226,12 @@ static u32 g_vm_net_mock_shop_catalog_count = 0;
 static bool g_vm_net_mock_shop_catalog_loaded = false;
 static bool g_vm_net_mock_shop_admin_db_loaded = false;
 static bool g_vm_net_mock_shop_admin_db_valid = false;
+static vm_net_mock_chest_admin_row
+    g_vm_net_mock_chest_rows[VM_NET_MOCK_CHEST_KIND_COUNT];
+static bool g_vm_net_mock_chest_db_loaded = false;
+static bool g_vm_net_mock_chest_db_valid = false;
+static u32 g_vm_net_mock_chest_reward_rng = 0;
+static u32 g_vm_net_mock_chest_reward_rng_serial = 0;
 static vm_net_mock_equipment_catalog_item g_vm_net_mock_equipment_catalog[VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS];
 static u32 g_vm_net_mock_equipment_catalog_count = 0;
 static bool g_vm_net_mock_equipment_catalog_loaded = false;
@@ -226,6 +272,8 @@ static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
                                     u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
+static const vm_net_mock_equipment_catalog_item *
+vm_net_mock_find_equipment_catalog_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
 {
@@ -1683,6 +1731,294 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
             return &g_vm_net_mock_shop_catalog[i];
     }
     return NULL;
+}
+
+static int vm_net_mock_chest_kind_index(u32 chestItemId)
+{
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+    {
+        if (g_vm_net_mock_chest_kinds[i].chestItemId == chestItemId)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void vm_net_mock_chest_rows_reset_to_identities(void)
+{
+    memset(g_vm_net_mock_chest_rows, 0, sizeof(g_vm_net_mock_chest_rows));
+    for (u32 i = 0; i < VM_NET_MOCK_CHEST_KIND_COUNT; ++i)
+    {
+        g_vm_net_mock_chest_rows[i].chestItemId =
+            g_vm_net_mock_chest_kinds[i].chestItemId;
+        g_vm_net_mock_chest_rows[i].keyItemId =
+            g_vm_net_mock_chest_kinds[i].keyItemId;
+    }
+}
+
+typedef struct
+{
+    u32 loaded;
+    u32 skipped;
+    bool invalid;
+} vm_net_mock_chest_db_load_context;
+
+static bool vm_net_mock_chest_db_row(void *contextValue,
+                                     unsigned int columnCount,
+                                     const char *const *values,
+                                     const size_t *lengths)
+{
+    vm_net_mock_chest_db_load_context *context =
+        (vm_net_mock_chest_db_load_context *)contextValue;
+    u32 chestItemId = 0;
+    u32 rewardOrder = 0;
+    u32 itemId = 0;
+    u32 count = 0;
+    u32 weight = 0;
+    int chestIndex = -1;
+    vm_net_mock_chest_admin_row *chest = NULL;
+
+    if (context == NULL || columnCount != 5 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &chestItemId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &rewardOrder) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &itemId) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &count) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &weight) ||
+        (chestIndex = vm_net_mock_chest_kind_index(chestItemId)) < 0 ||
+        rewardOrder == 0 || rewardOrder > VM_NET_MOCK_CHEST_REWARD_MAX ||
+        itemId == 0 || count == 0 ||
+        count > VM_NET_MOCK_CHEST_REWARD_COUNT_MAX || weight == 0 ||
+        weight > VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX)
+    {
+        if (context != NULL)
+        {
+            ++context->skipped;
+            context->invalid = true;
+        }
+        return true;
+    }
+
+    chest = &g_vm_net_mock_chest_rows[chestIndex];
+    /* The persisted ordering is part of the configured probability contract.
+     * Gaps or duplicate slots would make an edited table ambiguous, so fail
+     * closed instead of silently changing the drawn distribution. */
+    if (rewardOrder != (u32)chest->rewardCount + 1u)
+    {
+        ++context->skipped;
+        context->invalid = true;
+        return true;
+    }
+    for (u8 i = 0; i < chest->rewardCount; ++i)
+    {
+        if (chest->rewards[i].itemId == itemId)
+        {
+            ++context->skipped;
+            context->invalid = true;
+            return true;
+        }
+    }
+    chest->rewards[chest->rewardCount].itemId = itemId;
+    chest->rewards[chest->rewardCount].count = count;
+    chest->rewards[chest->rewardCount].weight = weight;
+    ++chest->rewardCount;
+    ++context->loaded;
+    return true;
+}
+
+static bool vm_net_mock_chest_admin_db_load(void)
+{
+    vm_net_mock_chest_db_load_context context;
+
+    if (g_vm_net_mock_chest_db_loaded)
+        return g_vm_net_mock_chest_db_valid;
+    g_vm_net_mock_chest_db_loaded = true;
+    g_vm_net_mock_chest_db_valid = false;
+    memset(&context, 0, sizeof(context));
+    vm_net_mock_chest_rows_reset_to_identities();
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_chest_rewards ("
+            "chest_item_id INT UNSIGNED NOT NULL,"
+            "reward_order TINYINT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,"
+            "item_count INT UNSIGNED NOT NULL,"
+            "weight INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(chest_item_id,reward_order),"
+            "KEY idx_server_chest_rewards_item(item_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT chest_item_id,reward_order,item_id,item_count,weight "
+            "FROM server_chest_rewards ORDER BY chest_item_id,reward_order",
+            vm_net_mock_chest_db_row, &context) ||
+        context.invalid)
+    {
+        vm_net_mock_chest_rows_reset_to_identities();
+        printf("[error][mock-admin] chest_reward_db_load failed rows=%u skipped=%u error=%s\n",
+               context.loaded, context.skipped, vm_mysql_last_error());
+        return false;
+    }
+
+    g_vm_net_mock_chest_db_valid = true;
+    printf("[info][mock-admin] chest_reward_db_load rows=%u\n", context.loaded);
+    return true;
+}
+
+static u32 vm_net_mock_chest_admin_list(vm_net_mock_chest_admin_row *rows,
+                                        u32 rowCap)
+{
+    if (!vm_net_mock_chest_admin_db_load())
+        return 0;
+    if (rows != NULL && rowCap != 0)
+    {
+        u32 copied = rowCap < VM_NET_MOCK_CHEST_KIND_COUNT
+                         ? rowCap : VM_NET_MOCK_CHEST_KIND_COUNT;
+        memcpy(rows, g_vm_net_mock_chest_rows, sizeof(*rows) * copied);
+    }
+    return VM_NET_MOCK_CHEST_KIND_COUNT;
+}
+
+static bool vm_net_mock_chest_admin_save(
+    const vm_net_mock_chest_admin_row *row, const char **errorOut)
+{
+    char query[512];
+    char mysqlError[512];
+    int chestIndex = -1;
+    bool transactionStarted = false;
+
+    if (errorOut)
+        *errorOut = "宝箱奖池参数无效";
+    if (row == NULL || row->rewardCount == 0 ||
+        row->rewardCount > VM_NET_MOCK_CHEST_REWARD_MAX ||
+        (chestIndex = vm_net_mock_chest_kind_index(row->chestItemId)) < 0 ||
+        row->keyItemId != g_vm_net_mock_chest_kinds[chestIndex].keyItemId)
+    {
+        return false;
+    }
+    for (u8 i = 0; i < row->rewardCount; ++i)
+    {
+        const vm_net_mock_chest_reward *reward = &row->rewards[i];
+
+        if (reward->itemId == 0 || reward->count == 0 ||
+            reward->count > VM_NET_MOCK_CHEST_REWARD_COUNT_MAX ||
+            reward->weight == 0 ||
+            reward->weight > VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX ||
+            vm_net_mock_find_shop_catalog_item(reward->itemId) == NULL)
+        {
+            if (errorOut)
+                *errorOut = "奖池物品、数量或权重无效";
+            return false;
+        }
+        if ((vm_net_mock_find_equipment_catalog_item(reward->itemId) != NULL ||
+             vm_net_mock_backpack_item_id_uses_reservoir_count(reward->itemId)) &&
+            reward->count != 1)
+        {
+            if (errorOut)
+                *errorOut = "装备、神仙壶和逍遥壶每次只能开出 1 个";
+            return false;
+        }
+        for (u8 previous = 0; previous < i; ++previous)
+        {
+            if (row->rewards[previous].itemId == reward->itemId)
+            {
+                if (errorOut)
+                    *errorOut = "同一宝箱不能重复配置相同物品";
+                return false;
+            }
+        }
+    }
+    if (!g_vm_net_mock_chest_db_valid)
+    {
+        g_vm_net_mock_chest_db_loaded = false;
+        if (!vm_net_mock_chest_admin_db_load())
+        {
+            if (errorOut)
+                *errorOut = "宝箱奖池数据库不可用";
+            return false;
+        }
+    }
+
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto mysql_failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_chest_rewards WHERE chest_item_id=%u",
+             row->chestItemId);
+    if (!vm_mysql_exec(query))
+        goto mysql_failed;
+    for (u8 i = 0; i < row->rewardCount; ++i)
+    {
+        const vm_net_mock_chest_reward *reward = &row->rewards[i];
+
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_chest_rewards("
+                 "chest_item_id,reward_order,item_id,item_count,weight) "
+                 "VALUES(%u,%u,%u,%u,%u)",
+                 row->chestItemId, (u32)i + 1u, reward->itemId,
+                 reward->count, reward->weight);
+        if (!vm_mysql_exec(query))
+            goto mysql_failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto mysql_failed;
+    transactionStarted = false;
+    g_vm_net_mock_chest_rows[chestIndex] = *row;
+    g_vm_net_mock_chest_rows[chestIndex].keyItemId =
+        g_vm_net_mock_chest_kinds[chestIndex].keyItemId;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] chest_reward_save chest=%u key=%u rows=%u\n",
+           row->chestItemId, row->keyItemId, row->rewardCount);
+    return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] chest_reward_save_failed chest=%u error=%s\n",
+           row ? row->chestItemId : 0, mysqlError);
+    if (errorOut)
+        *errorOut = "宝箱奖池保存失败，请检查 MySQL 日志";
+    return false;
+}
+
+static bool vm_net_mock_chest_admin_reset(u32 chestItemId,
+                                          const char **errorOut)
+{
+    char query[256];
+    int chestIndex = vm_net_mock_chest_kind_index(chestItemId);
+
+    if (errorOut)
+        *errorOut = "宝箱类型无效";
+    if (chestIndex < 0)
+        return false;
+    if (!g_vm_net_mock_chest_db_valid)
+    {
+        g_vm_net_mock_chest_db_loaded = false;
+        if (!vm_net_mock_chest_admin_db_load())
+        {
+            if (errorOut)
+                *errorOut = "宝箱奖池数据库不可用";
+            return false;
+        }
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_chest_rewards WHERE chest_item_id=%u",
+             chestItemId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = "清空宝箱奖池失败，请检查 MySQL 日志";
+        return false;
+    }
+    memset(&g_vm_net_mock_chest_rows[chestIndex], 0,
+           sizeof(g_vm_net_mock_chest_rows[chestIndex]));
+    g_vm_net_mock_chest_rows[chestIndex].chestItemId = chestItemId;
+    g_vm_net_mock_chest_rows[chestIndex].keyItemId =
+        g_vm_net_mock_chest_kinds[chestIndex].keyItemId;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] chest_reward_reset chest=%u\n", chestItemId);
+    return true;
 }
 
 typedef struct
@@ -4608,6 +4944,235 @@ static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const c
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/* A chest uses the ordinary item-use request, so its detector must resolve
+ * the selected sequence against the active backpack before taking precedence
+ * over the broad 1/7/1 consumable handler. */
+static bool vm_net_mock_is_chest_open_request(const u8 *request, u32 requestLen)
+{
+    vm_net_mock_item_use_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+
+    if (!vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
+        return false;
+    role = vm_net_mock_active_role();
+    item = vm_net_mock_role_find_backpack_item(role, parsed.itemId, parsed.seq);
+    return item != NULL && vm_net_mock_chest_kind_index(item->itemId) >= 0;
+}
+
+static u32 vm_net_mock_chest_next_random(const vm_net_mock_role_state *role)
+{
+    u32 seed = 0;
+
+    if (g_vm_net_mock_chest_reward_rng == 0)
+    {
+        seed = 0x9e3779b9u ^ (u32)time(NULL) ^ scheduler_get_tick_ms() ^
+               (++g_vm_net_mock_chest_reward_rng_serial * 0x85ebca6bu) ^
+               (role ? role->roleId * 0xc2b2ae35u : 0u);
+        if (seed == 0)
+            seed = 0x6d2b79f5u;
+        g_vm_net_mock_chest_reward_rng = seed;
+    }
+    g_vm_net_mock_chest_reward_rng ^= g_vm_net_mock_chest_reward_rng << 13;
+    g_vm_net_mock_chest_reward_rng ^= g_vm_net_mock_chest_reward_rng >> 17;
+    g_vm_net_mock_chest_reward_rng ^= g_vm_net_mock_chest_reward_rng << 5;
+    return g_vm_net_mock_chest_reward_rng;
+}
+
+static const vm_net_mock_chest_reward *vm_net_mock_chest_draw_reward(
+    const vm_net_mock_chest_admin_row *chest, const vm_net_mock_role_state *role,
+    u32 *totalWeightOut, u32 *drawOut)
+{
+    u32 totalWeight = 0;
+    u32 draw = 0;
+    uint64_t acceptedLimit = 0;
+
+    if (totalWeightOut)
+        *totalWeightOut = 0;
+    if (drawOut)
+        *drawOut = 0;
+    if (chest == NULL || chest->rewardCount == 0 ||
+        chest->rewardCount > VM_NET_MOCK_CHEST_REWARD_MAX)
+    {
+        return NULL;
+    }
+    for (u8 i = 0; i < chest->rewardCount; ++i)
+    {
+        if (chest->rewards[i].itemId == 0 || chest->rewards[i].count == 0 ||
+            chest->rewards[i].weight == 0 ||
+            chest->rewards[i].weight >
+                VM_NET_MOCK_CHEST_REWARD_WEIGHT_MAX ||
+            0xffffffffu - totalWeight < chest->rewards[i].weight)
+        {
+            return NULL;
+        }
+        totalWeight += chest->rewards[i].weight;
+    }
+    if (totalWeight == 0)
+        return NULL;
+
+    /* Rejection sampling avoids giving the low-valued rows a tiny modulo
+     * advantage when the configured total does not divide UINT32_MAX+1. */
+    acceptedLimit = 0x100000000ull -
+                    (0x100000000ull % (uint64_t)totalWeight);
+    do
+    {
+        draw = vm_net_mock_chest_next_random(role);
+    } while ((uint64_t)draw >= acceptedLimit);
+    draw %= totalWeight;
+    if (totalWeightOut)
+        *totalWeightOut = totalWeight;
+    if (drawOut)
+        *drawOut = draw;
+    for (u8 i = 0; i < chest->rewardCount; ++i)
+    {
+        if (draw < chest->rewards[i].weight)
+            return &chest->rewards[i];
+        draw -= chest->rewards[i].weight;
+    }
+    return NULL;
+}
+
+/*
+ * Client contract:
+ * - JianghuOL.CBE:0x01033544 consumes 1/7/1 only for the pending item-use
+ *   acknowledgement.
+ * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=2 as a selected-row update
+ *   and type=1 as a one-shot additive reward row.
+ * - the same CBE parser consumes 1/7/11 to synchronize the item count.
+ *
+ * 1/7/37 is intentionally absent: HandleItemAcquire can insert an item too,
+ * and battle-reward runtime evidence shows pairing it with 7/7 type=1 risks a
+ * duplicate local add.  The proven no-popup 7/7 path is sufficient here.
+ */
+static u32 vm_net_mock_build_chest_open_response(const u8 *request,
+                                                 u32 requestLen,
+                                                 u8 *out, u32 outCap)
+{
+    vm_net_mock_item_use_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *chestItem = NULL;
+    vm_net_mock_backpack_item_state *keyItem = NULL;
+    const vm_net_mock_chest_admin_row *chest = NULL;
+    const vm_net_mock_chest_reward *reward = NULL;
+    vm_net_mock_backpack_item_state *rewardItem = NULL;
+    vm_net_mock_role_state before;
+    vm_net_mock_role_state projected;
+    int chestIndex = -1;
+    u16 rewardSeq = 0;
+    u32 chestRemaining = 0;
+    u32 keyRemaining = 0;
+    u32 rewardWireCount = 0;
+    u32 totalWeight = 0;
+    u32 draw = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+    u8 itemUseType = 1;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_item_use_request(request, requestLen, &parsed))
+    {
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    chestItem = vm_net_mock_role_find_backpack_item(role, parsed.itemId,
+                                                     parsed.seq);
+    if (role == NULL || chestItem == NULL ||
+        (chestIndex = vm_net_mock_chest_kind_index(chestItem->itemId)) < 0)
+    {
+        return 0;
+    }
+    if (parsed.count != 1)
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Open one chest per request");
+    if (!vm_net_mock_chest_admin_db_load())
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest reward pool unavailable");
+
+    chest = &g_vm_net_mock_chest_rows[chestIndex];
+    if (chest->rewardCount == 0)
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest reward pool is not configured");
+    keyItem = vm_net_mock_role_find_backpack_item(role, chest->keyItemId, 0);
+    if (keyItem == NULL || keyItem->count == 0)
+        return vm_net_mock_build_item_use_hint_response(out, outCap,
+                                                         "Matching key required");
+
+    reward = vm_net_mock_chest_draw_reward(chest, role, &totalWeight, &draw);
+    if (reward == NULL ||
+        vm_net_mock_find_shop_catalog_item(reward->itemId) == NULL)
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest reward configuration is invalid");
+
+    before = *role;
+    projected = before;
+    if (!vm_net_mock_role_consume_backpack_item(
+            &projected, chest->chestItemId, chestItem->seq, 1,
+            &chestRemaining) ||
+        !vm_net_mock_role_consume_backpack_item(
+            &projected, chest->keyItemId, keyItem->seq, 1, &keyRemaining) ||
+        !vm_net_mock_role_add_backpack_item_to_role_in_memory(
+            &projected, reward->itemId, reward->count, &rewardSeq) ||
+        rewardSeq == 0)
+    {
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Backpack cannot receive chest reward");
+    }
+    rewardItem = vm_net_mock_role_find_backpack_item(&projected,
+                                                      reward->itemId, rewardSeq);
+    rewardWireCount = vm_net_mock_backpack_item_id_uses_reservoir_count(
+                          reward->itemId)
+                          ? (rewardItem ? rewardItem->count : 0)
+                          : reward->count;
+    if (rewardItem == NULL || rewardWireCount == 0)
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest reward state is invalid");
+
+    itemUseType = parsed.type ? parsed.type : 1;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", itemUseType) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "id",
+                                    (u16)chest->chestItemId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
+    if (!vm_net_mock_append_backpack_item_remove7_objects(
+            out, outCap, &pos, &objectCount, chestItem->seq,
+            chest->chestItemId, chestRemaining) ||
+        !vm_net_mock_append_backpack_item_remove7_objects(
+            out, outCap, &pos, &objectCount, keyItem->seq,
+            chest->keyItemId, keyRemaining) ||
+        !vm_net_mock_append_backpack_item_add7_object(
+            out, outCap, &pos, rewardSeq, reward->itemId, rewardWireCount))
+    {
+        return 0;
+    }
+    ++objectCount;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    *role = projected;
+    if (!vm_net_mock_role_db_save("chest-open"))
+    {
+        *role = before;
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest opening could not be saved");
+    }
+    printf("[info][network] mock_chest_open chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+           chest->chestItemId, chest->keyItemId, chestItem->seq, keyItem->seq,
+           reward->itemId, rewardSeq, reward->count, reward->weight,
+           totalWeight, draw);
+    vm_autotest_note("mock_chest_open chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
+                     chest->chestItemId, chest->keyItemId, chestItem->seq,
+                     keyItem->seq, reward->itemId, rewardSeq, reward->count,
+                     reward->weight, totalWeight);
     return pos;
 }
 

@@ -433,6 +433,22 @@ CREATE TABLE IF NOT EXISTS `server_shop_items` (
   PRIMARY KEY (`item_id`)
 ) ENGINE=InnoDB;
 
+-- The three chest/key identities are read from item.dsh; its data contains no
+-- reward table or rates.  This server-authoritative weighted pool selects one
+-- row per successful opening.  An empty chest has no configured opening and
+-- is intentionally not consumed.
+CREATE TABLE IF NOT EXISTS `server_chest_rewards` (
+  `chest_item_id` INT UNSIGNED NOT NULL,
+  `reward_order` TINYINT UNSIGNED NOT NULL,
+  `item_id` INT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL,
+  `weight` INT UNSIGNED NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`chest_item_id`, `reward_order`),
+  KEY `idx_server_chest_rewards_item` (`item_id`)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS `guilds` (
   `guild_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `guild_name` VARBINARY(12) NOT NULL,
