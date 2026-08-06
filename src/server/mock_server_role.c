@@ -2414,129 +2414,228 @@ static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId
     return fallback;
 }
 
+/* Monster defaults are deliberately derived from the same no-equipment player
+ * model that authoritative battle damage uses.  This is a balancing policy,
+ * not a claim about an unrecovered original-server formula: all three jobs
+ * are constructed at the requested level and the weakest survivability and
+ * combat columns form the encounter floor. */
+typedef struct
+{
+    u32 hp;
+    u32 mp;
+    u32 attack;
+    u32 defense;
+} vm_net_mock_monster_level_reference;
+
+static u32 vm_net_mock_monster_scale_ceil(u32 value, u32 numerator,
+                                          u32 denominator)
+{
+    uint64_t scaled;
+
+    if (denominator == 0)
+        return 0;
+    scaled = (uint64_t)value * numerator;
+    scaled = (scaled + denominator - 1u) / denominator;
+    if (scaled > VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX)
+        return VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX;
+    return (u32)scaled;
+}
+
+static void vm_net_mock_monster_level_reference_for_level(
+    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+{
+    vm_net_mock_role_state role;
+    vm_net_mock_player_stats stats;
+    u32 level = requestedLevel;
+
+    if (reference == NULL)
+        return;
+    memset(reference, 0, sizeof(*reference));
+    if (level == 0)
+        level = 1;
+    /* Role creation and level-up persistence cap real characters at 70.  A
+     * malformed catalog level must not invent a stronger player baseline than
+     * the server can actually create. */
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+
+    for (u32 job = 1; job <= 3; ++job)
+    {
+        memset(&role, 0, sizeof(role));
+        role.level = level;
+        role.job = job;
+        vm_net_mock_role_build_base_player_stats(&role, &stats);
+        if (job == 1 || stats.maxHp < reference->hp)
+            reference->hp = stats.maxHp;
+        if (job == 1 || stats.maxMp < reference->mp)
+            reference->mp = stats.maxMp;
+        if (job == 1 || stats.attack < reference->attack)
+            reference->attack = stats.attack;
+        if (job == 1 || stats.defense < reference->defense)
+            reference->defense = stats.defense;
+    }
+}
+
+static void vm_net_mock_monster_family_scale(
+    vm_net_mock_monster_family family,
+    u32 *hpScaleOut, u32 *mpScaleOut, u32 *attackScaleOut,
+    u32 *defenseScaleOut)
+{
+    u32 hp = 1000;
+    u32 mp = 1000;
+    u32 attack = 1000;
+    u32 defense = 1000;
+
+    switch (family)
+    {
+    case VM_NET_MOCK_MONSTER_SLIME:
+        hp = 850; mp = 1100; attack = 850; defense = 750;
+        break;
+    case VM_NET_MOCK_MONSTER_FLYING:
+        hp = 850; mp = 1000; attack = 1100; defense = 750;
+        break;
+    case VM_NET_MOCK_MONSTER_INSECT:
+        hp = 800; mp = 1000; attack = 1050; defense = 700;
+        break;
+    case VM_NET_MOCK_MONSTER_REPTILE:
+        hp = 1000; mp = 1100; attack = 1050; defense = 1000;
+        break;
+    case VM_NET_MOCK_MONSTER_UNDEAD:
+        hp = 1200; mp = 850; attack = 1000; defense = 1200;
+        break;
+    case VM_NET_MOCK_MONSTER_SPIRIT:
+        hp = 900; mp = 1300; attack = 1150; defense = 900;
+        break;
+    case VM_NET_MOCK_MONSTER_ELEMENTAL:
+        hp = 1100; mp = 1500; attack = 1200; defense = 1000;
+        break;
+    case VM_NET_MOCK_MONSTER_STONE:
+        hp = 1400; mp = 1000; attack = 900; defense = 1450;
+        break;
+    case VM_NET_MOCK_MONSTER_HUMANOID:
+        hp = 1000; mp = 1000; attack = 1100; defense = 1000;
+        break;
+    case VM_NET_MOCK_MONSTER_SOLDIER:
+        hp = 1150; mp = 850; attack = 1150; defense = 1200;
+        break;
+    case VM_NET_MOCK_MONSTER_BEAST:
+    default:
+        break;
+    }
+    if (hpScaleOut)
+        *hpScaleOut = hp;
+    if (mpScaleOut)
+        *mpScaleOut = mp;
+    if (attackScaleOut)
+        *attackScaleOut = attack;
+    if (defenseScaleOut)
+        *defenseScaleOut = defense;
+}
+
 static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
     vm_net_mock_monster_stats stats;
     u32 level = entry.level ? entry.level : 1;
+    vm_net_mock_monster_level_reference reference;
+    u32 hpScale = 1000;
+    u32 mpScale = 1000;
+    u32 attackScale = 1000;
+    u32 defenseScale = 1000;
+    u32 normalHp = 0;
+    u32 normalMp = 0;
+    u32 normalAttack = 0;
+    u32 normalDefense = 0;
 
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
+    vm_net_mock_monster_level_reference_for_level(level, &reference);
+    normalHp = vm_net_mock_monster_scale_ceil(reference.attack, 5, 1);
+    normalMp = 8 + level * 3;
+    normalAttack = vm_net_mock_monster_scale_ceil(
+        reference.hp, 100 + reference.defense, 1600);
+    normalDefense = vm_net_mock_monster_scale_ceil(reference.attack, 30, 100);
 
     switch ((vm_net_mock_monster_family)entry.family)
     {
     case VM_NET_MOCK_MONSTER_SLIME:
-        stats.hp = 16 + level * 4;
-        stats.mp = 18 + level * 2;
-        stats.attack = 6 + level * 2;
-        stats.defense = 2 + level / 4;
         stats.exp = 3 + level * 2;
         stats.gold = 3 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_BEAST:
-        stats.hp = 26 + level * 7;
-        stats.mp = 10 + level;
-        stats.attack = 7 + level * 2;
-        stats.defense = 2 + level / 3;
         stats.exp = 4 + level * 3;
         stats.gold = 3 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_FLYING:
-        stats.hp = 18 + level * 5;
-        stats.mp = 12 + level;
-        stats.attack = 8 + level * 2;
-        stats.defense = 1 + level / 4;
         stats.exp = 4 + level * 3;
         stats.gold = 3 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_INSECT:
-        stats.hp = 16 + level * 5;
-        stats.mp = 12 + level;
-        stats.attack = 8 + level * 2;
-        stats.defense = 1 + level / 5;
         stats.exp = 4 + level * 3;
         stats.gold = 3 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_REPTILE:
-        stats.hp = 24 + level * 6;
-        stats.mp = 14 + level;
-        stats.attack = 8 + level * 2;
-        stats.defense = 2 + level / 3;
         stats.exp = 5 + level * 3;
         stats.gold = 4 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_UNDEAD:
-        stats.hp = 34 + level * 8;
-        stats.mp = 10 + level;
-        stats.attack = 8 + level * 2;
-        stats.defense = 4 + level / 3;
         stats.exp = 6 + level * 3;
         stats.gold = 4 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_SPIRIT:
-        stats.hp = 22 + level * 6;
-        stats.mp = 16 + level * 3;
-        stats.attack = 10 + level * 2;
-        stats.defense = 2 + level / 3;
         stats.exp = 6 + level * 3;
         stats.gold = 5 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_ELEMENTAL:
-        stats.hp = 30 + level * 7;
-        stats.mp = 20 + level * 4;
-        stats.attack = 11 + level * 2;
-        stats.defense = 3 + level / 3;
         stats.exp = 7 + level * 3;
         stats.gold = 5 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_STONE:
-        stats.hp = 42 + level * 9;
-        stats.mp = 12 + level * 2;
-        stats.attack = 8 + level * 2;
-        stats.defense = 6 + level / 2;
         stats.exp = 8 + level * 3;
         stats.gold = 5 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_HUMANOID:
-        stats.hp = 30 + level * 7;
-        stats.mp = 12 + level * 2;
-        stats.attack = 9 + level * 2;
-        stats.defense = 3 + level / 3;
         stats.exp = 6 + level * 3;
         stats.gold = 6 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_SOLDIER:
-        stats.hp = 34 + level * 8;
-        stats.mp = 10 + level;
-        stats.attack = 10 + level * 2;
-        stats.defense = 4 + level / 3;
         stats.exp = 7 + level * 3;
         stats.gold = 7 + level * 2;
         break;
     case VM_NET_MOCK_MONSTER_BOSS:
-        stats.hp = 80 + level * 12;
-        stats.mp = 24 + level * 4;
-        stats.attack = 14 + level * 3;
-        stats.defense = 8 + level / 2;
+        /* Bosses must be defeated through party durability and combined damage,
+         * not through an artificial admission check.  A level-matched naked
+         * solo role falls before it can exhaust this pool, while a real party
+         * with coordinated healing, equipment and combined actions can make
+         * progress through the unchanged team-battle contract. */
+        stats.hp = vm_net_mock_monster_scale_ceil(reference.attack, 28, 1);
+        stats.mp = 24 + level * 6;
+        stats.attack = vm_net_mock_monster_scale_ceil(
+            reference.hp, 100 + reference.defense, 750);
+        stats.defense = vm_net_mock_monster_scale_ceil(reference.attack, 60, 100);
         stats.exp = 20 + level * 5;
         stats.gold = 25 + level * 4;
         break;
     default:
-        stats.hp = 20 + level * 5;
-        stats.mp = 10 + level;
-        stats.attack = 7 + level * 2;
-        stats.defense = 2 + level / 3;
         stats.exp = 4 + level * 3;
         stats.gold = 3 + level * 2;
         break;
     }
 
-    if (stats.enemyId == VM_NET_MOCK_BATTLE_POISON_SLIME_ID)
+    if (entry.family != VM_NET_MOCK_MONSTER_BOSS)
     {
-        stats.exp = VM_NET_MOCK_BATTLE_POISON_SLIME_EXP;
-        stats.gold = VM_NET_MOCK_BATTLE_POISON_SLIME_GOLD;
+        vm_net_mock_monster_family_scale((vm_net_mock_monster_family)entry.family,
+                                         &hpScale, &mpScale,
+                                         &attackScale, &defenseScale);
+        stats.hp = vm_net_mock_monster_scale_ceil(normalHp, hpScale, 1000);
+        stats.mp = vm_net_mock_monster_scale_ceil(normalMp, mpScale, 1000);
+        stats.attack = vm_net_mock_monster_scale_ceil(normalAttack,
+                                                       attackScale, 1000);
+        stats.defense = vm_net_mock_monster_scale_ceil(normalDefense,
+                                                        defenseScale, 1000);
     }
+
     if (stats.hp == 0)
         stats.hp = 1;
     if (stats.mp == 0)
@@ -2737,6 +2836,22 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
     if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
         return g_vm_net_mock_monster_overrides[index].stats;
     return vm_net_mock_monster_base_stats_for_enemy(enemyId);
+}
+
+/* A persisted administrator row chooses the effective monster type as well as
+ * its explicit combat values.  Encounter cardinality must follow that type so
+ * a monster changed to a boss cannot be randomly expanded into multiple boss
+ * copies by the scene encounter roller. */
+static vm_net_mock_monster_family vm_net_mock_monster_family_for_enemy(u32 enemyId)
+{
+    int index = vm_net_mock_monster_catalog_index(enemyId);
+
+    (void)vm_net_mock_monster_db_load();
+    if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
+        return (vm_net_mock_monster_family)
+            g_vm_net_mock_monster_overrides[index].family;
+    return (vm_net_mock_monster_family)
+        vm_net_mock_monster_entry_for_enemy(enemyId).family;
 }
 
 /* The source catalog predates backend editing and stores one legacy drop per
