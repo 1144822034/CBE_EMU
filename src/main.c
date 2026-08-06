@@ -206,6 +206,9 @@ typedef enum
      * control and battle assertion, but intentionally omits the shop round
      * trip so the first differing client lifecycle edge is observable. */
     VM_AUTOMATION_SCENARIO_DIRECT_HANGUP,
+    /* Starts from a clean isolated cache and proves the native title-module
+     * 18/6 update transaction reaches its installed terminal state. */
+    VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE,
     /* A read-only visual/protocol probe for the authored n_telestone scene.
      * It deliberately stops at the native scene boundary; it does not fake a
      * 16/1 request or call the mmGame action callback directly. */
@@ -225,6 +228,7 @@ typedef enum
 typedef enum
 {
     VM_AUTOMATION_STAGE_BOOT_CONFIRM = 0,
+    VM_AUTOMATION_STAGE_WAIT_TITLE_MODULE_UPDATE,
     VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP,
     VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH,
     VM_AUTOMATION_STAGE_WAIT_ROLE_LIST,
@@ -253,6 +257,9 @@ typedef struct
     u8 titleScreenInitialized;
     u8 titleLoginResponseSeen;
     u8 titleLoginResponseCaptured;
+    u8 titleModuleUpdateChunkSeen;
+    u8 titleModuleUpdateCompleted;
+    u8 titleModuleUpdateLifecycleRejectSeen;
     u8 titleRoleListSeen;
     u8 initialScenePacketSeen;
     u8 shopStatusSeen;
@@ -282,6 +289,8 @@ typedef struct
     u32 stageStartedMs;
     u32 totalStartedMs;
     u32 titleUpdateFrame;
+    u32 titleModuleUpdateTotalSize;
+    u32 titleModuleUpdateChecksum;
     u32 initialScenePacketFrame;
     u32 titleScreenInitFrame;
     /* These are observed screen descriptors, not hard-coded client addresses.
@@ -324,6 +333,13 @@ static void vm_automation_note_screen_init(u32 screen, u32 initEntry,
                                            u32 logicEntry, u32 renderEntry);
 static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                                                  u32 eventType, u32 sequence);
+/* Startup-module update investigation only.  The helper is read-only and is
+ * called exclusively from the opt-in automation trace path. */
+static void vm_autotest_trace_update_state(const char *phase, u32 sequence,
+                                           const u8 *packet, u32 packetLen);
+static void vm_autotest_trace_update_guest_callback(const char *phase,
+                                                     u32 responsePtr,
+                                                     u32 responseLen);
 static void vm_automation_note_battle_handler_pc(u32 localPc,
                                                   u32 moduleSpBf);
 static void vm_automation_note_battle_scene_char_list(u32 sequence,
@@ -3845,6 +3861,13 @@ static uc_err scheduler_dispatch_net_tasks(void)
             task->active = 0;
             g_netTaskDispatchDepth++;
             g_netTaskDispatchSlot = (int)i;
+            if (g_autotestEnabled && (taskEvent == 5u || taskEvent == 7u ||
+                                      taskEvent == 9u))
+            {
+                vm_autotest_note("net_fire event=%u r0=%08x r1=%08x cb=%08x ctx=%08x\n",
+                                 taskEvent, taskR0, taskR1, taskCallback,
+                                 taskContext);
+            }
             DEBUG_PRINT("[probe_net_fire] event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u\n", taskEvent, taskR0, taskR1, taskR2, taskCallback, taskContext, g_schedulerTick);
             if (g_netDebugReadWindow)
             {
@@ -3862,6 +3885,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
+            vm_autotest_trace_update_guest_callback("callback-begin", taskR0,
+                                                     taskR1);
             scheduler_trace_hangup_battle_response_callback(
                 "begin", &taskRemoteObservation, taskEvent, taskR0,
                 taskCallback, UC_ERR_OK);
@@ -3870,6 +3895,8 @@ static uc_err scheduler_dispatch_net_tasks(void)
             scheduler_trace_hangup_battle_response_callback(
                 "end", &taskRemoteObservation, taskEvent, taskR0,
                 taskCallback, err);
+            vm_autotest_trace_update_guest_callback("callback-end", taskR0,
+                                                     taskR1);
             vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
             if (g_netDebugReadWindow)
             {
@@ -5329,6 +5356,8 @@ static const char *vm_automation_stage_name(vm_automation_stage stage)
     switch (stage)
     {
     case VM_AUTOMATION_STAGE_BOOT_CONFIRM: return "boot-confirm";
+    case VM_AUTOMATION_STAGE_WAIT_TITLE_MODULE_UPDATE:
+        return "wait-title-module-update";
     case VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP: return "wait-timed-title-bootstrap";
     case VM_AUTOMATION_STAGE_WAIT_TITLE_LOGIN_DISPATCH: return "wait-title-login";
     case VM_AUTOMATION_STAGE_WAIT_ROLE_LIST: return "wait-role-list";
@@ -5361,6 +5390,8 @@ static const char *vm_automation_scenario_name(void)
         return "shop-return-hangup-v1";
     case VM_AUTOMATION_SCENARIO_DIRECT_HANGUP:
         return "direct-hangup-control-v1";
+    case VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE:
+        return "title-module-update-v1";
     case VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE:
         return "scene-teleport-stone-probe-v1";
     case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE:
@@ -5403,6 +5434,9 @@ static void vm_automation_write_result(const char *result, const char *reason)
             "  \"render_frames\": %u,\n"
             "  \"input_count\": %u,\n"
             "  \"timed_input_count\": %u,\n"
+            "  \"title_module_total_size\": %u,\n"
+            "  \"title_module_checksum\": %u,\n"
+            "  \"title_module_lifecycle_reject\": %u,\n"
             "  \"timestamp_unix\": %lld\n"
             "}\n",
             vm_automation_scenario_name(), result ? result : "unknown",
@@ -5410,6 +5444,9 @@ static void vm_automation_write_result(const char *result, const char *reason)
             vm_automation_stage_name(g_vmAutomation.stage),
             g_vmAutomation.renderFrames, g_vmAutomation.inputCount,
             g_vmAutomation.timedInputCount,
+            g_vmAutomation.titleModuleUpdateTotalSize,
+            g_vmAutomation.titleModuleUpdateChecksum,
+            g_vmAutomation.titleModuleUpdateLifecycleRejectSeen,
             (long long)now);
     fclose(stream);
 }
@@ -5771,6 +5808,7 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawAutoEnable = 0;
     u8 sawAutoDisable = 0;
     u8 sawSettlement = 0;
+    u8 sawModuleUpdateChunk = 0;
 
     if (!g_vmAutomation.active || packet == NULL || eventType != 7 ||
         packetLen < 5 || packet[0] != 'W' || packet[1] != 'T' ||
@@ -5793,6 +5831,8 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
             sawTaskSubset = 1;
         if (kind == 18 && subtype == 9)
             sawTitleUpdateComplete = 1;
+        if (kind == 18 && subtype == 6)
+            sawModuleUpdateChunk = 1;
         if (kind == 1 && subtype == 12)
             sawTitleLoginResponse = 1;
         if (kind == 14 && subtype == 14)
@@ -5825,6 +5865,15 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     }
     if (offset != packetLen)
         return;
+    if (sawModuleUpdateChunk)
+    {
+        /* The update trace is intentionally automation-only and read-only.
+         * It captures the client-owned resume state before its network
+         * callback parses this 18/6 packet, so an interrupted module update
+         * can be attributed to the first failing lifecycle transition. */
+        vm_autotest_trace_update_state("response-queued", sequence,
+                                       packet, packetLen);
+    }
     if (sawTaskSubset)
     {
         g_vmAutomation.initialScenePacketSeen = 1;
@@ -5946,6 +5995,17 @@ static void vm_automation_tick(void)
 
     switch (g_vmAutomation.stage)
     {
+    case VM_AUTOMATION_STAGE_WAIT_TITLE_MODULE_UPDATE:
+        if (g_vmAutomation.titleModuleUpdateLifecycleRejectSeen)
+        {
+            vm_automation_finish(0, "title-module-update-lifecycle-reject");
+        }
+        else if (g_vmAutomation.titleModuleUpdateCompleted)
+        {
+            vm_automation_request_capture("title-module-update-installed");
+            vm_automation_finish(1, "native-title-module-18-6-install-complete");
+        }
+        break;
     case VM_AUTOMATION_STAGE_BOOT_CONFIRM:
         if (g_vmAutomation.renderFrames >= 2 &&
             vm_automation_issue_key('f', "two-rendered-boot-frames"))
@@ -6472,6 +6532,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_SHOP_RETURN_HANGUP;
     else if (strcmp(scenario, "direct-hangup-control-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_DIRECT_HANGUP;
+    else if (strcmp(scenario, "title-module-update-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE;
     else if (strcmp(scenario, "scene-teleport-stone-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE;
     else if (strcmp(scenario, "equipment-enhance-rules-probe-v1") == 0)
@@ -6493,15 +6555,20 @@ static void vm_automation_init_config(int argc, char *args[])
     g_vmAutomation.scenario = parsedScenario;
     g_vmAutomation.timedTitleDriver =
         titleDriver != NULL && strcmp(titleDriver, "timed-title-v1") == 0;
-    g_vmAutomation.stage = g_vmAutomation.timedTitleDriver
-        ? VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP
-        : VM_AUTOMATION_STAGE_BOOT_CONFIRM;
+    g_vmAutomation.stage = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
+        ? VM_AUTOMATION_STAGE_WAIT_TITLE_MODULE_UPDATE
+        : (g_vmAutomation.timedTitleDriver
+            ? VM_AUTOMATION_STAGE_WAIT_TIMED_TITLE_BOOTSTRAP
+            : VM_AUTOMATION_STAGE_BOOT_CONFIRM);
     g_vmAutomation.active = 1;
-    g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-        ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u);
-    g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-        ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u);
-    g_vmAutomation.stepTimeoutMs = 15000u;
+    g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
+        ? 1u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+            ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u));
+    g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
+        ? 30000u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+            ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u));
+    g_vmAutomation.stepTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
+        ? 30000u : 15000u;
     snprintf(g_vmAutomation.artifactDir, sizeof(g_vmAutomation.artifactDir),
              "%s", artifactDir);
     g_autotestEnabled = 1;
@@ -7081,6 +7148,114 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
     g_vmEquipmentEnhanceRulesCaptured = 1;
 }
 
+/* Read-only update-state capture for the isolated automation investigation.
+ * These offsets are the client module-update context established by
+ * send_update_chunk_request (JianghuOL.CBE:0x01036D80).  This code never
+ * changes guest memory, registers, packets, or guest control flow. */
+static void vm_autotest_trace_update_state(const char *phase, u32 sequence,
+                                           const u8 *packet, u32 packetLen)
+{
+    const u32 updateBaseOffset = 38220u;
+    u16 versions[4] = {0, 0, 0, 0};
+    u8 slot = 0;
+    u32 start = 0;
+    u32 tempFile = 0;
+    u32 checksum = 0;
+    u8 requestState = 0;
+    u8 requestPending = 0;
+    u32 buffer = 0;
+    u32 bufferOffset = 0;
+    u8 bufferBlocks = 0;
+    u32 totalSize = 0;
+    u32 capacity = 0;
+    u8 loaderState = 0;
+    u16 loaderVersion = 0;
+    u32 loaderBuffer = 0;
+    u8 kind = 0;
+    u8 subtype = 0;
+    u32 base;
+
+    if (!g_autotestEnabled || Global_R9 == 0)
+        return;
+    if (packet != NULL && packetLen >= 8u &&
+        packet[0] == 'W' && packet[1] == 'T')
+    {
+        kind = packet[6];
+        subtype = packet[7];
+    }
+    base = Global_R9 + updateBaseOffset;
+    if (uc_mem_read(MTK, base, versions, sizeof(versions)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 8u, &slot, sizeof(slot)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 12u, &start, sizeof(start)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 20u, &tempFile, sizeof(tempFile)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 56u, &checksum, sizeof(checksum)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 72u, &requestState, sizeof(requestState)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 73u, &requestPending, sizeof(requestPending)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 80u, &buffer, sizeof(buffer)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 84u, &bufferOffset, sizeof(bufferOffset)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 88u, &bufferBlocks, sizeof(bufferBlocks)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 96u, &totalSize, sizeof(totalSize)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 100u, &capacity, sizeof(capacity)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 156u, &loaderState, sizeof(loaderState)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 158u, &loaderVersion, sizeof(loaderVersion)) != UC_ERR_OK ||
+        uc_mem_read(MTK, base + 160u, &loaderBuffer, sizeof(loaderBuffer)) != UC_ERR_OK)
+    {
+        vm_autotest_note("update_trace phase=%s seq=%u read=failed r9=%08x\\n",
+                         phase != NULL ? phase : "unknown", sequence, Global_R9);
+        return;
+    }
+    vm_autotest_note("update_trace phase=%s seq=%u wire=%u kind=%u/%u slot=%u versions=%u/%u/%u/%u start=%u checksum=%u request=%u/%u temp=%08x buffer=%08x offset=%u blocks=%u total=%u cap=%u loader=%u/%u loaderbuf=%08x\\n",
+                     phase != NULL ? phase : "unknown", sequence, packetLen,
+                     kind, subtype, slot, versions[0], versions[1], versions[2],
+                     versions[3], start, checksum, requestState, requestPending,
+                     tempFile, buffer, bufferOffset, bufferBlocks, totalSize,
+                     capacity, loaderState, loaderVersion, loaderBuffer);
+    /* The test only observes the same updater context the client owns.  A
+     * pass requires an actual 18/6 response followed by the installed native
+     * terminal state; no fixed delay or title-screen side effect is treated
+     * as evidence that the transaction succeeded. */
+    if (g_vmAutomation.active &&
+        g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE &&
+        slot == 1u && totalSize != 0)
+    {
+        if (packet != NULL && kind == 18u && subtype == 6u)
+            g_vmAutomation.titleModuleUpdateChunkSeen = 1;
+        if (g_vmAutomation.titleModuleUpdateChunkSeen && phase != NULL &&
+            strcmp(phase, "callback-end") == 0 &&
+            requestState == 0 && requestPending == 0 &&
+            tempFile == 0xffffffffu && buffer == 0 && start == 0 &&
+            checksum != 0)
+        {
+            g_vmAutomation.titleModuleUpdateCompleted = 1;
+            g_vmAutomation.titleModuleUpdateTotalSize = totalSize;
+            g_vmAutomation.titleModuleUpdateChecksum = checksum;
+        }
+    }
+}
+
+static void vm_autotest_trace_update_guest_callback(const char *phase,
+                                                     u32 responsePtr,
+                                                     u32 responseLen)
+{
+    u8 header[11];
+    u32 declaredLen;
+
+    if (!g_autotestEnabled || responsePtr == 0 || responseLen < sizeof(header))
+        return;
+    if (uc_mem_read(MTK, responsePtr, header, sizeof(header)) != UC_ERR_OK ||
+        header[0] != 'W' || header[1] != 'T' || header[4] == 0 ||
+        header[6] != 18 || header[7] != 6)
+        return;
+    declaredLen = ((u32)header[2] << 8) | header[3];
+    if (declaredLen != responseLen)
+    {
+        vm_autotest_note("update_trace phase=%s callback_len_mismatch ptr=%08x event_len=%u wire_len=%u\\n",
+                         phase != NULL ? phase : "unknown", responsePtr,
+                         responseLen, declaredLen);
+    }
+    vm_autotest_trace_update_state(phase, 0, header, responseLen);
+}
+
 static void vm_autotest_note_startup_pc(u32 pc)
 {
     static u32 seenEntry = 0;
@@ -7094,6 +7269,9 @@ static void vm_autotest_note_startup_pc(u32 pc)
     static u32 seenTitleRoleListInit = 0;
     static u32 seenTitleRoleManageInit = 0;
     static u32 seenTitleRoleNetwork = 0;
+    static u32 seenModuleUpdateReject = 0;
+    static u32 seenModuleUpdateFlush = 0;
+    static u32 seenModuleUpdateRequest = 0;
     u32 startupState = 0;
     u32 netTask = 0;
     u16 waitTicks = 0;
@@ -7105,6 +7283,8 @@ static void vm_autotest_note_startup_pc(u32 pc)
         return;
     if (pc != 0x0103A77C && pc != 0x0103A7AC && pc != 0x0103A7BA &&
         pc != 0x0103A7C2 && pc != 0x0103B2D6 && pc != 0x0103B95A &&
+        pc != 0x01036C66 && pc != 0x01036F48 && pc != 0x010373DA &&
+        pc != 0x010375A0 &&
         pc != 0x050816DC && pc != 0x05082D80 && pc != 0x05082A50 &&
         pc != 0x05082DBA && pc != 0x05083AD2 && pc != 0x050853EC)
         return;
@@ -7170,6 +7350,45 @@ static void vm_autotest_note_startup_pc(u32 pc)
     {
         seenTitleRoleNetwork = 1;
         vm_autotest_note("title_role_manage_network pc=%08x\n", pc);
+    }
+    else if (pc == 0x01036C66 && seenModuleUpdateRequest < 16u)
+    {
+        ++seenModuleUpdateRequest;
+        vm_autotest_trace_update_state("chunk-request-builder",
+                                       seenModuleUpdateRequest, NULL, 0);
+    }
+    else if (pc == 0x01036F48 && seenModuleUpdateFlush < 8u)
+    {
+        ++seenModuleUpdateFlush;
+        vm_autotest_trace_update_state("chunk-tempfile-flush",
+                                       seenModuleUpdateFlush, NULL, 0);
+    }
+    else if (pc == 0x010373DA && seenModuleUpdateReject < 8u)
+    {
+        u32 calculated = 0;
+        u32 advertised = 0;
+
+        ++seenModuleUpdateReject;
+        (void)uc_reg_read(MTK, UC_ARM_REG_R0, &calculated);
+        (void)uc_reg_read(MTK, UC_ARM_REG_R1, &advertised);
+        vm_autotest_note("update_trace reject count=%u calculated_or_loader=%u advertised_crc=%u\n",
+                         seenModuleUpdateReject, calculated, advertised);
+        vm_autotest_trace_update_state("chunk-reject", seenModuleUpdateReject,
+                                       NULL, 0);
+    }
+    else if (pc == 0x010375A0 && seenModuleUpdateReject < 8u)
+    {
+        u32 eventType = 0;
+
+        (void)uc_reg_read(MTK, UC_ARM_REG_R5, &eventType);
+        ++seenModuleUpdateReject;
+        vm_autotest_note("update_trace lifecycle_reject count=%u event=%u\n",
+                         seenModuleUpdateReject, eventType);
+        if (g_vmAutomation.active &&
+            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE)
+            g_vmAutomation.titleModuleUpdateLifecycleRejectSeen = 1;
+        vm_autotest_trace_update_state("lifecycle-reject", seenModuleUpdateReject,
+                                       NULL, 0);
     }
 }
 

@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -62,6 +62,18 @@ $null = New-Item -ItemType Directory -Path $runDir
 $null = New-Item -ItemType Directory -Path (Join-Path $runDir 'frames')
 $clientDir = Join-Path $runDir 'client'
 $null = New-Item -ItemType Directory -Path $clientDir
+$serverResourceRoot = Join-Path $runDir 'server-resource'
+# The update catalog and delivery ledger are service state, even though they
+# reside beside static resources.  Run the isolated service against a private
+# copy so an existing interactive client's delivery entry cannot affect the
+# result and the test never writes back into web/fs/JHOnlineData.
+Copy-Item -LiteralPath $resourceRoot -Destination $serverResourceRoot -Recurse
+$isolatedDeliveryLedger = Join-Path $serverResourceRoot 'server_update_delivery.tsv'
+if (Test-Path -LiteralPath $isolatedDeliveryLedger) {
+    # A delivery ledger is volatile service state, not part of the immutable
+    # resource fixture.  Every run starts with no completed clients.
+    Remove-Item -LiteralPath $isolatedDeliveryLedger -Force
+}
 # The client-side protocol probes are deliberately append-only host logs.  The
 # emulator does not create parent directories for them, so prepare this
 # per-run artifact directory before launch.  This is not guest state and does
@@ -90,7 +102,7 @@ try {
     # service starts so startup migration sees one internally consistent test
     # account/role pair, just as it would in a populated deployment.  The
     # fixture writes only to the uniquely named automation schema.
-    $fixtureProfile = if ($Scenario -eq 'scene-teleport-stone-probe-v1') {
+    $fixtureProfile = if ($Scenario -in @('scene-teleport-stone-probe-v1', 'title-module-update-v1')) {
         'teleport-stone-c00'
     } else {
         'hangup-peach'
@@ -106,7 +118,7 @@ try {
     $env:CBE_MYSQL_USER = if ($env:CBE_AUTOMATION_MYSQL_USER) { $env:CBE_AUTOMATION_MYSQL_USER } else { 'root' }
     $env:CBE_MYSQL_PASSWORD = $env:CBE_AUTOMATION_MYSQL_PASSWORD
     $env:CBE_MYSQL_DATABASE = $database
-    $env:CBE_RESOURCE_ROOT = $resourceRoot
+    $env:CBE_RESOURCE_ROOT = $serverResourceRoot
     # These are per-run service fixtures, not user-server configuration.  The
     # cancel case keeps three high-HP targets alive until the native cancel
     # button is dispatched; the terminal case exercises the original three
@@ -120,7 +132,7 @@ try {
     }
 
     $serverProcess = Start-Process -FilePath $server -WorkingDirectory $runDir -PassThru `
-        -ArgumentList "--mock-service-only", "--mock-service-bind=127.0.0.1", "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$resourceRoot" `
+        -ArgumentList "--mock-service-only", "--mock-service-bind=127.0.0.1", "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$serverResourceRoot" `
         -RedirectStandardOutput (Join-Path $runDir 'server.stdout.log') `
         -RedirectStandardError (Join-Path $runDir 'server.stderr.log')
     [pscustomobject]@{ server = $serverProcess.Id; client = $null } |
@@ -132,18 +144,46 @@ try {
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $clientDir }
     }
     New-Item -ItemType Junction -Path (Join-Path $clientDir 'CBE') -Target (Join-Path $repo 'bin\CBE') | Out-Null
-    New-Item -ItemType Junction -Path (Join-Path $clientDir 'JHOnlineData') -Target (Join-Path $repo 'bin\JHOnlineData') | Out-Null
+    # The module updater creates MMORPGTempcbm while it streams a CBM.  Do not
+    # read from or junction to bin\JHOnlineData: an interactive client may be
+    # holding that cache open, and a junction would let a test mutate it.
+    # resourceRoot is the server-owned input for this isolated run and is
+    # copied into a per-run client cache instead.
+    Copy-Item -LiteralPath $serverResourceRoot -Destination (Join-Path $clientDir 'JHOnlineData') -Recurse
+    $isolatedUpdateTemp = Join-Path $clientDir 'JHOnlineData\MMORPGTempcbm'
+    if (Test-Path -LiteralPath $isolatedUpdateTemp) {
+        # A host cache may contain a partial update from a prior interactive
+        # run.  The isolated client must begin this test from a deterministic
+        # update state; this path is inside the just-created run directory.
+        Remove-Item -LiteralPath $isolatedUpdateTemp -Force
+    }
+    if ($Scenario -eq 'title-module-update-v1') {
+        # The copied service tree can contain the current module-version table.
+        # This test needs the documented pre-release client state (slot 1 at
+        # version 0), so remove that table only from its private cache.  The
+        # CBE initializes an absent table to its built-in module versions and
+        # must then perform the regular 18/5 -> 18/6 transaction itself.
+        $isolatedVersionTable = Join-Path $clientDir 'JHOnlineData\mmorpg_updateversioncbm'
+        if (Test-Path -LiteralPath $isolatedVersionTable) {
+            Remove-Item -LiteralPath $isolatedVersionTable -Force
+        }
+    }
     $loginRecord = Join-Path $clientDir 'nvram\CBE_______OL.CBE_storage_mmorpg_LoginRecord.bin'
     & $php $fixture client-login $loginRecord | Tee-Object -FilePath (Join-Path $runDir 'fixture.log') -Append
     if ($LASTEXITCODE -ne 0) { throw 'isolated client LoginRecord fixture failed' }
     $env:CBE_SERVER_ENDPOINT = "127.0.0.1:$ServicePort"
     # These are the formerly manually documented title inputs, now an explicit
     # one-shot schedule delivered through the VM's ordinary input queue.  The
-    # scenario does not treat timing as success: it waits for its own real
-    # packet/parser assertions afterwards.
+    # title-module probe purposely sends no input: it stops at the native
+    # module-updater terminal state before the title screen accepts controls.
     $titleActions = '5000:key:f,17000:key:f,19000:key:q,23000:key:f,29000:key:f,35000:key:f'
+    $clientArguments = @("--automation-scenario=$Scenario", "--automation-artifacts=$runDir")
+    if ($Scenario -ne 'title-module-update-v1') {
+        $clientArguments += '--automation-title-driver=timed-title-v1'
+        $clientArguments += "--actions=$titleActions"
+    }
     $clientProcess = Start-Process -FilePath (Join-Path $clientDir 'main.exe') -WorkingDirectory $clientDir -PassThru `
-        -ArgumentList "--automation-scenario=$Scenario", "--automation-title-driver=timed-title-v1", "--automation-artifacts=$runDir", "--actions=$titleActions" `
+        -ArgumentList $clientArguments `
         -RedirectStandardOutput (Join-Path $runDir 'client.stdout.log') `
         -RedirectStandardError (Join-Path $runDir 'client.stderr.log')
     [pscustomobject]@{ server = $serverProcess.Id; client = $clientProcess.Id } |

@@ -517,9 +517,6 @@ static u32 vm_net_mock_process_request_bytes(u32 connectId,
         return 0;
     }
 
-    closeAfterData = vm_net_mock_request_contains(request, requestLen, "version") &&
-                     !vm_net_mock_request_contains(request, requestLen, "start") &&
-                          vm_net_mock_has_installed_update();
     haveWtHeader = vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
                                                           &requestWtKind,
                                                           &requestWtSubtype);
