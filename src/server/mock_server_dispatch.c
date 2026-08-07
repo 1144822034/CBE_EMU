@@ -1112,10 +1112,10 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
-    hookedLen = vm_net_mock_build_battle_auto12_cancel_response(request, requestLen, out, outCap);
+    hookedLen = vm_net_mock_build_battle_auto12_replay_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
-        vm_net_log_handled_packet("builtin-battle-auto12-cancel", request, requestLen, hookedLen);
+        vm_net_log_handled_packet("builtin-battle-auto12-replay", request, requestLen, hookedLen);
         return hookedLen;
     }
 

@@ -2914,6 +2914,20 @@ static const vm_net_mock_item_effect_catalog_item *vm_net_mock_find_item_effect_
     return NULL;
 }
 
+/* `item.dsh` column 10 (堆叠数) is the authoritative maximum quantity of
+ * one ordinary backpack instance.  A zero return means this item was not
+ * found in the client resource catalogue; callers must preserve the legacy
+ * row rather than invent a stack limit for an unresolved resource. */
+static u32 vm_net_mock_item_effect_stack_limit(u32 itemId)
+{
+    const vm_net_mock_item_effect_catalog_item *item =
+        vm_net_mock_find_item_effect_catalog_item(itemId);
+
+    if (item == NULL || item->stack == 0)
+        return 0;
+    return item->stack;
+}
+
 /* These ids have client-side request/response handlers that are distinct from
  * the ordinary 7/1 consumable flow.  Keeping the classification here prevents
  * a future generic caller from silently deleting a special item just because

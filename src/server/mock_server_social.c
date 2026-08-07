@@ -4277,10 +4277,6 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     {
         return vm_net_mock_build_battle_pending_settlement_response(out, outCap);
     }
-    teamBattleResponseLen = vm_net_mock_build_pending_auto_battle_action_response(
-        out, outCap, observer);
-    if (teamBattleResponseLen != 0)
-        return teamBattleResponseLen;
     teamBattleResponseLen = vm_net_mock_build_pending_scene_hangup_battle_response(
         out, outCap, observer);
     if (teamBattleResponseLen != 0)

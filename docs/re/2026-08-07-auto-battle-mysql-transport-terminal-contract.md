@@ -1,5 +1,10 @@
 # 自动战斗末击的 MySQL 连接失效与结算合同
 
+> 更新（2026-08-07）：本文记录的 MySQL 空闲连接根因、`4/6`/`4/7` 结算合同和
+> transport 修复不变；文中出现的旧 `mock_battle_auto_action` scene-poll 调度日志仅是
+> 当时的历史证据。自动操作回放的当前合同见
+> [自动战斗沿用上一操作的协议合同](2026-08-07-battle-auto-last-operation-replay.md)。
+
 ## 状态
 
 - 日期：2026-08-07

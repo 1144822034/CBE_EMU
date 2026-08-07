@@ -1798,7 +1798,10 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleOperateTurnCounter;
     u8 mockBattleOperateSessionArmed;
     u8 mockBattleAutoEnabled;
-    u32 mockBattleAutoNextActionTick;
+    u8 mockBattleAutoLastOperationValid;
+    u32 mockBattleAutoLastOperationRoleId;
+    u32 mockBattleAutoLastOperationIndex;
+    u32 mockBattleAutoLastOperationOperate;
     u32 mockBattleTerminalCloseNotBeforeTick;
     u8 mockBattleOperateSessionFinished;
     u8 mockBattlePendingEnemyTurn;
@@ -2297,8 +2300,14 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->mockBattleOperateTurnCounter = g_mockBattleOperateTurnCounter;
     state->mockBattleOperateSessionArmed = g_mockBattleOperateSessionArmed;
     state->mockBattleAutoEnabled = g_vm_net_mock_battle_auto_enabled;
-    state->mockBattleAutoNextActionTick =
-        g_vm_net_mock_battle_auto_next_action_tick;
+    state->mockBattleAutoLastOperationValid =
+        g_vm_net_mock_battle_auto_last_operation_valid;
+    state->mockBattleAutoLastOperationRoleId =
+        g_vm_net_mock_battle_auto_last_operation_role_id;
+    state->mockBattleAutoLastOperationIndex =
+        g_vm_net_mock_battle_auto_last_operation_index;
+    state->mockBattleAutoLastOperationOperate =
+        g_vm_net_mock_battle_auto_last_operation_operate;
     state->mockBattleTerminalCloseNotBeforeTick =
         g_vm_net_mock_battle_terminal_close_not_before_tick;
     state->mockBattleOperateSessionFinished = g_mockBattleOperateSessionFinished;
@@ -2408,8 +2417,14 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_mockBattleOperateTurnCounter = state->mockBattleOperateTurnCounter;
     g_mockBattleOperateSessionArmed = state->mockBattleOperateSessionArmed;
     g_vm_net_mock_battle_auto_enabled = state->mockBattleAutoEnabled;
-    g_vm_net_mock_battle_auto_next_action_tick =
-        state->mockBattleAutoNextActionTick;
+    g_vm_net_mock_battle_auto_last_operation_valid =
+        state->mockBattleAutoLastOperationValid;
+    g_vm_net_mock_battle_auto_last_operation_role_id =
+        state->mockBattleAutoLastOperationRoleId;
+    g_vm_net_mock_battle_auto_last_operation_index =
+        state->mockBattleAutoLastOperationIndex;
+    g_vm_net_mock_battle_auto_last_operation_operate =
+        state->mockBattleAutoLastOperationOperate;
     g_vm_net_mock_battle_terminal_close_not_before_tick =
         state->mockBattleTerminalCloseNotBeforeTick;
     g_mockBattleOperateSessionFinished = state->mockBattleOperateSessionFinished;

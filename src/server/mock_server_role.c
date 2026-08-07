@@ -3601,6 +3601,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
         u32 instanceCount = 1;
         const vm_net_mock_equipment_catalog_item *equipment = NULL;
         u16 expectedMax = 0;
+        u32 stackLimit = 0;
         if (item.itemId == 0 || item.count == 0)
             continue;
         if (item.enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -3620,6 +3621,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
         }
         equipment = vm_net_mock_find_equipment_catalog_item(item.itemId);
         expectedMax = vm_net_mock_equipment_durability_max_for_item(item.itemId);
+        stackLimit = vm_net_mock_item_effect_stack_limit(item.itemId);
         if (equipment != NULL && expectedMax != 0)
         {
             /* Equipment rows are identities, never stacks.  Old snapshots
@@ -3674,6 +3676,31 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 continue;
             }
         }
+        if (equipment == NULL && item.itemId != 921 && stackLimit != 0)
+        {
+            /* Ordinary item rows must honor item.dsh 堆叠数.  Older role
+             * snapshots could have been created by the former unbounded
+             * merge path, so split them before they are exposed to the
+             * client.  Do not truncate an impossible migration: preserve the
+             * original row and make the violated storage contract explicit. */
+            instanceCount = item.count / stackLimit;
+            if (item.count % stackLimit != 0)
+                ++instanceCount;
+            if (instanceCount > 1 &&
+                (compactCount + instanceCount > role->backpackCapacity ||
+                 compactCount + instanceCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS))
+            {
+                if (compactCount < role->backpackCapacity &&
+                    compactCount < VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                {
+                    compact[compactCount++] = item;
+                }
+                printf("[error][mock-service] backpack_stack_limit_unresolved role=%u item=%u seq=%u count=%u stack_limit=%u capacity=%u reason=insufficient-slots\n",
+                       role->roleId, item.itemId, item.seq, item.count,
+                       stackLimit, role->backpackCapacity);
+                continue;
+            }
+        }
         for (u32 instance = 0; instance < instanceCount; ++instance)
         {
             vm_net_mock_backpack_item_state instanceItem = item;
@@ -3694,6 +3721,12 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 instanceItem.count = 1;
             if (item.itemId == 921)
                 instanceItem.count = 1;
+            if (equipment == NULL && item.itemId != 921 && stackLimit != 0)
+            {
+                u32 consumed = instance * stackLimit;
+                u32 remaining = item.count > consumed ? item.count - consumed : 0;
+                instanceItem.count = remaining > stackLimit ? stackLimit : remaining;
+            }
             if (compactCount >= role->backpackCapacity ||
                 compactCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
             {
@@ -6666,6 +6699,75 @@ static bool vm_net_mock_role_add_backpack_item_to_role_in_memory(
         vm_net_mock_role_normalize_backpack(role);
         return true;
     }
+    {
+        u32 stackLimit = vm_net_mock_item_effect_stack_limit(itemId);
+
+        if (stackLimit != 0)
+        {
+            u32 remaining = count;
+            u16 firstSeq = 0;
+            u32 newRows = 0;
+
+            /* Fill existing partial stacks first.  `item.dsh` owns this
+             * limit, not the wire's u32 count width: a 99-stack chest plus a
+             * 22-stack chest must remain two sequences. */
+            for (u32 i = 0; i < itemCount && remaining != 0; ++i)
+            {
+                vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+                u32 freeCount = 0;
+                u32 added = 0;
+
+                if (item->itemId != itemId || item->count >= stackLimit)
+                    continue;
+                freeCount = stackLimit - item->count;
+                added = remaining < freeCount ? remaining : freeCount;
+                item->count += added;
+                remaining -= added;
+                if (firstSeq == 0)
+                    firstSeq = item->seq;
+            }
+
+            newRows = remaining / stackLimit;
+            if (remaining % stackLimit != 0)
+                ++newRows;
+            if (newRows > role->backpackCapacity - itemCount ||
+                newRows > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
+            {
+                *role = before;
+                return false;
+            }
+            while (remaining != 0)
+            {
+                vm_net_mock_backpack_item_state *item =
+                    &role->backpackItems[itemCount];
+                u32 added = remaining < stackLimit ? remaining : stackLimit;
+
+                memset(item, 0, sizeof(*item));
+                item->itemId = itemId;
+                if (!vm_net_mock_role_allocate_backpack_sequence(
+                        role, NULL, 0, role->nextBackpackSeq, &item->seq))
+                {
+                    *role = before;
+                    return false;
+                }
+                item->count = added;
+                if (firstSeq == 0)
+                    firstSeq = item->seq;
+                role->nextBackpackSeq = (u16)(item->seq + 1);
+                ++itemCount;
+                role->backpackItemCount = itemCount;
+                remaining -= added;
+            }
+            if (seqOut)
+                *seqOut = firstSeq;
+            vm_net_mock_role_normalize_backpack(role);
+            return true;
+        }
+    }
+
+    /* Unknown item resources retain the historical single-row behavior.
+     * The authoritative server must not invent a stack limit when the client
+     * DSH record is unavailable; the item resource issue remains observable. */
     for (u32 i = 0; i < itemCount; ++i)
     {
         vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
