@@ -598,7 +598,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     bool currentSceneReload = false;
     bool sceneShellAlreadyEntered = false;
     bool shopReturnReload = false;
-    bool tongquetaiNpcSeedAfterCurrentCompletion = false;
+    bool deferredTeleportNpcSeedAfterCurrentCompletion = false;
     bool completeTeleportResourceEnter = false;
     bool completePositionedPortalEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
@@ -785,16 +785,21 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
-    /* See the paired direct-map-stone completion response.  That WT2/3 sends
+    /* See the paired direct-map-stone completion response. That WT2/3 sends
      * the required empty 27/11 gate object and leaves this one-shot catalog
-     * pending.  WT6/1 is the first client-requested scene-runtime phase after
-     * the no-posinfo 30/2, so it owns the non-empty 27/11 NPC creation data. */
+     * pending. WT6/1 is the first client-requested scene-runtime phase after
+     * the no-posinfo 30/2, so it owns the non-empty 27/11 NPC creation data.
+     *
+     * Do not scope this by a destination name. The direct-map-stone contract
+     * is identified by the only state it deliberately leaves behind: the
+     * just-completed current scene has a matching pending but unseeded catalog.
+     * Ordinary completions have already consumed that catalog, and a real shop
+     * return retains its own explicit session marker. */
     vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(currentScene);
-    tongquetaiNpcSeedAfterCurrentCompletion =
+    deferredTeleportNpcSeedAfterCurrentCompletion =
         recentCompletedScene &&
         !shopReturnReload &&
         currentScene != NULL &&
-        vm_net_mock_scene_is_penglai01(currentScene) &&
         !g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_pending &&
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
@@ -822,16 +827,16 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * `30/2` scene re-enter with posinfo; the parser then calls the scene
          * entry method rather than only resetting its download state.
          */
-        if (tongquetaiNpcSeedAfterCurrentCompletion)
+        if (deferredTeleportNpcSeedAfterCurrentCompletion)
         {
             if (!vm_net_mock_append_scene_npcs11_once_or_empty(
                     out, outCap, &pos, currentScene,
-                    "tongquetai-current-scene-completion-followup"))
+                    "direct-map-stone-current-scene-completion-followup"))
             {
                 return 0;
             }
             objectCount += 1;
-            printf("[info][network] mock_scene_npc_seed_deliver scene=%s phase=WT6/1 after=current-scene-completion\n",
+            printf("[info][network] mock_scene_npc_seed_deliver scene=%s phase=WT6/1 after=direct-map-stone-current-scene-completion\n",
                    currentScene);
         }
         else if (!vm_net_mock_append_scene_npc_lifecycle_seed(
