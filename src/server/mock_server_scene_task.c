@@ -585,9 +585,22 @@ typedef struct
 
 typedef struct
 {
+    char scene[64];
+    char previousTargetScene[64];
+    char canonicalTargetScene[64];
+    u32 actorId;
+} vm_net_mock_dynamic_npc_instance_scene_migration;
+
+typedef struct
+{
     u32 loaded;
     u32 skipped;
     u32 quarantined;
+    u32 migrated;
+    u32 migrationFailures;
+    vm_net_mock_dynamic_npc_instance_scene_migration
+        migrations[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+    u32 migrationCount;
 } vm_net_mock_dynamic_npc_load_context;
 
 typedef struct
@@ -666,6 +679,118 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
     return true;
 }
 
+/* A dynamic instance target is sent directly in 30/1 and must consequently
+ * name the exact downloadable SCE file.  The old admin converter persisted
+ * b_* targets without `.sce`; that passed the server's optional suffix lookup
+ * but forced the client to request the nonexistent bare name over WT18/7.
+ * This is a data migration, not a runtime alias: it only appends the suffix
+ * when the exact resulting SCE exists in the server resource root. */
+static bool vm_net_mock_dynamic_npc_instance_scene_canonicalize(
+    const char *configuredScene, char *canonicalScene, size_t canonicalCap)
+{
+    char candidate[64];
+
+    if (canonicalScene == NULL || canonicalCap == 0)
+        return false;
+    canonicalScene[0] = 0;
+    if (configuredScene == NULL || configuredScene[0] == 0 ||
+        !vm_net_mock_scene_name_is_download_key(configuredScene))
+    {
+        return false;
+    }
+    if (vm_net_mock_str_ends_with(configuredScene, ".sce"))
+    {
+        if (!vm_net_mock_scene_resource_exists(configuredScene) ||
+            strlen(configuredScene) >= canonicalCap)
+        {
+            return false;
+        }
+        snprintf(canonicalScene, canonicalCap, "%s", configuredScene);
+        return true;
+    }
+    if (snprintf(candidate, sizeof(candidate), "%s.sce", configuredScene) < 0 ||
+        strlen(candidate) >= sizeof(candidate) ||
+        !vm_net_mock_scene_resource_exists(candidate) ||
+        strlen(candidate) >= canonicalCap)
+    {
+        return false;
+    }
+    snprintf(canonicalScene, canonicalCap, "%s", candidate);
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_instance_scene_queue_migration(
+    vm_net_mock_dynamic_npc_load_context *context,
+    const vm_net_mock_dynamic_npc_override *row,
+    const char *configuredScene)
+{
+    vm_net_mock_dynamic_npc_instance_scene_migration *migration = NULL;
+
+    if (context == NULL || row == NULL || configuredScene == NULL ||
+        context->migrationCount >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX)
+    {
+        return false;
+    }
+    migration = &context->migrations[context->migrationCount++];
+    memset(migration, 0, sizeof(*migration));
+    snprintf(migration->scene, sizeof(migration->scene), "%s", row->scene);
+    snprintf(migration->previousTargetScene,
+             sizeof(migration->previousTargetScene), "%s", configuredScene);
+    snprintf(migration->canonicalTargetScene,
+             sizeof(migration->canonicalTargetScene), "%s",
+             row->seed.instanceScene);
+    migration->actorId = row->seed.actorId;
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_instance_scene_apply_migrations(
+    vm_net_mock_dynamic_npc_load_context *context)
+{
+    if (context == NULL)
+        return false;
+    for (u32 i = 0; i < context->migrationCount; ++i)
+    {
+        const vm_net_mock_dynamic_npc_instance_scene_migration *migration =
+            &context->migrations[i];
+        char sceneHex[sizeof(migration->scene) * 2 + 1];
+        char previousHex[sizeof(migration->previousTargetScene) * 2 + 1];
+        char canonicalHex[sizeof(migration->canonicalTargetScene) * 2 + 1];
+        char query[768];
+
+        if (vm_mysql_hex_encode(migration->scene, strlen(migration->scene),
+                                sceneHex, sizeof(sceneHex)) == 0 ||
+            vm_mysql_hex_encode(migration->previousTargetScene,
+                                strlen(migration->previousTargetScene),
+                                previousHex, sizeof(previousHex)) == 0 ||
+            vm_mysql_hex_encode(migration->canonicalTargetScene,
+                                strlen(migration->canonicalTargetScene),
+                                canonicalHex, sizeof(canonicalHex)) == 0)
+        {
+            ++context->migrationFailures;
+            continue;
+        }
+        snprintf(query, sizeof(query),
+                 "UPDATE server_dynamic_npc_instances SET target_scene=X'%s' "
+                 "WHERE scene=X'%s' AND actor_id=%u AND target_scene=X'%s'",
+                 canonicalHex, sceneHex, migration->actorId, previousHex);
+        if (!vm_mysql_exec(query))
+        {
+            ++context->migrationFailures;
+            printf("[error][mock-admin] dynamic_npc_instance_scene_migration_failed scene=%s actor=%u from=%s to=%s error=%s\n",
+                   migration->scene, migration->actorId,
+                   migration->previousTargetScene,
+                   migration->canonicalTargetScene, vm_mysql_last_error());
+            continue;
+        }
+        ++context->migrated;
+        printf("[info][mock-admin] dynamic_npc_instance_scene_migration scene=%s actor=%u from=%s to=%s action=persist-exact-sce-key\n",
+               migration->scene, migration->actorId,
+               migration->previousTargetScene,
+               migration->canonicalTargetScene);
+    }
+    return context->migrationFailures == 0;
+}
+
 static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                        unsigned int columnCount,
                                        const char *const *values,
@@ -722,6 +847,32 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceMinLevel = (u16)number[11];
+    if (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+        row.seed.instanceScene[0] != 0)
+    {
+        char configuredScene[sizeof(row.seed.instanceScene)];
+
+        snprintf(configuredScene, sizeof(configuredScene), "%s",
+                 row.seed.instanceScene);
+        if (!vm_net_mock_dynamic_npc_instance_scene_canonicalize(
+                configuredScene, row.seed.instanceScene,
+                sizeof(row.seed.instanceScene)))
+        {
+            ++context->skipped;
+            printf("[error][mock-admin] dynamic_npc_instance_scene_unresolved scene=%s actor=%u target=%s action=skip-row reason=exact-sce-resource-not-found\n",
+                   row.scene, row.seed.actorId, configuredScene);
+            return true;
+        }
+        if (strcmp(configuredScene, row.seed.instanceScene) != 0 &&
+            !vm_net_mock_dynamic_npc_instance_scene_queue_migration(
+                context, &row, configuredScene))
+        {
+            ++context->skipped;
+            printf("[error][mock-admin] dynamic_npc_instance_scene_migration_queue_failed scene=%s actor=%u target=%s action=skip-row\n",
+                   row.scene, row.seed.actorId, configuredScene);
+            return true;
+        }
+    }
     if (!vm_net_mock_dynamic_npc_actor_resource_is_supported(
             row.seed.actorResource))
     {
@@ -745,7 +896,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
          ((row.seed.instanceScene[0] == 0 && row.seed.challengeEnemyId == 0) ||
           (row.seed.instanceScene[0] != 0 &&
-           (!vm_net_mock_scene_name_is_safe(row.seed.instanceScene) ||
+           (!vm_net_mock_str_ends_with(row.seed.instanceScene, ".sce") ||
+            !vm_net_mock_scene_name_is_safe(row.seed.instanceScene) ||
             row.seed.instanceX == 0 || row.seed.instanceY == 0 ||
             !vm_net_mock_scene_resource_exists(row.seed.instanceScene))) ||
           (row.seed.challengeEnemyId != 0 &&
@@ -836,6 +988,11 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
                vm_mysql_last_error());
         return false;
     }
+    if (!vm_net_mock_dynamic_npc_instance_scene_apply_migrations(&context))
+    {
+        printf("[error][mock-admin] dynamic_npc_db_load migration=instance-scene-sce-suffix error=persist-failed\n");
+        return false;
+    }
     for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
     {
         vm_net_mock_dynamic_npc_override *row =
@@ -854,8 +1011,9 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         }
     }
     g_vm_net_mock_dynamic_npc_db_valid = true;
-    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u quarantined=%u\n",
-           context.loaded, context.skipped, context.quarantined);
+    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u quarantined=%u migrated=%u\n",
+           context.loaded, context.skipped, context.quarantined,
+           context.migrated);
     return true;
 }
 
@@ -923,7 +1081,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
          ((seed->instanceScene[0] == 0 && seed->challengeEnemyId == 0) ||
           (seed->instanceScene[0] != 0 &&
-           (!vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
+           (!vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
+            !vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
             seed->instanceX == 0 || seed->instanceY == 0 ||
             !vm_net_mock_scene_resource_exists(seed->instanceScene))) ||
           (seed->challengeEnemyId != 0 &&

@@ -4185,6 +4185,7 @@ static u32 vm_net_mock_build_instance_enter_response(
     u32 pos = 0;
 
     if (seed == NULL || seed->instanceScene[0] == 0 ||
+        !vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
         seed->instanceX == 0 || seed->instanceY == 0)
     {
         return 0;
