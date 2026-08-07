@@ -6401,6 +6401,51 @@ static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
     return responseLen;
 }
 
+/*
+ * Once BattleScene has sent its empty 25/5, a following normal scene
+ * collision request is an equally valid native continuation boundary as a
+ * later scene-sync poll.  It must inherit the armed scene-hangup session;
+ * otherwise the generic collision builder increments the battle serial and
+ * the next poll sees a false session mismatch.
+ *
+ * Keep this deliberately stricter than a generic "hangup enabled" check:
+ * it accepts only the completed, rewarded scene-monster session that the
+ * 25/5 handler has already marked restart-pending.  Scene names are compared
+ * exactly so similarly named c00/00 resources can never share a continuation.
+ */
+static bool vm_net_mock_scene_hangup_can_adopt_native_challenge(
+    vm_mock_service_client_session *session,
+    const char *scene,
+    u32 roleId,
+    bool useSceneMonsterStart)
+{
+    if (!useSceneMonsterStart || session == NULL || scene == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !session->sceneHangupEnabled ||
+        !session->sceneHangupRestartPending ||
+        !session->sceneVisibleReady || session->sceneVisiblePending ||
+        session->onlineRoleId == 0 || roleId == 0 ||
+        session->onlineRoleId != roleId ||
+        session->sceneHangupBattleSessionSerial == 0 ||
+        session->sceneHangupBattleSessionSerial !=
+            g_mockBattleOperateSessionSerial ||
+        g_vm_net_mock_battle_role_id_current != roleId ||
+        g_mockBattleOperateSessionArmed != 0 ||
+        g_mockBattleAwaitingSettlement == 0 ||
+        g_mockBattleSceneMonsterStartActive == 0 ||
+        g_mockBattleEnemyHpCurrent != 0 || g_mockBattleRoleHpCurrent == 0 ||
+        strcmp(session->sceneHangupScene, scene) != 0 ||
+        strcmp(session->sceneVisibleScene, scene) != 0)
+    {
+        return false;
+    }
+
+    /* Team battles own a different start/turn contract.  The scene-hangup
+     * loop is currently a solo scene-monster feature, so never retrofit this
+     * continuation onto an existing team state. */
+    return vm_mock_service_team_find_for_client(session->clientId) == NULL;
+}
+
 static u32 vm_net_mock_build_challenge_interaction_response_ex(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap,
     bool forceNonSceneStart)
@@ -6453,6 +6498,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     u8 battleEnemyCount = 1;
     bool prefillEnemyTemplate = false;
     bool prefillPlayerTemplate = false;
+    bool continueSceneHangup = false;
+    u8 hangupAutoFlagType = (u8)vm_net_mock_env_u32(
+        "CBE_HANGUP_BATTLE_AUTO_FLAG", 1);
     u32 responseObjectCount = 1;
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
 
@@ -6498,6 +6546,11 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "index", &index);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx", &posx);
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &posy);
+
+    continueSceneHangup =
+        vm_net_mock_scene_hangup_can_adopt_native_challenge(
+            activeSession, vm_net_mock_current_scene_name(), roleId,
+            useSceneMonsterStart);
 
     sceneMonsterIndex = index;
     sceneMonsterPosX = posx;
@@ -6630,6 +6683,15 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     if (!vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo", battleInfo, (u16)battleInfoLen))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
+    if (continueSceneHangup && hangupAutoFlagType != 0)
+    {
+        if (!vm_net_mock_append_battle_case11_auto_flag_object(
+                out, outCap, &pos, hangupAutoFlagType))
+        {
+            return 0;
+        }
+        ++responseObjectCount;
+    }
     if (hasMoveinfo)
     {
         if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
@@ -6638,7 +6700,10 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     }
     vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
     g_mockBattleOperateSessionArmed = 1;
-    vm_net_mock_battle_auto_reset();
+    if (continueSceneHangup && hangupAutoFlagType != 0)
+        vm_net_mock_battle_auto_arm();
+    else
+        vm_net_mock_battle_auto_reset();
     g_mockBattleOperateSessionFinished = 0;
     g_mockBattlePendingEnemyTurn = 0;
     g_mockBattleAwaitingSettlement = 0;
@@ -6669,6 +6734,12 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     g_mockBattleRoleMpMax = roleMaxMp;
     if (g_mockBattleRoleMpMax < g_mockBattleRoleMpCurrent)
         g_mockBattleRoleMpMax = g_mockBattleRoleMpCurrent;
+    if (continueSceneHangup)
+    {
+        vm_net_mock_scene_hangup_record_battle_start(
+            activeSession, vm_net_mock_current_scene_name(),
+            "native-challenge-continuation");
+    }
     {
         vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(requestedEnemyId);
         u32 perEnemyHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_HP", stats.hp);
@@ -6676,7 +6747,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
         if (perEnemyMaxHp < perEnemyHp)
             perEnemyMaxHp = perEnemyHp;
         vm_net_mock_battle_reset_enemy_hp_from_stats(requestedEnemyId);
-        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u) req_index=%u req_pos=(%u,%u) target_source=%s prefill_player=%u prefill_enemy=%u objects=%u\n",
+        printf("[info][network] mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u enemymp=%u subtype=%u side=%u scene_start=%u index=%u pos=(%u,%u) req_index=%u req_pos=(%u,%u) target_source=%s prefill_player=%u prefill_enemy=%u hangup_continue=%u auto=%u objects=%u\n",
                id, requestedEnemyId,
                g_vm_net_mock_battle_role_id_current,
                vm_net_mock_battle_enemy_count_current(),
@@ -6695,8 +6766,10 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                sceneMonsterTargetSource,
                prefillPlayerTemplate ? 1u : 0u,
                prefillEnemyTemplate ? 1u : 0u,
+               continueSceneHangup ? 1u : 0u,
+               continueSceneHangup ? (u32)hangupAutoFlagType : 0u,
                responseObjectCount);
-        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) target_source=%s subtype=%u side=%u scene_start=%u table=%08x ids=%u/%u/%u/%u\n",
+        vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) target_source=%s subtype=%u side=%u scene_start=%u hangup_continue=%u auto=%u table=%08x ids=%u/%u/%u/%u\n",
                          id, requestedEnemyId,
                          g_vm_net_mock_battle_role_id_current,
                          vm_net_mock_battle_enemy_count_current(),
@@ -6717,6 +6790,8 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                          index, posx, posy,
                          sceneMonsterTargetSource,
                          battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
+                         continueSceneHangup ? 1u : 0u,
+                         continueSceneHangup ? (u32)hangupAutoFlagType : 0u,
                           enemyTable, enemyTableIds[0], enemyTableIds[1],
                           enemyTableIds[2], enemyTableIds[3]);
     }
