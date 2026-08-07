@@ -21,6 +21,8 @@
 #include <unistd.h>
 #endif
 #include <stdlib.h>
+#include <errno.h>
+#include <time.h>
 #include "../mysql-client.h"
 #include "../md5.h"
 

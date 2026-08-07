@@ -1240,7 +1240,11 @@ enum
     VM_MOCK_SERVICE_WORKER_DEFAULT = 4,
     VM_MOCK_SERVICE_WORKER_MIN = 2,
     VM_MOCK_SERVICE_WORKER_MAX = 16,
-    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 128
+    VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX = 128,
+    /* The running MySQL configuration uses wait_timeout=120 seconds.  Wake
+     * workers at half that interval so their thread-local durable connection
+     * stays alive without creating new idle connections. */
+    VM_MOCK_SERVICE_MYSQL_KEEPALIVE_SECONDS = 60
 };
 
 typedef enum
@@ -1333,16 +1337,42 @@ static void *vm_mock_service_connection_worker_main(void *opaque)
         u32 workerStartMs = 0;
         u32 queueWaitMs = 0;
         int ok = 0;
+        bool keepaliveDue = false;
 
         memset(&job, 0, sizeof(job));
         job.socket = VM_MOCK_SERVICE_INVALID_SOCKET;
         pthread_mutex_lock(&pool->mutex);
         while (!pool->stopRequested && pool->queuedJobs == 0)
-            pthread_cond_wait(&pool->condition, &pool->mutex);
+        {
+            struct timespec deadline;
+            int waitResult;
+
+            deadline.tv_sec = time(NULL) +
+                              VM_MOCK_SERVICE_MYSQL_KEEPALIVE_SECONDS;
+            deadline.tv_nsec = 0;
+            waitResult = pthread_cond_timedwait(&pool->condition,
+                                                &pool->mutex, &deadline);
+            if (waitResult == ETIMEDOUT && pool->queuedJobs == 0 &&
+                !pool->stopRequested)
+            {
+                keepaliveDue = true;
+                break;
+            }
+        }
         if (pool->stopRequested && pool->queuedJobs == 0)
         {
             pthread_mutex_unlock(&pool->mutex);
             return NULL;
+        }
+        if (pool->queuedJobs == 0 && keepaliveDue)
+        {
+            pthread_mutex_unlock(&pool->mutex);
+            if (!vm_mysql_keepalive())
+            {
+                printf("[warn][mock-service] mysql_keepalive_reset worker=%u error=%s\n",
+                       worker->workerId, vm_mysql_last_error());
+            }
+            continue;
         }
         job = pool->jobs[pool->queueHead];
         pool->queueHead = (pool->queueHead + 1) % VM_MOCK_SERVICE_CONNECTION_QUEUE_MAX;

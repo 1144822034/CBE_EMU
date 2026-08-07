@@ -11,6 +11,9 @@ typedef bool (*vm_mysql_row_callback)(void *context,
 
 bool vm_mysql_exec(const char *sql);
 bool vm_mysql_query(const char *sql, vm_mysql_row_callback callback, void *context);
+/* Sends a native COM_PING only on this thread's already-open connection.
+ * It never opens a connection merely to keep it alive. */
+bool vm_mysql_keepalive(void);
 const char *vm_mysql_last_error(void);
 void vm_mysql_close(void);
 
