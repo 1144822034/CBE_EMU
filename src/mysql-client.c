@@ -54,6 +54,11 @@ typedef struct
  * worker therefore owns and reuses its own connection and error buffer. */
 static VM_MYSQL_THREAD_LOCAL SOCKET g_vm_mysql_socket = INVALID_SOCKET;
 static VM_MYSQL_THREAD_LOCAL char g_vm_mysql_error[512];
+/* A reconnect/retry is safe only when MySQL framing proves that the server
+ * cannot have received a complete command packet.  This flag is reset before
+ * each packet write and becomes true only after both the packet header and
+ * its complete payload were accepted by the local TCP stack. */
+static VM_MYSQL_THREAD_LOCAL bool g_vm_mysql_last_packet_fully_sent = false;
 #ifdef _WIN32
 static pthread_once_t g_vm_mysql_wsa_once = PTHREAD_ONCE_INIT;
 static int g_vm_mysql_wsa_ready = 0;
@@ -260,6 +265,7 @@ static bool vm_mysql_recv_all(uint8_t *data, size_t data_len)
 
 static bool vm_mysql_send_packet(const uint8_t *payload, size_t payload_len, uint8_t sequence)
 {
+    g_vm_mysql_last_packet_fully_sent = false;
     if (payload_len >= 0x1000000u)
     {
         vm_mysql_set_error("MySQL packet is too large");
@@ -270,7 +276,13 @@ static bool vm_mysql_send_packet(const uint8_t *payload, size_t payload_len, uin
     header[1] = (uint8_t)(payload_len >> 8);
     header[2] = (uint8_t)(payload_len >> 16);
     header[3] = sequence;
-    return vm_mysql_send_all(header, sizeof(header)) && vm_mysql_send_all(payload, payload_len);
+    if (!vm_mysql_send_all(header, sizeof(header)) ||
+        !vm_mysql_send_all(payload, payload_len))
+    {
+        return false;
+    }
+    g_vm_mysql_last_packet_fully_sent = true;
+    return true;
 }
 
 static bool vm_mysql_recv_packet(uint8_t *payload, size_t payload_capacity, size_t *payload_len, uint8_t *sequence)
@@ -575,7 +587,9 @@ static bool vm_mysql_packet_is_eof(const uint8_t *packet, size_t packet_len)
 
 static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, void *context)
 {
-    if (sql == NULL || !vm_mysql_connect())
+    bool retried_incomplete_command = false;
+
+    if (sql == NULL)
         return false;
     size_t sql_len = strlen(sql);
     uint8_t *request = (uint8_t *)malloc(sql_len + 1);
@@ -589,8 +603,26 @@ static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, 
     }
     request[0] = 0x03;
     memcpy(request + 1, sql, sql_len);
-    if (!vm_mysql_send_packet(request, sql_len + 1, 0))
+retry_command:
+    if (!vm_mysql_connect())
         goto connection_failed;
+    if (!vm_mysql_send_packet(request, sql_len + 1, 0))
+    {
+        /* A connection can become stale while its worker is idle.  If the
+         * complete MySQL packet was not written, the server cannot parse or
+         * execute COM_QUERY because its length-delimited payload is missing.
+         * Reconnect and retry exactly once.  Never retry after a complete
+         * write: a later receive failure (especially for COMMIT) has unknown
+         * server-side outcome and must remain visible to the caller. */
+        if (!g_vm_mysql_last_packet_fully_sent && !retried_incomplete_command)
+        {
+            retried_incomplete_command = true;
+            vm_mysql_close();
+            printf("[warn][mysql] mysql_transport_retry phase=com-query-incomplete\n");
+            goto retry_command;
+        }
+        goto connection_failed;
+    }
     free(request);
     request = NULL;
 
@@ -684,6 +716,32 @@ bool vm_mysql_exec(const char *sql)
 bool vm_mysql_query(const char *sql, vm_mysql_row_callback callback, void *context)
 {
     return vm_mysql_run_query(sql, callback, context);
+}
+
+bool vm_mysql_keepalive(void)
+{
+    static const uint8_t command = 0x0e; /* COM_PING */
+    uint8_t response[64];
+    size_t response_len = 0;
+    uint8_t sequence = 0;
+
+    /* Do not create a connection only for housekeeping: a worker that has
+     * never touched durable state has nothing to keep alive. */
+    if (g_vm_mysql_socket == INVALID_SOCKET)
+        return true;
+    if (!vm_mysql_send_packet(&command, sizeof(command), 0) ||
+        !vm_mysql_recv_packet(response, sizeof(response), &response_len,
+                              &sequence) ||
+        vm_mysql_is_error(response, response_len) ||
+        response_len == 0 || response[0] != 0x00)
+    {
+        if (g_vm_mysql_error[0] == '\0')
+            vm_mysql_set_error("Unexpected MySQL COM_PING response");
+        vm_mysql_close();
+        return false;
+    }
+    g_vm_mysql_error[0] = '\0';
+    return true;
 }
 
 const char *vm_mysql_last_error(void)
