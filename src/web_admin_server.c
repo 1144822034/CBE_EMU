@@ -1705,6 +1705,39 @@ static void vm_mock_admin_render_instance_scene_select(
     vm_mock_admin_text_appendf(page, "</select>");
 }
 
+/* Role recovery accepts only an exact server-owned SCE key.  A datalist keeps
+ * the account page compact and searchable while still showing the authoritative
+ * resource catalog once, rather than multiplying a full select list per role. */
+static void vm_mock_admin_render_role_reset_scene_catalog(
+    vm_mock_admin_text *page,
+    const vm_mock_admin_scene_file *sceneFiles,
+    u32 sceneCount)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page, "<datalist id=\"role-reset-scene-catalog\">");
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char runtimeScene[64];
+        char sceneUtf8[192];
+
+        memset(runtimeScene, 0, sizeof(runtimeScene));
+        memset(sceneUtf8, 0, sizeof(sceneUtf8));
+        if (!vm_mock_admin_scene_file_to_runtime_key(
+                sceneFiles[i].name, runtimeScene, sizeof(runtimeScene)))
+        {
+            continue;
+        }
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, sceneUtf8,
+                                      sizeof(sceneUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page, "\">");
+    }
+    vm_mock_admin_text_appendf(page, "</datalist>");
+}
+
 static void vm_mock_admin_render_instance_fields(
     vm_mock_admin_text *page,
     const vm_mock_admin_scene_file *sceneFiles,
@@ -1813,73 +1846,21 @@ static bool vm_mock_admin_scene_file_to_runtime_key(const char *sceneFile,
                                                     char *runtimeScene,
                                                     size_t runtimeSceneCap)
 {
-    char stem[64];
-    char canonical[64];
-    size_t len = 0;
-
     if (runtimeScene == NULL || runtimeSceneCap == 0)
         return false;
     runtimeScene[0] = 0;
-    if (sceneFile == NULL || !vm_net_mock_scene_name_is_safe(sceneFile))
+    /* This value is sent back to the client as a scene-transition resource
+     * key.  LoadSceneRes and the subsequent WT18/7 request preserve it, so a
+     * selected SCE filename must remain byte-for-byte intact.  In particular,
+     * stripping `.sce` from b_* instance scenes makes the client request a
+     * nonexistent bare resource and loop in the update screen. */
+    if (sceneFile == NULL || !vm_net_mock_str_ends_with(sceneFile, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(sceneFile) ||
+        strlen(sceneFile) >= runtimeSceneCap)
+    {
         return false;
-    snprintf(stem, sizeof(stem), "%s", sceneFile);
-    len = strlen(stem);
-    if (len > 4 && strcmp(stem + len - 4, ".sce") == 0)
-    {
-        stem[len - 4] = 0;
-        len -= 4;
     }
-    memset(canonical, 0, sizeof(canonical));
-    if (stem[0] == 'c')
-    {
-        if (len < 4 || !isdigit((unsigned char)stem[1]) ||
-            !isdigit((unsigned char)stem[2]))
-        {
-            return false;
-        }
-        snprintf(canonical, sizeof(canonical), "%s", stem);
-    }
-    else if (len < 3 || !isdigit((unsigned char)stem[0]) ||
-             !isdigit((unsigned char)stem[1]))
-    {
-        /* Battle/test SCE files use keys such as b_20黑龙潭 and 测试地图.
-         * They have already been selected from the server-owned SCE directory,
-         * so the extensionless resource key is both safe and authoritative. */
-        snprintf(canonical, sizeof(canonical), "%s", stem);
-    }
-    else if (stem[2] == '_' && len > 5 &&
-        isdigit((unsigned char)stem[len - 2]) &&
-        isdigit((unsigned char)stem[len - 1]))
-    {
-        size_t middleLen = len - 5;
-        if (1 + 2 + middleLen + 1 + 2 + 1 > sizeof(canonical))
-            return false;
-        canonical[0] = 'c';
-        canonical[1] = stem[0];
-        canonical[2] = stem[1];
-        memcpy(canonical + 3, stem + 3, middleLen);
-        canonical[3 + middleLen] = '_';
-        canonical[4 + middleLen] = stem[len - 2];
-        canonical[5 + middleLen] = stem[len - 1];
-        canonical[6 + middleLen] = 0;
-    }
-    else
-    {
-        if (len + 2 > sizeof(canonical))
-            return false;
-        canonical[0] = 'c';
-        memcpy(canonical + 1, stem, len + 1);
-    }
-
-    /* Legacy files resolve through a c-prefixed runtime alias, while newer
-     * catalogs such as 00蓬莱仙岛_02.sce are authoritative without that prefix.
-     * Keep whichever key the server resource resolver can actually open. */
-    if (vm_net_mock_scene_name_is_safe(canonical))
-        snprintf(runtimeScene, runtimeSceneCap, "%s", canonical);
-    else if (vm_net_mock_scene_name_is_safe(stem))
-        snprintf(runtimeScene, runtimeSceneCap, "%s", stem);
-    else
-        return false;
+    snprintf(runtimeScene, runtimeSceneCap, "%s", sceneFile);
     return true;
 }
 
@@ -4905,9 +4886,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     char message[256];
     const char *roleError = NULL;
     vm_mock_service_account_state *accountState = NULL;
+    vm_mock_admin_scene_file resetSceneFiles[VM_MOCK_ADMIN_SCENE_FILE_MAX];
     u32 managedRoleIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
     char managedRoleNames[VM_NET_MOCK_ROLE_DB_MAX_ROLES][128];
     u32 managedRoleCount = 0;
+    u32 resetSceneCount = 0;
 
     vm_mock_admin_text_init(&page, response, responseCap);
     memset(tab, 0, sizeof(tab));
@@ -4915,6 +4898,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     memset(accountSearch, 0, sizeof(accountSearch));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    memset(resetSceneFiles, 0, sizeof(resetSceneFiles));
     memset(managedRoleIds, 0, sizeof(managedRoleIds));
     memset(managedRoleNames, 0, sizeof(managedRoleNames));
     (void)vm_mock_admin_form_value(query, "tab", tab, sizeof(tab));
@@ -4959,6 +4943,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
 
     vm_mock_service_account_db_load();
+    resetSceneCount = vm_mock_admin_collect_scene_files(
+        resetSceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
     if ((selectedAccount[0] == 0 || vm_mock_service_account_find_record(selectedAccount) == NULL) &&
         g_vm_mock_service_account_db.accountCount > 0)
     {
@@ -4978,7 +4964,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
@@ -5015,7 +5001,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(&page, "<h2>角色明细：");
     vm_mock_admin_text_append_html(&page, selectedAccount[0] ? selectedAccount : "未选择");
     vm_mock_admin_text_appendf(&page, "</h2><div class=\"table-wrap\"><table><thead><tr>"
-                               "<th>角色</th><th>等级 / 状态</th><th>普通钱币</th><th>W 币</th><th>操作</th>"
+                               "<th>角色</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>W 币</th><th>操作</th>"
                                "</tr></thead><tbody>");
 
     if (selectedAccount[0] != 0)
@@ -5026,6 +5012,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         {
             const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
             char roleNameUtf8[128];
+            char sceneUtf8[128];
             u32 gold = role->money / 10000u;
             u32 silver = (role->money / 100u) % 100u;
             u32 copper = role->money % 100u;
@@ -5033,6 +5020,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
 
             vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
                                           roleNameUtf8, sizeof(roleNameUtf8));
+            vm_net_mock_gbk_label_to_utf8(role->scene[0] ? role->scene : "-",
+                                          sceneUtf8, sizeof(sceneUtf8));
             if (managedRoleCount < VM_NET_MOCK_ROLE_DB_MAX_ROLES)
             {
                 managedRoleIds[managedRoleCount] = role->roleId;
@@ -5046,6 +5035,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_appendf(&page, "</strong><br><span class=\"muted\">ID %u</span></td>", role->roleId);
             vm_mock_admin_text_appendf(&page, "<td>Lv.%u%s</td>", role->level,
                                        active ? " <span class=\"badge\">当前角色</span>" : "");
+            vm_mock_admin_text_appendf(&page, "<td class=\"position\">");
+            vm_mock_admin_text_append_html(&page, sceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                                       "<br><span class=\"muted\">(%u, %u)</span></td>",
+                                       role->x, role->y);
             vm_mock_admin_text_appendf(&page,
                                        "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td>%u</td><td>",
                                        gold, silver, copper, role->money, role->wcoin);
@@ -5066,20 +5060,33 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_appendf(&page,
                 "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
                 "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加 W 币\" required>"
-                "<button type=\"submit\">加 W 币</button></form></td></tr>", role->roleId);
+                "<button type=\"submit\">加 W 币</button></form>", role->roleId);
+            vm_mock_admin_text_appendf(&page,
+                "<form class=\"inline\" method=\"post\" action=\"/action\" "
+                "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？此操作仅在角色离线时可执行。');\">"
+                "<input type=\"hidden\" name=\"action\" value=\"reset-role-selected-scene\">"
+                "<input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                "<input class=\"scene-reset-input\" name=\"reset_scene\" list=\"role-reset-scene-catalog\" placeholder=\"选择或输入目标场景\" aria-label=\"目标重置场景\" required>"
+                "<button class=\"reset-position\" type=\"submit\">重置到指定场景</button></form></td></tr>",
+                role->roleId);
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
-            vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">该账号尚未创建角色</td></tr>");
+            vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"6\" class=\"muted\">该账号尚未创建角色</td></tr>");
         vm_mock_service_close_account_role_db_for_management(accountState, true);
     }
     else
     {
-        vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">");
+        vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"6\" class=\"muted\">");
         vm_mock_admin_text_append_html(&page, selectedAccount[0] ?
                                        (roleError ? roleError : "角色数据不可用") : "请选择账号");
         vm_mock_admin_text_appendf(&page, "</td></tr>");
     }
     vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
+    vm_mock_admin_render_role_reset_scene_catalog(
+        &page, resetSceneFiles, resetSceneCount);
     vm_mock_admin_render_item_grant_form(
         &page, selectedAccount, managedRoleIds, managedRoleNames,
         managedRoleCount);
@@ -5096,7 +5103,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(&page,
                                "\" required><input type=\"password\" name=\"password\" maxlength=\"63\" placeholder=\"新密码\" required>"
                                "<button type=\"submit\">保存新密码</button></form></div></div>"
-                               "<p class=\"foot\">安全限制：后台需要密码验证；所有请求有长度限制，页面不包含外部脚本。</p>"
+                               "<p class=\"foot\">位置重置仅对离线账号开放：选择服务端资源目录中的精确 SCE 场景后，服务端从该 SCE 解析安全落点并保存；目标资源或落点无法验证时不会改写位置，也不会回退到出生点。</p>"
                                "</section></div></main></body></html>");
 
     if (page.truncated)
@@ -6398,6 +6405,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     char role[64];
     char itemText[32];
     char amountText[32];
+    char resetSceneUtf8[192];
+    char resetRuntimeScene[64];
     const char *error = NULL;
     u32 itemId = 0;
     u32 amount = 0;
@@ -6410,6 +6419,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(role, 0, sizeof(role));
     memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
+    memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
+    memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
@@ -6502,6 +6513,26 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (strcmp(action, "add-money") == 0 ? "普通钱币增加成功" : "W 币增加成功")
                                   : (error ? error : "余额修改失败"));
+        return;
+    }
+    if (strcmp(action, "reset-role-selected-scene") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            role[0] == 0 ||
+            !vm_mock_admin_optional_scene_from_form(
+                body, "reset_scene", resetSceneUtf8, sizeof(resetSceneUtf8),
+                resetRuntimeScene, sizeof(resetRuntimeScene)) ||
+            resetRuntimeScene[0] == 0)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "角色或目标场景参数无效");
+            return;
+        }
+        ok = vm_mock_service_account_reset_role_to_scene_spawn(
+            account, role, resetRuntimeScene, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "已重置到指定场景的安全落点，重新进入游戏后生效"
+                                  : (error ? error : "角色位置重置失败"));
         return;
     }
     if (strcmp(action, "grant-item") == 0)

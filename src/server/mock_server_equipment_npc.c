@@ -4695,6 +4695,132 @@ static void vm_mock_service_close_account_role_db_for_management(vm_mock_service
     g_vm_mock_service_active_client_id = 0;
 }
 
+/* A web-admin repair is deliberately offline-only.  The role database is
+ * restored into the account-local cache while it is edited; allowing that to
+ * race an in-game session would let a later position save overwrite the repair
+ * (or make the live scene and persisted scene disagree). */
+static bool vm_mock_service_account_has_live_role_session(const char *accountId)
+{
+    const vm_mock_service_client_session *session =
+        g_vm_mock_service_client_sessions;
+
+    if (accountId == NULL || accountId[0] == 0)
+        return false;
+    while (session != NULL)
+    {
+        if (strcmp(session->accountId, accountId) == 0 &&
+            (session->roleOnline || session->onlinePresenceValid ||
+             session->sceneVisibleReady))
+        {
+            return true;
+        }
+        session = session->next;
+    }
+    return false;
+}
+
+/* This is an administrative recovery path for a role whose saved position no
+ * longer permits entry into the scene.  The administrator must name an exact
+ * server-owned SCE key; its landing coordinate comes from that SCE rather than
+ * an invented centre, a scene-name alias, or a global initial-scene fallback. */
+static bool vm_mock_service_account_reset_role_to_scene_spawn(
+    const char *accountId, const char *roleSelector, const char *targetScene,
+    const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state before;
+    char sourceScene[64];
+    u16 targetX = 0;
+    u16 targetY = 0;
+
+    if (messageOut)
+        *messageOut = "角色位置重置失败";
+    if (accountId == NULL || accountId[0] == 0 ||
+        roleSelector == NULL || roleSelector[0] == 0 ||
+        targetScene == NULL || targetScene[0] == 0)
+    {
+        if (messageOut)
+            *messageOut = "账号、角色或目标场景参数无效";
+        return false;
+    }
+    if (!vm_net_mock_str_ends_with(targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(targetScene) ||
+        !vm_net_mock_scene_resource_exists(targetScene))
+    {
+        if (messageOut)
+            *messageOut = "目标场景不是服务端存在的精确 SCE 资源";
+        return false;
+    }
+    if (vm_mock_service_account_has_live_role_session(accountId))
+    {
+        if (messageOut)
+            *messageOut = "账号角色仍在线，请先返回标题并稍候刷新后再重置";
+        return false;
+    }
+
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                  messageOut);
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
+    if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(
+            targetScene, &targetX, &targetY, NULL))
+    {
+        if (messageOut)
+            *messageOut = "无法从目标 SCE 解析安全落点，未修改角色位置";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    vm_net_mock_adjust_safe_player_pos_for_scene(targetScene, &targetX,
+                                                  &targetY);
+    if (targetX == 0 || targetY == 0)
+    {
+        if (messageOut)
+            *messageOut = "目标 SCE 未提供可用安全落点，未修改角色位置";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    before = *role;
+    snprintf(role->scene, sizeof(role->scene), "%s", targetScene);
+    role->x = targetX;
+    role->y = targetY;
+    /* The selected role is not necessarily active.  Persist the complete
+     * account snapshot in the existing transactional role writer, rather than
+     * using the active-role-only position fast path. */
+    if (!vm_net_mock_role_db_save_relational(
+            "admin-reset-selected-scene", NULL, NULL, 0, true, NULL))
+    {
+        *role = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "角色位置保存失败，未修改角色位置";
+        printf("[error][mock-admin] role_selected_scene_reset_failed account=%s role=%u source_scene=%s target_scene=%s target_pos=(%u,%u) error=%s\n",
+               accountId, before.roleId, sourceScene, targetScene, targetX,
+               targetY, vm_mysql_last_error());
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-admin] role_selected_scene_reset account=%s role=%u source_scene=%s source_pos=(%u,%u) target_scene=%s target_pos=(%u,%u) landing_source=SCE action=commit\n",
+           accountId, role->roleId, sourceScene, before.x, before.y,
+           targetScene, targetX, targetY);
+    if (messageOut)
+        *messageOut = "已重置到指定场景的安全落点，重新进入游戏后生效";
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
 static bool vm_mock_service_migrate_account_role_databases(void)
 {
     for (u32 i = 0; i < g_vm_mock_service_account_db.accountCount; ++i)
