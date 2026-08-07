@@ -429,7 +429,7 @@ Status: validated
 
 | binary | function/address | finding |
 | --- | --- | --- |
-| `江湖OL.CBE` | `sub_1018166` / `0x01018166` | 本地场景逻辑遍历 `Global_R9 + 23780` 的 32 字节 move entry；命中 trigger rect 后把 `entry+16` 的目标场景名复制到 scene object，并把 `entry+0` 写入 `Global_R9 + 23692`。这说明运行时切图的源身份来自当前场景的 move entry。 |
+| `江湖OL.CBE` | `FindEmptyActorSlot` / `0x01018166` | 2026-08-07 复核：该函数遍历 actor slot 并返回空 slot，不能作为本地传送门创建目标场景的证据。边缘传送进入仍须以 `WT30/1` 或带 `posinfo` 的 `WT30/2` parser 路径为准。 |
 | `江湖OL.CBE` | `scene_handle_change_result_scene_pos` / `0x01039890` | `30/2` 在 `result==1` 后读取 `scene` 与 tagged `posinfo`，并调用 scene object 的 enter/update 方法。服务端响应坐标就是最终落点。 |
 | `江湖OL.CBE` | `scene_handle_enter_with_scene_pos` / `0x010396D6` | `30/1` 同样读取 `scene + posinfo`，坐标流格式为两个 tagged i16。 |
 | `江湖OL.CBE` | `EnterSceneByMapName` / `0x01018150` | 把场景名复制到 scene object，并写入目标 x/y 后触发生命周期切换。 |
@@ -483,7 +483,7 @@ Status: validated
 - 预期日志：
   - `mock_scene_change_source_portal source_kind=role-pending source=c00蓬莱仙岛_01... request=00蓬莱仙岛_02.sce request_exit=0 portal_entry=1 targetEntry=0 match=target-entry ... target=(128,57)`
   - `target=(128,57)` 是 `(128,45)` 经过上方触发矩形 `(108,5)-(148,25)` 的 32px 安全间隔调整后的落点。
-- 若出现 `mock_scene_portal_exit_mismatch`，说明请求 `exitID` 与源 SCE `target_entry_id` 不一致，应继续追 `0x01018166` 到 `WT 2/3` 组包之间的字段来源，而不是新增地图特殊处理。
+- 若出现 `mock_scene_portal_exit_mismatch`，说明请求 `exitID` 与源 SCE `target_entry_id` 不一致，应继续追客户端传送门 request producer 到 `WT 2/3` 组包之间的字段来源，而不是新增地图特殊处理；`0x01018166` 已证实只是 actor-slot 查询，不是该 producer。
 - 若出现 `mock_scene_change_source_probe_miss`，说明 pending target 已匹配请求，但角色稳定场景/runtime scene 中没有找到满足 target/exit 的源 portal，需要继续追 SCE 载入到 move entry 的字段映射。
 - 2026-06-30 follow-up: map-stone download support had introduced an
   `exitID=0` same-scene pending/completed target inheritance before the source

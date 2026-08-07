@@ -600,7 +600,9 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     bool shopReturnReload = false;
     bool tongquetaiNpcSeedAfterCurrentCompletion = false;
     bool completeTeleportResourceEnter = false;
+    bool completePositionedPortalEnter = false;
     vm_net_mock_scene_change_target downloadedTarget;
+    vm_net_mock_scene_change_target positionedPortalTarget;
     bool useDownloadedTarget = false;
     u32 timingStartMs = 0;
     u32 timingLifecycleMs = 0;
@@ -621,6 +623,25 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         vm_net_mock_scene_names_equal_loose(
             currentScene,
             g_vm_net_mock_last_scene_change_target.scene);
+
+    /*
+     * Ordinary portal WT2/3 has already supplied the one coordinate-bearing
+     * 30/2 and therefore created the destination scene shell.  The next
+     * WT6/1 resource request must be built for that recorded target and close
+     * with a no-posinfo acknowledgement.  Using the still-persisted source
+     * scene here either loaded the old resource set or appended another 30/1,
+     * both of which restart/stall the new scene lifecycle.
+     */
+    if (g_vm_net_mock_last_scene_change_target_valid &&
+        g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent)
+    {
+        positionedPortalTarget = g_vm_net_mock_last_scene_change_target;
+        completePositionedPortalEnter =
+            vm_net_mock_prepare_scene_enter_resources(&positionedPortalTarget,
+                                                      NULL, 0);
+        if (completePositionedPortalEnter)
+            g_vm_net_mock_last_scene_change_target = positionedPortalTarget;
+    }
 
     if (completeTeleportResourceEnter)
     {
@@ -679,6 +700,58 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                target.scene, target.x, target.y, objectCount, pos);
         vm_autotest_note("mock_teleport_resource_followup_complete scene=%s pos=(%u,%u) objects=%u response=resources+30/2-no-posinfo evidence=WT6/1-after-final-WT18/7\n",
                          target.scene, target.x, target.y, objectCount);
+        return pos;
+    }
+    if (completePositionedPortalEnter)
+    {
+        u32 objectStart = 0;
+
+        if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+                out, outCap, &pos, &objectCount,
+                positionedPortalTarget.scene, true, true))
+        {
+            return 0;
+        }
+        if (!vm_net_mock_append_scene_resource_followup_objects(
+                out, outCap, &pos, &objectCount,
+                positionedPortalTarget.scene,
+                includeSkillBooks, true, true, true,
+                false, false, false))
+        {
+            return 0;
+        }
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                         &objectStart))
+        {
+            return 0;
+        }
+        if (!vm_net_mock_put_scene_ack_without_posinfo(
+                out, outCap, &pos, 2, positionedPortalTarget.scene))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+        vm_net_mock_mark_completed_scene_change_target(&positionedPortalTarget);
+        vm_net_mock_save_player_pos_state(positionedPortalTarget.scene,
+                                          positionedPortalTarget.x,
+                                          positionedPortalTarget.y,
+                                          "scene-resource-positioned-portal-followup");
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+        g_vm_net_mock_teleport_stone_map_enter_pending = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        (void)vm_mock_service_mark_active_session_scene_ready_from_role(
+            positionedPortalTarget.scene,
+            "scene-resource-positioned-portal-followup");
+        printf("[info][network] mock_scene_resource_positioned_portal_complete scene=%s pos=(%u,%u) objects=%u resp=%u completion=resources+30/2-no-posinfo\n",
+               positionedPortalTarget.scene, positionedPortalTarget.x,
+               positionedPortalTarget.y, objectCount, pos);
+        vm_autotest_note("mock_scene_resource_positioned_portal_complete scene=%s pos=(%u,%u) objects=%u response=resources+30/2-no-posinfo evidence=JianghuOL.CBE:0x01039770\n",
+                         positionedPortalTarget.scene, positionedPortalTarget.x,
+                         positionedPortalTarget.y, objectCount);
         return pos;
     }
     startupSceneAlreadyEntered = g_vm_net_mock_title_role_scene_followup_pending ||
@@ -1115,6 +1188,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     bool primaryTaskSubsetNeedsFb11Ack = false;
     bool sceneNpcLifecycleAppended = false;
     bool shopReturnReload = false;
+    const char *responseScene = NULL;
     u32 subsetNpcActorInfoLen = 0;
     u32 subsetNpcActorId = 0;
     u32 nearbyRoleCount = 0;
@@ -1176,6 +1250,17 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
          */
         completeDeferredScene = false;
     }
+    /*
+     * A pending target is authoritative for a scene-change completion.  The
+     * role/session still names the source scene until this response completes,
+     * so using currentScene below would serialize the old map's task/resource
+     * rows into the destination scene callback.  This is especially important
+     * now that composite 25/5 requests remain in their own 6/* handler rather
+     * than being claimed by the standalone mmGame default-event handler.
+     */
+    responseScene = completeDeferredScene
+                        ? g_vm_net_mock_last_scene_change_target.scene
+                        : currentScene;
     shopReturnReload =
         !completeDeferredScene &&
         currentScene != NULL &&
@@ -1187,7 +1272,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
         u8 objectCountBeforeLifecycle = objectCount;
 
         if (!vm_net_mock_append_scene_npc_lifecycle_seed(
-                out, outCap, &pos, &objectCount, currentScene,
+                out, outCap, &pos, &objectCount, responseScene,
                 startupSceneAlreadyEntered && !completeDeferredScene,
                 !completeDeferredScene))
         {
@@ -1207,17 +1292,17 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
             return 0;
         objectCount += 1;
         printf("[info][network] mock_scene_task_subset_fb11_ack scene=%s request=25/5+6/1+6/13+6/14+2/10+27/11 response=empty-27/11 reason=npc-catalog-already-delivered\n",
-               currentScene ? currentScene : "-");
+               responseScene ? responseScene : "-");
     }
-    seedSubsetNpcOther = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
+    seedSubsetNpcOther = vm_net_mock_scene_supports_actor_other_npc_seed(responseScene) &&
                          vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_OTHERINFO", 0) != 0;
-    seedSubsetNpcActorInfo = vm_net_mock_scene_supports_actor_other_npc_seed(currentScene) &&
-                             vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_ACTORINFO", 0) != 0;
+    seedSubsetNpcActorInfo = vm_net_mock_scene_supports_actor_other_npc_seed(responseScene) &&
+                         vm_net_mock_env_u8("CBE_SCENE_TASK_SUBSET_NPC_ACTORINFO", 0) != 0;
     startupNearbyInRequestedObject = startupSceneAlreadyEntered &&
                                        !completeDeferredScene &&
                                        !seedSubsetNpcOther;
     if (!vm_net_mock_append_scene_resource_followup_objects_ex(out, outCap, &pos, &objectCount,
-                                                              currentScene,
+                                                              responseScene,
                                                               includeSkillBooks, true, true, true,
                                                               false, false,
                                                               seedSubsetNpcOther,
@@ -1232,7 +1317,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
          * action.  Keep the existing subtype-2 request/result identity and
          * provide the player's authoritative persisted position. */
         if (!vm_net_mock_append_scene_pos_result_object_for_scene(
-                out, outCap, &pos, currentScene,
+                out, outCap, &pos, responseScene,
                 vm_net_mock_scene_spawn_x(),
                 vm_net_mock_scene_spawn_y()))
         {
@@ -1257,6 +1342,14 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                         vm_net_mock_fb_target_info_text()))
             return 0;
         objectCount += 1;
+        /*
+         * Do not append another scene-channel object here.  The first WT2/3
+         * already carried the sole 30/2+posinfo entry (which also runs
+         * ResetDownloadState), while this composite callback can already fill
+         * all ten main-business object slots with its requested 6/*, 2/10 and
+         * 27/* results.  Adding a cosmetic no-posinfo 30/2 would exceed the
+         * client's verified ten-object dispatch limit.
+         */
         vm_net_mock_mark_completed_scene_change_target(target);
         g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -1291,7 +1384,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
          * NPC nodes after the scene table is initialized.
          */
         if (!vm_net_mock_append_scene_actorinfo_npc_object(out, outCap, &pos,
-                                                          currentScene,
+                                                          responseScene,
                                                           &subsetNpcActorInfoLen,
                                                           &subsetNpcActorId))
             return 0;

@@ -59,6 +59,7 @@ static bool vm_net_mock_battle_pending_settlement_is_deliverable(
 /* A completed scene-monster battle reaches the scene only after the native
  * 25/5 close acknowledgement.  The battle fragment owns the continuation
  * state transition; social owns that acknowledgement and the poll channel. */
+static void vm_net_mock_battle_on_scene_default_event(void);
 static void vm_net_mock_scene_hangup_on_scene_default_event(void);
 static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
     u8 *out, u32 outCap, vm_mock_service_client_session *observer);
