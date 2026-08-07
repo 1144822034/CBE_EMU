@@ -1695,6 +1695,42 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
     return pos;
 }
 
+/* `BattleAutoAction_TimerTick(0x2952)` sends an empty 4/12 request after the
+ * client-visible auto delay.  Its payload cannot express a new choice, so the
+ * server is the authority for the last choice which *successfully* produced a
+ * 4/6 action.  Keep this per account/role (captured by the active-account
+ * state) rather than per battle session: scene hangup deliberately starts a
+ * fresh battle while retaining the user's selected automatic skill. */
+static void vm_net_mock_battle_auto_remember_operation(
+    u32 roleId,
+    u32 index,
+    u32 operate,
+    const char *source)
+{
+    if ((operate != 0 && !vm_net_mock_battle_operate_is_skill(operate)) ||
+        roleId == 0)
+    {
+        return;
+    }
+
+    g_vm_net_mock_battle_auto_last_operation_valid = 1;
+    g_vm_net_mock_battle_auto_last_operation_role_id = roleId;
+    g_vm_net_mock_battle_auto_last_operation_index = index;
+    g_vm_net_mock_battle_auto_last_operation_operate = operate;
+    printf("[info][network] mock_battle_auto_remember role=%u index=%u "
+           "operate=%u source=%s evidence=accepted-WT4/2\n",
+           g_vm_net_mock_battle_auto_last_operation_role_id,
+           index,
+           operate,
+           source ? source : "-");
+    vm_autotest_note("mock_battle_auto_remember role=%u index=%u operate=%u "
+                     "source=%s evidence=accepted-WT4/2\n",
+                     g_vm_net_mock_battle_auto_last_operation_role_id,
+                     index,
+                     operate,
+                     source ? source : "-");
+}
+
 static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requestLen,
                                                      u8 *out, u32 outCap)
 {
@@ -2272,6 +2308,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         vm_net_mock_battle_modifier_advance_round(&g_vm_net_mock_battle_solo_modifier);
         g_vm_net_mock_battle_active_modifier_current = g_vm_net_mock_battle_solo_modifier;
     }
+    if (operateConsumesTurn && g_vm_net_mock_battle_auto_replay_inflight == 0)
+        vm_net_mock_battle_auto_remember_operation(
+            g_vm_net_mock_battle_role_id_current, index, operate, "battle-operate");
     printf("[info][network] mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u costAction=%u costHp=%u costMp=%u mp=%u/%u resp=%u evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
            index, operate, operateIsSkill ? 1 : 0,
            skillTargetsEnemyGroup ? 4 :
@@ -2892,6 +2931,9 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         vm_net_mock_battle_modifier_advance_round(&g_vm_net_mock_battle_solo_modifier);
         g_vm_net_mock_battle_active_modifier_current = g_vm_net_mock_battle_solo_modifier;
     }
+    if (operateConsumesTurn && g_vm_net_mock_battle_auto_replay_inflight == 0)
+        vm_net_mock_battle_auto_remember_operation(g_vm_net_mock_battle_role_id_current, index, operate,
+                                                   "battle-operate-fallback");
     return pos;
 }
 
@@ -4058,9 +4100,9 @@ static bool vm_net_mock_append_battle_auto_flask_counts_object(
 }
 
 /* BattleMenu_SelectOption(0x5F78) enables the native auto UI after a 4/11
- * acknowledgement.  The overlay it installs uses a 1000 ms cadence; keep the
- * service-side action cadence aligned with that observable client phase so a
- * new 4/6 is never delivered in the same dispatch as 4/11. */
+ * acknowledgement.  The overlay owns its 1000 ms cadence and sends 4/12;
+ * retain the duration only for terminal action-display ordering, where a
+ * 4/6 can carry multiple queued animation records. */
 enum
 {
     VM_NET_MOCK_BATTLE_AUTO_ACTION_INTERVAL_TICKS = 1000 / VM_SCHED_FRAME_MS,
@@ -4077,14 +4119,11 @@ enum
 static void vm_net_mock_battle_auto_reset(void)
 {
     g_vm_net_mock_battle_auto_enabled = 0;
-    g_vm_net_mock_battle_auto_next_action_tick = 0;
 }
 
 static void vm_net_mock_battle_auto_arm(void)
 {
     g_vm_net_mock_battle_auto_enabled = 1;
-    g_vm_net_mock_battle_auto_next_action_tick =
-        g_schedulerTick + VM_NET_MOCK_BATTLE_AUTO_ACTION_INTERVAL_TICKS;
 }
 
 static u32 vm_net_mock_battle_auto_action_delay_ticks(u8 actionCount)
@@ -4823,6 +4862,8 @@ static u32 vm_net_mock_build_duel_operate_response(
     vm_mock_service_duel_event *event = NULL;
     int sourceIndex = -1;
     int targetIndex = -1;
+    u32 index = 0;
+    u8 index8 = 0;
     u32 operate = 0;
     u8 operate8 = 0;
     u32 damage = 0;
@@ -4862,6 +4903,13 @@ static u32 vm_net_mock_build_duel_operate_response(
                                         "Operate", &operate8))
     {
         operate = operate8;
+    }
+    if (!vm_net_mock_get_object_u32_field(request, requestLen,
+                                          "index", &index) &&
+        vm_net_mock_get_object_u8_field(request, requestLen,
+                                        "index", &index8))
+    {
+        index = index8;
     }
     if (operate != 0 && operate <= 2)
     {
@@ -4934,6 +4982,9 @@ static u32 vm_net_mock_build_duel_operate_response(
         duel->terminalPendingMask = duel->startedMask;
         duel->terminalNotBeforeTick = g_schedulerTick + 25;
     }
+    if (g_vm_net_mock_battle_auto_replay_inflight == 0)
+        vm_net_mock_battle_auto_remember_operation(
+            source->onlineRoleId, index, operate, "duel-operate");
     printf("[info][mock-service] duel_action serial=%u action=%u source=%08x "
            "actor=%d target=%08x operate=%u damage=%u target_hp=%u/%u "
            "source_mp=%u/%u terminal=%u delivered=%02x resp=%u "
@@ -5537,8 +5588,9 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
  * `result=1`; it uses `type=1` to enter its native automatic-action phase and
  * `type=0` to return to the ordinary battle phase.  This is a toggle
  * acknowledgement, not an action result, so it must not advance the server
- * round or clear a pending monster turn.  It only arms/disarms the later
- * scene-poll delivery of a normal 4/6 action result.
+ * round or clear a pending monster turn.  With type=1 the native client
+ * timer will later issue the empty 4/12 replay request; type=0 is the only
+ * explicit cancellation path.
  */
 static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
@@ -5609,216 +5661,163 @@ static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u3
     }
 
     printf("[info][network] mock_battle_auto_toggle type=%u session=%u turn=%u "
-           "pending_enemy=%u enabled=%u due_tick=%u resp=%u "
+           "pending_enemy=%u enabled=%u next_request=client-4/12 resp=%u "
            "evidence=mmBattle:0x5F78/0x6258->0x7BD0(case11)\n",
            requestedType,
            g_mockBattleOperateSessionSerial,
            g_mockBattleOperateTurnCounter,
            g_mockBattlePendingEnemyTurn,
            g_vm_net_mock_battle_auto_enabled,
-           g_vm_net_mock_battle_auto_next_action_tick,
            pos);
     vm_autotest_note("mock_battle_auto_toggle type=%u session=%u turn=%u "
-                     "enabled=%u due_tick=%u response=4/11 evidence=mmBattle:0x5F78/0x6258/0x7BD0\n",
+                     "enabled=%u next_request=client-4/12 response=4/11 evidence=mmBattle:0x5F78/0x6258/0x7BD0\n",
                      requestedType,
                      g_mockBattleOperateSessionSerial,
                      g_mockBattleOperateTurnCounter,
-                     g_vm_net_mock_battle_auto_enabled,
-                     g_vm_net_mock_battle_auto_next_action_tick);
+                     g_vm_net_mock_battle_auto_enabled);
     return pos;
 }
 
-static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
+/* The native auto timer sends exactly one empty 1/4/12 object.  It is not a
+ * cancellation packet: BattleScene_HandleInput(0x6258) sends 4/11(type=0)
+ * for that.  Reconstruct the action only after this real client request so
+ * the natural timer, parser wait state, and normal battle builders retain
+ * ownership of the round transition. */
+static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap)
 {
-    u8 kind = 0;
-    u8 subtype = 0;
-    u32 pos = 5;
-    u32 objectCount = 0;
-
-    if (!vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
-        kind != 4 || subtype != 12)
-        return 0;
-    if (g_mockBattleOperateSessionArmed == 0 && !vm_net_mock_current_screen_is_battle())
-        return 0;
-
-    if (outCap < pos ||
-        !vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos, 0))
-        return 0;
-    ++objectCount;
-
-    g_mockBattlePendingEnemyTurn = 0;
-    g_mockBattleOperateSessionFinished = 0;
-    vm_net_mock_battle_auto_reset();
-    if (g_mockBattleEnemyHpCurrent == 0)
-    {
-        g_mockBattleOperateSessionArmed = 0;
-        g_mockBattleAwaitingSettlement = 1;
-    }
-    vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
-    return pos;
-}
-
-/*
- * Once 4/11(type=1) has been parsed, BattleScene_HandleInput(0x6258) hides
- * the ordinary action controls and emits no 4/2 request for a physical hit.
- * HandleServerBattleCmd(0x7BD0) instead waits for the next 4/6 action list.
- *
- * Scene polling is the normal asynchronous event transport already used for
- * team and spar actions.  Build a narrow internal physical-attack intent and
- * route it through the same authoritative builders used by a received 4/2:
- * this preserves the existing actioninfo codec, role HP/MP mutation, team
- * round barrier, and duel turn owner.  The intent is never sent to the
- * client, and the only client-visible result is the parser-faithful 4/6.
- */
-static u32 vm_net_mock_build_pending_auto_battle_action_response(
-    u8 *out,
-    u32 outCap,
-    vm_mock_service_client_session *observer)
-{
-    u8 autoIntent[96];
-    u32 intentPos = 9;
-    const u32 intentObjectStart = 4;
-    u32 responseLen = 0;
+    vm_net_mock_request_object object;
+    vm_mock_service_client_session *source =
+        vm_mock_service_get_active_client_session();
     vm_mock_service_team *team = NULL;
     vm_mock_service_duel *duel = NULL;
-    int teamMemberIndex = -1;
-    int duelMemberIndex = -1;
+    u8 kind = 0;
+    u8 subtype = 0;
+    u8 replayIntent[96];
+    u32 offset = 4;
+    const u32 intentObjectStart = 4;
+    u32 intentPos = 9;
+    u32 index = 0;
+    u32 operate = 0;
+    u32 responseLen = 0;
+    bool saved = false;
+    const char *selection = "bootstrap-physical";
     const char *mode = "solo";
-    u8 actionCount = 0;
-    u32 actionDelayTicks = 0;
+    u8 previousReplayInflight = 0;
 
-    if (out == NULL || outCap < 5 || observer == NULL ||
-        g_vm_net_mock_battle_auto_enabled == 0 ||
-        g_mockBattleOperateSessionArmed == 0 ||
-        g_mockBattleAwaitingSettlement != 0 ||
-        observer->onlineRoleId == 0 ||
-        (g_vm_net_mock_battle_role_id_current != 0 &&
-         g_vm_net_mock_battle_role_id_current != observer->onlineRoleId) ||
-        g_schedulerTick < g_vm_net_mock_battle_auto_next_action_tick)
+    if (request == NULL || out == NULL || outCap < 5 || source == NULL ||
+        requestLen != 9 ||
+        !vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
+        kind != 4 || subtype != 12 ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 4 ||
+        object.subtype != 12 || object.payloadLen != 0 ||
+        source->onlineRoleId == 0 || g_vm_net_mock_battle_auto_enabled == 0)
     {
         return 0;
     }
 
-    duel = vm_mock_service_duel_find_for_client(observer->clientId,
-                                                &duelMemberIndex);
-    /* This is an immediate request-local observation of the primary 4/6
-     * object emitted below.  Do not carry a prior request's count into this
-     * scheduler decision if its builder fails before writing actioninfo. */
-    g_vm_net_mock_battle_action6_emitted_count = 0;
-    if (duel != NULL)
+    duel = vm_mock_service_duel_find_for_client(source->clientId, NULL);
+    team = vm_mock_service_team_find_for_client(source->clientId);
+    if (duel != NULL && duel->active && !duel->finished)
     {
-        if (!duel->active || duel->finished || duelMemberIndex < 0 ||
-            (duel->startedMask & (1u << duelMemberIndex)) == 0 ||
-            duel->turnIndex != (u8)duelMemberIndex)
-        {
-            return 0;
-        }
         mode = "duel";
     }
-    else
+    else if (team != NULL && team->battleActive && !team->battleFinished)
     {
-        team = vm_mock_service_team_find_for_client(observer->clientId);
-        if (team != NULL && team->battleActive)
-        {
-            teamMemberIndex = vm_mock_service_team_battle_member_index(
-                team, observer->clientId);
-            if (team->battleFinished || teamMemberIndex < 0 ||
-                teamMemberIndex >= team->battleMemberCount ||
-                team->battleMemberHp[teamMemberIndex] == 0 ||
-                (team->battleRoundActedMask & (1u << teamMemberIndex)) != 0)
-            {
-                return 0;
-            }
-            mode = "team";
-        }
+        mode = "team";
     }
-
-    /* Incoming WT requests have no object-count byte: their sole object's
-     * five-byte header starts at offset 4.  Do not use begin_wt_object here;
-     * that helper deliberately writes the six-byte response-object layout. */
-    memset(autoIntent, 0, sizeof(autoIntent));
-    autoIntent[0] = 'W';
-    autoIntent[1] = 'T';
-    autoIntent[intentObjectStart] = 1;
-    autoIntent[intentObjectStart + 1] = 4;
-    autoIntent[intentObjectStart + 2] = 2;
-    if (!vm_net_mock_put_object_u32(autoIntent, sizeof(autoIntent),
-                                    &intentPos, "index", 0) ||
-        !vm_net_mock_put_object_u32(autoIntent, sizeof(autoIntent),
-                                    &intentPos, "Operate", 0))
+    else if (g_mockBattleOperateSessionArmed == 0 &&
+             !vm_net_mock_current_screen_is_battle())
     {
         return 0;
     }
-    autoIntent[2] = (u8)(intentPos >> 8);
-    autoIntent[3] = (u8)intentPos;
-    autoIntent[intentObjectStart + 3] =
+
+    saved = g_vm_net_mock_battle_auto_last_operation_valid != 0 &&
+            g_vm_net_mock_battle_auto_last_operation_role_id ==
+                source->onlineRoleId &&
+            (g_vm_net_mock_battle_auto_last_operation_operate == 0 ||
+             vm_net_mock_battle_operate_is_skill(
+                 g_vm_net_mock_battle_auto_last_operation_operate));
+    if (saved)
+    {
+        index = g_vm_net_mock_battle_auto_last_operation_index;
+        operate = g_vm_net_mock_battle_auto_last_operation_operate;
+        selection = "saved-last-operation";
+    }
+
+    /* Incoming WT packets have no response object-count byte.  Construct the
+     * same narrow 4/2 intent the existing authoritative builders consume, but
+     * only as an implementation detail of the already-received 4/12 request.
+     * It is never queued or emitted to the client. */
+    memset(replayIntent, 0, sizeof(replayIntent));
+    replayIntent[0] = 'W';
+    replayIntent[1] = 'T';
+    replayIntent[intentObjectStart] = 1;
+    replayIntent[intentObjectStart + 1] = 4;
+    replayIntent[intentObjectStart + 2] = 2;
+    if (!vm_net_mock_put_object_u32(replayIntent, sizeof(replayIntent),
+                                    &intentPos, "index", index) ||
+        !vm_net_mock_put_object_u32(replayIntent, sizeof(replayIntent),
+                                    &intentPos, "Operate", operate))
+    {
+        return 0;
+    }
+    replayIntent[2] = (u8)(intentPos >> 8);
+    replayIntent[3] = (u8)intentPos;
+    replayIntent[intentObjectStart + 3] =
         (u8)((intentPos - intentObjectStart) >> 8);
-    autoIntent[intentObjectStart + 4] =
+    replayIntent[intentObjectStart + 4] =
         (u8)(intentPos - intentObjectStart);
-    if (!vm_net_mock_is_battle_operate_request(autoIntent, intentPos))
+    if (!vm_net_mock_is_battle_operate_request(replayIntent, intentPos))
     {
-        printf("[error][mock-service] battle_auto_intent_invalid "
-               "observer=%08x len=%u header=%02x%02x%02x%02x%02x "
-               "evidence=request-WT-4/2\n",
-               observer->clientId, intentPos,
-               autoIntent[4], autoIntent[5], autoIntent[6],
-               autoIntent[7], autoIntent[8]);
+        printf("[error][mock-service] battle_auto_replay_intent_invalid "
+               "source=%08x len=%u index=%u operate=%u\n",
+               source->clientId, intentPos, index, operate);
         return 0;
     }
 
-    if (duel != NULL)
+    previousReplayInflight = g_vm_net_mock_battle_auto_replay_inflight;
+    g_vm_net_mock_battle_auto_replay_inflight = 1;
+    if (duel != NULL && duel->active && !duel->finished)
     {
         responseLen = vm_net_mock_build_duel_operate_response(
-            autoIntent, intentPos, out, outCap);
+            replayIntent, intentPos, out, outCap);
     }
-    else if (team != NULL && team->battleActive)
+    else if (team != NULL && team->battleActive && !team->battleFinished)
     {
         responseLen = vm_net_mock_build_synchronized_team_battle_response(
-            autoIntent, intentPos, out, outCap,
+            replayIntent, intentPos, out, outCap,
             VM_MOCK_TEAM_BATTLE_BUILD_OPERATE);
     }
     else
     {
         responseLen = vm_net_mock_build_battle_operate_response(
-            autoIntent, intentPos, out, outCap);
+            replayIntent, intentPos, out, outCap);
     }
+    g_vm_net_mock_battle_auto_replay_inflight = previousReplayInflight;
+
     if (responseLen == 0)
     {
-        printf("[error][mock-service] battle_auto_action_build_failed "
-               "observer=%08x mode=%s session=%u turn=%u tick=%u\n",
-               observer->clientId, mode, g_mockBattleOperateSessionSerial,
-               g_mockBattleOperateTurnCounter, g_schedulerTick);
+        printf("[error][mock-service] battle_auto_replay_build_failed "
+               "source=%08x role=%u mode=%s session=%u turn=%u "
+               "selection=%s index=%u operate=%u\n",
+               source->clientId, source->onlineRoleId, mode,
+               g_mockBattleOperateSessionSerial, g_mockBattleOperateTurnCounter,
+               selection, index, operate);
         return 0;
     }
 
-    actionCount = g_vm_net_mock_battle_action6_emitted_count;
-    actionDelayTicks = vm_net_mock_battle_auto_action_delay_ticks(actionCount);
-    if (g_mockBattleOperateSessionArmed == 0 ||
-        g_mockBattleAwaitingSettlement != 0)
-    {
-        vm_net_mock_battle_auto_reset();
-    }
-    else
-    {
-        g_vm_net_mock_battle_auto_next_action_tick =
-            g_schedulerTick + actionDelayTicks;
-    }
-    printf("[info][network] mock_battle_auto_action observer=%08x mode=%s "
-           "session=%u turn=%u tick=%u actionnum=%u delay_ticks=%u "
-           "next_tick=%u armed=%u response=4/6 "
-           "evidence=mmBattle:0x7BD0(case6)->0x6EB0\n",
-           observer->clientId, mode, g_mockBattleOperateSessionSerial,
-           g_mockBattleOperateTurnCounter, g_schedulerTick, actionCount,
-           actionDelayTicks,
-           g_vm_net_mock_battle_auto_next_action_tick,
-           g_mockBattleOperateSessionArmed, responseLen);
-    vm_autotest_note("mock_battle_auto_action observer=%08x mode=%s session=%u "
-                     "turn=%u actionnum=%u delay_ticks=%u response=4/6 "
-                     "evidence=mmBattle:0x7BD0/0x6EB0\n",
-                     observer->clientId, mode, g_mockBattleOperateSessionSerial,
-                     g_mockBattleOperateTurnCounter, actionCount,
-                     actionDelayTicks);
+    printf("[info][network] mock_battle_auto_replay source=%08x role=%u "
+           "mode=%s session=%u turn=%u selection=%s saved_index=%u "
+           "saved_operate=%u response=%u evidence=mmBattle:0x2952->4/12->0x7BD0(case6)\n",
+           source->clientId, source->onlineRoleId, mode,
+           g_mockBattleOperateSessionSerial, g_mockBattleOperateTurnCounter,
+           selection, index, operate, responseLen);
+    vm_autotest_note("mock_battle_auto_replay role=%u mode=%s selection=%s "
+                     "index=%u operate=%u response=4/6 "
+                     "evidence=mmBattle:0x2952/0x7BD0/0x6EB0\n",
+                     source->onlineRoleId, mode, selection, index, operate);
     return responseLen;
 }
 

@@ -595,12 +595,21 @@ static u32 g_mockBattleOperateSessionSerial = 0;
 static u32 g_mockBattleOperateTurnCounter = 0;
 u8 g_mockBattleOperateSessionArmed = 0;
 /* The native 4/11 acknowledgement only changes the client's battle input
- * state.  The service owns the corresponding per-account turn scheduler. */
+ * state.  The client timer subsequently sends its empty 4/12 replay request;
+ * the service therefore retains the last accepted replayable choice for the
+ * active account/role and answers that real request through the normal 4/2
+ * action builders. */
 static u8 g_vm_net_mock_battle_auto_enabled = 0;
-static u32 g_vm_net_mock_battle_auto_next_action_tick = 0;
+static u8 g_vm_net_mock_battle_auto_last_operation_valid = 0;
+static u32 g_vm_net_mock_battle_auto_last_operation_role_id = 0;
+static u32 g_vm_net_mock_battle_auto_last_operation_index = 0;
+static u32 g_vm_net_mock_battle_auto_last_operation_operate = 0;
+/* Request-local guard: a 4/12 replay is routed through the same 4/2
+ * builders but must not manufacture a new remembered manual selection. */
+static u8 g_vm_net_mock_battle_auto_replay_inflight = 0;
 /* Request-local observation written by the common 4/6 builder and consumed
- * immediately by the automatic-battle scheduler.  It is deliberately not
- * role state: the value never survives a request/context boundary. */
+ * by terminal action-display ordering only.  It is deliberately not role
+ * state: the value never survives a request/context boundary. */
 static u8 g_vm_net_mock_battle_action6_emitted_count = 0;
 /* The scene-hangup terminal boundary must not share the network event that
  * enqueues the final 4/6 action list.  The visible 4/7 settlement remains
@@ -636,7 +645,7 @@ static bool vm_net_mock_append_battle_terminal_case9_object(u8 *out, u32 outCap,
 static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap, u32 *pos);
 static u32 vm_net_mock_build_battle_auto11_toggle_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap);
-static u32 vm_net_mock_build_battle_auto12_cancel_response(const u8 *request, u32 requestLen,
+static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u32 requestLen,
                                                            u8 *out, u32 outCap);
 static u32 vm_net_mock_min_u32(u32 a, u32 b);
 static void hook_vm_pool_code_callback(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
