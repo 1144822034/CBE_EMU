@@ -903,8 +903,9 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     bool needBooks = vm_net_mock_request_contains_object(request, requestLen, 1, 7, 42);
     bool needFb11 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 11);
     bool needFb4 = vm_net_mock_request_contains_object(request, requestLen, 1, 0x1b, 4);
-    bool splitScenePosCommit = true;
+    bool emitInitialScenePosition = false;
     bool currentSceneAlreadyTarget = false;
+    bool samePendingTarget = false;
     u8 fb4Type = 1;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -941,27 +942,40 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         vm_net_mock_scene_names_equal_loose(
             g_vm_net_mock_last_scene_change_target.scene,
             target.scene);
+    samePendingTarget =
+        g_vm_net_mock_last_scene_change_target_valid &&
+        vm_net_mock_scene_change_targets_equal(
+            &target, &g_vm_net_mock_last_scene_change_target);
+    /*
+     * `scene_handle_change_result_scene_pos` (WT30/2) calls the scene entry
+     * method only when `posinfo` is present.  An ordinary edge portal has no
+     * earlier position-bearing response, so its first successful WT2/3 must
+     * carry the target scene and landing position.  Keep the target pending so
+     * the following scene-runtime request can deliver its resources and a
+     * no-posinfo completion acknowledgement.
+     *
+     * A duplicate WT2/3 for the same pending target is not a second entry:
+     * retain its recorded phase and acknowledge it without posinfo.  This is
+     * what prevents a completed loading cycle from immediately re-entering the
+     * same scene.
+     */
+    emitInitialScenePosition =
+        resourcesReady &&
+        !target.needsSceneDownload &&
+        !recentCompletedTarget &&
+        !samePendingTarget &&
+        !deferTeleportResourceCompletion &&
+        !g_vm_net_mock_teleport_stone_map_enter_pending &&
+        !currentSceneAlreadyTarget;
     if (!recentCompletedTarget &&
         vm_net_mock_should_use_full_scene_bootstrap(currentScene, &target))
     {
         u8 targetNpcCount = 0;
 
         /*
-         * The local edge-portal path has already created and initialized the
-         * destination scene screen before this WT 2/3 response is dispatched.
-         * A position-bearing 30/2 is the required completion for this request
-         * family. Appending 30/1 immediately after it calls the same scene-enter
-         * vtable a second time and visibly restarts loading. Send exactly one
-         * resolved scene-position completion.
-         *
-         * That locally-created screen is nevertheless a fresh scene shell.  The
-         * normal 30/1 path rearms the one-shot 27/11 NPC catalog, but this 30/2
-         * completion deliberately bypasses 30/1.  Arm the catalog here, but do
-         * not consume it in this 2/3 response: the client follows the position
-         * completion with its explicit 25/5 + 2/3 + 27/11 + 7/42 post-enter
-         * request.  That is the first response whose 27/11 parser runs against
-         * the completed destination shell.  Consuming it before 30/2 leaves that
-         * real request with an empty catalog and the return screen without NPCs.
+         * This full bootstrap owns one and only one position-bearing 30/2.
+         * Its later WT25/5 follow-up may seed NPCs and resources, but must not
+         * start the scene lifecycle again.
          */
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
         targetNpcCount = vm_net_mock_scene_room_npc_seed_count(target.scene);
@@ -1002,43 +1016,30 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
         return pos;
     }
     fb4Type = vm_net_mock_get_request_fb4_type(request, requestLen, 1);
-    if (splitScenePosCommit)
-    {
-        /*
-         * A deferred teleport 30/1 can make the destination the service's
-         * current scene before the client has installed its SCE-declared MAP,
-         * Actor and GIF dependencies.  A 30/2 here calls ResetDownloadState
-         * and snapshots the target as completed while WT18/7 downloads are
-         * still in flight.  Keep the request's other result objects, but leave
-         * the scene lifecycle pending until the post-download WT6/1 callback.
-         */
-        if (!deferTeleportResourceCompletion)
-        {
-            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
-                return 0;
-            if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
-                return 0;
-            vm_net_mock_finish_wt_object(out, objectStart, pos);
-            objectCount += 1;
-        }
-    }
-    else
+    if (!deferTeleportResourceCompletion)
     {
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
             return 0;
-        if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, true, true, 2, target.scene, target.x, target.y))
+        if (emitInitialScenePosition)
+        {
+            if (!vm_net_mock_put_scene_fields_with(out, outCap, &pos, true, true,
+                                                   2, target.scene,
+                                                   target.x, target.y))
+            {
+                return 0;
+            }
+            target.sceneEnterPosinfoSent = true;
+        }
+        else if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos,
+                                                             2, target.scene))
+        {
             return 0;
+        }
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount += 1;
     }
     if (needFb11)
     {
-        if (!splitScenePosCommit)
-        {
-            if (!vm_net_mock_append_fb_target_result12_for_scene(out, outCap, &pos, target.scene, target.x, target.y))
-                return 0;
-            objectCount += 1;
-        }
         if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
             return 0;
         objectCount += 1;
@@ -1060,12 +1061,6 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     else if (needBooks)
     {
         if (!vm_net_mock_append_books42_object(out, outCap, &pos))
-            return 0;
-        objectCount += 1;
-    }
-    if (!splitScenePosCommit)
-    {
-        if (!vm_net_mock_append_scene_enter_object_for_scene(out, outCap, &pos, target.scene, target.x, target.y))
             return 0;
         objectCount += 1;
     }
@@ -1140,7 +1135,25 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     }
     else if (!recentCompletedTarget)
     {
-        vm_net_mock_remember_scene_change_target(&target);
+        if (samePendingTarget)
+        {
+            printf("[info][network] mock_scene_change_pending_repeat_ack scene=%s pos=(%u,%u) exit=%u posinfo_sent=%u action=ack-only-keep-phase\n",
+                   target.scene, target.x, target.y, target.exitId,
+                   g_vm_net_mock_last_scene_change_target.sceneEnterPosinfoSent ? 1u : 0u);
+        }
+        else
+        {
+            if (target.sceneEnterPosinfoSent)
+                vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
+            vm_net_mock_remember_scene_change_target(&target);
+            if (target.sceneEnterPosinfoSent)
+            {
+                printf("[info][network] mock_scene_change_initial_enter scene=%s pos=(%u,%u) exit=%u response=30/2-posinfo phase=await-scene-followup\n",
+                       target.scene, target.x, target.y, target.exitId);
+                vm_autotest_note("mock_scene_change_initial_enter scene=%s pos=(%u,%u) exit=%u response=30/2-posinfo phase=await-scene-followup evidence=JianghuOL.CBE:0x01039770\n",
+                                 target.scene, target.x, target.y, target.exitId);
+            }
+        }
     }
     else
     {
@@ -1267,8 +1280,10 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
         return pos;
     }
     /* Battle.cbm sends this only after the final visual close has returned to
-     * the scene.  Let the hangup owner arm a later poll here; never append a
-     * new 4/5 to this acknowledgement packet. */
+     * the scene.  Ordinary rewarded battles release their terminal state at
+     * this native boundary.  Scene hangup retains ownership of the same
+     * acknowledgement and arms a later poll; never append a new 4/5 here. */
+    vm_net_mock_battle_on_scene_default_event();
     vm_net_mock_scene_hangup_on_scene_default_event();
     if (g_mockBattleOperateSessionFinished != 0)
     {
@@ -1633,13 +1648,23 @@ static u32 vm_net_mock_build_current_scene_reload_response(const u8 *request, u3
     return pos;
 }
 
+static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen,
+                                                   u8 kind, u8 subtype);
+
 static bool vm_net_mock_is_mmgame_scene_transfer_followup_request(const u8 *request, u32 requestLen)
 {
     if (!g_vm_net_mock_last_scene_change_target_valid)
         return false;
     if (g_vm_net_mock_teleport_stone_direct_enter_pending)
         return false;
-    return vm_net_mock_request_contains_object(request, requestLen, 1, 0x19, 5);
+    /*
+     * WT25/5 is a member of several scene-runtime composite requests.  This
+     * mmGame transfer completion owns only the standalone default-event
+     * callback.  Claiming every packet that merely contains 25/5 used to drop
+     * the requested 6/* task and 2/10 actor families, leaving the client in a
+     * loading state or feeding a later response into the wrong scene phase.
+     */
+    return vm_net_mock_is_short_wt_control_packet(request, requestLen, 0x19, 5);
 }
 
 static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *request, u32 requestLen,
@@ -1820,9 +1845,6 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
                      target.scene, target.x, target.y, objectCount);
     return pos;
 }
-
-static bool vm_net_mock_is_short_wt_control_packet(const u8 *request, u32 requestLen,
-                                                   u8 kind, u8 subtype);
 
 static u32 vm_net_mock_build_teleport_stone_direct_enter_default_ack_response(const u8 *request,
                                                                               u32 requestLen,

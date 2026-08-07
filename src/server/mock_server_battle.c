@@ -2011,7 +2011,6 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (terminalFollowup)
     {
         u8 terminalObjectCount = 0;
-        bool sceneHangupRewardPanelActive = false;
         if (!vm_net_mock_append_battle_terminal_status_objects(
                 out, outCap, &pos, &terminalObjectCount, false,
                 &terminalStatusAppended))
@@ -2022,9 +2021,12 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                "battle-operate-terminal",
                                                                true))
             return 0;
-        sceneHangupRewardPanelActive = terminalStatusAppended &&
-                                       vm_net_mock_scene_hangup_result_panel_active();
-        if (!sceneHangupRewardPanelActive)
+        /* A successful 4/7 owns the client result panel for every battle
+         * flavor.  Its native input path emits 25/5 and cleans the battle
+         * screen; appending 4/11(type=0)+4/9 here would clear that phase
+         * before the client gets that chance.  Only an omitted 4/7 has no
+         * such lifecycle and continues through the legacy close contract. */
+        if (!terminalStatusAppended)
         {
             if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
                 !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
@@ -2214,13 +2216,6 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                     skillTeamHp,
                                                     skillTeamMp))
         return 0;
-    terminalCloseDeferred =
-        vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
-    if (terminalCloseDeferred)
-    {
-        vm_net_mock_battle_schedule_terminal_close_after_actions(
-            actionCount, "battle-operate");
-    }
     if (battleEndsThisRound &&
         g_mockBattleEnemyHpCurrent == 0 &&
         g_mockBattleRoleHpCurrent > 0 &&
@@ -2238,6 +2233,17 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                "battle-operate-inline",
                                                                true))
             return 0;
+    }
+    /* Delay the close only for a terminal result with no 4/7 panel.  A
+     * rewarded final automatic action already carries 4/7 in this response;
+     * the next valid boundary is the client-originated 25/5 after it exits
+     * the native result panel, not a server-originated 4/11+4/9. */
+    terminalCloseDeferred = !terminalStatusAppended &&
+        vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
+    if (terminalCloseDeferred)
+    {
+        vm_net_mock_battle_schedule_terminal_close_after_actions(
+            actionCount, "battle-operate-no-result-panel");
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -2374,6 +2380,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     u8 deathActionCount = 0;
     bool terminalActionEnabled = vm_net_mock_battle_terminal_action_enabled();
     bool terminalFollowup = false;
+    bool terminalStatusAppended = false;
     bool terminalCloseDeferred = false;
     bool operateIsSkill = false;
     bool operateConsumesTurn = false;
@@ -2641,7 +2648,6 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     {
         u8 terminalObjectCount = 0;
         bool terminalStatusAppended = false;
-        bool sceneHangupRewardPanelActive = false;
         if (!vm_net_mock_append_battle_terminal_status_objects(
                 out, outCap, &pos, &terminalObjectCount, false,
                 &terminalStatusAppended))
@@ -2652,9 +2658,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                "battle-operate-fallback-terminal",
                                                                true))
             return 0;
-        sceneHangupRewardPanelActive = terminalStatusAppended &&
-                                       vm_net_mock_scene_hangup_result_panel_active();
-        if (!sceneHangupRewardPanelActive)
+        if (!terminalStatusAppended)
         {
             if (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
                 !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos))
@@ -2835,13 +2839,6 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                     skillTeamHp,
                                                     skillTeamMp))
         return 0;
-    terminalCloseDeferred =
-        vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
-    if (terminalCloseDeferred)
-    {
-        vm_net_mock_battle_schedule_terminal_close_after_actions(
-            actionCount, "battle-operate-fallback");
-    }
     if (battleEndsThisRound &&
         g_mockBattleEnemyHpCurrent == 0 &&
         g_mockBattleRoleHpCurrent > 0 &&
@@ -2860,6 +2857,13 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                "battle-operate-fallback-inline",
                                                                true))
             return 0;
+    }
+    terminalCloseDeferred = !terminalStatusAppended &&
+        vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
+    if (terminalCloseDeferred)
+    {
+        vm_net_mock_battle_schedule_terminal_close_after_actions(
+            actionCount, "battle-operate-fallback-no-result-panel");
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -4558,6 +4562,46 @@ static bool vm_net_mock_scene_hangup_result_panel_active(void)
 }
 
 /*
+ * BattleScene_ExitAndCleanup(0x60C8) emits an empty 25/5 only after a normal
+ * 4/7 result panel has been dismissed.  This is the authoritative lifecycle
+ * boundary for an ordinary rewarded battle: before it, the client still owns
+ * the battle screen; after it, a stale AwaitingSettlement flag must not
+ * affect a later scene action or battle session.  Scene-hangup deliberately
+ * keeps ownership of the same acknowledgement so it can schedule its next
+ * 4/5 on a later poll.
+ */
+static void vm_net_mock_battle_on_scene_default_event(void)
+{
+    if (g_mockBattleOperateSessionArmed != 0 ||
+        g_mockBattleAwaitingSettlement == 0 ||
+        g_mockBattleEnemyHpCurrent != 0 ||
+        g_mockBattleRoleHpCurrent == 0 ||
+        g_vm_net_mock_battle_settlement_sent_serial !=
+            g_mockBattleOperateSessionSerial ||
+        g_vm_net_mock_battle_no_reward_terminal_serial ==
+            g_mockBattleOperateSessionSerial ||
+        vm_net_mock_scene_hangup_result_panel_active())
+    {
+        return;
+    }
+
+    vm_net_mock_battle_auto_reset();
+    g_mockBattlePendingEnemyTurn = 0;
+    g_mockBattleAwaitingSettlement = 0;
+    g_mockBattleSceneMonsterStartActive = 0;
+    g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
+    printf("[info][mock-service] battle_reward_panel_closed "
+           "battle=%u role=%u source=native-25/5 action=release-ordinary-state\n",
+           g_mockBattleOperateSessionSerial,
+           g_vm_net_mock_battle_role_id_current);
+    vm_autotest_note("mock_battle_reward_panel_closed battle=%u role=%u "
+                     "source=native-25/5 action=release-ordinary-state "
+                     "evidence=mmBattle:0x60C8\n",
+                     g_mockBattleOperateSessionSerial,
+                     g_vm_net_mock_battle_role_id_current);
+}
+
+/*
  * A resurrection-stone confirmation happens after the battle-side HP has
  * already reached zero.  Scene 30/1 only changes the map/position; it does
  * not replace the Battle.cbm character cache which still owns the displayed
@@ -5023,8 +5067,7 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     bool noRewardTerminal =
         g_vm_net_mock_battle_no_reward_terminal_serial ==
         g_mockBattleOperateSessionSerial;
-    bool sceneHangupRewardPanelActive =
-        !noRewardTerminal && vm_net_mock_scene_hangup_result_panel_active();
+    bool terminalResultPanelActive = false;
 
     if (outCap < pos)
         return 0;
@@ -5045,41 +5088,42 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
     if (terminalStatusAppended)
         g_vm_net_mock_battle_settlement_sent_serial =
             g_mockBattleOperateSessionSerial;
+    terminalResultPanelActive = !noRewardTerminal &&
+        (terminalStatusAlreadyInline || terminalStatusAppended);
     if (!vm_net_mock_append_battle_drop_refresh7_if_needed(out, outCap, &pos,
                                                            &objectCount,
                                                            "battle-pending-settlement",
                                                            false))
         return 0;
-    if (sceneHangupRewardPanelActive)
+    if (terminalResultPanelActive)
     {
         /*
-         * 4/7 is the winning result panel.  Do not overwrite it with 4/8:
-         * that packet's autorevive/info fields belong to the revival flow and
-         * produced an empty information dialog after a normal victory.  A
-         * previously-inline 4/7 therefore needs no response here; when 4/7
-         * was built by this fallback path, return only that result object.
-         * The native panel dismissal sends 25/5, which is the established
-         * lifecycle boundary for scheduling the next scene-hangup battle.
-         */
-        /* The delay marker protected the final 4/6 action playback before
-         * this poll.  Once that boundary has elapsed, it must not keep
-         * claiming later scene polls: the separate sceneHangupRestartPending
-         * flag is set only by the native 25/5 confirmation and remains the
-         * sole authority for the next 4/5.
+         * 4/7 is the winning result panel for both ordinary battles and
+         * scene-hangup rounds.  Do not overwrite its phase with 4/11(type=0)
+         * or with revival-only 4/8 fields.  A previously-inline 4/7 needs no
+         * response here; when 4/7 was built by this fallback path, return
+         * only that result object.  Native panel dismissal sends 25/5: it is
+         * the ordinary battle cleanup boundary and, for scene hangup, the
+         * sole authority for scheduling the next 4/5.
          */
         if (closeDeferred)
         {
             g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
-            printf("[info][mock-service] scene_hangup_reward_panel_wait "
-                   "battle=%u action_boundary=%u next_start=native-25/5\n",
-                   g_mockBattleOperateSessionSerial, closeNotBeforeTick);
+            printf("[info][mock-service] battle_reward_panel_wait "
+                   "battle=%u action_boundary=%u mode=%s "
+                   "next_step=native-25/5\n",
+                   g_mockBattleOperateSessionSerial, closeNotBeforeTick,
+                   vm_net_mock_scene_hangup_result_panel_active() ?
+                       "scene-hangup" : "ordinary");
         }
         if (objectCount == 0)
             return 0;
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][mock-service] scene_hangup_reward_panel_deliver "
-               "battle=%u objects=%u response=4/7-await-native-25/5\n",
-               g_mockBattleOperateSessionSerial, objectCount);
+        printf("[info][mock-service] battle_reward_panel_deliver "
+               "battle=%u objects=%u mode=%s response=4/7-await-native-25/5\n",
+               g_mockBattleOperateSessionSerial, objectCount,
+               vm_net_mock_scene_hangup_result_panel_active() ?
+                   "scene-hangup" : "ordinary");
         return pos;
     }
     {

@@ -1716,6 +1716,12 @@ typedef struct
     u8 mapType;
     bool hasSceEntry;
     bool needsSceneDownload;
+    /*
+     * The server has emitted the one position-bearing scene result for this
+     * in-flight target.  Follow-up WT25/5 families may finish resources, but
+     * must never emit another scene+posinfo result for the same target.
+     */
+    bool sceneEnterPosinfoSent;
 } vm_net_mock_scene_change_target;
 
 typedef struct
