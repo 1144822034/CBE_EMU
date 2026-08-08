@@ -487,3 +487,48 @@
 [info][mock-service] chat_notice_deliver observer=023ad4cc type=world source=00000000/10036 bytes=44 age_ticks=14
 [info][mock-service] chat_notice_deliver observer=023ad4cc type=system source=00000000/0 bytes=16 age_ticks=14
 [info][network] mock_moveinfo_source pos=(201,220) reason=moveinfo-upload-timeline scene=c04临安府_01
+[info][mock-service] session_offline client=023ad4cc account=21642502 role=10036 name=武林盟主 scene=c04临安府_01 pos=(201,220) reason=explicit-disconnect
+[debug][mock-service] moveinfo_clear client=023ad4cc reason=explicit-disconnect
+[debug][mock-service] movement_rate_reset client=023ad4cc reason=explicit-disconnect
+[info][mock-service] account_cache_release account=21642502 entries=0 reason=explicit-disconnect
+[info][mock-service] account_state_release account=21642502 reason=explicit-disconnect
+[info][mock-admin] request worker=3 sequence=1960 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=339
+[info][mock-admin] monster_db_load rows=0 skipped=0 drops=0 drops_skipped=0
+[info][network] mock_auto_monster_catalog total=104 source=automonster.dsh
+[info][mock-admin] request worker=2 sequence=1995 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=114
+[info][mock-admin] chest_reward_db_load rows=4
+[info][mock-admin] request worker=2 sequence=1999 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=122
+[info][mock-admin] request worker=4 sequence=2001 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=105
+[info][mock-admin] request worker=2 sequence=2003 result=1 queue_wait_ms=0 state_wait_ms=79 process_ms=12
+[info][mock-admin] request worker=3 sequence=2004 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=114
+[info][mock-admin] request worker=1 sequence=2006 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=108
+[info][mock-admin] request worker=2 sequence=2007 result=0 queue_wait_ms=0 state_wait_ms=108 process_ms=109
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=38 count=15734 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=39 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=40 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=42 count=46979 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=43 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=44 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[info][mock-service] account_state_release account=1034096998 reason=admin-management-close
+[info][mock-admin] request worker=2 sequence=2015 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=114
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=38 count=15734 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=39 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=40 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=42 count=46979 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=43 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=44 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[info][mock-service] account_state_release account=1034096998 reason=admin-management-close
+[info][mock-admin] request worker=4 sequence=2017 result=1 queue_wait_ms=0 state_wait_ms=0 process_ms=102
+[warn][mock-service] mysql_keepalive_reset worker=1 error=MySQL socket receive failed
+[warn][mock-service] mysql_keepalive_reset worker=3 error=MySQL socket send failed
+[info][mock-admin] request worker=1 sequence=2032 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=113
+[info][mock-admin] request worker=2 sequence=2035 result=1 queue_wait_ms=1 state_wait_ms=0 process_ms=113
+[info][mock-admin] request worker=1 sequence=2040 result=0 queue_wait_ms=0 state_wait_ms=0 process_ms=116
+[info][mock-admin] request worker=3 sequence=2041 result=0 queue_wait_ms=0 state_wait_ms=115 process_ms=108
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=38 count=15734 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=39 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=803 seq=40 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=42 count=46979 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=43 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[error][mock-service] backpack_stack_limit_unresolved role=10221 item=802 seq=44 count=50000 stack_limit=1 capacity=45 reason=insufficient-slots
+[info][mock-service] account_state_release account=1034096998 reason=admin-management-close

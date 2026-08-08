@@ -5311,8 +5311,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_append_html(&page, selectedAccount);
             vm_mock_admin_text_appendf(&page,
                 "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加 W 币\" required>"
-                "<button type=\"submit\">加 W 币</button></form>", role->roleId);
+                "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加账号 W 币\" required>"
+                "<button type=\"submit\">加账号 W 币</button></form>", role->roleId);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\" "
                 "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？此操作仅在角色离线时可执行。');\">"

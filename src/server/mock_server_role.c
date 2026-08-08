@@ -303,9 +303,14 @@ static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
  * cannot forget that the migration already happened.
  */
 #define VM_MOCK_MYSQL_AUTHORITY_MIGRATION "mysql-authoritative-v1"
+#define VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION "account-wcoin-wallet-v1"
 
 static bool g_vm_mock_mysql_authority_prepared = false;
 static bool g_vm_mock_mysql_authority_sealed = false;
+/* False only during the one boot where legacy role-bound W coin must still be
+ * written long enough for the transactional account-wallet migration below
+ * to consume it.  No live client is accepted before that migration finishes. */
+static bool g_vm_mock_account_wcoin_wallet_migrated = false;
 
 typedef struct
 {
@@ -333,6 +338,7 @@ static bool vm_mock_mysql_authority_engine_row(void *context_value,
 {
     static const char *const table_names[] = {
         "accounts",
+        "account_wallets",
         "friendships",
         "account_role_state",
         "account_roles",
@@ -412,7 +418,7 @@ static bool vm_mock_service_mysql_authority_prepare(void)
 {
     vm_mock_mysql_authority_engine_context engine_context;
     vm_mock_mysql_authority_marker_context marker_context;
-    const u8 expected_mask = (u8)((1u << 7) - 1u);
+    const u8 expected_mask = (u8)((1u << 8) - 1u);
 
     if (g_vm_mock_mysql_authority_prepared)
         return true;
@@ -427,11 +433,28 @@ static bool vm_mock_service_mysql_authority_prepare(void)
         return false;
     }
 
+    /* W coin is account currency.  The CBE still receives it through its
+     * role-shaped actor/shop packets, but this relation is the single durable
+     * authority shared by every role under the account. */
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_wallets ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "wcoin INT UNSIGNED NOT NULL DEFAULT 0,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id),"
+            "CONSTRAINT fk_account_wallets_account FOREIGN KEY(account_id) "
+            "REFERENCES accounts(account_id) ON DELETE CASCADE) ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] mysql_authority_prepare wallet schema error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+
     memset(&engine_context, 0, sizeof(engine_context));
     if (!vm_mysql_query(
             "SELECT TABLE_NAME,ENGINE FROM information_schema.TABLES "
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN "
-            "('accounts','friendships','account_role_state','account_roles',"
+            "('accounts','account_wallets','friendships','account_role_state','account_roles',"
             "'account_role_equipment','account_role_backpack','server_data_migrations')",
             vm_mock_mysql_authority_engine_row, &engine_context) ||
         engine_context.invalid || engine_context.seenMask != expected_mask)
@@ -694,6 +717,16 @@ static bool vm_mock_service_account_db_save_all(const char *reason)
             vm_mysql_exec("ROLLBACK");
             return false;
         }
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO account_wallets(account_id,wcoin) "
+                 "VALUES(CAST(X'%s' AS CHAR),0)", username_hex);
+        if (!vm_mysql_exec(query))
+        {
+            vm_autotest_note("mock_account_db_mysql_save_failed reason=%s index=%u wallet_error=%s\n",
+                             reason ? reason : "state", i, vm_mysql_last_error());
+            vm_mysql_exec("ROLLBACK");
+            return false;
+        }
     }
     if (!vm_mysql_exec("COMMIT"))
     {
@@ -733,6 +766,12 @@ static bool vm_mock_service_account_db_write_record(const vm_mock_service_accoun
     }
     if (create)
     {
+        if (!vm_mysql_exec("START TRANSACTION"))
+        {
+            vm_autotest_note("mock_account_db_mysql_write_failed reason=%s operation=insert error=%s\n",
+                             reason ? reason : "state", vm_mysql_last_error());
+            return false;
+        }
         snprintf(query, sizeof(query),
                  "INSERT INTO accounts(account_id,password_value) VALUES(CAST(X'%s' AS CHAR),X'%s')",
                  username_hex, password_hex);
@@ -748,7 +787,22 @@ static bool vm_mock_service_account_db_write_record(const vm_mock_service_accoun
         vm_autotest_note("mock_account_db_mysql_write_failed reason=%s operation=%s error=%s\n",
                          reason ? reason : "state", create ? "insert" : "update",
                          vm_mysql_last_error());
+        if (create)
+            (void)vm_mysql_exec("ROLLBACK");
         return false;
+    }
+    if (create)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_wallets(account_id,wcoin) "
+                 "VALUES(CAST(X'%s' AS CHAR),0)", username_hex);
+        if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        {
+            vm_autotest_note("mock_account_db_mysql_write_failed reason=%s operation=insert wallet_error=%s\n",
+                             reason ? reason : "state", vm_mysql_last_error());
+            (void)vm_mysql_exec("ROLLBACK");
+            return false;
+        }
     }
     vm_autotest_note("mock_account_db_mysql_write reason=%s operation=%s\n",
                      reason ? reason : "state", create ? "insert" : "update");
@@ -5388,6 +5442,196 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     return true;
 }
 
+typedef struct
+{
+    u32 balance;
+    bool found;
+    bool invalid;
+} vm_mock_account_wallet_balance_context;
+
+typedef struct
+{
+    uint64_t value;
+    bool found;
+    bool invalid;
+} vm_mock_account_wallet_u64_context;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+} vm_mock_account_wallet_marker_context;
+
+static bool vm_mock_account_wallet_balance_row(void *context_value,
+                                               unsigned int column_count,
+                                               const char *const *values,
+                                               const size_t *lengths)
+{
+    vm_mock_account_wallet_balance_context *context =
+        (vm_mock_account_wallet_balance_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->balance))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_account_wallet_u64_row(void *context_value,
+                                           unsigned int column_count,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_mock_account_wallet_u64_context *context =
+        (vm_mock_account_wallet_u64_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u64(values[0], lengths[0], &context->value))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_account_wallet_marker_row(void *context_value,
+                                              unsigned int column_count,
+                                              const char *const *values,
+                                              const size_t *lengths)
+{
+    vm_mock_account_wallet_marker_context *context =
+        (vm_mock_account_wallet_marker_context *)context_value;
+    const size_t marker_len = strlen(VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION);
+
+    if (context == NULL || context->found || column_count != 1 || values[0] == NULL ||
+        lengths[0] != marker_len ||
+        memcmp(values[0], VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION, marker_len) != 0)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_service_account_wallet_read(const char *account_id,
+                                                bool for_update,
+                                                u32 *balance_out)
+{
+    char account_hex[129];
+    char query[512];
+    vm_mock_account_wallet_balance_context context;
+
+    if (balance_out)
+        *balance_out = 0;
+    if (account_id == NULL || account_id[0] == 0 ||
+        vm_mysql_hex_encode(account_id, strlen(account_id), account_hex,
+                            sizeof(account_hex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT wcoin FROM account_wallets WHERE account_id=CAST(X'%s' AS CHAR)%s",
+             account_hex, for_update ? " FOR UPDATE" : "");
+    if (!vm_mysql_query(query, vm_mock_account_wallet_balance_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (balance_out)
+        *balance_out = context.balance;
+    return true;
+}
+
+/* This migration is deliberately separate from the historical payload and
+ * relation migrations.  It runs only after all legacy role snapshots have
+ * become account_roles rows, then moves every old role balance exactly once
+ * inside the same InnoDB transaction that clears the old source column and
+ * records the marker. */
+static bool vm_mock_service_account_wallet_prepare_and_migrate(void)
+{
+    vm_mock_account_wallet_marker_context marker;
+    vm_mock_account_wallet_u64_context maximum;
+    char query[1024];
+    bool transaction = false;
+
+    if (!vm_mock_service_mysql_authority_prepare() ||
+        !vm_mysql_exec("START TRANSACTION"))
+    {
+        return false;
+    }
+    transaction = true;
+    memset(&marker, 0, sizeof(marker));
+    snprintf(query, sizeof(query),
+             "SELECT migration_name FROM server_data_migrations WHERE migration_name='%s' FOR UPDATE",
+             VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION);
+    if (!vm_mysql_query(query, vm_mock_account_wallet_marker_row, &marker) || marker.invalid)
+        goto failed;
+    if (marker.found)
+    {
+        if (!vm_mysql_exec("COMMIT"))
+            goto failed;
+        g_vm_mock_account_wcoin_wallet_migrated = true;
+        return true;
+    }
+
+    /* Accounts without a role still need a stable zero wallet so later role
+     * creation and payment-order history share the same parent account. */
+    if (!vm_mysql_exec(
+            "INSERT IGNORE INTO account_wallets(account_id,wcoin) "
+            "SELECT account_id,0 FROM accounts"))
+    {
+        goto failed;
+    }
+    memset(&maximum, 0, sizeof(maximum));
+    if (!vm_mysql_query(
+            "SELECT COALESCE(MAX(wallet_total),0) FROM "
+            "(SELECT SUM(wcoin) AS wallet_total FROM account_roles GROUP BY account_id) "
+            "AS account_wallet_totals",
+            vm_mock_account_wallet_u64_row, &maximum) ||
+        maximum.invalid || !maximum.found || maximum.value > UINT32_MAX)
+    {
+        if (maximum.found && maximum.value > UINT32_MAX)
+            printf("[error][mock-service] account_wcoin_wallet_migration overflow max=%llu limit=%u\n",
+                   (unsigned long long)maximum.value, UINT32_MAX);
+        goto failed;
+    }
+    if (!vm_mysql_exec(
+            "UPDATE account_wallets AS wallet "
+            "JOIN (SELECT account_id,SUM(wcoin) AS wallet_total "
+            "FROM account_roles GROUP BY account_id) AS legacy "
+            "ON legacy.account_id=wallet.account_id "
+            "SET wallet.wcoin=legacy.wallet_total") ||
+        !vm_mysql_exec("UPDATE account_roles SET wcoin=0 WHERE wcoin<>0") ||
+        !vm_mysql_exec(
+            "INSERT INTO server_data_migrations(migration_name) VALUES('"
+            VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION "')") ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    transaction = false;
+    g_vm_mock_account_wcoin_wallet_migrated = true;
+    printf("[info][mock-service] account_wcoin_wallet_migration marker=%s source=account_roles destination=account_wallets action=committed\n",
+           VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION);
+    return true;
+
+failed:
+    if (transaction)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] account_wcoin_wallet_migration_failed marker=%s error=%s\n",
+           VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION, vm_mysql_last_error());
+    return false;
+}
+
 static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
                                                        bool *backfill_needed_out,
                                                        bool *exp_curve_migration_out)
@@ -5443,6 +5687,21 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_backpack_row, &context) || context.invalid)
         return false;
+    if (g_vm_mock_account_wcoin_wallet_migrated)
+    {
+        u32 account_wcoin = 0;
+
+        if (!vm_mock_service_account_wallet_read(g_vm_mock_service_active_account_id,
+                                                 false, &account_wcoin))
+        {
+            return false;
+        }
+        /* The client has only role-shaped W-coin fields.  Hydrate every
+         * loaded role with the one account balance so role selection cannot
+         * split what is now an account-level currency. */
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+            g_vm_net_mock_role_db.roles[i].wcoin = account_wcoin;
+    }
     if (found_out)
         *found_out = true;
     if (backfill_needed_out)
@@ -5634,12 +5893,23 @@ static void vm_net_mock_apply_role_id_migration_to_friend_cache(const char *acco
     }
 }
 
+typedef struct
+{
+    u32 expectedBalance;
+    u32 debit;
+    u32 committedBalance;
+} vm_net_mock_account_wallet_debit;
+
+static void vm_mock_service_account_wallet_sync_cached_balance(
+    const char *account_id, u32 balance);
+
 static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  const u32 *old_ids,
                                                  const u32 *new_ids,
                                                  u32 mapping_count,
                                                  bool full_snapshot,
-                                                 const vm_net_mock_role_item_effect *timed_effect)
+                                                 const vm_net_mock_role_item_effect *timed_effect,
+                                                 vm_net_mock_account_wallet_debit *wallet_debit)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -5649,6 +5919,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     size_t bulk_capacity = 131072;
     bool transaction_started = false;
     u32 scoped_role_id = 0;
+    u32 wallet_balance = 0;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -5701,6 +5972,22 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         goto failed;
     }
     transaction_started = true;
+    if (wallet_debit != NULL)
+    {
+        wallet_debit->committedBalance = 0;
+        if (wallet_debit->debit == 0 ||
+            !vm_mock_service_account_wallet_read(account_id, true, &wallet_balance) ||
+            wallet_balance != wallet_debit->expectedBalance ||
+            wallet_balance < wallet_debit->debit)
+        {
+            snprintf(mysql_error, sizeof(mysql_error),
+                     "account wallet debit rejected expected=%u actual=%u debit=%u",
+                     wallet_debit->expectedBalance, wallet_balance,
+                     wallet_debit->debit);
+            goto failed;
+        }
+        wallet_debit->committedBalance = wallet_balance - wallet_debit->debit;
+    }
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_state(account_id,format_version,active_role_id,role_count) "
              "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u) ON DUPLICATE KEY UPDATE "
@@ -5834,7 +6121,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                  "next_backpack_seq=VALUES(next_backpack_seq)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
-                 role->mp, role->mpMax, role->money, role->wcoin, scene_hex,
+                 /* account_roles.wcoin is retired source data after the
+                  * wallet marker commits.  The pre-marker exception preserves
+                  * a legacy payload just long enough for that migration. */
+                 role->mp, role->mpMax, role->money,
+                 g_vm_mock_account_wcoin_wallet_migrated ? 0u : role->wcoin,
+                 scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
                  role->nextBackpackSeq);
         if (!vm_mysql_exec(query))
@@ -5968,12 +6260,27 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             goto failed;
         }
     }
+    if (wallet_debit != NULL)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_wallets SET wcoin=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)",
+                 wallet_debit->committedBalance, account_hex);
+        if (!vm_mysql_exec(query))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+            goto failed;
+        }
+    }
     if (!vm_mysql_exec("COMMIT"))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
         goto failed;
     }
     free(bulk_query);
+    if (wallet_debit != NULL)
+        vm_mock_service_account_wallet_sync_cached_balance(
+            account_id, wallet_debit->committedBalance);
     g_vm_net_mock_role_position_dirty = false;
     vm_autotest_note("mock_role_db_mysql_save account=%s reason=%s roles=%u active=%u scope=%s storage=relational\n",
                      account_id ? account_id : "-", reason ? reason : "state",
@@ -5993,7 +6300,7 @@ failed:
 
 static bool vm_net_mock_role_db_save(const char *reason)
 {
-    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL);
+    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL, NULL);
 }
 
 static u32 vm_net_mock_role_active_exp_card_multiplier(
@@ -6074,7 +6381,7 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
         return false;
     if (!vm_net_mock_role_db_save_relational(
-            reason ? reason : "special-item-use", NULL, NULL, 0, false, effect))
+            reason ? reason : "special-item-use", NULL, NULL, 0, false, effect, NULL))
     {
         *role = before;
         printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
@@ -6465,7 +6772,7 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount, true, NULL))
+                                                 migratedIdCount, true, NULL, NULL))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -6556,18 +6863,86 @@ static vm_net_mock_role_state *vm_net_mock_find_role_in_db(vm_net_mock_role_db_f
 
 static u32 vm_net_mock_role_wcoin_balance(const vm_net_mock_role_state *role)
 {
+    u32 wallet_balance = 0;
+
+    /* Refresh the compatibility cache at a low-frequency display boundary.
+     * A payment callback can be handled after the role record was loaded, so
+     * returning only the old role-shaped cache would temporarily reintroduce
+     * different balances between two role sessions of one account. */
+    if (role != NULL && g_vm_mock_account_wcoin_wallet_migrated &&
+        vm_mock_service_account_wallet_read(g_vm_mock_service_active_account_id,
+                                            false, &wallet_balance))
+    {
+        vm_mock_service_account_wallet_sync_cached_balance(
+            g_vm_mock_service_active_account_id, wallet_balance);
+        return wallet_balance;
+    }
     return role ? role->wcoin : 0;
 }
 
-static u32 vm_net_mock_role_add_wcoin(vm_net_mock_role_state *role, u32 amount)
+static void vm_mock_service_account_wallet_sync_cached_balance(
+    const char *account_id, u32 balance)
 {
-    uint64_t total = 0;
+    if (account_id == NULL || account_id[0] == 0)
+        return;
+    /* Role-management and user-web flows have already opened their account
+     * database into this active cache before mutating a wallet.  Other
+     * accounts intentionally stay unloaded; their next explicit acquisition
+     * rehydrates from account_wallets instead of retaining a stale duplicate. */
+    if (g_vm_mock_service_active_account_id != NULL &&
+        strcmp(g_vm_mock_service_active_account_id, account_id) == 0)
+    {
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+            g_vm_net_mock_role_db.roles[i].wcoin = balance;
+    }
+}
 
-    if (role == NULL || amount == 0)
-        return role ? role->wcoin : 0;
-    total = (uint64_t)role->wcoin + (uint64_t)amount;
-    role->wcoin = total > 0xffffffffull ? 0xffffffffu : (u32)total;
-    return role->wcoin;
+static bool vm_mock_service_account_wallet_credit(const char *account_id,
+                                                  u32 amount,
+                                                  u32 *before_out,
+                                                  u32 *after_out)
+{
+    char account_hex[129];
+    char query[512];
+    u32 before = 0;
+    u32 after = 0;
+    bool transaction = false;
+
+    if (before_out)
+        *before_out = 0;
+    if (after_out)
+        *after_out = 0;
+    if (account_id == NULL || account_id[0] == 0 || amount == 0 ||
+        vm_mysql_hex_encode(account_id, strlen(account_id), account_hex,
+                            sizeof(account_hex)) == 0 ||
+        !vm_mysql_exec("START TRANSACTION"))
+    {
+        return false;
+    }
+    transaction = true;
+    if (!vm_mock_service_account_wallet_read(account_id, true, &before) ||
+        before > UINT32_MAX - amount)
+    {
+        goto failed;
+    }
+    after = before + amount;
+    snprintf(query, sizeof(query),
+             "UPDATE account_wallets SET wcoin=%u WHERE account_id=CAST(X'%s' AS CHAR)",
+             after, account_hex);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transaction = false;
+    vm_mock_service_account_wallet_sync_cached_balance(account_id, after);
+    if (before_out)
+        *before_out = before;
+    if (after_out)
+        *after_out = after;
+    return true;
+
+failed:
+    if (transaction)
+        (void)vm_mysql_exec("ROLLBACK");
+    return false;
 }
 
 static bool vm_net_mock_select_active_role(u32 roleId)
@@ -6721,7 +7096,7 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
-    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true, NULL))
+    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true, NULL, NULL))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -6791,7 +7166,7 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     }
 
-    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true, NULL))
+    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true, NULL, NULL))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)

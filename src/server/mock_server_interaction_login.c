@@ -2134,12 +2134,12 @@ vm_net_mock_shop_find_direct_effect(u8 type, u32 itemId)
  * Commit a direct-store purchase as one role snapshot.  The common one-item
  * helper persists on success, which is correct for an ordinary purchase but
  * would make a multi-content gift pack observable in partial states.  This
- * path composes its in-memory variant with W-coin deduction and saves only
- * after every grant has succeeded.
+ * path composes its in-memory variant.  Its paired wallet debit is committed
+ * by the role writer in the same transaction only after every grant succeeds.
  */
 static bool vm_net_mock_shop_apply_direct_effect(
     vm_net_mock_role_state *role, const vm_net_mock_shop_direct_effect *effect,
-    u32 purchaseCount, u32 cost, u32 *moneyBeforeOut, u32 *moneyGrantOut,
+    u32 purchaseCount, u32 *moneyBeforeOut, u32 *moneyGrantOut,
     u8 *grantEntriesOut)
 {
     vm_net_mock_role_state before;
@@ -2152,8 +2152,7 @@ static bool vm_net_mock_shop_apply_direct_effect(
         *moneyGrantOut = 0;
     if (grantEntriesOut)
         *grantEntriesOut = 0;
-    if (role == NULL || effect == NULL || purchaseCount == 0 ||
-        role->wcoin < cost)
+    if (role == NULL || effect == NULL || purchaseCount == 0)
     {
         return false;
     }
@@ -2188,18 +2187,35 @@ static bool vm_net_mock_shop_apply_direct_effect(
         }
     }
 
-    role->wcoin -= cost;
-    if (!vm_net_mock_role_db_save("shop-buy14-direct"))
-    {
-        *role = before;
-        return false;
-    }
     if (moneyBeforeOut)
         *moneyBeforeOut = before.money;
     if (moneyGrantOut)
         *moneyGrantOut = moneyGrant;
     if (grantEntriesOut)
         *grantEntriesOut = grantEntries;
+    return true;
+}
+
+static bool vm_net_mock_shop_commit_purchase(const char *reason,
+                                             u32 wcoin_before, u32 cost,
+                                             u32 *wcoin_after_out)
+{
+    vm_net_mock_account_wallet_debit debit;
+
+    if (wcoin_after_out)
+        *wcoin_after_out = wcoin_before;
+    if (cost == 0 || wcoin_before < cost)
+        return false;
+    memset(&debit, 0, sizeof(debit));
+    debit.expectedBalance = wcoin_before;
+    debit.debit = cost;
+    if (!vm_net_mock_role_db_save_relational(
+            reason, NULL, NULL, 0, false, NULL, &debit))
+    {
+        return false;
+    }
+    if (wcoin_after_out)
+        *wcoin_after_out = debit.committedBalance;
     return true;
 }
 
@@ -2231,6 +2247,7 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
     u8 directGrantEntries = 0;
     u32 actorInfoLen = 0;
     vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state roleBefore;
     const vm_net_mock_shop_direct_effect *directEffect = NULL;
 
     if (out == NULL || outCap < pos)
@@ -2267,20 +2284,24 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
              */
             if (count <= 1)
             {
+                roleBefore = *role;
                 directExpandApplied = vm_net_mock_role_expand_backpack_capacity(role, 1);
-                if (directExpandApplied != 0)
+                if (directExpandApplied != 0 &&
+                    vm_net_mock_shop_commit_purchase("shop-buy14-expand",
+                                                     wcoinBefore, cost,
+                                                     &wcoinAfter))
                 {
-                    role->wcoin = wcoinBefore - cost;
-                    wcoinAfter = role->wcoin;
                     g_netMockShop17ListPending = 0;
                     g_netMockBackpackPreferRoleListAfterShopBuy = 0;
                     g_netMockBackpackGridSeededRoleId = 0;
                     capacityAfter = role->backpackCapacity;
-                    vm_net_mock_role_db_save("shop-buy14-expand");
                     result = 1;
                 }
                 else
                 {
+                    *role = roleBefore;
+                    directExpandApplied = 0;
+                    capacityAfter = role->backpackCapacity;
                     result = vm_net_mock_shop_buy14_failure_result(type);
                 }
             }
@@ -2292,12 +2313,15 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
         }
         else if (directEffect != NULL)
         {
-            if (vm_net_mock_shop_apply_direct_effect(role, directEffect, count, cost,
+            roleBefore = *role;
+            if (vm_net_mock_shop_apply_direct_effect(role, directEffect, count,
                                                      &directMoneyBefore,
                                                      &directMoneyGrant,
-                                                     &directGrantEntries))
+                                                     &directGrantEntries) &&
+                vm_net_mock_shop_commit_purchase("shop-buy14-direct",
+                                                 wcoinBefore, cost,
+                                                 &wcoinAfter))
             {
-                wcoinAfter = role->wcoin;
                 g_netMockShop17ListPending = 0;
                 /* Bundle contents are normal backpack rows, but the package
                  * itself is not.  Let the next native list request render the
@@ -2311,22 +2335,33 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
             }
             else
             {
+                *role = roleBefore;
+                directMoneyBefore = 0;
+                directMoneyGrant = 0;
+                directGrantEntries = 0;
                 result = vm_net_mock_shop_buy14_failure_result(type);
             }
         }
-        else if (vm_net_mock_role_add_backpack_item(itemId, count, &seq))
-        {
-            role->wcoin = wcoinBefore - cost;
-            wcoinAfter = role->wcoin;
-            g_netMockShop17ListPending = 0;
-            g_netMockBackpackPreferRoleListAfterShopBuy = 1;
-            g_netMockBackpackGridSeededRoleId = 0;
-            vm_net_mock_role_db_save("shop-buy14-item");
-            result = 1;
-        }
         else
         {
-            result = vm_net_mock_shop_buy14_failure_result(type);
+            roleBefore = *role;
+            if (vm_net_mock_role_add_backpack_item_to_role_in_memory(
+                    role, itemId, count, &seq) &&
+                vm_net_mock_shop_commit_purchase("shop-buy14-item",
+                                                 wcoinBefore, cost,
+                                                 &wcoinAfter))
+            {
+                g_netMockShop17ListPending = 0;
+                g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+                g_netMockBackpackGridSeededRoleId = 0;
+                result = 1;
+            }
+            else
+            {
+                *role = roleBefore;
+                seq = 0;
+                result = vm_net_mock_shop_buy14_failure_result(type);
+            }
         }
     }
 

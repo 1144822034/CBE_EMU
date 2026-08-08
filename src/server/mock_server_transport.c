@@ -1576,6 +1576,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     vm_mock_service_friend_db_load();
     if (!g_vm_mock_service_account_db_valid || !g_vm_mock_service_friend_db_valid ||
         (legacyAccountMigration && !vm_mock_service_migrate_account_role_databases()) ||
+        !vm_mock_service_account_wallet_prepare_and_migrate() ||
         !vm_mock_service_mysql_authority_seal())
     {
         printf("[error][mock-service] mysql persistence unavailable error=%s\n",
