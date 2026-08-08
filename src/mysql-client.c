@@ -54,6 +54,8 @@ typedef struct
  * worker therefore owns and reuses its own connection and error buffer. */
 static VM_MYSQL_THREAD_LOCAL SOCKET g_vm_mysql_socket = INVALID_SOCKET;
 static VM_MYSQL_THREAD_LOCAL char g_vm_mysql_error[512];
+static VM_MYSQL_THREAD_LOCAL unsigned int g_vm_mysql_trace_query_serial = 0;
+static VM_MYSQL_THREAD_LOCAL bool g_vm_mysql_result_callback_active = false;
 /* A reconnect/retry is safe only when MySQL framing proves that the server
  * cannot have received a complete command packet.  This flag is reset before
  * each packet write and becomes true only after both the packet header and
@@ -585,12 +587,78 @@ static bool vm_mysql_packet_is_eof(const uint8_t *packet, size_t packet_len)
     return packet_len > 0 && packet[0] == 0xfe && packet_len < 9;
 }
 
+static bool vm_mysql_protocol_trace_enabled(void)
+{
+    const char *enabled = getenv("CBE_MYSQL_PROTOCOL_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && strcmp(enabled, "0") != 0;
+}
+
+static void vm_mysql_trace_query_phase(const char *phase, unsigned int query_id,
+                                       const char *sql)
+{
+    char operation[16] = {0};
+    size_t operation_len = 0;
+
+    if (!vm_mysql_protocol_trace_enabled())
+        return;
+    while (sql != NULL && sql[operation_len] != '\0' &&
+           sql[operation_len] != ' ' && sql[operation_len] != '\t' &&
+           operation_len + 1 < sizeof(operation))
+    {
+        operation[operation_len] = sql[operation_len];
+        ++operation_len;
+    }
+    printf("[debug][mysql] protocol_query phase=%s id=%u operation=%s\n",
+           phase ? phase : "unknown", query_id,
+           operation[0] ? operation : "unknown");
+}
+
+/* MySQL protocol errors normally need a packet capture to distinguish a
+ * server dialect mismatch from an incomplete result being reused.  Keep this
+ * narrowly opt-in: startup and normal game traffic must not emit SQL or row
+ * data.  The fixed eight-byte prefix is enough to identify the packet class
+ * and framing boundary without exposing query values. */
+static void vm_mysql_trace_bad_result_packet(const char *phase,
+                                             size_t packet_len,
+                                             uint8_t sequence,
+                                             const uint8_t *packet)
+{
+    uint8_t bytes[8] = {0};
+    size_t copy_len = packet_len < sizeof(bytes) ? packet_len : sizeof(bytes);
+
+    if (!vm_mysql_protocol_trace_enabled())
+        return;
+    if (packet != NULL && copy_len != 0)
+        memcpy(bytes, packet, copy_len);
+    printf("[debug][mysql] protocol_packet phase=%s seq=%u len=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+           phase ? phase : "unknown", (unsigned int)sequence,
+           (unsigned int)packet_len,
+           (unsigned int)bytes[0], (unsigned int)bytes[1],
+           (unsigned int)bytes[2], (unsigned int)bytes[3],
+           (unsigned int)bytes[4], (unsigned int)bytes[5],
+           (unsigned int)bytes[6], (unsigned int)bytes[7]);
+}
+
 static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, void *context)
 {
     bool retried_incomplete_command = false;
+    unsigned int query_id = 0;
 
     if (sql == NULL)
         return false;
+    /* A MySQL connection is sequential even when it belongs to one worker.
+     * A row callback runs before the current result terminator has been
+     * consumed, so a nested query here would interleave command/result
+     * packets and corrupt the stream.  Callers must preload DB-backed
+     * dependencies before entering vm_mysql_query(). */
+    if (g_vm_mysql_result_callback_active)
+    {
+        vm_mysql_set_error("MySQL query attempted from an active result callback");
+        printf("[error][mysql] reentrant_query_denied phase=result-callback\n");
+        return false;
+    }
+    query_id = ++g_vm_mysql_trace_query_serial;
+    vm_mysql_trace_query_phase("begin", query_id, sql);
     size_t sql_len = strlen(sql);
     uint8_t *request = (uint8_t *)malloc(sql_len + 1);
     uint8_t *packet = (uint8_t *)malloc(VM_MYSQL_PACKET_CAPACITY);
@@ -636,6 +704,7 @@ retry_command:
     {
         free(packet);
         g_vm_mysql_error[0] = '\0';
+        vm_mysql_trace_query_phase("ok", query_id, sql);
         return true;
     }
 
@@ -644,8 +713,14 @@ retry_command:
     bool is_null = false;
     if (!vm_mysql_read_lenenc(packet, packet_len, &pos, &column_count64, &is_null) || is_null || column_count64 > 256)
     {
+        vm_mysql_trace_bad_result_packet("result-header", packet_len,
+                                         sequence, packet);
         vm_mysql_set_error("Malformed MySQL result-set header");
-        goto query_failed;
+        /* The result framing is unknown at this point, so keeping this
+         * persistent socket would let the next query consume leftover bytes
+         * from this result.  A new connection is the only valid state after
+         * an undecodable result header. */
+        goto connection_failed;
     }
     unsigned int column_count = (unsigned int)column_count64;
     for (unsigned int i = 0; i < column_count; ++i)
@@ -656,6 +731,8 @@ retry_command:
     if (!vm_mysql_recv_packet(packet, VM_MYSQL_PACKET_CAPACITY, &packet_len, &sequence) ||
         vm_mysql_is_error(packet, packet_len) || !vm_mysql_packet_is_eof(packet, packet_len))
     {
+        vm_mysql_trace_bad_result_packet("column-terminator", packet_len,
+                                         sequence, packet);
         vm_mysql_set_error("Malformed MySQL result-set column terminator");
         goto connection_failed;
     }
@@ -678,6 +755,8 @@ retry_command:
             if (!vm_mysql_read_lenenc(packet, packet_len, &pos, &value_len, &is_null) ||
                 (!is_null && (value_len > SIZE_MAX || pos + (size_t)value_len > packet_len)))
             {
+                vm_mysql_trace_bad_result_packet("result-row", packet_len,
+                                                 sequence, packet);
                 vm_mysql_set_error("Malformed MySQL result-set row");
                 goto connection_failed;
             }
@@ -686,25 +765,36 @@ retry_command:
             if (!is_null)
                 pos += (size_t)value_len;
         }
-        if (callback != NULL && !callback(context, column_count, values, lengths))
+        if (callback != NULL)
         {
-            /* The result must still be drained before this persistent connection
-             * can be reused, so continue reading while suppressing callbacks. */
-            callback = NULL;
+            bool callbackAccepted = false;
+
+            g_vm_mysql_result_callback_active = true;
+            callbackAccepted = callback(context, column_count, values, lengths);
+            g_vm_mysql_result_callback_active = false;
+            if (!callbackAccepted)
+            {
+                /* The result must still be drained before this persistent connection
+                 * can be reused, so continue reading while suppressing callbacks. */
+                callback = NULL;
+            }
         }
     }
     free(packet);
     g_vm_mysql_error[0] = '\0';
+    vm_mysql_trace_query_phase("ok", query_id, sql);
     return true;
 
 connection_failed:
     free(request);
     free(packet);
     vm_mysql_close();
+    vm_mysql_trace_query_phase("connection-failed", query_id, sql);
     return false;
 query_failed:
     free(request);
     free(packet);
+    vm_mysql_trace_query_phase("query-failed", query_id, sql);
     return false;
 }
 
