@@ -4801,6 +4801,7 @@ typedef struct
 
 #define VM_MOCK_SERVICE_ACCOUNT_DB_VERSION 1
 #define VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS 1000000
+#define VM_MOCK_SERVICE_ACCOUNT_DB_INITIAL_CAPACITY 64
 #define VM_MOCK_SERVICE_FRIEND_DB_VERSION 1
 #define VM_MOCK_SERVICE_FRIEND_DB_MAX_RECORDS 256
 
@@ -4815,8 +4816,19 @@ typedef struct
     char magic[4];
     u32 version;
     u32 accountCount;
-    vm_mock_service_account_record accounts[VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS];
+    u32 accountCapacity;
+    vm_mock_service_account_record *accounts;
 } vm_mock_service_account_db_file;
+
+/* The pre-MySQL snapshot wrote its records directly after this header.  Keep
+ * the on-disk header separate from the live cache so the old 128 MiB maximum
+ * array is never embedded in the server executable or placed on a stack. */
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 accountCount;
+} vm_mock_service_account_db_legacy_header;
 
 typedef struct
 {

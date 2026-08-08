@@ -789,7 +789,7 @@ static vm_mock_user_session *vm_mock_user_request_session(const char *request,
         vm_mock_user_session *session = &g_vm_mock_user_sessions[i];
         if (session->active && strcmp(session->token, token) == 0)
         {
-            if (vm_mock_service_account_find_record(session->accountId) == NULL)
+            if (!vm_mock_service_account_exists(session->accountId))
             {
                 memset(session, 0, sizeof(*session));
                 return NULL;
@@ -4925,49 +4925,152 @@ static void vm_mock_admin_render_servers_page(char *response,
     }
 }
 
-/* The game server keeps the authenticated-account directory in memory for
- * login lookup.  The administration page must not mirror that implementation
- * detail by emitting the entire directory in one HTTP response.  This cursor
- * is an index into that stable process-local snapshot; it is intentionally
- * not a database offset, so every follow-up request resumes after the rows
- * already sent without issuing an ever-larger OFFSET query. */
-static bool vm_mock_admin_account_matches_search(const char *accountId,
-                                                 const char *search)
+/* Account listing is an administrative directory view, not a reason to keep
+ * every credential in the game-session cache.  The cursor is a database
+ * offset over the same ORDER BY contract on each request.  Fetching one extra
+ * row makes the existing scroll/load-more UI deterministic without returning
+ * the whole account table. */
+typedef struct
 {
-    size_t searchLen = 0;
+    char accountIds[VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE + 1][64];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_account_page;
 
-    if (accountId == NULL)
-        return false;
-    if (search == NULL || search[0] == 0)
-        return true;
-    searchLen = strlen(search);
-    for (const char *cursor = accountId; *cursor != 0; ++cursor)
+typedef struct
+{
+    u32 value;
+    bool found;
+    bool invalid;
+} vm_mock_admin_account_count;
+
+static bool vm_mock_admin_account_page_row(void *contextValue,
+                                           unsigned int columnCount,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_mock_admin_account_page *page =
+        (vm_mock_admin_account_page *)contextValue;
+
+    if (page == NULL || columnCount != 1 ||
+        page->count >= VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE + 1 ||
+        !vm_mock_mysql_copy_text(page->accountIds[page->count],
+                                 sizeof(page->accountIds[page->count]),
+                                 values[0], lengths[0]))
     {
-        size_t matched = 0;
-
-        while (matched < searchLen && cursor[matched] != 0 &&
-               tolower((unsigned char)cursor[matched]) ==
-                   tolower((unsigned char)search[matched]))
-        {
-            ++matched;
-        }
-        if (matched == searchLen)
-            return true;
+        if (page != NULL)
+            page->invalid = true;
+        return true;
     }
-    return false;
+    ++page->count;
+    return true;
+}
+
+static bool vm_mock_admin_account_count_row(void *contextValue,
+                                            unsigned int columnCount,
+                                            const char *const *values,
+                                            const size_t *lengths)
+{
+    vm_mock_admin_account_count *count =
+        (vm_mock_admin_account_count *)contextValue;
+
+    if (count == NULL || count->found || columnCount != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &count->value))
+    {
+        if (count != NULL)
+            count->invalid = true;
+        return true;
+    }
+    count->found = true;
+    return true;
+}
+
+static bool vm_mock_admin_account_query_page(const char *search, u32 cursor,
+                                             vm_mock_admin_account_page *page)
+{
+    char searchHex[128];
+    char query[768];
+    size_t searchLen = search ? strlen(search) : 0;
+
+    if (page == NULL || cursor > 0xffffffffu - VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE)
+        return false;
+    memset(page, 0, sizeof(*page));
+    if (searchLen == 0)
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT account_id FROM accounts ORDER BY account_id LIMIT %u,%u",
+                 cursor, VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE + 1);
+    }
+    else
+    {
+        if (searchLen >= 64 ||
+            vm_mysql_hex_encode(search, searchLen, searchHex,
+                                sizeof(searchHex)) == 0)
+        {
+            return false;
+        }
+        snprintf(query, sizeof(query),
+                 "SELECT account_id FROM accounts "
+                 "WHERE LOCATE(LOWER(CAST(X'%s' AS CHAR)),LOWER(account_id))>0 "
+                 "ORDER BY account_id LIMIT %u,%u",
+                 searchHex, cursor, VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE + 1);
+    }
+    if (!vm_mysql_query(query, vm_mock_admin_account_page_row, page) ||
+        page->invalid)
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_account_query_count(const char *search, u32 *countOut)
+{
+    vm_mock_admin_account_count count;
+    char searchHex[128];
+    char query[640];
+    size_t searchLen = search ? strlen(search) : 0;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    memset(&count, 0, sizeof(count));
+    if (searchLen == 0)
+    {
+        snprintf(query, sizeof(query), "SELECT COUNT(*) FROM accounts");
+    }
+    else
+    {
+        if (searchLen >= 64 ||
+            vm_mysql_hex_encode(search, searchLen, searchHex,
+                                sizeof(searchHex)) == 0)
+        {
+            return false;
+        }
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM accounts "
+                 "WHERE LOCATE(LOWER(CAST(X'%s' AS CHAR)),LOWER(account_id))>0",
+                 searchHex);
+    }
+    if (!vm_mysql_query(query, vm_mock_admin_account_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count.value;
+    return true;
 }
 
 static void vm_mock_admin_render_account_list_fragment(
     vm_mock_admin_text *page, const char *search, u32 cursor,
     const char *selectedAccount)
 {
-    u32 index = cursor;
+    vm_mock_admin_account_page accounts;
     u32 emitted = 0;
+    bool hasMore = false;
 
     if (page == NULL)
         return;
-    if (!g_vm_mock_service_account_db_valid ||
-        cursor > g_vm_mock_service_account_db.accountCount)
+    if (!vm_mock_admin_account_query_page(search, cursor, &accounts))
     {
         vm_mock_admin_text_appendf(
             page,
@@ -4975,18 +5078,17 @@ static void vm_mock_admin_render_account_list_fragment(
             "<span data-account-page-state data-next=\"0\" data-has-more=\"0\" hidden></span>");
         return;
     }
-    while (index < g_vm_mock_service_account_db.accountCount &&
-           emitted < VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE)
+    hasMore = accounts.count > VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE;
+    if (accounts.count > VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE)
+        accounts.count = VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE;
+    while (emitted < accounts.count)
     {
-        const char *accountId = g_vm_mock_service_account_db.accounts[index].username;
+        const char *accountId = accounts.accountIds[emitted];
         char encodedAccount[192];
         char encodedSearch[192];
         bool online = false;
         bool selected = false;
 
-        ++index;
-        if (!vm_mock_admin_account_matches_search(accountId, search))
-            continue;
         online = vm_mock_admin_account_is_online(accountId);
         selected = selectedAccount != NULL &&
                    strcmp(accountId, selectedAccount) == 0;
@@ -5017,7 +5119,7 @@ static void vm_mock_admin_render_account_list_fragment(
     vm_mock_admin_text_appendf(
         page,
         "<span data-account-page-state data-next=\"%u\" data-has-more=\"%u\" hidden></span>",
-        index, index < g_vm_mock_service_account_db.accountCount ? 1 : 0);
+        cursor + emitted, hasMore ? 1 : 0);
 }
 
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
@@ -5036,6 +5138,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     char managedRoleNames[VM_NET_MOCK_ROLE_DB_MAX_ROLES][128];
     u32 managedRoleCount = 0;
     u32 resetSceneCount = 0;
+    u32 accountTotal = 0;
+    vm_mock_admin_account_page initialAccounts;
 
     vm_mock_admin_text_init(&page, response, responseCap);
     memset(tab, 0, sizeof(tab));
@@ -5087,14 +5191,17 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
 
-    vm_mock_service_account_db_load();
     resetSceneCount = vm_mock_admin_collect_scene_files(
         resetSceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
-    if ((selectedAccount[0] == 0 || vm_mock_service_account_find_record(selectedAccount) == NULL) &&
-        g_vm_mock_service_account_db.accountCount > 0)
+    if (!vm_mock_admin_account_query_count(accountSearch, &accountTotal))
+        accountTotal = 0;
+    if ((selectedAccount[0] == 0 ||
+         !vm_mock_service_account_exists(selectedAccount)) &&
+        vm_mock_admin_account_query_page(accountSearch, 0, &initialAccounts) &&
+        initialAccounts.count != 0)
     {
         snprintf(selectedAccount, sizeof(selectedAccount), "%s",
-                 g_vm_mock_service_account_db.accounts[0].username);
+                 initialAccounts.accountIds[0]);
     }
 
     vm_mock_admin_text_appendf(&page,
@@ -5125,7 +5232,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><form class=\"account-search\" data-account-search-form role=\"search\"><input data-account-search maxlength=\"63\" placeholder=\"搜索账号名\" aria-label=\"搜索账号名\" value=\"",
-        g_vm_mock_service_account_db.accountCount);
+        accountTotal);
     vm_mock_admin_text_append_html(&page, accountSearch);
     vm_mock_admin_text_appendf(&page,
                                "\"><button type=\"submit\">搜索</button></form>"
@@ -5265,6 +5372,7 @@ static int vm_mock_admin_handle_account_list_request(
     char cursorText[32];
     char *response = NULL;
     u32 cursor = 0;
+    u32 accountTotal = 0;
     vm_mock_admin_text page;
 
     memset(search, 0, sizeof(search));
@@ -5281,9 +5389,8 @@ static int vm_mock_admin_handle_account_list_request(
             return 0;
         }
     }
-    vm_mock_service_account_db_load();
-    if (!g_vm_mock_service_account_db_valid ||
-        cursor > g_vm_mock_service_account_db.accountCount)
+    if (!vm_mock_admin_account_query_count(search, &accountTotal) ||
+        cursor > accountTotal)
     {
         vm_mock_admin_send_response(client, "409 Conflict", NULL, NULL,
                                     "账号目录不可用，请刷新后台页面。\n");

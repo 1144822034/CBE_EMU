@@ -1540,6 +1540,7 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
     const char *resolvedBindHost = bindHost && bindHost[0] ? bindHost : "127.0.0.1";
     u32 acceptedGameLogCount = 0;
     u32 acceptedAdminLogCount = 0;
+    bool legacyAccountMigration = false;
 
     if (!vm_net_mock_service_ensure_resource_root())
     {
@@ -1563,16 +1564,29 @@ static int vm_net_mock_service_run_forever(const char *bindHost, u16 port)
                vm_mysql_last_error());
         return -1;
     }
+    legacyAccountMigration = !vm_mock_service_mysql_authority_is_sealed();
     vm_mock_service_account_db_load();
+    if (legacyAccountMigration &&
+        !vm_mock_service_account_db_load_all_for_legacy_migration())
+    {
+        printf("[error][mock-service] mysql persistence unavailable reason=legacy-account-migration error=%s\n",
+               vm_mysql_last_error());
+        return -1;
+    }
     vm_mock_service_friend_db_load();
     if (!g_vm_mock_service_account_db_valid || !g_vm_mock_service_friend_db_valid ||
-        !vm_mock_service_migrate_account_role_databases() ||
+        (legacyAccountMigration && !vm_mock_service_migrate_account_role_databases()) ||
         !vm_mock_service_mysql_authority_seal())
     {
         printf("[error][mock-service] mysql persistence unavailable error=%s\n",
                vm_mysql_last_error());
         return -1;
     }
+    /* The all-account directory only existed to migrate old role payloads.
+     * Once the authority marker is sealed, release it before accepting the
+     * first client; normal logins acquire exactly one record. */
+    if (legacyAccountMigration)
+        vm_mock_service_account_cache_clear("legacy-migration-complete");
     if (!vm_mock_payment_ensure_tables())
         printf("[warn][payment] recharge_disabled reason=schema-unavailable\n");
     if (!vm_net_mock_validate_xse_task_resources())
