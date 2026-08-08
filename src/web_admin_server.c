@@ -5250,14 +5250,39 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_text_appendf(&page, "</div>");
     }
 
-    vm_mock_admin_text_appendf(&page, "<h2>角色明细：");
+    vm_mock_admin_text_appendf(&page, "<h2>账号与角色明细：");
     vm_mock_admin_text_append_html(&page, selectedAccount[0] ? selectedAccount : "未选择");
-    vm_mock_admin_text_appendf(&page, "</h2><div class=\"table-wrap\"><table><thead><tr>"
-                               "<th>角色</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>W 币</th><th>操作</th>"
-                               "</tr></thead><tbody>");
+    vm_mock_admin_text_appendf(&page, "</h2>");
 
     if (selectedAccount[0] != 0)
         accountState = vm_mock_service_open_account_role_db_for_management(selectedAccount, &roleError);
+    if (accountState != NULL)
+    {
+        u32 accountWcoin = 0;
+
+        if (vm_mock_service_account_wallet_read(selectedAccount, false, &accountWcoin))
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<div class=\"notice ok\"><strong>账号 W 币：%u</strong>"
+                "<span class=\"muted\">W 币归账号所有，全部角色共用。</span>"
+                "<form class=\"inline\" method=\"post\" action=\"/action\">"
+                "<input type=\"hidden\" name=\"action\" value=\"add-wcoin\">"
+                "<input type=\"hidden\" name=\"account\" value=\"",
+                accountWcoin);
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加 W 币\" required>"
+                "<button type=\"submit\">加 W 币</button></form></div>");
+        }
+        else
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<div class=\"notice error\">账号 W 币钱包暂不可读取，未提供修改入口。</div>");
+        }
+    }
+    vm_mock_admin_text_appendf(&page, "<div class=\"table-wrap\"><table><thead><tr>"
+                               "<th>角色</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>操作</th>"
+                               "</tr></thead><tbody>");
     if (accountState != NULL)
     {
         for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
@@ -5293,8 +5318,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                        "<br><span class=\"muted\">(%u, %u)</span></td>",
                                        role->x, role->y);
             vm_mock_admin_text_appendf(&page,
-                                       "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td>%u</td><td>",
-                                       gold, silver, copper, role->money, role->wcoin);
+                                       "<td class=\"money\">%u 金 %u 银 %u 铜<br><span class=\"muted\">总计 %u 铜</span></td><td>",
+                                       gold, silver, copper, role->money);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\">"
                 "<input type=\"hidden\" name=\"action\" value=\"add-money\">"
@@ -5304,15 +5329,6 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
                 "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加铜钱\" required>"
                 "<button type=\"submit\">加钱</button></form>", role->roleId);
-            vm_mock_admin_text_appendf(&page,
-                "<form class=\"inline\" method=\"post\" action=\"/action\">"
-                "<input type=\"hidden\" name=\"action\" value=\"add-wcoin\">"
-                "<input type=\"hidden\" name=\"account\" value=\"");
-            vm_mock_admin_text_append_html(&page, selectedAccount);
-            vm_mock_admin_text_appendf(&page,
-                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
-                "<input type=\"number\" name=\"amount\" min=\"1\" max=\"4294967295\" placeholder=\"增加账号 W 币\" required>"
-                "<button type=\"submit\">加账号 W 币</button></form>", role->roleId);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\" "
                 "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？此操作仅在角色离线时可执行。');\">"
@@ -5326,12 +5342,12 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 role->roleId);
         }
         if (g_vm_net_mock_role_db.roleCount == 0)
-            vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"6\" class=\"muted\">该账号尚未创建角色</td></tr>");
+            vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">该账号尚未创建角色</td></tr>");
         vm_mock_service_close_account_role_db_for_management(accountState, true);
     }
     else
     {
-        vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"6\" class=\"muted\">");
+        vm_mock_admin_text_appendf(&page, "<tr><td colspan=\"5\" class=\"muted\">");
         vm_mock_admin_text_append_html(&page, selectedAccount[0] ?
                                        (roleError ? roleError : "角色数据不可用") : "请选择账号");
         vm_mock_admin_text_appendf(&page, "</td></tr>");
@@ -6951,17 +6967,23 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     }
     if (strcmp(action, "add-money") == 0 || strcmp(action, "add-wcoin") == 0)
     {
-        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
-            !vm_mock_admin_form_value(body, "amount", amountText, sizeof(amountText)) ||
+        if (!vm_mock_admin_form_value(body, "amount", amountText, sizeof(amountText)) ||
             !vm_net_mock_parse_u32_strict(amountText, &amount) || amount == 0)
         {
             vm_mock_admin_redirect(client, account, "error", "金额必须是大于 0 的整数");
             return;
         }
         if (strcmp(action, "add-money") == 0)
+        {
+            if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)))
+            {
+                vm_mock_admin_redirect(client, account, "error", "请选择角色");
+                return;
+            }
             ok = vm_mock_service_account_add_role_money(account, role, amount, NULL, NULL, &error);
+        }
         else
-            ok = vm_mock_service_account_add_role_wcoin(account, role, amount, &error);
+            ok = vm_mock_service_account_add_wcoin(account, amount, &error);
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? (strcmp(action, "add-money") == 0 ? "普通钱币增加成功" : "W 币增加成功")
                                   : (error ? error : "余额修改失败"));
@@ -7184,13 +7206,12 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
                 "<div><strong>等级 / 经验</strong>Lv.%u · %u</div>"
                 "<div><strong>职业 / 性别</strong>%s · %s</div>"
                 "<div><strong>普通钱币</strong>%u 金 %u 银 %u 铜</div>"
-                "<div><strong>元宝</strong>%u</div>"
                 "<div><strong>所在场景</strong>",
                 role->roleId, active ? "<span class=\"active\">当前角色</span>" : "",
                 role->hp, role->hpMax, hpPercent, role->mp, role->mpMax,
                 mpPercent, role->level, role->exp,
                 vm_mock_user_job_label(role->job), role->sex == 1 ? "女" : "男",
-                gold, silver, copper, role->wcoin);
+                gold, silver, copper);
             vm_mock_admin_text_append_html(&page, sceneUtf8);
             vm_mock_admin_text_appendf(&page,
                 "</div><div><strong>坐标</strong>(%u, %u)</div></div>"
@@ -7413,12 +7434,10 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     if (strcmp(target, "/user/recharge/create") == 0)
     {
         vm_mock_user_session *session = NULL;
-        char roleText[32];
         char yuanText[32];
         char typeText[16];
         char payId[64];
         char location[192];
-        u32 roleId = 0;
         u32 yuan = 0;
         u32 payType = 0;
         const char *message = NULL;
@@ -7436,24 +7455,20 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             vm_mock_admin_send_location(client, "/", NULL);
             return 0;
         }
-        memset(roleText, 0, sizeof(roleText));
         memset(yuanText, 0, sizeof(yuanText));
         memset(typeText, 0, sizeof(typeText));
-        if (!vm_mock_admin_form_value(body, "role_id", roleText,
-                                      sizeof(roleText)) ||
-            !vm_mock_admin_form_value(body, "yuan", yuanText,
+        if (!vm_mock_admin_form_value(body, "yuan", yuanText,
                                       sizeof(yuanText)) ||
             !vm_mock_admin_form_value(body, "pay_type", typeText,
                                       sizeof(typeText)) ||
-            !vm_net_mock_parse_u32_strict(roleText, &roleId) || roleId == 0 ||
             !vm_net_mock_parse_u32_strict(yuanText, &yuan) || yuan == 0 ||
             !vm_net_mock_parse_u32_strict(typeText, &payType))
         {
             vm_mock_user_redirect_message(client, "error", "充值参数无效");
             return 0;
         }
-        if (!vm_mock_payment_create_order(session->accountId, roleId, yuan,
-                                          payType, payId, &message))
+        if (!vm_mock_payment_create_order(session->accountId, yuan, payType,
+                                          payId, &message))
         {
             vm_mock_user_redirect_message(
                 client, "error", message ? message : "订单创建失败");

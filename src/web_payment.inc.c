@@ -88,13 +88,6 @@ typedef struct
 {
     bool found;
     bool invalid;
-    u32 value;
-} vm_mock_payment_u32_row;
-
-typedef struct
-{
-    bool found;
-    bool invalid;
     uint64_t value;
 } vm_mock_payment_u64_row;
 
@@ -916,22 +909,6 @@ static bool vm_mock_payment_load_order(const char *payId, bool forUpdate,
            order->found && !order->invalid;
 }
 
-static bool vm_mock_payment_u32_row_callback(void *contextValue,
-                                             unsigned int columnCount,
-                                             const char *const *values,
-                                             const size_t *lengths)
-{
-    vm_mock_payment_u32_row *row = (vm_mock_payment_u32_row *)contextValue;
-    if (row == NULL || row->found)
-        return true;
-    if (columnCount != 1 || values[0] == NULL ||
-        !vm_mock_mysql_parse_u32(values[0], lengths[0], &row->value))
-        row->invalid = true;
-    else
-        row->found = true;
-    return true;
-}
-
 static bool vm_mock_payment_u64_row_callback(void *contextValue,
                                              unsigned int columnCount,
                                              const char *const *values,
@@ -945,33 +922,6 @@ static bool vm_mock_payment_u64_row_callback(void *contextValue,
         row->invalid = true;
     else
         row->found = true;
-    return true;
-}
-
-static bool vm_mock_payment_role_balance(const char *accountId, u32 roleId,
-                                         bool forUpdate, u32 *balanceOut)
-{
-    char accountHex[127];
-    char query[512];
-    vm_mock_payment_u32_row row;
-
-    if (balanceOut)
-        *balanceOut = 0;
-    memset(&row, 0, sizeof(row));
-    if (accountId == NULL || accountId[0] == 0 ||
-        vm_mysql_hex_encode(accountId, strlen(accountId), accountHex,
-                            sizeof(accountHex)) == 0)
-        return false;
-    snprintf(query, sizeof(query),
-             "SELECT wallet.wcoin FROM account_wallets AS wallet "
-             "INNER JOIN account_roles AS role ON role.account_id=wallet.account_id "
-             "WHERE wallet.account_id=CAST(X'%s' AS CHAR) AND role.role_id=%u%s",
-             accountHex, roleId, forUpdate ? " FOR UPDATE" : "");
-    if (!vm_mysql_query(query, vm_mock_payment_u32_row_callback, &row) ||
-        row.invalid || !row.found)
-        return false;
-    if (balanceOut)
-        *balanceOut = row.value;
     return true;
 }
 
@@ -1103,8 +1053,8 @@ static bool vm_mock_payment_build_callback_url(const char *base,
     return strlen(out) < outCap - 1;
 }
 
-static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
-                                         u32 yuan, u32 payType,
+static bool vm_mock_payment_create_order(const char *accountId, u32 yuan,
+                                         u32 payType,
                                          char payIdOut[64],
                                          const char **messageOut)
 {
@@ -1139,8 +1089,8 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
     memset(notifyUrl, 0, sizeof(notifyUrl));
     memset(returnUrl, 0, sizeof(returnUrl));
     memset(response, 0, sizeof(response));
-    printf("[info][payment] order_create_request account=%s role=%u type=%u yuan=%u\n",
-           accountId ? accountId : "-", roleId, payType, yuan);
+    printf("[info][payment] order_create_request account=%s scope=account type=%u yuan=%u\n",
+           accountId ? accountId : "-", payType, yuan);
     if (!vm_mock_payment_load_config(&config))
         goto failed;
     if (payType != 1 && payType != 2)
@@ -1157,16 +1107,18 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
     }
     wcoin64 = (uint64_t)yuan * config.wcoinPerYuan;
     if (wcoin64 == 0 || wcoin64 > UINT32_MAX || yuan > UINT32_MAX / 100u ||
-        !vm_mock_payment_role_balance(accountId, roleId, false, &balance) ||
+        !vm_mock_service_account_wallet_read(accountId, false, &balance) ||
         !vm_mock_payment_account_reserved(accountId, &reserved) ||
         (uint64_t)balance + reserved + wcoin64 > UINT32_MAX)
     {
         if (messageOut)
-            *messageOut = "角色不存在或 W 币余额空间不足";
+            *messageOut = "账号不存在或 W 币余额空间不足";
         goto failed;
     }
     snprintf(order.accountId, sizeof(order.accountId), "%s", accountId);
-    order.roleId = roleId;
+    /* role_id remains in the table for old order rows, but new orders are
+     * deliberately account-scoped and must not imply a role owner. */
+    order.roleId = 0;
     order.payType = payType;
     order.priceCents = yuan * 100u;
     order.wcoinAmount = (u32)wcoin64;
@@ -1218,8 +1170,8 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
         vm_mock_payment_mark_create_failed(order.payId);
         if (messageOut)
             *messageOut = providerMessage;
-        printf("[error][payment] order_create_failed pay_id=%s account=%s role=%u type=%u http=%d reason=%s\n",
-               order.payId, accountId, roleId, payType, httpStatus,
+        printf("[error][payment] order_create_failed pay_id=%s account=%s scope=account type=%u http=%d reason=%s\n",
+               order.payId, accountId, payType, httpStatus,
                failureReason);
         goto failed;
     }
@@ -1227,8 +1179,8 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
         snprintf(payIdOut, 64, "%s", order.payId);
     if (messageOut)
         *messageOut = "ok";
-    printf("[info][payment] order_created pay_id=%s account=%s role=%u type=%u cents=%u wcoin=%u\n",
-           order.payId, accountId, roleId, payType, order.priceCents,
+    printf("[info][payment] order_created pay_id=%s account=%s scope=account type=%u cents=%u wcoin=%u\n",
+           order.payId, accountId, payType, order.priceCents,
            order.wcoinAmount);
     memset(config.secretKey, 0, sizeof(config.secretKey));
     memset(signInput, 0, sizeof(signInput));
@@ -1269,9 +1221,8 @@ static bool vm_mock_payment_parse_callback(const char *query,
 }
 
 static void vm_mock_payment_sync_cached_wcoin(const char *accountId,
-                                              u32 roleId, u32 balance)
+                                              u32 balance)
 {
-    (void)roleId; /* Retained in recharge-order history, not wallet ownership. */
     vm_mock_service_account_wallet_sync_cached_balance(accountId, balance);
 }
 
@@ -1314,8 +1265,8 @@ static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
     {
         if (!vm_mysql_exec("COMMIT"))
             goto invalid_no_rollback;
-        printf("[error][payment] credit_pending pay_id=%s account=%s role=%u reason=balance-cap-or-role\n",
-               order.payId, order.accountId, order.roleId);
+        printf("[error][payment] credit_pending pay_id=%s account=%s scope=account reason=balance-cap\n",
+               order.payId, order.accountId);
         return VM_MOCK_PAYMENT_SETTLE_PENDING;
     }
     after = balance + order.wcoinAmount;
@@ -1337,9 +1288,9 @@ static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
     if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
         goto invalid_no_rollback;
     transaction = false;
-    vm_mock_payment_sync_cached_wcoin(order.accountId, order.roleId, after);
-    printf("[info][payment] credited pay_id=%s account=%s role=%u add=%u before=%u after=%u\n",
-           order.payId, order.accountId, order.roleId, order.wcoinAmount,
+    vm_mock_payment_sync_cached_wcoin(order.accountId, after);
+    printf("[info][payment] credited pay_id=%s account=%s scope=account add=%u before=%u after=%u\n",
+           order.payId, order.accountId, order.wcoinAmount,
            balance, after);
     return VM_MOCK_PAYMENT_SETTLE_CREDITED;
 
@@ -1531,7 +1482,7 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
     {
         vm_mock_admin_text_appendf(&page,
             "<p class=\"sub\">%s</p><div class=\"amount\"><div><span>平台实际应付金额</span><strong>￥%u.%02u</strong></div><div><span>到账 W 币</span><strong>%u</strong></div></div>"
-            "<div class=\"details\"><div><span>角色 ID</span>%u</div><div><span>支付方式</span>%s</div><div><span>商户订单号</span>",
+            "<div class=\"details\"><div><span>到账钱包</span>账号 W 币钱包</div><div><span>支付方式</span>%s</div><div><span>商户订单号</span>",
             order->status == VM_MOCK_PAYMENT_STATUS_CREDITED ?
                 "W 币已经安全入账，3 秒后返回用户中心。" :
             order->status == VM_MOCK_PAYMENT_STATUS_PAID_PENDING ?
@@ -1540,8 +1491,7 @@ static void vm_mock_payment_render_order_page(char *response, size_t responseCap
                 "完成支付后请保留本页，系统每 3 秒检查一次。" :
                 "该订单已停止检查，你可以返回用户中心重新下单。",
             actualPriceCents / 100u, actualPriceCents % 100u,
-            order->wcoinAmount, order->roleId,
-            order->payType == 1 ? "微信支付" : "支付宝支付");
+            order->wcoinAmount, order->payType == 1 ? "微信支付" : "支付宝支付");
         vm_mock_admin_text_append_html(&page, order->payId);
         vm_mock_admin_text_appendf(&page, "</div><div><span>订单状态</span>%s</div></div>",
                                    vm_mock_payment_status_label(order));
@@ -1607,6 +1557,7 @@ static void vm_mock_payment_render_dashboard(vm_mock_admin_text *page,
     char accountHex[127];
     char suffix[384];
     char query[1200];
+    u32 accountBalance = 0;
     bool available = false;
 
     memset(&config, 0, sizeof(config));
@@ -1622,31 +1573,18 @@ static void vm_mock_payment_render_dashboard(vm_mock_admin_text *page,
         memset(config.secretKey, 0, sizeof(config.secretKey));
         return;
     }
-    if (g_vm_net_mock_role_db.roleCount == 0)
+    if (!vm_mock_service_account_wallet_read(accountId, false, &accountBalance))
     {
         vm_mock_admin_text_appendf(page,
-            "<div class=\"recharge-unavailable\">请先在游戏中创建角色。</div></section>");
+            "<div class=\"recharge-unavailable\">账号 W 币钱包暂不可读取，请稍后重试。</div></section>");
         memset(config.secretKey, 0, sizeof(config.secretKey));
         return;
     }
     vm_mock_admin_text_appendf(page,
-        "<form class=\"recharge-form\" method=\"post\" action=\"/user/recharge/create\"><label>订单角色（仅用于订单记录）<select name=\"role_id\" required>");
-    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-    {
-        const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
-        char roleNameUtf8[128];
-        memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
-        vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
-                                      roleNameUtf8, sizeof(roleNameUtf8));
-        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", role->roleId);
-        vm_mock_admin_text_append_html(page, roleNameUtf8);
-        vm_mock_admin_text_appendf(page, "（ID %u）</option>", role->roleId);
-    }
-    vm_mock_admin_text_appendf(page,
-        "</select></label><p class=\"recharge-note\">当前账号余额：%u W币。W币归账号所有，所有角色共用。</p><label>充值金额（元）<input type=\"number\" name=\"yuan\" min=\"%u\" max=\"%u\" step=\"1\" value=\"10\" required></label>"
+        "<form class=\"recharge-form\" method=\"post\" action=\"/user/recharge/create\"><p class=\"recharge-note\">当前账号余额：%u W币。W币归账号所有，所有角色共用。</p><label>充值金额（元）<input type=\"number\" name=\"yuan\" min=\"%u\" max=\"%u\" step=\"1\" value=\"10\" required></label>"
         "<label>支付方式<select name=\"pay_type\"><option value=\"2\">支付宝</option><option value=\"1\">微信支付</option></select></label>"
         "<button type=\"submit\">生成支付订单</button></form>",
-        g_vm_net_mock_role_db.roles[0].wcoin,
+        accountBalance,
         config.minimumYuan, config.maximumYuan);
 
     if (accountId != NULL &&

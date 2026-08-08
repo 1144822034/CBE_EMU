@@ -222,7 +222,12 @@ typedef enum
      * battle auto-cancel target, the second waits for a three-enemy round to
      * close natively and enter the next hangup round. */
     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL,
-    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL
+    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL,
+    /* The reward panel is deliberately left untouched.  Passing requires the
+     * real client to finish the winning action, accept the next server-pushed
+     * 4/5 start, and then submit/consume a native automatic 4/12 -> 4/6
+     * continuation without any reward-panel input. */
+    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
 } vm_automation_scenario;
 
 typedef enum
@@ -242,6 +247,7 @@ typedef enum
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_VISIBLE,
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_CANCEL_RESPONSE,
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL,
+    VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE,
     VM_AUTOMATION_STAGE_PASSED,
     VM_AUTOMATION_STAGE_FAILED
 } vm_automation_stage;
@@ -285,6 +291,8 @@ typedef struct
     u8 captureLabelIndex;
     u8 exitRequested;
     u32 renderFrames;
+    u32 hangupSettlementInputCount;
+    u32 hangupSettlementActionResponseCount;
     u32 stageFrame;
     u32 stageStartedMs;
     u32 totalStartedMs;
@@ -313,6 +321,7 @@ typedef struct
     u32 equipmentEnhanceDetailTapFrame;
     u32 battleModuleSpBf;
     u32 hangupBattleResponseCount;
+    u32 battleActionResponseCount;
     u32 captureIndex;
     u32 inputCount;
     u32 timedInputCount;
@@ -5385,6 +5394,8 @@ static const char *vm_automation_stage_name(vm_automation_stage stage)
         return "wait-hangup-auto-cancel-response";
     case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL:
         return "wait-hangup-auto-terminal";
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE:
+        return "wait-hangup-auto-reward-continue";
     case VM_AUTOMATION_STAGE_PASSED: return "passed";
     case VM_AUTOMATION_STAGE_FAILED: return "failed";
     default: return "none";
@@ -5409,6 +5420,8 @@ static const char *vm_automation_scenario_name(void)
         return "hangup-auto-cancel-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL:
         return "hangup-auto-terminal-v1";
+    case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE:
+        return "hangup-auto-reward-continue-v1";
     default:
         return "none";
     }
@@ -5418,7 +5431,8 @@ static bool vm_automation_scenario_uses_direct_hangup(void)
 {
     return g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_DIRECT_HANGUP ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
-           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL;
+           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
+           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE;
 }
 
 static void vm_automation_write_result(const char *result, const char *reason)
@@ -5711,7 +5725,9 @@ static void vm_automation_note_battle_handler_pc(u32 localPc,
                          g_vmAutomation.renderFrames, vmAddedScreen,
                          g_currentScreenThis);
         if ((g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
-             g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL) &&
+             g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
+             g_vmAutomation.scenario ==
+                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE) &&
             Global_R9 != 0 &&
             uc_mem_read(MTK, Global_R9 + 8272u, &gameState,
                         sizeof(gameState)) == UC_ERR_OK &&
@@ -5817,6 +5833,7 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawAutoEnable = 0;
     u8 sawAutoDisable = 0;
     u8 sawSettlement = 0;
+    u8 sawBattleAction = 0;
     u8 sawModuleUpdateChunk = 0;
 
     if (!g_vmAutomation.active || packet == NULL || eventType != 7 ||
@@ -5852,6 +5869,8 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
             sawSceneComplete = 1;
         if (kind == 4 && subtype == 5)
             sawHangup = 1;
+        if (kind == 4 && subtype == 6)
+            sawBattleAction = 1;
         /* A successful scene-hangup victory must present the native 4/7
          * settlement panel.  4/8 is the revival packet and is deliberately
          * not accepted as a normal-terminal signal. */
@@ -5959,12 +5978,28 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
         g_vmAutomation.hangupAutoEnableResponseSeen = 1;
     if (sawAutoDisable)
         g_vmAutomation.hangupAutoDisableResponseSeen = 1;
+    if (sawBattleAction)
+    {
+        ++g_vmAutomation.battleActionResponseCount;
+        vm_autotest_note("automation_hangup_action_response seq=%u count=%u frame=%u\n",
+                         sequence, g_vmAutomation.battleActionResponseCount,
+                         g_vmAutomation.renderFrames);
+    }
     if (sawSettlement)
+    {
         g_vmAutomation.hangupSettlementResponseSeen = 1;
-    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u\n",
+        g_vmAutomation.hangupSettlementInputCount = g_vmAutomation.inputCount;
+        g_vmAutomation.hangupSettlementActionResponseCount =
+            g_vmAutomation.battleActionResponseCount;
+        vm_autotest_note("automation_hangup_settlement seq=%u inputs=%u frame=%u\n",
+                         sequence, g_vmAutomation.inputCount,
+                         g_vmAutomation.renderFrames);
+    }
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
                      sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
                      sawSceneComplete, sawHangup, sawAutoEnable, sawAutoDisable,
-                     sawSettlement, g_vmAutomation.hangupBattleResponseCount);
+                     sawSettlement, g_vmAutomation.hangupBattleResponseCount,
+                     g_vmAutomation.battleActionResponseCount);
 }
 
 static void vm_automation_tick(void)
@@ -6283,13 +6318,22 @@ static void vm_automation_tick(void)
                 }
             }
             else if (g_vmAutomation.scenario ==
-                     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL)
+                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE)
             {
                 if (g_vmAutomation.hangupAutoEnableResponseSeen)
                 {
-                    vm_automation_request_capture("hangup-auto-terminal-start");
+                    vm_automation_request_capture(
+                        g_vmAutomation.scenario ==
+                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
+                            ? "hangup-auto-reward-continue-start"
+                            : "hangup-auto-terminal-start");
                     vm_automation_set_stage(
-                        VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL,
+                        g_vmAutomation.scenario ==
+                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
+                            ? VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE
+                            : VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL,
                         "three-enemy-auto-round-rendered");
                 }
             }
@@ -6333,6 +6377,22 @@ static void vm_automation_tick(void)
             vm_automation_request_capture("hangup-auto-reward-panel");
             vm_automation_finish(1,
                                  "native-4-7-reward-panel-received");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE:
+        /* No tap is scheduled after 4/7.  A second 4/5 alone is insufficient:
+         * it may parse behind the still-visible reward panel.  Require the
+         * native auto timer to submit and receive one more 4/6 action after
+         * that second start, while input remains unchanged. */
+        if (g_vmAutomation.hangupSettlementResponseSeen &&
+            g_vmAutomation.hangupBattleResponseCount >= 2u &&
+            g_vmAutomation.battleActionResponseCount >
+                g_vmAutomation.hangupSettlementActionResponseCount &&
+            g_vmAutomation.inputCount == g_vmAutomation.hangupSettlementInputCount)
+        {
+            vm_automation_request_capture("hangup-auto-reward-continued");
+            vm_automation_finish(1,
+                                 "native-4-7-then-next-4-5-and-4-6-without-reward-input");
         }
         break;
     default:
@@ -6551,6 +6611,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL;
     else if (strcmp(scenario, "hangup-auto-terminal-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL;
+    else if (strcmp(scenario, "hangup-auto-reward-continue-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE;
     else
         return;
     if (artifactDir == NULL || artifactDir[0] == 0 ||

@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -126,7 +126,7 @@ try {
     if ($Scenario -eq 'hangup-auto-cancel-v1') {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '100'
-    } elseif ($Scenario -eq 'hangup-auto-terminal-v1') {
+    } elseif ($Scenario -in @('hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1')) {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '20'
     }

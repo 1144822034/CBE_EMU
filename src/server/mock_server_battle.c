@@ -9,6 +9,8 @@ static void vm_net_mock_battle_auto_arm(void);
 static bool vm_net_mock_battle_terminal_close_should_defer(bool battleEndsThisRound);
 static void vm_net_mock_battle_schedule_terminal_close_after_actions(
     u8 actionCount, const char *source);
+static u32 vm_net_mock_build_hangup_battle_start_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 
 static u32 vm_net_mock_build_battle_scene_start_info_blob(u8 *out, u32 outCap,
                                                           u32 sceneMonsterIndex,
@@ -492,6 +494,19 @@ static bool vm_net_mock_battle_terminal_action_enabled(void)
      * explicit experiment only.
      */
     return vm_net_mock_env_u32("CBE_BATTLE_TERMINAL_ACTION_ENABLED", 0) != 0;
+}
+
+/*
+ * A rewarded automatic scene-hangup victory retains its normal 4/7 result
+ * panel, then receives the same native 2/2 + 4/5 + 4/11 scene-hangup start
+ * family as an ordinary post-cleanup continuation, but only after the final
+ * action animation has completed.  This is a protocol-driven handoff: it
+ * never changes guest state or emulates a click on the reward panel.
+ */
+static bool vm_net_mock_scene_hangup_auto_continue_after_reward(void)
+{
+    return g_vm_net_mock_battle_auto_enabled != 0 &&
+           vm_net_mock_scene_hangup_result_panel_active();
 }
 
 static u32 vm_net_mock_battle_operate_skill_id(u32 operate)
@@ -1771,6 +1786,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     u8 deathActionWireSlot = 0;
     u8 deathActionCount = 0;
     bool terminalActionEnabled = vm_net_mock_battle_terminal_action_enabled();
+    bool sceneHangupAutoContinue = false;
     bool terminalFollowup = false;
     bool terminalStatusAppended = false;
     bool terminalCloseDeferred = false;
@@ -2225,6 +2241,10 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                 return 0;
             ++deathActionCount;
         }
+        sceneHangupAutoContinue =
+            battleEndsThisRound && g_mockBattleEnemyHpCurrent == 0 &&
+            g_mockBattleRoleHpCurrent > 0 &&
+            vm_net_mock_scene_hangup_auto_continue_after_reward();
         if (battleEndsThisRound &&
             g_mockBattleEnemyHpCurrent == 0 &&
             terminalActionEnabled &&
@@ -2270,16 +2290,14 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                                true))
             return 0;
     }
-    /* Delay the close only for a terminal result with no 4/7 panel.  A
-     * rewarded final automatic action already carries 4/7 in this response;
-     * the next valid boundary is the client-originated 25/5 after it exits
-     * the native result panel, not a server-originated 4/11+4/9. */
-    terminalCloseDeferred = !terminalStatusAppended &&
+    terminalCloseDeferred = (!terminalStatusAppended || sceneHangupAutoContinue) &&
         vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
     if (terminalCloseDeferred)
     {
         vm_net_mock_battle_schedule_terminal_close_after_actions(
-            actionCount, "battle-operate-no-result-panel");
+            actionCount, sceneHangupAutoContinue ?
+                "battle-operate-scene-hangup-auto-continue" :
+                "battle-operate-no-result-panel");
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -2311,7 +2329,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (operateConsumesTurn && g_vm_net_mock_battle_auto_replay_inflight == 0)
         vm_net_mock_battle_auto_remember_operation(
             g_vm_net_mock_battle_role_id_current, index, operate, "battle-operate");
-    printf("[info][network] mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u costAction=%u costHp=%u costMp=%u mp=%u/%u resp=%u evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
+    printf("[info][network] mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u scene_hangup_continue=%u costAction=%u costHp=%u costMp=%u mp=%u/%u resp=%u evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
            index, operate, operateIsSkill ? 1 : 0,
            skillTargetsEnemyGroup ? 4 :
                ((skillTargetsFriendlyGroupHeal || skillTargetsFriendlyGroupModifier) ? 2 : 0),
@@ -2338,11 +2356,12 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
            g_mockBattlePendingEnemyTurn ? 1 : 0,
            battleEndsThisRound ? "action6-first" : "action6-only",
            terminalActionEnabled ? 1 : 0,
+           sceneHangupAutoContinue ? 1 : 0,
            (operateIsSkill && skillCostActionEnabled) ? skillCostActionType : 0,
            (operateIsSkill && skillCostActionEnabled) ? skillCostValueA : 0,
            (operateIsSkill && skillCostActionEnabled) ? skillCostValueB : 0,
            skillMpBefore, skillMpPrepared ? skillMpAfter : skillMpBefore, pos);
-    vm_autotest_note("mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u costAction=%u costHp=%u costMp=%u mp=%u/%u response=4/6 evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
+    vm_autotest_note("mock_battle_operate index=%u operate=%u skill=%u target_mode=%u targets=%u wires=%u/%u/%u amount=%u/%u/%u action=%u actions=%u effect=%u actor=%u target=%u enemyhp=%u slots=%u/%u/%u rolehp=%u counters=%u deaths=%u deathActor=%u counterdmg=%u mpcost=%u valueB=%u teaminfo=%u:%u/%u bundle=%u pending=%u order=%s terminal=%u scene_hangup_continue=%u costAction=%u costHp=%u costMp=%u mp=%u/%u response=4/6 evidence=skill.dsh:目标指向,mmBattle:0x6EB0\n",
                      index, operate, operateIsSkill ? 1 : 0,
                      skillTargetsEnemyGroup ? 4 :
                          ((skillTargetsFriendlyGroupHeal || skillTargetsFriendlyGroupModifier) ? 2 : 0),
@@ -2369,6 +2388,7 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                      g_mockBattlePendingEnemyTurn ? 1 : 0,
                      battleEndsThisRound ? "action6-first" : "action6-only",
                      terminalActionEnabled ? 1 : 0,
+                     sceneHangupAutoContinue ? 1 : 0,
                      (operateIsSkill && skillCostActionEnabled) ? skillCostActionType : 0,
                      (operateIsSkill && skillCostActionEnabled) ? skillCostValueA : 0,
                      (operateIsSkill && skillCostActionEnabled) ? skillCostValueB : 0,
@@ -2418,6 +2438,7 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     u8 deathActionWireSlot = 0;
     u8 deathActionCount = 0;
     bool terminalActionEnabled = vm_net_mock_battle_terminal_action_enabled();
+    bool sceneHangupAutoContinue = false;
     bool terminalFollowup = false;
     bool terminalStatusAppended = false;
     bool terminalCloseDeferred = false;
@@ -2849,6 +2870,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
             }
             ++deathActionCount;
         }
+        sceneHangupAutoContinue =
+            battleEndsThisRound && g_mockBattleEnemyHpCurrent == 0 &&
+            g_mockBattleRoleHpCurrent > 0 &&
+            vm_net_mock_scene_hangup_auto_continue_after_reward();
         if (battleEndsThisRound &&
             g_mockBattleEnemyHpCurrent == 0 &&
             terminalActionEnabled &&
@@ -2883,7 +2908,6 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         g_mockBattleRoleHpCurrent > 0 &&
         vm_net_mock_battle_inline_settlement_enabled())
     {
-        bool terminalStatusAppended = false;
         if (!vm_net_mock_append_battle_terminal_status_objects(
                 out, outCap, &pos, &responseObjectCount, false,
                 &terminalStatusAppended))
@@ -2897,12 +2921,14 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                                true))
             return 0;
     }
-    terminalCloseDeferred = !terminalStatusAppended &&
+    terminalCloseDeferred = (!terminalStatusAppended || sceneHangupAutoContinue) &&
         vm_net_mock_battle_terminal_close_should_defer(battleEndsThisRound);
     if (terminalCloseDeferred)
     {
         vm_net_mock_battle_schedule_terminal_close_after_actions(
-            actionCount, "battle-operate-fallback-no-result-panel");
+            actionCount, sceneHangupAutoContinue ?
+                "battle-operate-fallback-scene-hangup-auto-continue" :
+                "battle-operate-fallback-no-result-panel");
     }
     vm_net_mock_finish_wt_packet(out, pos, (u8)responseObjectCount);
     if (g_mockBattleOperateSessionArmed != 0)
@@ -4580,10 +4606,10 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
 }
 
 /*
- * A rewarded scene-hangup victory owns a visible 4/7 result panel.  The
- * client closes that panel through its normal input path and then sends 25/5;
- * this predicate is deliberately scoped to the matching live hangup session
- * so ordinary battles and the separate revival path retain their own terminal
+ * A rewarded scene-hangup victory owns a visible 4/7 result panel. Manual
+ * panel dismissal sends 25/5; automatic hangup uses this same exact-session
+ * predicate to perform its verified delayed 4/5 continuation. The scope
+ * keeps ordinary battles and the separate revival path on their own terminal
  * contracts.
  */
 static bool vm_net_mock_scene_hangup_result_panel_active(void)
@@ -5153,10 +5179,28 @@ static u32 vm_net_mock_build_battle_pending_settlement_response(u8 *out, u32 out
          * scene-hangup rounds.  Do not overwrite its phase with 4/11(type=0)
          * or with revival-only 4/8 fields.  A previously-inline 4/7 needs no
          * response here; when 4/7 was built by this fallback path, return
-         * only that result object.  Native panel dismissal sends 25/5: it is
-         * the ordinary battle cleanup boundary and, for scene hangup, the
-         * sole authority for scheduling the next 4/5.
+         * only that result object. Ordinary and manually dismissed scene
+         * hangup panels still close through native 25/5. Automatic scene
+         * hangup has a separate, verified continuation below once the final
+         * action playback boundary is due.
          */
+        if (closeDeferred &&
+            vm_net_mock_scene_hangup_auto_continue_after_reward())
+        {
+            u32 previousSession = g_mockBattleOperateSessionSerial;
+            u32 responseLen = vm_net_mock_build_hangup_battle_start_response(
+                NULL, 0, out, outCap);
+
+            if (responseLen == 0)
+                return 0;
+            printf("[info][network] mock_scene_hangup_auto_continue_deliver "
+                   "previous_session=%u action_boundary=%u tick=%u "
+                   "response=2/2+4/5+4/11-after-4/7 resp=%u\n",
+                   previousSession, closeNotBeforeTick, g_schedulerTick,
+                   responseLen);
+            g_vm_net_mock_battle_terminal_close_not_before_tick = 0;
+            return responseLen;
+        }
         if (closeDeferred)
         {
             g_vm_net_mock_battle_terminal_close_not_before_tick = 0;

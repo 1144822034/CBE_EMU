@@ -2327,7 +2327,8 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
 static void vm_net_mock_role_build_player_stats_impl(
     const vm_net_mock_role_state *role,
     vm_net_mock_player_stats *stats,
-    bool include_equipment)
+    bool include_equipment,
+    bool include_timed_combat_effects)
 {
     u32 level = role ? role->level : 1;
     u32 job = role ? role->job : 1;
@@ -2389,6 +2390,24 @@ static void vm_net_mock_role_build_player_stats_impl(
     stats->crit = 1 + stats->agility / 3 + stats->wisdom / 5 + equipment.crit;
     stats->resist = stats->wisdom / 2 + stats->endurance / 3 + equipment.resist;
 
+    if (include_timed_combat_effects)
+    {
+        u32 timedAttackPercent = 0;
+        u32 timedDefensePercent = 0;
+
+        if (vm_net_mock_role_active_timed_combat_bonus_percent(
+                role, &timedAttackPercent, &timedDefensePercent))
+        {
+            uint64_t raisedAttack = (uint64_t)stats->attack *
+                                     (100u + timedAttackPercent) / 100u;
+            uint64_t raisedDefense = (uint64_t)stats->defense *
+                                      (100u + timedDefensePercent) / 100u;
+
+            stats->attack = raisedAttack > 9999u ? 9999u : (u32)raisedAttack;
+            stats->defense = raisedDefense > 9999u ? 9999u : (u32)raisedDefense;
+        }
+    }
+
     stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 9999);
     stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 9999);
     stats->attack = vm_net_mock_cap_u32(stats->attack, 9999);
@@ -2405,13 +2424,13 @@ static void vm_net_mock_role_build_player_stats_impl(
 static void vm_net_mock_role_build_base_player_stats(
     const vm_net_mock_role_state *role, vm_net_mock_player_stats *stats)
 {
-    vm_net_mock_role_build_player_stats_impl(role, stats, false);
+    vm_net_mock_role_build_player_stats_impl(role, stats, false, false);
 }
 
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats)
 {
-    vm_net_mock_role_build_player_stats_impl(role, stats, true);
+    vm_net_mock_role_build_player_stats_impl(role, stats, true, true);
 }
 
 static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change)
@@ -2491,7 +2510,11 @@ static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
 
     if (role == NULL)
         return;
-    vm_net_mock_role_build_player_stats(role, &stats);
+    /* Timed attack/defence effects do not affect HP/MP maxima.  Avoid four
+     * effect-table reads on every ordinary scene/vital synchronization; the
+     * battle-only wrapper above reads them at the point they can influence an
+     * authoritative combat calculation. */
+    vm_net_mock_role_build_player_stats_impl(role, &stats, true, false);
     refillHp = (role->hpMax == 0);
     refillMp = (role->mpMax == 0);
     role->hpMax = stats.maxHp ? stats.maxHp : VM_NET_MOCK_ROLE_DEFAULT_HP;
@@ -4457,15 +4480,48 @@ static bool vm_net_mock_role_item_effect_is_valid(
     }
     if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL)
     {
-        /* item.dsh proves the duration but contains no numeric stat modifier. */
-        return (effect->itemId == 829 || effect->itemId == 830) &&
-               effect->multiplier == 0;
+        /* 大力丸/神力丸 only describe relative strength in item.dsh.  The
+         * service balance policy records the explicit percentages below so
+         * the duration, item consumption and actual battle calculation share
+         * one durable value. */
+        return (effect->itemId == 829 && effect->multiplier == 50) ||
+               (effect->itemId == 830 && effect->multiplier == 100);
     }
     if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT)
     {
         return effect->itemId == 828 && effect->multiplier == 20;
     }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK)
+    {
+        return ((effect->itemId == 525 || effect->itemId == 820) &&
+                effect->multiplier == 10) ||
+               ((effect->itemId == 526 || effect->itemId == 821) &&
+                effect->multiplier == 40) ||
+               ((effect->itemId == 527 || effect->itemId == 822) &&
+                effect->multiplier == 100);
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE)
+    {
+        return ((effect->itemId == 528 || effect->itemId == 823) &&
+                effect->multiplier == 10) ||
+               ((effect->itemId == 529 || effect->itemId == 824) &&
+                effect->multiplier == 40) ||
+               ((effect->itemId == 530 || effect->itemId == 825) &&
+                effect->multiplier == 100);
+    }
+    if (effect->kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE)
+    {
+        return (effect->itemId == 531 || effect->itemId == 826) &&
+               effect->multiplier == 120;
+    }
     return false;
+}
+
+static bool vm_net_mock_role_item_effect_allows_duration_extension(u8 effect_kind)
+{
+    return effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK ||
+           effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE ||
+           effect_kind == VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE;
 }
 
 static bool vm_net_mock_role_prepare_item_effect_schema(void)
@@ -6345,48 +6401,155 @@ static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
 }
 
+/* Return all persistent combat effects in one normalized view before a
+ * battle formula consumes them.  The individual rows deliberately remain
+ * separate: item.dsh has independent attack, defence and combined event
+ * consumables, while 829/830 improve both columns.  Expired rows are removed
+ * by vm_net_mock_role_get_active_timed_item_effect(), so the next calculation
+ * naturally returns the unmodified values without a client-memory write. */
+static bool vm_net_mock_role_active_timed_combat_bonus_percent(
+    const vm_net_mock_role_state *role, u32 *attackPercentOut,
+    u32 *defensePercentOut)
+{
+    static const u8 effectKinds[] = {
+        VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL,
+        VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK,
+        VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE,
+        VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE
+    };
+    u32 attackPercent = 0;
+    u32 defensePercent = 0;
+
+    if (attackPercentOut)
+        *attackPercentOut = 0;
+    if (defensePercentOut)
+        *defensePercentOut = 0;
+    if (role == NULL)
+        return false;
+
+    for (u32 i = 0; i < sizeof(effectKinds) / sizeof(effectKinds[0]); ++i)
+    {
+        vm_net_mock_role_item_effect effect;
+
+        memset(&effect, 0, sizeof(effect));
+        if (!vm_net_mock_role_get_active_timed_item_effect(
+                role, effectKinds[i], &effect))
+        {
+            printf("[error][mock-service] timed_combat_effect_state_read_failed account=%s role=%u kind=%u error=%s\n",
+                   g_vm_mock_service_active_account_id ?
+                       g_vm_mock_service_active_account_id : "-",
+                   role->roleId, effectKinds[i], vm_mysql_last_error());
+            return false;
+        }
+        if (effect.expiresUnix == 0)
+            continue;
+
+        switch (effect.kind)
+        {
+        case VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL:
+        case VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE:
+            attackPercent += effect.multiplier;
+            defensePercent += effect.multiplier;
+            break;
+        case VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK:
+            attackPercent += effect.multiplier;
+            break;
+        case VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE:
+            defensePercent += effect.multiplier;
+            break;
+        default:
+            break;
+        }
+    }
+    /* The catalogue's largest possible concurrent combination is well below
+     * this ceiling, but retain an explicit bound before percentage arithmetic
+     * so malformed DB rows cannot overflow an action calculation. */
+    attackPercent = vm_net_mock_min_u32(attackPercent, 1000);
+    defensePercent = vm_net_mock_min_u32(defensePercent, 1000);
+    if (attackPercentOut)
+        *attackPercentOut = attackPercent;
+    if (defensePercentOut)
+        *defensePercentOut = defensePercent;
+    return true;
+}
+
 /* The backpack decrement and the timed effect belong to one durable action.
  * The row is only changed in memory before the relational transaction has
  * committed; on any failure restore the exact previous role state so a retry
  * cannot lose an item or create an unbacked effect. */
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
-    const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
-    const char *reason)
+    const vm_net_mock_role_item_effect *effect, u32 durationSeconds,
+    u32 *remainingOut, const char *reason)
 {
     vm_net_mock_role_item_effect active;
+    vm_net_mock_role_item_effect effective;
     vm_net_mock_role_state before;
     u32 remaining = 0;
+    u32 now = (u32)time(NULL);
 
     if (remainingOut)
         *remainingOut = 0;
     if (role == NULL || effect == NULL || effect->itemId != itemId ||
-        !vm_net_mock_role_item_effect_is_valid(effect))
+        durationSeconds == 0 || !vm_net_mock_role_item_effect_is_valid(effect))
     {
         return false;
     }
+    effective = *effect;
     memset(&active, 0, sizeof(active));
     if (!vm_net_mock_role_get_active_timed_item_effect(role, effect->kind, &active))
         return false;
     if (active.expiresUnix != 0)
     {
-        printf("[info][network] mock_special_item_rejected_active account=%s role=%u kind=%u active_item=%u active_until=%u requested_item=%u\n",
-               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
-               role->roleId, effect->kind, active.itemId, active.expiresUnix,
-               itemId);
-        return false;
+        if (!vm_net_mock_role_item_effect_allows_duration_extension(effect->kind))
+        {
+            printf("[info][network] mock_special_item_rejected_active account=%s role=%u kind=%u active_item=%u active_until=%u requested_item=%u\n",
+                   g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+                   role->roleId, effect->kind, active.itemId, active.expiresUnix,
+                   itemId);
+            return false;
+        }
+        {
+            uint64_t candidateExpiry = (uint64_t)active.expiresUnix + durationSeconds;
+            uint64_t maximumExpiry = (uint64_t)now + VM_NET_MOCK_TIMED_EVENT_MAX_SECONDS;
+
+            effective.expiresUnix = (u32)(candidateExpiry > maximumExpiry ?
+                                               maximumExpiry : candidateExpiry);
+            /* A weaker event candy may extend a stronger active effect, but
+             * must not silently lower its combat percentage.  Keep the item
+             * identity that proves the retained percentage is valid. */
+            if (active.multiplier > effective.multiplier)
+            {
+                effective.itemId = active.itemId;
+                effective.multiplier = active.multiplier;
+            }
+            if (effective.expiresUnix <= active.expiresUnix)
+            {
+                printf("[info][network] mock_special_item_rejected_duration_cap account=%s role=%u kind=%u active_until=%u requested_item=%u cap_seconds=%u\n",
+                       g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+                       role->roleId, effect->kind, active.expiresUnix, itemId,
+                       VM_NET_MOCK_TIMED_EVENT_MAX_SECONDS);
+                return false;
+            }
+            printf("[info][network] mock_special_item_extend account=%s role=%u kind=%u active_item=%u requested_item=%u old_until=%u new_until=%u multiplier=%u\n",
+                   g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
+                   role->roleId, effect->kind, active.itemId, itemId,
+                   active.expiresUnix, effective.expiresUnix,
+                   effective.multiplier);
+        }
     }
 
     before = *role;
     if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, 1, &remaining))
         return false;
     if (!vm_net_mock_role_db_save_relational(
-            reason ? reason : "special-item-use", NULL, NULL, 0, false, effect, NULL))
+            reason ? reason : "special-item-use", NULL, NULL, 0, false,
+            &effective, NULL))
     {
         *role = before;
         printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
                g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
-               before.roleId, itemId, seq, effect->kind, vm_mysql_last_error());
+               before.roleId, itemId, seq, effective.kind, vm_mysql_last_error());
         return false;
     }
     if (remainingOut)
