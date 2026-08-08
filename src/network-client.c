@@ -51,7 +51,7 @@ static vm_net_mock_scene_change_target g_vm_net_mock_last_scene_change_target;
 static bool g_vm_net_mock_last_scene_change_target_valid = false;
 static u32 g_vm_net_mock_last_scene_change_target_serial = 0;
 
-static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b)
+static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b)
 {
     return a != NULL && b != NULL && a[0] != 0 && strcmp(a, b) == 0;
 }

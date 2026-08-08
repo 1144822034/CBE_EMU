@@ -15,7 +15,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(
         bool valid = ageTicks <= (60u * 1000u / VM_SCHED_FRAME_MS) &&
                      requestedEnemyId == session->instanceChallengeEnemyId &&
                      vm_net_mock_scene_name_is_safe(scene) &&
-                     vm_net_mock_scene_names_equal_loose(
+                     vm_net_mock_scene_names_equal_exact(
                          scene, session->instanceChallengeScene);
 
         session->instanceChallengeDirectPending = false;
@@ -457,7 +457,7 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
     if (activeSession != NULL && activeSession->shopSceneNpcReseedPending)
     {
         if (activeSession->shopSceneNpcReseedScene[0] != 0 &&
-            vm_net_mock_scene_names_equal_loose(activeSession->shopSceneNpcReseedScene,
+            vm_net_mock_scene_names_equal_exact(activeSession->shopSceneNpcReseedScene,
                                                 currentScene))
         {
             shopReturnSeed = allowShopReturnSeed;
@@ -477,7 +477,7 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
                   !g_vm_net_mock_scene_moveinfo_npc_seeded &&
                   g_vm_net_mock_scene_moveinfo_npc_pending &&
                   g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
-                  vm_net_mock_scene_names_equal_loose(
+                  vm_net_mock_scene_names_equal_exact(
                       g_vm_net_mock_scene_moveinfo_npc_pending_scene,
                       currentScene);
     if (!startupSeed && !shopReturnSeed)
@@ -620,7 +620,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
-        vm_net_mock_scene_names_equal_loose(
+        vm_net_mock_scene_names_equal_exact(
             currentScene,
             g_vm_net_mock_last_scene_change_target.scene);
 
@@ -803,7 +803,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         !g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_pending &&
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
-        vm_net_mock_scene_names_equal_loose(
+        vm_net_mock_scene_names_equal_exact(
             g_vm_net_mock_scene_moveinfo_npc_pending_scene, currentScene);
     if (!g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
@@ -1241,7 +1241,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     if (completeDeferredScene &&
         currentScene != NULL &&
         vm_net_mock_scene_is_penglai03(currentScene) &&
-        vm_net_mock_scene_names_equal_loose(currentScene, g_vm_net_mock_last_scene_change_target.scene))
+        vm_net_mock_scene_names_equal_exact(currentScene, g_vm_net_mock_last_scene_change_target.scene))
     {
         /*
          * Runtime _02 -> _03 already consumed the real scene-enter callback from
@@ -2871,6 +2871,12 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     actorField120 = vm_net_mock_env_u8("CBE_ACTOR_BYTE_120", actorTargetY);
     actorResource = vm_net_mock_actor_resource_name((u8)actorJob, (u8)actorSex);
     sceneKey = vm_net_mock_scene_key_name();
+    if (!vm_net_mock_scene_name_is_persistable(sceneKey))
+    {
+        printf("[error][network] mock_actorinfo_rejected role=%u scene=%s reason=noncanonical-scene-key contract=exact-sce-key\n",
+               roleId, sceneKey && sceneKey[0] ? sceneKey : "-");
+        return 0;
+    }
     actorResourceArg = (u16)vm_net_mock_env_u32("CBE_ACTOR_RESOURCE_ARG", roleLevel);
     motionResourceArg0 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG0", actorGridX);
     motionResourceArg1 = (u16)vm_net_mock_env_u32("CBE_ACTOR_MOTION_ARG1", actorGridY);

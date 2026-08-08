@@ -2140,7 +2140,7 @@ static u32 vm_net_mock_apply_remote_observation(
     if (observation->sceneCompleteAfterCallback &&
         g_vm_net_mock_last_scene_change_target_valid &&
         (observation->scene[0] == 0 ||
-         vm_net_mock_scene_names_equal_loose(
+         vm_net_mock_scene_names_equal_exact(
              observation->scene,
              g_vm_net_mock_last_scene_change_target.scene)))
     {

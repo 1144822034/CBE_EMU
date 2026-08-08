@@ -4439,7 +4439,7 @@ static bool vm_scene_same_reenter_matches_target(const vm_net_mock_scene_change_
     return target != NULL &&
            g_sceneSameReenterGuard.valid &&
            g_sceneSameReenterGuard.serial == g_vm_net_mock_last_scene_change_target_serial &&
-           vm_net_mock_scene_names_equal_loose(g_sceneSameReenterGuard.scene, target->scene);
+           vm_net_mock_scene_names_equal_exact(g_sceneSameReenterGuard.scene, target->scene);
 }
 
 static void vm_scene_same_reenter_remember_target(const vm_net_mock_scene_change_target *target)

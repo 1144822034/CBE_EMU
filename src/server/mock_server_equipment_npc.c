@@ -1602,12 +1602,17 @@ static const char *vm_net_mock_current_scene_name(void)
      * environment key and local runtime scene remain useful only before a
      * request has selected a role (local/offline diagnostics).
      */
-    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
-        return vm_net_mock_normalize_scene_name_for_enter(role->scene);
-    if (overrideName != NULL && overrideName[0] != 0)
+    /* An authenticated role owns the scene identity. A legacy row that has
+     * not been repaired from sMap.dsh must stay visible as unresolved here;
+     * returning the bootstrap scene would silently turn a data error into a
+     * cross-map move. Downstream scene handlers require an exact *.sce key
+     * and reject that unresolved value. */
+    if (role != NULL && vm_net_mock_scene_name_is_download_key(role->scene))
+        return role->scene;
+    if (overrideName != NULL && vm_net_mock_scene_name_is_persistable(overrideName))
         return overrideName;
     if (vm_net_mock_read_runtime_scene_name(runtimeScene, sizeof(runtimeScene)))
-        return vm_net_mock_normalize_scene_name_for_enter(runtimeScene);
+        return runtimeScene;
     return vm_net_mock_default_scene_name();
 }
 
@@ -1648,17 +1653,20 @@ static const char *vm_net_mock_scene_key_name(void)
     vm_net_mock_role_state *role = vm_net_mock_active_role();
 
     /*
-     * This key is copied by parse_actorinfo_response() into R9+0x5E46 and later
-     * reused as the mode-10 descriptor name by scene_rebuild_runtime_nodes().
-     * The ASCII experiment proved the update path, but also bypassed the local
-     * .sce scene descriptor and left the map background black when cached.
-     * Keep the default aligned with 30/1.scene and use CBE_SCENE_KEY for
-     * non-colliding descriptor experiments.
+     * This key is copied by parse_actorinfo_response() into R9+0x5E46, then
+     * `LoadSceneRes(0x0103130A)` passes it to
+     * `LoadMapDataSheet(0x0103581E, mode=4)`.  The latter uses an exact
+     * `sMap.dsh` map-name lookup to initialise the world-map current-node
+     * controller.  A response-only `cNN... .sce` -> `cNN...` rewrite therefore
+     * leaves the actor in the correct scene but keeps the previous map marker
+     * (normally Penglai).  Preserve the durable scene resource key byte-for-
+     * byte here.  Every downstream scene comparison is strict as well, so the
+     * resource key remains one complete identity from persistence to UI.
      */
-    if (overrideName != NULL && overrideName[0] != 0)
+    if (overrideName != NULL && vm_net_mock_scene_name_is_persistable(overrideName))
         return overrideName;
-    if (role != NULL && vm_net_mock_scene_name_is_safe(role->scene))
-        return vm_net_mock_normalize_scene_name_for_enter(role->scene);
+    if (role != NULL && vm_net_mock_scene_name_is_persistable(role->scene))
+        return role->scene;
     return vm_net_mock_current_scene_name();
 }
 
@@ -1675,6 +1683,9 @@ static bool vm_net_mock_put_scene_fields_with(u8 *out, u32 outCap, u32 *pos,
                                                const char *sceneName, u16 spawnX, u16 spawnY)
 {
     u8 posInfo[8];
+
+    if (!vm_net_mock_scene_name_is_persistable(sceneName))
+        return false;
     u32 posInfoLen = vm_net_mock_build_pos_info(posInfo, sizeof(posInfo), spawnX, spawnY);
     if (posInfoLen == 0)
         return false;
@@ -1682,7 +1693,7 @@ static bool vm_net_mock_put_scene_fields_with(u8 *out, u32 outCap, u32 *pos,
         return false;
     if (includeType && !vm_net_mock_put_object_u8(out, outCap, pos, "type", requestType))
         return false;
-    if (!vm_net_mock_put_object_string(out, outCap, pos, "scene", sceneName ? sceneName : vm_net_mock_default_scene_name()))
+    if (!vm_net_mock_put_object_string(out, outCap, pos, "scene", sceneName))
         return false;
     return vm_net_mock_put_object_entry(out, outCap, pos, "posinfo", posInfo, (u16)posInfoLen);
 }
@@ -1690,12 +1701,13 @@ static bool vm_net_mock_put_scene_fields_with(u8 *out, u32 outCap, u32 *pos,
 static bool vm_net_mock_put_scene_ack_without_posinfo(u8 *out, u32 outCap, u32 *pos,
                                                       u8 requestType, const char *sceneName)
 {
+    if (!vm_net_mock_scene_name_is_persistable(sceneName))
+        return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", requestType))
         return false;
-    return vm_net_mock_put_object_string(out, outCap, pos, "scene",
-                                         sceneName ? sceneName : vm_net_mock_default_scene_name());
+    return vm_net_mock_put_object_string(out, outCap, pos, "scene", sceneName);
 }
 
 static bool vm_net_mock_put_scene_fields(u8 *out, u32 outCap, u32 *pos, bool includeResult, bool includeType, u8 requestType)
@@ -2734,7 +2746,7 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
         return;
     changed = !session->shopSceneNpcReseedPending ||
               session->shopSceneNpcReseedScene[0] == 0 ||
-              !vm_net_mock_scene_names_equal_loose(session->shopSceneNpcReseedScene,
+              !vm_net_mock_scene_names_equal_exact(session->shopSceneNpcReseedScene,
                                                    scene);
     session->shopSceneNpcReseedPending = true;
     snprintf(session->shopSceneNpcReseedScene,
@@ -2754,7 +2766,7 @@ static bool vm_mock_service_shop_scene_npc_reseed_matches(const char *scene)
            session->shopSceneNpcReseedPending &&
            session->shopSceneNpcReseedScene[0] != 0 &&
            vm_net_mock_scene_name_is_safe(scene) &&
-           vm_net_mock_scene_names_equal_loose(session->shopSceneNpcReseedScene,
+           vm_net_mock_scene_names_equal_exact(session->shopSceneNpcReseedScene,
                                                scene);
 }
 
@@ -4055,7 +4067,7 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     changed = !session->sceneVisiblePending ||
               !session->sceneVisibleReady ||
               ((scene != NULL || session->scenePendingScene[0] != 0) &&
-               !vm_net_mock_scene_names_equal_loose(session->scenePendingScene, scene));
+               !vm_net_mock_scene_names_equal_exact(session->scenePendingScene, scene));
     session->sceneVisibleReady = false;
     session->sceneVisiblePending = true;
     session->sceneVisibleTick = g_schedulerTick;
@@ -4093,7 +4105,7 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
     vm_net_mock_adjust_safe_player_pos_for_scene(scene, &x, &y);
     changed = !session->sceneVisibleReady ||
               session->sceneVisiblePending ||
-              !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene) ||
+              !vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene) ||
               session->sceneVisibleX != x ||
               session->sceneVisibleY != y;
     session->sceneVisibleReady = true;
@@ -4154,7 +4166,7 @@ static void vm_mock_service_session_update_move_position(vm_mock_service_client_
     if (!session->sceneVisibleReady ||
         session->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
-        !vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene))
+        !vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene))
     {
         /* A movement upload has no scene-enter completion semantics.  Only
          * the target scene's own follow-up may transition pending/not-ready
@@ -4450,7 +4462,7 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
         vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
         (roleScene == NULL ||
          roleScene[0] == 0 ||
-         vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, roleScene)))
+         vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, roleScene)))
     {
         scene = session->sceneVisibleScene;
         x = session->sceneVisibleX;
@@ -4487,7 +4499,7 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     if (session->sceneVisibleReady &&
         !session->sceneVisiblePending &&
         vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
-        vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene))
+        vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene))
     {
         visiblePosChanged = session->sceneVisibleX != x || session->sceneVisibleY != y;
         session->sceneVisibleX = x;
@@ -4523,7 +4535,7 @@ static bool vm_mock_service_mark_active_session_scene_ready_from_role(const char
     roleScene = vm_net_mock_scene_name_is_safe(role->scene) ? role->scene : sceneHint;
     if (!vm_net_mock_scene_name_is_safe(roleScene) ||
         (vm_net_mock_scene_name_is_safe(sceneHint) &&
-         !vm_net_mock_scene_names_equal_loose(roleScene, sceneHint)))
+         !vm_net_mock_scene_names_equal_exact(roleScene, sceneHint)))
     {
         return false;
     }
@@ -4583,7 +4595,7 @@ static bool vm_mock_service_session_scene_is_visible(const vm_mock_service_clien
     {
         return false;
     }
-    return vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene);
+    return vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene);
 }
 
 static u8 vm_mock_service_team_collect_battle_members(
