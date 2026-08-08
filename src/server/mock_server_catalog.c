@@ -4596,14 +4596,22 @@ static bool vm_net_mock_parse_special_item_seq_request(
         seqField == NULL || !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         offset != requestLen || object.major != 1 || object.kind != kind ||
         object.subtype != subtype ||
-        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
-                                              seqField, &sequence) ||
+        /* Special-item clients emit ordinary length-prefixed field entries.
+         * A u16 sequence therefore has the exact value bytes
+         * `00 02 <seq>`, wrapped by entry-length `00 04`.  The historical
+         * loose u32 scanner treats that outer length as a value tag and
+         * turns sequence 17 into 0x00020011; it then rejects the packet as
+         * out of the client u16 sequence range.  Decode the entry grammar
+         * itself, as the chest and enhancement sequence contracts do. */
+        !vm_net_mock_get_object_tagged_number_entry(
+            object.payload, object.payloadLen, seqField, &sequence) ||
         sequence == 0 || sequence > 0xffffu)
     {
         return false;
     }
     if (requireOneNum &&
-        (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &num) ||
+        (!vm_net_mock_get_object_tagged_number_entry(
+             object.payload, object.payloadLen, "num", &num) ||
          num != 1))
     {
         return false;
