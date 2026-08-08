@@ -1504,8 +1504,11 @@ static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
 {
     u32 pos = 5;
     u32 objectStart = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_practise_info info;
 
-    if (outCap < pos)
+    if (outCap < pos || role == NULL ||
+        !vm_net_mock_practise_get_info(role, &info))
         return 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 18, &objectStart))
         return 0;
@@ -1514,24 +1517,93 @@ static u32 vm_net_mock_build_practise_info18_response(u8 *out, u32 outCap)
      * reads todaypasthour, todaypastmin, getexp, todaylasthour,
      * todaylastmin, alllasthour, alllastmin, then isgold.
      */
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypasthour", 0))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypasthour",
+                                    info.todayPastHours))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypastmin", 15))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaypastmin",
+                                    info.todayPastMinutes))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "getexp", 120))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "getexp", info.gainedExp))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylasthour", 1))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylasthour",
+                                    info.todayRemainingHours))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylastmin", 45))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "todaylastmin",
+                                    info.todayRemainingMinutes))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllasthour", 1))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllasthour",
+                                    info.allRemainingHours))
         return 0;
-    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllastmin", 45))
+    if (!vm_net_mock_put_object_u32(out, outCap, &pos, "alllastmin",
+                                    info.allRemainingMinutes))
         return 0;
-    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "isgold", 0))
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "isgold", info.goldEnabled))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/* JianghuOL.CBE:HandleTradeInput(0x0102C3D6) sends this exact one-object
+ * request when the cultivation panel's help action is selected.  The
+ * response parser (HandleExpBattleResponse, 0x0102CB46 case 19) reads only
+ * `helpinfo` as a GBK byte string and then releases the pending dialog. */
+static bool vm_net_mock_is_practise_help19_request(const u8 *request,
+                                                   u32 requestLen)
+{
+    vm_net_mock_request_object object;
+    u32 offset = 4;
+    u32 requestType = 0;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' ||
+        request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                         &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 7 ||
+        object.subtype != 19 ||
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "type", &requestType))
+    {
+        return false;
+    }
+    return requestType == 0;
+}
+
+static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
+                                                      u32 requestLen,
+                                                      u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+    /* GBK: 修炼帮助：\r\n使用修炼丹可增加修炼时间，每颗增加1小时。\r\n
+     * 角色离线后自动修炼。普通修炼每日最多8小时；黄金修炼每日最多4小时，经验翻倍。\r\n
+     * 修炼时间最多累计100小时。 */
+    static const char helpInfoGbk[] =
+        "\xD0\xDE\xC1\xB6\xB0\xEF\xD6\xFA\xA3\xBA\x0D\x0A"
+        "\xCA\xB9\xD3\xC3\xD0\xDE\xC1\xB6\xB5\xA4\xBF\xC9\xD4\xF6\xBC\xD3"
+        "\xD0\xDE\xC1\xB6\xCA\xB1\xBC\xE4\xA3\xAC\xC3\xBF\xBF\xC5\xD4\xF6\xBC\xD3"
+        "\x31\xD0\xA1\xCA\xB1\xA1\xA3\x0D\x0A"
+        "\xBD\xC7\xC9\xAB\xC0\xEB\xCF\xDF\xBA\xF3\xD7\xD4\xB6\xAF\xD0\xDE\xC1\xB6"
+        "\xA1\xA3\xC6\xD5\xCD\xA8\xD0\xDE\xC1\xB6\xC3\xBF\xC8\xD5\xD7\xEE\xB6\xE0"
+        "\x38\xD0\xA1\xCA\xB1\xA3\xBB\xBB\xC6\xBD\xF0\xD0\xDE\xC1\xB6\xC3\xBF\xC8"
+        "\xD5\xD7\xEE\xB6\xE0\x34\xD0\xA1\xCA\xB1\xA3\xAC\xBE\xAD\xD1\xE9\xB7\xAD"
+        "\xB1\xB6\xA1\xA3\x0D\x0A"
+        "\xD0\xDE\xC1\xB6\xCA\xB1\xBC\xE4\xD7\xEE\xB6\xE0\xC0\xDB\xBC\xC6\x31\x30"
+        "\x30\xD0\xA1\xCA\xB1\xA1\xA3";
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_practise_help19_request(request, requestLen) ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 19,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "helpinfo",
+                                       helpInfoGbk))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_practise_help19 type=0 response=%u evidence=JianghuOL.CBE:0x0102C3D6+0x0102CB46(case19)\n",
+           pos);
     return pos;
 }
 
@@ -1587,6 +1659,49 @@ static u32 vm_net_mock_build_battle_death_prompt_error_response(u8 *out, u32 out
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/* JianghuOL.CBE:HandleExpBattleAction(0x0102C3D6) emits precisely one
+ * 1/7/21 object with `opengold` when the cultivation setting is confirmed.
+ * HandleExpBattleResponse(0x0102CB46) waits for this matching subtype and
+ * reads only `result`; an empty acknowledgement leaves the loading dialog
+ * active. */
+static u32 vm_net_mock_build_practise_setting21_response(const u8 *request,
+                                                         u32 requestLen,
+                                                         u8 *out, u32 outCap)
+{
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    u32 offset = 4;
+    u32 openGold = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    bool success = false;
+
+    if (request == NULL || requestLen < 9 || out == NULL || outCap < pos ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 7 ||
+        object.subtype != 21 ||
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                             "opengold", &openGold) ||
+        openGold > 1)
+    {
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    success = vm_net_mock_practise_set_gold(role, openGold != 0);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 21, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 1 : 0))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_practise_setting21 role=%u opengold=%u result=%u response=%u evidence=JianghuOL.CBE:0x0102C3D6+0x0102CB46\n",
+           role ? role->roleId : 0, openGold, success ? 1u : 0u, pos);
     return pos;
 }
 

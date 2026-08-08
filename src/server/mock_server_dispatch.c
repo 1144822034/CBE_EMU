@@ -830,6 +830,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    hookedLen = vm_net_mock_build_practise_help19_response(request, requestLen,
+                                                            out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-help19", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_setting21_response(request, requestLen,
+                                                               out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-setting21", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_battle_death_prompt_followup_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -851,6 +869,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-special-timed-item-use", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_practise_pill16_response(request, requestLen,
+                                                           out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-practise-pill16", request,
                                   requestLen, hookedLen);
         return hookedLen;
     }

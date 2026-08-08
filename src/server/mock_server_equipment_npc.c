@@ -4204,10 +4204,17 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
 {
     bool wasOnline = false;
     char accountId[sizeof(session->accountId)];
+    u32 offlineRoleId = 0;
 
     if (session == NULL)
         return;
     snprintf(accountId, sizeof(accountId), "%s", session->accountId);
+    offlineRoleId = session->onlineRoleId;
+    /* The client never owns an offline timer.  Mark the exact transport
+     * lifecycle boundary before clearing the session's role identity; the
+     * next online practise-info request will settle only this interval. */
+    if (accountId[0] != 0 && offlineRoleId != 0)
+        vm_net_mock_practise_mark_offline(accountId, offlineRoleId);
     vm_mock_service_session_clear_scene_hangup(session,
                                                reason ? reason : "offline");
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
