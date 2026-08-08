@@ -2550,6 +2550,50 @@ static vm_mock_service_account_state *vm_mock_service_account_find_or_create(con
     return state;
 }
 
+/* Account state is a per-live-session working set, not an archival copy of
+ * every account that ever touched this process.  All durable role mutations
+ * are written by their owning handlers before the offline lifecycle reaches
+ * this function.  Keep a state only while at least one live session owns the
+ * account (normally exactly one; login takeover enforces that invariant). */
+static void vm_mock_service_account_state_release_if_offline(
+    const char *accountId, const char *reason)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    vm_mock_service_account_state **link = &g_vm_mock_service_accounts;
+
+    if (accountId == NULL || accountId[0] == 0)
+        return;
+    while (session != NULL)
+    {
+        if (strcmp(session->accountId, accountId) == 0 &&
+            (session->roleOnline || session->onlinePresenceValid ||
+             session->sceneVisibleReady))
+        {
+            return;
+        }
+        session = session->next;
+    }
+    while (*link != NULL)
+    {
+        vm_mock_service_account_state *state = *link;
+
+        if (strcmp(state->accountId, accountId) == 0)
+        {
+            *link = state->next;
+            if (g_vm_mock_service_active_account == state)
+            {
+                g_vm_mock_service_active_account = NULL;
+                g_vm_mock_service_active_account_id = NULL;
+            }
+            printf("[info][mock-service] account_state_release account=%s reason=%s\n",
+                   accountId, reason ? reason : "-");
+            free(state);
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
 static vm_mock_service_client_session *vm_mock_service_find_client_session(u32 clientId)
 {
     vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
@@ -4159,9 +4203,11 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
                                                  const char *reason)
 {
     bool wasOnline = false;
+    char accountId[sizeof(session->accountId)];
 
     if (session == NULL)
         return;
+    snprintf(accountId, sizeof(accountId), "%s", session->accountId);
     vm_mock_service_session_clear_scene_hangup(session,
                                                reason ? reason : "offline");
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
@@ -4239,6 +4285,13 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     vm_mock_service_session_reset_movement_rate(session, reason ? reason : "offline");
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
         session->peerSync[i].visible = false;
+    if (accountId[0] != 0)
+    {
+        vm_mock_service_account_cache_release(accountId,
+                                              reason ? reason : "offline");
+        vm_mock_service_account_state_release_if_offline(
+            accountId, reason ? reason : "offline");
+    }
 }
 
 static void vm_mock_service_mark_active_session_scene_pending(const vm_net_mock_scene_change_target *target,
@@ -4332,6 +4385,15 @@ static void vm_mock_service_bind_session_account(u32 clientId, const char *accou
     }
     displacedCount = vm_mock_service_session_take_over_account(clientId, accountId);
     snprintf(session->accountId, sizeof(session->accountId), "%s", accountId);
+    if (!vm_mock_service_account_cache_acquire(accountId, "session-login"))
+    {
+        /* Authentication has already confirmed the MySQL row.  The cache is
+         * not protocol authority, so preserve the client-visible login path
+         * but leave a precise operational error if its optional working set
+         * could not be allocated/read. */
+        printf("[error][mock-service] account_cache_acquire_failed account=%s client=%08x error=%s\n",
+               accountId, clientId, vm_mysql_last_error());
+    }
     printf("[info][mock-service] session_bind client=%08x account=%s displaced=%u\n",
            clientId, accountId, displacedCount);
 }
@@ -4694,7 +4756,7 @@ static vm_mock_service_account_state *vm_mock_service_open_account_role_db_for_m
             *messageOut = "account cannot be empty";
         return NULL;
     }
-    if (vm_mock_service_account_find_record(accountId) == NULL)
+    if (!vm_mock_service_account_exists(accountId))
     {
         if (messageOut)
             *messageOut = "account not found";
@@ -4723,10 +4785,17 @@ static vm_mock_service_account_state *vm_mock_service_open_account_role_db_for_m
 static void vm_mock_service_close_account_role_db_for_management(vm_mock_service_account_state *state,
                                                                  bool captureState)
 {
+    char accountId[64];
+
+    memset(accountId, 0, sizeof(accountId));
+    if (state != NULL)
+        snprintf(accountId, sizeof(accountId), "%s", state->accountId);
     if (captureState && state != NULL)
         vm_mock_service_account_capture(state);
     vm_mock_service_account_restore(NULL);
     g_vm_mock_service_active_client_id = 0;
+    vm_mock_service_account_state_release_if_offline(
+        accountId, "admin-management-close");
 }
 
 /* A web-admin repair is deliberately offline-only.  The role database is

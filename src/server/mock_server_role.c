@@ -514,6 +514,59 @@ typedef struct
     bool invalid;
 } vm_mock_mysql_account_load_context;
 
+/* The account table is authoritative in MySQL.  The in-process index is only
+ * a login/admin cache, so reserve exactly the capacity that the current
+ * database needs instead of embedding one million 128-byte records in PE
+ * .data.  This also keeps legacy import off the service stack. */
+static bool vm_mock_service_account_db_reserve(
+    vm_mock_service_account_db_file *database, u32 required)
+{
+    vm_mock_service_account_record *records;
+    u32 capacity;
+    size_t oldBytes;
+    size_t newBytes;
+
+    if (database == NULL || required > VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
+        return false;
+    if (required <= database->accountCapacity)
+        return true;
+    capacity = database->accountCapacity;
+    if (capacity == 0)
+        capacity = VM_MOCK_SERVICE_ACCOUNT_DB_INITIAL_CAPACITY;
+    while (capacity < required)
+    {
+        u32 growth = capacity / 2;
+
+        if (growth < VM_MOCK_SERVICE_ACCOUNT_DB_INITIAL_CAPACITY)
+            growth = VM_MOCK_SERVICE_ACCOUNT_DB_INITIAL_CAPACITY;
+        if (capacity > VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS - growth)
+            capacity = VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS;
+        else
+            capacity += growth;
+    }
+    if ((size_t)capacity > (size_t)-1 / sizeof(*records))
+        return false;
+    oldBytes = (size_t)database->accountCapacity * sizeof(*records);
+    newBytes = (size_t)capacity * sizeof(*records);
+    records = (vm_mock_service_account_record *)realloc(database->accounts,
+                                                         newBytes);
+    if (records == NULL)
+        return false;
+    memset((u8 *)records + oldBytes, 0, newBytes - oldBytes);
+    database->accounts = records;
+    database->accountCapacity = capacity;
+    return true;
+}
+
+static void vm_mock_service_account_db_reset(
+    vm_mock_service_account_db_file *database)
+{
+    if (database == NULL)
+        return;
+    free(database->accounts);
+    memset(database, 0, sizeof(*database));
+}
+
 static bool vm_mock_mysql_account_row(void *context_value,
                                       unsigned int column_count,
                                       const char *const *values,
@@ -521,7 +574,9 @@ static bool vm_mock_mysql_account_row(void *context_value,
 {
     vm_mock_mysql_account_load_context *context = (vm_mock_mysql_account_load_context *)context_value;
     if (context == NULL || context->database == NULL || column_count != 2 ||
-        context->database->accountCount >= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
+        context->database->accountCount >= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS ||
+        !vm_mock_service_account_db_reserve(
+            context->database, context->database->accountCount + 1))
     {
         if (context != NULL)
             context->invalid = true;
@@ -545,23 +600,43 @@ static bool vm_mock_mysql_account_row(void *context_value,
     return true;
 }
 
-static bool vm_mock_service_account_db_load_legacy(void)
+static bool vm_mock_service_account_db_load_legacy(
+    vm_mock_service_account_db_file *database)
 {
     char path[128];
+    vm_mock_service_account_db_legacy_header header;
     vm_mock_service_account_db_file loaded;
+
+    if (database == NULL)
+        return false;
     vm_mock_service_account_db_path(path, sizeof(path));
     FILE *fp = fopen(path, "rb");
     if (fp == NULL)
         return false;
+    memset(&header, 0, sizeof(header));
     memset(&loaded, 0, sizeof(loaded));
-    bool valid = fread(&loaded, 1, sizeof(loaded), fp) == sizeof(loaded) &&
-                 memcmp(loaded.magic, "JHA1", 4) == 0 &&
-                 loaded.version == VM_MOCK_SERVICE_ACCOUNT_DB_VERSION &&
-                 loaded.accountCount <= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS;
+    bool valid = fread(&header, 1, sizeof(header), fp) == sizeof(header) &&
+                 memcmp(header.magic, "JHA1", 4) == 0 &&
+                 header.version == VM_MOCK_SERVICE_ACCOUNT_DB_VERSION &&
+                 header.accountCount <= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS &&
+                 vm_mock_service_account_db_reserve(
+                     &loaded, header.accountCount);
+    if (valid && header.accountCount != 0)
+    {
+        valid = fread(loaded.accounts, sizeof(*loaded.accounts),
+                      header.accountCount, fp) == header.accountCount;
+    }
     fclose(fp);
     if (!valid)
+    {
+        vm_mock_service_account_db_reset(&loaded);
         return false;
-    g_vm_mock_service_account_db = loaded;
+    }
+    memcpy(loaded.magic, header.magic, sizeof(loaded.magic));
+    loaded.version = header.version;
+    loaded.accountCount = header.accountCount;
+    vm_mock_service_account_db_reset(database);
+    *database = loaded;
     return true;
 }
 
@@ -680,68 +755,92 @@ static bool vm_mock_service_account_db_write_record(const vm_mock_service_accoun
     return true;
 }
 
+/* The normal runtime directory is an online-account cache.  It must never
+ * become a second authority for the complete accounts table: a cold service
+ * starts empty and individual game logins explicitly acquire their record.
+ * The one-time legacy migration below is the only operation allowed to load
+ * every account, because it has to open each old role payload before the
+ * MySQL-authority marker is sealed. */
 static void vm_mock_service_account_db_load(void)
 {
     if (g_vm_mock_service_account_db_loaded)
         return;
     g_vm_mock_service_account_db_loaded = true;
-    memset(&g_vm_mock_service_account_db, 0, sizeof(g_vm_mock_service_account_db));
+    vm_mock_service_account_db_reset(&g_vm_mock_service_account_db);
     memcpy(g_vm_mock_service_account_db.magic, "JHA1", 4);
     g_vm_mock_service_account_db.version = VM_MOCK_SERVICE_ACCOUNT_DB_VERSION;
     g_vm_mock_service_account_db_valid = true;
 
+    vm_autotest_note("mock_account_cache_init entries=0 source=runtime-lifecycle\n");
+}
+
+static bool vm_mock_service_account_db_load_all_for_legacy_migration(void)
+{
+    vm_mock_service_account_db_file loaded;
     vm_mock_mysql_account_load_context context;
+    bool has_role_data = false;
+
+    vm_mock_service_account_db_load();
+    if (!g_vm_mock_service_account_db_valid)
+        return false;
+    if (vm_mock_service_mysql_authority_is_sealed())
+        return true;
+
+    memset(&loaded, 0, sizeof(loaded));
+    memcpy(loaded.magic, "JHA1", 4);
+    loaded.version = VM_MOCK_SERVICE_ACCOUNT_DB_VERSION;
     memset(&context, 0, sizeof(context));
-    context.database = &g_vm_mock_service_account_db;
+    context.database = &loaded;
     if (!vm_mysql_query("SELECT account_id,HEX(password_value) FROM accounts ORDER BY account_id",
                         vm_mock_mysql_account_row, &context))
     {
-        g_vm_mock_service_account_db_valid = false;
-        vm_autotest_note("mock_account_db_mysql_load_failed error=%s\n", vm_mysql_last_error());
-        return;
+        vm_mock_service_account_db_reset(&loaded);
+        vm_autotest_note("mock_account_db_legacy_load_failed error=%s\n", vm_mysql_last_error());
+        return false;
     }
     if (context.invalid)
     {
-        memset(&g_vm_mock_service_account_db, 0, sizeof(g_vm_mock_service_account_db));
-        g_vm_mock_service_account_db_valid = false;
-        vm_autotest_note("mock_account_db_mysql_load_failed error=invalid-row\n");
-        return;
+        vm_mock_service_account_db_reset(&loaded);
+        vm_autotest_note("mock_account_db_legacy_load_failed error=invalid-row\n");
+        return false;
     }
-    if (g_vm_mock_service_account_db.accountCount == 0)
+    if (loaded.accountCount == 0)
     {
-        bool has_role_data = false;
-
         /* An empty account table alongside role rows/payload backups is an
          * integrity failure, not a fresh installation.  Importing the old
          * file at this point was the path that made a later process restart
          * appear to restore an account list from the distant past. */
         if (!vm_mock_service_mysql_has_role_data(&has_role_data))
         {
-            g_vm_mock_service_account_db_valid = false;
-            vm_autotest_note("mock_account_db_mysql_load_failed error=authority-probe:%s\n",
+            vm_mock_service_account_db_reset(&loaded);
+            vm_autotest_note("mock_account_db_legacy_load_failed error=authority-probe:%s\n",
                              vm_mysql_last_error());
-            return;
+            return false;
         }
         if (has_role_data)
         {
-            g_vm_mock_service_account_db_valid = false;
-            vm_autotest_note("mock_account_db_mysql_load_failed error=empty-accounts-with-role-data\n");
-            return;
+            vm_mock_service_account_db_reset(&loaded);
+            vm_autotest_note("mock_account_db_legacy_load_failed error=empty-accounts-with-role-data\n");
+            return false;
         }
-        if (!vm_mock_service_mysql_authority_is_sealed() &&
-            vm_mock_service_account_db_load_legacy())
+        if (vm_mock_service_account_db_load_legacy(&loaded))
         {
-            vm_autotest_note("mock_account_db_legacy_migrate count=%u\n",
-                             g_vm_mock_service_account_db.accountCount);
-            if (!vm_mock_service_account_db_save_all("legacy-migrate"))
-            {
-                g_vm_mock_service_account_db_valid = false;
-                return;
-            }
+            vm_autotest_note("mock_account_db_legacy_import count=%u\n",
+                             loaded.accountCount);
         }
     }
-    vm_autotest_note("mock_account_db_mysql_load count=%u\n",
+    vm_mock_service_account_db_reset(&g_vm_mock_service_account_db);
+    g_vm_mock_service_account_db = loaded;
+    g_vm_mock_service_account_db_valid = true;
+    if (g_vm_mock_service_account_db.accountCount != 0 &&
+        !vm_mock_service_account_db_save_all("legacy-migrate"))
+    {
+        g_vm_mock_service_account_db_valid = false;
+        return false;
+    }
+    vm_autotest_note("mock_account_db_legacy_load count=%u\n",
                      g_vm_mock_service_account_db.accountCount);
+    return true;
 }
 
 static void vm_mock_service_friend_db_path(char *path, size_t pathSize)
@@ -1226,9 +1325,97 @@ static bool vm_mock_service_friend_db_add_pair(
     return true;
 }
 
+typedef struct
+{
+    vm_mock_service_account_record record;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_account_lookup_context;
+
+static bool vm_mock_mysql_account_lookup_row(void *context_value,
+                                             unsigned int column_count,
+                                             const char *const *values,
+                                             const size_t *lengths)
+{
+    vm_mock_mysql_account_lookup_context *context =
+        (vm_mock_mysql_account_lookup_context *)context_value;
+    size_t password_len = 0;
+
+    if (context == NULL || context->found || column_count != 2 ||
+        !vm_mock_mysql_copy_text(context->record.username,
+                                 sizeof(context->record.username),
+                                 values[0], lengths[0]) || values[1] == NULL ||
+        !vm_mysql_hex_decode(values[1], lengths[1], context->record.password,
+                             sizeof(context->record.password) - 1,
+                             &password_len))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->record.password[password_len] = 0;
+    context->found = true;
+    return true;
+}
+
+/* This is deliberately an exact MySQL lookup rather than a cache miss that
+ * silently repopulates all accounts.  Authentication, web sessions and
+ * administration only need one record at a time; the runtime cache belongs
+ * exclusively to an active game session. */
+static bool vm_mock_service_account_query_record(
+    const char *username, vm_mock_service_account_record *recordOut,
+    bool *foundOut)
+{
+    vm_mock_mysql_account_lookup_context context;
+    char username_hex[128];
+    char query[384];
+    size_t username_len = 0;
+
+    if (foundOut != NULL)
+        *foundOut = false;
+    if (recordOut != NULL)
+        memset(recordOut, 0, sizeof(*recordOut));
+    vm_mock_service_account_db_load();
+    if (!g_vm_mock_service_account_db_valid || username == NULL)
+        return false;
+    username_len = vm_mock_mysql_bounded_strlen(username, 64);
+    if (username_len == 0 || username_len >= 64 ||
+        vm_mysql_hex_encode(username, username_len, username_hex,
+                            sizeof(username_hex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT account_id,HEX(password_value) FROM accounts "
+             "WHERE account_id=CAST(X'%s' AS CHAR) LIMIT 1",
+             username_hex);
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(query, vm_mock_mysql_account_lookup_row, &context) ||
+        context.invalid)
+    {
+        vm_autotest_note("mock_account_lookup_failed account=%s error=%s\n",
+                         username, vm_mysql_last_error());
+        return false;
+    }
+    if (context.found && recordOut != NULL)
+        *recordOut = context.record;
+    if (foundOut != NULL)
+        *foundOut = context.found;
+    return true;
+}
+
+static bool vm_mock_service_account_exists(const char *username)
+{
+    bool found = false;
+
+    return vm_mock_service_account_query_record(username, NULL, &found) && found;
+}
+
+/* Cache-only lookup: callers that need arbitrary accounts must use the exact
+ * database query above.  This keeps cache size proportional to live game
+ * sessions rather than account history or admin-page visits. */
 static vm_mock_service_account_record *vm_mock_service_account_find_record(const char *username)
 {
-    vm_mock_service_account_db_load();
     if (!g_vm_mock_service_account_db_valid || username == NULL || username[0] == 0)
         return NULL;
     for (u32 i = 0; i < g_vm_mock_service_account_db.accountCount; ++i)
@@ -1239,25 +1426,119 @@ static vm_mock_service_account_record *vm_mock_service_account_find_record(const
     return NULL;
 }
 
+static bool vm_mock_service_account_cache_acquire(const char *username,
+                                                  const char *reason)
+{
+    vm_mock_service_account_record record;
+    vm_mock_service_account_record *cached = NULL;
+    bool found = false;
+
+    vm_mock_service_account_db_load();
+    if (!g_vm_mock_service_account_db_valid || username == NULL || username[0] == 0)
+        return false;
+    cached = vm_mock_service_account_find_record(username);
+    if (cached != NULL)
+        return true;
+    if (!vm_mock_service_account_query_record(username, &record, &found) || !found)
+        return false;
+    if (!vm_mock_service_account_db_reserve(
+            &g_vm_mock_service_account_db,
+            g_vm_mock_service_account_db.accountCount + 1))
+    {
+        return false;
+    }
+    g_vm_mock_service_account_db.accounts[
+        g_vm_mock_service_account_db.accountCount++] = record;
+    printf("[info][mock-service] account_cache_acquire account=%s entries=%u reason=%s\n",
+           username, g_vm_mock_service_account_db.accountCount,
+           reason ? reason : "-");
+    return true;
+}
+
+static void vm_mock_service_account_cache_release(const char *username,
+                                                  const char *reason)
+{
+    u32 index = 0;
+
+    if (!g_vm_mock_service_account_db_valid || username == NULL || username[0] == 0)
+        return;
+    while (index < g_vm_mock_service_account_db.accountCount &&
+           strcmp(g_vm_mock_service_account_db.accounts[index].username,
+                  username) != 0)
+    {
+        ++index;
+    }
+    if (index == g_vm_mock_service_account_db.accountCount)
+        return;
+    if (index + 1 < g_vm_mock_service_account_db.accountCount)
+    {
+        memmove(&g_vm_mock_service_account_db.accounts[index],
+                &g_vm_mock_service_account_db.accounts[index + 1],
+                (g_vm_mock_service_account_db.accountCount - index - 1) *
+                    sizeof(g_vm_mock_service_account_db.accounts[0]));
+    }
+    --g_vm_mock_service_account_db.accountCount;
+    memset(&g_vm_mock_service_account_db.accounts[
+               g_vm_mock_service_account_db.accountCount],
+           0, sizeof(g_vm_mock_service_account_db.accounts[0]));
+    if (g_vm_mock_service_account_db.accountCount == 0)
+    {
+        free(g_vm_mock_service_account_db.accounts);
+        g_vm_mock_service_account_db.accounts = NULL;
+        g_vm_mock_service_account_db.accountCapacity = 0;
+    }
+    printf("[info][mock-service] account_cache_release account=%s entries=%u reason=%s\n",
+           username, g_vm_mock_service_account_db.accountCount,
+           reason ? reason : "-");
+}
+
+static void vm_mock_service_account_cache_clear(const char *reason)
+{
+    u32 released = g_vm_mock_service_account_db.accountCount;
+
+    if (!g_vm_mock_service_account_db_valid)
+        return;
+    free(g_vm_mock_service_account_db.accounts);
+    g_vm_mock_service_account_db.accounts = NULL;
+    g_vm_mock_service_account_db.accountCount = 0;
+    g_vm_mock_service_account_db.accountCapacity = 0;
+    if (released != 0)
+    {
+        printf("[info][mock-service] account_cache_clear released=%u reason=%s\n",
+               released, reason ? reason : "-");
+    }
+}
+
 static bool vm_mock_service_account_verify_credentials(const char *username, const char *password)
 {
-    vm_mock_service_account_record *record = vm_mock_service_account_find_record(username);
-    if (record == NULL || password == NULL)
+    vm_mock_service_account_record record;
+    bool found = false;
+
+    if (password == NULL ||
+        !vm_mock_service_account_query_record(username, &record, &found) ||
+        !found)
+    {
         return false;
-    return strcmp(record->password, password) == 0;
+    }
+    return strcmp(record.password, password) == 0;
 }
 
 static bool vm_mock_service_account_copy_password(const char *username,
                                                   char *passwordOut,
                                                   size_t passwordOutCap)
 {
-    vm_mock_service_account_record *record = vm_mock_service_account_find_record(username);
+    vm_mock_service_account_record record;
+    bool found = false;
+
     if (passwordOut == NULL || passwordOutCap == 0)
         return false;
     passwordOut[0] = 0;
-    if (record == NULL)
+    if (!vm_mock_service_account_query_record(username, &record, &found) ||
+        !found)
+    {
         return false;
-    snprintf(passwordOut, passwordOutCap, "%s", record->password);
+    }
+    snprintf(passwordOut, passwordOutCap, "%s", record.password);
     return passwordOut[0] != 0;
 }
 
@@ -1265,6 +1546,8 @@ static bool vm_mock_service_account_create_record(const char *username,
                                                   const char *password,
                                                   const char **messageOut)
 {
+    bool found = false;
+
     vm_mock_service_account_db_load();
     if (messageOut)
         *messageOut = "ok";
@@ -1280,16 +1563,16 @@ static bool vm_mock_service_account_create_record(const char *username,
             *messageOut = "username/password cannot be empty";
         return false;
     }
-    if (vm_mock_service_account_find_record(username) != NULL)
+    if (!vm_mock_service_account_query_record(username, NULL, &found))
+    {
+        if (messageOut)
+            *messageOut = "account db unavailable";
+        return false;
+    }
+    if (found)
     {
         if (messageOut)
             *messageOut = "account already exists";
-        return false;
-    }
-    if (g_vm_mock_service_account_db.accountCount >= VM_MOCK_SERVICE_ACCOUNT_DB_MAX_ACCOUNTS)
-    {
-        if (messageOut)
-            *messageOut = "account db full";
         return false;
     }
     vm_mock_service_account_record pending;
@@ -1302,11 +1585,6 @@ static bool vm_mock_service_account_create_record(const char *username,
             *messageOut = "account persistence failed";
         return false;
     }
-    u32 record_index = g_vm_mock_service_account_db.accountCount;
-    vm_mock_service_account_record *record =
-        &g_vm_mock_service_account_db.accounts[record_index];
-    *record = pending;
-    g_vm_mock_service_account_db.accountCount = record_index + 1;
     return true;
 }
 
@@ -1314,10 +1592,19 @@ static bool vm_mock_service_account_set_password(const char *username,
                                                  const char *password,
                                                  const char **messageOut)
 {
-    vm_mock_service_account_record *record = vm_mock_service_account_find_record(username);
+    vm_mock_service_account_record pending;
+    vm_mock_service_account_record *cached = NULL;
+    bool found = false;
+
     if (messageOut)
         *messageOut = "ok";
-    if (record == NULL)
+    if (!vm_mock_service_account_query_record(username, &pending, &found))
+    {
+        if (messageOut)
+            *messageOut = "account db unavailable";
+        return false;
+    }
+    if (!found)
     {
         if (messageOut)
             *messageOut = "account not found";
@@ -1329,7 +1616,6 @@ static bool vm_mock_service_account_set_password(const char *username,
             *messageOut = "password cannot be empty";
         return false;
     }
-    vm_mock_service_account_record pending = *record;
     snprintf(pending.password, sizeof(pending.password), "%s", password);
     if (!vm_mock_service_account_db_write_record(&pending, false, "passwd"))
     {
@@ -1337,7 +1623,48 @@ static bool vm_mock_service_account_set_password(const char *username,
             *messageOut = "account persistence failed";
         return false;
     }
-    *record = pending;
+    cached = vm_mock_service_account_find_record(username);
+    if (cached != NULL)
+        *cached = pending;
+    return true;
+}
+
+static bool vm_mock_mysql_account_guest_ordinal_row(void *context_value,
+                                                     unsigned int column_count,
+                                                     const char *const *values,
+                                                     const size_t *lengths)
+{
+    vm_mock_mysql_authority_count_context *context =
+        (vm_mock_mysql_authority_count_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->value))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_service_account_guest_next_ordinal(u32 *ordinalOut)
+{
+    vm_mock_mysql_authority_count_context context;
+
+    if (ordinalOut != NULL)
+        *ordinalOut = 0;
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COALESCE(MAX(CAST(SUBSTRING(account_id,6) AS UNSIGNED)),0) "
+            "FROM accounts WHERE account_id REGEXP '^guest[0-9]+$'",
+            vm_mock_mysql_account_guest_ordinal_row, &context) ||
+        context.invalid || !context.found || context.value == 0xffffffffu)
+    {
+        return false;
+    }
+    if (ordinalOut != NULL)
+        *ordinalOut = context.value + 1;
     return true;
 }
 
@@ -1362,14 +1689,15 @@ static bool vm_mock_service_account_issue_guest_credentials(u32 clientId,
     if (!g_vm_mock_service_account_db_valid)
         return false;
 
-    seedBase = g_vm_mock_service_account_db.accountCount + 1;
+    if (!vm_mock_service_account_guest_next_ordinal(&seedBase))
+        return false;
     for (u32 attempt = 0; attempt < 100000; ++attempt)
     {
         u32 ordinal = seedBase + attempt;
+        if (ordinal < seedBase)
+            break;
         snprintf(usernameOut, usernameOutCap, "guest%05u", ordinal);
         snprintf(passwordOut, passwordOutCap, "g%08X", clientId ^ (ordinal * 2654435761u));
-        if (vm_mock_service_account_find_record(usernameOut) != NULL)
-            continue;
         if (vm_mock_service_account_create_record(usernameOut, passwordOut, &message))
         {
             if (messageOut)

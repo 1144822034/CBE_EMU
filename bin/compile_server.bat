@@ -1,1 +1,0 @@
-gcc -Wl,--gc-sections obj/server/gifDecode.o obj/server/mystd.o obj/server/mysql-client.o obj/server/md5.o obj/server/main.o -o bin/jh-online-server.exe -lpthread -liconv -lm -lkernel32 -lws2_32
