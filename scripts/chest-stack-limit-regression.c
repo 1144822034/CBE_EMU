@@ -72,7 +72,11 @@ int main(void)
         fputs("item.dsh chest/key stack limits were not loaded as 99\n", stderr);
         return 1;
     }
-    vm_net_mock_role_normalize_backpack(&role);
+    if (!vm_net_mock_role_normalize_backpack(&role))
+    {
+        fputs("legacy 121-count golden chest did not report a durable backpack migration\n", stderr);
+        return 1;
+    }
     if (count_item_rows(&role, 524, &first, &second) != 2 ||
         first != 99 || second != 22 || role.backpackItems[0].seq != 78 ||
         role.backpackItems[1].seq == 78)

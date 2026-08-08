@@ -3896,14 +3896,20 @@ static bool vm_net_mock_role_allocate_backpack_sequence(
     return false;
 }
 
-static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
+/* Returns whether this call changed the durable backpack representation.  The
+ * load path uses that result to persist legacy repairs transactionally; merely
+ * making an over-limit stack look valid in RAM would reintroduce the same
+ * invalid item row on every login. */
+static bool vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
 {
     vm_net_mock_backpack_item_state compact[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    vm_net_mock_role_state before;
     u32 compactCount = 0;
     u16 maxSeq = VM_NET_MOCK_EQUIP_SLOT_COUNT;
 
     if (role == NULL)
-        return;
+        return false;
+    before = *role;
     memset(compact, 0, sizeof(compact));
     if (role->backpackCapacity == 0)
         role->backpackCapacity = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
@@ -3942,7 +3948,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
             {
                 printf("[error][mock-service] backpack_sequence_namespace_unresolved role=%u item=%u reason=no-free-sequence\n",
                        role->roleId, item.itemId);
-                return;
+                return memcmp(&before, role, sizeof(before)) != 0;
             }
             if (item.seq > maxSeq)
                 maxSeq = item.seq;
@@ -4040,7 +4046,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 {
                     printf("[error][mock-service] backpack_sequence_namespace_unresolved role=%u item=%u reason=no-free-split-sequence\n",
                            role->roleId, item.itemId);
-                    return;
+                    return memcmp(&before, role, sizeof(before)) != 0;
                 }
                 if (instanceItem.seq > maxSeq)
                     maxSeq = instanceItem.seq;
@@ -4080,6 +4086,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                role->roleId);
         role->nextBackpackSeq = 0;
     }
+    return memcmp(&before, role, sizeof(before)) != 0;
 }
 
 static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
@@ -6103,6 +6110,7 @@ static void vm_net_mock_role_db_load(void)
     u32 migratedIdCount = 0;
     u32 backpackNamespaceMigratedRoles = 0;
     u32 backpackNamespaceRemappedRows = 0;
+    u32 backpackNormalizedRoles = 0;
     u32 expCurveMigratedRoles = 0;
     u32 expCurveCappedRoles = 0;
 
@@ -6349,8 +6357,19 @@ static void vm_net_mock_role_db_load(void)
         vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
         u32 reservedSequenceCount =
             vm_net_mock_role_count_reserved_backpack_sequences(role);
+        vm_net_mock_role_state beforeNormalize = *role;
 
         vm_net_mock_role_normalize(role);
+        if (memcmp(&beforeNormalize, role, sizeof(beforeNormalize)) != 0)
+        {
+            /* This includes the `item.dsh` stack-limit repair (for example
+             * a persisted 黄金宝箱 x120 becomes x99 + x21).  The relational
+             * writer below deletes and replaces the account's backpack in
+             * one transaction, so setting needsSave here cannot leave the
+             * old row deleted without its split replacements. */
+            needsSave = true;
+            ++backpackNormalizedRoles;
+        }
         if (reservedSequenceCount != 0)
         {
             /* Persist this exact namespace repair now.  Leaving it only in
@@ -6366,6 +6385,13 @@ static void vm_net_mock_role_db_load(void)
         printf("[info][mock-service] backpack_sequence_namespace_migrate roles=%u remapped=%u reserved=1..%u\n",
                backpackNamespaceMigratedRoles, backpackNamespaceRemappedRows,
                VM_NET_MOCK_EQUIP_SLOT_COUNT);
+    }
+    if (backpackNormalizedRoles != 0)
+    {
+        printf("[info][mock-service] backpack_normalize_persist roles=%u account=%s source=role-load-relational\n",
+               backpackNormalizedRoles,
+               g_vm_mock_service_active_account_id ?
+                   g_vm_mock_service_active_account_id : "-");
     }
     if (g_vm_net_mock_role_db.roleCount == 1 &&
         vm_net_mock_role_is_pristine_bootstrap_default(&g_vm_net_mock_role_db.roles[0]))
