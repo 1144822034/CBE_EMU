@@ -10,8 +10,10 @@
  * The fixture owns six independent copies of equip.dsh item 1001 and one
  * non-equipment row.  It proves that the NPC dialog exposes only the buyer
  * action, pages the six equipment instances by seq, sells exactly one chosen
- * instance for ceil(base_value * 50%), and emits the established 7/7(type=2)
- * + 7/11 item-manager update after the 26/1 dialog response.
+ * instance for ceil(base_value * 50%), and returns only the parser-owned 26/1
+ * dialog response.  The next native backpack-list request reloads the
+ * committed role state; an equipment sale must not misuse the 7/7 type=2
+ * equipment-install stream as an inventory deletion notification.
  */
 
 function entry(string $name, string $value): string {
@@ -267,12 +269,12 @@ try {
     $seqsAfterSale = array_map(function ($row) {
         return (int)$row['item_seq'];
     }, $rowsAfterSale);
-    if (!response_has_object($sale, 26, 1) || !response_has_object($sale, 7, 7) ||
-        !response_has_object($sale, 7, 11) ||
+    if (!response_has_object($sale, 26, 1) || response_has_object($sale, 7, 7) ||
+        response_has_object($sale, 7, 11) ||
         (int)($afterSale['money'] ?? -1) !== 654 + $salePrice ||
         in_array(41, $seqsAfterSale, true) || !in_array(42, $seqsAfterSale, true) ||
         !in_array(47, $seqsAfterSale, true)) {
-        throw new RuntimeException('sale did not atomically remove seq 41, credit the displayed recovery price, and emit 26/1+7/7+7/11');
+        throw new RuntimeException('sale did not atomically remove seq 41, credit the displayed recovery price, and emit only the parser-owned 26/1 dialog');
     }
 
     $staleSale = call_service($port, $clientId,
@@ -282,7 +284,7 @@ try {
         (int)($afterStale['money'] ?? -1) !== 654 + $salePrice) {
         throw new RuntimeException('stale equipment sequence credited money or emitted a removal update');
     }
-    echo "dynamic NPC equipment-buyer regression passed pages=5+1 sale_seq=41 copper=$salePrice response=26/1+7/7+7/11 stale=blocked\n";
+    echo "dynamic NPC equipment-buyer regression passed pages=5+1 sale_seq=41 copper=$salePrice response=26/1-only stale=blocked\n";
 } finally {
     try { call_service($port, $clientId, '', 4); } catch (Throwable $ignored) {}
 }

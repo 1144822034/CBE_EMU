@@ -819,6 +819,13 @@ static bool vm_net_mock_task_catalog_apply_db(void)
 
     memset(&context, 0, sizeof(context));
     memset(&rewardContext, 0, sizeof(rewardContext));
+    /* vm_net_mock_task_reward_catalog_db_row validates each reward through
+     * vm_net_mock_find_shop_catalog_item().  That lookup lazily loads the
+     * shop's MySQL overrides on a cold service.  A row callback executes
+     * before its SELECT result is fully drained, so resolve that dependency
+     * before beginning either task result set rather than nesting a query on
+     * the same protocol stream. */
+    (void)vm_net_mock_load_shop_catalog();
     if (!vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_tasks ("
             "task_id INT UNSIGNED NOT NULL,enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
@@ -4609,14 +4616,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 objectStart = 0;
     u8 objectCount = 1;
     bool appendBackpackAdd = false;
-    bool appendBackpackRemove = false;
     bool appendSkills = false;
     u32 backpackAddItemId = 0;
     u32 backpackAddCount = 0;
     u16 backpackAddSeq = 0;
-    u32 backpackRemoveItemId = 0;
-    u32 backpackRemoveCount = 0;
-    u16 backpackRemoveSeq = 0;
     const char *action = "invalid";
     u32 result = 0;
     u32 skillEligibleCount = 0;
@@ -5011,7 +5014,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             const vm_net_mock_shop_catalog_item *catalogItem = NULL;
             vm_net_mock_role_state before;
             u32 price = 0;
-            u32 remaining = 0;
 
             page = 0;
             if (value == 0 || value > 0xffffu)
@@ -5033,11 +5035,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 else
                 {
                     before = *role;
-                    backpackRemoveItemId = backpackItem->itemId;
-                    backpackRemoveSeq = backpackItem->seq;
                     if (!vm_net_mock_role_consume_backpack_item(
-                            role, backpackRemoveItemId, backpackRemoveSeq,
-                            1, &remaining))
+                            role, backpackItem->itemId, backpackItem->seq,
+                            1, NULL))
                     {
                         dialogText =
                             "\xb8\xc3\xd7\xb0\xb1\xb8\xd2\xd1\xb2\xbb\xd4\xda\xb1\xb3\xb0\xfc\xd6\xd0\xa1\xa3"; /* 该装备已不在背包中。 */
@@ -5054,15 +5054,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         if (!vm_net_mock_role_db_save("npc-equipment-sell"))
                         {
                             *role = before;
-                            backpackRemoveItemId = 0;
-                            backpackRemoveSeq = 0;
                             dialogText =
                                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
                         }
                         else
                         {
-                            backpackRemoveCount = remaining;
-                            appendBackpackRemove = true;
                             result = 1;
                             snprintf(dialogTextStorage,
                                      sizeof(dialogTextStorage), "%s%u%s",
@@ -5137,7 +5133,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 (page + 1u);
             ++optionCount;
         }
-        if (optionCount == 0 && !appendBackpackRemove)
+        if (optionCount == 0)
         {
             dialogText =
                 "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有可出售的装备。 */
@@ -5337,15 +5333,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             return 0;
         ++objectCount;
     }
-    if (appendBackpackRemove)
-    {
-        if (!vm_net_mock_append_backpack_item_remove7_objects(
-                out, outCap, &pos, &objectCount, backpackRemoveSeq,
-                backpackRemoveItemId, backpackRemoveCount))
-        {
-            return 0;
-        }
-    }
     if (appendSkills)
     {
         if (!vm_net_mock_append_role_skills_object(out, outCap, &pos))
@@ -5373,14 +5360,17 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                  vm_net_mock_scene_name_is_safe(scene) ? scene : "");
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_npc_service action=%s opcode=%08x value=%u role=%u job=%u level=%u result=%u options=%u money=%u skill_eligible=%u skill_learned=%u skill_level_locked=%u next_skill=%u next_level=%u next_price=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh\n",
+    printf("[info][network] mock_npc_service action=%s opcode=%08x value=%u role=%u job=%u level=%u result=%u options=%u money=%u skill_eligible=%u skill_learned=%u skill_level_locked=%u next_skill=%u next_level=%u next_price=%u objects=%u resp=%u inventory_sync=%s evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh\n",
            action, serviceValue, value, role->roleId, role->job, role->level,
            result, optionCount, role->money, skillEligibleCount,
            skillLearnedCount, skillLevelLockedCount,
            skillNextLocked ? skillNextLocked->skillId : 0,
            skillNextLocked ? skillNextLocked->levelRequired : 0,
            skillNextLocked ? skillNextLocked->learnPrice : 0,
-           objectCount, pos);
+           objectCount, pos,
+           strcmp(action, "equipment-sell") == 0 && result == 1
+               ? "deferred-native-backpack-query"
+               : "not-applicable");
     return pos;
 }
 
