@@ -4628,6 +4628,57 @@ static u32 vm_net_mock_exp_card_multiplier_for_item(u32 itemId)
     }
 }
 
+/* Every time-limited category-21 item is submitted through the same 1/22/3
+ * client request, but item.dsh gives them three distinct effect families.
+ * Keep the mapping declarative and verify its duration/category against the
+ * loaded DSH row before consuming an item.  The event candy series contains
+ * two copies of each recipe (old event IDs 525..531 and store IDs 820..826).
+ */
+typedef struct
+{
+    u32 itemId;
+    u8 effectKind;
+    u8 multiplier;
+    u8 durationMinutes;
+} vm_net_mock_timed_combat_item_spec;
+
+static const vm_net_mock_timed_combat_item_spec g_vm_net_mock_timed_combat_item_specs[] = {
+    {525u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 10u, 15u},
+    {526u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 40u, 30u},
+    {527u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 100u, 60u},
+    {528u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 10u, 15u},
+    {529u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 40u, 30u},
+    {530u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 100u, 60u},
+    {531u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE, 120u, 60u},
+    {820u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 10u, 15u},
+    {821u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 40u, 30u},
+    {822u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK, 100u, 60u},
+    {823u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 10u, 15u},
+    {824u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 40u, 30u},
+    {825u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE, 100u, 60u},
+    {826u, VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE, 120u, 60u},
+    /* The original item rows describe these as “明显/巨幅提升” without an
+     * exact numeric column.  These 50%%/100%% values are an explicit server
+     * balance policy, stored with the effect and applied identically to attack
+     * and defence; they are not claimed to be hidden DSH values. */
+    {829u, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL, 50u, 30u},
+    {830u, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL, 100u, 30u}
+};
+
+static const vm_net_mock_timed_combat_item_spec *
+vm_net_mock_find_timed_combat_item_spec(u32 itemId)
+{
+    for (u32 i = 0;
+         i < sizeof(g_vm_net_mock_timed_combat_item_specs) /
+                 sizeof(g_vm_net_mock_timed_combat_item_specs[0]);
+         ++i)
+    {
+        if (g_vm_net_mock_timed_combat_item_specs[i].itemId == itemId)
+            return &g_vm_net_mock_timed_combat_item_specs[i];
+    }
+    return NULL;
+}
+
 static const char *vm_net_mock_special_item_success_info(u32 itemId)
 {
     /* GBK literals copied from item.dsh descriptions.  The CBE client renders
@@ -4644,6 +4695,27 @@ static const char *vm_net_mock_special_item_success_info(u32 itemId)
         return "\xCA\xA7\xB4\xAB\xD2\xD1\xBE\xC3\xB5\xC4\xC9\xF1\xC3\xD8\xB5\xA4\xD2\xA9\xA3\xAC\xB7\xFE\xD3\xC3\xBA\xF3\x33\x30\xB7\xD6\xD6\xD3\xC4\xDA\xC9\xCB\xBA\xA6\xBA\xCD\xB7\xC0\xD3\xF9\xD0\xA7\xB9\xFB\xC3\xF7\xCF\xD4\xCC\xE1\xC9\xFD\xA1\xA3";
     case 830:
         return "\xCA\xA7\xB4\xAB\xD2\xD1\xBE\xC3\xB5\xC4\xC9\xF1\xC3\xD8\xB5\xA4\xD2\xA9\xA3\xAC\xB7\xFE\xD3\xC3\xBA\xF3\x33\x30\xB7\xD6\xD6\xD3\xC4\xDA\xC9\xCB\xBA\xA6\xBA\xCD\xB7\xC0\xD3\xF9\xD0\xA7\xB9\xFB\xBE\xDE\xB7\xF9\xCC\xE1\xC9\xFD\xA3\xAC\xBC\xF2\xD6\xB1\xCA\xC7\xC8\xCB\xB5\xB2\xC9\xB1\xC8\xC8\xCB\xB7\xF0\xB5\xB2\xC9\xB1\xB7\xF0\xB0\xA1\xA3";
+    case 525:
+    case 820:
+        return "\xB9\xA5\xBB\xF7\xC1\xA6\xCC\xE1\xC9\xFD\x31\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x31\x35\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 526:
+    case 821:
+        return "\xB9\xA5\xBB\xF7\xC1\xA6\xCC\xE1\xC9\xFD\x34\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x33\x30\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 527:
+    case 822:
+        return "\xB9\xA5\xBB\xF7\xC1\xA6\xCC\xE1\xC9\xFD\x31\x30\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x36\x30\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 528:
+    case 823:
+        return "\xB7\xC0\xD3\xF9\xC1\xA6\xCC\xE1\xC9\xFD\x31\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x31\x35\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 529:
+    case 824:
+        return "\xB7\xC0\xD3\xF9\xC1\xA6\xCC\xE1\xC9\xFD\x34\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x33\x30\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 530:
+    case 825:
+        return "\xB7\xC0\xD3\xF9\xC1\xA6\xCC\xE1\xC9\xFD\x31\x30\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x36\x30\xB7\xD6\xD6\xD3\xA1\xA3";
+    case 531:
+    case 826:
+        return "\xB9\xA5\xBB\xF7\xC1\xA6\xD3\xEB\xB7\xC0\xD3\xF9\xC1\xA6\xCC\xE1\xC9\xFD\x31\x32\x30\x25\xA3\xAC\xB3\xD6\xD0\xF8\x36\x30\xB7\xD6\xD6\xD3\xA1\xA3";
     default:
         return "OK";
     }
@@ -4739,6 +4811,7 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_backpack_item_state *item = NULL;
     const vm_net_mock_item_effect_catalog_item *catalogItem = NULL;
+    const vm_net_mock_timed_combat_item_spec *combatSpec = NULL;
     vm_net_mock_role_item_effect effect;
     u32 resolvedItemId = 0;
     u32 multiplier = 0;
@@ -4746,7 +4819,7 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     u32 now = (u32)time(NULL);
     bool isExpCard = false;
     bool isBattleInsight = false;
-    bool isCombatPill = false;
+    bool isTimedCombatItem = false;
     bool success = false;
     const char *info = "item unavailable";
     u32 pos = 5;
@@ -4766,7 +4839,7 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     {
         requestKind = 22;
         requestSubtype = 3;
-        isCombatPill = true;
+        isTimedCombatItem = true;
     }
     else if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 25, 6,
                                                         "seq", false, &requestedSeq))
@@ -4813,30 +4886,28 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
                 durationSeconds = (u32)catalogItem->durationMinutes * 60u;
             }
         }
-        else if (isCombatPill)
+        else if (isTimedCombatItem)
         {
-            effect.kind = VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL;
-            effect.itemId = item->itemId;
-            effect.multiplier = 0;
-            if (catalogItem != NULL && (item->itemId == 829 || item->itemId == 830) &&
-                catalogItem->durationMinutes == 30 && catalogItem->category == 21)
+            combatSpec = vm_net_mock_find_timed_combat_item_spec(item->itemId);
+            if (combatSpec != NULL && catalogItem != NULL &&
+                catalogItem->category == 21 &&
+                catalogItem->consumeMode == 1 &&
+                catalogItem->durationMinutes == combatSpec->durationMinutes)
             {
+                effect.kind = combatSpec->effectKind;
+                effect.itemId = item->itemId;
+                effect.multiplier = combatSpec->multiplier;
                 durationSeconds = (u32)catalogItem->durationMinutes * 60u;
             }
         }
-        if (isCombatPill)
-        {
-            /* The category-21 client contract is known, but item.dsh contains
-             * no attack/defence value for 829/830. Do not consume an item and
-             * claim success until that missing authority is supplied. */
-            info = "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xB9\xA5\xB7\xC0\xCA\xFD\xD6\xB5\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
-        }
-        else if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
+        if (durationSeconds != 0 && now <= 0xffffffffu - durationSeconds)
         {
             effect.expiresUnix = now + durationSeconds;
             success = vm_net_mock_role_consume_backpack_item_with_timed_effect(
-                role, item->itemId, requestedSeq, &effect, NULL,
-                isExpCard ? "exp-card-use" : "battle-insight-use");
+                role, item->itemId, requestedSeq, &effect, durationSeconds, NULL,
+                isExpCard ? "exp-card-use"
+                          : (isBattleInsight ? "battle-insight-use"
+                                             : "timed-combat-item-use"));
             if (success)
                 info = isBattleInsight
                            ? "\xD5\xBD\xB6\xB7\xD0\xC4\xB5\xC3\xD0\xA7\xB9\xFB\xD2\xD1\xC9\xFA\xD0\xA7\xA3\xAC\xBE\xAD\xD1\xE9\xD4\xF6\xBC\xD3\x32\x30\x25\xA1\xA3"

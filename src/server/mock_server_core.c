@@ -4611,8 +4611,16 @@ enum
 {
     VM_NET_MOCK_ROLE_ITEM_EFFECT_EXP_CARD = 1,
     VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL = 2,
-    VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_BATTLE_INSIGHT = 3,
+    /* item.dsh category-21 event consumables.  They are kept apart so an
+     * attack candy, a defence candy and the combined event reward can be
+     * active independently, exactly as their resource descriptions imply. */
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK = 4,
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_DEFENSE = 5,
+    VM_NET_MOCK_ROLE_ITEM_EFFECT_EVENT_ATTACK_DEFENSE = 6
 };
+
+#define VM_NET_MOCK_TIMED_EVENT_MAX_SECONDS (12u * 60u * 60u)
 
 typedef struct
 {
@@ -5023,12 +5031,18 @@ static bool vm_net_mock_append_backpack_item_remove7_objects(
     u32 remaining);
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
-    const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
-    const char *reason);
+    const vm_net_mock_role_item_effect *effect, u32 durationSeconds,
+    u32 *remainingOut, const char *reason);
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
+/* Fills the final combat-stat percentage bonuses currently active for this
+ * role.  These effects only alter authoritative battle calculations; there
+ * is no parser evidence for treating them as a permanent ActorInfo rewrite. */
+static bool vm_net_mock_role_active_timed_combat_bonus_percent(
+    const vm_net_mock_role_state *role, u32 *attackPercentOut,
+    u32 *defensePercentOut);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
 static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                       u32 requestLen,

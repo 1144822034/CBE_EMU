@@ -4944,44 +4944,34 @@ static bool vm_mock_service_migrate_account_role_databases(void)
 }
 
 
-static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
-                                                   const char *roleSelector,
-                                                   u32 amount,
-                                                   const char **messageOut)
+/* W 币的唯一权威是 account_wallets；后台赠送不能再要求任意一个角色
+ * 存在或被选中，否则无角色账号及角色目录变动都会错误阻断账号钱包操作。 */
+static bool vm_mock_service_account_add_wcoin(const char *accountId,
+                                              u32 amount,
+                                              const char **messageOut)
 {
-    vm_mock_service_account_state *state =
-        vm_mock_service_open_account_role_db_for_management(accountId, messageOut);
-    vm_net_mock_role_state *role = NULL;
     u32 before = 0;
     u32 after = 0;
 
-    if (state == NULL)
-        return false;
-    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
-    if (role == NULL)
+    if (messageOut)
+        *messageOut = NULL;
+    if (accountId == NULL || accountId[0] == 0 || amount == 0)
     {
         if (messageOut)
-            *messageOut = "role not found";
-        vm_mock_service_close_account_role_db_for_management(state, true);
+            *messageOut = "账号或 W 币数量无效";
         return false;
     }
     if (!vm_mock_service_account_wallet_credit(accountId, amount, &before, &after))
     {
-        vm_mock_service_account_capture(state);
         if (messageOut)
-            *messageOut = "account wallet persistence failed";
-        vm_mock_service_close_account_role_db_for_management(state, false);
+            *messageOut = "账号 W 币钱包写入失败";
         return false;
     }
-    vm_mock_service_account_capture(state);
-    printf("[info][mock-service] account_wcoin_add user=%s scope=account requested_role=%s id=%u add=%u before=%u after=%u\n",
+    printf("[info][mock-service] account_wcoin_add user=%s scope=account add=%u before=%u after=%u\n",
            accountId,
-           role->name[0] ? role->name : "-",
-           role->roleId,
            amount,
            before,
            after);
-    vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
 }
 
