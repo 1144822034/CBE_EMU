@@ -3034,42 +3034,6 @@ done:
     return ok;
 }
 
-static const char *vm_mock_admin_orientation_arrow(u16 orientation)
-{
-    switch (orientation)
-    {
-    case 1:
-        return "↑";
-    case 2:
-        return "→";
-    case 3:
-        return "↓";
-    case 4:
-        return "←";
-    default:
-        return "•";
-    }
-}
-
-static const char *vm_mock_admin_orientation_name(u16 orientation)
-{
-    switch (orientation)
-    {
-    case 0:
-        return "默认";
-    case 1:
-        return "上";
-    case 2:
-        return "右";
-    case 3:
-        return "下";
-    case 4:
-        return "左";
-    default:
-        return "扩展";
-    }
-}
-
 static void vm_mock_admin_preview_fill_placeholder(u16 *canvas,
                                                    u32 canvasWidth,
                                                    u32 canvasHeight,
@@ -3268,6 +3232,14 @@ done:
     return ok;
 }
 
+static void vm_mock_admin_render_item_picker_field(
+    vm_mock_admin_text *page, const char *pickerId, const char *fieldName,
+    const char *label, u32 itemId, bool required);
+static void vm_mock_admin_render_item_picker_modal(vm_mock_admin_text *page);
+static void vm_mock_admin_render_npc_inventory(
+    vm_mock_admin_text *page, const char *sceneUtf8, const char *runtimeScene,
+    u32 actorId, u16 serviceKind, const char *pickerPrefix);
+
 static void vm_mock_admin_render_content_page(char *response,
                                               size_t responseCap,
                                               const char *query)
@@ -3276,6 +3248,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_scene_file actorFiles[VM_MOCK_ADMIN_ACTOR_FILE_MAX];
     vm_mock_admin_scene_file xseFiles[VM_MOCK_ADMIN_XSE_FILE_MAX];
     vm_net_mock_dynamic_npc_admin_row npcRows[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+    vm_net_mock_native_npc_admin_row nativeNpcRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
     vm_net_mock_scene_npcinfo_seed previewNpcRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
     vm_mock_admin_scene_portal previewPortalRows[VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX];
     vm_mock_admin_scene_preview preview;
@@ -3289,6 +3262,7 @@ static void vm_mock_admin_render_content_page(char *response,
     u32 actorCount = 0;
     u32 xseCount = 0;
     u32 npcCount = 0;
+    u32 nativeNpcCount = 0;
     u32 previewNpcCount = 0;
     u32 previewNpcTotal = 0;
     u32 previewDynamicCount = 0;
@@ -3300,6 +3274,7 @@ static void vm_mock_admin_render_content_page(char *response,
     memset(actorFiles, 0, sizeof(actorFiles));
     memset(xseFiles, 0, sizeof(xseFiles));
     memset(npcRows, 0, sizeof(npcRows));
+    memset(nativeNpcRows, 0, sizeof(nativeNpcRows));
     memset(previewNpcRows, 0, sizeof(previewNpcRows));
     memset(previewPortalRows, 0, sizeof(previewPortalRows));
     memset(&preview, 0, sizeof(preview));
@@ -3349,6 +3324,8 @@ static void vm_mock_admin_render_content_page(char *response,
     {
         npcCount = vm_net_mock_dynamic_npc_admin_list(
             runtimeScene, npcRows, VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX);
+        nativeNpcCount = vm_net_mock_native_npc_admin_list(
+            runtimeScene, nativeNpcRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
         previewReady = vm_mock_admin_scene_preview_info(runtimeScene, &preview);
         previewNpcCount = vm_net_mock_collect_scene_npcinfo_seeds(
             runtimeScene, previewNpcRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX,
@@ -3367,13 +3344,13 @@ static void vm_mock_admin_render_content_page(char *response,
         ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
         ".logout{background:none;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
-        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
+        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-help{grid-column:1/-1;margin:0;color:#7a2e0e;font-size:12px}"
-        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
+        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}.native-section{margin:0 0 18px;padding:14px;border:1px solid #c7d7fe;border-radius:9px;background:#f5f8ff}.native-title{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.native-meta{margin:4px 0 10px;color:#475467;font-size:12px}.inventory{margin-top:10px;padding:10px;border:1px solid #d0d5dd;border-radius:7px;background:#fff}.inventory h4{margin:0 0 8px;font-size:14px}.inventory-row{display:grid;grid-template-columns:minmax(170px,1fr) 110px 100px 80px;gap:8px;align-items:end;padding:8px 0;border-top:1px solid #eaecf0}.inventory-row:first-of-type{border-top:0}.inventory-row .actions{margin:0}.item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-modal{position:fixed;inset:0;z-index:1001;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(820px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-head-actions{display:flex;gap:8px}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}"
         ".actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
-        "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
+        "<p class=\"sub\">场景资源、原生 NPC 覆盖与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a>"
@@ -3412,7 +3389,7 @@ static void vm_mock_admin_render_content_page(char *response,
     if (sceneCount == 0)
         vm_mock_admin_text_appendf(&page, "<span class=\"size\">未找到 SCE 文件</span>");
     vm_mock_admin_text_appendf(&page,
-        "</div></aside><section data-admin-detail><div class=\"card\"><h2>动态 NPC：");
+        "</div></aside><section data-admin-detail><div class=\"card\"><h2>场景 NPC 配置：");
     vm_mock_admin_text_append_html(&page,
                                    selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择场景");
     vm_mock_admin_text_appendf(
@@ -3530,10 +3507,7 @@ static void vm_mock_admin_render_content_page(char *response,
                 serviceNpc ? " service" : "", markerX, markerY);
             vm_mock_admin_text_append_html(&page, npcNameUtf8);
             vm_mock_admin_text_appendf(&page,
-                " · (%u,%u) · 朝向 %u %s · ",
-                seed->x, seed->y,
-                seed->orientation,
-                vm_mock_admin_orientation_name(seed->orientation));
+                " · (%u,%u) · ", seed->x, seed->y);
             vm_mock_admin_text_append_html(&page, seed->actorResource);
             vm_mock_admin_text_appendf(&page,
                 " · %s%s\"><span class=\"pin-name\">",
@@ -3544,13 +3518,8 @@ static void vm_mock_admin_render_content_page(char *response,
                 "</span><span class=\"sprite-wrap\"><img class=\"actor-sprite\" src=\"/actor-preview.svg?actor=%s\" alt=\"",
                 actorEncoded);
             vm_mock_admin_text_append_html(&page, npcNameUtf8);
-            vm_mock_admin_text_appendf(
-                &page,
-                " NPC 模型\"><span class=\"facing-badge\" title=\"朝向 %u %s\">%s%u</span></span></div>",
-                seed->orientation,
-                vm_mock_admin_orientation_name(seed->orientation),
-                vm_mock_admin_orientation_arrow(seed->orientation),
-                seed->orientation);
+            vm_mock_admin_text_appendf(&page,
+                " NPC 模型\"></span></div>");
         }
         vm_mock_admin_text_appendf(&page,
             "</div></div><div class=\"preview-legend\"><span class=\"legend-icon service\">人</span><span class=\"size\">服务端动态 NPC</span>"
@@ -3573,10 +3542,8 @@ static void vm_mock_admin_render_content_page(char *response,
                 serviceNpc ? " service" : "");
             vm_mock_admin_text_append_html(&page, npcNameUtf8);
             vm_mock_admin_text_appendf(
-                &page, " (%u,%u) · 朝向 %u %s · %s</span>",
-                seed->x, seed->y, seed->orientation,
-                vm_mock_admin_orientation_name(seed->orientation),
-                seed->actorResource);
+                &page, " (%u,%u) · %s</span>",
+                seed->x, seed->y, seed->actorResource);
         }
         if (previewNpcCount != 0)
             vm_mock_admin_text_appendf(&page, "</div>");
@@ -3640,7 +3607,104 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_appendf(&page,
             "<div class=\"preview-error\">该 SCE 引用的地图资源无法解析，暂时不能生成预览。</div>");
     }
-    vm_mock_admin_text_appendf(&page, "<div class=\"npc-list\">");
+    vm_mock_admin_text_appendf(&page,
+        "<div class=\"native-section\"><div class=\"native-title\"><h2>原生 NPC 覆盖</h2><span class=\"badge\">SCE 资源只读</span></div>"
+        "<p class=\"foot\">精确绑定当前场景和原生 Actor。仅保存服务类型与启用状态，不会改写 SCE/XSE、模型、坐标或名称；武器/防具/药品商人必须在下方配置专属库存与明确单价。</p>");
+    for (u32 i = 0; i < nativeNpcCount; ++i)
+    {
+        const vm_net_mock_native_npc_admin_row *row = &nativeNpcRows[i];
+        vm_net_mock_npc_shop_inventory_row inventory[64];
+        u32 inventoryCount = vm_net_mock_npc_shop_inventory_admin_list(
+            runtimeScene, row->seed.actorId, inventory, 64);
+        char displayUtf8[128];
+
+        memset(displayUtf8, 0, sizeof(displayUtf8));
+        vm_net_mock_gbk_label_to_utf8(row->seed.displayName, displayUtf8,
+                                      sizeof(displayUtf8));
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"npc%s\"><div class=\"npc-head\"><strong>",
+            row->enabled ? "" : " off");
+        vm_mock_admin_text_append_html(&page, displayUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "</strong><span><span class=\"badge\">原生 Actor %u</span> <span class=\"badge\">%s</span></span></div>"
+            "<div class=\"native-meta\">场景实体类型 %u · 坐标 (%u,%u) · Actor %s · XSE %s</div>"
+            "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-native-npc-override\"><input type=\"hidden\" name=\"scene\" value=\"",
+            row->seed.actorId, row->enabled ? "已启用" : "已停用",
+            row->seed.sceneEntityKind, row->seed.x, row->seed.y,
+            row->seed.actorResource,
+            row->seed.scriptName[0] ? row->seed.scriptName : "—");
+        vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><div class=\"fields\"><label class=\"field\"><span>服务类型</span>",
+            row->seed.actorId);
+        vm_mock_admin_render_npc_kind_select(&page, row->seed.kind);
+        vm_mock_admin_text_appendf(&page,
+            "</label><label class=\"field\"><span>启用状态</span><select name=\"enabled\"><option value=\"1\"%s>启用</option><option value=\"0\"%s>停用</option></select></label></div><div class=\"actions\"><button type=\"submit\">保存原生覆盖</button></div></form>",
+            row->enabled ? " selected" : "", row->enabled ? "" : " selected");
+        if (row->overridden)
+        {
+            vm_mock_admin_text_appendf(&page,
+                "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-native-npc-override\"><input type=\"hidden\" name=\"scene\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">恢复 SCE 默认服务</button></form>",
+                row->seed.actorId);
+        }
+        if (vm_net_mock_npc_service_kind_uses_inventory(row->seed.kind))
+        {
+            char pickerId[96];
+
+            vm_mock_admin_text_appendf(&page,
+                "<div class=\"inventory\"><h4>NPC 专属库存（%u）</h4>", inventoryCount);
+            for (u32 inventoryIndex = 0; inventoryIndex < inventoryCount;
+                 ++inventoryIndex)
+            {
+                const vm_net_mock_npc_shop_inventory_row *stock =
+                    &inventory[inventoryIndex];
+                const vm_net_mock_shop_catalog_item *item =
+                    vm_net_mock_find_shop_catalog_item(stock->itemId);
+                char itemNameUtf8[128];
+
+                memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+                if (item != NULL)
+                    vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                                  sizeof(itemNameUtf8));
+                vm_mock_admin_text_appendf(&page,
+                    "<div class=\"inventory-row\"><form method=\"post\" action=\"/action\" class=\"inventory-row\"><input type=\"hidden\" name=\"action\" value=\"save-native-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"");
+                vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+                vm_mock_admin_text_appendf(&page,
+                    "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"item_id\" value=\"%u\"><div><strong>[%u] ",
+                    row->seed.actorId, stock->itemId, stock->itemId);
+                vm_mock_admin_text_append_html(&page,
+                                               itemNameUtf8[0] ? itemNameUtf8 : "未知物品");
+                vm_mock_admin_text_appendf(&page,
+                    "</strong></div><label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" value=\"%u\" required></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select></label><div class=\"actions\"><button type=\"submit\">保存</button></div></form>"
+                    "<form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-native-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"",
+                    stock->unitPrice, stock->enabled ? " selected" : "",
+                    stock->enabled ? "" : " selected");
+                vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+                vm_mock_admin_text_appendf(&page,
+                    "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"item_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">移除</button></form></div>",
+                    row->seed.actorId, stock->itemId);
+            }
+            snprintf(pickerId, sizeof(pickerId), "native-stock-%u-new",
+                     row->seed.actorId);
+            vm_mock_admin_text_appendf(&page,
+                "<form method=\"post\" action=\"/action\" class=\"inventory-row\"><input type=\"hidden\" name=\"action\" value=\"save-native-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\">",
+                row->seed.actorId);
+            vm_mock_admin_render_item_picker_field(&page, pickerId, "item_id",
+                                                   "添加商品", 0, true);
+            vm_mock_admin_text_appendf(&page,
+                "<label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" required></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\" selected>上架</option><option value=\"0\">下架</option></select></label><div class=\"actions\"><button type=\"submit\">加入库存</button></div></form></div>");
+        }
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (nativeNpcCount == 0)
+        vm_mock_admin_text_appendf(&page, "<p class=\"size\">该场景没有可覆盖的 SCE 原生 NPC。</p>");
+    vm_mock_admin_text_appendf(&page, "</div><h2>动态 NPC</h2><div class=\"npc-list\">");
     for (u32 i = 0; i < npcCount; ++i)
     {
         const vm_net_mock_dynamic_npc_admin_row *row = &npcRows[i];
@@ -3676,9 +3740,7 @@ static void vm_mock_admin_render_content_page(char *response,
             row->seed.x, row->seed.y);
         vm_mock_admin_render_npc_kind_select(&page, row->seed.kind);
         vm_mock_admin_text_appendf(&page,
-            "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"%u\"></label></div>"
-            "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>",
-            row->seed.orientation);
+            "</label></div><label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
         vm_mock_admin_render_xse_select(&page, xseFiles, xseCount,
                                         row->seed.scriptName);
         vm_mock_admin_text_appendf(&page,
@@ -3713,6 +3775,9 @@ static void vm_mock_admin_render_content_page(char *response,
                 row->seed.actorId,
                 row->builtin ? "恢复内置默认" : "删除自定义 NPC");
         }
+        vm_mock_admin_render_npc_inventory(
+            &page, selectedSceneUtf8, runtimeScene, row->seed.actorId,
+            row->seed.kind, "dynamic-stock");
         vm_mock_admin_text_appendf(&page, "</div>");
     }
     if (npcCount == 0)
@@ -3735,8 +3800,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<label class=\"field\"><span>服务类型</span>");
     vm_mock_admin_render_npc_kind_select(&page, VM_NET_MOCK_NPC_KIND_NORMAL);
     vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\"><span>朝向</span><input type=\"number\" name=\"orientation\" min=\"0\" max=\"65535\" value=\"0\"></label></div>"
-        "<label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
+        "</label></div><label class=\"field\" style=\"margin-top:8px\"><span>XSE 脚本（可留空）</span>");
     vm_mock_admin_render_xse_select(&page, xseFiles, xseCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "</label><label class=\"field\" style=\"margin-top:8px\"><span>可接取任务（可留空；会校验等级与前置任务）</span>");
@@ -3749,6 +3813,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<p class=\"foot\">服务类型决定对话中的可操作入口：武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。装备回收商人仅列出背包中的装备，并按装备基础价值的 50% 回收为铜钱；已装备在角色身上的物品不会出现在回收列表。副本向导可独立启用场景传送、守关怪挑战或同时启用两者，并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div>");
     vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
+    vm_mock_admin_render_item_picker_modal(&page);
     vm_mock_admin_text_appendf(&page, "</section></div></main></body></html>");
 
     if (page.truncated)
@@ -3852,6 +3917,73 @@ static void vm_mock_admin_render_item_picker_field(
     }
     vm_mock_admin_text_appendf(
         page, "</span><small>分类搜索</small></button></div>");
+}
+
+/* Dedicated NPC stock is independent of the global mall catalog.  Reuse the
+ * same searchable picker so every item id is chosen from the canonical item
+ * directory, then persist the NPC-specific price and sale status. */
+static void vm_mock_admin_render_npc_inventory(
+    vm_mock_admin_text *page, const char *sceneUtf8, const char *runtimeScene,
+    u32 actorId, u16 serviceKind, const char *pickerPrefix)
+{
+    vm_net_mock_npc_shop_inventory_row rows[64];
+    u32 count = 0;
+
+    if (page == NULL || sceneUtf8 == NULL || runtimeScene == NULL ||
+        actorId == 0 || pickerPrefix == NULL ||
+        !vm_net_mock_npc_service_kind_uses_inventory(serviceKind))
+    {
+        return;
+    }
+    count = vm_net_mock_npc_shop_inventory_admin_list(runtimeScene, actorId,
+                                                       rows, 64);
+    vm_mock_admin_text_appendf(page,
+        "<div class=\"inventory\"><h4>NPC 专属库存（%u）</h4>", count);
+    for (u32 i = 0; i < count; ++i)
+    {
+        const vm_net_mock_npc_shop_inventory_row *stock = &rows[i];
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_find_shop_catalog_item(stock->itemId);
+        char itemNameUtf8[128];
+
+        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+        if (item != NULL)
+            vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                          sizeof(itemNameUtf8));
+        vm_mock_admin_text_appendf(page,
+            "<div class=\"inventory-row\"><form method=\"post\" action=\"/action\" class=\"inventory-row\"><input type=\"hidden\" name=\"action\" value=\"save-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"item_id\" value=\"%u\"><div><strong>[%u] ",
+            actorId, stock->itemId, stock->itemId);
+        vm_mock_admin_text_append_html(page,
+                                       itemNameUtf8[0] ? itemNameUtf8 : "未知物品");
+        vm_mock_admin_text_appendf(page,
+            "</strong></div><label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" value=\"%u\" required></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select></label><div class=\"actions\"><button type=\"submit\">保存</button></div></form><form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"",
+            stock->unitPrice, stock->enabled ? " selected" : "",
+            stock->enabled ? "" : " selected");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\"><input type=\"hidden\" name=\"item_id\" value=\"%u\"><button class=\"danger\" type=\"submit\">移除</button></form></div>",
+            actorId, stock->itemId);
+    }
+    {
+        char pickerId[96];
+
+        snprintf(pickerId, sizeof(pickerId), "%s-%u-new", pickerPrefix,
+                 actorId);
+        vm_mock_admin_text_appendf(page,
+            "<form method=\"post\" action=\"/action\" class=\"inventory-row\"><input type=\"hidden\" name=\"action\" value=\"save-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page,
+            "\"><input type=\"hidden\" name=\"actor_id\" value=\"%u\">",
+            actorId);
+        vm_mock_admin_render_item_picker_field(page, pickerId, "item_id",
+                                               "添加商品", 0, true);
+        vm_mock_admin_text_appendf(page,
+            "<label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" required></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\" selected>上架</option><option value=\"0\">下架</option></select></label><div class=\"actions\"><button type=\"submit\">加入库存</button></div></form>");
+    }
+    vm_mock_admin_text_appendf(page, "</div>");
 }
 
 /* Requirement IDs are polymorphic (item or monster).  Keep their numeric
@@ -5798,7 +5930,6 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 kind = 0;
     u32 taskId = 0;
     u32 taskRepeatable = 0;
-    u32 orientation = 0;
     u32 actorImageCount = 0;
     u32 instanceX = 0;
     u32 instanceY = 0;
@@ -5823,6 +5954,203 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "场景或 Actor ID 无效");
         return;
+    }
+
+    if (strcmp(action, "save-npc-inventory") == 0 ||
+        strcmp(action, "delete-npc-inventory") == 0)
+    {
+        vm_net_mock_dynamic_npc_admin_row dynamicRows[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+        vm_net_mock_native_npc_admin_row nativeRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+        u16 serviceKind = VM_NET_MOCK_NPC_KIND_NORMAL;
+        u32 dynamicCount = vm_net_mock_dynamic_npc_admin_list(
+            runtimeScene, dynamicRows, VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX);
+        u32 nativeCount = vm_net_mock_native_npc_admin_list(
+            runtimeScene, nativeRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
+        u32 itemId = 0;
+        u32 unitPrice = 0;
+        u32 enabled = 0;
+        bool found = false;
+
+        for (u32 i = 0; i < dynamicCount; ++i)
+        {
+            if (dynamicRows[i].seed.actorId == actorId)
+            {
+                serviceKind = dynamicRows[i].seed.kind;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            for (u32 i = 0; i < nativeCount; ++i)
+            {
+                if (nativeRows[i].seed.actorId == actorId)
+                {
+                    serviceKind = nativeRows[i].seed.kind;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found || !vm_net_mock_npc_service_kind_uses_inventory(serviceKind) ||
+            !vm_mock_admin_form_u32(body, "item_id", 0xffffffffu, &itemId) ||
+            itemId == 0)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "NPC、服务类型或物品参数无效");
+            return;
+        }
+        if (strcmp(action, "delete-npc-inventory") == 0)
+        {
+            if (!vm_net_mock_npc_shop_inventory_admin_delete(
+                    runtimeScene, actorId, itemId, &error))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               error ? error : "库存商品删除失败");
+                return;
+            }
+            vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                           "NPC 专属库存商品已移除");
+            return;
+        }
+        if (!vm_mock_admin_form_u32(body, "unit_price", 0xffffffffu,
+                                    &unitPrice) || unitPrice == 0 ||
+            !vm_mock_admin_form_u32(body, "enabled", 1, &enabled) ||
+            !vm_net_mock_npc_shop_inventory_admin_save(
+                runtimeScene, actorId, itemId, unitPrice, enabled != 0,
+                &error))
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           error ? error : "库存商品保存失败");
+            return;
+        }
+        vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                       "NPC 专属库存已保存");
+        return;
+    }
+
+    if (strcmp(action, "save-native-npc-override") == 0 ||
+        strcmp(action, "delete-native-npc-override") == 0 ||
+        strcmp(action, "save-native-npc-inventory") == 0 ||
+        strcmp(action, "delete-native-npc-inventory") == 0)
+    {
+        vm_net_mock_native_npc_admin_row nativeRows[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+        const vm_net_mock_native_npc_admin_row *nativeRow = NULL;
+        u32 nativeCount = vm_net_mock_native_npc_admin_list(
+            runtimeScene, nativeRows, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
+
+        for (u32 i = 0; i < nativeCount; ++i)
+        {
+            if (nativeRows[i].seed.actorId == actorId)
+            {
+                nativeRow = &nativeRows[i];
+                break;
+            }
+        }
+        if (nativeRow == NULL)
+        {
+            vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                           "该场景不存在对应的原生 NPC");
+            return;
+        }
+        if (strcmp(action, "delete-native-npc-override") == 0)
+        {
+            if (!vm_net_mock_native_npc_admin_delete_override(
+                    runtimeScene, actorId, &error))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               error ? error : "原生 NPC 覆盖删除失败");
+                return;
+            }
+            vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                           "已恢复 SCE 原生 NPC 默认服务");
+            return;
+        }
+        if (strcmp(action, "save-native-npc-override") == 0)
+        {
+            u32 enabled = 0;
+
+            if (!vm_mock_admin_form_u32(body, "kind",
+                                        VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
+                !vm_mock_admin_form_u32(body, "enabled", 1, &enabled))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "服务类型或启用状态无效");
+                return;
+            }
+            /* Instance entry needs a target-scene contract.  Preserve that
+             * richer configuration on dynamic NPCs rather than inventing
+             * target data for an immutable SCE actor. */
+            if (kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "原生 NPC 覆盖暂不支持副本向导；请使用动态 NPC 配置传送或挑战目标");
+                return;
+            }
+            if (!vm_net_mock_native_npc_admin_save_override(
+                    runtimeScene, actorId, (u16)kind, enabled != 0, &error))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               error ? error : "原生 NPC 覆盖保存失败");
+                return;
+            }
+            vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                           "原生 NPC 服务覆盖已保存");
+            return;
+        }
+        else
+        {
+            u32 itemId = 0;
+            u32 unitPrice = 0;
+            u32 enabled = 0;
+
+            if (!vm_net_mock_npc_service_kind_uses_inventory(
+                    nativeRow->seed.kind))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "当前服务类型不使用商品库存");
+                return;
+            }
+            if (!vm_mock_admin_form_u32(body, "item_id", 0xffffffffu,
+                                        &itemId) || itemId == 0)
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "物品参数无效");
+                return;
+            }
+            if (strcmp(action, "delete-native-npc-inventory") == 0)
+            {
+                if (!vm_net_mock_npc_shop_inventory_admin_delete(
+                        runtimeScene, actorId, itemId, &error))
+                {
+                    vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                                   error ? error : "库存商品删除失败");
+                    return;
+                }
+                vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                               "NPC 专属库存商品已移除");
+                return;
+            }
+            if (!vm_mock_admin_form_u32(body, "unit_price", 0xffffffffu,
+                                        &unitPrice) || unitPrice == 0 ||
+                !vm_mock_admin_form_u32(body, "enabled", 1, &enabled))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               "单价或上架状态无效");
+                return;
+            }
+            if (!vm_net_mock_npc_shop_inventory_admin_save(
+                    runtimeScene, actorId, itemId, unitPrice, enabled != 0,
+                    &error))
+            {
+                vm_mock_admin_redirect_content(client, sceneUtf8, "error",
+                                               error ? error : "库存商品保存失败");
+                return;
+            }
+            vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
+                                           "NPC 专属库存已保存");
+            return;
+        }
     }
 
     if (strcmp(action, "delete-npc-override") == 0)
@@ -5908,7 +6236,6 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "kind", VM_NET_MOCK_NPC_KIND_MAX, &kind) ||
         !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
         !vm_mock_admin_form_u32(body, "task_repeatable", 1, &taskRepeatable) ||
-        !vm_mock_admin_form_u32(body, "orientation", 0xffffu, &orientation) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
         !vm_mock_admin_form_value(body, "actor_resource", actorResource,
@@ -6053,7 +6380,6 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.kind = (u16)kind;
     seed.taskId = taskId;
     seed.taskRepeatable = taskRepeatable != 0;
-    seed.orientation = (u16)orientation;
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;
     seed.challengeEnemyId = challengeEnemyId;
@@ -6441,7 +6767,13 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     }
     if (strcmp(action, "save-npc") == 0 ||
         strcmp(action, "toggle-npc") == 0 ||
-        strcmp(action, "delete-npc-override") == 0)
+        strcmp(action, "delete-npc-override") == 0 ||
+        strcmp(action, "save-npc-inventory") == 0 ||
+        strcmp(action, "delete-npc-inventory") == 0 ||
+        strcmp(action, "save-native-npc-override") == 0 ||
+        strcmp(action, "delete-native-npc-override") == 0 ||
+        strcmp(action, "save-native-npc-inventory") == 0 ||
+        strcmp(action, "delete-native-npc-inventory") == 0)
     {
         vm_mock_admin_handle_npc_action(client, action, body);
         return;

@@ -2071,6 +2071,18 @@ typedef struct
     char scene[64];
 } vm_mock_service_task_offer_context;
 
+/* A service follow-up (26/1) only contains a private menu value.  Bind it to
+ * the actor that produced the preceding native dialog so merchandise and
+ * prices cannot bleed between NPCs or clients. */
+typedef struct
+{
+    bool active;
+    u32 roleId;
+    u32 actorId;
+    u16 serviceKind;
+    char scene[64];
+} vm_mock_service_npc_context;
+
 typedef struct vm_mock_service_client_session
 {
     u32 clientId;
@@ -2172,6 +2184,7 @@ typedef struct vm_mock_service_client_session
      * 6/4 submit cannot silently lose the NPC that authorized it. */
     vm_mock_service_task_offer_context
         taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
+    vm_mock_service_npc_context npcServiceContext;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -5189,7 +5202,13 @@ typedef struct
     u32 challengeEnemyId;
     u16 x;
     u16 y;
+    /* `kind` is the server service contract (merchant/repair/trainer/etc.).
+     * SCE's leading word is an entity/resource record kind, not a service
+     * type, and is retained separately for source inspection. */
     u16 kind;
+    u16 sceneEntityKind;
+    /* Source-only SCE/legacy-DB metadata.  WT 27/11 has no orientation
+     * field, so it must never be presented as a client-visible NPC setting. */
     u16 orientation;
     u16 instanceX;
     u16 instanceY;
@@ -5198,6 +5217,7 @@ typedef struct
     char displayName[32];
     char scriptName[64];
     char instanceScene[64];
+    bool nativeSceneActor;
 } vm_net_mock_scene_npcinfo_seed;
 
 typedef struct

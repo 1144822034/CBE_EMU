@@ -326,7 +326,8 @@ static bool vm_net_mock_build_scene_npcinfo_blob(
          * registered into the scene node's visual slot. The emulator resolves
          * a missing published Actor/GIF through WT 18/7 before returning the
          * file-open failure to this parser, so all catalog rows are safe to
-         * deliver in the initial scene lifecycle. */
+         * deliver in the initial scene lifecycle.  There is deliberately no
+         * orientation field: the client parser has no such slot. */
         if (!vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->actorId) ||
             !vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->x) ||
             !vm_net_mock_seq_put_u32(npcInfo, npcInfoCap, &npcInfoLen, seed->y) ||
@@ -3348,6 +3349,61 @@ static const char *vm_net_mock_npc_dialog_text(u32 actorId)
     }
 }
 
+static bool vm_net_mock_npc_service_kind_uses_inventory(u16 serviceKind)
+{
+    return serviceKind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT ||
+           serviceKind == VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT ||
+           serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT;
+}
+
+static void vm_net_mock_npc_service_context_record(
+    vm_mock_service_client_session *session, const vm_net_mock_role_state *role,
+    const char *scene, const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    if (session == NULL)
+        return;
+    memset(&session->npcServiceContext, 0,
+           sizeof(session->npcServiceContext));
+    if (role == NULL || scene == NULL || seed == NULL || seed->actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return;
+    }
+    session->npcServiceContext.active = true;
+    session->npcServiceContext.roleId = role->roleId;
+    session->npcServiceContext.actorId = seed->actorId;
+    session->npcServiceContext.serviceKind = seed->kind;
+    snprintf(session->npcServiceContext.scene,
+             sizeof(session->npcServiceContext.scene), "%s", scene);
+}
+
+static const vm_mock_service_npc_context *
+vm_net_mock_npc_service_context_get(const vm_mock_service_client_session *session,
+                                    const vm_net_mock_role_state *role)
+{
+    const char *scene = vm_net_mock_current_scene_name();
+
+    if (session == NULL || role == NULL ||
+        !session->npcServiceContext.active ||
+        session->npcServiceContext.roleId != role->roleId || scene == NULL ||
+        strcmp(session->npcServiceContext.scene, scene) != 0)
+    {
+        return NULL;
+    }
+    return &session->npcServiceContext;
+}
+
+static bool vm_net_mock_npc_shop_selector_allowed_for_service(
+    u32 selector, u16 serviceKind)
+{
+    if (serviceKind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)
+        return selector >= 8u && selector <= 10u;
+    if (serviceKind == VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)
+        return selector >= 1u && selector <= 7u;
+    return serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT &&
+           selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR;
+}
+
 static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestLen,
                                                  u8 *out, u32 outCap)
 {
@@ -3381,6 +3437,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     u32 dialogLen = 0;
     u32 pos = 5;
     u32 objectStart = 0;
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
 
     if (!vm_net_mock_is_npc_dialog_request(request, requestLen, &actorId, &index) ||
         out == NULL || outCap < pos)
@@ -3737,6 +3795,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
         serviceOptionCount = serviceOptionValue != 0 ? 1 : 0;
     }
+    /* A nested private service request does not carry actor identity.  Record
+     * the exact clicked NPC only when we actually exposed its service option;
+     * any ordinary dialog clears stale merchant context. */
+    vm_net_mock_npc_service_context_record(
+        session, activeRole, scene,
+        serviceOptionCount != 0 ? matchedSeed : NULL);
 
     /* ParseNPCDialogData(0x010380E8) consumes the raw sequence as:
      * dialog-kind:u8, main-text:string, option-count:u8, then each option as
@@ -3850,7 +3914,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             scene);
     }
 
-    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u npc_kind=%u service_action=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
+    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u service_kind=%u scene_entity_kind=%u native=%u service_action=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
            actorId,
            index,
            matchedSeed && matchedSeed->displayName[0] ? matchedSeed->displayName : "-",
@@ -3858,6 +3922,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
            scene ? scene : "-",
            matchedSeed ? 1u : 0u,
            matchedSeed ? matchedSeed->kind : 0u,
+           matchedSeed ? matchedSeed->sceneEntityKind : 0u,
+           matchedSeed && matchedSeed->nativeSceneActor ? 1u : 0u,
            serviceOptionValue,
            (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u) + optionCount,
            taskAlreadyAccepted ? 1u : 0u,
@@ -3897,22 +3963,45 @@ static u32 vm_net_mock_npc_shop_selector_for_item(
 }
 
 static bool vm_net_mock_npc_shop_item_matches_selector(
-    const vm_net_mock_shop_catalog_item *item, u32 selector)
+    const vm_net_mock_shop_catalog_item *item, u32 selector,
+    const vm_mock_service_npc_context *context, u32 *unitPriceOut)
 {
+    const vm_net_mock_npc_shop_inventory_row *inventory = NULL;
+
+    if (unitPriceOut)
+        *unitPriceOut = 0;
     if (item == NULL || !item->enabled ||
-        item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+        item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+        context == NULL || !vm_net_mock_npc_service_kind_uses_inventory(
+                               context->serviceKind) ||
+        !vm_net_mock_npc_shop_selector_allowed_for_service(
+            selector, context->serviceKind))
     {
         return false;
     }
+    inventory = vm_net_mock_npc_shop_inventory_find_exact(
+        context->scene, context->actorId, item->itemId);
+    if (inventory == NULL || !inventory->enabled || inventory->unitPrice == 0)
+        return false;
     if (selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR)
-        return !item->isEquip && item->category == 10;
-    return selector >= 1u && selector <= 10u && item->isEquip &&
-           item->category == selector - 1u &&
-           vm_net_mock_equipment_slot_for_category(item->category) <
-               VM_NET_MOCK_EQUIP_SLOT_COUNT;
+    {
+        if (item->isEquip || item->category != 10)
+            return false;
+    }
+    else if (!(selector >= 1u && selector <= 10u && item->isEquip &&
+               item->category == selector - 1u &&
+               vm_net_mock_equipment_slot_for_category(item->category) <
+                   VM_NET_MOCK_EQUIP_SLOT_COUNT))
+    {
+        return false;
+    }
+    if (unitPriceOut)
+        *unitPriceOut = inventory->unitPrice;
+    return true;
 }
 
-static u32 vm_net_mock_npc_shop_selector_total(u32 selector)
+static u32 vm_net_mock_npc_shop_selector_total(
+    u32 selector, const vm_mock_service_npc_context *context)
 {
     u32 total = 0;
 
@@ -3921,7 +4010,7 @@ static u32 vm_net_mock_npc_shop_selector_total(u32 selector)
     for (u32 i = 0; i < vm_net_mock_load_shop_catalog(); ++i)
     {
         if (vm_net_mock_npc_shop_item_matches_selector(
-                &g_vm_net_mock_shop_catalog[i], selector))
+                &g_vm_net_mock_shop_catalog[i], selector, context, NULL))
         {
             ++total;
         }
@@ -3930,20 +4019,31 @@ static u32 vm_net_mock_npc_shop_selector_total(u32 selector)
 }
 
 static const vm_net_mock_shop_catalog_item *
-vm_net_mock_npc_shop_selector_item_at(u32 selector, u32 ordinal)
+vm_net_mock_npc_shop_selector_item_at(
+    u32 selector, u32 ordinal, const vm_mock_service_npc_context *context,
+    u32 *unitPriceOut)
 {
     u32 seen = 0;
 
+    if (unitPriceOut)
+        *unitPriceOut = 0;
     if (!vm_net_mock_npc_shop_selector_is_valid(selector))
         return NULL;
     for (u32 i = 0; i < vm_net_mock_load_shop_catalog(); ++i)
     {
         const vm_net_mock_shop_catalog_item *item =
             &g_vm_net_mock_shop_catalog[i];
-        if (!vm_net_mock_npc_shop_item_matches_selector(item, selector))
+        u32 unitPrice = 0;
+
+        if (!vm_net_mock_npc_shop_item_matches_selector(item, selector,
+                                                        context, &unitPrice))
             continue;
         if (seen++ == ordinal)
+        {
+            if (unitPriceOut)
+                *unitPriceOut = unitPrice;
             return item;
+        }
     }
     return NULL;
 }
@@ -4166,16 +4266,25 @@ static const vm_net_mock_scene_npcinfo_seed *
 vm_net_mock_instance_guide_seed(u32 actorId)
 {
     const char *scene = vm_net_mock_current_scene_name();
-    int index = vm_net_mock_dynamic_npc_find_override(scene, actorId);
+    static vm_net_mock_scene_npcinfo_seed resolved[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    u32 selected = 0;
 
-    if (index < 0 ||
-        g_vm_net_mock_dynamic_npc_overrides[index].seed.kind !=
-            VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE ||
-        !g_vm_net_mock_dynamic_npc_overrides[index].enabled)
+    if (scene == NULL || actorId == 0)
     {
         return NULL;
     }
-    return &g_vm_net_mock_dynamic_npc_overrides[index].seed;
+    memset(resolved, 0, sizeof(resolved));
+    selected = vm_net_mock_select_scene_npcinfo_seeds(
+        scene, resolved, VM_NET_MOCK_SCENE_NPCINFO_MAX, NULL, NULL);
+    for (u32 i = 0; i < selected; ++i)
+    {
+        if (resolved[i].actorId == actorId &&
+            resolved[i].kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+        {
+            return &resolved[i];
+        }
+    }
+    return NULL;
 }
 
 static u32 vm_net_mock_build_instance_enter_response(
@@ -4511,6 +4620,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 skillLevelLockedCount = 0;
     const vm_net_mock_skill_catalog_item *skillNextLocked = NULL;
     const vm_net_mock_scene_npcinfo_seed *instanceSeed = NULL;
+    const vm_mock_service_npc_context *shopContext = NULL;
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
 
@@ -4528,6 +4638,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     memset(optionValues, 0, sizeof(optionValues));
     operation = serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK;
     value = serviceValue & VM_NET_MOCK_NPC_SERVICE_VALUE_MASK;
+    shopContext = vm_net_mock_npc_service_context_get(session, role);
 
     if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
@@ -4609,37 +4720,65 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         static const u8 weaponSelectors[] = {8, 9, 10};
 
         action = "weapon-categories";
-        dialogText =
-            "\xc7\xeb\xd1\xa1\xd4\xf1\xce\xe4\xc6\xf7\xc0\xe0\xd0\xcd\xa3\xba"; /* 请选择武器类型： */
-        for (u32 i = 0; i < sizeof(weaponSelectors); ++i)
+        if (shopContext == NULL || shopContext->serviceKind !=
+                                       VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)
         {
-            u32 selector = weaponSelectors[i];
-            optionNames[optionCount] =
-                vm_net_mock_npc_shop_selector_name(selector);
-            optionDescriptions[optionCount] =
-                "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
-            ++optionCount;
+            dialogText =
+                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+        }
+        else
+        {
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xce\xe4\xc6\xf7\xc0\xe0\xd0\xcd\xa3\xba"; /* 请选择武器类型： */
+            for (u32 i = 0; i < sizeof(weaponSelectors); ++i)
+            {
+                u32 selector = weaponSelectors[i];
+                if (vm_net_mock_npc_shop_selector_total(selector, shopContext) == 0)
+                    continue;
+                optionNames[optionCount] =
+                    vm_net_mock_npc_shop_selector_name(selector);
+                optionDescriptions[optionCount] =
+                    "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
+                ++optionCount;
+            }
+            if (optionCount == 0)
+                dialogText =
+                    "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
         }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR)
     {
         action = "armor-categories";
-        dialogText =
-            "\xc7\xeb\xd1\xa1\xd4\xf1\xb7\xc0\xbe\xdf\xc0\xe0\xd0\xcd\xa3\xba"; /* 请选择防具类型： */
-        for (u32 selector = 1;
-             selector <= 7 &&
-             optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
-             ++selector)
+        if (shopContext == NULL || shopContext->serviceKind !=
+                                       VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)
         {
-            optionNames[optionCount] =
-                vm_net_mock_npc_shop_selector_name(selector);
-            optionDescriptions[optionCount] =
-                "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
-            ++optionCount;
+            dialogText =
+                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+        }
+        else
+        {
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xb7\xc0\xbe\xdf\xc0\xe0\xd0\xcd\xa3\xba"; /* 请选择防具类型： */
+            for (u32 selector = 1;
+                 selector <= 7 &&
+                 optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                 ++selector)
+            {
+                if (vm_net_mock_npc_shop_selector_total(selector, shopContext) == 0)
+                    continue;
+                optionNames[optionCount] =
+                    vm_net_mock_npc_shop_selector_name(selector);
+                optionDescriptions[optionCount] =
+                    "\xb2\xe9\xbf\xb4\xb8\xc3\xc0\xe0\xc9\xcc\xc6\xb7"; /* 查看该类商品 */
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE | selector;
+                ++optionCount;
+            }
+            if (optionCount == 0)
+                dialogText =
+                    "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
         }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE ||
@@ -4652,6 +4791,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         u32 page = 0;
         u32 total = 0;
         u32 start = 0;
+        u32 unitPrice = 0;
         bool buyRequest = operation == VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE ||
                           operation == VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE;
         bool legacyWeaponBuy =
@@ -4676,7 +4816,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 selector = 0;
         }
 
-        if (!vm_net_mock_npc_shop_selector_is_valid(selector))
+        if (!vm_net_mock_npc_shop_selector_is_valid(selector) ||
+            shopContext == NULL ||
+            !vm_net_mock_npc_shop_selector_allowed_for_service(
+                selector, shopContext->serviceKind))
         {
             dialogText =
                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
@@ -4691,12 +4834,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         if (buyRequest)
         {
             if (buyItem == NULL ||
-                !vm_net_mock_npc_shop_item_matches_selector(buyItem, selector))
+                !vm_net_mock_npc_shop_item_matches_selector(
+                    buyItem, selector, shopContext, &unitPrice))
             {
                 dialogText =
                     "\xb8\xc3\xc9\xcc\xc6\xb7\xd2\xd1\xcf\xc2\xbc\xdc\xa1\xa3"; /* 该商品已下架。 */
             }
-            else if (role->money < buyItem->price)
+            else if (role->money < unitPrice)
             {
                 dialogText =
                     "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 铜钱不足，无法购买。 */
@@ -4709,13 +4853,13 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                  * instead of refunding only money in RAM after the item has
                  * already reached MySQL. */
                 vm_net_mock_role_state purchaseBefore = *role;
-                role->money -= buyItem->price;
+                role->money -= unitPrice;
                 if (!vm_net_mock_role_add_backpack_item_to_role(
                         role, buyItem->itemId, 1, &backpackAddSeq,
                         buyItem->isEquip ? "npc-equipment-buy"
                                          : "npc-medicine-buy"))
                 {
-                    role->money += buyItem->price;
+                    role->money += unitPrice;
                     dialogText =
                         "\xb1\xb3\xb0\xfc\xd2\xd1\xc2\xfa\xa3\xac\xce\xde\xb7\xa8\xb9\xba\xc2\xf2\xa1\xa3"; /* 背包已满，无法购买。 */
                 }
@@ -4766,7 +4910,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             page = 0;
         }
 
-        total = vm_net_mock_npc_shop_selector_total(selector);
+        total = vm_net_mock_npc_shop_selector_total(selector, shopContext);
         start = page * VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS;
         if (total != 0 && start >= total)
         {
@@ -4780,7 +4924,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
              ++ordinal)
         {
             const vm_net_mock_shop_catalog_item *item =
-                vm_net_mock_npc_shop_selector_item_at(selector, ordinal);
+                vm_net_mock_npc_shop_selector_item_at(selector, ordinal,
+                                                      shopContext, &unitPrice);
             const vm_net_mock_equipment_catalog_item *equipment = NULL;
             const vm_net_mock_item_effect_catalog_item *effect = NULL;
             u32 levelRequired = 1;
@@ -4801,7 +4946,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             }
             snprintf(optionNameStorage[optionCount],
                      sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
-                     "\xb9\xba\xc2\xf2", item->name, item->price,
+                     "\xb9\xba\xc2\xf2", item->name, unitPrice,
                      "\xcd\xad"); /* 购买...铜 */
             snprintf(optionDescriptionStorage[optionCount],
                      sizeof(optionDescriptionStorage[optionCount]),

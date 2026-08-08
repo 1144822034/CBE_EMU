@@ -114,8 +114,13 @@ static bool vm_net_mock_parse_sce_interactive_npc_at(const u8 *data, u32 len, u3
     if (data == NULL || seedOut == NULL || off + 8 > len)
         return false;
     memset(&seed, 0, sizeof(seed));
-    seed.kind = vm_net_mock_read_le16_at(data, pos);
-    if (seed.kind > 32)
+    seed.sceneEntityKind = vm_net_mock_read_le16_at(data, pos);
+    /* The first SCE word is the scene entity/resource kind.  It describes
+     * how the map instantiates the actor and must never be interpreted as the
+     * server-side merchant/service enum. */
+    seed.kind = VM_NET_MOCK_NPC_KIND_NORMAL;
+    seed.nativeSceneActor = true;
+    if (seed.sceneEntityKind > 32)
         return false;
     pos += 2;
     if (!vm_net_mock_read_sce_string_field(data, len, &pos, 3,
@@ -565,7 +570,12 @@ static bool vm_net_mock_scene_is_linan_south_gate(const char *scene)
 
 enum
 {
-    VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX = 256
+    VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX = 256,
+    /* Native SCE actors are immutable resource data.  These tables contain
+     * only server-owned overlays keyed by the exact runtime scene filename
+     * and the deterministic actor id derived from that source row. */
+    VM_NET_MOCK_NATIVE_NPC_OVERRIDE_MAX = 512,
+    VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX = 4096
 };
 
 typedef struct
@@ -582,6 +592,30 @@ typedef struct
     bool builtin;
     bool overridden;
 } vm_net_mock_dynamic_npc_admin_row;
+
+typedef struct
+{
+    vm_net_mock_scene_npcinfo_seed seed;
+    bool enabled;
+    bool overridden;
+} vm_net_mock_native_npc_admin_row;
+
+typedef struct
+{
+    char scene[64];
+    u32 actorId;
+    u16 serviceKind;
+    bool enabled;
+} vm_net_mock_native_npc_override;
+
+typedef struct
+{
+    char scene[64];
+    u32 actorId;
+    u32 itemId;
+    u32 unitPrice;
+    bool enabled;
+} vm_net_mock_npc_shop_inventory_row;
 
 typedef struct
 {
@@ -615,6 +649,14 @@ static vm_net_mock_dynamic_npc_override
 static u32 g_vm_net_mock_dynamic_npc_override_count = 0;
 static bool g_vm_net_mock_dynamic_npc_db_loaded = false;
 static bool g_vm_net_mock_dynamic_npc_db_valid = false;
+static vm_net_mock_native_npc_override
+    g_vm_net_mock_native_npc_overrides[VM_NET_MOCK_NATIVE_NPC_OVERRIDE_MAX];
+static u32 g_vm_net_mock_native_npc_override_count = 0;
+static vm_net_mock_npc_shop_inventory_row
+    g_vm_net_mock_npc_shop_inventory[VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX];
+static u32 g_vm_net_mock_npc_shop_inventory_count = 0;
+static bool g_vm_net_mock_native_npc_db_loaded = false;
+static bool g_vm_net_mock_native_npc_db_valid = false;
 
 static bool vm_net_mock_dynamic_npc_decode_hex(const char *value, size_t valueLen,
                                                char *out, size_t outCap)
@@ -628,6 +670,427 @@ static bool vm_net_mock_dynamic_npc_decode_hex(const char *value, size_t valueLe
         return false;
     }
     out[decodedLen] = 0;
+    return true;
+}
+
+static bool vm_net_mock_native_npc_override_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_native_npc_override row;
+    u32 number[3];
+
+    (void)contextValue;
+    memset(&row, 0, sizeof(row));
+    memset(number, 0, sizeof(number));
+    if (columnCount != 4 ||
+        g_vm_net_mock_native_npc_override_count >=
+            VM_NET_MOCK_NATIVE_NPC_OVERRIDE_MAX ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0], row.scene,
+                                            sizeof(row.scene)) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[0]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &number[1]) ||
+        number[1] > VM_NET_MOCK_NPC_KIND_MAX ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &number[2]) ||
+        number[2] > 1u || row.scene[0] == 0 || number[0] == 0)
+    {
+        printf("[warn][mock-admin] native_npc_override_row action=skip-invalid\n");
+        return true;
+    }
+    row.actorId = number[0];
+    row.serviceKind = (u16)number[1];
+    row.enabled = number[2] != 0;
+    g_vm_net_mock_native_npc_overrides[
+        g_vm_net_mock_native_npc_override_count++] = row;
+    return true;
+}
+
+static bool vm_net_mock_npc_shop_inventory_db_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_npc_shop_inventory_row row;
+    u32 number[4];
+
+    (void)contextValue;
+    memset(&row, 0, sizeof(row));
+    memset(number, 0, sizeof(number));
+    if (columnCount != 5 ||
+        g_vm_net_mock_npc_shop_inventory_count >=
+            VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0], row.scene,
+                                            sizeof(row.scene)) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[0]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &number[1]) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &number[2]) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &number[3]) ||
+        number[0] == 0 || number[1] == 0 || number[2] == 0 ||
+        number[3] > 1u || row.scene[0] == 0)
+    {
+        printf("[warn][mock-admin] npc_shop_inventory_row action=skip-invalid\n");
+        return true;
+    }
+    row.actorId = number[0];
+    row.itemId = number[1];
+    row.unitPrice = number[2];
+    row.enabled = number[3] != 0;
+    g_vm_net_mock_npc_shop_inventory[
+        g_vm_net_mock_npc_shop_inventory_count++] = row;
+    return true;
+}
+
+static bool vm_net_mock_native_npc_db_load(void)
+{
+    if (g_vm_net_mock_native_npc_db_loaded)
+        return g_vm_net_mock_native_npc_db_valid;
+    g_vm_net_mock_native_npc_db_loaded = true;
+    g_vm_net_mock_native_npc_db_valid = false;
+    g_vm_net_mock_native_npc_override_count = 0;
+    g_vm_net_mock_npc_shop_inventory_count = 0;
+    memset(g_vm_net_mock_native_npc_overrides, 0,
+           sizeof(g_vm_net_mock_native_npc_overrides));
+    memset(g_vm_net_mock_npc_shop_inventory, 0,
+           sizeof(g_vm_net_mock_npc_shop_inventory));
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_native_npc_overrides ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "service_kind SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_npc_shop_inventory ("
+            "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+            "item_id INT UNSIGNED NOT NULL,unit_price INT UNSIGNED NOT NULL,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(scene,actor_id,item_id),"
+            "KEY idx_server_npc_shop_inventory_npc(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_mysql_query(
+            "SELECT HEX(scene),actor_id,service_kind,enabled "
+            "FROM server_native_npc_overrides ORDER BY scene,actor_id",
+            vm_net_mock_native_npc_override_row, NULL) ||
+        !vm_mysql_query(
+            "SELECT HEX(scene),actor_id,item_id,unit_price,enabled "
+            "FROM server_npc_shop_inventory ORDER BY scene,actor_id,item_id",
+            vm_net_mock_npc_shop_inventory_db_row, NULL))
+    {
+        printf("[error][mock-admin] native_npc_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_native_npc_db_valid = true;
+    printf("[info][mock-admin] native_npc_db_load overrides=%u inventory=%u\n",
+           g_vm_net_mock_native_npc_override_count,
+           g_vm_net_mock_npc_shop_inventory_count);
+    return true;
+}
+
+static int vm_net_mock_native_npc_override_find_exact(const char *scene,
+                                                       u32 actorId)
+{
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0)
+        return -1;
+    for (u32 i = 0; i < g_vm_net_mock_native_npc_override_count; ++i)
+    {
+        if (g_vm_net_mock_native_npc_overrides[i].actorId == actorId &&
+            strcmp(g_vm_net_mock_native_npc_overrides[i].scene, scene) == 0)
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* The base actor remains wholly owned by its SCE/XSE.  This applies only the
+ * server service contract and enabled state stored in the explicit overlay. */
+static bool vm_net_mock_native_npc_override_apply(const char *scene,
+                                                  vm_net_mock_scene_npcinfo_seed *seed)
+{
+    int index = -1;
+
+    if (scene == NULL || seed == NULL || !seed->nativeSceneActor ||
+        seed->actorId == 0)
+    {
+        return false;
+    }
+    index = vm_net_mock_native_npc_override_find_exact(scene, seed->actorId);
+    if (index < 0)
+        return true;
+    if (!g_vm_net_mock_native_npc_overrides[index].enabled)
+        return false;
+    seed->kind = g_vm_net_mock_native_npc_overrides[index].serviceKind;
+    return true;
+}
+
+static const vm_net_mock_npc_shop_inventory_row *
+vm_net_mock_npc_shop_inventory_find_exact(const char *scene, u32 actorId,
+                                          u32 itemId)
+{
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        itemId == 0)
+    {
+        return NULL;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count; ++i)
+    {
+        const vm_net_mock_npc_shop_inventory_row *row =
+            &g_vm_net_mock_npc_shop_inventory[i];
+        if (row->actorId == actorId && row->itemId == itemId &&
+            strcmp(row->scene, scene) == 0)
+        {
+            return row;
+        }
+    }
+    return NULL;
+}
+
+static u32 vm_net_mock_npc_shop_inventory_admin_list(
+    const char *scene, u32 actorId, vm_net_mock_npc_shop_inventory_row *rows,
+    u32 rowCap)
+{
+    u32 count = 0;
+
+    if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
+        rows == NULL || rowCap == 0)
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count && count < rowCap;
+         ++i)
+    {
+        if (g_vm_net_mock_npc_shop_inventory[i].actorId == actorId &&
+            strcmp(g_vm_net_mock_npc_shop_inventory[i].scene, scene) == 0)
+        {
+            rows[count++] = g_vm_net_mock_npc_shop_inventory[i];
+        }
+    }
+    return count;
+}
+
+static bool vm_net_mock_native_npc_admin_save_override(
+    const char *scene, u32 actorId, u16 serviceKind, bool enabled,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_native_npc_overrides[0].scene) * 2 + 1];
+    char query[768];
+    vm_net_mock_native_npc_override row;
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "native NPC override is invalid";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
+        serviceKind > VM_NET_MOCK_NPC_KIND_MAX ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    existing = vm_net_mock_native_npc_override_find_exact(scene, actorId);
+    if (existing < 0 && g_vm_net_mock_native_npc_override_count >=
+                            VM_NET_MOCK_NATIVE_NPC_OVERRIDE_MAX)
+    {
+        if (errorOut)
+            *errorOut = "native NPC override catalog is full";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_native_npc_overrides(scene,actor_id,service_kind,enabled) "
+             "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "service_kind=VALUES(service_kind),enabled=VALUES(enabled)",
+             sceneHex, actorId, serviceKind, enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&row, 0, sizeof(row));
+    snprintf(row.scene, sizeof(row.scene), "%s", scene);
+    row.actorId = actorId;
+    row.serviceKind = serviceKind;
+    row.enabled = enabled;
+    if (existing >= 0)
+        g_vm_net_mock_native_npc_overrides[existing] = row;
+    else
+        g_vm_net_mock_native_npc_overrides[
+            g_vm_net_mock_native_npc_override_count++] = row;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] native_npc_override_save scene=%s actor=%u service=%u enabled=%u\n",
+           scene, actorId, serviceKind, enabled ? 1u : 0u);
+    return true;
+}
+
+static bool vm_net_mock_native_npc_admin_delete_override(
+    const char *scene, u32 actorId, const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_native_npc_overrides[0].scene) * 2 + 1];
+    char query[512];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "native NPC override not found";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    existing = vm_net_mock_native_npc_override_find_exact(scene, actorId);
+    if (existing < 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_native_npc_overrides "
+             "WHERE scene=X'%s' AND actor_id=%u", sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if ((u32)existing + 1 < g_vm_net_mock_native_npc_override_count)
+    {
+        memmove(&g_vm_net_mock_native_npc_overrides[existing],
+                &g_vm_net_mock_native_npc_overrides[existing + 1],
+                (g_vm_net_mock_native_npc_override_count - (u32)existing - 1) *
+                    sizeof(g_vm_net_mock_native_npc_overrides[0]));
+    }
+    --g_vm_net_mock_native_npc_override_count;
+    memset(&g_vm_net_mock_native_npc_overrides[
+               g_vm_net_mock_native_npc_override_count],
+           0, sizeof(g_vm_net_mock_native_npc_overrides[0]));
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] native_npc_override_delete scene=%s actor=%u\n",
+           scene, actorId);
+    return true;
+}
+
+static bool vm_net_mock_npc_shop_inventory_admin_save(
+    const char *scene, u32 actorId, u32 itemId, u32 unitPrice, bool enabled,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_npc_shop_inventory[0].scene) * 2 + 1];
+    char query[768];
+    vm_net_mock_npc_shop_inventory_row row;
+    const vm_net_mock_shop_catalog_item *item = NULL;
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "NPC shop inventory is invalid";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 || itemId == 0 ||
+        unitPrice == 0 ||
+        (item = vm_net_mock_find_shop_catalog_item(itemId)) == NULL ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        if (errorOut && itemId != 0 && item == NULL)
+            *errorOut = "物品目录中不存在该物品";
+        return false;
+    }
+    existing = -1;
+    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count; ++i)
+    {
+        if (g_vm_net_mock_npc_shop_inventory[i].actorId == actorId &&
+            g_vm_net_mock_npc_shop_inventory[i].itemId == itemId &&
+            strcmp(g_vm_net_mock_npc_shop_inventory[i].scene, scene) == 0)
+        {
+            existing = (int)i;
+            break;
+        }
+    }
+    if (existing < 0 && g_vm_net_mock_npc_shop_inventory_count >=
+                            VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX)
+    {
+        if (errorOut)
+            *errorOut = "NPC 专属库存已满";
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_npc_shop_inventory(scene,actor_id,item_id,unit_price,enabled) "
+             "VALUES(X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "unit_price=VALUES(unit_price),enabled=VALUES(enabled)",
+             sceneHex, actorId, itemId, unitPrice, enabled ? 1u : 0u);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    memset(&row, 0, sizeof(row));
+    snprintf(row.scene, sizeof(row.scene), "%s", scene);
+    row.actorId = actorId;
+    row.itemId = itemId;
+    row.unitPrice = unitPrice;
+    row.enabled = enabled;
+    if (existing >= 0)
+        g_vm_net_mock_npc_shop_inventory[existing] = row;
+    else
+        g_vm_net_mock_npc_shop_inventory[
+            g_vm_net_mock_npc_shop_inventory_count++] = row;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] npc_shop_inventory_save scene=%s actor=%u item=%u price=%u enabled=%u\n",
+           scene, actorId, itemId, unitPrice, enabled ? 1u : 0u);
+    return true;
+}
+
+static bool vm_net_mock_npc_shop_inventory_admin_delete(
+    const char *scene, u32 actorId, u32 itemId, const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_npc_shop_inventory[0].scene) * 2 + 1];
+    char query[640];
+    int existing = -1;
+
+    if (errorOut)
+        *errorOut = "NPC inventory item not found";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 || itemId == 0 ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count; ++i)
+    {
+        if (g_vm_net_mock_npc_shop_inventory[i].actorId == actorId &&
+            g_vm_net_mock_npc_shop_inventory[i].itemId == itemId &&
+            strcmp(g_vm_net_mock_npc_shop_inventory[i].scene, scene) == 0)
+        {
+            existing = (int)i;
+            break;
+        }
+    }
+    if (existing < 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_shop_inventory "
+             "WHERE scene=X'%s' AND actor_id=%u AND item_id=%u",
+             sceneHex, actorId, itemId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if ((u32)existing + 1 < g_vm_net_mock_npc_shop_inventory_count)
+    {
+        memmove(&g_vm_net_mock_npc_shop_inventory[existing],
+                &g_vm_net_mock_npc_shop_inventory[existing + 1],
+                (g_vm_net_mock_npc_shop_inventory_count - (u32)existing - 1) *
+                    sizeof(g_vm_net_mock_npc_shop_inventory[0]));
+    }
+    --g_vm_net_mock_npc_shop_inventory_count;
+    memset(&g_vm_net_mock_npc_shop_inventory[
+               g_vm_net_mock_npc_shop_inventory_count],
+           0, sizeof(g_vm_net_mock_npc_shop_inventory[0]));
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] npc_shop_inventory_delete scene=%s actor=%u item=%u\n",
+           scene, actorId, itemId);
     return true;
 }
 
@@ -1559,7 +2022,6 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
             }
             if (duplicate)
                 continue;
-            total += 1;
             if (count < seedCap)
             {
                 u32 candidate = 20000u +
@@ -1581,7 +2043,23 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                     }
                 }
                 seed.actorId = candidate;
-                seeds[count++] = seed;
+                if (!vm_net_mock_native_npc_override_apply(scene, &seed))
+                {
+                    printf("[info][network] native_npc_overlay scene=%s actor=%u action=disabled\n",
+                           scene, seed.actorId);
+                }
+                else
+                {
+                    seeds[count++] = seed;
+                    total += 1;
+                }
+            }
+            else
+            {
+                /* The client can consume only the selected subset.  Keep the
+                 * total as a source count when the catalog cap is reached;
+                 * an omitted row cannot be interacted with in that packet. */
+                total += 1;
             }
             if (end > off)
                 off = end - 1;
@@ -1589,6 +2067,111 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
     }
     if (totalOut)
         *totalOut = total;
+    return count;
+}
+
+/* Admin discovery reads the SCE source directly so a disabled native actor
+ * remains editable.  It intentionally uses the same source exclusions and
+ * deterministic id derivation as the runtime catalog. */
+static u32 vm_net_mock_native_npc_admin_list(
+    const char *scene, vm_net_mock_native_npc_admin_row *rows, u32 rowCap)
+{
+    vm_net_mock_scene_npcinfo_seed occupied[VM_NET_MOCK_SCENE_NPC_CATALOG_MAX];
+    u8 data[8192];
+    u32 len = 0;
+    u32 start = 0;
+    u32 occupiedCount = 0;
+    u32 count = 0;
+
+    if (scene == NULL || rows == NULL || rowCap == 0 ||
+        vm_net_mock_scene_is_penglai02(scene) ||
+        vm_net_mock_scene_is_linan_south_gate(scene))
+    {
+        return 0;
+    }
+    memset(rows, 0, sizeof(*rows) * rowCap);
+    memset(occupied, 0, sizeof(occupied));
+    occupiedCount = vm_net_mock_append_service_scene_npcinfo_seeds(
+        scene, occupied, VM_NET_MOCK_SCENE_NPC_CATALOG_MAX);
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    start = vm_net_mock_scene_payload_start(data, len);
+    if (len == 0 || start == 0)
+        return 0;
+
+    for (u32 off = start; off + 8 <= len && count < rowCap; ++off)
+    {
+        vm_net_mock_scene_npcinfo_seed seed;
+        u32 end = 0;
+        bool duplicate = false;
+        int overrideIndex = -1;
+
+        if (!vm_net_mock_parse_sce_interactive_npc_at(data, len, off,
+                                                      &seed, &end))
+        {
+            continue;
+        }
+        if (vm_net_mock_scene_is_penglai01(scene) &&
+            (strcmp(seed.scriptName, "task0.xse") != 0 ||
+             strcmp(seed.displayName,
+                    "\xb4\xf3\xcf\xc0\xb9\xf9\xbe\xb8") != 0))
+        {
+            if (end > off)
+                off = end - 1;
+            continue;
+        }
+        for (u32 i = 0; i < occupiedCount; ++i)
+        {
+            if (occupied[i].x == seed.x && occupied[i].y == seed.y &&
+                strcmp(occupied[i].scriptName, seed.scriptName) == 0 &&
+                strcmp(occupied[i].displayName, seed.displayName) == 0)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate)
+        {
+            u32 candidate = 20000u +
+                (vm_net_mock_scene_npcinfo_hash(scene, &seed) % 40000u);
+            bool collision = true;
+
+            while (collision)
+            {
+                collision = false;
+                for (u32 i = 0; i < occupiedCount; ++i)
+                {
+                    if (occupied[i].actorId == candidate)
+                    {
+                        candidate = candidate == 59999u ? 20000u : candidate + 1u;
+                        collision = true;
+                        break;
+                    }
+                }
+            }
+            seed.actorId = candidate;
+            overrideIndex = vm_net_mock_native_npc_override_find_exact(
+                scene, seed.actorId);
+            rows[count].seed = seed;
+            rows[count].enabled = overrideIndex < 0 ||
+                                  g_vm_net_mock_native_npc_overrides[
+                                      overrideIndex].enabled;
+            rows[count].overridden = overrideIndex >= 0;
+            if (overrideIndex >= 0)
+            {
+                rows[count].seed.kind =
+                    g_vm_net_mock_native_npc_overrides[overrideIndex].serviceKind;
+            }
+            ++count;
+            if (rows[count - 1].enabled &&
+                occupiedCount < VM_NET_MOCK_SCENE_NPC_CATALOG_MAX)
+            {
+                occupied[occupiedCount++] = seed;
+                occupied[occupiedCount - 1].kind = rows[count - 1].seed.kind;
+            }
+        }
+        if (end > off)
+            off = end - 1;
+    }
     return count;
 }
 
