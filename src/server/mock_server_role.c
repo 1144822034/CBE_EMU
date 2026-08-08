@@ -124,7 +124,7 @@ static bool vm_net_mock_select_auto_monster_for_scene(const char *scene,
         u32 choices[3] = {0, 0, 0};
         u32 choiceCount = 0;
 
-        if (!vm_net_mock_scene_names_equal_loose(scene, item->scene))
+        if (!vm_net_mock_scene_names_equal_exact(scene, item->scene))
             continue;
         for (u32 j = 0; j < 3; ++j)
         {
@@ -146,8 +146,7 @@ static bool vm_net_mock_select_auto_monster_for_scene(const char *scene,
 static bool vm_net_mock_scene_is_c00_penglai03(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33") == 0 ||
-            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0);
+           strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0;
 }
 
 static bool vm_net_mock_scene_is_taohuadao01(const char *scene)
@@ -4192,7 +4191,14 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
     vm_net_mock_role_sync_derived_vitals(role);
     role->scene[sizeof(role->scene) - 1] = 0;
     if (!vm_net_mock_scene_name_is_persistable(role->scene))
-        snprintf(role->scene, sizeof(role->scene), "%s", vm_net_mock_role_initial_scene_name());
+    {
+        /* Invalid historical scene keys are diagnosed and retained for the
+         * explicit sMap migration below.  Replacing them with the bootstrap
+         * scene silently moves a player to another map and violates strict
+         * scene identity. */
+        printf("[error][mock-service] role_scene_key_unresolved role=%u scene=%s action=preserve-exact-key\n",
+               role->roleId, role->scene[0] ? role->scene : "-");
+    }
     if (role->x == 0 || role->y == 0)
     {
         role->x = VM_NET_MOCK_ROLE_INITIAL_X;
@@ -4245,6 +4251,26 @@ static bool vm_net_mock_mysql_account_hex(char account_hex[129])
     size_t account_len = vm_mock_mysql_bounded_strlen(account_id, 64);
     return account_id != NULL && account_len > 0 && account_len < 64 &&
            vm_mysql_hex_encode(account_id, account_len, account_hex, 129) != 0;
+}
+
+static bool vm_net_mock_role_migrate_legacy_scene_key(vm_net_mock_role_state *role)
+{
+    char exactScene[sizeof(role->scene)];
+
+    if (role == NULL || vm_net_mock_scene_name_is_persistable(role->scene))
+        return false;
+    memset(exactScene, 0, sizeof(exactScene));
+    if (!vm_net_mock_scene_key_resolve_exact_smap(role->scene, exactScene,
+                                                   sizeof(exactScene)))
+    {
+        printf("[error][mock-service] role_scene_key_migration_unresolved role=%u scene=%s source=sMap.dsh action=preserve\n",
+               role->roleId, role->scene[0] ? role->scene : "-");
+        return false;
+    }
+    printf("[info][mock-service] role_scene_key_migration role=%u from=%s to=%s source=sMap.dsh action=exact-rewrite\n",
+           role->roleId, role->scene, exactScene);
+    snprintf(role->scene, sizeof(role->scene), "%s", exactScene);
+    return true;
 }
 
 /* A battle session serial prevents duplicate status packets from granting a
@@ -7168,6 +7194,7 @@ static void vm_net_mock_role_db_load(void)
     u32 backpackNamespaceMigratedRoles = 0;
     u32 backpackNamespaceRemappedRows = 0;
     u32 backpackNormalizedRoles = 0;
+    u32 sceneKeyMigratedRoles = 0;
     u32 expCurveMigratedRoles = 0;
     u32 expCurveCappedRoles = 0;
 
@@ -7416,6 +7443,11 @@ static void vm_net_mock_role_db_load(void)
             vm_net_mock_role_count_reserved_backpack_sequences(role);
         vm_net_mock_role_state beforeNormalize = *role;
 
+        if (vm_net_mock_role_migrate_legacy_scene_key(role))
+        {
+            needsSave = true;
+            ++sceneKeyMigratedRoles;
+        }
         vm_net_mock_role_normalize(role);
         if (memcmp(&beforeNormalize, role, sizeof(beforeNormalize)) != 0)
         {
@@ -7447,6 +7479,13 @@ static void vm_net_mock_role_db_load(void)
     {
         printf("[info][mock-service] backpack_normalize_persist roles=%u account=%s source=role-load-relational\n",
                backpackNormalizedRoles,
+               g_vm_mock_service_active_account_id ?
+                   g_vm_mock_service_active_account_id : "-");
+    }
+    if (sceneKeyMigratedRoles != 0)
+    {
+        printf("[info][mock-service] role_scene_key_migration_persist roles=%u account=%s source=sMap.dsh strict=1\n",
+               sceneKeyMigratedRoles,
                g_vm_mock_service_active_account_id ?
                    g_vm_mock_service_active_account_id : "-");
     }
@@ -7937,6 +7976,12 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
     vm_net_mock_role_state before;
     if (role == NULL || scene == NULL || scene[0] == 0 || x == 0 || y == 0)
         return;
+    if (!vm_net_mock_scene_name_is_persistable(scene))
+    {
+        printf("[error][mock-service] role_position_rejected role=%u scene=%s reason=%s contract=exact-sce-key\n",
+               role->roleId, scene, reason ? reason : "position");
+        return;
+    }
     /* Scene bootstrap reports the already persisted landing point again after
      * the map has finished initializing.  Rewriting the complete relational
      * role/equipment/backpack snapshot for that no-op costs several MySQL
@@ -7944,7 +7989,7 @@ static void vm_net_mock_role_set_position(const char *scene, u16 x, u16 y, const
      * response that contains the first NPC catalog and welcome message. */
     if (role->x == x && role->y == y &&
         vm_net_mock_scene_name_is_persistable(role->scene) &&
-        vm_net_mock_scene_names_equal_loose(role->scene, scene))
+        vm_net_mock_scene_names_equal_exact(role->scene, scene))
     {
         printf("[debug][mock-service] role_position_save_skip role=%u scene=%s pos=(%u,%u) reason=%s unchanged=1\n",
                role->roleId, scene, x, y, reason ? reason : "position");

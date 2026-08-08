@@ -16,7 +16,7 @@ Status: validated
 
 - `docs/re/2026-07-20-dynamic-npc-scene-roundtrip.md` 已记录本类问题的有效包族：
   `2/3` 场景变更、随后 `25/5` 资源/任务子集，或 `30/2` 收尾的本地场景壳完成。
-- 最近的场景 key 审计已确认：仅可把同一 key 的可选 `.sce` 扩展名视作相同；不得将
+- 场景 key 审计现要求完整 `.sce` 键逐字节一致；不得将无后缀键或
   `c00蓬莱仙岛_02.sce`、`00_蓬莱仙岛02.sce` 或 `00蓬莱仙岛_02.sce` 互相替换。
 - 当前服务端用 `sceneMoveinfoNpcPending(Scene)` / `sceneMoveinfoNpcSeeded(Scene)` 维护
   `27/11` 的一次性发送状态，并由账号会话捕获/恢复。这是本轮要验证的状态边界。

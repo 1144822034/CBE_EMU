@@ -94,6 +94,9 @@ typedef struct
     u8 stack;
     u8 visual;
     u8 isEquip;
+    /* equip.dsh \"品质\" (column 6).  This is catalog metadata, not the
+     * per-instance enhancement level stored with a character's equipment. */
+    u8 quality;
     u8 category;
     u8 enabled;
     /* Store placement is independent from item.dsh/equip.dsh category.  The
@@ -1548,7 +1551,7 @@ static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_stat
 
 static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 nameLen,
                                               u32 price, u32 stock, u8 stack, u8 visual,
-                                              bool equip, u32 category)
+                                              bool equip, u32 quality, u32 category)
 {
     vm_net_mock_shop_catalog_item *item = NULL;
     u32 copyLen = 0;
@@ -1570,6 +1573,7 @@ static bool vm_net_mock_add_shop_catalog_item(u32 itemId, const u8 *name, u32 na
     item->stack = stack ? stack : 1;
     item->visual = visual ? visual : 1;
     item->isEquip = equip ? 1 : 0;
+    item->quality = equip ? (u8)(quality > 255 ? 255 : quality) : 0;
     item->category = (u8)(category > 255 ? 255 : category);
     item->enabled = 1;
     return true;
@@ -1612,6 +1616,7 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
         u32 kubaoPrice = 0;
         u32 stock = equip ? 1 : VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK;
         u32 visual = 1;
+        u32 quality = 0;
         u32 category = 0xff;
         const u8 *name = NULL;
         u32 nameLen = 0;
@@ -1635,6 +1640,8 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
             }
             else if (!equip && col == 3)
                 visual = vm_net_mock_parse_dsh_u32(value, valueLen, 1);
+            else if (equip && col == 6)
+                quality = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
             else if ((!equip && col == 5) || (equip && col == 7))
                 category = vm_net_mock_parse_dsh_u32(value, valueLen, 0xff);
             else if ((!equip && col == 8) || (equip && col == 5))
@@ -1664,6 +1671,7 @@ static u32 vm_net_mock_load_shop_catalog_dsh(const char *path, bool equip)
                                              (u8)(stock > 255 ? 255 : stock),
                                              (u8)(visual > 255 ? 1 : visual),
                                              equip,
+                                             quality,
                                              category))
         {
             ++added;
@@ -1705,6 +1713,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
                                                 VM_NET_MOCK_BACKPACK_DEFAULT_ITEM_COUNT,
                                                 1,
                                                 false,
+                                                0,
                                                 14);
     }
     else
@@ -6307,14 +6316,14 @@ static bool vm_net_mock_read_current_player_grid(u32 *nodeOut, u32 *actorIdOut,
                                                  u16 *gridXOut, u16 *gridYOut,
                                                  u16 *targetXOut, u16 *targetYOut);
 static bool vm_net_mock_snapshot_current_player_pos(const char *reason);
-static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b);
+static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b);
 
 static void vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(const char *scene)
 {
     if (g_vm_net_mock_scene_moveinfo_npc_seeded &&
         (scene == NULL ||
          g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] == 0 ||
-         !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+         !vm_net_mock_scene_names_equal_exact(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
                                               scene)))
     {
         g_vm_net_mock_scene_moveinfo_npc_seeded = false;
@@ -6323,7 +6332,7 @@ static void vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(const char *scen
     if (g_vm_net_mock_scene_moveinfo_npc_pending &&
         (scene == NULL ||
          g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] == 0 ||
-         !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+         !vm_net_mock_scene_names_equal_exact(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
                                               scene)))
     {
         g_vm_net_mock_scene_moveinfo_npc_pending = false;
@@ -6351,7 +6360,7 @@ static bool vm_net_mock_is_scene_moveinfo_npc_seed_request(const char *scene,
         return false;
     if (scene == NULL || scene[0] == 0 ||
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] == 0 ||
-        !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+        !vm_net_mock_scene_names_equal_exact(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
                                              scene))
     {
         return false;
@@ -6397,8 +6406,8 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
                                                    size_t pathOutCap)
 {
     static const char *pathFormats[] = {
-        "../web/fs/JHOnlineData/%s%s",
-        "web/fs/JHOnlineData/%s%s"
+        "../web/fs/JHOnlineData/%s",
+        "web/fs/JHOnlineData/%s"
     };
     char candidate[1200];
 
@@ -6406,53 +6415,48 @@ static bool vm_net_mock_open_server_scene_resource(const char *scene,
         *fpOut = NULL;
     if (pathOut && pathOutCap != 0)
         pathOut[0] = 0;
-    if (scene == NULL || scene[0] == 0 || vm_net_mock_scene_name_has_path_separator(scene))
-        return false;
+    if (scene == NULL || scene[0] == 0 ||
+        !vm_net_mock_str_ends_with(scene, ".sce") ||
+        vm_net_mock_scene_name_has_path_separator(scene))
+    return false;
 
-    for (u32 extPass = 0; extPass < 2; ++extPass)
+    if (g_vm_net_mock_resource_dir[0] != 0)
     {
-        const char *suffix = extPass == 0 ? "" : ".sce";
-        if (extPass != 0 && vm_net_mock_str_ends_with(scene, ".sce"))
+        FILE *fp = NULL;
+        if (vm_net_mock_build_configured_resource_path(scene, candidate,
+                                                       sizeof(candidate)))
+        {
+            fp = vm_net_mock_fopen_game_path(candidate, "rb");
+            if (fp != NULL)
+            {
+                if (pathOut && pathOutCap != 0)
+                    snprintf(pathOut, pathOutCap, "%s", candidate);
+                if (fpOut)
+                    *fpOut = fp;
+                else
+                    fclose(fp);
+                return true;
+            }
+        }
+    }
+    for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+    {
+        FILE *fp = NULL;
+        snprintf(candidate, sizeof(candidate), pathFormats[i], scene);
+        fp = vm_net_mock_fopen_game_path(candidate, "rb");
+        if (fp == NULL)
             continue;
-        if (g_vm_net_mock_resource_dir[0] != 0)
+        if (pathOut && pathOutCap != 0)
+            snprintf(pathOut, pathOutCap, "%s", candidate);
+        if (fpOut)
         {
-            char resourceName[128];
-            FILE *fp = NULL;
-            snprintf(resourceName, sizeof(resourceName), "%s%s", scene, suffix);
-            if (vm_net_mock_build_configured_resource_path(resourceName, candidate,
-                                                           sizeof(candidate)))
-            {
-                fp = vm_net_mock_fopen_game_path(candidate, "rb");
-                if (fp != NULL)
-                {
-                    if (pathOut && pathOutCap != 0)
-                        snprintf(pathOut, pathOutCap, "%s", candidate);
-                    if (fpOut)
-                        *fpOut = fp;
-                    else
-                        fclose(fp);
-                    return true;
-                }
-            }
+            *fpOut = fp;
         }
-        for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
+        else
         {
-            snprintf(candidate, sizeof(candidate), pathFormats[i], scene, suffix);
-            FILE *fp = vm_net_mock_fopen_game_path(candidate, "rb");
-            if (fp == NULL)
-                continue;
-            if (pathOut && pathOutCap != 0)
-                snprintf(pathOut, pathOutCap, "%s", candidate);
-            if (fpOut)
-            {
-                *fpOut = fp;
-            }
-            else
-            {
-                fclose(fp);
-            }
-            return true;
+            fclose(fp);
         }
+        return true;
     }
     return false;
 }
@@ -6462,6 +6466,95 @@ static bool vm_net_mock_open_server_data_resource(const char *name,
                                                   FILE **fpOut,
                                                   char *pathOut,
                                                   size_t pathOutCap);
+
+/* Older service builds persisted some role scenes as bare basenames.  This
+ * is a one-time data repair, not a request-time alias: only an exact raw row
+ * from the authoritative sMap.dsh can replace such a legacy value. */
+static bool vm_net_mock_scene_key_resolve_exact_smap(const char *legacyScene,
+                                                     char *exactScene,
+                                                     size_t exactSceneCap)
+{
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 headerBytes = 0;
+    u32 pos = 0;
+    size_t legacyLen = 0;
+    bool found = false;
+
+    if (exactScene == NULL || exactSceneCap == 0)
+        return false;
+    exactScene[0] = 0;
+    if (legacyScene == NULL || legacyScene[0] == 0 ||
+        vm_net_mock_str_ends_with(legacyScene, ".sce") ||
+        !vm_net_mock_scene_name_is_download_key(legacyScene))
+    {
+        return false;
+    }
+    legacyLen = strlen(legacyScene);
+    if (legacyLen + 4 >= exactSceneCap ||
+        !vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL,
+                                               path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 20 || vm_net_mock_read_le32_at(data, 0) != len - 4)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    headerBytes = vm_net_mock_read_le32_at(data, 12);
+    if (columnCount < 2 || columnCount > 64 || rowCount > 512 ||
+        16u + headerBytes > len)
+    {
+        return false;
+    }
+    pos = 16u + headerBytes;
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        for (u32 column = 0; column < columnCount && rowPos < rowEnd; ++column)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+            u32 nameLen = valueLen;
+
+            if (rowPos + valueLen > rowEnd)
+                return false;
+            if (column == 1)
+            {
+                while (nameLen > 0 && value[nameLen - 1] == 0)
+                    --nameLen;
+                if (nameLen == legacyLen + 4 &&
+                    memcmp(value, legacyScene, legacyLen) == 0 &&
+                    memcmp(value + legacyLen, ".sce", 4) == 0)
+                {
+                    if (found || nameLen >= exactSceneCap)
+                    {
+                        /* Multiple sMap rows with the same old basename are
+                         * ambiguous.  Preserve it as unresolved rather than
+                         * selecting an arbitrary map identity. */
+                        exactScene[0] = 0;
+                        return false;
+                    }
+                    memcpy(exactScene, value, nameLen);
+                    exactScene[nameLen] = 0;
+                    found = true;
+                }
+            }
+            rowPos += valueLen;
+        }
+        pos = rowEnd;
+    }
+    return found;
+}
 
 static bool vm_net_mock_client_base_data_resource_exists(
     const char *name, const char *requiredSuffix)
@@ -6527,9 +6620,9 @@ static bool vm_net_mock_scene_resource_exists(const char *scene)
 {
     FILE *fp = NULL;
 
-    /* Scene identity is byte-for-byte, except that open_server_scene_resource
-     * itself may add the optional .sce suffix to the same key.  In particular,
-     * c00蓬莱仙岛_02.sce, 00蓬莱仙岛_02.sce and 00_蓬莱仙岛02.sce are not aliases. */
+    /* Scene identity and resource lookup are byte-for-byte.  In particular,
+     * `foo` never means `foo.sce`, and c00蓬莱仙岛_02.sce,
+     * 00蓬莱仙岛_02.sce and 00_蓬莱仙岛02.sce are distinct keys. */
     if (!vm_net_mock_open_server_scene_resource(scene, &fp, NULL, 0))
         return false;
     fclose(fp);
@@ -6612,7 +6705,8 @@ static bool vm_net_mock_scene_name_is_safe(const char *scene)
  * not reinterpret local lookup failure as permission to replace its key. */
 static bool vm_net_mock_scene_name_is_persistable(const char *scene)
 {
-    return vm_net_mock_scene_name_is_download_key(scene);
+    return vm_net_mock_scene_name_is_download_key(scene) &&
+           vm_net_mock_str_ends_with(scene, ".sce");
 }
 
 static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
@@ -6643,53 +6737,20 @@ static bool vm_net_mock_read_runtime_scene_name(char *out, size_t outCap)
 
 static const char *vm_net_mock_normalize_scene_name_for_enter(const char *scene)
 {
-    static char normalized[64];
+    /* Historical callers already validate their scene source before entering
+     * this boundary.  Keep that invariant explicit: an invalid value becomes
+     * unresolved, never the bootstrap scene and never an extension alias. */
     if (!vm_net_mock_scene_name_is_persistable(scene))
-        return vm_net_mock_default_scene_name();
-
-    /*
-     * Fresh actorinfo/sceneKey historically used extensionless c-prefixed town
-     * keys (`c00..._01`), which the local file layer resolves to `.sce`.
-     * Replaying `c00..._NN.sce` directly can be mistaken for a downloadable
-     * resource key on re-enter, so strip only that c-prefixed suffix form.
-     */
-    if (scene[0] == 'c' && vm_net_mock_str_ends_with(scene, ".sce"))
-    {
-        size_t len = strlen(scene) - 4;
-        if (len >= sizeof(normalized))
-            len = sizeof(normalized) - 1;
-        memcpy(normalized, scene, len);
-        normalized[len] = 0;
-        return normalized;
-    }
+        return "";
+    /* A scene-enter key is a resource/map-controller identity, not a lookup
+     * hint.  Do not strip, append, or otherwise rewrite it. */
     return scene;
 }
 
-static void vm_net_mock_copy_normalized_scene_name(const char *scene, char *out, size_t outCap)
+static bool vm_net_mock_scene_names_equal_exact(const char *a, const char *b)
 {
-    if (out == NULL || outCap == 0)
-        return;
-    out[0] = 0;
-    if (scene == NULL || scene[0] == 0)
-        return;
-    snprintf(out, outCap, "%s", scene);
-    {
-        size_t len = strlen(out);
-        if (len > 4 && strcmp(out + len - 4, ".sce") == 0)
-            out[len - 4] = 0;
-    }
-}
-
-static bool vm_net_mock_scene_names_equal_loose(const char *a, const char *b)
-{
-    char normalizedA[64];
-    char normalizedB[64];
-
-    vm_net_mock_copy_normalized_scene_name(a, normalizedA, sizeof(normalizedA));
-    vm_net_mock_copy_normalized_scene_name(b, normalizedB, sizeof(normalizedB));
-    return normalizedA[0] != 0 &&
-           normalizedB[0] != 0 &&
-           strcmp(normalizedA, normalizedB) == 0;
+    return a != NULL && b != NULL && a[0] != 0 && b[0] != 0 &&
+           strcmp(a, b) == 0;
 }
 
 static bool vm_net_mock_add_auto_monster_catalog_item(const u8 *scene,

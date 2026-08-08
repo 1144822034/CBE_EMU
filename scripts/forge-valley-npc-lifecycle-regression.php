@@ -1,8 +1,7 @@
 <?php
 /*
  * Scene-key identity regression.  These two persisted keys name distinct maps
- * and must survive settings "unstuck" -> direct 16/2 unchanged except for the
- * optional .sce suffix representation of the same key:
+ * and must survive settings "unstuck" -> direct 16/2 byte-for-byte:
  *
  *   c00蓬莱仙岛_02.sce
  *   00_蓬莱仙岛02.sce
@@ -85,9 +84,7 @@ function assert_same_scene_key($wireValue, $expected, $phase) {
     }
     $length = unpack('n', substr($wireValue, 0, 2))[1];
     $actual = substr($wireValue, 2);
-    $expectedWithoutSuffix = preg_replace('/\.sce$/', '', $expected);
-    if ($length !== strlen($actual) ||
-        ($actual !== $expected && $actual !== $expectedWithoutSuffix)) {
+    if ($length !== strlen($actual) || $actual !== $expected) {
         throw new RuntimeException("$phase rewrote scene key expected=" . bin2hex($expected) .
             " actual=" . bin2hex($actual));
     }

@@ -10,8 +10,8 @@
 服务端不得因为名称形状相近、`c` 前缀、下划线位置或本地资源缺失，将任一场景
 替换为另一场景；同一规则适用于所有场景。
 
-允许的唯一表示归一化是同一资源键的可选 `.sce` 扩展名，例如
-`c00蓬莱仙岛_01` 与 `c00蓬莱仙岛_01.sce`。该归一化不删除、增加或移动任何其他字符。
+场景键必须逐字节等于资源表中的完整 `.sce` 文件名，例如
+`c00蓬莱仙岛_01.sce`。无后缀、改前缀或改下划线形式都不是同一资源的合法表示。
 
 ## 已固定证据
 
@@ -62,26 +62,26 @@ key。已确认的两处是 `vm_net_mock_scene_resource_legacy_alias()` / `c` �
 1. 删除所有 `scene_resource_legacy_alias` 使用与 `c` 前缀删除的本地资源回退：
    SCE、NPC、怪物、任务交接均只读取完全相同的场景 key。
 2. 将“本地资源存在”与“可持久化的远端场景 key”分离。角色场景持久化和脱离目标
-   可保留无路径分隔符的原始 key；仅在空、截断或含路径分隔符时回到初始场景。
-   本地资源缺失需以 `unresolved` 记录并走既有资源更新/请求链，绝不改写 key。
+   必须保存完整 `.sce` key；仅历史无后缀行可由 `sMap.dsh` 的唯一精确行一次性迁移。
+   本地资源缺失需以 `unresolved` 记录并走既有资源更新/请求链，绝不改写 key 或回到初始场景。
 3. 静态 NPC 目录仅由同 key SCE 或该 key 的服务端动态 NPC 行构建。无法确认
    `c00蓬莱仙岛_02.sce` 的真实资源/目录来源时返回空目录并记录 `unresolved`，
    不借用 `00_蓬莱仙岛02.sce` 或 `00蓬莱仙岛_02.sce`。
-4. 审计所有 `scene_is_*` 特判；每个枚举仅可列出有资源或协议证据的精确 key（以及
-   同 key 的 `.sce` 可选形式），不得添加形状别名。
+4. 审计所有 `scene_is_*` 特判；每个枚举仅可列出有资源或协议证据的完整精确 `*.sce`
+   key，不得添加形状别名。
 
 ## 修改与验证结果
 
 1. 删除所有 `scene_resource_legacy_alias` 调用和 c 前缀删除回退；SCE、NPC、怪物
    出生点与任务交接 NPC 现在只以原始 key 读取资源。
 2. 移除 `00_蓬莱仙岛01 → c00蓬莱仙岛_01` 的角色迁移，以及 P01/P02/P03
-   的形状别名枚举；`scene_is_*` 仅匹配有证据的精确 key 和可选 `.sce` 后缀。
+   的形状别名枚举；`scene_is_*` 仅匹配有证据的完整精确 `*.sce` key。
 3. 增加 `scene_name_is_persistable()`，将本地 SCE 可用性和角色/场景目标的持久化
    身份分离；`vm_net_mock_save_player_pos_state()` 不再把 unresolved key 改写成默认场景。
 4. 回归 [`scripts/forge-valley-npc-lifecycle-regression.php`](../../scripts/forge-valley-npc-lifecycle-regression.php)
    在服务启动前写入三个独立角色，并逐个验证 `12/3 → 16/3` 与 `16/2`：
    `c00蓬莱仙岛_02.sce`、`00_蓬莱仙岛02.sce`、`00蓬莱仙岛_02.sce` 均按自身原字节
-   返回（仅允许同 key 的 `.sce` 后缀省略）。结果：`distinct_keys=3` 通过。
+   返回。结果：`distinct_keys=3` 通过。
 5. `make -j2` 与 `make boundary-check` 均通过。
 
 ## 已知边界

@@ -563,9 +563,9 @@ static u32 vm_net_mock_scene_npcinfo_hash(const char *scene,
 static bool vm_net_mock_scene_is_linan_south_gate(const char *scene)
 {
     return scene != NULL &&
-           vm_net_mock_scene_names_equal_loose(
+           vm_net_mock_scene_names_equal_exact(
                scene,
-               "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31"); /* c04临安府_01 */
+               "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31\x2e\x73\x63\x65"); /* c04临安府_01.sce */
 }
 
 enum
@@ -625,6 +625,17 @@ typedef struct
     u32 actorId;
 } vm_net_mock_dynamic_npc_instance_scene_migration;
 
+/* A dynamic NPC itself is keyed by the exact SCE filename.  Earlier admin
+ * builds persisted some rows without the .sce suffix, creating a second SQL
+ * primary key for the same runtime NPC once an administrator later saved the
+ * correct SCE key. */
+typedef struct
+{
+    char legacyScene[64];
+    char canonicalScene[64];
+    u32 actorId;
+} vm_net_mock_dynamic_npc_parent_scene_migration;
+
 typedef struct
 {
     u32 loaded;
@@ -635,6 +646,12 @@ typedef struct
     vm_net_mock_dynamic_npc_instance_scene_migration
         migrations[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
     u32 migrationCount;
+    vm_net_mock_dynamic_npc_parent_scene_migration
+        parentMigrations[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
+    u32 parentMigrationCount;
+    u32 parentMigrated;
+    u32 parentMigrationFailures;
+    bool scanningParentSceneMigrations;
 } vm_net_mock_dynamic_npc_load_context;
 
 typedef struct
@@ -643,6 +660,21 @@ typedef struct
     bool invalid;
     u32 count;
 } vm_net_mock_dynamic_npc_column_context;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u16 serviceKind;
+} vm_net_mock_dynamic_npc_exact_kind_context;
+
+static bool vm_net_mock_dynamic_npc_column_count_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths);
+
+static bool vm_net_mock_dynamic_npc_exact_kind_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths);
 
 static vm_net_mock_dynamic_npc_override
     g_vm_net_mock_dynamic_npc_overrides[VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX];
@@ -839,8 +871,11 @@ vm_net_mock_npc_shop_inventory_find_exact(const char *scene, u32 actorId,
     {
         const vm_net_mock_npc_shop_inventory_row *row =
             &g_vm_net_mock_npc_shop_inventory[i];
+        /* Both administration and the live NPC context carry the canonical
+         * sMap/SCE resource key. Scene, actor and item are one exact tuple;
+         * a bare basename is invalid rather than an alias for `*.sce`. */
         if (row->actorId == actorId && row->itemId == itemId &&
-            strcmp(row->scene, scene) == 0)
+            vm_net_mock_scene_names_equal_exact(row->scene, scene))
         {
             return row;
         }
@@ -855,20 +890,61 @@ static u32 vm_net_mock_npc_shop_inventory_admin_list(
     u32 count = 0;
 
     if (!vm_net_mock_native_npc_db_load() || scene == NULL || actorId == 0 ||
-        rows == NULL || rowCap == 0)
+        (rows == NULL && rowCap != 0))
     {
         return 0;
     }
-    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count && count < rowCap;
-         ++i)
+    for (u32 i = 0; i < g_vm_net_mock_npc_shop_inventory_count; ++i)
     {
         if (g_vm_net_mock_npc_shop_inventory[i].actorId == actorId &&
             strcmp(g_vm_net_mock_npc_shop_inventory[i].scene, scene) == 0)
         {
-            rows[count++] = g_vm_net_mock_npc_shop_inventory[i];
+            if (rows != NULL && count < rowCap)
+                rows[count] = g_vm_net_mock_npc_shop_inventory[i];
+            ++count;
         }
     }
-    return count;
+    return rows != NULL && count > rowCap ? rowCap : count;
+}
+
+static bool vm_net_mock_npc_shop_inventory_service_kind_is_supported(
+    u16 serviceKind)
+{
+    return serviceKind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT ||
+           serviceKind == VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT ||
+           serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT;
+}
+
+/* The client exposes three distinct merchant menus.  Inventory configuration
+ * must follow the same category boundary as the later 26/1 menu builder;
+ * otherwise an administrator can save an item which can never be displayed
+ * (or accidentally route a medicine through an equipment menu). */
+static bool vm_net_mock_npc_shop_inventory_item_matches_service(
+    const vm_net_mock_shop_catalog_item *item, u16 serviceKind)
+{
+    if (item == NULL)
+        return false;
+    if (serviceKind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)
+        return item->isEquip && item->category >= 7u && item->category <= 9u;
+    if (serviceKind == VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)
+        return item->isEquip && item->category <= 6u;
+    if (serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT)
+        return !item->isEquip && item->category == 10u;
+    return false;
+}
+
+/* A zero value is the explicit administrator-facing spelling of "use the
+ * current product-catalog price".  Store the resolved positive price so the
+ * NPC shop packet remains self-contained and continues to satisfy the
+ * client's u32 price parser. */
+static u32 vm_net_mock_npc_shop_inventory_resolve_unit_price(
+    const vm_net_mock_shop_catalog_item *item, u32 requestedUnitPrice)
+{
+    if (item == NULL)
+        return 0;
+    if (requestedUnitPrice != 0)
+        return requestedUnitPrice;
+    return vm_net_mock_shop_effective_unit_price(item->itemId, item->price);
 }
 
 static bool vm_net_mock_native_npc_admin_save_override(
@@ -971,8 +1047,8 @@ static bool vm_net_mock_native_npc_admin_delete_override(
 }
 
 static bool vm_net_mock_npc_shop_inventory_admin_save(
-    const char *scene, u32 actorId, u32 itemId, u32 unitPrice, bool enabled,
-    const char **errorOut)
+    const char *scene, u32 actorId, u16 serviceKind, u32 itemId,
+    u32 unitPrice, bool enabled, const char **errorOut)
 {
     char sceneHex[sizeof(g_vm_net_mock_npc_shop_inventory[0].scene) * 2 + 1];
     char query[768];
@@ -984,12 +1060,25 @@ static bool vm_net_mock_npc_shop_inventory_admin_save(
         *errorOut = "NPC shop inventory is invalid";
     if (!vm_net_mock_native_npc_db_load() ||
         !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 || itemId == 0 ||
-        unitPrice == 0 ||
+        !vm_net_mock_npc_shop_inventory_service_kind_is_supported(serviceKind) ||
         (item = vm_net_mock_find_shop_catalog_item(itemId)) == NULL ||
+        !vm_net_mock_npc_shop_inventory_item_matches_service(item, serviceKind) ||
         vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
     {
         if (errorOut && itemId != 0 && item == NULL)
             *errorOut = "物品目录中不存在该物品";
+        else if (errorOut && item != NULL &&
+                 !vm_net_mock_npc_shop_inventory_item_matches_service(
+                     item, serviceKind))
+            *errorOut = "该物品不属于当前商人可售分类";
+        return false;
+    }
+    unitPrice = vm_net_mock_npc_shop_inventory_resolve_unit_price(item,
+                                                                    unitPrice);
+    if (unitPrice == 0)
+    {
+        if (errorOut)
+            *errorOut = "物品默认价格无效";
         return false;
     }
     existing = -1;
@@ -1037,6 +1126,146 @@ static bool vm_net_mock_npc_shop_inventory_admin_save(
     printf("[info][mock-admin] npc_shop_inventory_save scene=%s actor=%u item=%u price=%u enabled=%u\n",
            scene, actorId, itemId, unitPrice, enabled ? 1u : 0u);
     return true;
+}
+
+/* Bulk edits are committed as one unit.  A category-wide add must never leave
+ * half of its selected products configured when a later row is rejected or a
+ * MySQL write fails. */
+static bool vm_net_mock_npc_shop_inventory_admin_save_many(
+    const char *scene, u32 actorId, u16 serviceKind, const u32 *itemIds,
+    u32 itemCount, u32 requestedUnitPrice, bool enabled,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_npc_shop_inventory[0].scene) * 2 + 1];
+    char query[768];
+    u32 newRows = 0;
+    bool transactionStarted = false;
+
+    if (errorOut)
+        *errorOut = "NPC shop inventory is invalid";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
+        !vm_net_mock_npc_shop_inventory_service_kind_is_supported(serviceKind) ||
+        itemIds == NULL || itemCount == 0 ||
+        itemCount > VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_find_shop_catalog_item(itemIds[i]);
+        bool existing = false;
+
+        if (itemIds[i] == 0 || item == NULL ||
+            !vm_net_mock_npc_shop_inventory_item_matches_service(
+                item, serviceKind) ||
+            vm_net_mock_npc_shop_inventory_resolve_unit_price(
+                item, requestedUnitPrice) == 0)
+        {
+            if (errorOut)
+                *errorOut = item == NULL ? "物品目录中不存在该物品" :
+                            "所选物品不属于当前商人可售分类";
+            return false;
+        }
+        for (u32 prior = 0; prior < i; ++prior)
+        {
+            if (itemIds[prior] == itemIds[i])
+            {
+                if (errorOut)
+                    *errorOut = "库存选择中包含重复物品";
+                return false;
+            }
+        }
+        for (u32 row = 0; row < g_vm_net_mock_npc_shop_inventory_count;
+             ++row)
+        {
+            if (g_vm_net_mock_npc_shop_inventory[row].actorId == actorId &&
+                g_vm_net_mock_npc_shop_inventory[row].itemId == itemIds[i] &&
+                strcmp(g_vm_net_mock_npc_shop_inventory[row].scene, scene) == 0)
+            {
+                existing = true;
+                break;
+            }
+        }
+        if (!existing)
+            ++newRows;
+    }
+    if (newRows > VM_NET_MOCK_NPC_SHOP_INVENTORY_MAX -
+                      g_vm_net_mock_npc_shop_inventory_count)
+    {
+        if (errorOut)
+            *errorOut = "NPC 专属库存已满";
+        return false;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    transactionStarted = true;
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_find_shop_catalog_item(itemIds[i]);
+        u32 unitPrice = vm_net_mock_npc_shop_inventory_resolve_unit_price(
+            item, requestedUnitPrice);
+
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_npc_shop_inventory(scene,actor_id,item_id,unit_price,enabled) "
+                 "VALUES(X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+                 "unit_price=VALUES(unit_price),enabled=VALUES(enabled)",
+                 sceneHex, actorId, itemIds[i], unitPrice,
+                 enabled ? 1u : 0u);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            vm_net_mock_find_shop_catalog_item(itemIds[i]);
+        u32 unitPrice = vm_net_mock_npc_shop_inventory_resolve_unit_price(
+            item, requestedUnitPrice);
+        u32 row = 0;
+
+        for (; row < g_vm_net_mock_npc_shop_inventory_count; ++row)
+        {
+            if (g_vm_net_mock_npc_shop_inventory[row].actorId == actorId &&
+                g_vm_net_mock_npc_shop_inventory[row].itemId == itemIds[i] &&
+                strcmp(g_vm_net_mock_npc_shop_inventory[row].scene, scene) == 0)
+                break;
+        }
+        if (row == g_vm_net_mock_npc_shop_inventory_count)
+        {
+            memset(&g_vm_net_mock_npc_shop_inventory[row], 0,
+                   sizeof(g_vm_net_mock_npc_shop_inventory[row]));
+            snprintf(g_vm_net_mock_npc_shop_inventory[row].scene,
+                     sizeof(g_vm_net_mock_npc_shop_inventory[row].scene),
+                     "%s", scene);
+            g_vm_net_mock_npc_shop_inventory[row].actorId = actorId;
+            g_vm_net_mock_npc_shop_inventory[row].itemId = itemIds[i];
+            ++g_vm_net_mock_npc_shop_inventory_count;
+        }
+        g_vm_net_mock_npc_shop_inventory[row].unitPrice = unitPrice;
+        g_vm_net_mock_npc_shop_inventory[row].enabled = enabled;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] npc_shop_inventory_save_many scene=%s actor=%u items=%u price=%u enabled=%u\n",
+           scene, actorId, itemCount, requestedUnitPrice, enabled ? 1u : 0u);
+    return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_npc_shop_inventory_admin_delete(
@@ -1094,6 +1323,123 @@ static bool vm_net_mock_npc_shop_inventory_admin_delete(
     return true;
 }
 
+static bool vm_net_mock_npc_shop_inventory_admin_delete_many(
+    const char *scene, u32 actorId, const u32 *itemIds, u32 itemCount,
+    const char **errorOut)
+{
+    char sceneHex[sizeof(g_vm_net_mock_npc_shop_inventory[0].scene) * 2 + 1];
+    char query[640];
+    bool transactionStarted = false;
+    u32 write = 0;
+
+    if (errorOut)
+        *errorOut = "NPC inventory item not found";
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
+        itemIds == NULL || itemCount == 0 ||
+        itemCount > VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        bool found = false;
+
+        if (itemIds[i] == 0)
+            return false;
+        for (u32 prior = 0; prior < i; ++prior)
+        {
+            if (itemIds[prior] == itemIds[i])
+            {
+                if (errorOut)
+                    *errorOut = "库存选择中包含重复物品";
+                return false;
+            }
+        }
+        for (u32 row = 0; row < g_vm_net_mock_npc_shop_inventory_count;
+             ++row)
+        {
+            if (g_vm_net_mock_npc_shop_inventory[row].actorId == actorId &&
+                g_vm_net_mock_npc_shop_inventory[row].itemId == itemIds[i] &&
+                strcmp(g_vm_net_mock_npc_shop_inventory[row].scene, scene) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            if (errorOut)
+                *errorOut = "所选库存已不存在，请刷新页面";
+            return false;
+        }
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    transactionStarted = true;
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_npc_shop_inventory "
+                 "WHERE scene=X'%s' AND actor_id=%u AND item_id=%u",
+                 sceneHex, actorId, itemIds[i]);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+
+    for (u32 read = 0; read < g_vm_net_mock_npc_shop_inventory_count; ++read)
+    {
+        bool removed = false;
+
+        if (g_vm_net_mock_npc_shop_inventory[read].actorId == actorId &&
+            strcmp(g_vm_net_mock_npc_shop_inventory[read].scene, scene) == 0)
+        {
+            for (u32 i = 0; i < itemCount; ++i)
+            {
+                if (g_vm_net_mock_npc_shop_inventory[read].itemId == itemIds[i])
+                {
+                    removed = true;
+                    break;
+                }
+            }
+        }
+        if (!removed)
+        {
+            if (write != read)
+                g_vm_net_mock_npc_shop_inventory[write] =
+                    g_vm_net_mock_npc_shop_inventory[read];
+            ++write;
+        }
+    }
+    if (write < g_vm_net_mock_npc_shop_inventory_count)
+    {
+        memset(&g_vm_net_mock_npc_shop_inventory[write], 0,
+               (g_vm_net_mock_npc_shop_inventory_count - write) *
+                   sizeof(g_vm_net_mock_npc_shop_inventory[0]));
+    }
+    g_vm_net_mock_npc_shop_inventory_count = write;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] npc_shop_inventory_delete_many scene=%s actor=%u items=%u\n",
+           scene, actorId, itemCount);
+    return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
+}
+
 static bool vm_net_mock_dynamic_npc_column_count_row(
     void *contextValue, unsigned int columnCount, const char *const *values,
     const size_t *lengths)
@@ -1108,6 +1454,27 @@ static bool vm_net_mock_dynamic_npc_column_count_row(
             context->invalid = true;
         return true;
     }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_dynamic_npc_exact_kind_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_dynamic_npc_exact_kind_context *context =
+        (vm_net_mock_dynamic_npc_exact_kind_context *)contextValue;
+    u32 parsedKind = 0;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &parsedKind) ||
+        parsedKind > VM_NET_MOCK_NPC_KIND_MAX)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->serviceKind = (u16)parsedKind;
     context->found = true;
     return true;
 }
@@ -1142,13 +1509,12 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
     return true;
 }
 
-/* A dynamic instance target is sent directly in 30/1 and must consequently
- * name the exact downloadable SCE file.  The old admin converter persisted
- * b_* targets without `.sce`; that passed the server's optional suffix lookup
- * but forced the client to request the nonexistent bare name over WT18/7.
- * This is a data migration, not a runtime alias: it only appends the suffix
- * when the exact resulting SCE exists in the server resource root. */
-static bool vm_net_mock_dynamic_npc_instance_scene_canonicalize(
+/* Every dynamic-NPC scene key is a client resource key.  Both a placement
+ * scene and an instance target must name the exact downloadable SCE file;
+ * accepting a bare name here makes a distinct SQL key which later collides
+ * with the real `*.sce` row.  This is a data migration prerequisite, not a
+ * runtime alias: only append the suffix when that exact resource exists. */
+static bool vm_net_mock_dynamic_npc_scene_key_canonicalize(
     const char *configuredScene, char *canonicalScene, size_t canonicalCap)
 {
     char candidate[64];
@@ -1180,6 +1546,141 @@ static bool vm_net_mock_dynamic_npc_instance_scene_canonicalize(
     }
     snprintf(canonicalScene, canonicalCap, "%s", candidate);
     return true;
+}
+
+static bool vm_net_mock_dynamic_npc_parent_scene_queue_migration(
+    vm_net_mock_dynamic_npc_load_context *context,
+    const char *legacyScene, const char *canonicalScene, u32 actorId)
+{
+    vm_net_mock_dynamic_npc_parent_scene_migration *migration = NULL;
+
+    if (context == NULL || legacyScene == NULL || legacyScene[0] == 0 ||
+        canonicalScene == NULL || canonicalScene[0] == 0 || actorId == 0 ||
+        context->parentMigrationCount >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX)
+    {
+        return false;
+    }
+    migration = &context->parentMigrations[context->parentMigrationCount++];
+    memset(migration, 0, sizeof(*migration));
+    snprintf(migration->legacyScene, sizeof(migration->legacyScene), "%s",
+             legacyScene);
+    snprintf(migration->canonicalScene, sizeof(migration->canonicalScene), "%s",
+             canonicalScene);
+    migration->actorId = actorId;
+    return true;
+}
+
+/* Move all server-owned dependent rows before deleting a legacy parent.  When
+ * a correctly keyed parent already exists, it is authoritative for conflicting
+ * rows; INSERT IGNORE only carries forward data that has no exact-key owner.
+ * The whole move is transactional so a failed migration cannot leave one NPC
+ * split between two scene identities. */
+static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
+    vm_net_mock_dynamic_npc_load_context *context)
+{
+    if (context == NULL)
+        return false;
+    for (u32 i = 0; i < context->parentMigrationCount; ++i)
+    {
+        const vm_net_mock_dynamic_npc_parent_scene_migration *migration =
+            &context->parentMigrations[i];
+        char legacyHex[sizeof(migration->legacyScene) * 2 + 1];
+        char canonicalHex[sizeof(migration->canonicalScene) * 2 + 1];
+        char query[2048];
+        bool transactionStarted = false;
+        vm_net_mock_dynamic_npc_column_context canonicalParent;
+
+        if (vm_mysql_hex_encode(migration->legacyScene,
+                                strlen(migration->legacyScene), legacyHex,
+                                sizeof(legacyHex)) == 0 ||
+            vm_mysql_hex_encode(migration->canonicalScene,
+                                strlen(migration->canonicalScene), canonicalHex,
+                                sizeof(canonicalHex)) == 0 ||
+            !vm_mysql_exec("START TRANSACTION"))
+        {
+            ++context->parentMigrationFailures;
+            printf("[error][mock-admin] dynamic_npc_parent_scene_migration_failed actor=%u from=%s to=%s phase=begin error=%s\n",
+                   migration->actorId, migration->legacyScene,
+                   migration->canonicalScene, vm_mysql_last_error());
+            continue;
+        }
+        transactionStarted = true;
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_dynamic_npcs("
+                 "scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
+                 "SELECT X'%s',actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled "
+                 "FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        /* A legacy key may be deleted only after the exact SCE parent exists
+         * in the same transaction.  INSERT IGNORE alone is not evidence of
+         * that: it can report success while doing no write, and treating that
+         * as a completed migration would orphan the admin target. */
+        memset(&canonicalParent, 0, sizeof(canonicalParent));
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM server_dynamic_npcs "
+                 "WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, migration->actorId);
+        if (!vm_mysql_query(query, vm_net_mock_dynamic_npc_column_count_row,
+                            &canonicalParent) ||
+            canonicalParent.invalid || !canonicalParent.found ||
+            canonicalParent.count != 1u)
+        {
+            printf("[error][mock-admin] dynamic_npc_parent_scene_migration_failed actor=%u from=%s to=%s phase=verify-canonical-parent count=%u error=%s\\n",
+                   migration->actorId, migration->legacyScene,
+                   migration->canonicalScene, canonicalParent.count,
+                   vm_mysql_last_error());
+            goto failed;
+        }
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable) "
+                 "SELECT X'%s',actor_id,task_id,repeatable FROM server_dynamic_npc_tasks "
+                 "WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_dynamic_npc_instances("
+                 "scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
+                 "SELECT X'%s',actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level "
+                 "FROM server_dynamic_npc_instances WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_npc_shop_inventory(scene,actor_id,item_id,unit_price,enabled) "
+                 "SELECT X'%s',actor_id,item_id,unit_price,enabled FROM server_npc_shop_inventory "
+                 "WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_npc_shop_inventory WHERE scene=X'%s' AND actor_id=%u",
+                 legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
+                 legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+            goto failed;
+        transactionStarted = false;
+        ++context->parentMigrated;
+        printf("[info][mock-admin] dynamic_npc_parent_scene_migration actor=%u from=%s to=%s action=merged-exact-sce-key\n",
+               migration->actorId, migration->legacyScene,
+               migration->canonicalScene);
+        continue;
+
+failed:
+        if (transactionStarted)
+            (void)vm_mysql_exec("ROLLBACK");
+        ++context->parentMigrationFailures;
+        printf("[error][mock-admin] dynamic_npc_parent_scene_migration_failed actor=%u from=%s to=%s phase=transaction error=%s\n",
+               migration->actorId, migration->legacyScene,
+               migration->canonicalScene, vm_mysql_last_error());
+    }
+    return context->parentMigrationFailures == 0;
 }
 
 static bool vm_net_mock_dynamic_npc_instance_scene_queue_migration(
@@ -1310,6 +1811,26 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceMinLevel = (u16)number[11];
+    if (context->scanningParentSceneMigrations)
+    {
+        char canonicalScene[sizeof(row.scene)];
+
+        /* Admin placement scenes are exact SCE keys.  Only legacy bare keys
+         * are migrated; distinct c00/00 prefixes remain distinct resources. */
+        if (!vm_net_mock_str_ends_with(row.scene, ".sce"))
+        {
+            if (!vm_net_mock_dynamic_npc_scene_key_canonicalize(
+                    row.scene, canonicalScene, sizeof(canonicalScene)) ||
+                !vm_net_mock_dynamic_npc_parent_scene_queue_migration(
+                    context, row.scene, canonicalScene, row.seed.actorId))
+            {
+                ++context->parentMigrationFailures;
+                printf("[error][mock-admin] dynamic_npc_parent_scene_unresolved actor=%u scene=%s action=abort-load reason=exact-sce-resource-not-found-or-migration-queue-full\n",
+                       row.seed.actorId, row.scene);
+            }
+        }
+        return true;
+    }
     if (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
         row.seed.instanceScene[0] != 0)
     {
@@ -1317,7 +1838,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
 
         snprintf(configuredScene, sizeof(configuredScene), "%s",
                  row.seed.instanceScene);
-        if (!vm_net_mock_dynamic_npc_instance_scene_canonicalize(
+        if (!vm_net_mock_dynamic_npc_scene_key_canonicalize(
                 configuredScene, row.seed.instanceScene,
                 sizeof(row.seed.instanceScene)))
         {
@@ -1385,6 +1906,25 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     return true;
 }
 
+static bool vm_net_mock_dynamic_npc_db_query_rows(
+    vm_net_mock_dynamic_npc_load_context *context)
+{
+    return vm_mysql_query(
+        "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
+        "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
+        "COALESCE(server_dynamic_npc_tasks.task_id,0),"
+        "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
+        "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
+        "COALESCE(server_dynamic_npc_instances.target_x,0),"
+        "COALESCE(server_dynamic_npc_instances.target_y,0),"
+        "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
+        "COALESCE(server_dynamic_npc_instances.minimum_level,1) "
+        "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
+        "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
+        "USING(scene,actor_id) ORDER BY scene,actor_id",
+        vm_net_mock_dynamic_npc_row, context);
+}
+
 static bool vm_net_mock_dynamic_npc_db_load(void)
 {
     vm_net_mock_dynamic_npc_load_context context;
@@ -1398,7 +1938,8 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
            sizeof(g_vm_net_mock_dynamic_npc_overrides));
     memset(&context, 0, sizeof(context));
 
-    if (!vm_mysql_exec(
+    if (!vm_net_mock_native_npc_db_load() ||
+        !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npcs ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
             "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
@@ -1431,23 +1972,35 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),"
             "CONSTRAINT fk_server_dynamic_npc_instances_npc FOREIGN KEY(scene,actor_id) "
-            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
-        !vm_mysql_query(
-            "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
-            "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
-            "COALESCE(server_dynamic_npc_tasks.task_id,0),"
-            "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
-            "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
-            "COALESCE(server_dynamic_npc_instances.target_x,0),"
-            "COALESCE(server_dynamic_npc_instances.target_y,0),"
-            "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
-            "COALESCE(server_dynamic_npc_instances.minimum_level,1) "
-            "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
-            "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
-            "USING(scene,actor_id) ORDER BY scene,actor_id",
-            vm_net_mock_dynamic_npc_row, &context))
+            "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB"))
     {
         printf("[error][mock-admin] dynamic_npc_db_load failed error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    context.scanningParentSceneMigrations = true;
+    if (!vm_net_mock_dynamic_npc_db_query_rows(&context) ||
+        !vm_net_mock_dynamic_npc_parent_scene_apply_migrations(&context))
+    {
+        printf("[error][mock-admin] dynamic_npc_db_load migration=parent-scene-exact-sce-key error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    /* The scan deliberately did not publish rows. Reload only after every
+     * legacy key has been atomically merged, so no runtime/admin lookup can
+     * observe duplicate scene identities. */
+    context.scanningParentSceneMigrations = false;
+    context.loaded = 0;
+    context.skipped = 0;
+    context.quarantined = 0;
+    context.migrationCount = 0;
+    context.migrationFailures = 0;
+    g_vm_net_mock_dynamic_npc_override_count = 0;
+    memset(g_vm_net_mock_dynamic_npc_overrides, 0,
+           sizeof(g_vm_net_mock_dynamic_npc_overrides));
+    if (!vm_net_mock_dynamic_npc_db_query_rows(&context))
+    {
+        printf("[error][mock-admin] dynamic_npc_db_load failed phase=final-load error=%s\n",
                vm_mysql_last_error());
         return false;
     }
@@ -1474,9 +2027,50 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         }
     }
     g_vm_net_mock_dynamic_npc_db_valid = true;
-    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u quarantined=%u migrated=%u\n",
+    printf("[info][mock-admin] dynamic_npc_db_load rows=%u skipped=%u quarantined=%u migrated=%u parent_migrated=%u\n",
            context.loaded, context.skipped, context.quarantined,
-           context.migrated);
+           context.migrated, context.parentMigrated);
+    return true;
+}
+
+/* The database is the parent-record authority for admin mutations.  The
+ * in-memory override list is intentionally long-lived for scene delivery, so
+ * it can lag a save performed through another service instance or a process
+ * that was restarted between two browser POSTs.  Resolve inventory ownership
+ * by the exact persisted SCE key instead of treating that cache as a durable
+ * identity index. */
+static bool vm_net_mock_dynamic_npc_admin_lookup_exact_kind(
+    const char *scene, u32 actorId, bool *foundOut, u16 *serviceKindOut)
+{
+    vm_net_mock_dynamic_npc_exact_kind_context context;
+    char sceneHex[64 * 2 + 1];
+    char query[512];
+
+    if (foundOut != NULL)
+        *foundOut = false;
+    if (serviceKindOut != NULL)
+        *serviceKindOut = VM_NET_MOCK_NPC_KIND_NORMAL;
+    if (!vm_net_mock_dynamic_npc_db_load() || scene == NULL || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT npc_kind FROM server_dynamic_npcs "
+             "WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_query(query, vm_net_mock_dynamic_npc_exact_kind_row,
+                        &context) || context.invalid)
+    {
+        return false;
+    }
+    if (foundOut != NULL)
+        *foundOut = context.found;
+    if (serviceKindOut != NULL && context.found)
+        *serviceKindOut = context.serviceKind;
     return true;
 }
 
@@ -1487,8 +2081,26 @@ static int vm_net_mock_dynamic_npc_find_override(const char *scene, u32 actorId)
     for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
     {
         if (g_vm_net_mock_dynamic_npc_overrides[i].seed.actorId == actorId &&
-            vm_net_mock_scene_names_equal_loose(
+            vm_net_mock_scene_names_equal_exact(
                 g_vm_net_mock_dynamic_npc_overrides[i].scene, scene))
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/* Admin edits are keyed by the exact resource filename printed in the scene
+ * picker. A legacy bare key is not an accepted identity for inventory POSTs. */
+static int vm_net_mock_dynamic_npc_find_override_exact(const char *scene,
+                                                        u32 actorId)
+{
+    if (!vm_net_mock_dynamic_npc_db_load() || scene == NULL || actorId == 0)
+        return -1;
+    for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
+    {
+        if (g_vm_net_mock_dynamic_npc_overrides[i].seed.actorId == actorId &&
+            strcmp(g_vm_net_mock_dynamic_npc_overrides[i].scene, scene) == 0)
         {
             return (int)i;
         }
@@ -1854,7 +2466,7 @@ static u32 vm_net_mock_append_service_scene_npcinfo_seeds(
             &g_vm_net_mock_dynamic_npc_overrides[i];
 
         if (!row->enabled ||
-            !vm_net_mock_scene_names_equal_loose(row->scene, scene))
+            !vm_net_mock_scene_names_equal_exact(row->scene, scene))
         {
             continue;
         }
@@ -1890,7 +2502,7 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
     (void)vm_net_mock_dynamic_npc_db_load();
     for (u32 i = 0; i < builtinCount && count < rowCap; ++i)
     {
-        int overrideIndex = vm_net_mock_dynamic_npc_find_override(
+        int overrideIndex = vm_net_mock_dynamic_npc_find_override_exact(
             scene, builtins[i].actorId);
         rows[count].builtin = true;
         if (overrideIndex >= 0)
@@ -1916,7 +2528,7 @@ static u32 vm_net_mock_dynamic_npc_admin_list(
         const vm_net_mock_dynamic_npc_override *row =
             &g_vm_net_mock_dynamic_npc_overrides[i];
 
-        if (!vm_net_mock_scene_names_equal_loose(row->scene, scene))
+        if (strcmp(row->scene, scene) != 0)
             continue;
         for (u32 builtinIndex = 0; builtinIndex < builtinCount; ++builtinIndex)
         {
@@ -2314,7 +2926,7 @@ static bool vm_net_mock_find_sce_edge_portal_by_target_exit(const char *scene,
             continue;
         if (portal.targetEntryId != (u16)exitId)
             continue;
-        if (!vm_net_mock_scene_names_equal_loose(portal.targetScene, targetScene))
+        if (!vm_net_mock_scene_names_equal_exact(portal.targetScene, targetScene))
             continue;
         if (portalOut)
             *portalOut = portal;
@@ -2778,7 +3390,7 @@ static bool vm_net_mock_pending_local_scene_change_matches(const char *requested
         sceneObj == 0 ||
         !vm_net_read_guest_raw_cstr(sceneObj + 0x475, pendingScene, sizeof(pendingScene)) ||
         !vm_net_mock_scene_name_is_safe(pendingScene) ||
-        !vm_net_mock_scene_names_equal_loose(pendingScene, requestedTargetScene))
+        !vm_net_mock_scene_names_equal_exact(pendingScene, requestedTargetScene))
     {
         return false;
     }
@@ -2815,7 +3427,7 @@ static bool vm_net_mock_try_scene_change_source_portal(const char *sourceKind,
 
     if (haveGrid &&
         vm_net_mock_find_sce_edge_portal_at_pos(sourceScene, gridX, gridY, 8, &portal) &&
-        vm_net_mock_scene_names_equal_loose(portal.targetScene, requestedTargetScene))
+        vm_net_mock_scene_names_equal_exact(portal.targetScene, requestedTargetScene))
     {
         matchMode = "trigger-rect";
     }
@@ -2938,7 +3550,7 @@ static bool vm_net_mock_get_scene_change_target_from_source_portal(const char *r
     {
         snprintf(sourceScene, sizeof(sourceScene), "%s",
                  vm_net_mock_normalize_scene_name_for_enter(runtimeScene));
-        if ((role == NULL || !vm_net_mock_scene_names_equal_loose(role->scene, sourceScene)) &&
+        if ((role == NULL || !vm_net_mock_scene_names_equal_exact(role->scene, sourceScene)) &&
             vm_net_mock_try_scene_change_source_portal(allowTargetExitMatch ? "runtime-pending" : "runtime",
                                                        sourceScene,
                                                        requestedTargetScene,
@@ -3062,7 +3674,7 @@ static bool vm_net_mock_scene_change_targets_equal(const vm_net_mock_scene_chang
            a->x == b->x &&
            a->y == b->y &&
            a->exitId == b->exitId &&
-           vm_net_mock_scene_names_equal_loose(a->scene, b->scene);
+           vm_net_mock_scene_names_equal_exact(a->scene, b->scene);
 }
 
 static bool vm_net_mock_scene_change_targets_same_arrival(const vm_net_mock_scene_change_target *a,
@@ -3071,7 +3683,7 @@ static bool vm_net_mock_scene_change_targets_same_arrival(const vm_net_mock_scen
     return a != NULL && b != NULL &&
            a->x == b->x &&
            a->y == b->y &&
-           vm_net_mock_scene_names_equal_loose(a->scene, b->scene);
+           vm_net_mock_scene_names_equal_exact(a->scene, b->scene);
 }
 
 static bool vm_net_mock_consume_update_completed_scene_reenter(const vm_net_mock_scene_change_target *target)
@@ -3191,7 +3803,7 @@ static bool vm_net_mock_is_recent_completed_scene_name(const char *scene, u32 wi
 {
     if (scene == NULL ||
         !g_vm_net_mock_last_completed_scene_change_target_valid ||
-        !vm_net_mock_scene_names_equal_loose(scene, g_vm_net_mock_last_completed_scene_change_target.scene))
+        !vm_net_mock_scene_names_equal_exact(scene, g_vm_net_mock_last_completed_scene_change_target.scene))
     {
         return false;
     }
@@ -3213,7 +3825,7 @@ static void vm_net_mock_clear_unresolved_scene_change_target(const vm_net_mock_s
 {
     if (target == NULL ||
         !g_vm_net_mock_last_scene_change_target_valid ||
-        !vm_net_mock_scene_names_equal_loose(g_vm_net_mock_last_scene_change_target.scene, target->scene))
+        !vm_net_mock_scene_names_equal_exact(g_vm_net_mock_last_scene_change_target.scene, target->scene))
     {
         return;
     }
@@ -3232,7 +3844,7 @@ static bool vm_net_mock_is_recent_current_scene_reload(const char *scene, u32 wi
 {
     if (scene == NULL ||
         !g_vm_net_mock_last_current_scene_reload_valid ||
-        !vm_net_mock_scene_names_equal_loose(scene, g_vm_net_mock_last_current_scene_reload_scene))
+        !vm_net_mock_scene_names_equal_exact(scene, g_vm_net_mock_last_current_scene_reload_scene))
     {
         return false;
     }
@@ -3257,7 +3869,7 @@ static void vm_net_mock_consume_current_scene_reload(const char *scene)
 {
     if (scene == NULL ||
         !g_vm_net_mock_last_current_scene_reload_valid ||
-        !vm_net_mock_scene_names_equal_loose(scene,
+        !vm_net_mock_scene_names_equal_exact(scene,
                                              g_vm_net_mock_last_current_scene_reload_scene))
     {
         return;
@@ -3302,7 +3914,7 @@ static bool vm_net_mock_should_use_full_scene_bootstrap(const char *currentScene
         target->exitId == 0 &&
         vm_net_mock_scene_is_penglai_transfer_scene(currentScene) &&
         vm_net_mock_scene_is_penglai_transfer_scene(target->scene) &&
-        !vm_net_mock_scene_names_equal_loose(currentScene, target->scene))
+        !vm_net_mock_scene_names_equal_exact(currentScene, target->scene))
     {
         return true;
     }
@@ -3341,28 +3953,31 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
     u16 sceSpawnY = 0;
     const char *currentScene = vm_net_mock_current_scene_name();
     memset(target, 0, sizeof(*target));
-    snprintf(target->scene, sizeof(target->scene), "%s", vm_net_mock_default_scene_name());
-    target->x = vm_net_mock_scene_spawn_x();
-    target->y = vm_net_mock_scene_spawn_y();
-    target->exitId = 0;
     target->mapType = 2;
-    target->hasSceEntry = false;
-    target->needsSceneDownload = false;
 
     if (!vm_net_mock_get_object_string_field(request, requestLen, "mapID", mapId, sizeof(mapId)))
         return;
     (void)vm_net_mock_get_object_u32_field(request, requestLen, "exitID", &exitId);
     (void)vm_net_mock_get_object_u8_field(request, requestLen, "maptype", &target->mapType);
     target->exitId = exitId;
-
-    if (mapId[0] != 0)
-        snprintf(target->scene, sizeof(target->scene), "%s", mapId);
+    if (!vm_net_mock_scene_name_is_persistable(mapId))
+    {
+        /* The map-controller and sMap.dsh contracts use the complete resource
+         * key. Do not acknowledge a bare or malformed key by substituting the
+         * bootstrap scene: that would make an invalid request move the role to
+         * a different map. Leaving target.scene empty makes every builder that
+         * consumes this probe reject the request before state mutation. */
+        printf("[error][network] mock_scene_target_rejected map=%s exit=%u reason=noncanonical-scene-key contract=exact-sce-key\n",
+               mapId[0] ? mapId : "-", exitId);
+        return;
+    }
+    snprintf(target->scene, sizeof(target->scene), "%s", mapId);
 
     if (g_vm_net_mock_teleport_stone_map_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
         (g_vm_net_mock_last_scene_change_target.x != 0 ||
          g_vm_net_mock_last_scene_change_target.y != 0) &&
-        vm_net_mock_scene_names_equal_loose(mapId, g_vm_net_mock_last_scene_change_target.scene))
+        vm_net_mock_scene_names_equal_exact(mapId, g_vm_net_mock_last_scene_change_target.scene))
     {
         u32 savedExit = g_vm_net_mock_last_scene_change_target.exitId;
         *target = g_vm_net_mock_last_scene_change_target;
@@ -3389,7 +4004,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         g_vm_net_mock_last_scene_change_target_valid &&
         (g_vm_net_mock_last_scene_change_target.x != 0 ||
          g_vm_net_mock_last_scene_change_target.y != 0) &&
-        vm_net_mock_scene_names_equal_loose(mapId, g_vm_net_mock_last_scene_change_target.scene))
+        vm_net_mock_scene_names_equal_exact(mapId, g_vm_net_mock_last_scene_change_target.scene))
     {
         *target = g_vm_net_mock_last_scene_change_target;
         target->exitId = exitId;
@@ -3405,7 +4020,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
             VM_NET_MOCK_COMPLETED_SCENE_REUSE_TICKS &&
         (g_vm_net_mock_last_completed_scene_change_target.x != 0 ||
          g_vm_net_mock_last_completed_scene_change_target.y != 0) &&
-        vm_net_mock_scene_names_equal_loose(mapId, g_vm_net_mock_last_completed_scene_change_target.scene))
+        vm_net_mock_scene_names_equal_exact(mapId, g_vm_net_mock_last_completed_scene_change_target.scene))
     {
         *target = g_vm_net_mock_last_completed_scene_change_target;
         target->exitId = exitId;
@@ -3460,7 +4075,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
         return;
     }
 
-    if (vm_net_mock_scene_name_is_download_key(mapId))
+    if (vm_net_mock_scene_name_is_persistable(mapId))
     {
         snprintf(target->scene, sizeof(target->scene), "%s", mapId);
         target->x = 0;
@@ -3491,8 +4106,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
             target->y = 473;
         }
     }
-    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0 ||
-             strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31") == 0)
+    else if (strcmp(mapId, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0)
     {
         target->x = 223;
         target->y = 382;
@@ -3510,7 +4124,7 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
             target->y = 395;
         }
         else if (currentScene != NULL &&
-                 vm_net_mock_scene_names_equal_loose(currentScene, target->scene))
+                 vm_net_mock_scene_names_equal_exact(currentScene, target->scene))
         {
             target->x = vm_net_mock_scene_spawn_x();
             target->y = vm_net_mock_scene_spawn_y();
@@ -4101,7 +4715,7 @@ static bool vm_net_mock_resolve_nearest_teleport_stone_respawn(
     }
     for (; sourceIndex < smapCount; ++sourceIndex)
     {
-        if (vm_net_mock_scene_names_equal_loose(fromScene, smap[sourceIndex].scene))
+        if (vm_net_mock_scene_names_equal_exact(fromScene, smap[sourceIndex].scene))
             break;
     }
     if (sourceIndex == smapCount)
@@ -4478,10 +5092,8 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
          * `.sce` suffix from c-prefixed targets makes that lookup miss and
          * leaves the previous (commonly Penglai) node highlighted.
          *
-         * This exception is deliberately limited to DSH-resolved map-stone
-         * targets.  Normal login/portal entry keeps the established
-         * extensionless normalization, while loose scene comparisons and the
-         * resource loader already accept both key forms.
+         * Every other login, portal and map-stone route uses this same exact
+         * resource key. No route may strip or append the `.sce` suffix.
          */
         snprintf(target->scene, sizeof(target->scene), "%s", targetScene);
     }
@@ -4840,7 +5452,7 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         if (session != NULL &&
             session->sceneVisibleReady && !session->sceneVisiblePending &&
             vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
-            vm_net_mock_scene_names_equal_loose(session->sceneVisibleScene, scene) &&
+            vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene, scene) &&
             session->sceneVisibleX != 0 && session->sceneVisibleY != 0)
         {
             fromX = session->sceneVisibleX;
@@ -5595,7 +6207,7 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
            target.x,
            target.y,
            posSource,
-           vm_net_mock_scene_names_equal_loose(provisionalTarget.scene,
+           vm_net_mock_scene_names_equal_exact(provisionalTarget.scene,
                                                target.scene)
                ? 0u
                : 1u);

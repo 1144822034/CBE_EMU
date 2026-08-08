@@ -1752,9 +1752,9 @@ static bool vm_net_mock_validate_xse_task_resources(void)
         "\xd0\xc5\xcf\xe4\x2e\x78\x73\x65" /* 信箱.xse */
     };
     static const char copperStageScene[] =
-        "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31"; /* c00蓬莱仙岛_01 */
+        "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65"; /* c00蓬莱仙岛_01.sce */
     static const char swordValleyScene[] =
-        "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32"; /* 00蓬莱仙岛_02 */
+        "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65"; /* 00蓬莱仙岛_02.sce */
     vm_net_mock_scene_npcinfo_seed copperStageSeeds[VM_NET_MOCK_SCENE_NPCINFO_MAX];
     vm_net_mock_scene_npcinfo_seed swordValleySeeds[VM_NET_MOCK_SCENE_NPCINFO_MAX];
     u32 loadedCount = 0;
@@ -2601,7 +2601,7 @@ static u32 vm_net_mock_select_scene_npcinfo_seeds(
         return 0;
 
     if (!cache->loaded ||
-        !vm_net_mock_scene_names_equal_loose(cache->scene, scene))
+        !vm_net_mock_scene_names_equal_exact(cache->scene, scene))
     {
         memset(cache->seeds, 0, sizeof(cache->seeds));
         snprintf(cache->scene, sizeof(cache->scene), "%s", scene);
@@ -3970,8 +3970,12 @@ static bool vm_net_mock_npc_shop_item_matches_selector(
 
     if (unitPriceOut)
         *unitPriceOut = 0;
-    if (item == NULL || !item->enabled ||
-        item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
+    /* `server_shop_items.enabled` controls placement in the global mall.
+     * A configured NPC inventory is a separate selling channel: its own
+     * enabled flag is the availability authority.  Reusing the mall flag
+     * here makes a fully enabled private merchant look empty whenever the
+     * same DSH item is hidden from the mall. */
+    if (item == NULL || item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
         context == NULL || !vm_net_mock_npc_service_kind_uses_inventory(
                                context->serviceKind) ||
         !vm_net_mock_npc_shop_selector_allowed_for_service(
@@ -4495,7 +4499,7 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
     ageTicks = g_schedulerTick - session->instanceChallengeTick;
     if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS) ||
         !vm_net_mock_scene_name_is_safe(scene) ||
-        !vm_net_mock_scene_names_equal_loose(
+        !vm_net_mock_scene_names_equal_exact(
             scene, session->instanceChallengeScene))
     {
         printf("[warn][network] mock_npc_instance_challenge_confirm_drop client=%08x actor=%u enemy=%u age_ticks=%u current_scene=%s pending_scene=%s reason=expired-or-scene-changed\n",
@@ -4541,7 +4545,7 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
     if (ageTicks > (10u * 1000u / VM_SCHED_FRAME_MS) ||
         !session->sceneVisibleReady || session->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) ||
-        !vm_net_mock_scene_names_equal_loose(
+        !vm_net_mock_scene_names_equal_exact(
             session->sceneVisibleScene, session->instanceChallengeScene))
     {
         printf("[warn][mock-service] instance_challenge_battle_drop client=%08x actor=%u enemy=%u age_ticks=%u visible_scene=%s pending_scene=%s reason=expired-or-scene-changed\n",

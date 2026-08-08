@@ -466,7 +466,7 @@ static bool vm_net_mock_append_scene_npcs11_once_or_empty(u8 *out, u32 outCap, u
     if (g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] != 0 &&
         scene != NULL &&
-        vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+        vm_net_mock_scene_names_equal_exact(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
                                             scene))
     {
         return vm_net_mock_append_fb_target_empty11_object(out, outCap, pos);
@@ -622,12 +622,12 @@ static bool vm_net_mock_is_current_scene_completion_request(const u8 *request, u
         currentScene != NULL &&
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
-        vm_net_mock_scene_names_equal_loose(
+        vm_net_mock_scene_names_equal_exact(
             target.scene, g_vm_net_mock_last_scene_change_target.scene);
     return currentScene != NULL &&
             (vm_net_mock_scene_uses_current_scene_completion(currentScene) ||
              directTeleportCompletion) &&
-            vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+            vm_net_mock_scene_names_equal_exact(currentScene, target.scene) &&
             !vm_net_mock_is_recent_completed_scene_change_target(&target);
 }
 
@@ -653,7 +653,7 @@ static bool vm_net_mock_is_current_scene_repeat_scene_change_request(const u8 *r
     currentScene = vm_net_mock_current_scene_name();
     return currentScene != NULL &&
            vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
-           vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+           vm_net_mock_scene_names_equal_exact(currentScene, target.scene) &&
            vm_net_mock_is_recent_completed_scene_change_target(&target);
 }
 
@@ -735,7 +735,7 @@ static u32 vm_net_mock_build_current_scene_completion_response(const u8 *request
     closeTeleportDirectEnter =
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
-        vm_net_mock_scene_names_equal_loose(
+        vm_net_mock_scene_names_equal_exact(
             target.scene,
             g_vm_net_mock_last_scene_change_target.scene);
     /*
@@ -941,12 +941,12 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
                                 !target.needsSceneDownload &&
                                 currentScene != NULL &&
                                 vm_net_mock_scene_uses_current_scene_completion(currentScene) &&
-                                vm_net_mock_scene_names_equal_loose(currentScene, target.scene);
+                                vm_net_mock_scene_names_equal_exact(currentScene, target.scene);
     deferTeleportResourceCompletion =
         !recentCompletedTarget &&
         g_vm_net_mock_teleport_stone_direct_enter_pending &&
         g_vm_net_mock_last_scene_change_target_valid &&
-        vm_net_mock_scene_names_equal_loose(
+        vm_net_mock_scene_names_equal_exact(
             g_vm_net_mock_last_scene_change_target.scene,
             target.scene);
     samePendingTarget =
@@ -1105,7 +1105,7 @@ static u32 vm_net_mock_build_scene_change_combo_response(const u8 *request, u32 
     if (target.needsSceneDownload)
     {
         if (g_vm_net_mock_last_scene_change_target_valid &&
-            vm_net_mock_scene_names_equal_loose(g_vm_net_mock_last_scene_change_target.scene, target.scene))
+            vm_net_mock_scene_names_equal_exact(g_vm_net_mock_last_scene_change_target.scene, target.scene))
         {
             g_vm_net_mock_last_scene_change_target.needsSceneDownload = true;
         }
@@ -1740,7 +1740,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     if (resourcesReady &&
         !g_vm_net_mock_teleport_stone_map_enter_pending &&
         currentScene != NULL &&
-        vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+        vm_net_mock_scene_names_equal_exact(currentScene, target.scene) &&
         vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
     {
         u32 ackLen = 0;
@@ -1769,7 +1769,7 @@ static u32 vm_net_mock_build_mmgame_scene_transfer_followup_response(const u8 *r
     if (resourcesReady &&
         g_vm_net_mock_teleport_stone_map_enter_pending &&
         currentScene != NULL &&
-        vm_net_mock_scene_names_equal_loose(currentScene, target.scene) &&
+        vm_net_mock_scene_names_equal_exact(currentScene, target.scene) &&
         vm_net_mock_is_recent_completed_scene_name(currentScene, 90))
     {
         /*
@@ -1946,12 +1946,12 @@ static bool vm_net_mock_is_current_scene_task_subset_followup_request(const u8 *
     if (currentScene == NULL || !vm_net_mock_scene_uses_current_scene_completion(currentScene))
         return false;
     if (g_vm_net_mock_last_completed_scene_change_target_valid &&
-        vm_net_mock_scene_names_equal_loose(currentScene, g_vm_net_mock_last_completed_scene_change_target.scene))
+        vm_net_mock_scene_names_equal_exact(currentScene, g_vm_net_mock_last_completed_scene_change_target.scene))
     {
         return true;
     }
     return g_vm_net_mock_last_scene_change_target_valid &&
-           vm_net_mock_scene_names_equal_loose(currentScene, g_vm_net_mock_last_scene_change_target.scene);
+           vm_net_mock_scene_names_equal_exact(currentScene, g_vm_net_mock_last_scene_change_target.scene);
 }
 
 static bool vm_net_mock_is_scene_task_subset_followup_request(const u8 *request, u32 requestLen)
@@ -2385,29 +2385,25 @@ typedef struct
 static bool vm_net_mock_scene_is_penglai02(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32") == 0 ||
-            strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65") == 0);
+           strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x32\x2e\x73\x63\x65") == 0;
 }
 
 static bool vm_net_mock_scene_is_penglai01(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31") == 0 ||
-            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0);
+           strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x31\x2e\x73\x63\x65") == 0;
 }
 
 static bool vm_net_mock_scene_is_penglai03(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33") == 0 ||
-            strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0);
+           strcmp(scene, "\x63\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x33\x2e\x73\x63\x65") == 0;
 }
 
 static bool vm_net_mock_scene_is_penglai04(const char *scene)
 {
     return scene != NULL &&
-           (strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x34") == 0 ||
-            strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x34\x2e\x73\x63\x65") == 0);
+           strcmp(scene, "\x30\x30\xc5\xee\xc0\xb3\xcf\xc9\xb5\xba\x5f\x30\x34\x2e\x73\x63\x65") == 0;
 }
 
 static bool vm_net_mock_scene_is_penglai_transfer_scene(const char *scene)
@@ -4285,7 +4281,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     if (!g_vm_net_mock_scene_moveinfo_npc_seeded &&
         g_vm_net_mock_scene_moveinfo_npc_pending &&
         g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] != 0 &&
-        vm_net_mock_scene_names_equal_loose(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+        vm_net_mock_scene_names_equal_exact(g_vm_net_mock_scene_moveinfo_npc_pending_scene,
                                             scene))
     {
         /*
@@ -4302,7 +4298,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
     }
     if (observer->taskPromptRefreshPending &&
         observer->taskPromptRefreshScene[0] != 0 &&
-        !vm_net_mock_scene_names_equal_loose(observer->taskPromptRefreshScene,
+        !vm_net_mock_scene_names_equal_exact(observer->taskPromptRefreshScene,
                                              scene))
     {
         printf("[info][mock-service] task_prompt_refresh_cancel client=%08x armed_scene=%s current_scene=%s reason=scene-changed\n",
@@ -4317,7 +4313,7 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * itself delivering 27/11, or the original race is preserved. */
     if (!npcCatalogAppended && observer->taskPromptRefreshPending &&
         observer->taskPromptRefreshScene[0] != 0 &&
-        vm_net_mock_scene_names_equal_loose(observer->taskPromptRefreshScene,
+        vm_net_mock_scene_names_equal_exact(observer->taskPromptRefreshScene,
                                             scene))
     {
         if (!vm_net_mock_append_taskinfo_empty1_object(out, outCap, &pos, scene) ||
@@ -4890,7 +4886,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
         activeSession->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(activeSession->sceneVisibleScene) ||
         !vm_net_mock_scene_name_is_safe(scene) ||
-        !vm_net_mock_scene_names_equal_loose(activeSession->sceneVisibleScene, scene))
+        !vm_net_mock_scene_names_equal_exact(activeSession->sceneVisibleScene, scene))
     {
         if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(out, outCap, &pos))
             return 0;
@@ -5063,7 +5059,7 @@ static u32 vm_net_mock_build_actor_moveinfo_ack_response(const u8 *request, u32 
                  activeSession->sceneVisibleReady &&
                  !activeSession->sceneVisiblePending &&
                  vm_net_mock_scene_name_is_safe(activeSession->sceneVisibleScene) &&
-                 vm_net_mock_scene_names_equal_loose(activeSession->sceneVisibleScene, scene) &&
+                 vm_net_mock_scene_names_equal_exact(activeSession->sceneVisibleScene, scene) &&
                  activeSession->sceneVisibleX != 0 &&
                  activeSession->sceneVisibleY != 0)
         {
