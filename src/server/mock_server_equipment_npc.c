@@ -4901,7 +4901,7 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
      * account snapshot in the existing transactional role writer, rather than
      * using the active-role-only position fast path. */
     if (!vm_net_mock_role_db_save_relational(
-            "admin-reset-selected-scene", NULL, NULL, 0, true, NULL))
+            "admin-reset-selected-scene", NULL, NULL, 0, true, NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -4965,19 +4965,16 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
         vm_mock_service_close_account_role_db_for_management(state, true);
         return false;
     }
-    before = role->wcoin;
-    after = vm_net_mock_role_add_wcoin(role, amount);
-    if (!vm_net_mock_role_db_save("admin-wcoin-add"))
+    if (!vm_mock_service_account_wallet_credit(accountId, amount, &before, &after))
     {
-        role->wcoin = before;
         vm_mock_service_account_capture(state);
         if (messageOut)
-            *messageOut = "role persistence failed";
+            *messageOut = "account wallet persistence failed";
         vm_mock_service_close_account_role_db_for_management(state, false);
         return false;
     }
     vm_mock_service_account_capture(state);
-    printf("[info][mock-service] account_wcoin_add user=%s role=%s id=%u add=%u before=%u after=%u\n",
+    printf("[info][mock-service] account_wcoin_add user=%s scope=account requested_role=%s id=%u add=%u before=%u after=%u\n",
            accountId,
            role->name[0] ? role->name : "-",
            role->roleId,
@@ -5174,7 +5171,7 @@ static bool vm_mock_service_account_remove_role_backpack_item(
      * persists activeRoleId, so use the relational full snapshot transaction
      * and keep the account's active role unchanged. */
     if (!vm_net_mock_role_db_save_relational("user-web-backpack-delete", NULL,
-                                             NULL, 0, true, NULL))
+                                             NULL, 0, true, NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);

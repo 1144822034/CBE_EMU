@@ -963,8 +963,10 @@ static bool vm_mock_payment_role_balance(const char *accountId, u32 roleId,
                             sizeof(accountHex)) == 0)
         return false;
     snprintf(query, sizeof(query),
-             "SELECT wcoin FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
-             "AND role_id=%u%s", accountHex, roleId, forUpdate ? " FOR UPDATE" : "");
+             "SELECT wallet.wcoin FROM account_wallets AS wallet "
+             "INNER JOIN account_roles AS role ON role.account_id=wallet.account_id "
+             "WHERE wallet.account_id=CAST(X'%s' AS CHAR) AND role.role_id=%u%s",
+             accountHex, roleId, forUpdate ? " FOR UPDATE" : "");
     if (!vm_mysql_query(query, vm_mock_payment_u32_row_callback, &row) ||
         row.invalid || !row.found)
         return false;
@@ -973,8 +975,8 @@ static bool vm_mock_payment_role_balance(const char *accountId, u32 roleId,
     return true;
 }
 
-static bool vm_mock_payment_role_reserved(const char *accountId, u32 roleId,
-                                          uint64_t *reservedOut)
+static bool vm_mock_payment_account_reserved(const char *accountId,
+                                             uint64_t *reservedOut)
 {
     char accountHex[127];
     char query[640];
@@ -989,8 +991,8 @@ static bool vm_mock_payment_role_reserved(const char *accountId, u32 roleId,
         return false;
     snprintf(query, sizeof(query),
              "SELECT COALESCE(SUM(wcoin_amount),0) FROM wcoin_recharge_orders "
-             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND status IN (0,1,2)",
-             accountHex, roleId);
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND status IN (0,1,2)",
+             accountHex);
     if (!vm_mysql_query(query, vm_mock_payment_u64_row_callback, &row) ||
         row.invalid || !row.found)
         return false;
@@ -1156,7 +1158,7 @@ static bool vm_mock_payment_create_order(const char *accountId, u32 roleId,
     wcoin64 = (uint64_t)yuan * config.wcoinPerYuan;
     if (wcoin64 == 0 || wcoin64 > UINT32_MAX || yuan > UINT32_MAX / 100u ||
         !vm_mock_payment_role_balance(accountId, roleId, false, &balance) ||
-        !vm_mock_payment_role_reserved(accountId, roleId, &reserved) ||
+        !vm_mock_payment_account_reserved(accountId, &reserved) ||
         (uint64_t)balance + reserved + wcoin64 > UINT32_MAX)
     {
         if (messageOut)
@@ -1269,33 +1271,8 @@ static bool vm_mock_payment_parse_callback(const char *query,
 static void vm_mock_payment_sync_cached_wcoin(const char *accountId,
                                               u32 roleId, u32 balance)
 {
-    vm_mock_service_account_state *state = g_vm_mock_service_accounts;
-
-    while (state != NULL)
-    {
-        if (strcmp(state->accountId, accountId) == 0)
-        {
-            if (state->roleDbValid)
-            {
-                for (u32 i = 0; i < state->roleDb.roleCount; ++i)
-                {
-                    if (state->roleDb.roles[i].roleId == roleId)
-                        state->roleDb.roles[i].wcoin = balance;
-                }
-            }
-            break;
-        }
-        state = state->next;
-    }
-    if (g_vm_mock_service_active_account_id != NULL &&
-        strcmp(g_vm_mock_service_active_account_id, accountId) == 0)
-    {
-        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-        {
-            if (g_vm_net_mock_role_db.roles[i].roleId == roleId)
-                g_vm_net_mock_role_db.roles[i].wcoin = balance;
-        }
-    }
+    (void)roleId; /* Retained in recharge-order history, not wallet ownership. */
+    vm_mock_service_account_wallet_sync_cached_balance(accountId, balance);
 }
 
 static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
@@ -1332,7 +1309,7 @@ static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
              callback->reallyPriceCents, payHex);
     if (!vm_mysql_exec(query))
         goto invalid;
-    if (!vm_mock_payment_role_balance(order.accountId, order.roleId, true, &balance) ||
+    if (!vm_mock_service_account_wallet_read(order.accountId, true, &balance) ||
         UINT32_MAX - balance < order.wcoinAmount)
     {
         if (!vm_mysql_exec("COMMIT"))
@@ -1348,8 +1325,8 @@ static vm_mock_payment_settle_result vm_mock_payment_settle_verified(
                                 sizeof(accountHex)) == 0)
             goto invalid;
         snprintf(query, sizeof(query),
-                 "UPDATE account_roles SET wcoin=%u WHERE account_id=CAST(X'%s' AS CHAR) "
-                 "AND role_id=%u", after, accountHex, order.roleId);
+                 "UPDATE account_wallets SET wcoin=%u WHERE account_id=CAST(X'%s' AS CHAR)",
+                 after, accountHex);
         if (!vm_mysql_exec(query))
             goto invalid;
     }
@@ -1653,7 +1630,7 @@ static void vm_mock_payment_render_dashboard(vm_mock_admin_text *page,
         return;
     }
     vm_mock_admin_text_appendf(page,
-        "<form class=\"recharge-form\" method=\"post\" action=\"/user/recharge/create\"><label>充值角色<select name=\"role_id\" required>");
+        "<form class=\"recharge-form\" method=\"post\" action=\"/user/recharge/create\"><label>订单角色（仅用于订单记录）<select name=\"role_id\" required>");
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
         const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
@@ -1663,13 +1640,13 @@ static void vm_mock_payment_render_dashboard(vm_mock_admin_text *page,
                                       roleNameUtf8, sizeof(roleNameUtf8));
         vm_mock_admin_text_appendf(page, "<option value=\"%u\">", role->roleId);
         vm_mock_admin_text_append_html(page, roleNameUtf8);
-        vm_mock_admin_text_appendf(page, "（ID %u，余额 %u W币）</option>",
-                                   role->roleId, role->wcoin);
+        vm_mock_admin_text_appendf(page, "（ID %u）</option>", role->roleId);
     }
     vm_mock_admin_text_appendf(page,
-        "</select></label><label>充值金额（元）<input type=\"number\" name=\"yuan\" min=\"%u\" max=\"%u\" step=\"1\" value=\"10\" required></label>"
+        "</select></label><p class=\"recharge-note\">当前账号余额：%u W币。W币归账号所有，所有角色共用。</p><label>充值金额（元）<input type=\"number\" name=\"yuan\" min=\"%u\" max=\"%u\" step=\"1\" value=\"10\" required></label>"
         "<label>支付方式<select name=\"pay_type\"><option value=\"2\">支付宝</option><option value=\"1\">微信支付</option></select></label>"
         "<button type=\"submit\">生成支付订单</button></form>",
+        g_vm_net_mock_role_db.roles[0].wcoin,
         config.minimumYuan, config.maximumYuan);
 
     if (accountId != NULL &&
