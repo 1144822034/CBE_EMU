@@ -4983,12 +4983,39 @@ typedef struct
     vm_net_mock_equipment_bonus equipment;
 } vm_net_mock_player_stats;
 
+/* Offline cultivation is deliberately separate from the role snapshot.  The
+ * timer continues while no client session exists, so its authority is a
+ * relational companion row keyed by the same account/role pair as the
+ * backpack and timed-item state. */
+typedef struct
+{
+    u16 todayPastHours;
+    u16 todayPastMinutes;
+    u32 gainedExp;
+    u16 todayRemainingHours;
+    u16 todayRemainingMinutes;
+    u16 allRemainingHours;
+    u16 allRemainingMinutes;
+    u8 goldEnabled;
+} vm_net_mock_practise_info;
+
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
 static bool vm_net_mock_role_db_save(const char *reason);
+static bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
+                                          vm_net_mock_practise_info *infoOut);
+static u32 vm_net_mock_build_practise_help19_response(const u8 *request,
+                                                      u32 requestLen,
+                                                      u8 *out, u32 outCap);
+static bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
+                                          bool goldEnabled);
+static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *remainingOut);
+static void vm_net_mock_practise_mark_offline(const char *accountId,
+                                              u32 roleId);
 static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
     const vm_net_mock_role_state *role, bool *grantedOut,
     u32 *remainingMsOut);

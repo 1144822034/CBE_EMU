@@ -79,8 +79,8 @@ if ($mode === 'create') {
     $tables = $source->query('SHOW FULL TABLES WHERE Table_type = \'BASE TABLE\'')
         ->fetchAll(PDO::FETCH_NUM);
     if (count($tables) === 0) throw new RuntimeException('jh_online schema has no base tables');
-    $db->exec("CREATE DATABASE `$database` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
-    $db->exec("USE `$database`");
+    $db->exec(sprintf('CREATE DATABASE %s CHARACTER SET utf8mb4 COLLATE utf8mb4_bin', $database));
+    $db->exec(sprintf('USE %s', $database));
     $db->exec('SET FOREIGN_KEY_CHECKS=0');
     try {
         foreach ($tables as $row) {
@@ -88,7 +88,7 @@ if ($mode === 'create') {
             if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
                 throw new RuntimeException('unexpected source table name');
             }
-            $create = $source->query("SHOW CREATE TABLE `$table`")->fetch(PDO::FETCH_NUM);
+            $create = $source->query(sprintf('SHOW CREATE TABLE %s', $table))->fetch(PDO::FETCH_NUM);
             if ($create === false || !isset($create[1])) {
                 throw new RuntimeException("could not read schema for $table");
             }
@@ -105,7 +105,7 @@ if ($mode === 'create') {
 
 if ($mode === 'cleanup') {
     $db = pdo();
-    $db->exec("DROP DATABASE IF EXISTS `$database`");
+    $db->exec(sprintf('DROP DATABASE IF EXISTS %s', $database));
     echo "removed isolated automation database\n";
     exit(0);
 }
@@ -142,7 +142,7 @@ try {
         'account_role_skills', 'account_role_tasks', 'account_role_backpack',
         'account_role_state'
     ] as $table) {
-        $db->prepare("DELETE FROM `$table` WHERE account_id=?")->execute([$account]);
+        $db->prepare("DELETE FROM $table WHERE account_id=?")->execute([$account]);
     }
     $db->prepare('DELETE FROM account_roles WHERE account_id=?')->execute([$account]);
     $db->prepare('DELETE FROM accounts WHERE account_id=?')->execute([$account]);

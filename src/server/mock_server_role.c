@@ -6359,6 +6359,593 @@ static bool vm_net_mock_role_db_save(const char *reason)
     return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL, NULL);
 }
 
+/*
+ * 离线修炼
+ * --------
+ * item.dsh row 827 is the authoritative contract: one pill gives one hour of
+ * offline-training time, at most eight hours may be consumed each day, and a
+ * role may hold at most one hundred hours.  The CBE only renders the totals;
+ * it never owns the timer or the experience.  Keep that state relational so a
+ * reconnect or service restart cannot fabricate elapsed time from a process
+ * tick counter.
+ *
+ * The small golden-practice panel proves the two rates but not a server-side
+ * numerical table.  The current balance therefore uses a documented level
+ * scaled rate of 8*level exp per normal minute.  Golden practice consumes at
+ * most four hours/day and awards double per consumed minute: each mode has the
+ * same daily ceiling while golden mode consumes half as much stored time.
+ */
+enum
+{
+    VM_NET_MOCK_PRACTISE_PILL_MINUTES = 60,
+    VM_NET_MOCK_PRACTISE_DAILY_NORMAL_MINUTES = 8 * 60,
+    VM_NET_MOCK_PRACTISE_DAILY_GOLD_MINUTES = 4 * 60,
+    VM_NET_MOCK_PRACTISE_MAX_MINUTES = 100 * 60,
+    VM_NET_MOCK_PRACTISE_EXP_PER_MINUTE_PER_LEVEL = 8
+};
+
+typedef struct
+{
+    u32 goldEnabled;
+    u32 availableMinutes;
+    u32 dailyEpochDay;
+    u32 dailyConsumedMinutes;
+    u32 dailyExp;
+    uint64_t offlineStartedUnix;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_practise_state_context;
+
+typedef struct
+{
+    uint64_t nowUnix;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_practise_clock_context;
+
+typedef struct
+{
+    u32 value;
+    bool found;
+    bool invalid;
+} vm_mock_mysql_practise_u32_context;
+
+static bool g_vm_net_mock_practise_schema_prepared = false;
+
+static bool vm_net_mock_practise_prepare_schema(void)
+{
+    if (g_vm_net_mock_practise_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_practise ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "gold_enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "available_minutes SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "daily_epoch_day INT UNSIGNED NOT NULL DEFAULT 0,"
+            "daily_consumed_minutes SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
+            "daily_exp INT UNSIGNED NOT NULL DEFAULT 0,"
+            "offline_started_unix BIGINT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id),"
+            "CONSTRAINT fk_account_role_practise_role FOREIGN KEY(account_id,role_id) "
+            "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] practise_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_net_mock_practise_schema_prepared = true;
+    return true;
+}
+
+static bool vm_mock_mysql_practise_state_row(
+    void *context_value, unsigned int column_count, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_mysql_practise_state_context *context =
+        (vm_mock_mysql_practise_state_context *)context_value;
+    u32 values32[5];
+    uint64_t offlineStartedUnix = 0;
+
+    if (context == NULL || context->found || column_count != 6 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &values32[0]) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &values32[1]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &values32[2]) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &values32[3]) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &values32[4]) ||
+        !vm_mock_mysql_parse_u64(values[5], lengths[5], &offlineStartedUnix) ||
+        values32[0] > 1 ||
+        values32[1] > VM_NET_MOCK_PRACTISE_MAX_MINUTES ||
+        values32[3] > VM_NET_MOCK_PRACTISE_DAILY_NORMAL_MINUTES)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->goldEnabled = values32[0];
+    context->availableMinutes = values32[1];
+    context->dailyEpochDay = values32[2];
+    context->dailyConsumedMinutes = values32[3];
+    context->dailyExp = values32[4];
+    context->offlineStartedUnix = offlineStartedUnix;
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_mysql_practise_clock_row(
+    void *context_value, unsigned int column_count, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_mysql_practise_clock_context *context =
+        (vm_mock_mysql_practise_clock_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u64(values[0], lengths[0], &context->nowUnix))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_mysql_practise_u32_row(
+    void *context_value, unsigned int column_count, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_mysql_practise_u32_context *context =
+        (vm_mock_mysql_practise_u32_context *)context_value;
+
+    if (context == NULL || context->found || column_count != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->value))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_practise_account_hex(const char *accountId,
+                                              char accountHex[129])
+{
+    size_t accountLen = vm_mock_mysql_bounded_strlen(accountId, 64);
+
+    return accountId != NULL && accountLen != 0 && accountLen < 64 &&
+           vm_mysql_hex_encode(accountId, accountLen, accountHex, 129) != 0;
+}
+
+static bool vm_net_mock_practise_ensure_row(const char *accountHex, u32 roleId)
+{
+    char query[1024];
+
+    if (accountHex == NULL || accountHex[0] == 0 || roleId == 0)
+        return false;
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_practise(account_id,role_id) "
+             "VALUES(CAST(X'%s' AS CHAR),%u) ON DUPLICATE KEY UPDATE role_id=VALUES(role_id)",
+             accountHex, roleId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_net_mock_practise_read_locked(const char *accountHex, u32 roleId,
+                                             vm_mock_mysql_practise_state_context *state)
+{
+    char query[1024];
+
+    if (state == NULL)
+        return false;
+    memset(state, 0, sizeof(*state));
+    snprintf(query, sizeof(query),
+             "SELECT gold_enabled,available_minutes,daily_epoch_day,"
+             "daily_consumed_minutes,daily_exp,offline_started_unix "
+             "FROM account_role_practise WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u FOR UPDATE",
+             accountHex, roleId);
+    return vm_mysql_query(query, vm_mock_mysql_practise_state_row, state) &&
+           state->found && !state->invalid;
+}
+
+static bool vm_net_mock_practise_read_clock_locked(
+    vm_mock_mysql_practise_clock_context *clock)
+{
+    if (clock == NULL)
+        return false;
+    memset(clock, 0, sizeof(*clock));
+    return vm_mysql_query(
+               "SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP()) AS UNSIGNED)",
+               vm_mock_mysql_practise_clock_row, clock) &&
+           clock->found && !clock->invalid;
+}
+
+static u32 vm_net_mock_practise_daily_cap(bool goldEnabled)
+{
+    return goldEnabled ? VM_NET_MOCK_PRACTISE_DAILY_GOLD_MINUTES :
+                         VM_NET_MOCK_PRACTISE_DAILY_NORMAL_MINUTES;
+}
+
+static u32 vm_net_mock_practise_exp_per_minute(u32 exp, bool goldEnabled)
+{
+    u32 level = vm_net_mock_role_level_from_exp(exp);
+    u32 rate = VM_NET_MOCK_PRACTISE_EXP_PER_MINUTE_PER_LEVEL *
+               (level ? level : 1);
+
+    if (goldEnabled)
+        rate *= 2;
+    return rate;
+}
+
+static bool vm_net_mock_practise_update_locked(
+    const char *accountHex, u32 roleId,
+    const vm_mock_mysql_practise_state_context *state)
+{
+    char query[1280];
+
+    if (accountHex == NULL || state == NULL)
+        return false;
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_practise SET gold_enabled=%u,available_minutes=%u,"
+             "daily_epoch_day=%u,daily_consumed_minutes=%u,daily_exp=%u,"
+             "offline_started_unix=%llu WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u",
+             state->goldEnabled, state->availableMinutes, state->dailyEpochDay,
+             state->dailyConsumedMinutes, state->dailyExp,
+             (unsigned long long)state->offlineStartedUnix, accountHex, roleId);
+    return vm_mysql_exec(query);
+}
+
+static void vm_net_mock_practise_fill_info(
+    const vm_mock_mysql_practise_state_context *state,
+    vm_net_mock_practise_info *infoOut)
+{
+    u32 cap = 0;
+    u32 dailyRemaining = 0;
+
+    if (infoOut == NULL || state == NULL)
+        return;
+    memset(infoOut, 0, sizeof(*infoOut));
+    cap = vm_net_mock_practise_daily_cap(state->goldEnabled != 0);
+    dailyRemaining = state->dailyConsumedMinutes >= cap ? 0 :
+                     cap - state->dailyConsumedMinutes;
+    infoOut->todayPastHours = (u16)(state->dailyConsumedMinutes / 60u);
+    infoOut->todayPastMinutes = (u16)(state->dailyConsumedMinutes % 60u);
+    infoOut->gainedExp = state->dailyExp;
+    infoOut->todayRemainingHours = (u16)(dailyRemaining / 60u);
+    infoOut->todayRemainingMinutes = (u16)(dailyRemaining % 60u);
+    infoOut->allRemainingHours = (u16)(state->availableMinutes / 60u);
+    infoOut->allRemainingMinutes = (u16)(state->availableMinutes % 60u);
+    infoOut->goldEnabled = (u8)state->goldEnabled;
+}
+
+static bool vm_net_mock_practise_get_info(vm_net_mock_role_state *role,
+                                          vm_net_mock_practise_info *infoOut)
+{
+    char accountHex[129];
+    char query[1024];
+    char mysqlError[512];
+    vm_mock_mysql_practise_state_context state;
+    vm_mock_mysql_practise_clock_context clock;
+    vm_mock_mysql_practise_u32_context roleExp;
+    bool transactionStarted = false;
+    uint64_t nowUnix = 0;
+    uint64_t minuteCursor = 0;
+    uint64_t minutesLeft = 0;
+    u32 newExp = 0;
+    u32 practiseRate = 0;
+    bool roleChanged = false;
+
+    if (infoOut != NULL)
+        memset(infoOut, 0, sizeof(*infoOut));
+    if (role == NULL || role->roleId == 0 || infoOut == NULL ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_practise_prepare_schema() ||
+        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+    {
+        return false;
+    }
+    mysqlError[0] = 0;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
+        !vm_net_mock_practise_read_clock_locked(&clock))
+    {
+        goto failed;
+    }
+    nowUnix = clock.nowUnix;
+    if (nowUnix / 86400u != state.dailyEpochDay &&
+        state.offlineStartedUnix == 0)
+    {
+        state.dailyEpochDay = (u32)(nowUnix / 86400u);
+        state.dailyConsumedMinutes = 0;
+        state.dailyExp = 0;
+    }
+
+    memset(&roleExp, 0, sizeof(roleExp));
+    if (state.offlineStartedUnix != 0 && nowUnix > state.offlineStartedUnix &&
+        state.availableMinutes != 0)
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT exp FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
+                 "AND role_id=%u FOR UPDATE", accountHex, role->roleId);
+        if (!vm_mysql_query(query, vm_mock_mysql_practise_u32_row, &roleExp) ||
+            !roleExp.found || roleExp.invalid)
+        {
+            goto failed;
+        }
+        newExp = roleExp.value;
+        /* An offline interval has one authoritative start level.  Recomputing
+         * the rate after every virtual minute feeds a level-up back into the
+         * same interval and makes a low-level role accelerate recursively.
+         * The item contract says rewards rise *with the role level*, not with
+         * levels earned part-way through a single offline settlement. */
+        practiseRate = vm_net_mock_practise_exp_per_minute(
+            roleExp.value, state.goldEnabled != 0);
+        minutesLeft = (nowUnix - state.offlineStartedUnix) / 60u;
+        minuteCursor = state.offlineStartedUnix;
+
+        /* There can be a long offline gap, but at most the persisted 100
+         * hours can ever be consumed.  Skip capped day tails in bulk and
+         * advance one minute only for a real experience credit, so the loop
+         * remains bounded and each level-up receives its new rate. */
+        while (minutesLeft != 0 && state.availableMinutes != 0)
+        {
+            uint64_t epochDay = minuteCursor / 86400u;
+            uint64_t nextDayUnix = (epochDay + 1u) * 86400u;
+            uint64_t minutesThisDay = (nextDayUnix > minuteCursor) ?
+                                       (nextDayUnix - minuteCursor) / 60u : 0;
+            u32 dailyCap = 0;
+
+            if (minutesThisDay == 0)
+                minutesThisDay = 1;
+            if (minutesThisDay > minutesLeft)
+                minutesThisDay = minutesLeft;
+            if (state.dailyEpochDay != (u32)epochDay)
+            {
+                state.dailyEpochDay = (u32)epochDay;
+                state.dailyConsumedMinutes = 0;
+                state.dailyExp = 0;
+            }
+            dailyCap = vm_net_mock_practise_daily_cap(state.goldEnabled != 0);
+            if (state.dailyConsumedMinutes >= dailyCap)
+            {
+                minuteCursor += minutesThisDay * 60u;
+                minutesLeft -= minutesThisDay;
+                continue;
+            }
+            while (minutesThisDay != 0 && minutesLeft != 0 &&
+                   state.availableMinutes != 0 &&
+                   state.dailyConsumedMinutes < dailyCap)
+            {
+                u32 expCap = vm_net_mock_role_exp_cap();
+                u32 accepted = newExp >= expCap ? 0 :
+                               (practiseRate > expCap - newExp ?
+                                expCap - newExp : practiseRate);
+
+                newExp += accepted;
+                if (accepted > 0 && state.dailyExp <= 0xffffffffu - accepted)
+                    state.dailyExp += accepted;
+                --state.availableMinutes;
+                ++state.dailyConsumedMinutes;
+                minuteCursor += 60u;
+                --minutesThisDay;
+                --minutesLeft;
+            }
+        }
+        state.offlineStartedUnix = 0;
+        if (newExp != roleExp.value)
+        {
+            snprintf(query, sizeof(query),
+                     "UPDATE account_roles SET exp=%u,level=%u WHERE "
+                     "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                     newExp, vm_net_mock_role_level_from_exp(newExp),
+                     accountHex, role->roleId);
+            if (!vm_mysql_exec(query))
+                goto failed;
+            roleChanged = true;
+        }
+    }
+    if (state.dailyEpochDay != (u32)(nowUnix / 86400u))
+    {
+        state.dailyEpochDay = (u32)(nowUnix / 86400u);
+        state.dailyConsumedMinutes = 0;
+        state.dailyExp = 0;
+    }
+    if (!vm_net_mock_practise_update_locked(accountHex, role->roleId, &state) ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    transactionStarted = false;
+    if (roleChanged)
+    {
+        role->exp = newExp;
+        role->level = vm_net_mock_role_level_from_exp(newExp);
+    }
+    vm_net_mock_practise_fill_info(&state, infoOut);
+    printf("[info][network] mock_practise_info role=%u gold=%u today=%uh%um exp=%u today_left=%uh%um all_left=%uh%um settled=%u\n",
+           role->roleId, state.goldEnabled, infoOut->todayPastHours,
+           infoOut->todayPastMinutes, infoOut->gainedExp,
+           infoOut->todayRemainingHours, infoOut->todayRemainingMinutes,
+           infoOut->allRemainingHours, infoOut->allRemainingMinutes,
+           roleChanged ? 1u : 0u);
+    return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] practise_info_failed account=%s role=%u error=%s\n",
+           g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, mysqlError[0] ? mysqlError : "unknown");
+    return false;
+}
+
+static bool vm_net_mock_practise_set_gold(vm_net_mock_role_state *role,
+                                          bool goldEnabled)
+{
+    char accountHex[129];
+    char query[1024];
+
+    if (role == NULL || role->roleId == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_practise_prepare_schema() ||
+        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_practise SET gold_enabled=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             goldEnabled ? 1u : 0u, accountHex, role->roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] practise_setting_failed account=%s role=%u error=%s\n",
+               g_vm_mock_service_active_account_id ?
+                   g_vm_mock_service_active_account_id : "-",
+               role->roleId, vm_mysql_last_error());
+        return false;
+    }
+    printf("[info][network] mock_practise_setting role=%u opengold=%u action=persisted\n",
+           role->roleId, goldEnabled ? 1u : 0u);
+    return true;
+}
+
+static void vm_net_mock_practise_mark_offline(const char *accountId,
+                                              u32 roleId)
+{
+    char accountHex[129];
+    char query[1024];
+
+    if (roleId == 0 || !vm_net_mock_practise_account_hex(accountId, accountHex) ||
+        !vm_net_mock_practise_prepare_schema())
+    {
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_practise(account_id,role_id,offline_started_unix) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,UNIX_TIMESTAMP(CURRENT_TIMESTAMP())) "
+             "ON DUPLICATE KEY UPDATE offline_started_unix="
+             "IF(offline_started_unix=0,VALUES(offline_started_unix),offline_started_unix)",
+             accountHex, roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] practise_offline_mark_failed account=%s role=%u error=%s\n",
+               accountId ? accountId : "-", roleId, vm_mysql_last_error());
+    }
+}
+
+/* 827 is a true one-hour bank deposit, not a generic consumable.  The exact
+ * backpack row and the companion training row are locked and committed in one
+ * transaction; otherwise a crash between the two writes could delete a pill
+ * without crediting its hour (or grant an hour for a retained pill). */
+static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *remainingOut)
+{
+    char accountHex[129];
+    char query[1280];
+    char mysqlError[512];
+    vm_net_mock_role_state projected;
+    vm_net_mock_backpack_item_state *sourceItem = NULL;
+    vm_mock_mysql_practise_state_context state;
+    vm_mock_mysql_practise_u32_context databaseItemCount;
+    bool transactionStarted = false;
+    u32 remaining = 0;
+    u32 expectedItemCount = 0;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_practise_prepare_schema() ||
+        !vm_net_mock_practise_ensure_row(accountHex, role->roleId))
+    {
+        return false;
+    }
+    sourceItem = vm_net_mock_role_find_backpack_item(role, 827, itemSeq);
+    if (sourceItem == NULL || sourceItem->count == 0)
+        return false;
+    expectedItemCount = sourceItem->count;
+    projected = *role;
+    if (!vm_net_mock_role_consume_backpack_item(&projected, 827, itemSeq, 1,
+                                                 &remaining))
+    {
+        return false;
+    }
+    mysqlError[0] = 0;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    if (!vm_net_mock_practise_read_locked(accountHex, role->roleId, &state) ||
+        state.availableMinutes >
+            VM_NET_MOCK_PRACTISE_MAX_MINUTES - VM_NET_MOCK_PRACTISE_PILL_MINUTES)
+    {
+        goto failed;
+    }
+    memset(&databaseItemCount, 0, sizeof(databaseItemCount));
+    snprintf(query, sizeof(query),
+             "SELECT item_count FROM account_role_backpack WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND item_id=827 "
+             "AND item_seq=%u FOR UPDATE",
+             accountHex, role->roleId, itemSeq);
+    if (!vm_mysql_query(query, vm_mock_mysql_practise_u32_row,
+                        &databaseItemCount) || !databaseItemCount.found ||
+        databaseItemCount.invalid || databaseItemCount.value != expectedItemCount)
+    {
+        goto failed;
+    }
+    if (databaseItemCount.value == 1)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
+                 "AND role_id=%u AND item_id=827 AND item_seq=%u",
+                 accountHex, role->roleId, itemSeq);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_backpack SET item_count=item_count-1 "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u "
+                 "AND item_id=827 AND item_seq=%u AND item_count=%u",
+                 accountHex, role->roleId, itemSeq, databaseItemCount.value);
+    }
+    if (!vm_mysql_exec(query))
+        goto failed;
+    state.availableMinutes += VM_NET_MOCK_PRACTISE_PILL_MINUTES;
+    if (!vm_net_mock_practise_update_locked(accountHex, role->roleId, &state))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET backpack_item_count=%u WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             projected.backpackItemCount, accountHex, role->roleId);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    *role = projected;
+    if (remainingOut)
+        *remainingOut = state.availableMinutes;
+    printf("[info][network] mock_practise_pill role=%u seq=%u item_remaining=%u practise_minutes=%u action=committed\n",
+           role->roleId, itemSeq, remaining, state.availableMinutes);
+    return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] practise_pill_failed account=%s role=%u seq=%u error=%s\n",
+           g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, itemSeq,
+           mysqlError[0] ? mysqlError : "state-rejected");
+    return false;
+}
+
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role)
 {

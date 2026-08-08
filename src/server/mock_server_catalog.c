@@ -4968,6 +4968,50 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     return pos;
 }
 
+/* 827 修炼丹 is now backed by the same account/role lifecycle as the
+ * practise panel.  Keep it ahead of the historical unresolved-special
+ * fallback: result=1 is meaningful to the client (it removes the selected
+ * stack row, closes the progress dialog and requests a fresh backpack grid). */
+static u32 vm_net_mock_build_practise_pill16_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = NULL;
+    u16 itemSeq = 0;
+    u32 practiseMinutes = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    bool success = false;
+    const char *itemInfo =
+        "\xD0\xDE\xC1\xB6\xCA\xB1\xBC\xE4\xD4\xF6\xBC\xD3\x31\xD0\xA1\xCA\xB1\xA1\xA3"; /* 修炼时间增加1小时。 */
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 16,
+                                                    "itemseq", false, &itemSeq))
+    {
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    success = vm_net_mock_practise_use_pill(role, itemSeq, &practiseMinutes);
+    if (!success)
+    {
+        itemInfo =
+            "\xD0\xDE\xC1\xB6\xCA\xB1\xBC\xE4\xD2\xD1\xB4\xEF\xB5\xBD\xC0\xDB\xBC\xC6\xC9\xCF\xCF\xDE\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 修炼时间已达到累计上限，未使用。 */
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 16, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 1 : 2) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", practiseMinutes) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", itemInfo))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_practise_pill16 role=%u seq=%u success=%u practise_minutes=%u response=%u evidence=item.dsh:827+JianghuOL.CBE:0x0102355E+0x0102615A\n",
+           role ? role->roleId : 0, itemSeq, success ? 1u : 0u,
+           practiseMinutes, pos);
+    return pos;
+}
+
 /* These requests have parser-proven response contracts, but their durable
  * gameplay state is not yet represented by an authoritative server record:
  * 827 needs offline-training hours, 833 needs vitality, and 920/921 need the
