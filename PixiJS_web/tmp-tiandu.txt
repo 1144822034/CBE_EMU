@@ -1,0 +1,34 @@
+W id=1 tp=1 name=蓬莱/蓬莱仙岛 base=37 n=3
+W id=2 tp=2 name=桃花岛/桃花岛 base=40 n=4
+W id=3 tp=3 name=丹霞山/丹霞山 base=44 n=3
+W id=4 tp=4 name=临安府/临安府 base=47 n=10
+W id=5 tp=5 name=上古皇陵/上古皇陵 base=57 n=5
+W id=6 tp=6 name=野猪林/野猪林 base=62 n=4
+W id=7 tp=7 name=泰山/泰山 base=66 n=4
+W id=8 tp=9 name=雁门关/雁门关 base=70 n=4
+W id=9 tp=10 name=华山/华山 base=79 n=3
+W id=10 tp=8 name=封神坛/封神坛 base=82 n=7
+W id=11 tp=11 name=终南山/终南山 base=89 n=4
+W id=12 tp=12 name=活死人墓/活死人墓 base=93 n=7
+W id=13 tp=13 name=剑阁/剑阁 base=100 n=4
+W id=14 tp=14 name=蜀山/蜀山 base=104 n=3
+W id=15 tp=15 name=剑冢/剑冢 base=110 n=3
+W id=16 tp=16 name=锁妖塔/锁妖塔 base=113 n=9
+W id=17 tp=17 name=无情谷/无情谷 base=122 n=4
+W id=18 tp=19 name=金蛇谷/金蛇谷 base=126 n=4
+W id=19 tp=18 name=大理/大理 base=130 n=3
+W id=20 tp=20 name=黑龙潭/黑龙潭 base=136 n=4
+W id=21 tp=21 name=幽冥鬼府/幽冥鬼府 base=140 n=8
+W id=22 tp=22 name=火焰山/火焰山 base=148 n=4
+W id=23 tp=23 name=蟠龙寨/黑木崖 base=152 n=12
+W id=24 tp=25 name=华山洞窟/华山洞窟 base=164 n=6
+W id=25 tp=27 name=深渊沼泽/深渊沼泽 base=170 n=8
+W id=26 tp=28 name=地府门道/地府门道 base=178 n=5
+W id= tp= name=/ base= n=
+--- taishan children ---
+S id=66 file=07泰山_01.sce alias=十八盘 parent=7
+S id=67 file=07泰山_02.sce alias=天都峰 parent=7
+S id=68 file=07泰山_03.sce alias=玉皇顶 parent=7
+S id=69 file=07泰山_04.sce alias=东天门 parent=7
+--- tiandu ---
+S id=67 file=07泰山_02.sce alias=天都峰 parent=7

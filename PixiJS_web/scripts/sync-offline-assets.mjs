@@ -1,0 +1,131 @@
+/**
+ * Sync JHOnlineData + font + client_code_version into PixiJS_web/public
+ * for vite build / Capacitor offline packaging.
+ *
+ * Priority matches vite.config.ts: web/fs/JHOnlineData → bin/JHOnlineData.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
+const pixiRoot = path.resolve(rootDir, "..");
+const repoRoot = path.resolve(pixiRoot, "..");
+const publicDir = path.join(pixiRoot, "public");
+
+function resolveJhOnlineData() {
+  const candidates = [
+    path.join(repoRoot, "web", "fs", "JHOnlineData"),
+    path.join(repoRoot, "bin", "JHOnlineData"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function resolveFontFile(fileName, candidates) {
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function resolveGb16Font() {
+  return resolveFontFile("gb16.uc2.uc3", [
+    path.join(repoRoot, "web", "fs", "gb16.uc2.uc3"),
+    path.join(repoRoot, "bin", "gb16.uc2.uc3"),
+    path.join(repoRoot, "bin", "multiplayer", "gb16.uc2.uc3"),
+  ]);
+}
+
+function resolveFontGb() {
+  return resolveFontFile("font_gb.uc3", [
+    path.join(repoRoot, "bin", "font_gb.uc3"),
+    path.join(repoRoot, "bin2", "font_gb.uc3"),
+    path.join(repoRoot, "web", "fs", "font_gb.uc3"),
+    path.join(
+      repoRoot,
+      "JianghuOL",
+      "app",
+      "src",
+      "main",
+      "assets",
+      "font_gb.uc3",
+    ),
+  ]);
+}
+
+function resolveClientCodeVersion() {
+  const candidates = [
+    path.join(pixiRoot, "client_code_version.txt"),
+    path.join(repoRoot, "client_code_version.txt"),
+    path.join(repoRoot, "web", "fs", "JHOnlineData", "client_code_version.txt"),
+    path.join(repoRoot, "bin", "JHOnlineData", "client_code_version.txt"),
+    path.join(repoRoot, "bin", "client_code_version.txt"),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function rmrf(dir) {
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function copyDir(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, ent.name);
+    const to = path.join(dest, ent.name);
+    if (ent.isDirectory()) copyDir(from, to);
+    else fs.copyFileSync(from, to);
+  }
+}
+
+const dataSrc = resolveJhOnlineData();
+if (!dataSrc) {
+  console.error(
+    "[sync-offline-assets] missing JHOnlineData (tried web/fs and bin)",
+  );
+  process.exit(1);
+}
+
+fs.mkdirSync(publicDir, { recursive: true });
+const dataDest = path.join(publicDir, "JHOnlineData");
+console.log(`[sync-offline-assets] JHOnlineData ← ${dataSrc}`);
+rmrf(dataDest);
+copyDir(dataSrc, dataDest);
+
+const gb16Src = resolveGb16Font();
+if (!gb16Src) {
+  console.error("[sync-offline-assets] missing gb16.uc2.uc3");
+  process.exit(1);
+}
+const gb16Dest = path.join(publicDir, "gb16.uc2.uc3");
+fs.copyFileSync(gb16Src, gb16Dest);
+console.log(`[sync-offline-assets] gb16.uc2.uc3 ← ${gb16Src}`);
+
+const fontGbSrc = resolveFontGb();
+if (fontGbSrc) {
+  const fontDest = path.join(publicDir, "font_gb.uc3");
+  fs.copyFileSync(fontGbSrc, fontDest);
+  console.log(`[sync-offline-assets] font_gb.uc3 ← ${fontGbSrc}`);
+} else {
+  console.warn("[sync-offline-assets] font_gb.uc3 not found (optional fallback)");
+}
+
+const verSrc = resolveClientCodeVersion();
+const verDest = path.join(publicDir, "client_code_version.txt");
+if (verSrc) {
+  fs.copyFileSync(verSrc, verDest);
+  console.log(`[sync-offline-assets] client_code_version.txt ← ${verSrc}`);
+} else {
+  fs.writeFileSync(verDest, "2\n", "utf8");
+  console.warn(
+    "[sync-offline-assets] no client_code_version.txt found; wrote default 2",
+  );
+}
+
+console.log("[sync-offline-assets] done →", publicDir);

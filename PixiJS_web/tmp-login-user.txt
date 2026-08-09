@@ -1,0 +1,15 @@
+﻿login lxh001 123456 wt 123
+cbmr body 170
+obj 1 12 result,serverinfo,color,servernum,newVer,information
+ result [ 0, 1, 49 ] 1
+ info select server
+{
+  result: 1,
+  servers: [
+    { name: '姹熸箹褰掓潵', label: '鏂板尯', serverId: 2, color: 16777215 },
+    { name: '姹熸箹涓€鍖?, label: '鎺ㄨ崘', serverId: 1, color: 16777215 }
+  ],
+  username: undefined,
+  password: undefined,
+  information: 'select server'
+}

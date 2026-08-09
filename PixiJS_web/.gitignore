@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.vite/
+public/JHOnlineData/
+public/font_gb.uc3
+public/client_code_version.txt
+android/app/build/
+android/.gradle/
+android/build/
+android/captures/
+android/local.properties
+*.apk
+*.aab

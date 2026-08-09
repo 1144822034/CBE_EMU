@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">江湖OL</string>
+    <string name="title_activity_main">江湖OL</string>
+    <string name="package_name">com.jianghu.pixijs</string>
+    <string name="custom_url_scheme">com.jianghu.pixijs</string>
+</resources>

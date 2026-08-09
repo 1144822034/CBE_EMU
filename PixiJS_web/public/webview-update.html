@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>需要更新系统 WebView</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #05070a;
+        color: #e8dcc8;
+        font-family: "Microsoft YaHei", SimSun, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      main {
+        max-width: 28em;
+        line-height: 1.55;
+      }
+      h1 {
+        font-size: 1.15rem;
+        color: #c4a35a;
+        margin: 0 0 12px;
+      }
+      p {
+        margin: 0 0 10px;
+        font-size: 0.95rem;
+      }
+      ol {
+        margin: 0 0 14px;
+        padding-left: 1.3em;
+        font-size: 0.92rem;
+        color: #c8c0b0;
+      }
+      code {
+        color: #3ddc84;
+      }
+      .actions {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      a.btn {
+        display: block;
+        text-align: center;
+        text-decoration: none;
+        padding: 10px 12px;
+        border: 1px solid #3a5a50;
+        color: #e8dcc8;
+        background: #1a2822;
+      }
+      a.btn.primary {
+        border-color: #c4a35a;
+        color: #c4a35a;
+      }
+      .muted {
+        color: #8a8070;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>需要更新系统网页组件</h1>
+      <p>
+        本游戏依赖手机自带的 <code>Android System WebView</code> /
+        <code>Chrome</code>。当前版本过旧或检测失败，无法正常启动。
+      </p>
+      <ol>
+        <li>打开手机应用商店（华为/小米/OPPO/vivo/应用宝等）</li>
+        <li>
+          搜索并更新：<code>Android System WebView</code>、
+          <code>系统网页查看器</code> 或 <code>Chrome</code>
+        </li>
+        <li>更新完成后<strong>完全关掉本应用再打开</strong></li>
+      </ol>
+      <p class="muted">
+        无谷歌框架的国产机请用厂商应用商店；不要只更新游戏本身。
+      </p>
+      <div class="actions">
+        <a class="btn primary" href="./index.html">已更新 / 仍想尝试进入游戏</a>
+        <a class="btn" href="market://details?id=com.google.android.webview"
+          >打开商店：System WebView</a
+        >
+        <a class="btn" href="market://details?id=com.android.chrome"
+          >打开商店：Chrome</a
+        >
+      </div>
+    </main>
+  </body>
+</html>

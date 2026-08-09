@@ -1,0 +1,2239 @@
+import { Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
+import {
+  CBE,
+  LCD_HEIGHT,
+  LCD_WIDTH,
+  SOFTKEY_H,
+  drawCbePanel,
+  drawCbeTitlePill,
+} from "./constants";
+import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
+import { tryLoadUiTexture, uiSprite } from "./UiAssets";
+import {
+  isChestBoxItem,
+  type BagItem,
+  type CharacterStats,
+  type MallState,
+  type ShopGoods,
+} from "../net/protocolExtras";
+import { isMapHealSkill, type BattleSkillRow } from "../resources/skill";
+import { qualityColor, WORN_SLOT_NAMES } from "../resources/itemCatalog";
+import {
+  actorResourceForJobSex,
+  composeMapActor,
+  loadActor,
+} from "../resources/actor";
+import {
+  buildEquipDetailLines,
+  EQUIP_DETAIL_YELLOW,
+  type EquipPaintLine,
+} from "./equipDetail";
+
+export type SystemKind =
+  | "bag"
+  | "equip"
+  | "quest"
+  | "mall"
+  | "enhance"
+  | "team"
+  | "skill"
+  | "status";
+
+type ViewMode = "list" | "detail" | "actions" | "recharge_pay";
+
+export type SystemAction =
+  | "use"
+  | "batch_open"
+  | "equip"
+  | "unequip"
+  | "swap"
+  | "enhance"
+  | "recast"
+  | "discard"
+  | "buy"
+  | "recharge_alipay"
+  | "recharge_wechat"
+  | "skill_use"
+  | "refresh";
+
+/**
+ * Worn panel visual grid (screenshot)：左帽衣披束 / 右裤鞋饰品武器.
+ * slot = body slot index (0 武器 … 7 戒指).
+ */
+const EQUIP_SLOT_UI: { slot: number; label: string; col: number; row: number }[] = [
+  { slot: 1, label: "帽", col: 0, row: 0 },
+  { slot: 2, label: "衣", col: 0, row: 1 },
+  { slot: 3, label: "披", col: 0, row: 2 },
+  { slot: 4, label: "束", col: 0, row: 3 },
+  { slot: 5, label: "裤", col: 1, row: 0 },
+  { slot: 6, label: "鞋", col: 1, row: 1 },
+  { slot: 7, label: "饰品", col: 1, row: 2 },
+  { slot: 0, label: "武器", col: 1, row: 3 },
+];
+
+const EQUIP_REPLACE_PART: Record<number, string> = {
+  0: "手部",
+  1: "头部",
+  2: "上衣",
+  3: "披风",
+  4: "腰部",
+  5: "腿部",
+  6: "脚部",
+  7: "饰品",
+};
+
+const EQUIP_CURSOR = 0xffdf00;
+/** Worn slot glow when server durability is 0. */
+const EQUIP_BROKEN_RED = 0xff2020;
+const EQUIP_BROKEN_RED_HI = 0xff6060;
+
+/** Rows visible per page on bag list (CBE 240×400). */
+const BAG_VISIBLE_ROWS = 14;
+/** Rows visible per page on mall / other generic lists. */
+const PAGE_SIZE = 10;
+/** Bottom inset only — L/R actions live on HTML softkeys, not in-panel buttons. */
+const PANEL_BOTTOM_PAD = 6;
+
+type BagTab = {
+  id: string;
+  /** Full label when selected (CBE). */
+  label: string;
+  /** Single-char clip when inactive (screenshot 道/务/料/物/宝). */
+  short: string;
+  match: (it: BagItem) => boolean;
+};
+
+type MallTab = {
+  id: string;
+  label: string;
+  match: (g: ShopGoods) => boolean;
+};
+
+/** CBE bag tabs @0x010250F2..0x0102511A：道具/装备/任务/材料/杂物/秘宝. */
+const BAG_TABS: BagTab[] = [
+  {
+    id: "daoju",
+    label: "道具",
+    short: "道",
+    match: (it) => it.kind === "item" && (it.category === 10 || it.category === 23),
+  },
+  { id: "equip", label: "装备", short: "装", match: (it) => it.kind === "equip" },
+  {
+    id: "quest",
+    label: "任务",
+    short: "务",
+    match: (it) => it.kind === "item" && it.category === 11,
+  },
+  {
+    id: "mat",
+    label: "材料",
+    short: "料",
+    match: (it) => it.kind === "item" && (it.category === 12 || it.category === 13),
+  },
+  {
+    id: "misc",
+    label: "杂物",
+    short: "物",
+    match: (it) => {
+      if (it.kind === "equip") return false;
+      const c = it.category;
+      return !(
+        c === 10 ||
+        c === 11 ||
+        c === 12 ||
+        c === 13 ||
+        c === 14 ||
+        c === 20 ||
+        c === 21 ||
+        c === 23
+      );
+    },
+  },
+  {
+    id: "secret",
+    label: "秘宝",
+    short: "宝",
+    match: (it) =>
+      it.kind === "item" && (it.category === 14 || it.category === 20 || it.category === 21),
+  },
+];
+
+const MALL_TABS: MallTab[] = [
+  { id: "all", label: "全部", match: () => true },
+  { id: "drug", label: "药品", match: (g) => g.kind === "item" && g.category === 10 },
+  {
+    id: "secret",
+    label: "秘宝",
+    match: (g) =>
+      g.kind === "item" &&
+      (g.category === 14 || g.category === 20 || g.category === 21),
+  },
+  {
+    id: "other",
+    label: "其他",
+    match: (g) => {
+      if (g.kind === "equip") return false;
+      const c = g.category;
+      return c !== 10 && c !== 14 && c !== 20 && c !== 21;
+    },
+  },
+];
+
+/** Visible action buttons on equip detail footer. */
+const EQUIP_ACTION_VISIBLE = 2;
+/** Selection bar on bag list (sampled from CBE shot). */
+const BAG_SELECT = 0x20676e;
+const BAG_TAB_BG = 0x375946;
+/** CBE capacity `%d/%d个` color 0xFFDF00. */
+const BAG_CAP_INK = 0xffdf00;
+/** CBE bag money amount DrawString color. */
+const BAG_MONEY_INK = 0xffffff;
+
+/** Rows visible on CBE 属性 panel (through 物攻 on first page). */
+const STATUS_VISIBLE_ROWS = 15;
+/** Value / row well (dark). */
+const STATUS_ROW_BG = 0x12231e;
+/** Label column strip — lighter than value well. */
+const STATUS_LABEL_BG = 0x3a5c52;
+/** Label mint; values stay white. */
+const STATUS_LABEL = 0xabcc98;
+/** Value column after 2 字标签（紧凑）. */
+/** Two UC3 CJK glyphs (32) + pad — was 40 for 12px system font. */
+const STATUS_LABEL_W = 48;
+
+/**
+ * CBE-style system overlays: bag / worn / skills / mall / character.
+ * All list data is server-driven; local DSH only supplies names/quality paint.
+ */
+export class SystemPanel extends Container {
+  private box = new Graphics();
+  private labels: BitmapLabel[] = [];
+  /** Transient UI sprites (jin/yin/tong); cleared each redraw. */
+  private uiSprites: Sprite[] = [];
+  private kind: SystemKind = "bag";
+  private mode: ViewMode = "list";
+  private cursorIndex = 0;
+  private actionCursor = 0;
+  private categoryIndex = 0;
+
+  private bagItems: BagItem[] = [];
+  private wornItems: BagItem[] = [];
+  private skills: BattleSkillRow[] = [];
+  private mall: MallState | null = null;
+  private stats: CharacterStats | null = null;
+  /** Copper total for bag footer 金/银/铜 (CBE money split). */
+  private bagMoney = 0;
+  /** Actor backpack capacity (default 20). */
+  private bagCapacity = 20;
+  /** Cached JHOnlineData currency icons. */
+  private moneyTex: { jin: Texture | null; yin: Texture | null; tong: Texture | null } | null =
+    null;
+  private moneyTexLoading = false;
+  private selected: BagItem | ShopGoods | BattleSkillRow | null = null;
+  private actionLabels: string[] = [];
+  private detailLines: string[] = [];
+  private inBattle = false;
+  /** Equip detail attribute page (CBE ⇦ n/m ⇨). */
+  private detailPage = 0;
+  /** Mall detail purchase quantity (← → adjust). */
+  private buyQty = 1;
+  /** Pending mall RMB recharge yuan (before channel pick). */
+  private rechargeYuan = 0;
+  /** Transient hit targets (mall footer 充值); destroyed each redraw. */
+  private hitSprites: Container[] = [];
+  /** Body slot under equip cursor (0..7). */
+  private equipFocusSlot = 1;
+  /** Bag candidates when replacing a worn slot. */
+  private replaceCandidates: BagItem[] = [];
+  /** Cached stand-frame for worn-panel center actor. */
+  private equipActorTex: Texture | null = null;
+  private equipActorKey = "";
+  /** Transient server feedback (item use / chest reward). */
+  private tipText = "";
+  private tipUntil = 0;
+  private tipTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Pulsing red glow over durability-0 worn slots (equip panel only). */
+  private brokenGlowGfx = new Graphics();
+  private brokenSlotRects: { x: number; y: number; w: number; h: number }[] = [];
+  private brokenGlowPhase = 0;
+  private brokenGlowTimer: ReturnType<typeof setInterval> | null = null;
+
+  onAction:
+    | ((
+        kind: SystemKind,
+        action: SystemAction | string,
+        item?: BagItem | ShopGoods | BattleSkillRow,
+      ) => void)
+    | null = null;
+  onClose: (() => void) | null = null;
+
+  constructor() {
+    super();
+    this.visible = false;
+    this.eventMode = "static";
+    this.addChild(
+      new Graphics()
+        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+        .fill({ color: 0x000000, alpha: 0.35 }),
+    );
+    this.addChild(this.box, this.brokenGlowGfx);
+  }
+
+  open(kind: SystemKind, _hint = ""): void {
+    this.kind = kind;
+    this.mode = kind === "status" ? "detail" : "list";
+    this.cursorIndex = 0;
+    this.actionCursor = 0;
+    this.detailPage = 0;
+    this.buyQty = 1;
+    this.rechargeYuan = 0;
+    this.replaceCandidates = [];
+    // Bag defaults to 道具; enhance picker still opens on 装备.
+    this.categoryIndex = kind === "enhance" ? 1 : 0;
+    this.selected = null;
+    this.clearTip();
+    this.visible = true;
+    if (kind === "bag") this.ensureMoneyIcons();
+    if (kind === "equip") {
+      // Default focus: 帽 (slot 1), UI index 0.
+      this.equipFocusSlot = 1;
+      this.cursorIndex = 0;
+    } else {
+      this.stopBrokenGlowAnim();
+    }
+    this.redraw();
+  }
+
+  /** Current mall buy quantity (for onAction buy). */
+  getMallBuyQty(): number {
+    return Math.max(1, this.buyQty | 0);
+  }
+
+  /** Yuan amount chosen before 支付宝/微信 confirm. */
+  getRechargeYuan(): number {
+    return Math.max(0, this.rechargeYuan | 0);
+  }
+
+  /** Worn body seq for 7/8 type4 / 7/9 body (= slot+1). */
+  getEquipFocusBodySeq(): number {
+    return (this.equipFocusSlot | 0) + 1;
+  }
+
+  getEquipFocusSlot(): number {
+    return this.equipFocusSlot | 0;
+  }
+
+  /** Full-body stand for worn-panel center (job/sex from selected role). */
+  setEquipActor(jobIndex: number, sex: number): void {
+    const name = actorResourceForJobSex(jobIndex, sex);
+    const cacheKey = `${name}#d3`;
+    if (cacheKey === this.equipActorKey && this.equipActorTex) return;
+    this.equipActorKey = cacheKey;
+    this.equipActorTex = null;
+    void loadActor(name)
+      .then((loaded) => {
+        if (this.equipActorKey !== cacheKey) return;
+        // CBE dir: 1=up 2=right 3=down(front) 4=left — equip panel wants front stand.
+        const frame = composeMapActor(loaded, 3, false, 0);
+        if (!frame || frame.width < 4) return;
+        const canvas = document.createElement("canvas");
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+        canvas.getContext("2d")!.putImageData(
+          new ImageData(new Uint8ClampedArray(frame.rgba), frame.width, frame.height),
+          0,
+          0,
+        );
+        const tex = Texture.from(canvas);
+        tex.source.scaleMode = "nearest";
+        this.equipActorTex = tex;
+        if (this.visible && this.kind === "equip") this.redraw();
+      })
+      .catch((e) => console.warn("[system] equip actor", name, e));
+  }
+
+  /** Show a short in-panel tip (item use / 获得奖励). */
+  showTip(text: string, ms = 2800): void {
+    const msg = text.trim();
+    if (!msg) return;
+    this.tipText = msg;
+    this.tipUntil = Date.now() + ms;
+    if (this.tipTimer) clearTimeout(this.tipTimer);
+    this.tipTimer = setTimeout(() => {
+      this.tipTimer = null;
+      if (Date.now() >= this.tipUntil) {
+        this.tipText = "";
+        if (this.visible) this.redraw();
+      }
+    }, ms + 20);
+    if (this.visible) this.redraw();
+  }
+
+  private clearTip(): void {
+    this.tipText = "";
+    this.tipUntil = 0;
+    if (this.tipTimer) {
+      clearTimeout(this.tipTimer);
+      this.tipTimer = null;
+    }
+  }
+
+  setInBattle(v: boolean): void {
+    this.inBattle = v;
+  }
+
+  setBag(items: BagItem[]): void {
+    this.bagItems = items;
+    if (this.visible && (this.kind === "bag" || this.kind === "enhance")) {
+      if (this.mode === "list") this.clampCursor();
+      this.redraw();
+      return;
+    }
+    if (this.visible && this.kind === "equip") {
+      if (this.mode === "detail") {
+        const slot = this.equipFocusSlot;
+        this.replaceCandidates = this.bagItems.filter(
+          (it) => it.kind === "equip" && it.equipSlot === slot,
+        );
+        if (!this.replaceCandidates.length) {
+          this.replaceCandidates = this.bagItems.filter((it) => it.kind === "equip");
+        }
+        if (this.cursorIndex >= this.replaceCandidates.length) this.cursorIndex = 0;
+        this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
+      }
+      this.redraw();
+    }
+  }
+
+  /** Money (copper) + capacity for CBE bag chrome `%d/%d个` + 金/银/铜. */
+  setBagMeta(money: number, capacity: number): void {
+    this.bagMoney = money >>> 0;
+    this.bagCapacity = Math.max(1, capacity | 0);
+    if (this.visible && this.kind === "bag") this.redraw();
+  }
+
+  setWorn(items: BagItem[]): void {
+    this.wornItems = items;
+    if (this.visible && this.kind === "equip") {
+      if (this.mode === "list" || this.mode === "actions") {
+        this.selected = this.wornBySlot(this.equipFocusSlot);
+      }
+      this.redraw();
+    }
+  }
+
+  setSkills(skills: BattleSkillRow[]): void {
+    this.skills = skills;
+    if (this.visible && this.kind === "skill") this.redraw();
+  }
+
+  setMall(state: MallState): void {
+    this.mall = state;
+    if (this.visible && this.kind === "mall") {
+      if (this.mode === "list") this.clampCursor();
+      this.redraw();
+    }
+  }
+
+  setStats(stats: CharacterStats): void {
+    this.stats = stats;
+    if (this.visible && this.kind === "status") this.redraw();
+  }
+
+  setLines(lines: string[]): void {
+    this.detailLines = lines;
+    this.redraw();
+  }
+
+  hide(): void {
+    this.visible = false;
+    this.stopBrokenGlowAnim();
+    this.brokenGlowGfx.clear();
+    this.brokenSlotRects = [];
+  }
+
+  /** Left/right: bag/mall category tab, equip-detail page, or mall buy qty. */
+  moveCategory(delta: number): void {
+    if (this.kind === "equip" && this.mode === "list") {
+      this.moveEquipGrid(0, delta);
+      return;
+    }
+    if (
+      this.kind === "mall" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isGoods(this.selected)
+    ) {
+      this.adjustBuyQty(delta);
+      return;
+    }
+    if (
+      this.kind === "bag" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isBag(this.selected) &&
+      this.selected.kind === "equip"
+    ) {
+      const lines = buildEquipDetailLines(this.selected);
+      // 与 drawBagEquipDetail 同一套可容纳行数：装得下则不分页
+      const fitRows = 16; // ≈ (bodyBottom-bodyTop)/16；装得下时 pages=1
+      const rowsPerPage = lines.length <= fitRows ? lines.length || 1 : fitRows;
+      const pages = Math.max(1, Math.ceil(lines.length / rowsPerPage));
+      if (pages <= 1) return;
+      this.detailPage = (this.detailPage + delta + pages) % pages;
+      this.redraw();
+      return;
+    }
+    if (this.mode !== "list" || !this.usesCategoryTabs()) return;
+    const tabs = this.categoryTabs();
+    if (tabs.length <= 1) return;
+    this.categoryIndex = (this.categoryIndex + delta + tabs.length) % tabs.length;
+    this.cursorIndex = 0;
+    this.redraw();
+  }
+
+  private adjustBuyQty(delta: number): void {
+    if (!this.selected || !isGoods(this.selected)) return;
+    const max = this.maxBuyQty(this.selected);
+    const next = Math.min(max, Math.max(1, this.buyQty + delta));
+    if (next === this.buyQty) return;
+    this.buyQty = next;
+    this.redraw();
+  }
+
+  private maxBuyQty(g: ShopGoods): number {
+    const bal = this.mall?.coolmoney ?? 0;
+    const byMoney = g.price > 0 ? Math.floor(bal / g.price) : 99;
+    const byStock = g.stock > 0 ? g.stock : 99;
+    return Math.max(1, Math.min(99, byStock, Math.max(1, byMoney)));
+  }
+
+  move(delta: number): void {
+    if (this.kind === "status") {
+      const rows = this.statusRows().length;
+      const pageCount = Math.max(1, Math.ceil(rows / STATUS_VISIBLE_ROWS));
+      if (pageCount <= 1) return;
+      this.cursorIndex = (this.cursorIndex + delta + pageCount) % pageCount;
+      this.redraw();
+      return;
+    }
+    if (this.kind === "equip" && this.mode === "list") {
+      this.moveEquipGrid(delta, 0);
+      return;
+    }
+    if (this.kind === "equip" && this.mode === "detail") {
+      const n = this.replaceCandidates.length;
+      if (!n) return;
+      this.cursorIndex = (this.cursorIndex + delta + n) % n;
+      this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
+      this.redraw();
+      return;
+    }
+    if (this.mode === "actions" || this.mode === "recharge_pay") {
+      if (!this.actionLabels.length) return;
+      this.actionCursor =
+        (this.actionCursor + delta + this.actionLabels.length) %
+        this.actionLabels.length;
+      this.redraw();
+      return;
+    }
+    const n = this.listCount();
+    if (!n) return;
+    this.cursorIndex = (this.cursorIndex + delta + n) % n;
+    this.redraw();
+  }
+
+  private moveEquipGrid(dRow: number, dCol: number): void {
+    const cur = EQUIP_SLOT_UI[this.cursorIndex] ?? EQUIP_SLOT_UI[0]!;
+    let row = cur.row + dRow;
+    let col = cur.col + dCol;
+    if (row < 0) row = 3;
+    if (row > 3) row = 0;
+    if (col < 0) col = 1;
+    if (col > 1) col = 0;
+    const next = EQUIP_SLOT_UI.findIndex((s) => s.row === row && s.col === col);
+    if (next < 0) return;
+    this.cursorIndex = next;
+    this.equipFocusSlot = EQUIP_SLOT_UI[next]!.slot;
+    this.selected = this.wornBySlot(this.equipFocusSlot);
+    this.redraw();
+  }
+
+  confirm(): void {
+    if (this.kind === "status") {
+      // 只读汇总；确定无操作
+      return;
+    }
+    if (this.kind === "equip") {
+      this.confirmEquip();
+      return;
+    }
+    if (this.mode === "recharge_pay") {
+      const label = this.actionLabels[this.actionCursor];
+      if (!label || !this.rechargeYuan) return;
+      const action =
+        label === "微信" ? "recharge_wechat" : "recharge_alipay";
+      this.onAction?.(this.kind, action);
+      this.mode = "list";
+      this.actionLabels = [];
+      this.redraw();
+      return;
+    }
+    if (this.mode === "list") {
+      this.openDetailFromList();
+      return;
+    }
+    if (this.mode === "detail") {
+      this.openActions();
+      return;
+    }
+    // actions
+    const label = this.actionLabels[this.actionCursor];
+    if (!label) return;
+    if (label === "返回") {
+      this.mode = "list";
+      this.selected = null;
+      this.redraw();
+      return;
+    }
+    const action = actionKey(label);
+    this.onAction?.(this.kind, action, this.selected ?? undefined);
+    if (action === "discard" || action === "use" || action === "equip" || action === "buy") {
+      this.mode = "list";
+      this.selected = null;
+      this.buyQty = 1;
+      this.redraw();
+    }
+  }
+
+  /** Mall footer 充值: prompt yuan then pick 支付宝/微信. */
+  beginMallRecharge(): void {
+    if (this.kind !== "mall") return;
+    const raw = window.prompt("充值金额(元)", "1");
+    if (raw == null) return;
+    const yuan = Math.floor(Number(String(raw).trim()));
+    if (!Number.isFinite(yuan) || yuan < 1) {
+      this.showTip("请输入有效整数金额");
+      return;
+    }
+    if (yuan > 100000) {
+      this.showTip("金额超出允许范围");
+      return;
+    }
+    this.rechargeYuan = yuan;
+    this.selected = null;
+    this.mode = "recharge_pay";
+    this.actionLabels = ["支付宝", "微信"];
+    this.actionCursor = 0;
+    this.redraw();
+  }
+
+  private confirmEquip(): void {
+    if (this.mode === "list") {
+      const ui = EQUIP_SLOT_UI[this.cursorIndex] ?? EQUIP_SLOT_UI[0]!;
+      this.equipFocusSlot = ui.slot;
+      this.selected = this.wornBySlot(ui.slot);
+      this.actionLabels = this.selected ? ["替换", "卸载"] : ["替换"];
+      this.actionCursor = 0;
+      this.mode = "actions";
+      this.redraw();
+      return;
+    }
+    if (this.mode === "actions") {
+      const label = this.actionLabels[this.actionCursor];
+      if (label === "替换") {
+        this.enterEquipReplace();
+        return;
+      }
+      if (label === "卸载") {
+        const worn = this.wornBySlot(this.equipFocusSlot);
+        if (!worn) return;
+        this.onAction?.(this.kind, "unequip", worn);
+        this.mode = "list";
+        this.redraw();
+        return;
+      }
+      return;
+    }
+    if (this.mode === "detail") {
+      const bag = this.replaceCandidates[this.cursorIndex];
+      if (!bag) return;
+      const worn = this.wornBySlot(this.equipFocusSlot);
+      this.onAction?.(this.kind, worn ? "swap" : "equip", bag);
+      this.mode = "list";
+      this.selected = null;
+      this.replaceCandidates = [];
+      this.redraw();
+    }
+  }
+
+  private enterEquipReplace(): void {
+    const slot = this.equipFocusSlot;
+    this.replaceCandidates = this.bagItems.filter(
+      (it) => it.kind === "equip" && (it.equipSlot === slot || it.equipSlot === -1),
+    );
+    // Prefer strict slot match; if catalog missed equipSlot, fall back to all equips.
+    const strict = this.replaceCandidates.filter((it) => it.equipSlot === slot);
+    if (strict.length) this.replaceCandidates = strict;
+    this.cursorIndex = 0;
+    this.selected = this.replaceCandidates[0] ?? null;
+    this.mode = "detail";
+    this.redraw();
+  }
+
+  cancel(): void {
+    if (this.kind === "status") {
+      this.hide();
+      this.onClose?.();
+      return;
+    }
+    if (this.kind === "equip") {
+      if (this.mode === "actions" || this.mode === "detail") {
+        this.mode = "list";
+        this.replaceCandidates = [];
+        this.selected = this.wornBySlot(this.equipFocusSlot);
+        // Restore visual cursor for focus slot
+        const vi = EQUIP_SLOT_UI.findIndex((s) => s.slot === this.equipFocusSlot);
+        if (vi >= 0) this.cursorIndex = vi;
+        this.redraw();
+        return;
+      }
+      this.hide();
+      this.onClose?.();
+      return;
+    }
+    if (this.mode === "recharge_pay") {
+      this.mode = "list";
+      this.rechargeYuan = 0;
+      this.actionLabels = [];
+      this.redraw();
+      return;
+    }
+    if (this.mode === "actions") {
+      // 背包/商城详情与操作同屏：取消直接回列表
+      if (
+        (this.kind === "bag" && this.selected && isBag(this.selected)) ||
+        (this.kind === "mall" && this.selected && isGoods(this.selected))
+      ) {
+        this.mode = "list";
+        this.selected = null;
+        this.buyQty = 1;
+        this.redraw();
+        return;
+      }
+      this.mode = "detail";
+      this.redraw();
+      return;
+    }
+    if (this.mode === "detail") {
+      this.mode = "list";
+      this.selected = null;
+      this.redraw();
+      return;
+    }
+    this.hide();
+    this.onClose?.();
+  }
+
+  private usesCategoryTabs(): boolean {
+    return this.kind === "bag" || this.kind === "enhance" || this.kind === "mall";
+  }
+
+  private categoryTabs(): { id: string; label: string }[] {
+    if (this.kind === "mall") return MALL_TABS;
+    if (this.kind === "bag" || this.kind === "enhance") return BAG_TABS;
+    return [];
+  }
+
+  private filteredBag(): BagItem[] {
+    const tab = BAG_TABS[this.categoryIndex] ?? BAG_TABS[0]!;
+    return this.bagItems.filter((it) => tab.match(it));
+  }
+
+  private filteredMall(): ShopGoods[] {
+    const goods = this.mall?.goods ?? [];
+    const tab = MALL_TABS[this.categoryIndex] ?? MALL_TABS[0]!;
+    return goods.filter((g) => tab.match(g));
+  }
+
+  private clampCursor(): void {
+    const n = this.listCount();
+    if (!n) {
+      this.cursorIndex = 0;
+      return;
+    }
+    this.cursorIndex = Math.min(this.cursorIndex, n - 1);
+  }
+
+  private listCount(): number {
+    switch (this.kind) {
+      case "bag":
+      case "enhance":
+        return Math.max(1, this.filteredBag().length);
+      case "equip":
+        return WORN_SLOT_NAMES.length;
+      case "skill":
+        return Math.max(1, this.skills.length);
+      case "mall":
+        return Math.max(1, this.filteredMall().length);
+      case "status":
+        return 1;
+      default:
+        return 1;
+    }
+  }
+
+  private openDetailFromList(): void {
+    if (this.kind === "status") {
+      this.mode = "detail";
+      this.redraw();
+      return;
+    }
+    if (this.kind === "bag" || this.kind === "enhance") {
+      const filtered = this.filteredBag();
+      if (!filtered.length) return;
+      const it = filtered[this.cursorIndex];
+      if (!it) return;
+      this.selected = it;
+      this.detailPage = 0;
+      // CBE：物品/装备详情与操作同屏
+      this.openActions();
+      return;
+    }
+    if (this.kind === "equip") {
+      this.confirmEquip();
+      return;
+    }
+    if (this.kind === "skill") {
+      const sk = this.skills[this.cursorIndex];
+      if (!sk) return;
+      this.selected = sk;
+      this.mode = "detail";
+      this.redraw();
+      return;
+    }
+    if (this.kind === "mall") {
+      const filtered = this.filteredMall();
+      if (!filtered.length) return;
+      const g = filtered[this.cursorIndex];
+      if (!g) return;
+      this.selected = g;
+      this.buyQty = 1;
+      // 与背包道具详情同屏：说明 + 购买（←→ 调数量）
+      this.openActions();
+    }
+  }
+
+  private openActions(): void {
+    this.actionLabels = this.buildActions();
+    if (!this.actionLabels.length) return;
+    this.actionCursor = 0;
+    this.mode = "actions";
+    this.redraw();
+  }
+
+  private buildActions(): string[] {
+    if (this.kind === "bag" && this.selected && isBag(this.selected)) {
+      const it = this.selected;
+      const acts: string[] = [];
+      if (it.kind === "equip") {
+        acts.push("装备");
+        acts.push("强化");
+        if (it.enhance > 0) acts.push("重铸");
+      } else {
+        // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
+        acts.push("使用");
+        if (isChestBoxItem(it.itemId)) acts.push("批量开启");
+      }
+      acts.push("丢弃");
+      acts.push("返回");
+      return acts;
+    }
+    if (this.kind === "equip" && this.selected && isBag(this.selected)) {
+      return ["卸下", "返回"];
+    }
+    if (this.kind === "enhance" && this.selected && isBag(this.selected)) {
+      const acts = ["强化"];
+      if (this.selected.enhance > 0) acts.push("重铸");
+      acts.push("返回");
+      return acts;
+    }
+    if (this.kind === "skill" && this.selected && isSkill(this.selected)) {
+      const acts: string[] = [];
+      if (this.inBattle) acts.push("施放");
+      if (isHealSkill(this.selected)) {
+        if (this.inBattle) acts.push("回血施放");
+        else if (isMapHealSkill(this.selected)) acts.push("回血施放");
+        else acts.push("回血(战斗中)");
+      }
+      acts.push("返回");
+      return acts;
+    }
+    if (this.kind === "mall" && this.selected && isGoods(this.selected)) {
+      // 操作仅购买；数量用 ←→；返回走软键/取消
+      return ["购买"];
+    }
+    return ["返回"];
+  }
+
+  private wornBySlot(slot: number): BagItem | null {
+    // 7/7 type2 seq = slot+1
+    return (
+      this.wornItems.find((w) => w.seq === slot + 1) ||
+      this.wornItems.find((w) => w.equipSlot === slot) ||
+      null
+    );
+  }
+
+  private paintBrokenGlowOverlay(): void {
+    this.brokenGlowGfx.clear();
+    if (!this.brokenSlotRects.length) return;
+    const pulse = 0.4 + 0.45 * (0.5 + 0.5 * Math.sin(this.brokenGlowPhase * 0.35));
+    for (const r of this.brokenSlotRects) {
+      this.brokenGlowGfx
+        .rect(r.x - 3, r.y - 3, r.w + 6, r.h + 6)
+        .stroke({ width: 3, color: EQUIP_BROKEN_RED, alpha: pulse * 0.55 });
+      this.brokenGlowGfx
+        .rect(r.x - 1, r.y - 1, r.w + 2, r.h + 2)
+        .stroke({ width: 2, color: EQUIP_BROKEN_RED_HI, alpha: 0.35 + pulse * 0.45 });
+      this.brokenGlowGfx
+        .rect(r.x + 1, r.y + 1, r.w - 2, r.h - 2)
+        .fill({ color: EQUIP_BROKEN_RED, alpha: 0.08 + pulse * 0.16 });
+    }
+  }
+
+  private syncBrokenGlowAnim(): void {
+    const need =
+      this.visible && this.kind === "equip" && this.brokenSlotRects.length > 0;
+    if (need) {
+      if (!this.brokenGlowTimer) {
+        this.brokenGlowTimer = setInterval(() => {
+          if (!this.visible || this.kind !== "equip") {
+            this.stopBrokenGlowAnim();
+            return;
+          }
+          this.brokenGlowPhase = (this.brokenGlowPhase + 1) % 360;
+          this.paintBrokenGlowOverlay();
+        }, 60);
+      }
+    } else {
+      this.stopBrokenGlowAnim();
+    }
+  }
+
+  private stopBrokenGlowAnim(): void {
+    if (this.brokenGlowTimer) {
+      clearInterval(this.brokenGlowTimer);
+      this.brokenGlowTimer = null;
+    }
+    this.brokenGlowPhase = 0;
+  }
+
+  private redraw(): void {
+    for (const t of this.labels) t.destroy();
+    this.labels = [];
+    for (const s of this.uiSprites) s.destroy();
+    this.uiSprites = [];
+    for (const h of this.hitSprites) h.destroy();
+    this.hitSprites = [];
+    this.box.clear();
+    if (this.kind !== "equip") {
+      this.brokenGlowGfx.clear();
+      this.brokenSlotRects = [];
+      this.stopBrokenGlowAnim();
+    }
+
+    if (this.kind === "status") {
+      this.drawStatusPanel();
+    } else if (this.kind === "bag") {
+      this.drawBagPanel();
+    } else if (this.kind === "equip") {
+      this.drawWornEquipPanel();
+    } else if (
+      this.kind === "mall" &&
+      this.mode === "actions" &&
+      this.selected &&
+      isGoods(this.selected)
+    ) {
+      const x = 4;
+      const y = 2;
+      const w = LCD_WIDTH - 8;
+      const h = LCD_HEIGHT - 4;
+      this.drawMallItemDetail(x, y, w, h);
+    } else if (
+      this.kind === "skill" &&
+      this.mode === "detail" &&
+      this.selected &&
+      isSkill(this.selected)
+    ) {
+      const x = 4;
+      const y = 2;
+      const w = LCD_WIDTH - 8;
+      const h = LCD_HEIGHT - 4;
+      this.drawSkillDetail(x, y, w, h);
+    } else {
+      const x = 10;
+      const y = 48;
+      const w = LCD_WIDTH - 20;
+      const h = LCD_HEIGHT - SOFTKEY_H - 64;
+      drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+
+      this.addLabel(titleOf(this.kind), x + 10, y + 8, CBE.ink);
+      this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
+
+      if (this.mode === "recharge_pay") {
+        this.addLabel(`充值 ${this.rechargeYuan} 元`, x + 10, y + 46, CBE.inkTipGreen);
+        this.addLabel("选择支付方式", x + 10, y + 64, CBE.inkLabel);
+        this.actionLabels.forEach((label, i) => {
+          const hi = i === this.actionCursor;
+          const rowY = y + 86 + i * 20;
+          if (hi) this.box.rect(x + 4, rowY, w - 8, 19).fill({ color: CBE.select });
+          this.addLabel(label, x + 12, rowY + 2, hi ? CBE.ink : CBE.inkMint);
+        });
+      } else if (this.mode === "actions") {
+        this.drawActionList(x, y, w);
+      } else if (this.mode === "detail") {
+        this.drawDetail(x, y, w);
+      } else {
+        this.drawList(x, y, w);
+      }
+    }
+    this.drawTipOverlay();
+  }
+
+  /**
+   * CBE 装备信息：胶囊标题、中心角色、左右 4×2 部位格、下方详情；
+   * 确定→替换/卸载弹层；替换→背包同部位列表。
+   */
+  private drawWornEquipPanel(): void {
+    const x = 4;
+    const y = 2;
+    const w = LCD_WIDTH - 8;
+    const h = LCD_HEIGHT - 4;
+    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+
+    if (this.mode === "detail") {
+      this.brokenSlotRects = [];
+      this.brokenGlowGfx.clear();
+      this.stopBrokenGlowAnim();
+      this.drawEquipReplacePanel(x, y, w, h);
+      return;
+    }
+
+    const pillW = 72;
+    const pillH = 22;
+    const pillY = y + 8;
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
+    this.addLabelCentered("装备", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    // Compact slots → more room for attr lines below; actor shows full body in center.
+    const slotSize = 24;
+    const slotGapY = 4;
+    const gridTop = pillY + pillH + 8;
+    const gridH = 4 * slotSize + 3 * slotGapY;
+    const leftX = x + 12;
+    const rightX = x + w - 12 - slotSize;
+    const actorCx = LCD_WIDTH / 2;
+    const actorCy = gridTop + gridH / 2;
+
+    if (this.equipActorTex) {
+      const spr = new Sprite(this.equipActorTex);
+      spr.anchor.set(0.5, 0.5);
+      // Fit full body between slot columns without clipping feet/head.
+      const maxH = gridH + 4;
+      const maxW = Math.max(40, rightX - leftX - slotSize - 8);
+      const sx = Math.min(maxW / spr.texture.width, maxH / spr.texture.height);
+      spr.scale.set(sx);
+      spr.position.set(actorCx, actorCy);
+      this.addChild(spr);
+      this.uiSprites.push(spr);
+    }
+
+    this.brokenSlotRects = [];
+    for (let i = 0; i < EQUIP_SLOT_UI.length; i++) {
+      const ui = EQUIP_SLOT_UI[i]!;
+      const sx = ui.col === 0 ? leftX : rightX;
+      const sy = gridTop + ui.row * (slotSize + slotGapY);
+      const worn = this.wornBySlot(ui.slot);
+      const broken = !!worn && worn.durability === 0;
+      const focused =
+        i === this.cursorIndex && (this.mode === "list" || this.mode === "actions");
+      this.box
+        .rect(sx, sy, slotSize, slotSize)
+        .fill({
+          color: broken ? 0x401010 : worn ? CBE.bgPanel : CBE.bgPanelDark,
+        })
+        .stroke({
+          width: focused ? 2 : broken ? 2 : 1,
+          color: focused ? EQUIP_CURSOR : broken ? EQUIP_BROKEN_RED : CBE.borderDim,
+        });
+      if (worn) {
+        const q = broken ? EQUIP_BROKEN_RED_HI : qualityColor(worn.quality);
+        this.box
+          .rect(sx + 2, sy + 2, slotSize - 4, slotSize - 4)
+          .fill({ color: broken ? EQUIP_BROKEN_RED : q, alpha: broken ? 0.32 : 0.22 });
+        this.addLabelCentered(ui.label, sx + slotSize / 2, sy + slotSize / 2, q);
+        if (broken) {
+          this.brokenSlotRects.push({ x: sx, y: sy, w: slotSize, h: slotSize });
+        }
+      } else {
+        this.addLabelCentered(ui.label, sx + slotSize / 2, sy + slotSize / 2, CBE.inkLabel);
+      }
+    }
+    this.paintBrokenGlowOverlay();
+    this.syncBrokenGlowAnim();
+
+    const detailTop = gridTop + gridH + 6;
+    const detailBottom = softY - 6;
+    this.box
+      .moveTo(x + 10, detailTop - 4)
+      .lineTo(x + w - 10, detailTop - 4)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const focusSlot = EQUIP_SLOT_UI[this.cursorIndex]?.slot ?? this.equipFocusSlot;
+    const focusWorn = this.wornBySlot(focusSlot);
+    if (!focusWorn) {
+      const part = EQUIP_REPLACE_PART[focusSlot] ?? WORN_SLOT_NAMES[focusSlot] ?? "";
+      this.addAttrText(`${part}：空`, x + 14, detailTop + 4, CBE.inkMint);
+    } else {
+      const qColor = qualityColor(focusWorn.quality);
+      this.addAttrText(formatBagName(focusWorn), x + 14, detailTop + 2, qColor);
+      const lines = buildEquipDetailLines(focusWorn, { omitTypeJob: true });
+      const rowH = 14;
+      const maxRows = Math.max(1, Math.floor((detailBottom - detailTop - 18) / rowH));
+      let ly = detailTop + 16;
+      for (let i = 0; i < Math.min(maxRows, lines.length); i++) {
+        this.paintEquipLine(lines[i]!, x + 14, ly);
+        ly += rowH;
+      }
+    }
+
+    if (this.mode === "actions") {
+      this.drawEquipActionPopup();
+    }
+  }
+
+  private drawEquipActionPopup(): void {
+    const labels = this.actionLabels;
+    if (!labels.length) return;
+    const rowH = 20;
+    const padX = 14;
+    const padY = 8;
+    let maxTextW = 48;
+    for (const lab of labels) {
+      let tw = 0;
+      for (const ch of lab) tw += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
+      if (tw > maxTextW) maxTextW = tw;
+    }
+    const pw = maxTextW + padX * 2;
+    const ph = padY * 2 + labels.length * rowH;
+    const px = Math.floor((LCD_WIDTH - pw) / 2);
+    const py = Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - ph / 2);
+    this.box
+      .roundRect(px, py, pw, ph, 4)
+      .fill({ color: 0x0a1814, alpha: 0.96 })
+      .stroke({ width: 1, color: CBE.borderBright });
+    labels.forEach((lab, i) => {
+      const hi = i === this.actionCursor;
+      const ry = py + padY + i * rowH;
+      if (hi) this.box.rect(px + 4, ry, pw - 8, rowH - 2).fill({ color: CBE.select });
+      this.addLabelCentered(lab, LCD_WIDTH / 2, ry + rowH / 2 - 1, hi ? CBE.ink : CBE.inkMint);
+    });
+  }
+
+  /** Replace flow: bag equips for focused body part + detail + 替换/返回. */
+  private drawEquipReplacePanel(x: number, y: number, w: number, h: number): void {
+    const part = EQUIP_REPLACE_PART[this.equipFocusSlot] ?? "部位";
+    const pillW = Math.min(160, 28 + part.length * 14 + 56);
+    const pillH = 22;
+    const pillY = y + 8;
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
+    this.addLabelCentered(`替换${part}装备`, LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const splitY = Math.floor(y + h * 0.42);
+    const listTop = pillY + pillH + 16;
+    const listBottom = splitY - 8;
+    const rows = this.replaceCandidates;
+    const total = Math.max(1, rows.length);
+    const visible = Math.max(1, Math.floor((listBottom - listTop - 20) / 18));
+    const pageStart = Math.floor(this.cursorIndex / visible) * visible;
+    const page = Math.floor(pageStart / visible);
+    const pageCount = Math.max(1, Math.ceil(total / visible));
+
+    this.drawScrollArrow(LCD_WIDTH / 2, listTop - 2, true, page > 0);
+    for (let i = 0; i < visible; i++) {
+      const idx = pageStart + i;
+      const ry = listTop + 10 + i * 18;
+      if (!rows.length) {
+        if (i === 0) this.addLabelCentered("无可用装备", LCD_WIDTH / 2, ry + 8, CBE.inkMint);
+        break;
+      }
+      const it = rows[idx];
+      if (!it) break;
+      const hi = idx === this.cursorIndex;
+      if (hi) this.box.rect(x + 10, ry, w - 20, 17).fill({ color: CBE.select });
+      this.addLabel(
+        `${formatBagName(it)} X${it.count}`,
+        x + 16,
+        ry + 1,
+        hi ? CBE.ink : qualityColor(it.quality),
+      );
+    }
+    this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 2, false, page < pageCount - 1);
+
+    this.box
+      .moveTo(x + 10, splitY)
+      .lineTo(x + w - 10, splitY)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const sel = rows[this.cursorIndex] ?? null;
+    if (sel) {
+      const lines = buildEquipDetailLines(sel);
+      const rowH = 15;
+      const maxRows = Math.max(1, Math.floor((softY - 8 - splitY - 6) / rowH));
+      let ly = splitY + 8;
+      for (let i = 0; i < Math.min(maxRows, lines.length); i++) {
+        this.paintEquipLine(lines[i]!, x + 14, ly);
+        ly += rowH;
+      }
+    } else {
+      this.addAttrText("选择背包装备后替换", x + 14, splitY + 10, CBE.inkLabel);
+    }
+
+  }
+
+  /** Center toast over panel for use/chest feedback. */
+  private drawTipOverlay(): void {
+    if (!this.tipText || Date.now() >= this.tipUntil) {
+      if (this.tipText && Date.now() >= this.tipUntil) this.tipText = "";
+      return;
+    }
+    const maxW = LCD_WIDTH - 28;
+    const padX = 10;
+    const padY = 8;
+    const lineH = 16;
+    const lines = wrapUc3Lines(this.tipText, maxW - padX * 2);
+    const boxH = padY * 2 + lines.length * lineH;
+    const boxW = Math.min(
+      maxW,
+      Math.max(
+        120,
+        ...lines.map((l) => {
+          let w = 0;
+          for (const ch of l) w += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
+          return w + padX * 2;
+        }),
+      ),
+    );
+    const bx = Math.floor((LCD_WIDTH - boxW) / 2);
+    const by = Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2);
+    this.box
+      .roundRect(bx, by, boxW, boxH, 4)
+      .fill({ color: 0x0a1814, alpha: 0.92 })
+      .stroke({ width: 1, color: CBE.borderBright });
+    lines.forEach((line, i) => {
+      this.addLabelCentered(
+        line,
+        LCD_WIDTH / 2,
+        by + padY + lineH / 2 + i * lineH,
+        CBE.inkTipGreen,
+      );
+    });
+  }
+
+  /**
+   * CBE 背包页（江湖OL.CBE 0x010250F2 标签簇 + 截图）：
+   * 胶囊「背包」、六分类 Tab、黄字 `%d/%d个`、品质色列表、金/银/铜栏；操作走 HTML 软键。
+   */
+  private drawBagPanel(): void {
+    const x = 4;
+    const y = 2;
+    const w = LCD_WIDTH - 8;
+    const h = LCD_HEIGHT - 4;
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const moneyH = 22;
+    const moneyY = softY - moneyH - 4;
+
+    // Item/equip detail owns the top title (name bar). Skip「背包」pill so
+    // addLabelCentered("背包") does not sit under the item name.
+    if (this.mode === "actions" && this.selected && isBag(this.selected)) {
+      if (this.selected.kind === "equip") {
+        this.drawBagEquipDetail(x, y, w, h);
+      } else {
+        this.drawBagItemDetail(x, y, w, h);
+      }
+      return;
+    }
+
+    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+
+    const pillW = 72;
+    const pillH = 22;
+    const pillY = y + 8;
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
+    this.addLabelCentered("背包", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+
+    if (this.mode === "actions") {
+      this.drawBagInnerActions(x, y, w, pillY + pillH + 8, moneyY - 8);
+      return;
+    }
+    if (this.mode === "detail") {
+      this.drawBagInnerDetail(x, y, w, pillY + pillH + 8, moneyY - 8);
+      this.drawBagMoneyBar(x + 8, moneyY, w - 16, moneyH);
+      return;
+    }
+
+    // —— list ——
+    const tabY = pillY + pillH + 6;
+    const tabH = 20;
+    this.drawBagTabs(x + 6, tabY, w - 12, tabH);
+
+    const used = this.bagItems.length;
+    const cap = Math.max(this.bagCapacity, used);
+    this.addLabelCentered(`${used}/${cap}个`, LCD_WIDTH / 2, tabY + tabH + 12, BAG_CAP_INK);
+
+    const filtered = this.filteredBag();
+    const rows = filtered.length
+      ? filtered
+      : null;
+    const emptyText = this.bagItems.length ? "本分类为空" : "背包为空";
+    const total = rows ? rows.length : 1;
+    const pageStart = Math.floor(this.cursorIndex / BAG_VISIBLE_ROWS) * BAG_VISIBLE_ROWS;
+    const localCursor = this.cursorIndex - pageStart;
+    const pageCount = Math.max(1, Math.ceil(total / BAG_VISIBLE_ROWS));
+    const page = Math.floor(pageStart / BAG_VISIBLE_ROWS);
+
+    const arrowTopY = tabY + tabH + 22;
+    const listTop = arrowTopY + 12;
+    const listBottom = moneyY - 16;
+    const rowH = Math.max(16, Math.floor((listBottom - listTop) / BAG_VISIBLE_ROWS));
+    const listX = x + 10;
+    const listW = w - 20;
+
+    this.drawScrollArrow(LCD_WIDTH / 2, arrowTopY + 4, true, page > 0);
+
+    for (let i = 0; i < BAG_VISIBLE_ROWS; i++) {
+      const ry = listTop + i * rowH;
+      const ty = ry + Math.floor((rowH - 14) / 2);
+      if (!rows) {
+        if (i === 0) this.addAttrText(emptyText, listX + 4, ty, CBE.inkMint);
+        break;
+      }
+      const it = rows[pageStart + i];
+      if (!it) break;
+      const hi = i === localCursor;
+      const col = qualityColor(it.quality);
+      if (hi) {
+        this.box.rect(listX, ry, listW, rowH - 1).fill({ color: BAG_SELECT });
+      }
+      const name = formatBagName(it);
+      this.addAttrText(name, listX + 4, ty, hi ? CBE.ink : col);
+      this.addAttrTextRight(String(it.count), listX + listW - 4, ty, hi ? CBE.ink : col);
+    }
+
+    this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 6, false, page < pageCount - 1);
+
+    this.drawBagMoneyBar(x + 8, moneyY, w - 16, moneyH);
+  }
+
+  private drawBagTabs(x: number, y: number, w: number, h: number): void {
+    const n = BAG_TABS.length;
+    const gap = 2;
+    const tw = Math.floor((w - gap * (n - 1)) / n);
+    for (let i = 0; i < n; i++) {
+      const tab = BAG_TABS[i]!;
+      const tx = x + i * (tw + gap);
+      const active = i === this.categoryIndex;
+      this.box
+        .roundRect(tx, y, tw, h, 2)
+        .fill({ color: active ? CBE.bgPanelDark : BAG_TAB_BG })
+        .stroke({ width: 1, color: active ? CBE.borderBright : CBE.borderDim });
+      if (active) {
+        this.addLabelCentered(tab.label, tx + tw / 2, y + h / 2, CBE.ink);
+      } else {
+        this.addLabelCentered(tab.short, tx + tw / 2, y + h / 2, CBE.inkMint);
+      }
+    }
+  }
+
+  private drawBagMoneyBar(x: number, y: number, w: number, h: number): void {
+    this.ensureMoneyIcons();
+    this.box.rect(x, y, w, h).fill({ color: 0x0c261e });
+    const { gold, silver, copper } = splitCopperMoney(this.bagMoney);
+    // CBE 0x01023016：icon x ≈ base+0x32 / +0x67 / +0x9c；数字右对齐贴图标左侧。
+    const parts: { n: number; tex: Texture | null | undefined; iw: number; ih: number }[] = [
+      { n: gold, tex: this.moneyTex?.jin, iw: 11, ih: 8 },
+      { n: silver, tex: this.moneyTex?.yin, iw: 11, ih: 8 },
+      { n: copper, tex: this.moneyTex?.tong, iw: 9, ih: 9 },
+    ];
+    const slotW = Math.floor(w / 3);
+    for (let i = 0; i < 3; i++) {
+      const p = parts[i]!;
+      const slotX = x + i * slotW;
+      const iconX = slotX + slotW - 8 - p.iw;
+      const iconY = y + Math.floor((h - p.ih) / 2);
+      if (p.tex) {
+        const spr = uiSprite(p.tex);
+        spr.position.set(iconX, iconY);
+        this.addChild(spr);
+        this.uiSprites.push(spr);
+      }
+      // White money amounts (CBE DrawString 0xFFFFFF)
+      this.addAttrTextRight(
+        String(p.n),
+        iconX - 2,
+        y + Math.floor((h - 14) / 2),
+        BAG_MONEY_INK,
+      );
+    }
+  }
+
+  /** Preload JHOnlineData jin.gif / yin.gif / tong.gif. */
+  private ensureMoneyIcons(): void {
+    if (this.moneyTex || this.moneyTexLoading) return;
+    this.moneyTexLoading = true;
+    void Promise.all([
+      tryLoadUiTexture("jin.gif"),
+      tryLoadUiTexture("yin.gif"),
+      tryLoadUiTexture("tong.gif"),
+    ]).then(([jin, yin, tong]) => {
+      this.moneyTex = { jin, yin, tong };
+      this.moneyTexLoading = false;
+      if (this.visible && this.kind === "bag") this.redraw();
+    });
+  }
+
+
+  /**
+   * 技能详情：标题名、暗色「技能介绍」区（skill.dsh 说明）、耗蓝/施放提示。
+   */
+  private drawSkillDetail(x: number, y: number, w: number, h: number): void {
+    const sk = this.selected;
+    if (!sk || !isSkill(sk)) return;
+
+    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+
+    const titleH = 28;
+    const titleY = y + 8;
+    this.box
+      .rect(x + 4, titleY, w - 8, titleH)
+      .fill({ color: CBE.bgPanelDark });
+    this.box
+      .moveTo(x + 8, titleY + titleH)
+      .lineTo(x + w - 8, titleY + titleH)
+      .stroke({ width: 1, color: CBE.borderDim });
+    this.addLabelCentered(sk.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const metaH = 36;
+    const metaTop = softY - metaH - 4;
+
+    const descX = x + 10;
+    const descY = titleY + titleH + 8;
+    const descW = w - 20;
+    const descH = Math.max(40, metaTop - descY - 8);
+    this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
+
+    this.addAttrText("技能介绍", descX + 6, descY + 6, CBE.inkTip);
+    const desc =
+      (sk.desc && sk.desc !== "-" ? sk.desc : "") || "（无技能介绍）";
+    const wrapped = wrapUc3Lines(desc, descW - 12);
+    const maxLines = Math.max(1, Math.floor((descH - 28) / 16));
+    wrapped.slice(0, maxLines).forEach((line, i) => {
+      this.addAttrText(line, descX + 6, descY + 24 + i * 16, CBE.ink);
+    });
+
+    const mpLine = sk.mpCost != null ? `耗蓝 ${sk.mpCost}` : "";
+    const battleLine = this.inBattle
+      ? "战斗中可施放"
+      : this.selected && isSkill(this.selected) && isMapHealSkill(this.selected)
+        ? "地图可施放回血"
+        : "地图上无法施放仙术";
+    this.addAttrText(
+      [mpLine, battleLine].filter(Boolean).join("  "),
+      descX + 6,
+      metaTop + 8,
+      CBE.inkMint,
+    );
+    this.addAttrText("左软=操作  右软=返回", descX + 6, metaTop + 24, CBE.inkLabel);
+  }
+
+  /**
+   * CBE 道具详情（截图「神仙壶」）：标题名、暗色说明区、底栏使用/丢弃/返回。
+   */
+  private drawBagItemDetail(x: number, y: number, w: number, h: number): void {
+    const it = this.selected;
+    if (!it || !isBag(it)) return;
+
+    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+
+    const titleH = 28;
+    const titleY = y + 8;
+    this.box
+      .rect(x + 4, titleY, w - 8, titleH)
+      .fill({ color: CBE.bgPanelDark });
+    this.box
+      .moveTo(x + 8, titleY + titleH)
+      .lineTo(x + w - 8, titleY + titleH)
+      .stroke({ width: 1, color: CBE.borderDim });
+    // 标题：原版偏薄荷绿（非品质色）
+    this.addLabelCentered(it.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const acts = this.actionLabels;
+    const btnH = 22;
+    const btnGap = 4;
+    const actionH = acts.length * (btnH + btnGap) + 12;
+    const actionTop = softY - actionH - 4;
+
+    // Description well
+    const descX = x + 10;
+    const descY = titleY + titleH + 8;
+    const descW = w - 20;
+    const descH = Math.max(40, actionTop - descY - 8);
+    this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
+
+    const desc =
+      (it.desc && it.desc !== "-" ? it.desc : "") ||
+      (it.count > 1 ? `数量 ${it.count}` : "（无说明）");
+    const wrapped = wrapUc3Lines(desc, descW - 12);
+    const maxLines = Math.floor((descH - 8) / 16);
+    wrapped.slice(0, maxLines).forEach((line, i) => {
+      this.addAttrText(line, descX + 6, descY + 6 + i * 16, CBE.ink);
+    });
+
+    // Action buttons
+    this.box.rect(x + 4, actionTop, w - 8, actionH).fill({ color: CBE.bgPanel });
+    this.box
+      .moveTo(x + 8, actionTop)
+      .lineTo(x + w - 8, actionTop)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const btnW = 72;
+    acts.forEach((label, i) => {
+      const hi = i === this.actionCursor;
+      const by = actionTop + 6 + i * (btnH + btnGap);
+      const bx = Math.floor((LCD_WIDTH - btnW) / 2);
+      this.box
+        .roundRect(bx, by, btnW, btnH, 3)
+        .fill({ color: CBE.bgDeep })
+        .stroke({ width: 1, color: CBE.borderBright });
+      if (hi) {
+        const cy = by + btnH / 2;
+        this.box.poly([bx - 8, cy, bx - 4, cy - 4, bx, cy, bx - 4, cy + 4]).fill({
+          color: CBE.inkMint,
+        });
+        this.box
+          .poly([bx + btnW + 8, cy, bx + btnW + 4, cy - 4, bx + btnW, cy, bx + btnW + 4, cy + 4])
+          .fill({ color: CBE.inkMint });
+      }
+      this.addLabelCentered(
+        label,
+        LCD_WIDTH / 2,
+        by + btnH / 2,
+        hi ? CBE.inkMint : CBE.ink,
+      );
+    });
+  }
+
+  /**
+   * 商城详情：与背包道具详情同壳——标题、暗色说明、底栏购买；←→ 调数量。
+   */
+  private drawMallItemDetail(x: number, y: number, w: number, h: number): void {
+    const g = this.selected;
+    if (!g || !isGoods(g)) return;
+
+    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+
+    const titleH = 28;
+    const titleY = y + 8;
+    this.box.rect(x + 4, titleY, w - 8, titleH).fill({ color: CBE.bgPanelDark });
+    this.box
+      .moveTo(x + 8, titleY + titleH)
+      .lineTo(x + w - 8, titleY + titleH)
+      .stroke({ width: 1, color: CBE.borderDim });
+    this.addLabelCentered(g.name, LCD_WIDTH / 2, titleY + titleH / 2, CBE.inkBody);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const btnH = 22;
+    const btnGap = 4;
+    // 数量行 + 购买按钮
+    const actionH = (btnH + btnGap) * 2 + 16;
+    const actionTop = softY - actionH - 4;
+
+    const descX = x + 10;
+    const descY = titleY + titleH + 8;
+    const descW = w - 20;
+    const descH = Math.max(40, actionTop - descY - 8);
+    this.box.rect(descX, descY, descW, descH).fill({ color: 0x0a1410 });
+
+    const desc =
+      (g.desc && g.desc !== "-" ? g.desc : "") ||
+      `酷宝 ${g.price}` + (g.stock > 0 ? `  库存 ${g.stock}` : "");
+    const wrapped = wrapUc3Lines(desc, descW - 12);
+    const maxLines = Math.max(1, Math.floor((descH - 28) / 16));
+    wrapped.slice(0, maxLines).forEach((line, i) => {
+      this.addAttrText(line, descX + 6, descY + 6 + i * 16, CBE.ink);
+    });
+    // Price / balance under desc text (余额右对齐，勿用固定左偏移/窄 maxWidth)
+    const metaY = descY + descH - 18;
+    this.addAttrText(`价格 ${g.price}酷宝`, descX + 6, metaY, CBE.inkTip);
+    const bal = this.mall?.coolmoney ?? 0;
+    this.addAttrTextRight(`余额 ${bal}`, descX + descW - 6, metaY, CBE.inkTip, descW - 12);
+
+    this.box.rect(x + 4, actionTop, w - 8, actionH).fill({ color: CBE.bgPanel });
+    this.box
+      .moveTo(x + 8, actionTop)
+      .lineTo(x + w - 8, actionTop)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const maxQty = this.maxBuyQty(g);
+    if (this.buyQty > maxQty) this.buyQty = maxQty;
+    const qtyY = actionTop + 10;
+    this.addLabelCentered(
+      `⇦ 数量 ${this.buyQty}/${maxQty} ⇨`,
+      LCD_WIDTH / 2,
+      qtyY + btnH / 2,
+      CBE.inkTipGreen,
+    );
+
+    const btnW = 72;
+    const by = actionTop + 10 + btnH + btnGap;
+    const bx = Math.floor((LCD_WIDTH - btnW) / 2);
+    const hi = this.actionCursor === 0;
+    this.box
+      .roundRect(bx, by, btnW, btnH, 3)
+      .fill({ color: CBE.bgDeep })
+      .stroke({ width: 1, color: CBE.borderBright });
+    if (hi) {
+      const cy = by + btnH / 2;
+      this.box.poly([bx - 8, cy, bx - 4, cy - 4, bx, cy, bx - 4, cy + 4]).fill({
+        color: CBE.inkMint,
+      });
+      this.box
+        .poly([bx + btnW + 8, cy, bx + btnW + 4, cy - 4, bx + btnW, cy, bx + btnW + 4, cy + 4])
+        .fill({ color: CBE.inkMint });
+    }
+    this.addLabelCentered("购买", LCD_WIDTH / 2, by + btnH / 2, hi ? CBE.inkMint : CBE.ink);
+  }
+
+  /**
+   * CBE 装备详情（截图）：品质色标题、[等级]/主属性黄值、强化附加亮/灰、底栏操作。
+   * 属性能一页装下则不分页。
+   */
+  private drawBagEquipDetail(x: number, y: number, w: number, h: number): void {
+    const it = this.selected;
+    if (!it || !isBag(it)) return;
+
+    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
+
+    const qColor = qualityColor(it.quality);
+    const titleH = 28;
+    const titleY = y + 6;
+    // Name bar
+    this.box
+      .roundRect(x + 8, titleY, w - 16, titleH, 4)
+      .fill({ color: CBE.bgPanelDark })
+      .stroke({ width: 1, color: CBE.borderBright });
+    this.addLabelCentered(it.name, LCD_WIDTH / 2, titleY + titleH / 2, qColor);
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const actionH = 52;
+    const actionTop = softY - actionH - 4;
+    const bodyTop = titleY + titleH + 8;
+    const bodyBottom = actionTop - 4;
+    const rowH = 16;
+    const lines = buildEquipDetailLines(it);
+    const fitRows = Math.max(1, Math.floor((bodyBottom - bodyTop) / rowH));
+    // 能一页显示全则不分页；否则按可容纳行数翻页
+    const rowsPerPage = lines.length <= fitRows ? lines.length || 1 : fitRows;
+    const pageCount = Math.max(1, Math.ceil(lines.length / rowsPerPage));
+    const page = Math.min(Math.max(0, this.detailPage), pageCount - 1);
+    this.detailPage = page;
+    const start = page * rowsPerPage;
+    const pageLines = lines.slice(start, start + rowsPerPage);
+
+    let ly = bodyTop;
+    for (const line of pageLines) {
+      this.paintEquipLine(line, x + 14, ly);
+      ly += rowH;
+    }
+
+    if (pageCount > 1) {
+      this.addLabelCentered(
+        `⇦ ${page + 1}/${pageCount} ⇨`,
+        LCD_WIDTH / 2 + 70,
+        bodyTop + Math.floor(fitRows * rowH * 0.45),
+        CBE.ink,
+      );
+    }
+
+    // Footer action strip
+    this.box.rect(x + 4, actionTop, w - 8, actionH).fill({ color: CBE.bgPanel });
+    this.box
+      .moveTo(x + 8, actionTop)
+      .lineTo(x + w - 8, actionTop)
+      .stroke({ width: 1, color: CBE.borderDim });
+
+    const acts = this.actionLabels;
+    const actStart = Math.max(
+      0,
+      Math.min(this.actionCursor, Math.max(0, acts.length - EQUIP_ACTION_VISIBLE)),
+    );
+    const btnW = 72;
+    const btnH = 20;
+    for (let i = 0; i < EQUIP_ACTION_VISIBLE; i++) {
+      const label = acts[actStart + i];
+      if (!label) break;
+      const hi = actStart + i === this.actionCursor;
+      const by = actionTop + 6 + i * (btnH + 4);
+      const bx = Math.floor((LCD_WIDTH - btnW) / 2);
+      this.box
+        .roundRect(bx, by, btnW, btnH, 3)
+        .fill({ color: CBE.bgDeep })
+        .stroke({ width: 1, color: CBE.borderBright });
+      if (hi) {
+        const cy = by + btnH / 2;
+        this.box.poly([bx - 8, cy, bx - 4, cy - 4, bx, cy, bx - 4, cy + 4]).fill({
+          color: EQUIP_DETAIL_YELLOW,
+        });
+        this.box
+          .poly([bx + btnW + 8, cy, bx + btnW + 4, cy - 4, bx + btnW, cy, bx + btnW + 4, cy + 4])
+          .fill({ color: EQUIP_DETAIL_YELLOW });
+      }
+      this.addLabelCentered(
+        label,
+        LCD_WIDTH / 2,
+        by + btnH / 2,
+        hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
+      );
+    }
+
+    // Footer ▲▼ (scroll actions when more than 2)
+    if (acts.length > EQUIP_ACTION_VISIBLE) {
+      const ax = x + w - 18;
+      this.drawScrollArrow(ax, actionTop + 14, true, this.actionCursor > 0);
+      this.drawScrollArrow(ax, actionTop + 36, false, this.actionCursor < acts.length - 1);
+    }
+  }
+
+  private paintEquipLine(line: EquipPaintLine, x: number, y: number): void {
+    if (line.kind === "text") {
+      this.addAttrText(line.text, x, y, line.color);
+      return;
+    }
+    // Same-color key+value → one Label (merge); two-tone keeps two Labels.
+    if (line.keyColor === line.valueColor) {
+      this.addAttrText(`${line.key}${line.value}`, x, y, line.keyColor);
+      return;
+    }
+    this.addAttrText(line.key, x, y, line.keyColor);
+    // UC3 16×16 — old 12/7 system-font estimate put yellow values on top of keys.
+    this.addAttrText(
+      line.value,
+      x + measureUiTextWidth(line.key),
+      y,
+      line.valueColor,
+    );
+  }
+
+  private drawBagInnerDetail(x: number, _y: number, w: number, top: number, bottom: number): void {
+    const lines = this.detailText();
+    const shown = lines.slice(0, Math.floor((bottom - top) / 16));
+    shown.forEach((line, i) => {
+      this.addAttrText(line.slice(0, 26), x + 14, top + i * 16, CBE.inkMint);
+    });
+    this.addAttrText("左软=操作  右软=返回", x + 14, top + shown.length * 16 + 8, CBE.inkLabel);
+  }
+
+  private drawBagInnerActions(
+    x: number,
+    _y: number,
+    w: number,
+    top: number,
+    _bottom: number,
+  ): void {
+    this.actionLabels.forEach((label, i) => {
+      const hi = i === this.actionCursor;
+      if (hi) this.box.rect(x + 10, top + i * 20, w - 20, 18).fill({ color: BAG_SELECT });
+      this.addAttrText(label, x + 18, top + i * 20 + 2, hi ? CBE.ink : CBE.inkMint);
+    });
+  }
+
+  /**
+   * CBE 属性页（docs/re/2026-08-04-attr-panel-label-value-mismatch.md）：
+   * 顶栏胶囊「属性」、黄名、标签左/数值右两列、暗行底、▲▼、右下「返回」。
+   * ↑↓ 按整页翻；经验单行。
+   */
+  private drawStatusPanel(): void {
+    const x = 4;
+    const y = 2;
+    const w = LCD_WIDTH - 8;
+    const h = LCD_HEIGHT - 4;
+    drawCbePanel(this.box, x, y, w, h, CBE.bgPanel);
+
+    const pillW = 72;
+    const pillH = 22;
+    const pillY = y + 8;
+    drawCbeTitlePill(this.box, LCD_WIDTH / 2, pillY, pillW, pillH);
+    this.addLabelCentered("属性", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
+
+    const name = this.stats?.name || (this.detailLines[0] ?? "…");
+    // Role name: system font (not title UC3).
+    const nameLab = new BitmapLabel();
+    nameLab.anchor.set(0.5, 0.5);
+    nameLab.position.set(Math.round(LCD_WIDTH / 2), Math.round(pillY + pillH + 16));
+    void nameLab.setText(name, CBE.inkChat, {
+      uc3: true,
+      smooth: false,
+      outline: false,
+    });
+    this.addChild(nameLab);
+    this.labels.push(nameLab);
+
+    const rows = this.statusRows();
+    const pageCount = Math.max(1, Math.ceil(rows.length / STATUS_VISIBLE_ROWS));
+    const page = Math.min(Math.max(0, this.cursorIndex), pageCount - 1);
+    const scroll = page * STATUS_VISIBLE_ROWS;
+
+    const softY = y + h - PANEL_BOTTOM_PAD;
+    const arrowH = 14;
+    const arrowY = softY - arrowH - 2;
+    const rowTop = y + 54;
+    const listBottom = arrowY - 4;
+    const rowH = Math.max(16, Math.floor((listBottom - rowTop) / STATUS_VISIBLE_ROWS));
+    const listX = x + 8;
+    const listW = w - 16;
+    const listH = STATUS_VISIBLE_ROWS * rowH + 2;
+    const valueX = listX + STATUS_LABEL_W;
+
+    // Value well (dark) + lighter label strip on the left
+    this.box.rect(listX, rowTop - 2, listW, listH).fill({ color: STATUS_ROW_BG });
+    this.box
+      .rect(listX, rowTop - 2, STATUS_LABEL_W, listH)
+      .fill({ color: STATUS_LABEL_BG });
+
+    for (let i = 0; i < STATUS_VISIBLE_ROWS; i++) {
+      const row = rows[scroll + i];
+      if (row == null) break;
+      const ry = rowTop + i * rowH;
+      if (i > 0) {
+        this.box
+          .moveTo(listX + 2, ry)
+          .lineTo(listX + listW - 2, ry)
+          .stroke({ width: 1, color: 0x2a4a42 });
+      }
+      if (!row.label && !row.value) continue;
+      const ty = ry + Math.floor((rowH - 14) / 2);
+      if (row.label) {
+        this.addAttrText(row.label, listX + 4, ty, STATUS_LABEL);
+      }
+      if (row.value) {
+        this.addAttrText(row.value, valueX, ty, CBE.ink);
+      }
+    }
+
+    if (pageCount > 1) {
+      const cx = LCD_WIDTH / 2;
+      this.drawScrollArrow(cx - 10, arrowY + 6, true, page > 0);
+      this.drawScrollArrow(cx + 10, arrowY + 6, false, page < pageCount - 1);
+    }
+  }
+
+  /** Small green ▲ / ▼ matching CBE attr footer. */
+  private drawScrollArrow(cx: number, cy: number, up: boolean, active: boolean): void {
+    const col = active ? CBE.borderBright : CBE.borderDim;
+    const s = 5;
+    if (up) {
+      this.box.poly([cx, cy - s, cx - s, cy + 3, cx + s, cy + 3]).fill({ color: col });
+    } else {
+      this.box.poly([cx, cy + s, cx - s, cy - 3, cx + s, cy - 3]).fill({ color: col });
+    }
+  }
+
+  /** CBE label order；经验单行装满. */
+  private statusRows(): { label: string; value: string }[] {
+    if (!this.stats) {
+      const loading = this.detailLines.length
+        ? this.detailLines
+        : ["正在拉取服务端属性汇总…"];
+      return loading.map((t) => ({ label: t, value: "" }));
+    }
+    const s = this.stats;
+    const jobName =
+      s.job === 1 ? "天机" : s.job === 2 ? "幻剑" : s.job === 3 ? "鬼道" : "无";
+    const expNext = formatSignedU32(s.expNext);
+    return [
+      { label: "称号", value: s.title || "无" },
+      { label: "等级", value: String(s.level) },
+      { label: "职业", value: jobName },
+      { label: "配偶", value: s.spouse || "无" },
+      { label: "帮派", value: s.guild || "无帮派" },
+      { label: "魅力", value: String(s.charm) },
+      { label: "生命", value: `${s.hp}/${s.hpMax}` },
+      { label: "法力", value: `${s.mp}/${s.mpMax}` },
+      { label: "经验", value: `${s.exp}/${expNext}` },
+      { label: "力量", value: String(s.strength) },
+      { label: "敏捷", value: String(s.agility) },
+      { label: "智慧", value: String(s.wisdom) },
+      { label: "物攻", value: String(s.attack) },
+      { label: "护甲", value: String(s.armor) },
+      { label: "躲闪", value: String(s.dodge) },
+      { label: "命中", value: String(s.hit) },
+      { label: "暴击", value: String(s.crit) },
+      { label: "抗性", value: String(s.resist) },
+      { label: "活力", value: String(s.endurance) },
+    ];
+  }
+
+  private listHint(): string {
+    if (this.mode === "recharge_pay") return "选择支付方式";
+    if (this.mode === "actions") return "选择操作";
+    if (this.mode === "detail") return "详细信息";
+    if (this.usesCategoryTabs()) {
+      const tabs = this.categoryTabs();
+      const tab = tabs[this.categoryIndex] ?? tabs[0];
+      const total =
+        this.kind === "mall" ? this.filteredMall().length : this.filteredBag().length;
+      const pageSize = this.kind === "bag" ? BAG_VISIBLE_ROWS : PAGE_SIZE;
+      const pages = Math.max(1, Math.ceil(Math.max(total, 1) / pageSize));
+      const page = total ? Math.floor(this.cursorIndex / pageSize) + 1 : 1;
+      return `${tab?.label ?? ""} ${page}/${pages}页 ←→分类`;
+    }
+    return hintOf(this.kind);
+  }
+
+  private drawList(x: number, y: number, w: number): void {
+    const lines = this.listLines();
+    const pageStart =
+      this.usesCategoryTabs() && lines.length
+        ? Math.floor(this.cursorIndex / PAGE_SIZE) * PAGE_SIZE
+        : 0;
+    const pageLines = this.usesCategoryTabs()
+      ? lines.slice(pageStart, pageStart + PAGE_SIZE)
+      : lines.slice(0, Math.min(14, lines.length));
+    const localCursor = this.usesCategoryTabs()
+      ? this.cursorIndex - pageStart
+      : this.cursorIndex;
+
+    for (let i = 0; i < pageLines.length; i++) {
+      const hi = i === localCursor;
+      if (hi) this.box.rect(x + 4, y + 44 + i * 16, w - 8, 15).fill({ color: CBE.select });
+      const row = pageLines[i]!;
+      const ink = hi ? CBE.ink : row.color;
+      const ty = y + 45 + i * 16;
+      if (row.right) {
+        this.addAttrText(row.text.slice(0, 14), x + 8, ty, ink);
+        this.addAttrTextRight(row.right, x + w - 8, ty, ink, 80);
+      } else {
+        this.addLabel(row.text.slice(0, 26), x + 8, ty, ink);
+      }
+    }
+
+    const footY = y + LCD_HEIGHT - SOFTKEY_H - 64 - 18;
+    if (this.kind === "mall" && this.mall && this.mode === "list") {
+      this.addLabel(`酷宝 ${this.mall.coolmoney}`, x + 10, footY, CBE.inkTip);
+      const rechargeX = x + w - 48;
+      this.addLabel("充值", rechargeX, footY, CBE.inkTipGreen);
+      const hit = new Container();
+      hit.position.set(rechargeX - 4, footY - 2);
+      hit.hitArea = new Rectangle(0, 0, 44, 18);
+      hit.eventMode = "static";
+      hit.cursor = "pointer";
+      hit.on("pointertap", () => this.beginMallRecharge());
+      this.addChild(hit);
+      this.hitSprites.push(hit);
+    } else if (this.usesCategoryTabs() && this.mode === "list") {
+      const total =
+        this.kind === "mall" ? this.filteredMall().length : this.filteredBag().length;
+      this.addLabel(`共 ${total} 件`, x + 10, footY, CBE.inkTip);
+    }
+  }
+
+  private listLines(): { text: string; color: number; right?: string }[] {
+    if (this.kind === "bag" || this.kind === "enhance") {
+      const filtered = this.filteredBag();
+      if (!filtered.length) {
+        return [{ text: this.bagItems.length ? "本分类为空" : "背包为空", color: CBE.inkMint }];
+      }
+      return filtered.map((it) => ({
+        text: formatBagLine(it),
+        color: qualityColor(it.quality),
+      }));
+    }
+    if (this.kind === "equip") {
+      return WORN_SLOT_NAMES.map((name, slot) => {
+        const it = this.wornBySlot(slot);
+        if (!it) return { text: `${name}：空`, color: CBE.inkMint };
+        return {
+          text: `${name}：${formatBagLine(it)}`,
+          color: qualityColor(it.quality),
+        };
+      });
+    }
+    if (this.kind === "skill") {
+      if (!this.skills.length) return [{ text: "未学会仙术（等 12/1）", color: CBE.inkMint }];
+      return this.skills.map((sk) => ({
+        text: `${sk.name}${sk.mpCost != null ? ` MP${sk.mpCost}` : ""}`,
+        color: CBE.inkMint,
+      }));
+    }
+    if (this.kind === "mall") {
+      const goods = this.filteredMall();
+      if (!goods.length) {
+        const raw = this.mall?.goods.length ?? 0;
+        return [
+          {
+            text: raw ? "本分类为空" : "商城加载中…",
+            color: CBE.inkMint,
+          },
+        ];
+      }
+      return goods.map((g) => ({
+        text: g.name,
+        right: `${g.price}酷宝`,
+        color: qualityColor(g.quality),
+      }));
+    }
+    if (this.kind === "status") {
+      return [{ text: "查看人物信息", color: CBE.inkMint }];
+    }
+    return [{ text: "(未实现)", color: CBE.inkMint }];
+  }
+
+  private drawDetail(x: number, y: number, w: number): void {
+    const lines = this.detailText();
+    const shown = lines.slice(0, 12);
+    shown.forEach((line, i) => {
+      this.addLabel(line.slice(0, 28), x + 8, y + 46 + i * 15, CBE.inkMint);
+    });
+    this.addLabel(
+      "左软=操作  右软=返回",
+      x + 8,
+      y + 46 + shown.length * 15 + 8,
+      CBE.inkLabel,
+    );
+  }
+
+  private detailText(): string[] {
+    if (this.selected && isBag(this.selected)) {
+      const it = this.selected;
+      return [
+        it.name,
+        `数量 ${it.count}  seq ${it.seq}`,
+        it.kind === "equip" ? `强化 +${it.enhance}  品质 ${it.quality}` : `品质 ${it.quality}`,
+        it.desc ? it.desc.slice(0, 40) : "",
+        `id ${it.itemId}`,
+      ].filter(Boolean);
+    }
+    if (this.selected && isGoods(this.selected)) {
+      const g = this.selected;
+      return [
+        g.name,
+        `价格 ${g.price} 酷宝`,
+        `库存 ${g.stock}`,
+        `id ${g.itemId}`,
+      ];
+    }
+    if (this.selected && isSkill(this.selected)) {
+      const sk = this.selected;
+      const desc = sk.desc && sk.desc !== "-" ? sk.desc : "";
+      return [
+        sk.name,
+        desc || "（无技能介绍）",
+        sk.mpCost != null ? `耗蓝 ${sk.mpCost}` : "",
+        this.inBattle
+          ? "战斗中可施放"
+          : this.selected && isSkill(this.selected) && isMapHealSkill(this.selected)
+            ? "地图可施放回血"
+            : "地图上无法施放仙术",
+      ].filter(Boolean);
+    }
+    return this.detailLines.length ? this.detailLines : ["(无详细)"];
+  }
+
+  private drawActionList(x: number, y: number, w: number): void {
+    this.actionLabels.forEach((label, i) => {
+      const hi = i === this.actionCursor;
+      if (hi) this.box.rect(x + 4, y + 46 + i * 18, w - 8, 17).fill({ color: CBE.select });
+      this.addLabel(label, x + 12, y + 48 + i * 18, hi ? CBE.ink : CBE.inkMint);
+    });
+  }
+
+  private addLabel(text: string, x: number, y: number, color: number): void {
+    const t = new BitmapLabel();
+    t.position.set(x, y);
+    void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - 36 });
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  /** Attr-panel / list rows — plain fill, no stroke (clearest on LCD stretch). */
+  private addAttrText(text: string, x: number, y: number, color: number): void {
+    const t = new BitmapLabel();
+    t.position.set(x, y);
+    void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - x - 16 });
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  private addAttrTextRight(
+    text: string,
+    rightX: number,
+    y: number,
+    color: number,
+    maxWidth = 96,
+  ): void {
+    const t = new BitmapLabel();
+    t.anchor.set(1, 0);
+    t.position.set(rightX, y);
+    void t.setText(text, color, { outline: false, maxWidth });
+    this.addChild(t);
+    this.labels.push(t);
+  }
+
+  private addLabelCentered(text: string, cx: number, cy: number, color: number): void {
+    const t = new BitmapLabel();
+    t.anchor.set(0.5, 0.5);
+    t.position.set(Math.round(cx), Math.round(cy));
+    // font_gb.uc3 hard pixels — sharp on CSS-pixelated LCD (HTML softkeys stay DOM).
+    void t.setText(text, color, { uc3: true, smooth: false, outline: false });
+    this.addChild(t);
+    this.labels.push(t);
+  }
+}
+
+function formatBagLine(it: BagItem): string {
+  const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
+  return `${it.name}${plus} ×${it.count}`;
+}
+
+function formatBagName(it: BagItem): string {
+  const plus = it.kind === "equip" && it.enhance > 0 ? `(+${it.enhance})` : "";
+  return `${it.name}${plus}`;
+}
+
+/** Wrap by system-font advances for dark description wells (fontSize≈12). */
+function wrapUc3Lines(text: string, maxWidth: number): string[] {
+  const cjk = 12;
+  const ascii = 12 * 0.55;
+  const lines: string[] = [];
+  let cur = "";
+  let w = 0;
+  for (const ch of text) {
+    const cw = (ch.codePointAt(0) ?? 0) > 0xff ? cjk : ascii;
+    if (w + cw > maxWidth && cur) {
+      lines.push(cur);
+      cur = ch;
+      w = cw;
+    } else {
+      cur += ch;
+      w += cw;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
+}
+
+/** CBE / admin：1金=10000铜，1银=100铜. */
+function splitCopperMoney(money: number): { gold: number; silver: number; copper: number } {
+  const m = money >>> 0;
+  return {
+    gold: Math.floor(m / 10000),
+    silver: Math.floor(m / 100) % 100,
+    copper: m % 100,
+  };
+}
+
+function isBag(v: unknown): v is BagItem {
+  return !!v && typeof v === "object" && "itemId" in v && "seq" in v && "count" in v;
+}
+function isGoods(v: unknown): v is ShopGoods {
+  return !!v && typeof v === "object" && "price" in v && "itemId" in v && !("seq" in v);
+}
+function isSkill(v: unknown): v is BattleSkillRow {
+  return !!v && typeof v === "object" && "id" in v && "name" in v && !("itemId" in v);
+}
+
+function isHealSkill(sk: BattleSkillRow): boolean {
+  return /清风|回血|疗|愈|生息|甘露/.test(sk.name) || sk.id === 211 || sk.id === 11 || sk.id === 301;
+}
+
+function actionKey(label: string): SystemAction | string {
+  switch (label) {
+    case "使用":
+      return "use";
+    case "批量开启":
+      return "batch_open";
+    case "装备":
+      return "equip";
+    case "卸下":
+    case "卸载":
+      return "unequip";
+    case "替换":
+      return "swap";
+    case "强化":
+      return "enhance";
+    case "重铸":
+      return "recast";
+    case "丢弃":
+      return "discard";
+    case "购买":
+      return "buy";
+    case "支付宝":
+      return "recharge_alipay";
+    case "微信":
+      return "recharge_wechat";
+    case "施放":
+    case "回血施放":
+      return "skill_use";
+    case "回血(战斗中)":
+      return "refresh";
+    default:
+      return "refresh";
+  }
+}
+
+function titleOf(k: SystemKind): string {
+  switch (k) {
+    case "bag":
+      return "背包物品";
+    case "equip":
+      return "装备信息";
+    case "quest":
+      return "任务列表";
+    case "mall":
+      return "商城";
+    case "enhance":
+      return "强化";
+    case "team":
+      return "组队";
+    case "skill":
+      return "技能列表";
+    case "status":
+      return "属性";
+  }
+}
+
+function hintOf(k: SystemKind): string {
+  switch (k) {
+    case "equip":
+      return "每次打开 · 1/7/22";
+    case "skill":
+      return "已学仙术 · 服务端 12/1";
+    case "status":
+      return "服务端汇总 · 基础+装备";
+    default:
+      return "";
+  }
+}
+
+/** CBE 属性页经验次级：大阈值按有符号 i32 显示（与截图一致）. */
+function formatSignedU32(v: number): string {
+  const n = v >>> 0;
+  if (n >= 0x80000000) return String(n - 0x100000000);
+  return String(n);
+}

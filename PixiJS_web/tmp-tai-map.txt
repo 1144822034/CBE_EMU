@@ -1,0 +1,4 @@
+OK 07泰山_01.sce → 07泰山_01.map sce=320x400 map=320x400 tiles=16x16 imgs=m_snowland2.gif
+OK 07泰山_02.sce → 07泰山_02.map sce=240x400 map=240x400 tiles=16x16 imgs=m_snowland2.gif
+OK 07泰山_03.sce → 07泰山_03.map sce=240x400 map=240x400 tiles=16x16 imgs=m_snowland2.gif
+OK 07泰山_04.sce → 07泰山_04.map sce=320x400 map=320x400 tiles=16x16 imgs=m_snowland2.gif

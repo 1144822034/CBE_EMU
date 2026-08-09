@@ -1,0 +1,40 @@
+{
+  "name": "pixijs-jianghu",
+  "version": "1.0.20",
+  "private": true,
+  "description": "PixiJS web client for 江湖 OL — reuses JHOnlineData + mock-server protocol notes",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "sync:assets": "node scripts/sync-offline-assets.mjs",
+    "prebuild": "npm run sync:assets && npm run gen:scenes",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "gen:scenes": "node scripts/gen-scene-index.mjs",
+    "patch:cap-android8": "node scripts/patch-capacitor-android8.mjs",
+    "cap:sync": "npm run patch:cap-android8 && npx cap sync android",
+    "build:android": "npm run build && npm run cap:sync && node scripts/assemble-android.mjs",
+    "smoke": "node scripts/smoke-decode.mjs && tsx scripts/smoke-scene.ts && tsx scripts/smoke-protocol.ts && tsx scripts/smoke-actor.ts",
+    "smoke:live": "tsx scripts/smoke-live.ts",
+    "smoke:world": "tsx scripts/smoke-world-enter.ts",
+    "smoke:npc": "tsx scripts/smoke-npc-catalog.ts",
+    "smoke:pos": "tsx scripts/smoke-pos-persist.ts",
+    "smoke:unstuck": "tsx scripts/smoke-unstuck.ts",
+    "gateway": "node scripts/ws-gateway.mjs",
+    "gateway:exe": "node scripts/build-gateway-exe.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.2",
+    "@capacitor/core": "^7.4.2",
+    "pixi.js": "^8.9.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.2",
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.2",
+    "ws": "^8.18.1"
+  }
+}

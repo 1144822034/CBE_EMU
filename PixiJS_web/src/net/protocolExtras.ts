@@ -1,0 +1,2727 @@
+/**
+ * Extra WT builders/parsers for live core loop (move, battle operate, hangup,
+ * NPC, chat, bag/equip/quest/mall shells).
+ */
+import {
+  SeqReader,
+  SeqWriter,
+  WtBuilder,
+  decodeAsciiDigitResult,
+  decodeFieldString,
+  decodeTaggedNumber,
+  decodeWtPacket,
+  findField,
+  type WtPacket,
+} from "./wt";
+import { decodeGbk, encodeWireString } from "./gbk";
+import { ensureSceneFile } from "./protocol";
+import { starterSkillIdForJob } from "../resources/skill";
+import { lookupItemSync } from "../resources/itemCatalog";
+export {
+  buildTeamInviteRequest,
+  buildTeamReplyRequest,
+  buildTeamLeaveRequest,
+  buildNearbyPageRequest,
+  buildPlayerInfoRequest,
+  buildOtherEquipRequest,
+  buildFriendPageRequest,
+  buildFriendAddRequest,
+  buildFriendReplyRequest,
+  buildTeamRosterRequest,
+  buildSparRequest,
+  buildTradeRequest,
+  buildTradeReplyRequest,
+  buildTradeCancelRequest,
+  buildTradeConfirmRequest,
+  buildTradeOfferRequest,
+  buildGuildInviteRequest,
+  buildGuildCreateStartRequest,
+  buildGuildCreateNameRequest,
+  buildGuildCreateCommitRequest,
+} from "./protocolSocial";
+export {
+  buildGuildListRequest,
+  buildGuildSelfDetailRequest,
+  buildGuildDetailRequest,
+  buildGuildLeaveRequest,
+  buildGuildMemberPageRequest,
+  buildGuildApplyRequest,
+  buildGuildApplicationPageRequest,
+  buildGuildApplicationActionRequest,
+} from "./protocolGuild";
+
+/** Direction codes: 1=up 2=right 3=down 4=left; 0=idle (CBE timeline). */
+export function buildMoveRequest(dirBytes: Uint8Array): Uint8Array {
+  const b = new WtBuilder();
+  // CBE put_object_blob: outer valueLen + inner BE16(dataLen) + dirs.
+  // Sample WT len=32 (docs/re/2026-07-10-nearby-player-movement-sync.md).
+  // Bare raw dirs (len=30) fail get_object_blob_field → no position persist.
+  b.object(1, 2, 1).blob("moveinfo", dirBytes);
+  return b.finish();
+}
+
+/**
+ * Walk-into portal / scene change: WT 2/3 + empty 27/11 + 7/42.
+ * Evidence: mock wait_wt6 — 2/3 alone returns soft 30/2 without catalog;
+ * `{2/3,27/11,7/42}` arms empty gate; next task-subset `6/1` owns nonempty 27/11.
+ */
+export function buildSceneChangeRequest(
+  mapId: string,
+  exitId: number,
+  mapType = 2,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 2, 3)
+    .u8("maptype", mapType)
+    .string("mapID", mapId)
+    .u32("exitID", exitId >>> 0);
+  b.object(1, 0x1b, 11);
+  b.object(1, 7, 42);
+  return b.finish();
+}
+
+/** Optional prelude before 2/3: 2/10 Type=1 (edge portal countdown path). */
+export function buildSceneChangePreludeRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 2, 10).u8("Type", 1);
+  return b.finish();
+}
+
+/** Scene teleport-stone destination list: empty 1/16/1. */
+export function buildTeleportStoneListRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 16, 1);
+  return b.finish();
+}
+
+/**
+ * World/regional map teleport prepare: 1/16/4 { curid, objid }.
+ * Server replies 16/4 result=0 value=cost (stone count).
+ */
+export function buildMapTeleportPrepareRequest(
+  curTeleportId: number,
+  objTeleportId: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 16, 4)
+    .u32("curid", curTeleportId >>> 0)
+    .u32("objid", objTeleportId >>> 0);
+  return b.finish();
+}
+
+/**
+ * After 16/4 confirm: one WT with 16/2 + 16/3 (+ optional later 7/1 in combo).
+ * type must be nonzero (combo parser rejects type=0).
+ */
+export function buildMapTeleportExitRequest(
+  subtype: 2 | 3,
+  exitId: number,
+  type = 1,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 16, subtype)
+    .u32("exitID", exitId >>> 0)
+    .u8("type", type & 0xff);
+  return b.finish();
+}
+
+/**
+ * CBE ConsumeInventoryItem batch: 16/2 + 16/3 + 7/1(item 800) in one WT.
+ * Evidence: docs/re/2026-06-25-teleport-stone.md (confirmed-exit-combo);
+ * server deducts via 7/1 then defers 30/1 on poll — without 7/1 the standalone
+ * 16/3 path enters the scene for free.
+ *
+ * 7/1 fields match ordinary item-use (`type`/`itemId`/`seq`/`num`); also send
+ * `id` so parsers that only read the short consumable shape still select 800.
+ */
+export function buildMapTeleportConfirmedExitRequest(
+  exitId: number,
+  type: number,
+  stoneSeq: number,
+  stoneCount = 1,
+): Uint8Array {
+  const t = Math.max(1, type & 0xff);
+  const n = Math.max(1, stoneCount | 0);
+  const b = new WtBuilder();
+  b.object(1, 16, 2)
+    .u32("exitID", exitId >>> 0)
+    .u8("type", t);
+  b.object(1, 16, 3)
+    .u32("exitID", exitId >>> 0)
+    .u8("type", t);
+  b.object(1, 7, 1)
+    .u8("type", 0)
+    .u32("itemId", TELEPORT_STONE_ITEM_ID)
+    .u32("id", TELEPORT_STONE_ITEM_ID)
+    .u32("seq", stoneSeq >>> 0)
+    .u32("num", n)
+    .u32("count", n);
+  return b.finish();
+}
+
+/** Teleport stone backpack id (ConsumeInventoryItem / mall 秘宝). */
+export const TELEPORT_STONE_ITEM_ID = 800;
+
+/** Parse 16/4 confirm object { result, value }. */
+export function parseMapTeleportConfirm(
+  packet: WtPacket,
+): { result: number; value: number } | null {
+  for (const o of packet.objects) {
+    if (o.kind !== 16 || o.subtype !== 4) continue;
+    const resultRaw = findField(o, "result");
+    const valueRaw = findField(o, "value");
+    if (!resultRaw) continue;
+    const result = decodeTaggedNumber(resultRaw);
+    const value = valueRaw ? decodeTaggedNumber(valueRaw) : 0;
+    if (result == null) continue;
+    return { result, value: value ?? 0 };
+  }
+  return null;
+}
+
+export function buildBattleOperateRequest(index: number, operate: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 4, 2).u32("index", index).u32("Operate", operate);
+  return b.finish();
+}
+
+/**
+ * Battle item use: WT 1/4/3 { index, seq }.
+ * `index` = actioninfo wire (ally/self only); `seq` = backpack row.
+ * Distinct from scene bag use `7/1`.
+ */
+export function buildBattleItemUseRequest(index: number, seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 4, 3)
+    .u32("index", index >>> 0)
+    .u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/** Escape: empty 1/4/4 object. */
+export function buildBattleEscapeRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 4, 4);
+  return b.finish();
+}
+
+/**
+ * Battle death prompt choice (mmBattle → WT 1/7/14).
+ * result=1 使用复活石原地复活；result=2 普通复活（惩罚+回城/传送石）。
+ * Evidence: docs/re/2026-07-23-battle-death-revival-stone.md
+ */
+export function buildBattleDeathPromptRequest(result: 1 | 2): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 14).u32("result", result);
+  return b.finish();
+}
+
+/** Hangup start: 1/2/10 Type=2 + empty 1/25/3. */
+export function buildHangupStartRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 2, 10).u8("Type", 2);
+  b.object(1, 25, 3);
+  return b.finish();
+}
+
+/** NPC root dialog open: 26/1 { type=u8(1), id }. Service follow-up uses type=2. */
+export function buildNpcDialogRequest(actorId: number, type = 1): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 26, 1).u8("type", type & 0xff).u32("id", actorId >>> 0);
+  return b.finish();
+}
+
+/** Task hall detail: 6/10 { taskid, state }. */
+export function buildTaskDetailRequest(taskId: number, state = 0): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 6, 10).u32("taskid", taskId >>> 0).u8("state", state & 0xff);
+  return b.finish();
+}
+
+/** Accept: 6/11 { taskinfo=tagged-u32 } + empty 25/5. */
+export function buildTaskAcceptRequest(taskId: number): Uint8Array {
+  const tagged = new Uint8Array(6);
+  tagged[0] = 0;
+  tagged[1] = 4;
+  const v = taskId >>> 0;
+  tagged[2] = (v >>> 24) & 0xff;
+  tagged[3] = (v >>> 16) & 0xff;
+  tagged[4] = (v >>> 8) & 0xff;
+  tagged[5] = v & 0xff;
+  const b = new WtBuilder();
+  b.object(1, 6, 11).raw("taskinfo", tagged);
+  b.object(1, 25, 5);
+  return b.finish();
+}
+
+/** Submit: empty 25/5 + 6/4 { taskid }. */
+export function buildTaskSubmitRequest(taskId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 25, 5);
+  b.object(1, 6, 4).u32("taskid", taskId >>> 0);
+  return b.finish();
+}
+
+/** Abandon accepted task: 6/7 { taskid }. */
+export function buildTaskAbandonRequest(taskId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 6, 7).u32("taskid", taskId >>> 0);
+  return b.finish();
+}
+
+/**
+ * Task list query: empty 6/1 (accepted) and/or empty 6/14 (scene candidates).
+ * Standalone — not the scene task-subset combo.
+ */
+export function buildTaskListQueryRequest(
+  opts: { accepted?: boolean; candidates?: boolean } = {},
+): Uint8Array {
+  const wantAccepted = opts.accepted !== false;
+  const wantCandidates = opts.candidates !== false;
+  const b = new WtBuilder();
+  if (wantAccepted) b.object(1, 6, 1);
+  if (wantCandidates) b.object(1, 6, 14);
+  return b.finish();
+}
+
+/** Accepted-task row from 6/1 taskinfo (ParseItemDataFields 0x01046D24). */
+export type TaskListRow = {
+  taskId: number;
+  difficulty: number;
+  classification: number;
+  name: string;
+  giver: string;
+  level: number;
+  receiver: string;
+  reqType1: number;
+  reqId1: number;
+  progress1: number;
+  reqCount1: number;
+  reqType2: number;
+  reqId2: number;
+  progress2: number;
+  reqCount2: number;
+  state: number;
+};
+
+/** Candidate row from 6/14 taskinfo (DeserializeRoleInfo 0x01046E00). */
+export type TaskCandidateRow = {
+  taskId: number;
+  difficulty: number;
+  classification: number;
+  name: string;
+  giver: string;
+  level: number;
+};
+
+/** Instance challenge confirm: strict 20-byte 30/10 { agree:u8 }. */
+export function buildChallengeConfirmRequest(agree = true): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 30, 10).u8("agree", agree ? 1 : 0);
+  return b.finish();
+}
+
+/** NPC service opcodes (high byte). */
+export const NpcServiceOpcode = {
+  OPEN_WEAPON: 0xe1,
+  BUY_WEAPON: 0xe2,
+  REPAIR_ALL: 0xe3,
+  OPEN_SKILLS: 0xe4,
+  LEARN_SKILL: 0xe5,
+  OPEN_ARMOR: 0xe6,
+  OPEN_MEDICINE: 0xe7,
+  OPEN_CATEGORY: 0xe8,
+  BUY_ITEM: 0xe9,
+  OPEN_INSTANCE: 0xea,
+  ENTER_INSTANCE: 0xeb,
+  CHALLENGE: 0xec,
+} as const;
+
+export function npcServiceOpcode(value: number): number {
+  return (value >>> 24) & 0xff;
+}
+
+
+/** World chat: 1/3/1 { type=0, data }. */
+export function buildChatRequest(text: string, type = 0): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 3, 1).u8("type", type).string("data", text);
+  return b.finish();
+}
+
+/** item.dsh 807 小喇叭 — world channel consume (docs/re/2026-07-20-small-horn-world-chat.md). */
+export const SMALL_HORN_ITEM_ID = 807;
+
+/**
+ * World send wire: chat object + horn consume (no 2/10 companions).
+ * Full CBE flush is `3/1+2/10+7/1+2/10`; Pixi only needs the two stateful
+ * objects. Evidence: docs/re/2026-07-20-small-horn-world-chat.md.
+ */
+export function buildWorldChatHornRequest(
+  text: string,
+  hornSeq: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 3, 1).u8("type", 0).string("data", text);
+  b.object(1, 7, 1)
+    .u8("type", 1)
+    .u32("id", SMALL_HORN_ITEM_ID)
+    .u32("itemId", SMALL_HORN_ITEM_ID)
+    .u32("seq", hornSeq >>> 0)
+    .u32("num", 1);
+  return b.finish();
+}
+
+/** GBK wire budget for world chat `data` / MySQL VARBINARY(81). */
+export function clampWorldChatText(text: string): string {
+  const raw = text.trim();
+  if (!raw) return "";
+  const bytes = encodeWireString(raw);
+  if (bytes.length <= 81) return raw;
+  let out = "";
+  let len = 0;
+  for (const ch of raw) {
+    const piece = encodeWireString(ch);
+    if (len + piece.length > 81) break;
+    out += ch;
+    len += piece.length;
+  }
+  return out;
+}
+
+/**
+ * Pixi backpack open / refresh: empty 1/7/23 → 17/1 + 30/21 (real item_seq).
+ * CBE still uses 7/42→17/1 only (no seq); inventing row-index seq breaks 7/15.
+ */
+export function buildBagOpenRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 23);
+  return b.finish();
+}
+
+/** Pixi-only worn equipment refresh: 1/7/22 → 7/7 type=2. */
+export function buildWornEquipRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 22);
+  return b.finish();
+}
+
+/**
+ * Item use: WT 1/7/1 { type, id/itemId, seq?, num? }.
+ * Evidence: docs/re/2026-06-28-item-use.md (was wrongly wired to 7/4 discard).
+ */
+export function buildItemUseRequest(
+  itemId: number,
+  seq: number,
+  num = 1,
+  type = 0,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 1)
+    .u8("type", type)
+    .u32("itemId", itemId)
+    .u32("seq", seq)
+    .u32("num", num);
+  return b.finish();
+}
+
+/**
+ * Map heal (鬼道 清风拂体): provisional Pixi `1/12/8 { skillid }`.
+ * skill.dsh 使用限制=1; mmGame cast WT still unresolved.
+ */
+export function buildMapHealSkillRequest(skillId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 0x12, 8).u32("skillid", skillId >>> 0);
+  return b.finish();
+}
+
+/** Chest ids → matching key (docs/re/2026-07-26-gold-chest-524-open.md). */
+export const CHEST_KEY_BY_BOX: Readonly<Record<number, number>> = {
+  522: 813,
+  523: 814,
+  524: 815,
+};
+
+export function isChestBoxItem(itemId: number): boolean {
+  return itemId in CHEST_KEY_BY_BOX;
+}
+
+export function isChestKeyItem(itemId: number): boolean {
+  return itemId === 813 || itemId === 814 || itemId === 815;
+}
+
+/** Official CBE exp cards → 1/7/30; custom 845 stays on generic 7/1. */
+export const EXP_CARD_MULT: Readonly<Record<number, number>> = {
+  809: 2,
+  810: 4,
+  811: 10,
+  845: 30,
+};
+
+export function isExpCardItem(itemId: number): boolean {
+  return itemId in EXP_CARD_MULT;
+}
+
+/** 809/810/811 only — JianghuOL.CBE:0x010236CA hardcodes these onto 7/30. */
+export function isOfficialExpCardItem(itemId: number): boolean {
+  return itemId === 809 || itemId === 810 || itemId === 811;
+}
+
+/** Mock success copy (GBK on wire; UTF-8 here for Pixi tip). */
+export function expCardSuccessMessage(itemId: number): string {
+  const m = EXP_CARD_MULT[itemId];
+  if (!m) return "经验卡使用成功";
+  return `获得${m}倍经验值，持续时间1小时。`;
+}
+
+/**
+ * Exp card: WT 1/7/30 { itemseq:u16, num:u8=1 }.
+ * Evidence: docs/re/2026-07-23-special-item-use-contract.md
+ */
+export function buildExpCardUseRequest(seq: number, num = 1): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 30).u16("itemseq", seq & 0xffff).u8("num", num & 0xff);
+  return b.finish();
+}
+
+/**
+ * Status icon / Pixi「修」click: WT 1/7/31 (SendSceneAction31).
+ * Response 7/31 { expinfo } lists active timed buffs + remaining duration.
+ */
+export function buildExpCardStatusRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 31);
+  return b.finish();
+}
+
+/** 829 大力丸 / 830 神力丸 — JianghuOL.CBE → 1/22/3 {seq:u16}. */
+export const COMBAT_PILL_ITEM_IDS: ReadonlySet<number> = new Set([829, 830]);
+
+export function isCombatPillItem(itemId: number): boolean {
+  return COMBAT_PILL_ITEM_IDS.has(itemId);
+}
+
+/**
+ * Combat pill: WT 1/22/3 { seq:u16 }.
+ * Evidence: docs/re/2026-07-23-special-item-use-contract.md
+ */
+export function buildCombatPillUseRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 22, 3).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/** Parse 7/31 expinfo from status / login push bodies. */
+export function parseExpCardStatusInfo(bodies: Uint8Array[]): string {
+  for (const body of bodies) {
+    let packet: WtPacket;
+    try {
+      packet = decodeWtPacket(body);
+    } catch {
+      continue;
+    }
+    for (const obj of packet.objects) {
+      if (obj.kind !== 7 || obj.subtype !== 31) continue;
+      const raw = findField(obj, "expinfo");
+      if (!raw) continue;
+      const text = decodeFieldString(raw).trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+/** 战斗心得 828 — JianghuOL.CBE:0x0102DC40 → 1/25/6 {seq:u16}. */
+export const BATTLE_INSIGHT_ITEM_ID = 828;
+
+export function isBattleInsightItem(itemId: number): boolean {
+  return itemId === BATTLE_INSIGHT_ITEM_ID;
+}
+
+export function buildBattleInsightUseRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 25, 6).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/** Follow-up wait-clear only (not a second consume): 1/25/7 {num:u8=1,seq:u16}. */
+export function buildBattleInsightFollowupRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 25, 7).u8("num", 1).u16("seq", seq & 0xffff);
+  return b.finish();
+}
+
+/**
+ * Open chest: WT 1/7/15 { x:i16 boxSeq, x:i16 keySeq }.
+ * Live CBE field names are both `x` (ADR alignment); server also accepts box/key.
+ */
+export function buildChestOpenRequest(boxSeq: number, keySeq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 15)
+    .u16("x", boxSeq & 0xffff)
+    .u16("x", keySeq & 0xffff);
+  return b.finish();
+}
+
+export type ItemUseFeedback = {
+  ok: boolean;
+  /** Short UI line (success / fail / 获得N个…). */
+  message: string;
+  /** Chest reward rows when 7/15 result=1. */
+  rewards?: { itemId: number; seq: number; count: number; name: string }[];
+};
+
+/** 16/2 tip used by item-use reject / unavailable paths. */
+export function parseHintNotices(packet: WtPacket): string[] {
+  const out: string[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 16 || obj.subtype !== 2) continue;
+    const hintRaw = findField(obj, "hint");
+    if (!hintRaw) continue;
+    const text = decodeFieldString(hintRaw).replace(/\0+$/g, "").trim();
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+/** Generic 7/1 result (+ optional same-packet 16/2 hint). */
+export function parseItemUseResult(packet: WtPacket): ItemUseFeedback | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 1);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const hints = parseHintNotices(packet);
+  if (result === 1) {
+    return { ok: true, message: hints[0] || "使用成功" };
+  }
+  return {
+    ok: false,
+    message: hints[0] || "使用失败",
+  };
+}
+
+function chestFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "宝箱不存在";
+    case 3:
+      return "钥匙不存在";
+    case 4:
+      return "背包空间不足";
+    case 5:
+      return "获得金币";
+    case 6:
+      return "开启失败";
+    default:
+      return "开启失败";
+  }
+}
+
+/**
+ * 7/15 chest open. Success: result=1 + total + iteminfo rewards → 「获得N个名」.
+ * Evidence: docs/re/2026-07-26-gold-chest-524-open.md / 2026-07-29-gold-chest-reward-count-tip.md.
+ */
+export function parseChestOpenResult(packet: WtPacket): ItemUseFeedback | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 15);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  if (result !== 1) {
+    return { ok: false, message: chestFailMessage(result) };
+  }
+  const total = Math.max(1, fieldU32(obj, "total") || 1);
+  const raw = findField(obj, "iteminfo");
+  const rewards: NonNullable<ItemUseFeedback["rewards"]> = [];
+  if (raw) {
+    const r = new SeqReader(raw);
+    for (let i = 0; i < total && r.remaining() > 4; i++) {
+      try {
+        const itemId = r.u32();
+        const seq = r.i16();
+        const count = r.u32();
+        readItemCommonExtra(r);
+        const cat = lookupItemSync(itemId);
+        rewards.push({
+          itemId,
+          seq,
+          count: Math.max(1, count),
+          name: cat?.name ?? `#${itemId}`,
+        });
+      } catch {
+        break;
+      }
+    }
+  }
+  if (!rewards.length) {
+    return { ok: true, message: "开启成功", rewards };
+  }
+  const parts = rewards.map((rw) => `获得${rw.count}个${rw.name}`);
+  return { ok: true, message: parts.join("，"), rewards };
+}
+
+/**
+ * Special timed-item responses: 7/30 exp card / 22/3 combat pill / 25/6 insight.
+ * Success/fail text lives in string field `iteminfo` (not a binary blob).
+ */
+export function parseSpecialTimedItemUseResult(
+  packet: WtPacket,
+): ItemUseFeedback | null {
+  for (const obj of packet.objects) {
+    const special =
+      (obj.kind === 7 && obj.subtype === 30) ||
+      (obj.kind === 22 && obj.subtype === 3) ||
+      (obj.kind === 25 && obj.subtype === 6);
+    if (!special) continue;
+    const result = fieldU32(obj, "result");
+    const infoRaw = findField(obj, "iteminfo") || findField(obj, "info");
+    let text = infoRaw
+      ? decodeFieldString(infoRaw).replace(/\0+$/g, "").trim()
+      : "";
+    if (text === "OK") text = "";
+    if (result === 1) {
+      return { ok: true, message: text || "使用成功" };
+    }
+    return { ok: false, message: text || "使用失败" };
+  }
+  return null;
+}
+
+/** Prefer chest → special timed → item-use → lone 16/2 hint. */
+export function parseItemUseFeedback(packet: WtPacket): ItemUseFeedback | null {
+  return (
+    parseChestOpenResult(packet) ||
+    parseSpecialTimedItemUseResult(packet) ||
+    parseItemUseResult(packet) ||
+    (() => {
+      const hints = parseHintNotices(packet);
+      if (!hints.length) return null;
+      const message = hints[0]!;
+      /* Map heal success uses 16/2 tip without 7/1 result. */
+      const ok = message === "使用成功";
+      return { ok, message };
+    })()
+  );
+}
+
+/** Discard: WT 1/7/4 { seq, itemId?, count? }. */
+export function buildItemDiscardRequest(
+  seq: number,
+  itemId: number,
+  count = 1,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 4)
+    .u32("seq", seq)
+    .u32("itemId", itemId)
+    .u32("count", count);
+  return b.finish();
+}
+
+/** Equip type=3 / unequip type=4. */
+export function buildItemEquipRequest(
+  type: 3 | 4,
+  itemId: number,
+  seq: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 8).u8("type", type).u32("itemId", itemId).u32("seq", seq);
+  return b.finish();
+}
+
+/** 7/8 result — bag seq after unequip (type=4) / equip (type=3). */
+export function parseItemEquipResult(
+  packet: WtPacket,
+): { type: number; result: number; seq: number } | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 8);
+  if (!obj) return null;
+  const typeRaw = findField(obj, "type");
+  const resultRaw = findField(obj, "result");
+  const seqRaw = findField(obj, "seq");
+  if (!resultRaw) return null;
+  return {
+    type: typeRaw ? (decodeTaggedNumber(typeRaw) ?? 0) : 0,
+    result: decodeTaggedNumber(resultRaw) ?? 0,
+    seq: seqRaw ? (decodeTaggedNumber(seqRaw) ?? 0) : 0,
+  };
+}
+
+/** Swap occupied body slot ↔ bag: body/bag as u16 seq. */
+export function buildEquipSwapRequest(bodySeq: number, bagSeq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 9).u16("body", bodySeq & 0xffff).u16("bag", bagSeq & 0xffff);
+  return b.finish();
+}
+
+export function buildEnhanceRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 1).u32("seq", seq);
+  return b.finish();
+}
+
+/** Crystal item ids 901..916 → 一级..十六级玄晶. */
+export const ENHANCE_CRYSTAL_FIRST = 901;
+export const ENHANCE_CRYSTAL_LAST = 916;
+export const ENHANCE_MAX_SLOTS = 5;
+export const ENHANCE_MAX_LEVEL = 16;
+
+const CRYSTAL_TIER_NAMES = [
+  "一",
+  "二",
+  "三",
+  "四",
+  "五",
+  "六",
+  "七",
+  "八",
+  "九",
+  "十",
+  "十一",
+  "十二",
+  "十三",
+  "十四",
+  "十五",
+  "十六",
+] as const;
+
+export function enhanceCrystalName(itemId: number): string {
+  const tier = itemId - ENHANCE_CRYSTAL_FIRST + 1;
+  if (tier < 1 || tier > 16) return `玄晶${itemId}`;
+  return `${CRYSTAL_TIER_NAMES[tier - 1]!}级玄晶`;
+}
+
+export function isEnhanceCrystal(itemId: number): boolean {
+  return itemId >= ENHANCE_CRYSTAL_FIRST && itemId <= ENHANCE_CRYSTAL_LAST;
+}
+
+/** occultinfo: n×(00 04 <itemId:u32> 00 01 <count:u8>), 1<=n<=5. */
+export function buildEnhanceOccultInfo(
+  materials: { itemId: number; count: number }[],
+): Uint8Array {
+  const rows = materials.filter((m) => m.count > 0).slice(0, ENHANCE_MAX_SLOTS);
+  const out = new Uint8Array(rows.length * 9);
+  let p = 0;
+  for (const m of rows) {
+    out[p++] = 0;
+    out[p++] = 4;
+    const id = m.itemId >>> 0;
+    out[p++] = (id >>> 24) & 0xff;
+    out[p++] = (id >>> 16) & 0xff;
+    out[p++] = (id >>> 8) & 0xff;
+    out[p++] = id & 0xff;
+    out[p++] = 0;
+    out[p++] = 1;
+    out[p++] = m.count & 0xff;
+  }
+  return out;
+}
+
+/**
+ * Preview / confirm enhance: 29/2 or 29/3.
+ * equipseq = tagged-u16 (outer len 4); occultinfo = raw material stream (no blob len).
+ */
+export function buildEnhanceMaterialRequest(
+  subtype: 2 | 3,
+  equipSeq: number,
+  materials: { itemId: number; count: number }[],
+): Uint8Array {
+  const occult = buildEnhanceOccultInfo(materials);
+  const b = new WtBuilder();
+  b.object(1, 29, subtype)
+    .u16("equipseq", equipSeq & 0xffff)
+    .raw("occultinfo", occult);
+  return b.finish();
+}
+
+/** Recast / transfer enhance preview: 29/5 { seqd, seqs } (tagged-u16). */
+export function buildEnhanceTransferRequest(
+  destSeq: number,
+  srcSeq: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 5)
+    .u16("seqd", destSeq & 0xffff)
+    .u16("seqs", srcSeq & 0xffff);
+  return b.finish();
+}
+
+/** Recast / transfer confirm: 29/6 { seqd, seqs }. */
+export function buildEnhanceTransferConfirmRequest(
+  destSeq: number,
+  srcSeq: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 6)
+    .u16("seqd", destSeq & 0xffff)
+    .u16("seqs", srcSeq & 0xffff);
+  return b.finish();
+}
+
+export type EnhanceOpenResult = {
+  result: number;
+  curLevel: number;
+  maxLevel: number;
+  /** Per-level required power (usually 100 each). */
+  required: number[];
+  /** Per crystal-tier unit rate for current L (100/33/11…). */
+  crystalPower: number[];
+};
+
+export type EnhancePreviewResult = {
+  result: number;
+  rate: number;
+  money: number;
+};
+
+export type EnhanceConfirmResult = {
+  result: number;
+  /** result 1=success 2=fail roll; 3..6 errors. */
+  ok: boolean;
+  message: string;
+};
+
+export type EnhanceTransferPreviewResult = {
+  result: number;
+  ok: boolean;
+  name: string;
+  moneyWire: number;
+  message: string;
+};
+
+export type EnhanceTransferConfirmResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  sourceSeq: number;
+  sourceLevel: number;
+  destSeq: number;
+  destLevel: number;
+};
+
+function parseTaggedU32Stream(raw: Uint8Array | null): number[] {
+  if (!raw || raw.length < 6) return [];
+  const out: number[] = [];
+  let p = 0;
+  while (p + 6 <= raw.length && raw[p] === 0 && raw[p + 1] === 4) {
+    out.push(
+      ((raw[p + 2]! << 24) |
+        (raw[p + 3]! << 16) |
+        (raw[p + 4]! << 8) |
+        raw[p + 5]!) >>>
+        0,
+    );
+    p += 6;
+  }
+  return out;
+}
+
+/** Local unit rate mirror of mock_server (tier≥L+1 → 100%; else floor(/3) steps). */
+export function enhanceCrystalUnitRate(level: number, tier: number): number {
+  if (tier <= 0) return 0;
+  if (tier > level) return 100;
+  let rate = 100;
+  let steps = level - tier + 1;
+  while (steps-- > 0) rate = Math.floor(rate / 3);
+  return rate;
+}
+
+export function enhanceSuccessRate(
+  level: number,
+  materials: { itemId: number; count: number }[],
+): number {
+  let total = 0;
+  for (const m of materials) {
+    if (!isEnhanceCrystal(m.itemId) || m.count <= 0) continue;
+    const tier = m.itemId - ENHANCE_CRYSTAL_FIRST + 1;
+    total += enhanceCrystalUnitRate(level, tier) * m.count;
+  }
+  return Math.min(100, total);
+}
+
+function enhanceConfirmFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "强化失败";
+    case 3:
+      return "装备不存在";
+    case 4:
+      return "玄晶不足";
+    case 5:
+      return "已达强化上限";
+    case 6:
+      return "金钱不足";
+    default:
+      return "强化失败";
+  }
+}
+
+export function parseEnhanceOpenResult(packet: WtPacket): EnhanceOpenResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 1);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const curLevel = fieldU32(obj, "curlevel");
+  const maxLevel = fieldU32(obj, "maxlevel") || ENHANCE_MAX_LEVEL;
+  const required = parseTaggedU32Stream(findField(obj, "data1"));
+  const crystalPower = parseTaggedU32Stream(findField(obj, "data2"));
+  return { result, curLevel, maxLevel, required, crystalPower };
+}
+
+export function parseEnhancePreviewResult(
+  packet: WtPacket,
+): EnhancePreviewResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 2);
+  if (!obj) return null;
+  return {
+    result: fieldU32(obj, "result"),
+    rate: fieldU32(obj, "value"),
+    money: fieldU32(obj, "money"),
+  };
+}
+
+export function parseEnhanceConfirmResult(
+  packet: WtPacket,
+): EnhanceConfirmResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 3);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  if (result === 1) {
+    return { result, ok: true, message: "强化成功" };
+  }
+  if (result === 2) {
+    return { result, ok: false, message: "强化失败" };
+  }
+  return { result, ok: false, message: enhanceConfirmFailMessage(result) };
+}
+
+export function parseEnhanceTransferPreview(
+  packet: WtPacket,
+): EnhanceTransferPreviewResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 5);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const nameRaw = findField(obj, "name");
+  const name = nameRaw ? decodeFieldString(nameRaw).replace(/\0+$/g, "") : "";
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      name,
+      moneyWire: fieldU32(obj, "money"),
+      message: "确认转移",
+    };
+  }
+  if (result === 2) {
+    return {
+      result,
+      ok: false,
+      name,
+      moneyWire: 0,
+      message: "装备不存在！",
+    };
+  }
+  return {
+    result,
+    ok: false,
+    name,
+    moneyWire: 0,
+    message: result === 5 ? "不可转移" : "转移失败",
+  };
+}
+
+export function parseEnhanceTransferConfirm(
+  packet: WtPacket,
+): EnhanceTransferConfirmResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 6);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: "转移成功",
+      sourceSeq: fieldU32(obj, "seqs"),
+      sourceLevel: fieldU32(obj, "curlevels"),
+      destSeq: fieldU32(obj, "seqd"),
+      destLevel: fieldU32(obj, "curleveld"),
+    };
+  }
+  let message = "转移失败";
+  if (result === 3) message = "没有对应玄晶";
+  else if (result === 4) message = "金钱不足";
+  else if (result === 5) message = "不可转移";
+  return {
+    result,
+    ok: false,
+    message,
+    sourceSeq: 0,
+    sourceLevel: 0,
+    destSeq: 0,
+    destLevel: 0,
+  };
+}
+
+/** Transfer fee display (product): 48金65银. */
+export const ENHANCE_TRANSFER_FEE_TEXT = "48金65银";
+
+/** Mall balance: 1/14/4 → coolmoney(=role.wcoin) + ticket. */
+export function buildMallBalanceRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 14, 4);
+  return b.finish();
+}
+
+/** @deprecated use buildMallBalanceRequest — 1/1/14 需 actorId，不能当余额查询. */
+export function buildMallOpenRequest(): Uint8Array {
+  return buildMallBalanceRequest();
+}
+
+/** Mall page: 1/14/{5..13} { index }.
+ * subtype 5 = 秘宝/酷宝货架（server_shop_items + 类别14）；6..13 = 原 W 币神兵分栏。
+ * 余额字段名 coolmoney，权威值为 role.wcoin。
+ */
+export function buildMallPageRequest(subtype: number, index = 0): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 14, subtype & 0xff).u32("index", index >>> 0);
+  return b.finish();
+}
+
+/** W币/酷宝 mall buy: 1/14/3 { type, id, num }. type=2 = 酷宝(W币)购买. */
+export function buildShopBuy14Request(
+  itemId: number,
+  num = 1,
+  type = 2,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 14, 3)
+    .u8("type", type)
+    .u32("id", itemId >>> 0)
+    .u32("num", num >>> 0);
+  return b.finish();
+}
+
+/**
+ * WT `1/12/1` (major=1 kind=0x0c subtype=1): learned skill IDs for the active role.
+ * Names/MP/effects come from local skill.dsh filtered by actorinfo job.
+ * Evidence: JianghuOL.CBE:0x01010594 / docs/re/2026-06-28-role-skills.md
+ */
+export function parseLearnedSkills(packet: WtPacket): {
+  count: number;
+  ids: number[];
+} | null {
+  const obj = packet.objects.find(
+    (o) =>
+      o.kind === 0x0c &&
+      o.subtype === 1 &&
+      (findField(o, "learnednum") || findField(o, "learnedskill")),
+  );
+  if (!obj) return null;
+  const numRaw = findField(obj, "learnednum");
+  const count = numRaw ? decodeTaggedNumber(numRaw) ?? 0 : 0;
+  const blob = findField(obj, "learnedskill");
+  const ids: number[] = [];
+  if (blob && blob.length) {
+    const r = new SeqReader(blob);
+    try {
+      while (r.remaining() >= 6 && ids.length < 64) {
+        ids.push(r.u32());
+      }
+    } catch {
+      /* truncated ok */
+    }
+  }
+  return { count: count || ids.length, ids };
+}
+
+/** Demo / offline: append role-bound starter skill object (kind 12 subtype 1). */
+export function appendDemoLearnedSkills(
+  b: WtBuilder,
+  jobIndex: number,
+  skillIds?: number[],
+): void {
+  const ids =
+    skillIds && skillIds.length
+      ? skillIds
+      : [starterSkillIdForJob(jobIndex)];
+  const blob = new SeqWriter();
+  for (const id of ids) blob.u32(id);
+  b.object(1, 0x0c, 1)
+    .u16("learnednum", ids.length)
+    .raw("learnedskill", blob.finish());
+}
+
+export type SceneReload = {
+  scene: string;
+  x: number;
+  y: number;
+  /** true when 30/2 (may still carry posinfo on position-bearing closes). */
+  soft: boolean;
+  /** true when wire included posinfo (authoritative landing). */
+  hasPos: boolean;
+};
+
+/**
+ * 30/1 hard enter or 30/2 soft close. Soft packets often omit posinfo (ack-only);
+ * full-bootstrap / portal completions put scene+posinfo on 30/2 — must read it.
+ */
+export function parseSceneReload(packet: WtPacket): SceneReload | null {
+  const hard = packet.objects.find((o) => o.kind === 0x1e && o.subtype === 1);
+  if (hard) {
+    const sceneRaw = findField(hard, "scene");
+    const posRaw = findField(hard, "posinfo");
+    if (!sceneRaw) return null;
+    const scene = ensureSceneFile(decodeFieldString(sceneRaw));
+    let x = 0;
+    let y = 0;
+    let hasPos = false;
+    if (posRaw && posRaw.length >= 4) {
+      const r = new SeqReader(posRaw);
+      x = r.i16();
+      y = r.i16();
+      hasPos = true;
+    }
+    return { scene, x, y, soft: false, hasPos };
+  }
+  const soft = packet.objects.find((o) => o.kind === 0x1e && o.subtype === 2);
+  if (soft) {
+    const sceneRaw = findField(soft, "scene");
+    if (!sceneRaw) return null;
+    const scene = ensureSceneFile(decodeFieldString(sceneRaw));
+    const posRaw = findField(soft, "posinfo");
+    let x = 0;
+    let y = 0;
+    let hasPos = false;
+    if (posRaw && posRaw.length >= 4) {
+      const r = new SeqReader(posRaw);
+      x = r.i16();
+      y = r.i16();
+      hasPos = true;
+    }
+    return { scene, x, y, soft: true, hasPos };
+  }
+  return null;
+}
+
+/**
+ * 27/12 name+posinfo landing (ui_apply_named_posinfo_target).
+ * Evidence: mock append_fb_target_result12_for_scene; portal post-enter.
+ */
+export function parseNamedSceneLanding(
+  packet: WtPacket,
+): { scene: string; x: number; y: number } | null {
+  const obj = packet.objects.find((o) => o.kind === 0x1b && o.subtype === 12);
+  if (!obj) return null;
+  const nameRaw = findField(obj, "name");
+  const posRaw = findField(obj, "posinfo");
+  if (!nameRaw || !posRaw || posRaw.length < 4) return null;
+  const scene = ensureSceneFile(decodeFieldString(nameRaw));
+  if (!scene) return null;
+  const r = new SeqReader(posRaw);
+  const x = r.i16();
+  const y = r.i16();
+  return { scene, x, y };
+}
+
+/** Prefer 30/1 → 30/2+posinfo → 16/3 unstuck → 27/12+posinfo for server landing. */
+export function parseServerSceneLanding(
+  packet: WtPacket,
+): { scene: string; x: number; y: number; source: string } | null {
+  const hard = packet.objects.find((o) => o.kind === 0x1e && o.subtype === 1);
+  if (hard) {
+    const sceneRaw = findField(hard, "scene");
+    const posRaw = findField(hard, "posinfo");
+    if (sceneRaw && posRaw && posRaw.length >= 4) {
+      const r = new SeqReader(posRaw);
+      return {
+        scene: ensureSceneFile(decodeFieldString(sceneRaw)),
+        x: r.i16(),
+        y: r.i16(),
+        source: "30/1",
+      };
+    }
+  }
+  const soft = packet.objects.find((o) => o.kind === 0x1e && o.subtype === 2);
+  if (soft) {
+    const sceneRaw = findField(soft, "scene");
+    const posRaw = findField(soft, "posinfo");
+    if (sceneRaw && posRaw && posRaw.length >= 4) {
+      const r = new SeqReader(posRaw);
+      return {
+        scene: ensureSceneFile(decodeFieldString(sceneRaw)),
+        x: r.i16(),
+        y: r.i16(),
+        source: "30/2",
+      };
+    }
+  }
+  const unstuck = parseMmGameUnstuckLanding(packet);
+  if (unstuck) return { ...unstuck, source: "16/3" };
+  const named = parseNamedSceneLanding(packet);
+  if (named) return { ...named, source: "27/12" };
+  return null;
+}
+
+/**
+ * Settings menu「脱离卡死」: WT 0|1 / 12/3 { id }.
+ * Evidence: docs/re/2026-06-27-unstuck-current-scene-reload.md (mmGame:0x5BCA).
+ */
+export function buildSettingsUnstuckRequest(id = 2): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 0x0c, 3).u32("id", id >>> 0);
+  return b.finish();
+}
+
+/**
+ * mmGame scene-transfer landing from settings unstuck: 16/3 { result=2, scene, posinfo, exitid }.
+ * Compact path may use 16/2 result=1 with the same scene fields.
+ */
+export function parseMmGameUnstuckLanding(
+  packet: WtPacket,
+): { scene: string; x: number; y: number } | null {
+  const obj =
+    packet.objects.find((o) => o.kind === 0x10 && o.subtype === 3) ||
+    packet.objects.find((o) => o.kind === 0x10 && o.subtype === 2);
+  if (!obj) return null;
+  const sceneRaw = findField(obj, "scene");
+  const posRaw = findField(obj, "posinfo");
+  if (!sceneRaw || !posRaw || posRaw.length < 4) return null;
+  const scene = ensureSceneFile(decodeFieldString(sceneRaw));
+  if (!scene) return null;
+  const r = new SeqReader(posRaw);
+  const x = r.i16();
+  const y = r.i16();
+  if (x === 0 && y === 0) return null;
+  return { scene, x, y };
+}
+
+export type BattleSettlement = {
+  /** Absolute totals on the wire (HandleBattleSettleMsg). */
+  expTotal: number;
+  goldTotal: number;
+  level: number;
+  lastExp: number;
+  curExp: number;
+  percentExp: number;
+  /** Display deltas when client baseline known. */
+  expGain: number;
+  goldGain: number;
+  fdata: string;
+  result: number;
+};
+
+export type BattleActionChild = {
+  wire: number;
+  flag: number;
+  /** Signed HP delta from server valueA (playback only; never invent client-side). */
+  delta: number;
+  valueB: number;
+};
+
+/** One record in the 4/6 actioninfo round script (server-authored). */
+export type BattleActionRecord = {
+  type: number;
+  actorWire: number;
+  children: BattleActionChild[];
+  /** type 1/2 skill effect index from eidolon.dsh (optional). */
+  effectIndex?: number;
+  effectText?: string;
+};
+
+export type BattleActionUpdate = {
+  /** True when 4/8 exit (or escape success) — leave battle UI. */
+  finished: boolean;
+  /** True when 4/7 settlement arrived (show panel; do not tear down yet). */
+  settled: boolean;
+  escaped: boolean;
+  escapeOk: boolean;
+  log: string;
+  /** Absolute HP snapshots (legacy / when server sends post-hit values). */
+  leftHp: { id: number; hp: number }[];
+  rightHp: { id: number; hp: number; mp?: number }[];
+  /**
+   * Signed HP deltas flattened from actioninfo children (valueA).
+   * Client only plays these — damage was computed on the server.
+   */
+  hpDeltas: { wire: number; delta: number; flag?: number }[];
+  /** Full round script for skill/death playback ordering. */
+  actions: BattleActionRecord[];
+  settlement?: BattleSettlement;
+};
+
+function fieldU32(obj: { fields: { name: string; raw: Uint8Array }[] }, name: string): number {
+  const raw = findField(obj as never, name);
+  if (!raw) return 0;
+  return decodeTaggedNumber(raw) ?? decodeAsciiDigitResult(raw) ?? 0;
+}
+
+function readU32BE(buf: Uint8Array, off: number): number {
+  return (
+    ((buf[off]! << 24) |
+      (buf[off + 1]! << 16) |
+      (buf[off + 2]! << 8) |
+      buf[off + 3]!) >>>
+    0
+  );
+}
+
+/** Mock overlapped teaminfo + demo tagged triple-u32 rows. */
+export function parseTeaminfoBlob(
+  team: Uint8Array,
+): { id: number; hp: number; mp: number }[] {
+  const rows: { id: number; hp: number; mp: number }[] = [];
+  const taggedTriple =
+    team.length >= 18 &&
+    team[0] === 0 &&
+    team[1] === 4 &&
+    team[6] === 0 &&
+    team[7] === 4 &&
+    team[12] === 0 &&
+    team[13] === 4;
+  if (!taggedTriple) {
+    let pos = 0;
+    while (pos + 14 <= team.length && team[pos] === 0 && team[pos + 1] === 4) {
+      rows.push({
+        id: readU32BE(team, pos + 2),
+        hp: readU32BE(team, pos + 6),
+        mp: readU32BE(team, pos + 10),
+      });
+      pos += 14;
+    }
+    if (rows.length) return rows;
+  }
+  try {
+    const r = new SeqReader(team);
+    while (r.remaining() >= 18) {
+      rows.push({ id: r.u32(), hp: r.u32(), mp: r.u32() });
+    }
+  } catch {
+    /* partial ok */
+  }
+  return rows;
+}
+
+/**
+ * Parse 4/6 actioninfo as a server round script.
+ * Mock encodes type/actor/childCount/target/flag via seq_put_u8 (tagged
+ * `00 01 xx`); valueA/valueB/effect via seq_put_u32 (`00 04` + BE32).
+ * Demo blobs may still use bare u8 — accept both (same as SeqReader.u8).
+ * Client must not invent HP changes — only replay type/actor/children/valueA.
+ */
+export function parseActionInfoScript(
+  actionInfo: Uint8Array,
+  actionnum: number,
+): BattleActionRecord[] {
+  const actions: BattleActionRecord[] = [];
+  let pos = 0;
+  const flexU8 = (): number => {
+    if (pos >= actionInfo.length) throw new Error("actioninfo eof");
+    if (
+      pos + 2 < actionInfo.length &&
+      actionInfo[pos] === 0 &&
+      actionInfo[pos + 1] === 1
+    ) {
+      const v = actionInfo[pos + 2]!;
+      pos += 3;
+      return v;
+    }
+    return actionInfo[pos++]!;
+  };
+  const tagU32 = (): number => {
+    if (pos + 6 > actionInfo.length) throw new Error("actioninfo u32");
+    if (actionInfo[pos] !== 0 || actionInfo[pos + 1] !== 4) {
+      throw new Error("actioninfo expected tagged u32");
+    }
+    const v =
+      ((actionInfo[pos + 2]! << 24) |
+        (actionInfo[pos + 3]! << 16) |
+        (actionInfo[pos + 4]! << 8) |
+        (actionInfo[pos + 5]!)) >>>
+      0;
+    pos += 6;
+    return v;
+  };
+  const tagString = (): string => {
+    if (pos + 2 > actionInfo.length) return "";
+    const len = (actionInfo[pos]! << 8) | actionInfo[pos + 1]!;
+    pos += 2;
+    const bytes = actionInfo.subarray(pos, pos + len);
+    pos += len;
+    // seq_put_string includes trailing NUL inside len
+    let end = bytes.length;
+    if (end > 0 && bytes[end - 1] === 0) end -= 1;
+    return decodeGbk(bytes.subarray(0, end));
+  };
+  const signedDelta = (u: number): number => (u | 0);
+
+  for (let a = 0; a < actionnum && pos < actionInfo.length; a++) {
+    try {
+      const type = flexU8();
+      const actorWire = flexU8();
+      if (type === 3 || type === 4) {
+        actions.push({ type, actorWire, children: [] });
+        continue;
+      }
+      const childCount = flexU8();
+      const children: BattleActionChild[] = [];
+      for (let c = 0; c < childCount; c++) {
+        const wire = flexU8();
+        const flag = flexU8();
+        const valueA = tagU32();
+        const valueB = tagU32();
+        children.push({ wire, flag, delta: signedDelta(valueA), valueB });
+      }
+      const rec: BattleActionRecord = { type, actorWire, children };
+      if (type === 1 || type === 2) {
+        rec.effectIndex = tagU32();
+        rec.effectText = tagString();
+        // Three tail bytes — mock writes them as tagged u8 each.
+        flexU8();
+        flexU8();
+        flexU8();
+      }
+      actions.push(rec);
+    } catch (e) {
+      console.warn(
+        `[battle] actioninfo parse stop at record ${a}/${actionnum} pos=${pos}/${actionInfo.length}`,
+        e,
+      );
+      break;
+    }
+  }
+  return actions;
+}
+
+/** @deprecated Prefer parseActionInfoScript; kept for narrow delta tests. */
+export function parseActionInfoDeltas(
+  actionInfo: Uint8Array,
+  actionnum: number,
+): { wire: number; delta: number; flag: number }[] {
+  return parseActionInfoScript(actionInfo, actionnum).flatMap((rec) =>
+    rec.children.map((c) => ({ wire: c.wire, delta: c.delta, flag: c.flag })),
+  );
+}
+
+function childFlagLabel(flag: number): string {
+  if (flag === 2) return "暴击";
+  if (flag === 3) return "闪躲";
+  return "";
+}
+
+function formatPlaybackLog(actions: BattleActionRecord[]): string {
+  if (!actions.length) return "actioninfo";
+  const bits: string[] = [];
+  for (const rec of actions) {
+    if (rec.type === 3) {
+      bits.push("倒下");
+      continue;
+    }
+    if (rec.type === 4) {
+      bits.push("退场");
+      continue;
+    }
+    const kind = rec.type === 1 ? "技" : rec.type === 2 ? "物" : "攻";
+    for (const c of rec.children) {
+      const fl = childFlagLabel(c.flag);
+      if (fl === "闪躲") {
+        bits.push(`${kind}:闪躲`);
+      } else if (c.delta !== 0) {
+        const n = c.delta < 0 ? `${c.delta}` : `+${c.delta}`;
+        bits.push(fl ? `${kind}${n}${fl}` : `${kind}${n}`);
+      } else if (rec.effectText) {
+        bits.push(rec.effectText.slice(0, 6));
+      }
+    }
+  }
+  return bits.length ? bits.join(" ") : `action×${actions.length}`;
+}
+
+export function parseBattleAction(packet: WtPacket): BattleActionUpdate | null {
+  const esc = packet.objects.find((o) => o.kind === 4 && o.subtype === 4);
+  let escapeOk: boolean | null = null;
+  if (esc) {
+    const resultRaw = findField(esc, "result");
+    escapeOk = resultRaw
+      ? (decodeAsciiDigitResult(resultRaw) ?? 0) === 1
+      : true;
+    /* Success: only 4/4 {result=1}; battle ends (mmBattle:0x7F18). */
+    if (escapeOk) {
+      return {
+        finished: true,
+        settled: false,
+        escaped: true,
+        escapeOk: true,
+        log: "逃跑成功",
+        leftHp: [],
+        rightHp: [],
+        hpDeltas: [],
+        actions: [],
+      };
+    }
+    /* Fail: 4/4 {result=0} + 4/6 enemy counters in the same WT — fall through
+     * so the other side still plays (docs/re/2026-06-25-battle-server-flow.md). */
+  }
+
+  /*
+   * Spar / duel: each hit is its own 4/6 (team_count=1 InitActionSlot_B),
+   * merged into one WT in delivery order.  Native CBE walks every object;
+   * only taking .find() first dropped the peer's hit (second 4/6).
+   */
+  const acts = packet.objects.filter((o) => o.kind === 4 && o.subtype === 6);
+  const settleObj = packet.objects.find((o) => o.kind === 4 && o.subtype === 7);
+  const exit = packet.objects.find((o) => o.kind === 4 && o.subtype === 8);
+  if (!acts.length && !settleObj && !exit && escapeOk === null) return null;
+  /* Escape-fail with no counters (no living enemies) still needs a UI tick. */
+  if (!acts.length && !settleObj && !exit && escapeOk === false) {
+    return {
+      finished: false,
+      settled: false,
+      escaped: true,
+      escapeOk: false,
+      log: "逃跑失败",
+      leftHp: [],
+      rightHp: [],
+      hpDeltas: [],
+      actions: [],
+    };
+  }
+
+  const leftHp: { id: number; hp: number }[] = [];
+  const rightHp: { id: number; hp: number; mp?: number }[] = [];
+  const hpDeltas: { wire: number; delta: number; flag?: number }[] = [];
+  let actions: BattleActionRecord[] = [];
+  let log = "回合结算";
+  for (const act of acts) {
+    const numRaw = findField(act, "actionnum");
+    const n = numRaw ? decodeAsciiDigitResult(numRaw) ?? numRaw[2] ?? 0 : 0;
+    const actionInfo = findField(act, "actioninfo");
+    if (actionInfo && n > 0) {
+      const chunk = parseActionInfoScript(actionInfo, n);
+      actions = actions.concat(chunk);
+      for (const rec of chunk) {
+        for (const c of rec.children) {
+          hpDeltas.push({ wire: c.wire, delta: c.delta, flag: c.flag });
+        }
+      }
+    }
+    const team = findField(act, "teaminfo");
+    if (team) {
+      for (const row of parseTeaminfoBlob(team)) {
+        // CBE InitActionSlot_B: id + mp authoritative; hp field overlapped/ignored.
+        // Later 4/6 teaminfo wins for the same id (fresher MP after skill).
+        const prev = rightHp.findIndex((r) => r.id === row.id);
+        const next = { id: row.id, hp: row.hp, mp: row.mp };
+        if (prev >= 0) rightHp[prev] = next;
+        else rightHp.push(next);
+      }
+    }
+  }
+  if (escapeOk === false) {
+    log = actions.length
+      ? `逃跑失败 · ${formatPlaybackLog(actions)}`
+      : "逃跑失败";
+  } else if (actions.length) {
+    log = formatPlaybackLog(actions);
+  } else if (acts.length) {
+    log = `actioninfo ×${acts.length}`;
+  }
+
+  let settlement: BattleSettlement | undefined;
+  if (settleObj) {
+    const expTotal = fieldU32(settleObj, "exp");
+    const goldTotal = fieldU32(settleObj, "gold");
+    const level = fieldU32(settleObj, "level");
+    const lastExp = fieldU32(settleObj, "lastexp");
+    const curExp = fieldU32(settleObj, "curexp");
+    const percentExp = fieldU32(settleObj, "persentexp");
+    const result = fieldU32(settleObj, "result");
+    const fRaw = findField(settleObj, "fdata");
+    const fdata = fRaw ? decodeFieldString(fRaw) : "";
+    settlement = {
+      expTotal,
+      goldTotal,
+      level,
+      lastExp,
+      curExp,
+      percentExp,
+      expGain: 0,
+      goldGain: 0,
+      fdata,
+      result,
+    };
+    log += ` · 结算 EXP=${expTotal} 金=${goldTotal}`;
+    if (fdata) log += ` ${fdata.slice(0, 12)}`;
+  }
+  if (exit) log += " · 退出战斗";
+  return {
+    // Exit (4/8) leaves battle; settle alone keeps the panel open.
+    finished: !!exit,
+    settled: !!settleObj,
+    escaped: escapeOk !== null,
+    // Escape success already returned above; only null | false reach here.
+    escapeOk: false,
+    log,
+    leftHp,
+    rightHp,
+    hpDeltas,
+    actions,
+    settlement,
+  };
+}
+
+export type NpcDialog = {
+  title: string;
+  body: string;
+  options: {
+    label: string;
+    action: number;
+    value: number;
+    description?: string;
+    displayType?: number;
+  }[];
+  /** Soft buttons from dialog blob (usually empty). */
+  buttons?: { label: string; type: number }[];
+  hidebtn?: number;
+};
+
+export function parseTaskDetail(packet: WtPacket): string | null {
+  const obj = packet.objects.find((o) => o.kind === 6 && o.subtype === 10);
+  if (!obj) return null;
+  const info = findField(obj, "info");
+  return info ? decodeFieldString(info) : null;
+}
+
+export function parseTaskAcceptResult(
+  packet: WtPacket,
+): { ok: boolean; taskId?: number } | null {
+  const obj = packet.objects.find((o) => o.kind === 6 && o.subtype === 11);
+  if (!obj) return null;
+  const resultRaw = findField(obj, "result");
+  const result = resultRaw
+    ? decodeAsciiDigitResult(resultRaw) ?? resultRaw[2] ?? 1
+    : 1;
+  return { ok: result === 0 };
+}
+
+export function parseTaskSubmitResult(
+  packet: WtPacket,
+): { ok: boolean; text?: string } | null {
+  const obj = packet.objects.find((o) => o.kind === 6 && o.subtype === 4);
+  if (!obj) return null;
+  const resultRaw = findField(obj, "result");
+  const result = resultRaw
+    ? decodeAsciiDigitResult(resultRaw) ?? resultRaw[2] ?? 0
+    : 0;
+  const textRaw = findField(obj, "taskdes") || findField(obj, "info");
+  return {
+    ok: result === 1,
+    text: textRaw ? decodeFieldString(textRaw) : undefined,
+  };
+}
+
+export function parseTaskAbandonResult(
+  packet: WtPacket,
+): { ok: boolean } | null {
+  const obj = packet.objects.find((o) => o.kind === 6 && o.subtype === 7);
+  if (!obj) return null;
+  const resultRaw = findField(obj, "result");
+  const result = resultRaw
+    ? decodeAsciiDigitResult(resultRaw) ?? resultRaw[2] ?? 1
+    : 1;
+  return { ok: result === 0 };
+}
+
+function parseAcceptedTaskInfoBlob(raw: Uint8Array): TaskListRow[] {
+  const rows: TaskListRow[] = [];
+  const r = new SeqReader(raw);
+  try {
+    while (r.remaining() > 8) {
+      const taskId = r.u32();
+      const difficulty = r.u8();
+      const classification = r.u8();
+      const name = r.string().replace(/\0+$/g, "");
+      const giver = r.string().replace(/\0+$/g, "");
+      const level = r.u8();
+      const receiver = r.string().replace(/\0+$/g, "");
+      const reqType1 = r.u8();
+      const reqId1 = r.u32();
+      r.string(); // unused prompt
+      const progress1 = r.u8();
+      const reqCount1 = r.u8();
+      const reqType2 = r.u8();
+      const reqId2 = r.u32();
+      r.string();
+      const progress2 = r.u8();
+      const reqCount2 = r.u8();
+      r.i16(); // pad
+      const state = r.u8();
+      rows.push({
+        taskId,
+        difficulty,
+        classification,
+        name,
+        giver,
+        level,
+        receiver,
+        reqType1,
+        reqId1,
+        progress1,
+        reqCount1,
+        reqType2,
+        reqId2,
+        progress2,
+        reqCount2,
+        state,
+      });
+    }
+  } catch {
+    /* truncated / partial row */
+  }
+  return rows;
+}
+
+function parseCandidateTaskInfoBlob(raw: Uint8Array): TaskCandidateRow[] {
+  const rows: TaskCandidateRow[] = [];
+  const r = new SeqReader(raw);
+  try {
+    while (r.remaining() > 6) {
+      const taskId = r.u32();
+      const difficulty = r.u8();
+      const classification = r.u8();
+      const name = r.string().replace(/\0+$/g, "");
+      const giver = r.string().replace(/\0+$/g, "");
+      const level = r.u8();
+      rows.push({ taskId, difficulty, classification, name, giver, level });
+    }
+  } catch {
+    /* truncated */
+  }
+  return rows;
+}
+
+/** Parse accepted (6/1) and/or candidates (6/14) from a list-query response. */
+export function parseTaskListQuery(packet: WtPacket): {
+  accepted: TaskListRow[];
+  candidates: TaskCandidateRow[];
+} {
+  const accepted: TaskListRow[] = [];
+  const candidates: TaskCandidateRow[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 6) continue;
+    const info = findField(obj, "taskinfo");
+    if (!info) continue;
+    if (obj.subtype === 1) accepted.push(...parseAcceptedTaskInfoBlob(info));
+    else if (obj.subtype === 14) candidates.push(...parseCandidateTaskInfoBlob(info));
+  }
+  return { accepted, candidates };
+}
+
+/**
+ * CBE `scene_refresh_interact_prompt_types` (0x01017C6C) node+326:
+ * 1 = yellow ? (可提交), 2 = yellow ! (可接), 3 = grey ? (未完成).
+ * Priority when multiple match the same NPC name: 1 > 2 > 3.
+ */
+export type NpcTaskPromptType = 1 | 2 | 3;
+
+export function computeNpcTaskPrompts(
+  accepted: TaskListRow[],
+  candidates: TaskCandidateRow[],
+): Map<string, NpcTaskPromptType> {
+  const map = new Map<string, NpcTaskPromptType>();
+  const rank = (t: number) => (t === 1 ? 3 : t === 2 ? 2 : t === 3 ? 1 : 0);
+  const set = (name: string, type: NpcTaskPromptType) => {
+    const key = name.replace(/\0+$/g, "").trim();
+    if (!key) return;
+    const cur = map.get(key) ?? 0;
+    if (rank(type) > rank(cur)) map.set(key, type);
+  };
+  for (const c of candidates) set(c.giver, 2);
+  for (const a of accepted) {
+    if (a.state === 2) set(a.receiver, 1);
+    else if (a.state === 1) set(a.receiver, 3);
+  }
+  return map;
+}
+
+/** 30/9 challenge confirm prompt (after empty 26/0). */
+export function parseChallengePrompt(
+  packet: WtPacket,
+): { isLeader: number; text: string } | null {
+  const obj = packet.objects.find((o) => o.kind === 30 && o.subtype === 9);
+  if (!obj) return null;
+  const leaderRaw = findField(obj, "isleader");
+  const isLeader = leaderRaw
+    ? decodeAsciiDigitResult(leaderRaw) ?? leaderRaw[2] ?? 0
+    : 0;
+  const challenge = findField(obj, "challenge");
+  if (!challenge) return null;
+  return { isLeader, text: decodeFieldString(challenge) || "是否挑战守关怪？" };
+}
+
+export function parseNpcDialog(packet: WtPacket): NpcDialog | null {
+  const obj = packet.objects.find((o) => o.kind === 26 && o.subtype === 1);
+  if (!obj) return null;
+
+  const dialogRaw = findField(obj, "dialog");
+  if (dialogRaw && dialogRaw.length >= 1) {
+    try {
+      const r = new SeqReader(dialogRaw);
+      r.u8(); // dialog-kind
+      const body = r.string().replace(/\0+$/g, "");
+      const optionCount = r.u8();
+      const options: NpcDialog["options"] = [];
+      for (let i = 0; i < optionCount && r.remaining() > 0; i++) {
+        const displayType = r.u8();
+        const label = r.string().replace(/\0+$/g, "");
+        const action = r.u8();
+        const value = r.u32();
+        const description = r.string().replace(/\0+$/g, "");
+        options.push({ label, action, value, description, displayType });
+      }
+      const buttons: NonNullable<NpcDialog["buttons"]> = [];
+      if (r.remaining() > 0) {
+        const buttonCount = r.u8();
+        for (let i = 0; i < buttonCount && r.remaining() > 0; i++) {
+          const type = r.u8();
+          const label = r.string().replace(/\0+$/g, "");
+          if (r.remaining() > 0) r.u8(); // final-byte
+          buttons.push({ label, type });
+        }
+      }
+      const hideRaw = findField(obj, "hidebtn");
+      const hidebtn = hideRaw
+        ? decodeAsciiDigitResult(hideRaw) ?? hideRaw[2] ?? 0
+        : 0;
+      return {
+        title: "对话",
+        body: body || "(对话)",
+        options,
+        buttons,
+        hidebtn,
+      };
+    } catch {
+      /* fall through to legacy flat fields */
+    }
+  }
+
+  // Legacy / demo flat fields (title + info + option blob).
+  const title = findField(obj, "title")
+    ? decodeFieldString(findField(obj, "title")!)
+    : "对话";
+  const body =
+    (findField(obj, "info") && decodeFieldString(findField(obj, "info")!)) ||
+    (findField(obj, "data") && decodeFieldString(findField(obj, "data")!)) ||
+    (findField(obj, "text") && decodeFieldString(findField(obj, "text")!)) ||
+    "";
+  const options: NpcDialog["options"] = [];
+  const optRaw = findField(obj, "option") || findField(obj, "options");
+  if (optRaw) {
+    try {
+      const r = new SeqReader(optRaw);
+      const count = r.u8();
+      for (let i = 0; i < count && r.remaining() > 0; i++) {
+        const label = r.string();
+        const action = r.u32();
+        const value = r.u32();
+        options.push({ label, action, value });
+      }
+    } catch {
+      /* keep title/body */
+    }
+  }
+  if (!body && !options.length && !findField(obj, "result")) return null;
+  return { title, body: body || "(对话)", options };
+}
+
+export type ChatLine = { type: number; text: string };
+
+/** Strip put_object_blob inner BE16(dataLen) prefix. */
+function unwrapChatinfoBlob(raw: Uint8Array): Uint8Array {
+  if (raw.length >= 2) {
+    const len = ((raw[0]! << 8) | raw[1]!) >>> 0;
+    if (len > 0 && 2 + len <= raw.length) return raw.subarray(2, 2 + len);
+  }
+  return raw;
+}
+
+export function parseChatNotices(packet: WtPacket): ChatLine[] {
+  const lines: ChatLine[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 3 || obj.subtype !== 3) continue;
+    const typeRaw = findField(obj, "type");
+    const type = typeRaw ? decodeAsciiDigitResult(typeRaw) ?? typeRaw[2] ?? 0 : 0;
+    const raw = findField(obj, "chatinfo");
+    if (!raw || raw.length < 1) continue;
+    // chatinfo value = BE16(len) + [u8 count][seq rows…]
+    // (docs/re/2026-07-16-chat-message-system.md). Using raw[0] as count
+    // treated the length high-byte (usually 0) as zero messages.
+    const info = unwrapChatinfoBlob(raw);
+    if (info.length < 1) continue;
+    const count = info[0]!;
+    const r = new SeqReader(info.subarray(1));
+    for (let i = 0; i < count && r.remaining() > 0; i++) {
+      try {
+        const name = r.string().replace(/\0+$/g, "");
+        const senderRoleId = r.u32(); // tagged; 0 = server system broadcast
+        const msg = r.string().replace(/\0+$/g, "");
+        // World [世]: drop player nick "系统" (nonzero roleId). Keep official
+        // enhance/chest world announces (name=系统, roleId=0) and type-5 tips.
+        if (type === 0 && name.trim() === "系统" && senderRoleId !== 0) {
+          continue;
+        }
+        lines.push({ type, text: `[${chatPrefix(type)}]${name}: ${msg}` });
+      } catch {
+        break;
+      }
+    }
+  }
+  return lines;
+}
+
+/** Server account-login takeover tip (GBK decoded). */
+export function isAccountKickChatLine(text: string): boolean {
+  return text.includes("其他地方登录") || text.includes("强制下线");
+}
+
+function chatPrefix(type: number): string {
+  switch (type) {
+    case 0:
+      return "世";
+    case 2:
+      return "队";
+    case 3:
+      return "帮";
+    case 4:
+      return "本";
+    case 5:
+    case 6:
+      return "系";
+    case 7:
+      return "私";
+    default:
+      return "?";
+  }
+}
+
+export type BagItem = {
+  itemId: number;
+  seq: number;
+  count: number;
+  name: string;
+  quality: number;
+  enhance: number;
+  kind: "item" | "equip";
+  /** item.dsh / equip.dsh 类别 — UI 分类筛选用. */
+  category: number;
+  desc: string;
+  /** True when category-10 consumable or HP/MP/EXP/consumable effect (mock catalog rule). */
+  usable: boolean;
+  /** Worn body slot when equipment (0..7), else -1. */
+  equipSlot: number;
+  /**
+   * Current durability (CBE item+0x110).
+   * - Worn `7/7 type=2`: wire u32 count.
+   * - Bag equip: wire count (login/grant = 1); preserved across bag refresh /
+   *   unequip move (30/21 does not rewrite +0x110 on CBE).
+   */
+  durability?: number;
+};
+
+/**
+ * Battle「物品」menu: HP/MP medicines (item.dsh category 10) and flasks 802/803.
+ * Excludes EXP-only cards and non-restore props; never equipment.
+ */
+export function isBattleMedicineOrFlask(it: BagItem): boolean {
+  if (it.kind !== "item" || it.seq <= 0 || it.count <= 0) return false;
+  if (it.itemId === 802 || it.itemId === 803) return true;
+  if (it.category !== 10) return false;
+  const cat = lookupItemSync(it.itemId);
+  if (cat) return cat.hpChange !== 0 || cat.mpChange !== 0;
+  return it.usable;
+}
+
+export type WornSlot = {
+  slot: number;
+  slotName: string;
+  item: BagItem | null;
+};
+
+export type ShopGoods = {
+  itemId: number;
+  name: string;
+  price: number;
+  stock: number;
+  visual: number;
+  quality: number;
+  kind: "item" | "equip";
+  /** item.dsh / equip.dsh 类别 — UI 分类筛选用. */
+  category: number;
+  /** item.dsh 说明 — 商城详情暗色说明区. */
+  desc: string;
+};
+
+export type MallState = {
+  coolmoney: number;
+  ticket: number;
+  goods: ShopGoods[];
+  /** True when this update carried 14/4 balance (do not clobber with 0). */
+  hasBalance?: boolean;
+};
+
+export type CharacterStats = {
+  name: string;
+  level: number;
+  title: string;
+  job: number;
+  spouse: string;
+  guild: string;
+  hp: number;
+  hpMax: number;
+  mp: number;
+  mpMax: number;
+  charm: number;
+  strength: number;
+  agility: number;
+  wisdom: number;
+  endurance: number;
+  /** Full build_player_stats attack (jobPrimary + equip). */
+  attack: number;
+  /** Full defense (bare + equip.armor). */
+  armor: number;
+  hit: number;
+  dodge: number;
+  crit: number;
+  resist: number;
+  baseStrength: number;
+  baseAgility: number;
+  baseWisdom: number;
+  eqStrength: number;
+  eqAgility: number;
+  eqWisdom: number;
+  eqAttack: number;
+  eqArmor: number;
+  exp: number;
+  /** Next level start exp (may exceed i32; UI may show as signed). */
+  expNext: number;
+  money: number;
+  coolmoney: number;
+  backpackCapacity: number;
+};
+
+/** Skip ParseEquipAttributes common-extra; returns first i16 (enhance or stack). */
+function readItemCommonExtra(r: SeqReader): { enhance: number; stackHint: number } {
+  let enhance = 0;
+  let stackHint = 1;
+  try {
+    const first = r.i16();
+    const second = r.i16();
+    const attrCount = r.u8();
+    enhance = first & 0xff;
+    stackHint = first & 0xff;
+    void second;
+    for (let a = 0; a < attrCount && a < 8; a++) {
+      r.u8(); // unlock
+      r.u8(); // type
+      r.u8(); // flag
+      r.i16(); // value
+    }
+  } catch {
+    /* truncated extra ok */
+  }
+  return { enhance, stackHint };
+}
+
+function enrichBagRow(
+  itemId: number,
+  seq: number,
+  count: number,
+  enhance: number,
+): BagItem {
+  const cat = lookupItemSync(itemId);
+  const kind = cat?.kind ?? (itemId >= 1000 ? "equip" : "item");
+  const quality = cat?.quality ?? 0;
+  // Mirror vm_net_mock_item_effect_is_usable: category 10 (道具/消耗) or any
+  // HP/MP/EXP effect. Also honor item.dsh 是否消耗 when set. Equip never usable.
+  const usable = !!(
+    cat &&
+    cat.kind === "item" &&
+    (cat.category === 10 ||
+      cat.hpChange ||
+      cat.mpChange ||
+      cat.expChange ||
+      cat.consumable)
+  );
+  const wireCount = Math.max(0, count >>> 0);
+  // Bag/grid equip wire count → item+0x110 (mmGame:sub_D04). Login/grant sends
+  // instance 1, so new bag rows show current durability 1 until unequip-move
+  // preserves a worn value or a later type=2 path rewrites it.
+  const durability = kind === "equip" ? (wireCount > 0 ? wireCount : 1) : undefined;
+  return {
+    itemId,
+    seq,
+    count: kind === "equip" ? 1 : Math.max(1, wireCount),
+    name: cat?.name ?? `#${itemId}`,
+    quality,
+    enhance: kind === "equip" ? enhance : 0,
+    kind,
+    category: cat?.category ?? 0,
+    desc: cat?.desc ?? "",
+    usable,
+    equipSlot: cat?.equipSlot ?? -1,
+    ...(durability != null ? { durability } : {}),
+  };
+}
+
+/**
+ * Parse backpack/worn blobs from a packet.
+ * - 17/1: u8 n; repeat u32 itemId + common-extra (no seq on wire)
+ * - 30/21: repeat u32 itemId, i16 seq, u32 count, common-extra
+ * - 7/7: type u8 + iteminfo rows { i16 seq, u32 itemId, u32 count, extra }
+ *
+ * When both 17/1 and 30/21 are present (Pixi 7/23), keep 17/1 row order but
+ * overlay real seq/count from the grid (matched by itemId occurrence order).
+ * Prefer 17/1 alone over a truncated lone 30/21; never invent seq from row index
+ * when a grid seq is available — fake seq makes 7/15 report「宝箱不存在」。
+ */
+export function parseBagItems(packet: WtPacket): BagItem[] {
+  const from17 = parseBagItems17(packet);
+  const fromGrid = parseBagGrid30(packet);
+  if (from17.length && fromGrid.length) {
+    return mergeBag17WithGridSeq(from17, fromGrid);
+  }
+  if (from17.length) return from17;
+  if (fromGrid.length) return fromGrid;
+  return parseItemManager77(packet).bag;
+}
+
+/** Overlay 30/21 seq/count onto 17/1 rows (same itemId order / multiset). */
+function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[] {
+  const pools = new Map<number, BagItem[]>();
+  for (const g of fromGrid) {
+    const arr = pools.get(g.itemId) ?? [];
+    arr.push(g);
+    pools.set(g.itemId, arr);
+  }
+  return from17.map((it) => {
+    const arr = pools.get(it.itemId);
+    const hit = arr?.shift();
+    if (!hit) return it;
+    return {
+      ...it,
+      seq: hit.seq > 0 ? hit.seq : it.seq,
+      count: hit.count > 0 ? hit.count : it.count,
+      enhance: hit.enhance || it.enhance,
+    };
+  });
+}
+
+/** Incremental 7/7 type=1 updates — merge by seq into existing bag. */
+export function parseBagItemUpdates(packet: WtPacket): BagItem[] {
+  return parseItemManager77(packet).bag;
+}
+
+export function parseWornEquipment(packet: WtPacket): BagItem[] {
+  return parseItemManager77(packet).worn;
+}
+
+/**
+ * Fresh worn snapshot from a packet that contains 7/7 type=2.
+ * Returns null when no type=2 object (do not clear cache).
+ * Returns [] when type=2 present but empty (clear all slots).
+ */
+export function parseWornEquipmentSnapshot(packet: WtPacket): BagItem[] | null {
+  let sawType2 = false;
+  const worn: BagItem[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 7 || obj.subtype !== 7) continue;
+    const typeRaw = findField(obj, "type");
+    const type = typeRaw ? decodeTaggedNumber(typeRaw) ?? typeRaw[2] ?? 0 : 0;
+    if (type !== 2) continue;
+    sawType2 = true;
+    const raw = findField(obj, "iteminfo");
+    if (!raw) continue;
+    const r = new SeqReader(raw);
+    try {
+      const n = r.u8();
+      for (let i = 0; i < n && r.remaining() > 4; i++) {
+        const seq = r.i16();
+        const itemId = r.u32();
+        const count = r.u32();
+        const extra = readItemCommonExtra(r);
+        // type=2 wire count = current durability (mmGame:sub_D04 / item+0x110).
+        worn.push({
+          ...enrichBagRow(itemId, seq, count, extra.enhance),
+          durability: count >>> 0,
+        });
+      }
+    } catch {
+      /* truncated */
+    }
+  }
+  return sawType2 ? worn : null;
+}
+
+function parseBagItems17(packet: WtPacket): BagItem[] {
+  const obj = packet.objects.find((o) => o.kind === 17 && o.subtype === 1);
+  if (!obj) return [];
+  const raw = findField(obj, "iteminfo") || findField(obj, "baginfo");
+  if (!raw) return [];
+  const items: BagItem[] = [];
+  const r = new SeqReader(raw);
+  let count = 0;
+  try {
+    count = r.u8();
+  } catch {
+    return [];
+  }
+  for (let i = 0; i < count && r.remaining() > 4; i++) {
+    const mark = r.pos;
+    try {
+      const itemId = r.u32();
+      const extra = readItemCommonExtra(r);
+      const cat = lookupItemSync(itemId);
+      const isEquip = cat?.kind === "equip" || itemId >= 1000;
+      const qty = isEquip
+        ? 1
+        : Math.max(1, extra.stackHint || 1);
+      // 17/1 has no wire seq — leave 0 until 30/21 overlay (do not invent i+1).
+      items.push(
+        enrichBagRow(itemId, 0, qty, isEquip ? extra.enhance : 0),
+      );
+    } catch {
+      // Resync attempt: skip one tagged field and continue next row.
+      r.pos = mark;
+      try {
+        r.u32();
+        readItemCommonExtra(r);
+      } catch {
+        break;
+      }
+    }
+  }
+  return items;
+}
+
+function parseBagGrid30(packet: WtPacket): BagItem[] {
+  const obj = packet.objects.find((o) => o.kind === 30 && o.subtype === 21);
+  if (!obj) return [];
+  const raw = findField(obj, "iteminfo") || findField(obj, "info");
+  if (!raw || raw.length < 8) return [];
+  const items: BagItem[] = [];
+  const r = new SeqReader(raw);
+  while (r.remaining() >= 10) {
+    const mark = r.pos;
+    try {
+      const itemId = r.u32();
+      const seq = r.i16();
+      const count = r.u32();
+      const extra = readItemCommonExtra(r);
+      items.push(enrichBagRow(itemId, seq, count, extra.enhance));
+    } catch {
+      r.pos = mark + 1;
+      if (r.pos >= raw.length) break;
+    }
+  }
+  return items;
+}
+
+function parseItemManager77(packet: WtPacket): { bag: BagItem[]; worn: BagItem[] } {
+  const bag: BagItem[] = [];
+  const worn: BagItem[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 7 || obj.subtype !== 7) continue;
+    const typeRaw = findField(obj, "type");
+    const type = typeRaw ? decodeTaggedNumber(typeRaw) ?? typeRaw[2] ?? 0 : 0;
+    const raw = findField(obj, "iteminfo");
+    if (!raw) continue;
+    const r = new SeqReader(raw);
+    try {
+      const n = r.u8();
+      for (let i = 0; i < n && r.remaining() > 4; i++) {
+        const seq = r.i16();
+        const itemId = r.u32();
+        const count = r.u32();
+        const extra = readItemCommonExtra(r);
+        const row = enrichBagRow(itemId, seq, count, extra.enhance);
+        if (type === 2) {
+          worn.push({ ...row, durability: count >>> 0 });
+        } else {
+          bag.push(row);
+        }
+      }
+    } catch {
+      /* truncated */
+    }
+  }
+  return { bag, worn };
+}
+
+export function parseMallState(packet: WtPacket): MallState | null {
+  let coolmoney = 0;
+  let ticket = 0;
+  let foundBalance = false;
+  const bal = packet.objects.find((o) => o.kind === 14 && o.subtype === 4);
+  if (bal) {
+    foundBalance = true;
+    const c = findField(bal, "coolmoney");
+    const t = findField(bal, "ticket");
+    if (c) coolmoney = decodeTaggedNumber(c) ?? 0;
+    if (t) ticket = decodeTaggedNumber(t) ?? 0;
+  }
+  const goods: ShopGoods[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 14 || obj.subtype < 5 || obj.subtype > 13) continue;
+    const raw = findField(obj, "iteminfo");
+    if (!raw) continue;
+    const r = new SeqReader(raw);
+    try {
+      const n = r.u8();
+      for (let i = 0; i < n && r.remaining() > 4; i++) {
+        const itemId = r.u32();
+        const name = r.string().replace(/\0+$/g, "") || `#${itemId}`;
+        const visual = r.u8();
+        r.u8(); // stack
+        const price = r.u32();
+        const stock = r.u32();
+        r.u8(); // buy step
+        try {
+          readItemCommonExtra(r);
+        } catch {
+          /* page extra may be short */
+        }
+        const cat = lookupItemSync(itemId);
+        goods.push({
+          itemId,
+          name: (cat?.name || name).replace(/\0+$/g, "") || `#${itemId}`,
+          price,
+          stock,
+          visual,
+          quality: cat?.quality ?? (visual <= 4 ? visual : 0),
+          kind: cat?.kind ?? (itemId >= 1000 ? "equip" : "item"),
+          category: cat?.category ?? 0,
+          desc: cat?.desc ?? "",
+        });
+      }
+    } catch {
+      /* truncated page */
+    }
+  }
+  if (!foundBalance && !goods.length) return null;
+  return { coolmoney, ticket, goods, hasBalance: foundBalance };
+}
+
+/** Pixi-only panel summary: 1/1/21 → build_player_stats (base+equip). */
+export function buildPanelStatsRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 1, 21);
+  return b.finish();
+}
+
+function fieldStringNamed(
+  obj: { fields: { name: string; raw: Uint8Array }[] },
+  name: string,
+): string {
+  const raw = findField(obj as never, name);
+  if (!raw) return "";
+  return decodeFieldString(raw).replace(/\0+$/g, "");
+}
+
+/**
+ * Pixi 人物信息权威源：`1/1/21` 全额汇总（基础+装备），非 CBE actorinfo 裸半字。
+ */
+export function parsePanelStats(packet: WtPacket): CharacterStats | null {
+  const obj = packet.objects.find((o) => o.kind === 1 && o.subtype === 21);
+  if (!obj) return null;
+  const name = fieldStringNamed(obj, "name");
+  const level = fieldU32(obj, "level");
+  if (!name && !level) return null;
+  return {
+    name: name || "?",
+    level,
+    title: fieldStringNamed(obj, "title"),
+    job: fieldU32(obj, "job"),
+    spouse: fieldStringNamed(obj, "spouse") || "无",
+    guild: fieldStringNamed(obj, "guild") || "无帮派",
+    hp: fieldU32(obj, "hp"),
+    hpMax: fieldU32(obj, "hpMax"),
+    mp: fieldU32(obj, "mp"),
+    mpMax: fieldU32(obj, "mpMax"),
+    charm: fieldU32(obj, "charm"),
+    strength: fieldU32(obj, "strength"),
+    agility: fieldU32(obj, "agility"),
+    wisdom: fieldU32(obj, "wisdom"),
+    endurance: fieldU32(obj, "endurance"),
+    attack: fieldU32(obj, "attack"),
+    armor: fieldU32(obj, "defense"),
+    hit: fieldU32(obj, "hit"),
+    dodge: fieldU32(obj, "dodge"),
+    crit: fieldU32(obj, "crit"),
+    resist: fieldU32(obj, "resist"),
+    baseStrength: fieldU32(obj, "baseStrength"),
+    baseAgility: fieldU32(obj, "baseAgility"),
+    baseWisdom: fieldU32(obj, "baseWisdom"),
+    eqStrength: fieldU32(obj, "eqStrength"),
+    eqAgility: fieldU32(obj, "eqAgility"),
+    eqWisdom: fieldU32(obj, "eqWisdom"),
+    eqAttack: fieldU32(obj, "eqAttack"),
+    eqArmor: fieldU32(obj, "eqArmor"),
+    exp: fieldU32(obj, "exp"),
+    expNext: fieldU32(obj, "expNext"),
+    money: fieldU32(obj, "money"),
+    coolmoney: fieldU32(obj, "coolmoney"),
+    backpackCapacity: fieldU32(obj, "backpack"),
+  };
+}
+
+/**
+ * 1/10/26 money refresh (enhance / transfer / discard / shop).
+ * Authoritative copper balance for the bag 金/银/铜 label.
+ */
+export function parseMoneyBalanceSync(packet: WtPacket): number | null {
+  const obj = packet.objects.find((o) => o.kind === 10 && o.subtype === 26);
+  if (!obj) return null;
+  const moneyRaw = findField(obj, "money");
+  if (!moneyRaw) return null;
+  return decodeTaggedNumber(moneyRaw) ?? fieldU32(obj, "money");
+}
+
+/** @deprecated use parsePanelStats — kept as alias. */
+export function parseCharacterStats(packet: WtPacket): CharacterStats | null {
+  return parsePanelStats(packet);
+}
+
+export function parseHangupNotice(packet: WtPacket): string | null {
+  const o11 = packet.objects.find((o) => o.kind === 25 && o.subtype === 11);
+  if (o11) {
+    const info = findField(o11, "info");
+    if (info) {
+      const text = decodeFieldString(info).replace(/\0+$/g, "").trim();
+      if (text) return text;
+    }
+  }
+  // 25/12 is info-banner clear ACK (after 25/11 wait / map reject), not hangup
+  // start. Mapping it to 「挂机已启动」 made stop/start both show the same tip.
+  return null;
+}
+
+/** Sync local hangup flag from 1/3/3 system lines (server authority). */
+export function hangupActiveFromChatLine(text: string): boolean | null {
+  if (text.includes("已停止挂机")) return false;
+  if (text.includes("不能挂机")) return false;
+  if (text.includes("已开始挂机")) return true;
+  return null;
+}
+
+/* ---------- designation / ranking / quick-repair ---------- */
+
+/** Open title page: 1/23/1. */
+export function buildDesignationListRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 23, 1);
+  return b.finish();
+}
+
+/** Equip title: 1/23/3 { type=designationId }. */
+export function buildDesignationSelectRequest(designationId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 23, 3).u8("type", designationId & 0xff);
+  return b.finish();
+}
+
+export type DesignationRow = {
+  id: number;
+  name: string;
+  desc: string;
+  gif: string;
+};
+
+export type DesignationPage = {
+  equippedId: number;
+  rows: DesignationRow[];
+};
+
+export function parseDesignationPage(packet: WtPacket): DesignationPage | null {
+  const obj = packet.objects.find((o) => o.kind === 23 && o.subtype === 1);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  if (result !== 1 && result !== 0) {
+    /* still try parse if equiptype present */
+  }
+  const equippedId = fieldU32(obj, "equiptype");
+  const count = fieldU32(obj, "count");
+  const raw = findField(obj, "designationinfo");
+  if (!raw) return { equippedId, rows: [] };
+  /* put_object_entry: no outer BE16 */
+  const r = new SeqReader(raw);
+  const rows: DesignationRow[] = [];
+  for (let i = 0; i < count && r.remaining() > 2; i++) {
+    try {
+      const id = r.u8();
+      r.u8(); /* fieldB */
+      const name = r.string().replace(/\0+$/g, "");
+      const desc = r.string().replace(/\0+$/g, "");
+      const gif = r.string().replace(/\0+$/g, "");
+      rows.push({ id, name, desc, gif });
+    } catch {
+      break;
+    }
+  }
+  return { equippedId, rows };
+}
+
+export function parseDesignationSelectResult(
+  packet: WtPacket,
+): { ok: boolean; gif?: string; name?: string } | null {
+  const ack = packet.objects.find((o) => o.kind === 23 && o.subtype === 3);
+  if (!ack) return null;
+  const result = fieldU32(ack, "result");
+  const upd = parseDesignationSceneUpdate(packet);
+  return {
+    ok: result === 1,
+    gif: upd?.gif,
+    name: upd?.name,
+  };
+}
+
+/**
+ * Scene/self overhead title update: 23/2 designationinfo
+ * tagged u32 actorId, i8 id, i8 fieldB, shortTitle, overheadResource.gif
+ */
+export function parseDesignationSceneUpdate(packet: WtPacket): {
+  actorId: number;
+  designationId: number;
+  name: string;
+  gif: string;
+} | null {
+  const upd = packet.objects.find((o) => o.kind === 23 && o.subtype === 2);
+  if (!upd) return null;
+  const raw = findField(upd, "designationinfo");
+  if (!raw) return null;
+  const r = new SeqReader(raw);
+  try {
+    const actorId = r.u32();
+    const designationId = r.u8();
+    r.u8(); /* fieldB */
+    const name = r.string().replace(/\0+$/g, "");
+    const gif = r.string().replace(/\0+$/g, "");
+    return { actorId, designationId, name, gif };
+  } catch {
+    return null;
+  }
+}
+
+/** Ranking board: 1/23/7 { type, pageIndex }. */
+export function buildRankingBoardRequest(type = 0, pageIndex = 0): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 23, 7)
+    .u8("type", type & 0xff)
+    .u8("pageIndex", pageIndex & 0xff);
+  return b.finish();
+}
+
+export type RankingRow = {
+  roleId: number;
+  name: string;
+  score: string;
+};
+
+export type RankingPage = {
+  tabs: string[];
+  type: number;
+  myorder: number;
+  colnames: string[];
+  pagemax: number;
+  rows: RankingRow[];
+};
+
+export function parseRankingBoard(
+  packet: WtPacket,
+  requestType = 0,
+): RankingPage | null {
+  const obj = packet.objects.find((o) => o.kind === 23 && o.subtype === 7);
+  if (!obj) return null;
+  const ordernum = fieldU32(obj, "ordernum");
+  const orderlist = findField(obj, "orderlist");
+  const tabs: string[] = [];
+  if (orderlist) {
+    const r = new SeqReader(orderlist);
+    for (let i = 0; i < ordernum && r.remaining() > 0; i++) {
+      try {
+        r.u8();
+        tabs.push(r.string().replace(/\0+$/g, ""));
+      } catch {
+        break;
+      }
+    }
+  }
+  const colnum = fieldU32(obj, "colnum");
+  const colnamesRaw = findField(obj, "colnames");
+  const colnames: string[] = [];
+  if (colnamesRaw) {
+    const r = new SeqReader(colnamesRaw);
+    for (let i = 0; i < colnum && r.remaining() > 0; i++) {
+      try {
+        colnames.push(r.string().replace(/\0+$/g, ""));
+      } catch {
+        break;
+      }
+    }
+  }
+  const count = fieldU32(obj, "count");
+  const top = findField(obj, "topplayerinfo");
+  const rows: RankingRow[] = [];
+  if (top) {
+    const r = new SeqReader(top);
+    for (let i = 0; i < count && r.remaining() > 0; i++) {
+      try {
+        const roleId = r.u32();
+        const name = r.string().replace(/\0+$/g, "");
+        const score = r.string().replace(/\0+$/g, "");
+        rows.push({ roleId, name, score });
+      } catch {
+        break;
+      }
+    }
+  }
+  return {
+    tabs: tabs.length ? tabs : ["等级榜", "财富榜", "PK榜"],
+    type: requestType,
+    myorder: fieldU32(obj, "myorder"),
+    colnames,
+    pagemax: fieldU32(obj, "pagemax"),
+    rows,
+  };
+}
+
+/** Quick repair quote: 1/7/29 { type=1 }. */
+export function buildQuickRepairQuoteRequest(type = 1): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 29).u8("type", type & 0xff);
+  return b.finish();
+}
+
+/** Confirm quick repair: 1/7/13. */
+export function buildQuickRepairConfirmRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 7, 13).u8("type", 2);
+  return b.finish();
+}
+
+export type QuickRepairQuote = {
+  type: number;
+  repairnum: number;
+  coolmoney: number;
+};
+
+export function parseQuickRepairQuote(packet: WtPacket): QuickRepairQuote | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 29);
+  if (!obj) return null;
+  return {
+    type: fieldU32(obj, "type"),
+    repairnum: fieldU32(obj, "repairnum"),
+    coolmoney: fieldU32(obj, "coolmoney"),
+  };
+}
+
+export function parseQuickRepairConfirm(
+  packet: WtPacket,
+): { result: number } | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 13);
+  if (!obj) return null;
+  return { result: fieldU32(obj, "result") };
+}

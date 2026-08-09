@@ -1,0 +1,69 @@
+﻿Tables_in_jh_online
+account_role_backpack
+account_role_equipment
+account_role_equipment_durability
+account_role_item_effects
+account_role_npc_task_daily
+account_role_offline_practise
+account_role_skills
+account_role_state
+account_role_state_payload_backup
+account_role_tasks
+account_role_warehouse
+account_roles
+accounts
+friendships
+guild_applications
+guild_members
+guilds
+role_id_sequence
+server_admin_config
+server_chest_rewards
+server_data_migrations
+server_dynamic_npc_instances
+server_dynamic_npc_tasks
+server_dynamic_npcs
+server_instance_enter_daily
+server_instance_enter_rules
+server_login_servers
+server_monster_catalog_extra
+server_monster_drops
+server_monsters
+server_payment_config
+server_scene_combat_spawns
+server_scene_display_names
+server_scene_monsters
+server_shop_items
+server_tasks
+wcoin_recharge_orders
+world_chat_messages
+Field	Type	Null	Key	Default	Extra
+account_id	varchar(63)	NO	PRI	NULL	
+password_value	varchar(64)	NO		NULL	
+created_at	timestamp	NO		CURRENT_TIMESTAMP	
+updated_at	timestamp	NO		CURRENT_TIMESTAMP	on update CURRENT_TIMESTAMP
+Field	Type	Null	Key	Default	Extra
+account_id	varchar(63)	NO	PRI	NULL	
+role_id	int(10) unsigned	NO	PRI	NULL	
+role_index	tinyint(3) unsigned	NO		NULL	
+role_name	varbinary(32)	NO		NULL	
+job	tinyint(3) unsigned	NO		NULL	
+sex	tinyint(3) unsigned	NO		NULL	
+backpack_capacity	tinyint(3) unsigned	NO		NULL	
+level	int(10) unsigned	NO		NULL	
+exp	int(10) unsigned	NO		NULL	
+hp	int(10) unsigned	NO		NULL	
+hp_max	int(10) unsigned	NO		NULL	
+mp	int(10) unsigned	NO		NULL	
+mp_max	int(10) unsigned	NO		NULL	
+money	int(10) unsigned	NO		NULL	
+wcoin	int(10) unsigned	NO		NULL	
+pk_points	int(10)	NO		0	
+scene	varbinary(64)	NO		NULL	
+pos_x	smallint(5) unsigned	NO		NULL	
+pos_y	smallint(5) unsigned	NO		NULL	
+backpack_item_count	tinyint(3) unsigned	NO		NULL	
+designation_id	tinyint(3) unsigned	NO		NULL	
+next_backpack_seq	smallint(5) unsigned	NO		NULL	
+created_at	timestamp	NO		CURRENT_TIMESTAMP	
+updated_at	timestamp	NO		CURRENT_TIMESTAMP	on update CURRENT_TIMESTAMP

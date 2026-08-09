@@ -1,0 +1,18 @@
+﻿
+=== login bodies=1 ===
+0 1/12
+node.exe : D:\works\my\jianghu\CBE_EMU_pay\PixiJS_web\scripts\smoke-world-enter.ts:108
+所在位置 行:1 字符: 1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (D:\works\my\jia...ld-enter.ts:108:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+if (!servers.servers.length) throw new Error("no servers");
+                                   ^
+
+Error: no servers
+    at <anonymous> (D:\works\my\jianghu\CBE_EMU_pay\PixiJS_web\scripts\smoke-world-enter.ts:108:36)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+Node.js v22.22.0

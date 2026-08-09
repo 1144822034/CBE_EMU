@@ -1,0 +1,9 @@
+OK 06野猪林_01.sce raw=427 pay=765 map=06野猪林_01.map 512x400
+OK 06野猪林_02.sce raw=377 pay=774 map=06野猪林_02.map 400x400
+OK 06野猪林_03.sce raw=456 pay=890 map=06野猪林_03.map 512x400
+OK 06野猪林_04.sce raw=384 pay=765 map=06野猪林_04.map 560x400
+OK 07泰山_01.sce raw=346 pay=534 map=07泰山_01.map 320x400
+OK 07泰山_02.sce raw=377 pay=596 map=07泰山_02.map 240x400
+OK 07泰山_03.sce raw=338 pay=545 map=07泰山_03.map 240x400
+OK 07泰山_04.sce raw=402 pay=620 map=07泰山_04.map 320x400
+OK c04临安府_01.sce raw=253 pay=285 map=04临安府_01.map 400x400

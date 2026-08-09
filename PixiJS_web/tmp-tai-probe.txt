@@ -1,0 +1,25 @@
+W 泰山 id=7 tp=7 base=66 n=4
+  S id=66 file=07泰山_01.sce exists=true size=346 hex=3037e6b3b0e5b1b15f30312e736365 cand=07泰山_01.sce|c07泰山_01.sce
+  S id=67 file=07泰山_02.sce exists=true size=377 hex=3037e6b3b0e5b1b15f30322e736365 cand=07泰山_02.sce|c07泰山_02.sce
+  S id=68 file=07泰山_03.sce exists=true size=338 hex=3037e6b3b0e5b1b15f30332e736365 cand=07泰山_03.sce|c07泰山_03.sce
+  S id=69 file=07泰山_04.sce exists=true size=402 hex=3037e6b3b0e5b1b15f30342e736365 cand=07泰山_04.sce|c07泰山_04.sce
+W 野猪 id=6 tp=6 base=62 n=4
+  S id=62 file=06野猪林_01.sce exists=true size=427 hex=3036e9878ee78caae69e975f30312e736365 cand=06野猪林_01.sce|c06野猪林_01.sce
+  S id=63 file=06野猪林_02.sce exists=true size=377 hex=3036e9878ee78caae69e975f30322e736365 cand=06野猪林_02.sce|c06野猪林_02.sce
+  S id=64 file=06野猪林_03.sce exists=true size=456 hex=3036e9878ee78caae69e975f30332e736365 cand=06野猪林_03.sce|c06野猪林_03.sce
+  S id=65 file=06野猪林_04.sce exists=true size=384 hex=3036e9878ee78caae69e975f30342e736365 cand=06野猪林_04.sce|c06野猪林_04.sce
+W 蓬莱 id=1 tp=1 base=37 n=3
+  S id=37 file=c00蓬莱仙岛_01.sce exists=true size=254 hex=633030e893ace88eb1e4bb99e5b29b5f30312e736365 cand=c00蓬莱仙岛_01.sce|00蓬莱仙岛_01.sce
+  S id=38 file=00蓬莱仙岛_02.sce exists=true size=267 hex=3030e893ace88eb1e4bb99e5b29b5f30322e736365 cand=00蓬莱仙岛_02.sce|c00蓬莱仙岛_02.sce
+  S id=39 file=c00蓬莱仙岛_03.sce exists=true size=293 hex=633030e893ace88eb1e4bb99e5b29b5f30332e736365 cand=c00蓬莱仙岛_03.sce|00蓬莱仙岛_03.sce
+W 临安 id=4 tp=4 base=47 n=10
+  S id=47 file=c04临安府_01.sce exists=true size=253 hex=633034e4b8b4e5ae89e5ba9c5f30312e736365 cand=c04临安府_01.sce|04临安府_01.sce
+  S id=48 file=c04临安府_02.sce exists=true size=319 hex=633034e4b8b4e5ae89e5ba9c5f30322e736365 cand=c04临安府_02.sce|04临安府_02.sce
+  S id=49 file=c04临安府_03.sce exists=true size=397 hex=633034e4b8b4e5ae89e5ba9c5f30332e736365 cand=c04临安府_03.sce|04临安府_03.sce
+  S id=50 file=c04临安府_04.sce exists=true size=235 hex=633034e4b8b4e5ae89e5ba9c5f30342e736365 cand=c04临安府_04.sce|04临安府_04.sce
+  S id=51 file=c04临安府_05.sce exists=true size=318 hex=633034e4b8b4e5ae89e5ba9c5f30352e736365 cand=c04临安府_05.sce|04临安府_05.sce
+  S id=52 file=c04临安府_06.sce exists=true size=295 hex=633034e4b8b4e5ae89e5ba9c5f30362e736365 cand=c04临安府_06.sce|04临安府_06.sce
+  S id=53 file=c04临安府_07.sce exists=true size=289 hex=633034e4b8b4e5ae89e5ba9c5f30372e736365 cand=c04临安府_07.sce|04临安府_07.sce
+  S id=54 file=c04临安府_08.sce exists=true size=302 hex=633034e4b8b4e5ae89e5ba9c5f30382e736365 cand=c04临安府_08.sce|04临安府_08.sce
+  S id=55 file=c04临安府_09.sce exists=true size=307 hex=633034e4b8b4e5ae89e5ba9c5f30392e736365 cand=c04临安府_09.sce|04临安府_09.sce
+  S id=56 file=c04临安府_10.sce exists=true size=365 hex=633034e4b8b4e5ae89e5ba9c5f31302e736365 cand=c04临安府_10.sce|04临安府_10.sce
