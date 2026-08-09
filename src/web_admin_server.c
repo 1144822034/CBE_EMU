@@ -450,7 +450,11 @@ enum
     VM_MOCK_ADMIN_NPC_STOCK_SELECTION_MAX = VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS,
     /* Keep the account pane responsive even for large account directories.
      * More rows are requested only when its own scroll viewport needs them. */
-    VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE = 40
+    VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE = 40,
+    /* Risk records are already a server-side subset (only <=3 second battle
+     * intervals are inserted).  Bound one admin render without hiding the
+     * newest evidence behind a synthetic pager contract. */
+    VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 100
 };
 
 typedef struct
@@ -503,16 +507,16 @@ static const char g_vm_mock_admin_script[] =
     "const inputById=new Map(inputs.map(input=>[input.id,input]));const labels=new Map([...category.options].map(option=>[option.value,option.textContent]));const optionByValue=new Map([...source.options].filter(option=>option.value&&option.value!=='0').map(option=>[option.value,option]));let activeId='';const choices=[];"
     "const update=input=>{if(!input)return;const option=optionByValue.get(input.value);const text=option?option.textContent:(input.value&&input.value!=='0'?`未知物品 #${input.value}`:'未选择物品');for(const label of document.querySelectorAll('[data-item-picker-label]'))if(label.dataset.itemPickerLabel===input.id)label.textContent=text;};"
     "for(const input of inputs)update(input);window.addEventListener('cbe-item-picker-sync',event=>update(inputById.get(event.detail&&event.detail.id)));"
-    "for(const option of source.options){if(!option.value||option.value==='0')continue;const button=document.createElement('button');button.type='button';button.className='item-choice';button.dataset.itemId=option.value;button.dataset.category=option.dataset.category||'';button.dataset.search=option.textContent.toLowerCase();const title=document.createElement('strong');title.textContent=option.textContent;const meta=document.createElement('span');meta.textContent=labels.get(button.dataset.category)||'未分类';button.append(title,meta);button.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value=option.value;update(input);error.textContent='';hide();});choices.push(button);list.appendChild(button);}"
+    "for(const option of source.options){if(!option.value||option.value==='0')continue;const button=document.createElement('button');button.type='button';button.className='item-choice';button.dataset.itemId=option.value;button.dataset.category=option.dataset.category||'';button.dataset.search=option.textContent.toLowerCase();const title=document.createElement('strong');title.textContent=option.textContent;const meta=document.createElement('span'),isEquipment=option.dataset.equip==='1';meta.textContent=`${labels.get(button.dataset.category)||'未分类'}${isEquipment?` · 品质 ${option.dataset.quality||'0'} · 需求等级 ${option.dataset.level||'0'}`:''}`;button.append(title,meta);button.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value=option.value;input.dispatchEvent(new Event('change',{bubbles:true}));update(input);error.textContent='';hide();});choices.push(button);list.appendChild(button);}"
     "const apply=()=>{const wanted=category.value,keyword=search.value.trim().toLowerCase();let shown=0;for(const choice of choices){const visible=(wanted==='all'||choice.dataset.category===wanted)&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;if(visible)shown++;}count.textContent=`找到 ${shown} 件物品`;empty.hidden=shown!==0;};"
     "const show=id=>{if(!inputById.has(id))return;activeId=id;modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';apply();search.focus();};"
     "function hide(){modal.hidden=true;document.body.classList.remove('modal-open');const trigger=document.querySelector(`[data-item-picker-open=\"${activeId}\"]`);if(trigger)trigger.focus();}"
-    "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',apply);search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});apply();};"
+    "for(const trigger of document.querySelectorAll('[data-item-picker-open]'))trigger.addEventListener('click',()=>show(trigger.dataset.itemPickerOpen));close.addEventListener('click',hide);clear.addEventListener('click',()=>{const input=inputById.get(activeId);if(!input)return;input.value='0';input.dispatchEvent(new Event('change',{bubbles:true}));update(input);hide();});modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',apply);search.addEventListener('input',apply);for(const form of document.querySelectorAll('form'))form.addEventListener('submit',event=>{const required=[...form.querySelectorAll('[data-item-picker-required]')].find(input=>!input.value||input.value==='0');if(!required)return;event.preventDefault();error.textContent='请先选择物品';show(required.id);});apply();};"
     "const setupNpcStock=()=>{"
     "const source=document.querySelector('#npc-stock-picker-options'),modal=document.querySelector('#npc-stock-picker-modal'),close=document.querySelector('#npc-stock-picker-close'),clear=document.querySelector('#npc-stock-picker-clear'),category=document.querySelector('#npc-stock-category'),quality=document.querySelector('#npc-stock-quality'),qualityField=document.querySelector('[data-npc-stock-quality-field]'),search=document.querySelector('#npc-stock-search'),list=document.querySelector('#npc-stock-picker-list'),count=document.querySelector('#npc-stock-result-count'),selectedCount=document.querySelector('#npc-stock-selection-count'),empty=document.querySelector('#npc-stock-picker-empty'),selectCategory=document.querySelector('#npc-stock-select-category'),unselectCategory=document.querySelector('#npc-stock-unselect-category'),confirm=document.querySelector('#npc-stock-picker-confirm'),managers=[...document.querySelectorAll('[data-npc-stock-manager]')];"
     "if(!source||!modal||!close||!clear||!category||!quality||!qualityField||!search||!list||!count||!selectedCount||!empty||!selectCategory||!unselectCategory||!confirm||!managers.length)return;"
     "const state={active:null,selected:new Map(),choices:[]},options=[...source.options].filter(option=>option.value);const keyOf=manager=>manager.dataset.npcStockKey||'',setOf=manager=>{const key=keyOf(manager);if(!state.selected.has(key))state.selected.set(key,new Set());return state.selected.get(key);},supportsQuality=manager=>{const kind=Number(manager.dataset.npcStockService);return kind===1||kind===4;},allowed=(option,manager)=>{const categoryName=option.dataset.category||'',kind=Number(manager.dataset.npcStockService),type=categoryName.charAt(0),number=Number(categoryName.slice(1));return kind===1?type==='e'&&number>=7&&number<=9:kind===4?type==='e'&&number>=0&&number<=6:kind===5?type==='i'&&number===10:false;},existing=manager=>new Set([...manager.querySelectorAll('[data-npc-stock-current-item]')].map(input=>input.value));"
-    "for(const option of options){const choice=document.createElement('label'),check=document.createElement('input'),body=document.createElement('span'),title=document.createElement('strong'),meta=document.createElement('small'),isEquipment=(option.dataset.category||'').charAt(0)==='e';choice.className='item-choice npc-stock-choice';choice.dataset.itemId=option.value;choice.dataset.category=option.dataset.category||'';choice.dataset.quality=option.dataset.quality||'0';choice.dataset.search=option.textContent.toLowerCase();check.type='checkbox';title.textContent=option.textContent;meta.textContent=`${isEquipment?`品质 ${choice.dataset.quality} · `:''}商城默认价 ${option.dataset.price||'—'} 铜`;body.append(title,meta);choice.append(check,body);check.addEventListener('change',()=>{if(!state.active)return;const set=setOf(state.active);if(check.checked)set.add(option.value);else set.delete(option.value);apply();syncAdd(state.active);});state.choices.push(choice);list.append(choice);}"
+    "for(const option of options){const choice=document.createElement('label'),check=document.createElement('input'),body=document.createElement('span'),title=document.createElement('strong'),meta=document.createElement('small'),isEquipment=(option.dataset.category||'').charAt(0)==='e';choice.className='item-choice npc-stock-choice';choice.dataset.itemId=option.value;choice.dataset.category=option.dataset.category||'';choice.dataset.quality=option.dataset.quality||'0';choice.dataset.level=option.dataset.level||'0';choice.dataset.search=option.textContent.toLowerCase();check.type='checkbox';title.textContent=option.textContent;meta.textContent=`${isEquipment?`品质 ${choice.dataset.quality} · 需求等级 ${choice.dataset.level} · `:''}商城默认价 ${option.dataset.price||'—'} 铜`;body.append(title,meta);choice.append(check,body);check.addEventListener('change',()=>{if(!state.active)return;const set=setOf(state.active);if(check.checked)set.add(option.value);else set.delete(option.value);apply();syncAdd(state.active);});state.choices.push(choice);list.append(choice);}"
     "const rebuildCategories=()=>{if(!state.active)return;const previous=category.value;category.replaceChildren();const all=document.createElement('option');all.value='all';all.textContent='全部可售分类';category.append(all);const categories=[...new Set(state.choices.filter(choice=>allowed({dataset:{category:choice.dataset.category}},state.active)).map(choice=>choice.dataset.category))].sort((a,b)=>a.localeCompare(b));for(const value of categories){const sourceOption=state.active.querySelector(`[data-npc-stock-current-category] option[value=\"${value}\"]`);const option=document.createElement('option');option.value=value;option.textContent=sourceOption?sourceOption.textContent:value;category.append(option);}category.value=[...category.options].some(option=>option.value===previous)?previous:'all';};"
     "const rebuildQualities=()=>{if(!state.active)return;if(!supportsQuality(state.active)){qualityField.hidden=true;quality.value='all';return;}qualityField.hidden=false;const previous=quality.value;quality.replaceChildren();const all=document.createElement('option');all.value='all';all.textContent='全部品质';quality.append(all);const qualities=[...new Set(state.choices.filter(choice=>allowed({dataset:{category:choice.dataset.category}},state.active)&&(category.value==='all'||choice.dataset.category===category.value)).map(choice=>choice.dataset.quality))].sort((a,b)=>Number(a)-Number(b));for(const value of qualities){const option=document.createElement('option');option.value=value;option.textContent=`品质 ${value}`;quality.append(option);}quality.value=[...quality.options].some(option=>option.value===previous)?previous:'all';};"
     "const syncAdd=manager=>{const set=setOf(manager),input=manager.querySelector('[data-npc-stock-item-ids]'),button=manager.querySelector('[data-npc-stock-add]');if(input)input.value=[...set].join(',');if(button){button.disabled=set.size===0;button.textContent=`加入库存（${set.size}）`;}};"
@@ -523,7 +527,26 @@ static const char g_vm_mock_admin_script[] =
     "for(const manager of managers){syncAdd(manager);syncRemove(manager);applyCurrent(manager);manager.querySelector('[data-npc-stock-open]')?.addEventListener('click',()=>show(manager));manager.querySelector('[data-npc-stock-current-category]')?.addEventListener('change',()=>applyCurrent(manager));manager.querySelector('[data-npc-stock-current-quality]')?.addEventListener('change',()=>applyCurrent(manager));manager.querySelector('[data-npc-stock-select-category]')?.addEventListener('click',()=>{for(const row of manager.querySelectorAll('[data-npc-stock-row]'))if(!row.hidden){const check=row.querySelector('[data-npc-stock-current-item]');if(check)check.checked=true;}syncRemove(manager);});for(const check of manager.querySelectorAll('[data-npc-stock-current-item]'))check.addEventListener('change',()=>syncRemove(manager));manager.querySelector('[data-npc-stock-add-form]')?.addEventListener('submit',event=>{syncAdd(manager);if(setOf(manager).size)return;event.preventDefault();show(manager);});manager.querySelector('[data-npc-stock-remove-form]')?.addEventListener('submit',event=>{syncRemove(manager);const selected=[...manager.querySelectorAll('[data-npc-stock-current-item]:checked')];if(!selected.length){event.preventDefault();return;}if(!window.confirm(`确定移除已选的 ${selected.length} 件库存商品吗？`))event.preventDefault();});}"
     "clear.addEventListener('click',()=>{if(!state.active)return;setOf(state.active).clear();syncAdd(state.active);apply();});selectCategory.addEventListener('click',()=>{if(!state.active)return;const set=setOf(state.active);for(const choice of state.choices)if(!choice.hidden)set.add(choice.dataset.itemId);syncAdd(state.active);apply();});unselectCategory.addEventListener('click',()=>{if(!state.active)return;const set=setOf(state.active);for(const choice of state.choices)if(!choice.hidden)set.delete(choice.dataset.itemId);syncAdd(state.active);apply();});confirm.addEventListener('click',hide);close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',()=>{rebuildQualities();apply();});quality.addEventListener('change',apply);search.addEventListener('input',apply);"
     "};"
-    "const setupMonsterDrops=()=>{const box=document.querySelector('#monster-drop-list'),add=document.querySelector('#monster-drop-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-drop-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-drop-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-drop-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),rate=row.querySelector('[data-drop-rate]');if(input)input.value='0';if(rate)rate.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
+    "const setupMonsterDrops=()=>{"
+    "const manager=document.querySelector('[data-monster-drop-manager]'),box=document.querySelector('#monster-drop-list'),source=document.querySelector('#item-picker-options'),modal=document.querySelector('#monster-drop-picker-modal'),close=document.querySelector('#monster-drop-picker-close'),clear=document.querySelector('#monster-drop-picker-clear'),category=document.querySelector('#monster-drop-category'),quality=document.querySelector('#monster-drop-quality'),qualityField=document.querySelector('[data-monster-drop-quality-field]'),search=document.querySelector('#monster-drop-search'),list=document.querySelector('#monster-drop-picker-list'),count=document.querySelector('#monster-drop-result-count'),selectedCount=document.querySelector('#monster-drop-selection-count'),error=document.querySelector('#monster-drop-picker-error'),empty=document.querySelector('#monster-drop-picker-empty'),selectFiltered=document.querySelector('#monster-drop-select-category'),unselectFiltered=document.querySelector('#monster-drop-unselect-category'),confirm=document.querySelector('#monster-drop-picker-confirm');"
+    "if(!manager||!box||!source||!modal||!close||!clear||!category||!quality||!qualityField||!search||!list||!count||!selectedCount||!error||!empty||!selectFiltered||!unselectFiltered||!confirm)return;"
+    "const rows=[...box.querySelectorAll('[data-monster-drop-row]')],options=[...source.options].filter(option=>option.value&&option.value!=='0'),optionById=new Map(options.map(option=>[option.value,option])),state={selected:new Set(),choices:[]};"
+    "const inputOf=row=>row.querySelector('[data-item-picker-input]'),rateOf=row=>row.querySelector('[data-drop-rate]'),checkOf=row=>row.querySelector('[data-monster-drop-current-item]'),activeRows=()=>rows.filter(row=>{const input=inputOf(row);return input&&input.value&&input.value!=='0';}),freeRows=()=>rows.filter(row=>{const input=inputOf(row);return input&&(!input.value||input.value==='0');}),usedIds=()=>new Set(activeRows().map(row=>inputOf(row).value));"
+    "const syncLabel=row=>{const input=inputOf(row);if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};"
+    "const setRowMetadata=(row,option)=>{if(!option){row.dataset.monsterDropCategory='i0';row.dataset.monsterDropQuality='0';row.dataset.monsterDropLevel='0';return;}row.dataset.monsterDropCategory=option.dataset.category||'i0';row.dataset.monsterDropQuality=option.dataset.quality||'0';row.dataset.monsterDropLevel=option.dataset.level||'0';};"
+    "const syncCurrent=()=>{const chosen=activeRows().filter(row=>checkOf(row)?.checked);const button=manager.querySelector('[data-monster-drop-remove-current]');if(button){button.disabled=chosen.length===0;button.textContent=`移除已选（${chosen.length}）`;}};"
+    "const currentSupportsQuality=()=>{const wanted=manager.querySelector('[data-monster-drop-current-category]')?.value||'all';return wanted==='all'?activeRows().some(row=>(row.dataset.monsterDropCategory||'').startsWith('e')):wanted.startsWith('e');};"
+    "const applyCurrent=()=>{const wanted=manager.querySelector('[data-monster-drop-current-category]')?.value||'all',wantedQuality=manager.querySelector('[data-monster-drop-current-quality]')?.value||'all',supports=currentSupportsQuality();qualityField.hidden=!supports;if(!supports){const field=manager.querySelector('[data-monster-drop-current-quality]');if(field)field.value='all';}for(const row of rows){const input=inputOf(row);if(!input||!input.value||input.value==='0'){row.hidden=true;continue;}const itemCategory=row.dataset.monsterDropCategory||'',itemQuality=row.dataset.monsterDropQuality||'0';row.hidden=(wanted!=='all'&&itemCategory!==wanted)||(supports&&wantedQuality!=='all'&&itemQuality!==wantedQuality);}syncCurrent();};"
+    "const syncAdd=()=>{const button=manager.querySelector('[data-monster-drop-add]'),free=freeRows().length,selected=state.selected.size;if(button){button.disabled=selected===0||selected>free;button.textContent=`加入掉落（${selected}）`;}};"
+    "for(const option of options){const choice=document.createElement('label'),check=document.createElement('input'),body=document.createElement('span'),title=document.createElement('strong'),meta=document.createElement('small'),isEquipment=option.dataset.equip==='1';choice.className='item-choice monster-drop-choice';choice.dataset.itemId=option.value;choice.dataset.category=option.dataset.category||'';choice.dataset.quality=option.dataset.quality||'0';choice.dataset.level=option.dataset.level||'0';choice.dataset.search=option.textContent.toLowerCase();check.type='checkbox';title.textContent=option.textContent;meta.textContent=isEquipment?`品质 ${choice.dataset.quality} · 需求等级 ${choice.dataset.level}`:'普通物品';body.append(title,meta);choice.append(check,body);check.addEventListener('change',()=>{if(check.checked)state.selected.add(option.value);else state.selected.delete(option.value);applyPicker();syncAdd();});state.choices.push(choice);list.append(choice);}"
+    "const pickerSupportsQuality=()=>{const wanted=category.value;return wanted==='all'||wanted.startsWith('e');};"
+    "const applyPicker=()=>{const wanted=category.value,wantedQuality=quality.value,keyword=search.value.trim().toLowerCase(),used=usedIds();qualityField.hidden=!pickerSupportsQuality();if(!pickerSupportsQuality())quality.value='all';let shown=0;for(const choice of state.choices){const visible=!used.has(choice.dataset.itemId)&&(wanted==='all'||choice.dataset.category===wanted)&&(!pickerSupportsQuality()||quality.value==='all'||choice.dataset.quality===quality.value)&&(!keyword||choice.dataset.search.includes(keyword));choice.hidden=!visible;const check=choice.querySelector('input');check.checked=state.selected.has(choice.dataset.itemId);choice.classList.toggle('selected',check.checked);if(visible)shown++;}count.textContent=`找到 ${shown} 件可添加物品`;selectedCount.textContent=`已选择 ${state.selected.size} 件，剩余 ${freeRows().length} 个槽位`;empty.hidden=shown!==0;};"
+    "const hide=()=>{modal.hidden=true;document.body.classList.remove('modal-open');manager.querySelector('[data-monster-drop-open]')?.focus();};const show=()=>{modal.hidden=false;document.body.classList.add('modal-open');error.textContent='';applyPicker();search.focus();};"
+    "const clearRow=row=>{const input=inputOf(row),rate=rateOf(row),check=checkOf(row);if(input)input.value='0';if(rate)rate.value='0';if(check)check.checked=false;setRowMetadata(row,null);row.hidden=true;syncLabel(row);};"
+    "const addSelected=()=>{const free=freeRows(),selected=[...state.selected];if(!selected.length)return;if(selected.length>free.length){error.textContent=`当前只剩 ${free.length} 个空掉落槽位，请减少选择或先移除已有掉落`;show();return;}const rate=Math.max(1,Math.min(100,Number(manager.querySelector('[data-monster-drop-default-rate]')?.value)||100));selected.forEach((itemId,index)=>{const row=free[index],option=optionById.get(itemId),input=inputOf(row),rateInput=rateOf(row),check=checkOf(row);if(!row||!option||!input)return;input.value=itemId;if(rateInput)rateInput.value=String(rate);if(check)check.checked=false;setRowMetadata(row,option);row.hidden=false;syncLabel(row);});state.selected.clear();syncAdd();applyCurrent();applyPicker();hide();};"
+    "for(const row of rows){const input=inputOf(row),remove=row.querySelector('[data-drop-remove]'),check=checkOf(row);if(input)input.addEventListener('change',()=>{const option=optionById.get(input.value);if(option){setRowMetadata(row,option);row.hidden=false;}else setRowMetadata(row,null);applyCurrent();applyPicker();syncAdd();});if(check)check.addEventListener('change',syncCurrent);if(remove)remove.addEventListener('click',()=>{clearRow(row);applyCurrent();applyPicker();syncAdd();});}"
+    "manager.querySelector('[data-monster-drop-open]')?.addEventListener('click',show);manager.querySelector('[data-monster-drop-add]')?.addEventListener('click',addSelected);manager.querySelector('[data-monster-drop-current-category]')?.addEventListener('change',applyCurrent);manager.querySelector('[data-monster-drop-current-quality]')?.addEventListener('change',applyCurrent);manager.querySelector('[data-monster-drop-select-current]')?.addEventListener('click',()=>{for(const row of activeRows())if(!row.hidden){const check=checkOf(row);if(check)check.checked=true;}syncCurrent();});manager.querySelector('[data-monster-drop-remove-current]')?.addEventListener('click',()=>{const selected=activeRows().filter(row=>checkOf(row)?.checked);if(!selected.length)return;if(!window.confirm(`确定移除已选的 ${selected.length} 项掉落吗？`))return;selected.forEach(clearRow);applyCurrent();applyPicker();syncAdd();});"
+    "clear.addEventListener('click',()=>{state.selected.clear();syncAdd();applyPicker();});selectFiltered.addEventListener('click',()=>{for(const choice of state.choices)if(!choice.hidden)state.selected.add(choice.dataset.itemId);syncAdd();applyPicker();});unselectFiltered.addEventListener('click',()=>{for(const choice of state.choices)if(!choice.hidden)state.selected.delete(choice.dataset.itemId);syncAdd();applyPicker();});confirm.addEventListener('click',hide);close.addEventListener('click',hide);modal.addEventListener('click',event=>{if(event.target===modal)hide();});document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)hide();});category.addEventListener('change',applyPicker);quality.addEventListener('change',applyPicker);search.addEventListener('input',applyPicker);syncAdd();applyCurrent();applyPicker();};"
     "const setupTaskRewards=()=>{const box=document.querySelector('#task-reward-list'),add=document.querySelector('#task-reward-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-task-reward-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-task-reward-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-task-reward-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),quantity=row.querySelector('[data-task-reward-count]'),type=row.querySelector('[data-task-reward-type]');if(input)input.value='0';if(quantity)quantity.value='0';if(type)type.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
     "const setupChestRewards=()=>{for(const box of document.querySelectorAll('[data-chest-reward-list]')){const form=box.closest('form'),add=form&&form.querySelector('[data-chest-reward-add]'),rows=[...box.querySelectorAll('[data-chest-reward-row]')];if(!form||!add||!rows.length)continue;const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const shown=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=shown(),total=active.reduce((sum,row)=>sum+Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0),0);active.forEach((row,index)=>{const number=row.querySelector('[data-chest-reward-index]'),probability=row.querySelector('[data-chest-reward-probability]'),weight=Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0);if(number)number.textContent='#'+(index+1);if(probability)probability.textContent=total&&weight?(weight*100/total).toFixed(2)+'%':'—';});add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 添加奖励（${active.length}/${rows.length}）`;};const showNext=()=>{const next=rows.find(row=>row.hidden);if(!next)return;next.hidden=false;sync(next);update();};add.addEventListener('click',showNext);for(const row of rows){for(const field of row.querySelectorAll('[data-chest-reward-count],[data-chest-reward-weight]'))field.addEventListener('input',update);const remove=row.querySelector('[data-chest-reward-remove]');if(!remove)continue;remove.addEventListener('click',()=>{const item=row.querySelector('[data-item-picker-input]'),count=row.querySelector('[data-chest-reward-count]'),weight=row.querySelector('[data-chest-reward-weight]'),broadcast=row.querySelector('[data-chest-reward-broadcast]');if(item)item.value='0';if(count)count.value='0';if(weight)weight.value='0';if(broadcast)broadcast.checked=false;row.hidden=true;sync(row);if(!shown().length){const first=rows[0];first.hidden=false;sync(first);}update();});}update();}};"
     "const setupMonsterSearch=()=>{const input=document.querySelector('#monster-search'),list=document.querySelector('#monster-list');if(!input||!list||input.dataset.monsterSearchBound==='1')return;input.dataset.monsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLowerCase();for(const row of list.querySelectorAll('.monster')){const key=(row.dataset.key||'').toLowerCase();row.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
@@ -808,8 +831,19 @@ static vm_mock_user_session *vm_mock_user_request_session(const char *request,
         vm_mock_user_session *session = &g_vm_mock_user_sessions[i];
         if (session->active && strcmp(session->token, token) == 0)
         {
+            bool banned = false;
+
             if (!vm_mock_service_account_exists(session->accountId))
             {
+                memset(session, 0, sizeof(*session));
+                return NULL;
+            }
+            if (!vm_mock_service_account_access_ban_check(
+                    session->accountId, &banned, NULL, 0) || banned)
+            {
+                /* This is the user-center equivalent of invalidating a game
+                 * transport session: the next HTTP request cannot continue
+                 * to act as a newly banned account. */
                 memset(session, 0, sizeof(*session));
                 return NULL;
             }
@@ -853,6 +887,25 @@ static void vm_mock_user_clear_request_session(const char *request,
         vm_mock_user_request_session(request, headerLen);
     if (session != NULL)
         memset(session, 0, sizeof(*session));
+}
+
+static u32 vm_mock_user_clear_account_sessions(const char *accountId)
+{
+    u32 cleared = 0;
+
+    if (accountId == NULL || accountId[0] == 0)
+        return 0;
+    for (u32 i = 0; i < VM_MOCK_USER_SESSION_MAX; ++i)
+    {
+        vm_mock_user_session *session = &g_vm_mock_user_sessions[i];
+
+        if (session->active && strcmp(session->accountId, accountId) == 0)
+        {
+            memset(session, 0, sizeof(*session));
+            ++cleared;
+        }
+    }
+    return cleared;
 }
 
 static bool vm_mock_user_valid_registration(const char *account,
@@ -3405,7 +3458,8 @@ static void vm_mock_admin_render_content_page(char *response,
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\" data-admin-list>",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
@@ -3873,6 +3927,71 @@ static const char *vm_mock_admin_item_category_name(bool equipment, u8 category)
     }
 }
 
+/* The shop catalog owns an equipment's category and quality, while equip.dsh
+ * owns its required level.  Keep the labels sourced from those two catalog
+ * records so every admin item picker describes the same immutable resource
+ * data and never mistakes an instance enhancement level for its quality. */
+static u32 vm_mock_admin_item_required_level(
+    const vm_net_mock_shop_catalog_item *item)
+{
+    const vm_net_mock_equipment_catalog_item *equipment = NULL;
+
+    if (item == NULL || !item->isEquip)
+        return 0;
+    equipment = vm_net_mock_find_equipment_catalog_item(item->itemId);
+    return equipment != NULL ? equipment->levelRequired : 0;
+}
+
+static void vm_mock_admin_append_item_picker_label(
+    vm_mock_admin_text *page, const vm_net_mock_shop_catalog_item *item,
+    const char *itemNameUtf8, bool includeId)
+{
+    u32 levelRequired = 0;
+
+    if (page == NULL || item == NULL)
+        return;
+    if (includeId)
+        vm_mock_admin_text_appendf(page, "[%u] ", item->itemId);
+    vm_mock_admin_text_append_html(
+        page, itemNameUtf8 != NULL && itemNameUtf8[0] != 0
+                  ? itemNameUtf8 : "未命名物品");
+    if (!item->isEquip)
+        return;
+    levelRequired = vm_mock_admin_item_required_level(item);
+    vm_mock_admin_text_appendf(page, " · 品质 %u · 需求等级 %u",
+                               item->quality, levelRequired);
+}
+
+static void vm_mock_admin_render_item_picker_catalog_option(
+    vm_mock_admin_text *page, const vm_net_mock_shop_catalog_item *item,
+    bool includePrice)
+{
+    char itemNameUtf8[128];
+    u32 levelRequired = 0;
+
+    if (page == NULL || item == NULL)
+        return;
+    memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
+    vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
+                                  sizeof(itemNameUtf8));
+    levelRequired = vm_mock_admin_item_required_level(item);
+    vm_mock_admin_text_appendf(
+        page,
+        "<option value=\"%u\" data-category=\"%c%u\" data-equip=\"%u\" data-quality=\"%u\" data-level=\"%u\"",
+        item->itemId, item->isEquip ? 'e' : 'i', item->category,
+        item->isEquip ? 1u : 0u, item->isEquip ? item->quality : 0u,
+        levelRequired);
+    if (includePrice)
+    {
+        vm_mock_admin_text_appendf(
+            page, " data-price=\"%u\"",
+            vm_net_mock_shop_effective_unit_price(item->itemId, item->price));
+    }
+    vm_mock_admin_text_appendf(page, ">");
+    vm_mock_admin_append_item_picker_label(page, item, itemNameUtf8, true);
+    vm_mock_admin_text_appendf(page, "</option>");
+}
+
 static void vm_mock_admin_render_item_picker_field(
     vm_mock_admin_text *page, const char *pickerId, const char *fieldName,
     const char *label, u32 itemId, bool required)
@@ -3900,11 +4019,8 @@ static void vm_mock_admin_render_item_picker_field(
         "<span data-item-picker-label=\"%s\">",
         pickerId, fieldName, itemId,
         required ? " data-item-picker-required" : "", pickerId, pickerId);
-    if (itemNameUtf8[0] != 0)
-    {
-        vm_mock_admin_text_appendf(page, "[%u] ", itemId);
-        vm_mock_admin_text_append_html(page, itemNameUtf8);
-    }
+    if (item != NULL)
+        vm_mock_admin_append_item_picker_label(page, item, itemNameUtf8, true);
     else if (itemId != 0)
     {
         vm_mock_admin_text_appendf(page, "未知物品 #%u", itemId);
@@ -4007,6 +4123,83 @@ static void vm_mock_admin_render_npc_stock_quality_options(
     }
 }
 
+static void vm_mock_admin_render_catalog_category_options(
+    vm_mock_admin_text *page, const char *allLabel)
+{
+    bool equipmentCategories[256];
+    bool itemCategories[256];
+    u32 itemCount = 0;
+
+    if (page == NULL)
+        return;
+    memset(equipmentCategories, 0, sizeof(equipmentCategories));
+    memset(itemCategories, 0, sizeof(itemCategories));
+    itemCount = vm_net_mock_load_shop_catalog();
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        if (item->isEquip)
+            equipmentCategories[item->category] = true;
+        else
+            itemCategories[item->category] = true;
+    }
+    vm_mock_admin_text_appendf(page, "<option value=\"all\">");
+    vm_mock_admin_text_append_html(
+        page, allLabel != NULL ? allLabel : "全部物品分类");
+    vm_mock_admin_text_appendf(page, "</option>");
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!equipmentCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(page,
+            "<option value=\"e%u\">装备 · ", category);
+        vm_mock_admin_text_append_html(
+            page, vm_mock_admin_item_category_name(true, (u8)category));
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    for (u32 category = 0; category < 256; ++category)
+    {
+        if (!itemCategories[category])
+            continue;
+        vm_mock_admin_text_appendf(page,
+            "<option value=\"i%u\">物品 · ", category);
+        vm_mock_admin_text_append_html(
+            page, vm_mock_admin_item_category_name(false, (u8)category));
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+}
+
+static void vm_mock_admin_render_catalog_quality_options(
+    vm_mock_admin_text *page, const char *allLabel)
+{
+    bool qualities[256];
+    u32 itemCount = 0;
+
+    if (page == NULL)
+        return;
+    memset(qualities, 0, sizeof(qualities));
+    itemCount = vm_net_mock_load_shop_catalog();
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_shop_catalog_item *item =
+            &g_vm_net_mock_shop_catalog[i];
+        if (item->isEquip)
+            qualities[item->quality] = true;
+    }
+    vm_mock_admin_text_appendf(page, "<option value=\"all\">");
+    vm_mock_admin_text_append_html(
+        page, allLabel != NULL ? allLabel : "全部品质");
+    vm_mock_admin_text_appendf(page, "</option>");
+    for (u32 quality = 0; quality < 256; ++quality)
+    {
+        if (qualities[quality])
+            vm_mock_admin_text_appendf(
+                page, "<option value=\"%u\">品质 %u</option>", quality,
+                quality);
+    }
+}
+
 /* NPC inventories are a set of catalog products with local price/status
  * overrides.  Existing rows remain individually editable; the toolbar stages
  * an atomic multi-select add/remove request. */
@@ -4089,8 +4282,15 @@ static void vm_mock_admin_render_npc_inventory(
             actorId, stock->itemId, stock->itemId);
         vm_mock_admin_text_append_html(page,
                                        itemNameUtf8[0] ? itemNameUtf8 : "未知物品");
+        vm_mock_admin_text_appendf(page, "</strong>");
+        if (item != NULL && item->isEquip)
+        {
+            vm_mock_admin_text_appendf(
+                page, "<small>品质 %u · 需求等级 %u</small>", item->quality,
+                vm_mock_admin_item_required_level(item));
+        }
         vm_mock_admin_text_appendf(page,
-            "</strong></div><label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" value=\"%u\" placeholder=\"留空：商城默认价\"></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select></label><div class=\"actions\"><button type=\"submit\">保存</button></div></form><form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"",
+            "</div><label class=\"field\"><span>单价（铜）</span><input type=\"number\" name=\"unit_price\" min=\"1\" max=\"4294967295\" value=\"%u\" placeholder=\"留空：商城默认价\"></label><label class=\"field\"><span>状态</span><select name=\"enabled\"><option value=\"1\"%s>上架</option><option value=\"0\"%s>下架</option></select></label><div class=\"actions\"><button type=\"submit\">保存</button></div></form><form method=\"post\" action=\"/action\" class=\"actions\"><input type=\"hidden\" name=\"action\" value=\"delete-npc-inventory\"><input type=\"hidden\" name=\"scene\" value=\"",
             stock->unitPrice, stock->enabled ? " selected" : "",
             stock->enabled ? "" : " selected");
         vm_mock_admin_text_append_html(page, sceneUtf8);
@@ -4145,17 +4345,7 @@ static void vm_mock_admin_render_item_picker_modal(vm_mock_admin_text *page)
     for (u32 i = 0; i < itemCount; ++i)
     {
         const vm_net_mock_shop_catalog_item *item = &g_vm_net_mock_shop_catalog[i];
-        char itemNameUtf8[128];
-
-        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
-        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
-                                      sizeof(itemNameUtf8));
-        vm_mock_admin_text_appendf(
-            page, "<option value=\"%u\" data-category=\"%c%u\">[%u] ",
-            item->itemId, item->isEquip ? 'e' : 'i', item->category,
-            item->itemId);
-        vm_mock_admin_text_append_html(page, itemNameUtf8);
-        vm_mock_admin_text_appendf(page, "</option>");
+        vm_mock_admin_render_item_picker_catalog_option(page, item, false);
     }
     vm_mock_admin_text_appendf(
         page,
@@ -4204,25 +4394,38 @@ static void vm_mock_admin_render_npc_stock_picker_modal(vm_mock_admin_text *page
     {
         const vm_net_mock_shop_catalog_item *item =
             &g_vm_net_mock_shop_catalog[i];
-        char itemNameUtf8[128];
-        u32 defaultPrice = vm_net_mock_shop_effective_unit_price(
-            item->itemId, item->price);
-
-        memset(itemNameUtf8, 0, sizeof(itemNameUtf8));
-        vm_net_mock_gbk_label_to_utf8(item->name, itemNameUtf8,
-                                      sizeof(itemNameUtf8));
-        vm_mock_admin_text_appendf(page,
-            "<option value=\"%u\" data-category=\"%c%u\" data-quality=\"%u\" data-price=\"%u\">[%u] ",
-            item->itemId, item->isEquip ? 'e' : 'i', item->category,
-            item->isEquip ? item->quality : 0u, defaultPrice, item->itemId);
-        vm_mock_admin_text_append_html(page, itemNameUtf8);
-        vm_mock_admin_text_appendf(page, "</option>");
+        vm_mock_admin_render_item_picker_catalog_option(page, item, true);
     }
     vm_mock_admin_text_appendf(page,
         "</select><div class=\"item-modal npc-stock-modal\" id=\"npc-stock-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"npc-stock-picker-title\" hidden><section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"npc-stock-picker-title\">批量选择 NPC 商品</h3><p>仅显示该 NPC 服务类型可售的物品。留空单价时按每个商品的商城默认价保存。</p></div><div class=\"item-picker-head-actions\"><button id=\"npc-stock-picker-clear\" type=\"button\">清空本次选择</button><button class=\"item-picker-close\" id=\"npc-stock-picker-close\" type=\"button\" aria-label=\"关闭商品选择\">×</button></div></div>"
         "<div class=\"item-picker-tools\"><label><span>物品分类</span><select id=\"npc-stock-category\"></select></label><label data-npc-stock-quality-field><span>装备品质</span><select id=\"npc-stock-quality\"></select></label><label><span>搜索</span><input id=\"npc-stock-search\" type=\"search\" placeholder=\"输入名称或物品 ID\" autocomplete=\"off\"></label></div>"
         "<div class=\"item-result-bar\"><span id=\"npc-stock-result-count\"></span><span id=\"npc-stock-selection-count\"></span></div><div class=\"npc-stock-picker-actions\"><button class=\"secondary\" type=\"button\" id=\"npc-stock-select-category\">全选当前筛选</button><button class=\"secondary\" type=\"button\" id=\"npc-stock-unselect-category\">移除当前筛选选择</button><button type=\"button\" id=\"npc-stock-picker-confirm\">确认已选商品</button></div>"
         "<div class=\"item-picker-list\" id=\"npc-stock-picker-list\"></div><p class=\"item-picker-empty\" id=\"npc-stock-picker-empty\" hidden>当前分类没有可添加商品</p></section></div>");
+}
+
+/* Monster drops keep an independent probability per item, so this is not an
+ * NPC inventory POST clone.  The modal only stages a catalog item set; the
+ * monster editor assigns that set to currently empty drop slots and the
+ * existing save-monster transaction persists the complete ordered list. */
+static void vm_mock_admin_render_monster_drop_picker_modal(
+    vm_mock_admin_text *page)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-modal monster-drop-modal\" id=\"monster-drop-picker-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"monster-drop-picker-title\" hidden><section class=\"item-picker-panel\"><div class=\"item-picker-head\"><div><h3 id=\"monster-drop-picker-title\">批量选择怪物掉落</h3><p>选择后再加入空掉落槽位；每个物品仍按自身的独立概率投掷。</p></div><div class=\"item-picker-head-actions\"><button id=\"monster-drop-picker-clear\" type=\"button\">清空本次选择</button><button class=\"item-picker-close\" id=\"monster-drop-picker-close\" type=\"button\" aria-label=\"关闭掉落选择\">×</button></div></div>"
+        "<div class=\"item-picker-tools\"><label><span>物品分类</span><select id=\"monster-drop-category\">");
+    vm_mock_admin_render_catalog_category_options(page, "全部掉落分类");
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label><label data-monster-drop-quality-field><span>装备品质</span><select id=\"monster-drop-quality\">");
+    vm_mock_admin_render_catalog_quality_options(page, "全部品质");
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label><label><span>搜索</span><input id=\"monster-drop-search\" type=\"search\" placeholder=\"输入名称或物品 ID\" autocomplete=\"off\"></label></div>"
+        "<div class=\"item-result-bar\"><span id=\"monster-drop-result-count\"></span><span id=\"monster-drop-selection-count\"></span><span class=\"item-picker-error\" id=\"monster-drop-picker-error\"></span></div><div class=\"npc-stock-picker-actions\"><button class=\"secondary\" type=\"button\" id=\"monster-drop-select-category\">全选当前筛选</button><button class=\"secondary\" type=\"button\" id=\"monster-drop-unselect-category\">移除当前筛选选择</button><button type=\"button\" id=\"monster-drop-picker-confirm\">确认已选物品</button></div>"
+        "<div class=\"item-picker-list\" id=\"monster-drop-picker-list\"></div><p class=\"item-picker-empty\" id=\"monster-drop-picker-empty\" hidden>当前筛选没有可添加物品</p></section></div>");
 }
 
 static void vm_mock_admin_render_item_grant_form(
@@ -4496,7 +4699,8 @@ static void vm_mock_admin_render_shop_page(char *response,
         "<a class=\"tab on\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card shop-card\">");
     if (status[0] != 0 && message[0] != 0)
     {
@@ -4677,7 +4881,8 @@ static void vm_mock_admin_render_update_page(char *response,
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab on\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>");
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>");
     if (message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -4911,7 +5116,7 @@ static void vm_mock_admin_render_task_page(char *response,
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.task-catalog{display:flex;flex-direction:column;min-height:0;overflow:hidden}.task-catalog-head{flex:none}.task-catalog-head .button{display:block;margin-bottom:14px}.task-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
         ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.task-reward-list{display:grid;gap:9px}.task-reward-row{display:grid;grid-template-columns:minmax(220px,1.7fr) 120px 100px auto;gap:10px;align-items:end;padding:10px;border:1px solid #eaecf0;border-radius:7px;background:#f9fafb}.task-reward-actions{justify-content:flex-start;margin-top:10px}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields,.task-reward-row{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><style>@media(max-width:900px){.task-catalog{max-height:300px}.task-list{max-height:none}}</style>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><style>@media(max-width:900px){.task-catalog{max-height:300px}.task-list{max-height:none}}</style>"
         "<div class=\"grid\"><aside class=\"card task-catalog\"><div class=\"task-catalog-head\"><a class=\"button%s\" data-admin-select%s href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2></div><div class=\"task-list\" data-admin-list>",
         createNew ? " on" : "",
         createNew ? " aria-current=\"page\"" : "",
@@ -5011,7 +5216,7 @@ static void vm_mock_admin_render_servers_page(char *response,
         "<title>江湖OL 服务器列表管理</title><style>"
         "*{box-sizing:border-box}html,body{min-height:100%%}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1240px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.off{background:#fef3f2;color:#b42318}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.server-list{display:grid;gap:12px}.server{border:1px solid #e4e7ec;border-radius:9px;padding:13px}.server-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.server-head h3{font-size:16px;margin:0}.state{font-size:12px;font-weight:650}.state.on{color:#027a48}.state.off{color:#b42318}.fields{display:grid;grid-template-columns:110px minmax(160px,1.3fr) minmax(130px,1fr) 130px 110px 110px auto;gap:9px;align-items:end}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.danger{background:#b42318}.actions{display:flex;gap:8px;align-items:end}.create-fields{display:grid;grid-template-columns:120px minmax(170px,1.3fr) minmax(130px,1fr) 140px 110px 110px auto;gap:10px;align-items:end}.hint{margin:11px 0 0;color:#667085;font-size:12px;line-height:1.65}@media(max-width:940px){.fields,.create-fields{grid-template-columns:1fr 1fr}.actions{align-items:stretch}}@media(max-width:620px){.wrap{padding:16px 10px}.fields,.create-fields{grid-template-columns:1fr}.actions{display:grid;grid-template-columns:1fr 1fr}}</style>"
         "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">标题服务器列表 · 保存后影响下一次登录</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
-        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a></nav>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab on\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card\"><div class=\"summary\"><span class=\"badge\">已配置 %u / %u</span><span class=\"badge\">已启用 %u</span><span class=\"badge off\">已停用 %u</span></div>",
         rowCount, VM_NET_MOCK_LOGIN_SERVER_MAX, enabledCount,
         rowCount >= enabledCount ? rowCount - enabledCount : 0);
@@ -5074,6 +5279,225 @@ static void vm_mock_admin_render_servers_page(char *response,
     {
         snprintf(response, responseCap,
                  "<!doctype html><meta charset=\"utf-8\"><p>服务器列表管理页面超过大小限制。</p>");
+    }
+}
+
+/* The rapid-entry table only contains events whose adjacent battle starts
+ * were inside VM_NET_MOCK_RAPID_BATTLE_ENTRY_WINDOW_MS.  This admin view does
+ * not infer risk from scene movement or packet count; it exposes that exact
+ * persisted audit evidence so an operator can review the source/scene before
+ * taking the account-wide access action. */
+typedef struct
+{
+    uint64_t auditId;
+    char accountId[64];
+    u32 roleId;
+    char roleName[32];
+    u32 intervalMs;
+    char source[49];
+    char scene[129];
+    u32 enemyId;
+    char createdAt[40];
+    bool banned;
+} vm_mock_admin_risk_audit_row;
+
+typedef struct
+{
+    vm_mock_admin_risk_audit_row rows[VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE];
+    u32 count;
+    bool invalid;
+} vm_mock_admin_risk_audit_page;
+
+static bool vm_mock_admin_risk_decode_hex(char *destination,
+                                          size_t destinationCap,
+                                          const char *value,
+                                          size_t valueLen)
+{
+    size_t decodedLen = 0;
+
+    if (destination == NULL || destinationCap == 0 || value == NULL ||
+        !vm_mysql_hex_decode(value, valueLen, destination,
+                             destinationCap - 1, &decodedLen) ||
+        decodedLen >= destinationCap)
+    {
+        return false;
+    }
+    destination[decodedLen] = 0;
+    return true;
+}
+
+static bool vm_mock_admin_risk_audit_row_callback(
+    void *contextValue, unsigned int columnCount,
+    const char *const *values, const size_t *lengths)
+{
+    vm_mock_admin_risk_audit_page *page =
+        (vm_mock_admin_risk_audit_page *)contextValue;
+    vm_mock_admin_risk_audit_row *row = NULL;
+    u32 banned = 0;
+
+    if (page == NULL || page->count >= VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE ||
+        columnCount != 10 || values == NULL || lengths == NULL)
+    {
+        if (page != NULL)
+            page->invalid = true;
+        return true;
+    }
+    row = &page->rows[page->count];
+    if (!vm_mock_mysql_parse_u64(values[0], lengths[0], &row->auditId) ||
+        !vm_mock_mysql_copy_text(row->accountId, sizeof(row->accountId),
+                                 values[1], lengths[1]) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &row->roleId) ||
+        !vm_mock_admin_risk_decode_hex(row->roleName, sizeof(row->roleName),
+                                       values[3], lengths[3]) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &row->intervalMs) ||
+        !vm_mock_admin_risk_decode_hex(row->source, sizeof(row->source),
+                                       values[5], lengths[5]) ||
+        !vm_mock_admin_risk_decode_hex(row->scene, sizeof(row->scene),
+                                       values[6], lengths[6]) ||
+        !vm_mock_mysql_parse_u32(values[7], lengths[7], &row->enemyId) ||
+        !vm_mock_mysql_copy_text(row->createdAt, sizeof(row->createdAt),
+                                 values[8], lengths[8]) ||
+        !vm_mock_mysql_parse_u32(values[9], lengths[9], &banned) || banned > 1)
+    {
+        page->invalid = true;
+        return true;
+    }
+    row->banned = banned != 0;
+    ++page->count;
+    return true;
+}
+
+static bool vm_mock_admin_risk_audit_query(vm_mock_admin_risk_audit_page *page)
+{
+    static const char sql[] =
+        "SELECT a.audit_id,a.account_id,a.role_id,"
+        "HEX(COALESCE(r.role_name,X'')),a.interval_ms,HEX(a.source),"
+        "HEX(a.scene_name),a.enemy_id,"
+        "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f'),"
+        "IF(b.account_id IS NULL,0,1) "
+        "FROM account_role_rapid_battle_entry_audit a "
+        "LEFT JOIN account_roles r ON r.account_id=a.account_id "
+        "AND r.role_id=a.role_id "
+        "LEFT JOIN account_access_bans b ON b.account_id=a.account_id "
+        "WHERE a.interval_ms<=3000 "
+        "ORDER BY a.audit_id DESC LIMIT 100";
+
+    if (page == NULL || !vm_net_mock_role_prepare_rapid_battle_entry_schema() ||
+        !vm_mock_service_account_ban_schema_prepare())
+    {
+        return false;
+    }
+    memset(page, 0, sizeof(*page));
+    return vm_mysql_query(sql, vm_mock_admin_risk_audit_row_callback, page) &&
+           !page->invalid;
+}
+
+static void vm_mock_admin_render_risk_page(char *response,
+                                           size_t responseCap,
+                                           const char *query)
+{
+    vm_mock_admin_text page;
+    vm_mock_admin_risk_audit_page auditPage;
+    char status[16];
+    char message[256];
+    bool queryOk = false;
+
+    memset(&auditPage, 0, sizeof(auditPage));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    queryOk = vm_mock_admin_risk_audit_query(&auditPage);
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(
+        &page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 风险角色管理</title><style>"
+        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:1050px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
+        "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险角色管理 · 三秒内连续进入战斗审计</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=risk\">风险角色管理</a></nav>"
+        "<section class=\"card\"><h2>审计条件 <span class=\"badge\">相邻进入战斗 ≤ 3000 ms</span></h2><p class=\"rule\">记录来自挑战和挂机两条真实战斗入口。封号是账号级永久访问限制：保存后立即注销该账号所有游戏会话与用户中心会话；之后的登录认证将被拒绝。</p></section>");
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    vm_mock_admin_text_appendf(&page, "<section class=\"card\"><h2>最近 %u 条风险审计</h2>",
+                               VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE);
+    if (!queryOk)
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<p class=\"muted\">无法读取风险审计或账号访问表：%s</p></section></main></body></html>",
+            vm_mysql_last_error());
+    }
+    else if (auditPage.count == 0)
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<p class=\"muted\">暂无三秒内连续进入战斗的审计记录。</p></section></main></body></html>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"table-wrap\"><table><thead><tr><th>审计时间</th><th>账号</th><th>角色</th><th>间隔</th><th>战斗来源</th><th>场景</th><th>怪物</th><th>状态</th><th>操作</th></tr></thead><tbody>");
+        for (u32 i = 0; i < auditPage.count; ++i)
+        {
+            const vm_mock_admin_risk_audit_row *row = &auditPage.rows[i];
+            char roleNameUtf8[96];
+            char sourceUtf8[128];
+            char sceneUtf8[256];
+
+            memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
+            memset(sourceUtf8, 0, sizeof(sourceUtf8));
+            memset(sceneUtf8, 0, sizeof(sceneUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->roleName, roleNameUtf8,
+                                          sizeof(roleNameUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->source, sourceUtf8,
+                                          sizeof(sourceUtf8));
+            vm_net_mock_gbk_label_to_utf8(row->scene, sceneUtf8,
+                                          sizeof(sceneUtf8));
+            vm_mock_admin_text_appendf(&page,
+                "<tr><td class=\"mono\">%s</td><td class=\"mono\">",
+                row->createdAt);
+            vm_mock_admin_text_append_html(&page, row->accountId);
+            vm_mock_admin_text_appendf(&page,
+                "</td><td><span class=\"role\">");
+            vm_mock_admin_text_append_html(&page,
+                                           roleNameUtf8[0] ? roleNameUtf8 : "（角色已删除）");
+            vm_mock_admin_text_appendf(&page, "</span><br><span class=\"mono\">ID %u</span></td><td class=\"mono\">%u ms</td><td class=\"mono\">",
+                                       row->roleId, row->intervalMs);
+            vm_mock_admin_text_append_html(&page, sourceUtf8);
+            vm_mock_admin_text_appendf(&page, "</td><td>");
+            vm_mock_admin_text_append_html(&page, sceneUtf8);
+            vm_mock_admin_text_appendf(&page,
+                "</td><td class=\"mono\">%u</td><td><span class=\"state %s\">%s</span></td><td>",
+                row->enemyId, row->banned ? "banned" : "open",
+                row->banned ? "已封禁" : "待处置");
+            if (row->banned)
+            {
+                vm_mock_admin_text_appendf(&page,
+                    "<button type=\"button\" disabled>已封号</button>");
+            }
+            else
+            {
+                vm_mock_admin_text_appendf(&page,
+                    "<form method=\"post\" action=\"/action\" onsubmit=\"return confirm('确认封禁该账号并立即断开所有连接？此操作会拒绝后续登录。');\"><input type=\"hidden\" name=\"action\" value=\"ban-risk-account\"><input type=\"hidden\" name=\"account\" value=\"");
+                vm_mock_admin_text_append_html(&page, row->accountId);
+                vm_mock_admin_text_appendf(&page,
+                    "\"><button type=\"submit\">封号并断开</button></form>");
+            }
+            vm_mock_admin_text_appendf(&page, "</td></tr>");
+        }
+        vm_mock_admin_text_appendf(&page,
+            "</tbody></table></div></section></main></body></html>");
+    }
+    if (page.truncated)
+    {
+        snprintf(response, responseCap,
+                 "<!doctype html><meta charset=\"utf-8\"><p>风险角色管理页面超过大小限制。</p>");
     }
 }
 
@@ -5338,6 +5762,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         vm_mock_admin_render_servers_page(response, responseCap, query);
         return;
     }
+    if (strcmp(tab, "risk") == 0)
+    {
+        vm_mock_admin_render_risk_page(response, responseCap, query);
+        return;
+    }
     (void)vm_mock_admin_form_value(query, "account", selectedAccount, sizeof(selectedAccount));
     (void)vm_mock_admin_form_value(query, "q", accountSearch, sizeof(accountSearch));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
@@ -5368,7 +5797,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-set{align-items:center;margin:7px 0 0}.level-set input{width:76px;min-width:76px}.level-set button{padding:6px 9px;font-size:12px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
@@ -5382,7 +5811,8 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
-        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav><div class=\"grid\">"
+        "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
+        "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav><div class=\"grid\">"
         "<aside class=\"card\"><h2>账号（%u）</h2><form class=\"account-search\" data-account-search-form role=\"search\"><input data-account-search maxlength=\"63\" placeholder=\"搜索账号名\" aria-label=\"搜索账号名\" value=\"",
         accountTotal);
     vm_mock_admin_text_append_html(&page, accountSearch);
@@ -5462,8 +5892,22 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             vm_mock_admin_text_appendf(&page, "<tr><td><strong>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);
             vm_mock_admin_text_appendf(&page, "</strong><br><span class=\"muted\">ID %u</span></td>", role->roleId);
-            vm_mock_admin_text_appendf(&page, "<td>Lv.%u%s</td>", role->level,
+            vm_mock_admin_text_appendf(&page, "<td><div>Lv.%u%s</div>", role->level,
                                        active ? " <span class=\"badge\">当前角色</span>" : "");
+            vm_mock_admin_text_appendf(
+                &page,
+                "<form class=\"inline level-set\" method=\"post\" action=\"/action\" "
+                "onsubmit=\"return confirm('将等级设为指定值，并把经验重置到该等级起点？角色需离线才能设置。');\">"
+                "<input type=\"hidden\" name=\"action\" value=\"set-role-level\">"
+                "<input type=\"hidden\" name=\"account\" value=\"");
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(
+                &page,
+                "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                "<input type=\"number\" name=\"level\" min=\"1\" max=\"%u\" value=\"%u\" aria-label=\"角色等级\" required>"
+                "<button type=\"submit\">设定等级</button></form>"
+                "<span class=\"level-note\">经验将定位到该等级起点；HP/MP 上限按新等级重算。</span></td>",
+                role->roleId, VM_NET_MOCK_ROLE_LEVEL_CAP, role->level);
             vm_mock_admin_text_appendf(&page, "<td class=\"position\">");
             vm_mock_admin_text_append_html(&page, sceneUtf8);
             vm_mock_admin_text_appendf(&page,
@@ -5749,6 +6193,25 @@ static void vm_mock_admin_redirect_servers(vm_mock_service_socket client,
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH
              "?tab=servers&status=%s&message=%s",
+             statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
+                                        const char *status,
+                                        const char *message)
+{
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1100];
+
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=risk&status=%s&message=%s",
              statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
@@ -7187,11 +7650,13 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     char role[64];
     char itemText[32];
     char amountText[32];
+    char levelText[32];
     char resetSceneUtf8[192];
     char resetRuntimeScene[64];
     const char *error = NULL;
     u32 itemId = 0;
     u32 amount = 0;
+    u32 level = 0;
     u16 itemSeq = 0;
     bool ok = false;
 
@@ -7201,6 +7666,7 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(role, 0, sizeof(role));
     memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
+    memset(levelText, 0, sizeof(levelText));
     memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
     memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
@@ -7259,6 +7725,37 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         strcmp(action, "delete-login-server") == 0)
     {
         vm_mock_admin_handle_login_server_action(client, action, body);
+        return;
+    }
+    if (strcmp(action, "ban-risk-account") == 0)
+    {
+        u32 disconnected = 0;
+        u32 userSessions = 0;
+
+        if (!vm_mock_admin_form_value(body, "account", account,
+                                      sizeof(account)) || account[0] == 0)
+        {
+            vm_mock_admin_redirect_risk(client, "error", "账号参数不完整");
+            return;
+        }
+        ok = vm_mock_service_account_ban_for_rapid_battle(
+            account, &disconnected, &error);
+        if (ok)
+            userSessions = vm_mock_user_clear_account_sessions(account);
+        if (ok)
+        {
+            char message[192];
+
+            snprintf(message, sizeof(message),
+                     "账号已封禁：已立即断开 %u 个游戏会话、注销 %u 个用户中心会话；后续登录将被拒绝",
+                     disconnected, userSessions);
+            vm_mock_admin_redirect_risk(client, "ok", message);
+        }
+        else
+        {
+            vm_mock_admin_redirect_risk(
+                client, "error", error ? error : "账号封禁失败");
+        }
         return;
     }
     if (!vm_mock_admin_form_value(body, "account", account, sizeof(account)))
@@ -7329,6 +7826,25 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "已重置到指定场景的安全落点，重新进入游戏后生效"
                                   : (error ? error : "角色位置重置失败"));
+        return;
+    }
+    if (strcmp(action, "set-role-level") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "level", levelText,
+                                      sizeof(levelText)) ||
+            !vm_net_mock_parse_u32_strict(levelText, &level) || level == 0 ||
+            level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "角色或等级参数无效（等级范围为 1 至 70）");
+            return;
+        }
+        ok = vm_mock_service_account_set_role_level(account, role, level,
+                                                    &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "角色等级已更新，经验已重置为该等级起点"
+                                  : (error ? error : "角色等级设置失败"));
         return;
     }
     if (strcmp(action, "grant-item") == 0)
@@ -7887,8 +8403,21 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         }
         else
         {
+            bool banned = false;
+
             ok = vm_mock_service_account_verify_credentials(account, password);
-            if (!ok)
+            if (ok && !vm_mock_service_account_access_ban_check(
+                          account, &banned, NULL, 0))
+            {
+                ok = false;
+                message = "账号访问状态暂不可用，请稍后重试";
+            }
+            else if (ok && banned)
+            {
+                ok = false;
+                message = "该账号已被封禁，无法登录";
+            }
+            else if (!ok)
                 message = "账号或密码错误";
         }
         memset(password, 0, sizeof(password));

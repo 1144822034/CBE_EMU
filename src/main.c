@@ -223,11 +223,22 @@ typedef enum
      * close natively and enter the next hangup round. */
     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL,
     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL,
-    /* The reward panel is deliberately left untouched.  Passing requires the
-     * real client to finish the winning action, accept the next server-pushed
-     * 4/5 start, and then submit/consume a native automatic 4/12 -> 4/6
-     * continuation without any reward-panel input. */
-    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
+    /* Exercises the product's opt-in reward confirmation assist.  The test
+     * scenario itself schedules no reward-panel tap; it must observe the
+     * real 4/7 panel, one host hardware touch, the client-owned 25/5, then
+     * the next server-pushed 4/5 and native automatic 4/12 -> 4/6 action. */
+    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE,
+    /* Settles one automatic scene-hangup round with a known HP/MP recovery
+     * and stops only after a read-only scene-node snapshot proves the client
+     * retained the final values after its native 25/5 exit. */
+    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY,
+    /* After that same native reward-panel exit, tap the scene hangup control
+     * once within the three-second rapid-entry audit window.  This is a
+     * request/response contract probe: the request has already put
+     * HandleBattleEnterReq in its battle-entry state, so its direct response
+     * must itself carry a 4/5 start; a banner-only reply is a deterministic
+     * client-side loading-state violation. */
+    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY
 } vm_automation_scenario;
 
 typedef enum
@@ -283,6 +294,11 @@ typedef struct
     u8 hangupAutoDisableResponseSeen;
     u8 hangupSettlementResponseSeen;
     u8 hangupAutoVisibleCaptured;
+    u8 hangupRapidEntryTapSent;
+    u8 hangupRapidEntryAwaitResponse;
+    u8 hangupRapidEntryResponseSeen;
+    u8 hangupRapidEntryResponseHasStart;
+    u8 hangupRapidEntryBattleStarted;
     u8 battleStartHandlerSeen;
     u8 battleSceneCharListSeen;
     u8 equipmentEnhanceDetailTapSent;
@@ -293,6 +309,10 @@ typedef struct
     u32 renderFrames;
     u32 hangupSettlementInputCount;
     u32 hangupSettlementActionResponseCount;
+    u32 hangupSettlementResponseCount;
+    u32 hangupRapidEntrySettlementBaseline;
+    u32 hangupRapidEntryTapFrame;
+    u32 hangupRapidEntryResponseSequence;
     u32 stageFrame;
     u32 stageStartedMs;
     u32 totalStartedMs;
@@ -333,6 +353,37 @@ typedef struct
 } vm_automation_state;
 
 static vm_automation_state g_vmAutomation;
+
+/*
+ * Hangup battles and ordinary automatic actions share the same 4/11 message,
+ * but only a scene-hangup winner subsequently needs to leave the native 4/7
+ * reward panel before the server can start another battle.  This helper is
+ * intentionally host/input-only: it observes the received packet plus the
+ * rendered client-owned phase-7 state, then sends one normal touchscreen
+ * press/release.  It never changes guest memory, CBE control flow, callback
+ * arguments or WT response bytes.
+ */
+typedef struct
+{
+    u8 enabled;
+    u8 hangupAutoActive;
+    u8 settlementPending;
+    u8 settlementRendered;
+    u8 confirmPressed;
+    u8 releasePending;
+    u8 reserved0[2];
+    u32 sessionSequence;
+    u32 settlementSequence;
+    u32 settlementFrame;
+    u32 renderedFrames;
+    u32 confirmNotBeforeTick;
+    u32 releaseAtMs;
+    u32 confirmPressCount;
+    u32 clientExitCount;
+} vm_hangup_auto_confirm_state;
+
+static vm_hangup_auto_confirm_state g_vmHangupAutoConfirm;
+
 static u8 g_vmEquipmentEnhanceRulesCaptured = 0;
 u32 g_vmEquipmentEnhanceRulesWatchAddress = 0;
 u32 g_vmEquipmentEnhanceRulesWatchWriteCount = 0;
@@ -354,6 +405,14 @@ static void vm_automation_note_battle_handler_pc(u32 localPc,
 static void vm_automation_note_battle_scene_char_list(u32 sequence,
                                                        u32 localPc);
 static void vm_automation_render_complete(void);
+static void vm_hangup_auto_confirm_init(int argc, char *args[]);
+static void vm_hangup_auto_confirm_note_network_response(
+    bool sawHangupStart, bool sawAutoEnable, bool sawAutoDisable,
+    bool sawSettlement, u32 sequence);
+static void vm_hangup_auto_confirm_note_uplink(const u8 *packet,
+                                                u32 packetLen);
+static void vm_hangup_auto_confirm_render_complete(void);
+static void vm_hangup_auto_confirm_tick(void);
 static int g_vmInputOpen = 0;
 static int g_vmInputPassword = 0;
 static u32 g_vmInputSerial = 0;
@@ -664,6 +723,21 @@ static u32 vm_net_mock_apply_remote_observation(
     const vm_net_remote_observation *observation);
 static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial);
 static uc_err scheduler_flush_post_vm_business_send_ready(const char *reason);
+/* Root-cause forensic probe for a native 4/7 settlement.  It is intentionally
+ * read-only: the packet, callback and guest state remain client-owned. */
+static void vm_hangup_vital_forensics_capture_response(const u8 *packet,
+                                                        u32 packetLen,
+                                                        u32 eventType,
+                                                        u32 sequence,
+                                                        u32 responsePtr,
+                                                        u32 callback);
+static void vm_hangup_vital_forensics_callback_begin(u32 eventType,
+                                                      u32 responsePtr,
+                                                      u32 callback);
+static void vm_hangup_vital_forensics_callback_end(u32 eventType,
+                                                    u32 responsePtr,
+                                                    u32 callback);
+static void vm_hangup_vital_forensics_note_pc(u32 pc);
 static u32 vm_dl_current_sp_bf(void);
 static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason);
 
@@ -3908,11 +3982,15 @@ static uc_err scheduler_dispatch_net_tasks(void)
             scheduler_trace_hangup_battle_response_callback(
                 "begin", &taskRemoteObservation, taskEvent, taskR0,
                 taskCallback, UC_ERR_OK);
+            vm_hangup_vital_forensics_callback_begin(taskEvent, taskR0,
+                                                      taskCallback);
             vm_hangup_protocol_parser_trace_begin(&taskRemoteObservation);
             uc_err err = vm_call4_preserve_regs_clear_stack_args(taskCallback, taskR0, taskR1, taskR2, taskEvent);
             scheduler_trace_hangup_battle_response_callback(
                 "end", &taskRemoteObservation, taskEvent, taskR0,
                 taskCallback, err);
+            vm_hangup_vital_forensics_callback_end(taskEvent, taskR0,
+                                                    taskCallback);
             vm_autotest_trace_update_guest_callback("callback-end", taskR0,
                                                      taskR1);
             vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
@@ -4820,6 +4898,7 @@ static void vm_lcd_update_with_input_overlay(void)
     UpdateLcd();
     /* This is the render-complete boundary.  Scenario evidence copies the
      * emulator-owned LCD cache here; it never samples the desktop window. */
+    vm_hangup_auto_confirm_render_complete();
     vm_automation_render_complete();
 }
 
@@ -5251,6 +5330,10 @@ static uc_err scheduler_tick(void)
     err = scheduler_dispatch_net_tasks();
     if (err != UC_ERR_OK)
         return err;
+    /* A reward-panel confirmation is input, not a server response.  Queue it
+     * only after a prior render-complete boundary has proved that the native
+     * phase-7 panel owns the screen. */
+    vm_hangup_auto_confirm_tick();
     vm_screen_root_exit_maybe_request();
     return UC_ERR_OK;
 }
@@ -5369,6 +5452,205 @@ static void vm_autotest_release_tap(void)
     g_autotestTapReleaseWindow = 0;
 }
 
+static bool vm_hangup_auto_confirm_read_result_state(u16 *phaseOut,
+                                                     u8 *resultOut)
+{
+    u32 gameState = 0;
+    u16 phase = 0;
+    u8 result = 0;
+
+    if (Global_R9 == 0 ||
+        uc_mem_read(MTK, Global_R9 + 8272u, &gameState,
+                    sizeof(gameState)) != UC_ERR_OK ||
+        gameState == 0 ||
+        uc_mem_read(MTK, Global_R9 + 13412u, &phase,
+                    sizeof(phase)) != UC_ERR_OK ||
+        uc_mem_read(MTK, gameState + 1138u, &result,
+                    sizeof(result)) != UC_ERR_OK)
+    {
+        return false;
+    }
+    if (phaseOut != NULL)
+        *phaseOut = phase;
+    if (resultOut != NULL)
+        *resultOut = result;
+    return true;
+}
+
+static void vm_hangup_auto_confirm_clear_pending(const char *reason)
+{
+    if (g_vmHangupAutoConfirm.settlementPending ||
+        g_vmHangupAutoConfirm.settlementRendered ||
+        g_vmHangupAutoConfirm.confirmPressed)
+    {
+        printf("[info][hangup] reward_auto_confirm_clear session=%u settlement=%u "
+               "reason=%s\n",
+               g_vmHangupAutoConfirm.sessionSequence,
+               g_vmHangupAutoConfirm.settlementSequence,
+               reason ? reason : "-");
+    }
+    g_vmHangupAutoConfirm.settlementPending = 0;
+    g_vmHangupAutoConfirm.settlementRendered = 0;
+    g_vmHangupAutoConfirm.confirmPressed = 0;
+    g_vmHangupAutoConfirm.settlementSequence = 0;
+    g_vmHangupAutoConfirm.settlementFrame = 0;
+    g_vmHangupAutoConfirm.confirmNotBeforeTick = 0;
+}
+
+static void vm_hangup_auto_confirm_note_network_response(
+    bool sawHangupStart, bool sawAutoEnable, bool sawAutoDisable,
+    bool sawSettlement, u32 sequence)
+{
+    if (!g_vmHangupAutoConfirm.enabled)
+        return;
+
+    /* Only the observed scene-hangup start bundle (4/5 together with
+     * 4/11{type=1}) arms this helper.  A manual battle's 4/7 must remain
+     * completely untouched. */
+    if (sawHangupStart && sawAutoEnable)
+    {
+        vm_hangup_auto_confirm_clear_pending("next-hangup-round");
+        g_vmHangupAutoConfirm.hangupAutoActive = 1;
+        g_vmHangupAutoConfirm.sessionSequence = sequence;
+        printf("[info][hangup] reward_auto_confirm_arm session=%u "
+               "evidence=4/5+4/11(type=1)\n", sequence);
+    }
+    if (sawAutoDisable)
+    {
+        vm_hangup_auto_confirm_clear_pending("server-auto-disabled");
+        g_vmHangupAutoConfirm.hangupAutoActive = 0;
+        g_vmHangupAutoConfirm.sessionSequence = 0;
+        printf("[info][hangup] reward_auto_confirm_disarm reason=4/11(type=0)\n");
+        return;
+    }
+    if (sawSettlement && g_vmHangupAutoConfirm.hangupAutoActive)
+    {
+        /* 4/7 is first parsed by the guest callback.  The actual confirmation
+         * stays disarmed until a later LCD frame proves phase 7/result 1. */
+        g_vmHangupAutoConfirm.settlementPending = 1;
+        g_vmHangupAutoConfirm.settlementRendered = 0;
+        g_vmHangupAutoConfirm.confirmPressed = 0;
+        g_vmHangupAutoConfirm.settlementSequence = sequence;
+        g_vmHangupAutoConfirm.settlementFrame = 0;
+        g_vmHangupAutoConfirm.confirmNotBeforeTick = 0;
+        printf("[info][hangup] reward_auto_confirm_wait settlement=%u "
+               "session=%u evidence=4/7\n", sequence,
+               g_vmHangupAutoConfirm.sessionSequence);
+    }
+}
+
+static void vm_hangup_auto_confirm_note_uplink(const u8 *packet,
+                                                u32 packetLen)
+{
+    if (!g_vmHangupAutoConfirm.enabled || packet == NULL ||
+        packetLen < 9u || packet[0] != 'W' || packet[1] != 'T' ||
+        (((u32)packet[2] << 8) | packet[3]) != packetLen ||
+        packet[4] != 1 || packet[5] != 25 || packet[6] != 5)
+    {
+        return;
+    }
+
+    /* This is emitted by BattleScene_ExitAndCleanup itself.  It is evidence
+     * that the client consumed our normal touchscreen event; the helper does
+     * not synthesize this protocol request. */
+    if (g_vmHangupAutoConfirm.hangupAutoActive &&
+        (g_vmHangupAutoConfirm.settlementPending ||
+         g_vmHangupAutoConfirm.confirmPressed))
+    {
+        printf("[info][hangup] reward_auto_confirm_client_exit settlement=%u "
+               "source=%s-25/5\n",
+               g_vmHangupAutoConfirm.settlementSequence,
+               g_vmHangupAutoConfirm.confirmPressed ? "auto-input" : "native");
+        ++g_vmHangupAutoConfirm.clientExitCount;
+        vm_hangup_auto_confirm_clear_pending("client-25/5");
+    }
+}
+
+static void vm_hangup_auto_confirm_render_complete(void)
+{
+    u16 phase = 0;
+    u8 result = 0;
+
+    if (!g_vmHangupAutoConfirm.enabled)
+        return;
+    ++g_vmHangupAutoConfirm.renderedFrames;
+    if (!g_vmHangupAutoConfirm.hangupAutoActive ||
+        !g_vmHangupAutoConfirm.settlementPending ||
+        g_vmHangupAutoConfirm.settlementRendered)
+    {
+        return;
+    }
+
+    /* HandleBattleCharTouch(0xB62) / BattleScene_HandleInput(0x62A2) accept
+     * a confirmation only for this exact state.  Reading it after UpdateLcd
+     * proves a real reward panel was rendered; nothing guest-owned is written. */
+    if (!vm_hangup_auto_confirm_read_result_state(&phase, &result) ||
+        phase != 7u || result != 1u)
+    {
+        return;
+    }
+    g_vmHangupAutoConfirm.settlementRendered = 1;
+    g_vmHangupAutoConfirm.settlementFrame =
+        g_vmHangupAutoConfirm.renderedFrames;
+    g_vmHangupAutoConfirm.confirmNotBeforeTick = g_schedulerTick + 1u;
+    printf("[info][hangup] reward_auto_confirm_rendered settlement=%u "
+           "frame=%u phase=%u result=%u due_tick=%u\n",
+           g_vmHangupAutoConfirm.settlementSequence,
+           g_vmHangupAutoConfirm.settlementFrame, phase, result,
+           g_vmHangupAutoConfirm.confirmNotBeforeTick);
+}
+
+static void vm_hangup_auto_confirm_tick(void)
+{
+    u32 now;
+    u16 phase = 0;
+    u8 result = 0;
+
+    if (!g_vmHangupAutoConfirm.enabled)
+        return;
+    now = SDL_GetTicks();
+    if (g_vmHangupAutoConfirm.releasePending &&
+        now >= g_vmHangupAutoConfirm.releaseAtMs)
+    {
+        mouseEvent(MR_MOUSE_UP, 120, 200);
+        g_vmHangupAutoConfirm.releasePending = 0;
+        printf("[info][hangup] reward_auto_confirm_input release "
+               "point=(120,200) settlement=%u\n",
+               g_vmHangupAutoConfirm.settlementSequence);
+    }
+    if (!g_vmHangupAutoConfirm.hangupAutoActive ||
+        !g_vmHangupAutoConfirm.settlementPending ||
+        !g_vmHangupAutoConfirm.settlementRendered ||
+        g_vmHangupAutoConfirm.confirmPressed ||
+        g_schedulerTick < g_vmHangupAutoConfirm.confirmNotBeforeTick ||
+        g_autotestTapReleasePending || g_autotestKeyReleasePending)
+    {
+        return;
+    }
+    if (!vm_hangup_auto_confirm_read_result_state(&phase, &result) ||
+        phase != 7u || result != 1u)
+    {
+        printf("[info][hangup] reward_auto_confirm_skip settlement=%u "
+               "phase=%u result=%u reason=state-no-longer-confirmable\n",
+               g_vmHangupAutoConfirm.settlementSequence, phase, result);
+        vm_hangup_auto_confirm_clear_pending("state-no-longer-confirmable");
+        return;
+    }
+
+    /* HandleBattleCharTouch checks phase/result before interpreting the touch
+     * coordinates.  Use one fixed central VM point, then release it 80 ms
+     * later through the same hardware event queue as a real touchscreen tap. */
+    mouseEvent(MR_MOUSE_DOWN, 120, 200);
+    g_vmHangupAutoConfirm.confirmPressed = 1;
+    g_vmHangupAutoConfirm.releasePending = 1;
+    g_vmHangupAutoConfirm.releaseAtMs = now + 80u;
+    ++g_vmHangupAutoConfirm.confirmPressCount;
+    printf("[info][hangup] reward_auto_confirm_input press point=(120,200) "
+           "settlement=%u frame=%u tick=%u\n",
+           g_vmHangupAutoConfirm.settlementSequence,
+           g_vmHangupAutoConfirm.settlementFrame, g_schedulerTick);
+}
+
 static const char *vm_automation_stage_name(vm_automation_stage stage)
 {
     switch (stage)
@@ -5422,6 +5704,10 @@ static const char *vm_automation_scenario_name(void)
         return "hangup-auto-terminal-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE:
         return "hangup-auto-reward-continue-v1";
+    case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY:
+        return "hangup-auto-vitals-recovery-v1";
+    case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY:
+        return "hangup-auto-rapid-entry-v1";
     default:
         return "none";
     }
@@ -5432,7 +5718,11 @@ static bool vm_automation_scenario_uses_direct_hangup(void)
     return g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_DIRECT_HANGUP ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
-           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE;
+           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
+           g_vmAutomation.scenario ==
+               VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
+           g_vmAutomation.scenario ==
+               VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY;
 }
 
 static void vm_automation_write_result(const char *result, const char *reason)
@@ -5727,7 +6017,11 @@ static void vm_automation_note_battle_handler_pc(u32 localPc,
         if ((g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
              g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
              g_vmAutomation.scenario ==
-                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE) &&
+                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
+             g_vmAutomation.scenario ==
+                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
+             g_vmAutomation.scenario ==
+                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY) &&
             Global_R9 != 0 &&
             uc_mem_read(MTK, Global_R9 + 8272u, &gameState,
                         sizeof(gameState)) == UC_ERR_OK &&
@@ -5818,6 +6112,314 @@ static bool vm_automation_response_object_u8_field(const u8 *payload,
     return false;
 }
 
+/* The normal battle client receives 4/7 as a named-object payload.  This
+ * decoder exists solely for the forensic trace below: it inspects the already
+ * validated network bytes before the guest parser owns them. */
+static bool vm_hangup_response_object_u32_field(const u8 *payload,
+                                                u16 payloadLen,
+                                                const char *field,
+                                                u32 *valueOut)
+{
+    u32 pos = 0;
+    size_t fieldLen;
+
+    if (payload == NULL || field == NULL || valueOut == NULL)
+        return false;
+    fieldLen = strlen(field);
+    if (fieldLen == 0 || fieldLen > 0xff)
+        return false;
+    while (pos < payloadLen)
+    {
+        u32 nameLen = payload[pos++];
+        u16 encodedLen;
+
+        if (nameLen > payloadLen - pos || payloadLen - pos - nameLen < 2u)
+            return false;
+        if (nameLen == fieldLen &&
+            memcmp(payload + pos, field, fieldLen) == 0)
+        {
+            pos += nameLen;
+            encodedLen = (u16)(((u16)payload[pos] << 8) | payload[pos + 1]);
+            pos += 2;
+            if (encodedLen != 6 || encodedLen > payloadLen - pos ||
+                payload[pos] != 0 || payload[pos + 1] != 4)
+            {
+                return false;
+            }
+            *valueOut = ((u32)payload[pos + 2] << 24) |
+                        ((u32)payload[pos + 3] << 16) |
+                        ((u32)payload[pos + 4] << 8) |
+                        (u32)payload[pos + 5];
+            return true;
+        }
+        pos += nameLen;
+        encodedLen = (u16)(((u16)payload[pos] << 8) | payload[pos + 1]);
+        pos += 2;
+        if (encodedLen > payloadLen - pos)
+            return false;
+        pos += encodedLen;
+    }
+    return false;
+}
+
+typedef struct
+{
+    u8 active;
+    u8 callbackBeginSeen;
+    u8 callbackEndSeen;
+    u8 sceneHudSeen;
+    u32 sequence;
+    u32 recoveryHp;
+    u32 recoveryMp;
+    u32 responsePtr;
+    u32 callback;
+} vm_hangup_vital_forensics_trace;
+
+static vm_hangup_vital_forensics_trace g_vmHangupVitalForensics;
+
+/* scene_rebuild_status_meter_node(0x0100FED8) walks this list from
+ * R9+0x6048.  These are read-only copies of the already parsed equipment
+ * records; logging their two direct vital fields lets us reconcile the
+ * client's actual meter calculation with the server's catalog projection. */
+static void vm_hangup_vital_forensics_log_hud_equipment(FILE *trace)
+{
+    u32 item = 0;
+    u32 totalHp = 0;
+    u32 totalMp = 0;
+
+    if (trace == NULL || MTK == NULL || Global_R9 == 0 ||
+        uc_mem_read(MTK, Global_R9 + 0x6048u, &item, sizeof(item)) != UC_ERR_OK)
+    {
+        return;
+    }
+    for (u32 index = 0; item != 0 && index < 16u; ++index)
+    {
+        u32 hpBonus = 0;
+        u32 mpBonus = 0;
+        u32 next = 0;
+        u16 durability = 0;
+        u8 category = 0;
+        u8 originalCategory = 0;
+        u8 enhanceLevel = 0;
+        u8 effectCount = 0;
+
+        if (uc_mem_read(MTK, item + 0x04u, &hpBonus, sizeof(hpBonus)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x08u, &mpBonus, sizeof(mpBonus)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x110u, &durability, sizeof(durability)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x11Au, &category, sizeof(category)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x11Bu, &originalCategory,
+                        sizeof(originalCategory)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x11Eu, &enhanceLevel,
+                        sizeof(enhanceLevel)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x120u, &effectCount,
+                        sizeof(effectCount)) != UC_ERR_OK ||
+            uc_mem_read(MTK, item + 0x140u, &next, sizeof(next)) != UC_ERR_OK)
+        {
+            fprintf(trace,
+                    "[info][network] mock_hangup_vital_trace equipment=unreadable "
+                    "index=%u ptr=%08x\n", index, item);
+            break;
+        }
+        if (durability != 0)
+        {
+            totalHp += hpBonus;
+            totalMp += mpBonus;
+        }
+        fprintf(trace,
+                "[info][network] mock_hangup_vital_trace equipment=%u ptr=%08x "
+                "bonus=%u/%u durability=%u category=%u/%u enhance=%u effects=%u\n",
+                index, item, hpBonus, mpBonus, durability, category,
+                originalCategory, enhanceLevel, effectCount);
+        item = next;
+    }
+    fprintf(trace,
+            "[info][network] mock_hangup_vital_trace equipment_direct_total=%u/%u\n",
+            totalHp, totalMp);
+}
+
+/* Snapshot the scene actor fields and the separate meter-cap object consumed
+ * by scene_draw_status_panels(0x0101466A).  The HUD scales node +0xB4/+0xB8
+ * against meter +0xC4/+0xC8, rather than against the node's base maxima.
+ * Nothing in this helper writes guest memory, invokes a guest function, or
+ * affects event scheduling. */
+static void vm_hangup_vital_forensics_log_scene_nodes(const char *phase)
+{
+    FILE *trace;
+    u32 sceneNodeBase = 0;
+    u32 currentSceneNode = 0;
+    u32 statusMeterNode = 0;
+    u32 statusMeterHpMax = 0;
+    u32 statusMeterMpMax = 0;
+
+    if (!g_vmHangupVitalForensics.active)
+        return;
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace == NULL)
+        return;
+    if (MTK == NULL || Global_R9 == 0 ||
+        uc_mem_read(MTK, Global_R9 + 0x5CB0u, &sceneNodeBase,
+                    sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+    {
+        fprintf(trace,
+                "[info][network] mock_hangup_vital_trace phase=%s seq=%u "
+                "scene_nodes=unavailable r9=%08x base=%08x delta=%u/%u\n",
+                phase ? phase : "-", g_vmHangupVitalForensics.sequence,
+                Global_R9, sceneNodeBase, g_vmHangupVitalForensics.recoveryHp,
+                g_vmHangupVitalForensics.recoveryMp);
+        fflush(trace);
+        fclose(trace);
+        return;
+    }
+    if (uc_mem_read(MTK, Global_R9 + 0x5CA4u, &currentSceneNode,
+                    sizeof(currentSceneNode)) == UC_ERR_OK &&
+        uc_mem_read(MTK, Global_R9 + 0x5CACu, &statusMeterNode,
+                    sizeof(statusMeterNode)) == UC_ERR_OK &&
+        statusMeterNode != 0)
+    {
+        (void)uc_mem_read(MTK, statusMeterNode + 0xC4u,
+                          &statusMeterHpMax, sizeof(statusMeterHpMax));
+        (void)uc_mem_read(MTK, statusMeterNode + 0xC8u,
+                          &statusMeterMpMax, sizeof(statusMeterMpMax));
+    }
+    fprintf(trace,
+            "[info][network] mock_hangup_vital_trace phase=%s seq=%u "
+            "hud_node=%08x meter=%08x bar_max=%u/%u delta=%u/%u\n",
+            phase ? phase : "-", g_vmHangupVitalForensics.sequence,
+            currentSceneNode, statusMeterNode,
+            statusMeterHpMax, statusMeterMpMax,
+            g_vmHangupVitalForensics.recoveryHp,
+            g_vmHangupVitalForensics.recoveryMp);
+    vm_hangup_vital_forensics_log_hud_equipment(trace);
+    for (u32 i = 0; i < 8; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 roleId = 0;
+        u32 hp = 0;
+        u32 mp = 0;
+        u32 hpMax = 0;
+        u32 mpMax = 0;
+
+        if (uc_mem_read(MTK, node + 0x64u, &roleId, sizeof(roleId)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xB4u, &hp, sizeof(hp)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xB8u, &mp, sizeof(mp)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xBCu, &hpMax, sizeof(hpMax)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xC0u, &mpMax, sizeof(mpMax)) != UC_ERR_OK)
+        {
+            continue;
+        }
+        if (roleId == 0 && hp == 0 && mp == 0 && hpMax == 0 && mpMax == 0)
+            continue;
+        fprintf(trace,
+                "[info][network] mock_hangup_vital_trace phase=%s seq=%u "
+                "node=%u actor=%u hp=%u/%u mp=%u/%u delta=%u/%u\n",
+                phase ? phase : "-", g_vmHangupVitalForensics.sequence,
+                i, roleId, hp, hpMax, mp, mpMax,
+                g_vmHangupVitalForensics.recoveryHp,
+                g_vmHangupVitalForensics.recoveryMp);
+    }
+    fflush(trace);
+    fclose(trace);
+}
+
+static void vm_hangup_vital_forensics_capture_response(const u8 *packet,
+                                                        u32 packetLen,
+                                                        u32 eventType,
+                                                        u32 sequence,
+                                                        u32 responsePtr,
+                                                        u32 callback)
+{
+    u32 offset = 5;
+    u8 objectCount;
+    u32 recoveryHp = 0;
+    u32 recoveryMp = 0;
+    bool foundSettlement = false;
+
+    if (packet == NULL || eventType != 7 || packetLen < 5 ||
+        packet[0] != 'W' || packet[1] != 'T' ||
+        (((u32)packet[2] << 8) | packet[3]) != packetLen)
+    {
+        return;
+    }
+    objectCount = packet[4];
+    for (u8 index = 0; index < objectCount; ++index)
+    {
+        u16 objectLen;
+
+        if (offset + 6u > packetLen)
+            return;
+        objectLen = (u16)(((u16)packet[offset + 4] << 8) | packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > packetLen)
+            return;
+        if (packet[offset] == 1 && packet[offset + 1] == 4 &&
+            packet[offset + 2] == 7 &&
+            vm_hangup_response_object_u32_field(packet + offset + 6u,
+                                                 (u16)(objectLen - 6u),
+                                                 "hp", &recoveryHp) &&
+            vm_hangup_response_object_u32_field(packet + offset + 6u,
+                                                 (u16)(objectLen - 6u),
+                                                 "mp", &recoveryMp))
+        {
+            foundSettlement = true;
+            break;
+        }
+        offset += objectLen;
+    }
+    if (!foundSettlement)
+        return;
+
+    memset(&g_vmHangupVitalForensics, 0, sizeof(g_vmHangupVitalForensics));
+    g_vmHangupVitalForensics.active = 1;
+    g_vmHangupVitalForensics.sequence = sequence;
+    g_vmHangupVitalForensics.recoveryHp = recoveryHp;
+    g_vmHangupVitalForensics.recoveryMp = recoveryMp;
+    g_vmHangupVitalForensics.responsePtr = responsePtr;
+    g_vmHangupVitalForensics.callback = callback;
+    vm_hangup_vital_forensics_log_scene_nodes("queued-before-4-7");
+}
+
+static void vm_hangup_vital_forensics_callback_begin(u32 eventType,
+                                                      u32 responsePtr,
+                                                      u32 callback)
+{
+    if (!g_vmHangupVitalForensics.active || eventType != 7 ||
+        g_vmHangupVitalForensics.responsePtr != responsePtr ||
+        g_vmHangupVitalForensics.callback != callback)
+    {
+        return;
+    }
+    g_vmHangupVitalForensics.callbackBeginSeen = 1;
+    vm_hangup_vital_forensics_log_scene_nodes("callback-before-4-7");
+}
+
+static void vm_hangup_vital_forensics_callback_end(u32 eventType,
+                                                    u32 responsePtr,
+                                                    u32 callback)
+{
+    if (!g_vmHangupVitalForensics.active || eventType != 7 ||
+        !g_vmHangupVitalForensics.callbackBeginSeen ||
+        g_vmHangupVitalForensics.responsePtr != responsePtr ||
+        g_vmHangupVitalForensics.callback != callback)
+    {
+        return;
+    }
+    g_vmHangupVitalForensics.callbackEndSeen = 1;
+    vm_hangup_vital_forensics_log_scene_nodes("callback-after-4-7");
+}
+
+static void vm_hangup_vital_forensics_note_pc(u32 pc)
+{
+    if (!g_vmHangupVitalForensics.active ||
+        !g_vmHangupVitalForensics.callbackEndSeen ||
+        g_vmHangupVitalForensics.sceneHudSeen || pc != 0x0101466Au)
+    {
+        return;
+    }
+    g_vmHangupVitalForensics.sceneHudSeen = 1;
+    vm_hangup_vital_forensics_log_scene_nodes("scene-hud-after-4-7");
+    g_vmHangupVitalForensics.active = 0;
+}
+
 static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                                                  u32 eventType, u32 sequence)
 {
@@ -5834,9 +6436,11 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawAutoDisable = 0;
     u8 sawSettlement = 0;
     u8 sawBattleAction = 0;
+    u8 sawActorOtherAck = 0;
     u8 sawModuleUpdateChunk = 0;
 
-    if (!g_vmAutomation.active || packet == NULL || eventType != 7 ||
+    if ((!g_vmAutomation.active && !g_vmHangupAutoConfirm.enabled) ||
+        packet == NULL || eventType != 7 ||
         packetLen < 5 || packet[0] != 'W' || packet[1] != 'T' ||
         (((u32)packet[2] << 8) | packet[3]) != packetLen)
         return;
@@ -5867,6 +6471,8 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
             sawShopMoney = 1;
         if (kind == 30 && subtype == 2)
             sawSceneComplete = 1;
+        if (kind == 2 && subtype == 10)
+            sawActorOtherAck = 1;
         if (kind == 4 && subtype == 5)
             sawHangup = 1;
         if (kind == 4 && subtype == 6)
@@ -5893,6 +6499,16 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     }
     if (offset != packetLen)
         return;
+
+    /* This is the only host-side bridge for the product assist.  It consumes
+     * an already received, checksum/length-validated response as read-only
+     * evidence; it neither changes this packet nor transport scheduling. */
+    vm_hangup_auto_confirm_note_network_response(
+        sawHangup != 0, sawAutoEnable != 0, sawAutoDisable != 0,
+        sawSettlement != 0, sequence);
+    if (!g_vmAutomation.active)
+        return;
+
     if (sawModuleUpdateChunk)
     {
         /* The update trace is intentionally automation-only and read-only.
@@ -5988,18 +6604,93 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     if (sawSettlement)
     {
         g_vmAutomation.hangupSettlementResponseSeen = 1;
+        ++g_vmAutomation.hangupSettlementResponseCount;
         g_vmAutomation.hangupSettlementInputCount = g_vmAutomation.inputCount;
         g_vmAutomation.hangupSettlementActionResponseCount =
             g_vmAutomation.battleActionResponseCount;
-        vm_autotest_note("automation_hangup_settlement seq=%u inputs=%u frame=%u\n",
-                         sequence, g_vmAutomation.inputCount,
-                         g_vmAutomation.renderFrames);
+        vm_autotest_note("automation_hangup_settlement seq=%u count=%u inputs=%u frame=%u\n",
+                         sequence, g_vmAutomation.hangupSettlementResponseCount,
+                         g_vmAutomation.inputCount, g_vmAutomation.renderFrames);
     }
-    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
+    if (g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY &&
+        g_vmAutomation.hangupRapidEntryAwaitResponse &&
+        sawActorOtherAck && !g_vmAutomation.hangupRapidEntryResponseSeen)
+    {
+        /* The native scene tap emits 2/10(Type=2) and the matching server
+         * response begins with 2/10.  A poll packet cannot satisfy this
+         * boundary.  Because HandleBattleEnterReq has already installed its
+         * battle-entry state, a 25/11 banner on this response cannot be a
+         * valid failure completion: it must carry 4/5. */
+        g_vmAutomation.hangupRapidEntryAwaitResponse = 0;
+        g_vmAutomation.hangupRapidEntryResponseSeen = 1;
+        g_vmAutomation.hangupRapidEntryResponseHasStart = sawHangup;
+        g_vmAutomation.hangupRapidEntryResponseSequence = sequence;
+        vm_autotest_note("automation_hangup_rapid_entry_response seq=%u "
+                         "actor_other_ack=1 battle_start=%u frame=%u\n",
+                         sequence, sawHangup, g_vmAutomation.renderFrames);
+    }
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
                      sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
-                     sawSceneComplete, sawHangup, sawAutoEnable, sawAutoDisable,
+                     sawSceneComplete, sawActorOtherAck, sawHangup, sawAutoEnable, sawAutoDisable,
                      sawSettlement, g_vmAutomation.hangupBattleResponseCount,
                      g_vmAutomation.battleActionResponseCount);
+}
+
+/* Read-only assertion used solely by the isolated vital-recovery scenario.
+ * The offsets are the same scene-actor vitals that the renderer consumes;
+ * this does not write guest memory or affect the VM schedule. */
+static bool vm_automation_scene_vitals_match(u32 roleId,
+                                             u32 hp, u32 hpMax,
+                                             u32 mp, u32 mpMax)
+{
+    u32 sceneNodeBase = 0;
+
+    if (MTK == NULL || Global_R9 == 0 || roleId == 0)
+        return false;
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0, &sceneNodeBase,
+                    sizeof(sceneNodeBase)) != UC_ERR_OK ||
+        sceneNodeBase == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < 8; ++i)
+    {
+        u32 node = sceneNodeBase + i * 340u;
+        u32 nodeRoleId = 0;
+        u32 nodeHp = 0;
+        u32 nodeMp = 0;
+        u32 nodeHpMax = 0;
+        u32 nodeMpMax = 0;
+
+        if (uc_mem_read(MTK, node + 0x64, &nodeRoleId,
+                        sizeof(nodeRoleId)) != UC_ERR_OK ||
+            nodeRoleId != roleId)
+        {
+            continue;
+        }
+        if (uc_mem_read(MTK, node + 0xB4, &nodeHp, sizeof(nodeHp)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xB8, &nodeMp, sizeof(nodeMp)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xBC, &nodeHpMax,
+                        sizeof(nodeHpMax)) != UC_ERR_OK ||
+            uc_mem_read(MTK, node + 0xC0, &nodeMpMax,
+                        sizeof(nodeMpMax)) != UC_ERR_OK)
+        {
+            return false;
+        }
+        if (nodeHp == hp && nodeHpMax == hpMax &&
+            nodeMp == mp && nodeMpMax == mpMax)
+        {
+            vm_autotest_note("automation_hangup_vital_scene_observed "
+                             "node=%u actorId=%u battleHp=%u/%u "
+                             "battleMp=%u/%u\n",
+                             i, nodeRoleId, nodeHp, nodeHpMax,
+                             nodeMp, nodeMpMax);
+            return true;
+        }
+        return false;
+    }
+    return false;
 }
 
 static void vm_automation_tick(void)
@@ -6027,6 +6718,16 @@ static void vm_automation_tick(void)
                 ? 60000u : g_vmAutomation.stepTimeoutMs;
         if (g_vmAutomation.stage == VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL)
             stageTimeoutMs = 45000u;
+        else if (g_vmAutomation.stage ==
+                 VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE)
+        {
+            /* A full three-target automatic round already consumes most of
+             * the normal 15-second UI step.  The service then deliberately
+             * honours the persisted eight-second reward window before the
+             * next 4/5.  This test boundary must cover both real phases;
+             * it changes only automation timeout accounting. */
+            stageTimeoutMs = 60000u;
+        }
         else if (g_vmAutomation.stage ==
                  VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_CANCEL_RESPONSE)
             stageTimeoutMs = 30000u;
@@ -6320,20 +7021,27 @@ static void vm_automation_tick(void)
             else if (g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
                      g_vmAutomation.scenario ==
-                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE)
+                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY)
             {
                 if (g_vmAutomation.hangupAutoEnableResponseSeen)
                 {
                     vm_automation_request_capture(
                         g_vmAutomation.scenario ==
-                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
-                            ? "hangup-auto-reward-continue-start"
-                            : "hangup-auto-terminal-start");
+                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL
+                            ? "hangup-auto-terminal-start"
+                            : (g_vmAutomation.scenario ==
+                                   VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY
+                                ? "hangup-auto-rapid-entry-start"
+                                : "hangup-auto-reward-continue-start"));
                     vm_automation_set_stage(
                         g_vmAutomation.scenario ==
-                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE
-                            ? VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE
-                            : VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL,
+                                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL
+                            ? VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL
+                            : VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE,
                         "three-enemy-auto-round-rendered");
                 }
             }
@@ -6380,11 +7088,113 @@ static void vm_automation_tick(void)
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE:
-        /* No tap is scheduled after 4/7.  A second 4/5 alone is insufficient:
-         * it may parse behind the still-visible reward panel.  Require the
-         * native auto timer to submit and receive one more 4/6 action after
-         * that second start, while input remains unchanged. */
+        if (g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY)
+        {
+            /* The test fixture starts at 80/295,70/205 and its one terminal
+             * 4/7 restores +15/+10.  Wait for the client to leave the result
+             * screen through its own 25/5, then read the rendered scene
+             * actor; do not use the service-side role as proof. */
+            if (g_vmAutomation.hangupSettlementResponseSeen &&
+                g_vmHangupAutoConfirm.confirmPressCount != 0 &&
+                g_vmHangupAutoConfirm.clientExitCount != 0 &&
+                g_vmAutomation.initialSceneScreen != 0 &&
+                vmAddedScreen == g_vmAutomation.initialSceneScreen &&
+                vm_automation_scene_vitals_match(810001u, 95u, 295u,
+                                                 80u, 205u))
+            {
+                vm_automation_request_capture("hangup-vitals-scene-restored");
+                vm_automation_finish(
+                    1,
+                    "native-4-7-25-5-scene-node-hp-mp-match");
+            }
+            break;
+        }
+        if (g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY)
+        {
+            /* This touch is deliberately gated by the real 4/7 render,
+             * the product helper's native 25/5, and restoration of the
+             * original scene owner.  It does not use a guessed delay and is
+             * delivered through the regular hardware input queue. */
+            if (g_vmAutomation.hangupSettlementResponseSeen &&
+                g_vmHangupAutoConfirm.confirmPressCount != 0 &&
+                g_vmHangupAutoConfirm.clientExitCount != 0 &&
+                !g_vmAutomation.hangupRapidEntryTapSent &&
+                g_vmAutomation.initialSceneScreen != 0 &&
+                vmAddedScreen == g_vmAutomation.initialSceneScreen &&
+                g_vmAutomation.renderFrames >
+                    g_vmAutomation.hangupSettlementInputCount)
+            {
+                /* Prove that the following 4/5 is parsed as a fresh battle
+                 * start, rather than reusing the first round's observation. */
+                g_vmAutomation.battleStartHandlerSeen = 0;
+                g_vmAutomation.battleSceneCharListSeen = 0;
+                g_vmAutomation.battleStartHandlerFrame = 0;
+                g_vmAutomation.battleSceneCharListFrame = 0;
+                if (vm_automation_issue_tap(
+                        50, 350,
+                        "scene-hangup-rapid-entry"))
+            {
+                    g_vmAutomation.hangupRapidEntryTapSent = 1;
+                    g_vmAutomation.hangupRapidEntryAwaitResponse = 1;
+                    g_vmAutomation.hangupRapidEntryTapFrame =
+                        g_vmAutomation.renderFrames;
+                    g_vmAutomation.hangupRapidEntrySettlementBaseline =
+                        g_vmAutomation.hangupSettlementResponseCount;
+                    vm_autotest_note("automation_hangup_rapid_entry_tap "
+                                     "frame=%u input_count=%u "
+                                     "client_exit=%u\n",
+                                     g_vmAutomation.hangupRapidEntryTapFrame,
+                                     g_vmAutomation.inputCount,
+                                     g_vmHangupAutoConfirm.clientExitCount);
+                }
+            }
+            if (g_vmAutomation.hangupRapidEntryResponseSeen &&
+                !g_vmAutomation.hangupRapidEntryResponseHasStart)
+            {
+                vm_automation_request_capture(
+                    "hangup-rapid-entry-banner-without-battle-start");
+                vm_automation_finish(
+                    0, "hangup-rapid-entry-response-missing-4-5-start");
+            }
+            else if (g_vmAutomation.hangupRapidEntryResponseHasStart &&
+                     g_vmAutomation.battleStartHandlerSeen &&
+                     !g_vmAutomation.hangupRapidEntryBattleStarted)
+            {
+                /* The direct request has entered a real second battle inside
+                 * the rapid-entry audit window.  Do not stop at its 4/5: this regression
+                 * is specifically about the terminal 4/6 -> 4/7 lifecycle
+                 * after the group-kill action. */
+                g_vmAutomation.hangupRapidEntryBattleStarted = 1;
+                vm_autotest_note("automation_hangup_rapid_entry_second_start "
+                                 "seq=%u settlement_baseline=%u frame=%u\n",
+                                 g_vmAutomation.hangupRapidEntryResponseSequence,
+                                 g_vmAutomation.hangupRapidEntrySettlementBaseline,
+                                 g_vmAutomation.renderFrames);
+            }
+            else if (g_vmAutomation.hangupRapidEntryBattleStarted &&
+                     g_vmAutomation.hangupSettlementResponseCount >
+                         g_vmAutomation.hangupRapidEntrySettlementBaseline &&
+                     g_vmHangupAutoConfirm.confirmPressCount >= 2u &&
+                     g_vmHangupAutoConfirm.clientExitCount >= 2u)
+            {
+                vm_automation_request_capture(
+                    "hangup-rapid-entry-reward-settlement-closed");
+                vm_automation_finish(
+                    1,
+                    "rapid-entry-group-kill-received-4-7-and-native-25-5");
+            }
+            break;
+        }
+        /* The scenario itself never taps through 4/7.  When the explicit
+         * CBE_HANGUP_AUTO_CONFIRM fixture is enabled, the product helper must
+         * first prove the rendered phase-7 panel, submit one hardware tap,
+         * and receive the client-owned 25/5.  A second 4/5 alone would be
+         * insufficient because it could parse behind the old BattleScreen. */
         if (g_vmAutomation.hangupSettlementResponseSeen &&
+            g_vmHangupAutoConfirm.confirmPressCount != 0 &&
+            g_vmHangupAutoConfirm.clientExitCount != 0 &&
             g_vmAutomation.hangupBattleResponseCount >= 2u &&
             g_vmAutomation.battleActionResponseCount >
                 g_vmAutomation.hangupSettlementActionResponseCount &&
@@ -6392,7 +7202,7 @@ static void vm_automation_tick(void)
         {
             vm_automation_request_capture("hangup-auto-reward-continued");
             vm_automation_finish(1,
-                                 "native-4-7-then-next-4-5-and-4-6-without-reward-input");
+                                 "rendered-4-7-auto-input-native-25-5-next-4-5-and-4-6");
         }
         break;
     default:
@@ -6579,6 +7389,35 @@ static void vm_autotest_parse_actions(const char *script)
     }
 }
 
+static void vm_hangup_auto_confirm_init(int argc, char *args[])
+{
+    const char *configured = getenv("CBE_HANGUP_AUTO_CONFIRM");
+    bool enabled = false;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        static const char option[] = "--hangup-auto-confirm=";
+        if (strcmp(args[i], "--hangup-auto-confirm") == 0)
+            configured = "1";
+        else if (strncmp(args[i], option, sizeof(option) - 1u) == 0)
+            configured = args[i] + sizeof(option) - 1u;
+    }
+    if (configured != NULL && configured[0] != 0 &&
+        strcmp(configured, "0") != 0 &&
+        strcmp(configured, "off") != 0 &&
+        strcmp(configured, "false") != 0)
+    {
+        enabled = true;
+    }
+    memset(&g_vmHangupAutoConfirm, 0, sizeof(g_vmHangupAutoConfirm));
+    g_vmHangupAutoConfirm.enabled = enabled ? 1u : 0u;
+    if (enabled)
+    {
+        printf("[info][hangup] reward_auto_confirm enabled "
+               "mode=hardware-input-after-rendered-4/7\n");
+    }
+}
+
 static void vm_automation_init_config(int argc, char *args[])
 {
     const char *scenario = getenv("CBE_AUTOMATION_SCENARIO");
@@ -6613,6 +7452,10 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL;
     else if (strcmp(scenario, "hangup-auto-reward-continue-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE;
+    else if (strcmp(scenario, "hangup-auto-vitals-recovery-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY;
+    else if (strcmp(scenario, "hangup-auto-rapid-entry-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY;
     else
         return;
     if (artifactDir == NULL || artifactDir[0] == 0 ||
@@ -6652,6 +7495,7 @@ static void vm_autotest_init(int argc, char *args[])
     const char *envMaxMs = getenv("CBE_AUTOTEST_MAX_MS");
     const char *envActions = getenv("CBE_AUTOTEST_ACTIONS");
 
+    vm_hangup_auto_confirm_init(argc, args);
     vm_automation_init_config(argc, args);
     if (envAuto && strcmp(envAuto, "0") != 0)
         g_autotestEnabled = 1;
@@ -8584,7 +9428,9 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
             u32 battleX = 0;
             u32 battleY = 0;
             u32 battleHp = 0;
+            u32 battleMp = 0;
             u32 battleHpMax = 0;
+            u32 battleMpMax = 0;
             uc_mem_read(MTK, node + 0x64, &actorId, sizeof(actorId));
             uc_mem_read(MTK, node + 0x18, &x, sizeof(x));
             uc_mem_read(MTK, node + 0x1A, &y, sizeof(y));
@@ -8597,13 +9443,16 @@ static void vm_autotest_dump_scene_tables(u32 elapsedMs)
             uc_mem_read(MTK, node + 0x11E, &targetX, sizeof(targetX));
             uc_mem_read(MTK, node + 0x120, &targetY, sizeof(targetY));
             uc_mem_read(MTK, node + 0xB4, &battleHp, sizeof(battleHp));
+            uc_mem_read(MTK, node + 0xB8, &battleMp, sizeof(battleMp));
             uc_mem_read(MTK, node + 0xBC, &battleHpMax, sizeof(battleHpMax));
+            uc_mem_read(MTK, node + 0xC0, &battleMpMax, sizeof(battleMpMax));
             uc_mem_read(MTK, node + 0xF0, &battleX, sizeof(battleX));
             uc_mem_read(MTK, node + 0xF4, &battleY, sizeof(battleY));
             if (actorId != 0 || active != 0 || nodeKind != 0 || promptKind != 0)
             {
-                vm_autotest_note("scene_probe_node[%u] actorId=%u pos=(%u,%u) battlePos=(%u,%u) battleHp=%u/%u labelPtr=%08x kind=%u prompt=%u active=%u visual=(%u,%u) target=(%u,%u)\n",
+                vm_autotest_note("scene_probe_node[%u] actorId=%u pos=(%u,%u) battlePos=(%u,%u) battleHp=%u/%u battleMp=%u/%u labelPtr=%08x kind=%u prompt=%u active=%u visual=(%u,%u) target=(%u,%u)\n",
                                  i, actorId, x, y, battleX, battleY, battleHp, battleHpMax,
+                                 battleMp, battleMpMax,
                                  labelPtr, nodeKind, promptKind, active, visualVariant,
                                  visualGroup, targetX, targetY);
             }
@@ -17636,6 +18485,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_hangup_transition_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_module_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
+    vm_hangup_vital_forensics_note_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
 

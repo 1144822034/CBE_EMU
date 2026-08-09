@@ -8,7 +8,7 @@
  *
  * Usage:
  *   php scripts/automation-shop-return-hangup-fixture.php create <database>
- *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|teleport-stone-c00]
+ *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00]
  *   php scripts/automation-shop-return-hangup-fixture.php client-login <nvram-file>
  *   php scripts/automation-shop-return-hangup-fixture.php cleanup <database>
  */
@@ -120,10 +120,40 @@ $db = pdo($database);
 $account = 'guest00001';
 $roleId = 810001;
 $profile = $argv[3] ?? 'hangup-peach';
+$backpackItemCount = 0;
+$nextBackpackSeq = 1;
 if ($profile === 'hangup-peach') {
     $scene = hex2bin('3031CCD2BBA8B5BA5F30312E736365'); /* 01桃花岛_01.sce, GBK */
     $posX = 146;
     $posY = 349;
+    $hp = 120;
+    $mp = 100;
+} elseif ($profile === 'hangup-vitals') {
+    /* Same authored scene node as the real hangup flow, but deliberately
+     * below maximum vitals.  The regression runner uses an explicit service
+     * recovery fixture and must prove that the next native battle starts from
+     * the post-4/7 absolute state rather than a stale pre-settlement cache. */
+    $scene = hex2bin('3031CCD2BBA8B5BA5F30312E736365'); /* 01桃花岛_01.sce, GBK */
+    $posX = 146;
+    $posY = 349;
+    $hp = 80;
+    $mp = 70;
+} elseif ($profile === 'hangup-vitals-flask') {
+    /* Identical initial vitals to hangup-vitals, but the recovery originates
+     * from the actual 802/803 reservoir items.  This keeps the client-side
+     * expected result (95/295,80/205) fixed while proving that 4/6's cached
+     * MP and 4/7's HP/MP deltas agree with the durable item consumption path. */
+    $scene = hex2bin('3031CCD2BBA8B5BA5F30312E736365'); /* 01桃花岛_01.sce, GBK */
+    $posX = 146;
+    $posY = 349;
+    $hp = 80;
+    $mp = 70;
+    /* account_roles is the authoritative in-memory allocation bound used
+     * while loading account_role_backpack.  Keep it consistent with the two
+     * rows below; otherwise normalization correctly treats them as outside
+     * the role's declared backpack and the test never reaches flask use. */
+    $backpackItemCount = 2;
+    $nextBackpackSeq = 3;
 } elseif ($profile === 'teleport-stone-c00') {
     /* Exact resource key: this is not interchangeable with 00蓬莱仙岛_03
      * or 00_蓬莱仙岛03.  (157,47) is the authored safe landing beside the
@@ -131,6 +161,8 @@ if ($profile === 'hangup-peach') {
     $scene = hex2bin('633030C5EEC0B3CFC9B5BA5F30332E736365'); /* c00蓬莱仙岛_03.sce, GBK */
     $posX = 157;
     $posY = 47;
+    $hp = 120;
+    $mp = 100;
 } else {
     throw new InvalidArgumentException('unknown isolated automation fixture profile');
 }
@@ -155,8 +187,9 @@ try {
         . 'account_id,role_id,role_index,role_name,job,sex,backpack_capacity,'
         . 'level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,'
         . 'backpack_item_count,designation_id,next_backpack_seq) '
-        . 'VALUES(?,?,0,?,1,1,20,5,1250,120,120,100,100,100000,1000,?,?,?,0,0,1)'
-    )->execute([$account, $roleId, 'AutoHangup', $scene, $posX, $posY]);
+        . 'VALUES(?,?,0,?,1,1,20,5,1250,?,120,?,100,100000,1000,?,?,?, ?,0,?)'
+    )->execute([$account, $roleId, 'AutoHangup', $hp, $mp, $scene, $posX, $posY,
+                $backpackItemCount, $nextBackpackSeq]);
     /* Keep one real, durable equip.dsh weapon on the isolated role.  Besides
      * matching a normal new-character state, this makes the client execute
      * its native CalcEquipStatBonus path during scene status reconstruction.
@@ -167,6 +200,20 @@ try {
         . 'account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) '
         . 'VALUES(?,?,?,?,?,?,?)'
     )->execute([$account, $roleId, 0, 1001, 0, 50, 50]);
+    if ($profile === 'hangup-vitals-flask') {
+        /* item_count is the native reservoir amount for 802/803, not a stack
+         * quantity.  One terminal result consumes these exact 15/10 units. */
+        $db->prepare(
+            'INSERT INTO account_role_backpack('
+            . 'account_id,role_id,slot_index,item_id,item_seq,item_count,'
+            . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
+        )->execute([$account, $roleId, 0, 802, 1, 15, 0, 0, 0]);
+        $db->prepare(
+            'INSERT INTO account_role_backpack('
+            . 'account_id,role_id,slot_index,item_id,item_seq,item_count,'
+            . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
+        )->execute([$account, $roleId, 1, 803, 2, 10, 0, 0, 0]);
+    }
     $db->commit();
     echo "seeded guest00001 role=810001 profile=$profile in isolated automation database\n";
 } catch (Throwable $error) {

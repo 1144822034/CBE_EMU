@@ -222,6 +222,89 @@ typedef struct
     char actorResource[64];
 } vm_net_mock_sce_combat_spawn;
 
+/*
+ * The leading SCE2 prop-scatter section is not decorative metadata: the
+ * scene loader instantiates one live scene node for every placement before it
+ * reaches the combat-spawn records.  `mmBattle:HandleBattleStartMsg(0x66CC)`
+ * addresses that same live-node table, so a battleinfo scene index must
+ * include these placements.  It must not use the ordinal among combat spawns.
+ *
+ * Known SCE2 form:
+ *   u16 kind=1, u16 version=1, u16 placement_count,
+ *   u16 scatter_group=1, u16 reserved=0, u16 template_count,
+ *   template_count { u8 length, bytes actor_resource },
+ *   placement_count { u16 template_index, u16 x, u16 y, u16 flags }.
+ */
+static bool vm_net_mock_parse_sce_prop_scatter_at(const u8 *data, u32 len,
+                                                  u32 off,
+                                                  u32 *placementCountOut,
+                                                  u32 *endOut)
+{
+    u32 pos = off;
+    u16 placementCount = 0;
+    u16 templateCount = 0;
+
+    if (placementCountOut != NULL)
+        *placementCountOut = 0;
+    if (endOut != NULL)
+        *endOut = 0;
+    if (data == NULL || off + 12 > len ||
+        vm_net_mock_read_le16_at(data, pos) != 1 ||
+        vm_net_mock_read_le16_at(data, pos + 2) != 1 ||
+        vm_net_mock_read_le16_at(data, pos + 6) != 1 ||
+        vm_net_mock_read_le16_at(data, pos + 8) != 0)
+    {
+        return false;
+    }
+
+    placementCount = vm_net_mock_read_le16_at(data, pos + 4);
+    templateCount = vm_net_mock_read_le16_at(data, pos + 10);
+    if (templateCount == 0)
+    {
+        if (placementCount != 0)
+            return false;
+        if (endOut != NULL)
+            *endOut = pos + 12;
+        return true;
+    }
+    pos += 12;
+
+    for (u16 templateIndex = 0; templateIndex < templateCount; ++templateIndex)
+    {
+        char actorResource[96];
+        u8 nameLen = 0;
+
+        if (pos >= len)
+            return false;
+        nameLen = data[pos++];
+        if (nameLen == 0 || nameLen >= sizeof(actorResource) ||
+            pos + nameLen > len)
+        {
+            return false;
+        }
+        memcpy(actorResource, data + pos, nameLen);
+        actorResource[nameLen] = 0;
+        if (!vm_net_mock_str_ends_with(actorResource, ".actor"))
+            return false;
+        pos += nameLen;
+    }
+
+    if (placementCount > (len - pos) / 8u)
+        return false;
+    for (u16 placementIndex = 0; placementIndex < placementCount; ++placementIndex)
+    {
+        if (vm_net_mock_read_le16_at(data, pos) >= templateCount)
+            return false;
+        pos += 8;
+    }
+
+    if (placementCountOut != NULL)
+        *placementCountOut = placementCount;
+    if (endOut != NULL)
+        *endOut = pos;
+    return true;
+}
+
 static bool vm_net_mock_parse_sce_combat_spawn_at(
     const u8 *data, u32 len, u32 off,
     vm_net_mock_sce_combat_spawn *spawnOut, u32 *endOut)
@@ -290,16 +373,25 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
     u8 data[8192];
     u32 len = 0;
     u32 start = 0;
-    u32 spawnIndex = 0;
+    u32 scanStart = 0;
+    u32 propNodeCount = 0;
+    u32 sceneNodeIndex = 0;
+    u32 combatOrdinal = 0;
 
     if (scene == NULL || scene[0] == 0 || actorId == 0)
         return false;
 
     len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
     start = vm_net_mock_scene_payload_start(data, len);
-    if (len != 0 && start != 0)
+    if (len != 0 && start != 0 &&
+        vm_net_mock_parse_sce_prop_scatter_at(data, len, start,
+                                               &propNodeCount, &scanStart))
     {
-        for (u32 off = start; off + 14 <= len; ++off)
+        /* Node 0 is the local-player row.  The first static placement is
+         * runtime row 1, so the battle scene index is exactly the number of
+         * preceding static placements plus the combat-record ordinal. */
+        sceneNodeIndex = propNodeCount;
+        for (u32 off = scanStart; off + 14 <= len; ++off)
         {
             vm_net_mock_sce_combat_spawn spawn;
             u32 end = 0;
@@ -309,25 +401,34 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
             {
                 continue;
             }
-            /* Scene actor slot zero is reserved by the runtime; recovered
-             * combat spawns occupy subsequent slots in SCE record order.
-             * Autonomous battle creation has no client-selected node, so
-             * it uses the same SCE record catalog that originally creates
-             * the live scene nodes.  Normal collision challenges must not
-             * use this selector: their request already identifies the
-             * exact live node selected by the client. */
-            ++spawnIndex;
+            ++combatOrdinal;
+            ++sceneNodeIndex;
             if (spawn.actorId == actorId)
             {
+                /* The main CBE scene table has rows 0..24.  Sending any
+                 * other index to mmBattle 0x66CC makes it copy an invalid
+                 * scene node into a battle fighter. */
+                if (sceneNodeIndex >= 25)
+                {
+                    printf("[error][network] mock_scene_monster_target scene=%s actor=%u "
+                           "runtime_index=%u action=reject-out-of-range "
+                           "evidence=mmBattle:0x66CC scene-node-table[25]\n",
+                           scene, actorId, sceneNodeIndex);
+                    return false;
+                }
                 if (indexOut)
-                    *indexOut = spawnIndex;
+                    *indexOut = sceneNodeIndex;
                 if (posxOut)
                     *posxOut = spawn.x;
                 if (posyOut)
                     *posyOut = spawn.y;
-                printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u index=%u pos=(%u,%u) name=%s actor_resource=%s source=SCE2-combat-spawn\n",
-                       scene, scene, actorId, spawnIndex,
-                       spawn.x, spawn.y, spawn.displayName,
+                printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u "
+                       "runtime_index=%u prop_nodes=%u combat_ordinal=%u pos=(%u,%u) "
+                       "name=%s actor_resource=%s source=SCE2-static-node-order "
+                       "evidence=runtime:01桃花岛_01 first-combat=6 third-combat=8 "
+                       "+ mmBattle:0x66CC\n",
+                       scene, scene, actorId, sceneNodeIndex, propNodeCount,
+                       combatOrdinal, spawn.x, spawn.y, spawn.displayName,
                        spawn.actorResource);
                 return true;
             }

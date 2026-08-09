@@ -905,6 +905,10 @@ static void vm_net_mock_async_drain_completions(void)
         }
         vm_client_capture_hangup_battle_start_response(completion,
                                                        &remoteObservation);
+        vm_hangup_vital_forensics_capture_response(
+            completion->response, completion->responseLen,
+            completion->eventType, completion->sequence,
+            responsePtr, channel->callback);
         /* Scenario automation observes the exact downlink packet before it is
          * copied to guest RAM.  It never changes bytes, queues, callbacks or
          * scheduler ordering. */
@@ -1014,6 +1018,10 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
     if (uc_mem_read(MTK, dataPtr, request, readLen) != UC_ERR_OK)
         return;
+    /* Read-only observation for the opt-in scene-hangup reward confirmer.
+     * It recognises the client-owned 25/5 emitted after a real input event;
+     * request bytes and transport queue remain unchanged. */
+    vm_hangup_auto_confirm_note_uplink(request, readLen);
     if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, request, readLen))
     {
         printf("[warn][network] client queue full connect=%u len=%u\n",
@@ -1039,8 +1047,10 @@ static void vm_net_mock_poll_push_if_due(void)
             break;
         }
     }
-    if (channel == NULL ||
-        scheduler_find_pending_net_event(7, channel->callback, channel->context) != NULL)
+    if (channel == NULL)
+        return;
+    if (scheduler_find_pending_net_event(7, channel->callback,
+                                         channel->context) != NULL)
         return;
     if (vm_client_enqueue(VM_CLIENT_JOB_SCENE_POLL, channel->connectId, NULL, 0))
         lastPollTick = g_schedulerTick;

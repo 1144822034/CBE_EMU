@@ -2282,6 +2282,33 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
     dst->resist += src->resist;
 }
 
+/* This is the server-authoritative definition of an equipped state that may
+ * affect a character.  Normal equip handlers enforce it before persistence;
+ * it is also used when a historical database row bypassed that handler, so
+ * battle calculation and the 7/7 equipment bootstrap can never disagree. */
+static bool vm_net_mock_role_equipment_slot_is_usable(
+    const vm_net_mock_role_state *role, u32 slot)
+{
+    const vm_net_mock_equipped_item_state *equipped = NULL;
+    const vm_net_mock_equipment_catalog_item *item = NULL;
+    u32 level = 0;
+
+    if (role == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        return false;
+    equipped = &role->equippedItems[slot];
+    if (equipped->itemId == 0)
+        return false;
+    item = vm_net_mock_find_equipment_catalog_item(equipped->itemId);
+    if (item == NULL || item->slot != slot)
+        return false;
+    /* EXP is the persisted source of truth; `level` is a derived/cache field
+     * and may still carry a pre-migration value during a role load. */
+    level = vm_net_mock_role_level_from_exp(role->exp);
+    if (level == 0)
+        level = 1;
+    return item->levelRequired <= level;
+}
+
 static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
                                                      u32 level,
                                                      vm_net_mock_equipment_bonus *bonus)
@@ -2306,10 +2333,10 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
          * server-only stat bonus. */
         if (itemId == 0 || equipped->durability == 0)
             continue;
-        item = vm_net_mock_find_equipment_catalog_item(itemId);
-        if (item == NULL || item->slot != slot)
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot))
             continue;
-        if (item->levelRequired > level)
+        item = vm_net_mock_find_equipment_catalog_item(itemId);
+        if (item == NULL)
             continue;
         vm_net_mock_equipment_bonus_add(bonus, &item->bonus);
         /* Match scene_rebuild_status_meter_node: the direct equip.dsh fields
@@ -3509,6 +3536,20 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
     u32 damage = vm_net_mock_damage_after_defense(attack, defense);
 
+    if (g_vm_net_mock_battle_active_enemy_modifier_current.defense < 0)
+    {
+        u32 reduction = (u32)(0 - g_vm_net_mock_battle_active_enemy_modifier_current.defense);
+        defense = defense > reduction ? defense - reduction : 0;
+        damage = vm_net_mock_damage_after_defense(attack, defense);
+    }
+    else if (g_vm_net_mock_battle_active_enemy_modifier_current.defense > 0)
+    {
+        uint64_t raised = (uint64_t)defense +
+                          (u32)g_vm_net_mock_battle_active_enemy_modifier_current.defense;
+        defense = raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
+        damage = vm_net_mock_damage_after_defense(attack, defense);
+    }
+
     if (enemyHpCurrent == 0)
         return 0;
     if (damage == 0)
@@ -3554,6 +3595,17 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
 
     defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_DEFENSE",
                                          monsterStats.defense);
+    if (g_vm_net_mock_battle_active_enemy_modifier_current.defense < 0)
+    {
+        u32 reduction = (u32)(0 - g_vm_net_mock_battle_active_enemy_modifier_current.defense);
+        defense = defense > reduction ? defense - reduction : 0;
+    }
+    else if (g_vm_net_mock_battle_active_enemy_modifier_current.defense > 0)
+    {
+        uint64_t raised = (uint64_t)defense +
+                          (u32)g_vm_net_mock_battle_active_enemy_modifier_current.defense;
+        defense = raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
+    }
     damage = vm_net_mock_damage_after_defense(rawDamage, defense);
     if (damage < baseDamage)
         damage = baseDamage;
@@ -3569,7 +3621,16 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE",
                                              vm_net_mock_battle_role_defense_default());
-    u32 damage = vm_net_mock_damage_after_defense(attack, defense);
+    u32 damage = 0;
+
+    {
+        int64_t modified = (int64_t)attack +
+                           g_vm_net_mock_battle_active_enemy_modifier_current.attack +
+                           g_vm_net_mock_battle_active_enemy_modifier_current.strength;
+        attack = modified <= 0 ? 0 :
+                 (modified > 0xffffffffll ? 0xffffffffu : (u32)modified);
+    }
+    damage = vm_net_mock_damage_after_defense(attack, defense);
 
     if (roleHpCurrent == 0)
         return 0;
@@ -3884,6 +3945,13 @@ static void vm_net_mock_role_normalize_equipment_instances(
     }
 }
 
+/* Defined beside the durable-instance backpack helper below.  This repair is
+ * deliberately only run while loading persisted role state: normal equip
+ * requests already enforce the level requirement before an item reaches an
+ * equipped slot. */
+static bool vm_net_mock_role_recover_overlevel_equipment(
+    vm_net_mock_role_state *role, u32 *movedOut, u32 *blockedOut);
+
 static bool vm_net_mock_backpack_sequence_present(
     const vm_net_mock_backpack_item_state *items,
     u32 itemCount,
@@ -4086,7 +4154,14 @@ static bool vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 continue;
             }
         }
-        if (equipment == NULL && item.itemId != 921 && stackLimit != 0)
+        /* 802/803 carry their remaining HP/MP reservoir in `count`, while
+         * their one visible client row is reconstructed with wire count 1
+         * followed by 7/11.  They are neither ordinary stacks nor a batch of
+         * physical items; splitting their stored amount here creates duplicate
+         * sequences and lets later count sync target a different client row. */
+        if (equipment == NULL && item.itemId != 921 &&
+            !vm_net_mock_backpack_item_id_uses_reservoir_count(item.itemId) &&
+            stackLimit != 0)
         {
             /* Ordinary item rows must honor item.dsh 堆叠数.  Older role
              * snapshots could have been created by the former unbounded
@@ -4131,7 +4206,9 @@ static bool vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 instanceItem.count = 1;
             if (item.itemId == 921)
                 instanceItem.count = 1;
-            if (equipment == NULL && item.itemId != 921 && stackLimit != 0)
+            if (equipment == NULL && item.itemId != 921 &&
+                !vm_net_mock_backpack_item_id_uses_reservoir_count(item.itemId) &&
+                stackLimit != 0)
             {
                 u32 consumed = instance * stackLimit;
                 u32 remaining = item.count > consumed ? item.count - consumed : 0;
@@ -4274,24 +4351,24 @@ static bool vm_net_mock_role_migrate_legacy_scene_key(vm_net_mock_role_state *ro
 }
 
 /* A battle session serial prevents duplicate status packets from granting a
- * second reward, but it is deliberately process-local.  The rate limit is a
- * different contract: it belongs to the persisted account/role identity and
- * must survive reconnects and a service restart. */
+ * second reward.  Separately, rapid battle entries are persisted for audit;
+ * unlike the removed reward cooldown, that audit never changes a legal
+ * battle's reward or the 4/5 -> 4/6 -> 4/7 client lifecycle. */
 typedef struct
 {
     uint64_t value;
     bool found;
     bool invalid;
-} vm_mock_mysql_monster_reward_cooldown_context;
+} vm_mock_mysql_rapid_battle_entry_context;
 
-static bool g_vm_net_mock_monster_reward_cooldown_schema_prepared = false;
+static bool g_vm_net_mock_rapid_battle_entry_schema_prepared = false;
 
-static bool vm_mock_mysql_monster_reward_cooldown_row(
+static bool vm_mock_mysql_rapid_battle_entry_row(
     void *context_value, unsigned int column_count,
     const char *const *values, const size_t *lengths)
 {
-    vm_mock_mysql_monster_reward_cooldown_context *context =
-        (vm_mock_mysql_monster_reward_cooldown_context *)context_value;
+    vm_mock_mysql_rapid_battle_entry_context *context =
+        (vm_mock_mysql_rapid_battle_entry_context *)context_value;
 
     if (context == NULL || context->found || column_count != 1 ||
         !vm_mock_mysql_parse_u64(values[0], lengths[0], &context->value))
@@ -4304,54 +4381,76 @@ static bool vm_mock_mysql_monster_reward_cooldown_row(
     return true;
 }
 
-static bool vm_net_mock_role_prepare_monster_reward_cooldown_schema(void)
+static bool vm_net_mock_role_prepare_rapid_battle_entry_schema(void)
 {
-    if (g_vm_net_mock_monster_reward_cooldown_schema_prepared)
+    if (g_vm_net_mock_rapid_battle_entry_schema_prepared)
         return true;
     if (!vm_mysql_exec(
-            "CREATE TABLE IF NOT EXISTS account_role_monster_reward_cooldowns ("
+            "CREATE TABLE IF NOT EXISTS account_role_battle_entry_state ("
             "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
             "role_id INT UNSIGNED NOT NULL,"
-            "last_reward_ms BIGINT UNSIGNED NOT NULL,"
+            "last_entry_ms BIGINT UNSIGNED NOT NULL,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(account_id,role_id),"
-            "CONSTRAINT fk_account_role_monster_reward_cooldowns_role "
+            "CONSTRAINT fk_account_role_battle_entry_state_role "
+            "FOREIGN KEY(account_id,role_id) REFERENCES account_roles(account_id,role_id) "
+            "ON DELETE CASCADE"
+            ") ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_rapid_battle_entry_audit ("
+            "audit_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "entered_at_ms BIGINT UNSIGNED NOT NULL,"
+            "previous_entry_ms BIGINT UNSIGNED NOT NULL,"
+            "interval_ms INT UNSIGNED NOT NULL,"
+            "source VARBINARY(48) NOT NULL,"
+            "scene_name VARBINARY(128) NOT NULL,"
+            "enemy_id INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),"
+            "PRIMARY KEY(audit_id),"
+            "KEY idx_account_role_entered(account_id,role_id,entered_at_ms),"
+            "CONSTRAINT fk_account_role_rapid_battle_entry_audit_role "
             "FOREIGN KEY(account_id,role_id) REFERENCES account_roles(account_id,role_id) "
             "ON DELETE CASCADE"
             ") ENGINE=InnoDB"))
     {
-        printf("[error][mock-service] monster_reward_cooldown_schema_prepare error=%s\n",
+        printf("[error][mock-service] rapid_battle_entry_schema_prepare error=%s\n",
                vm_mysql_last_error());
         return false;
     }
-    g_vm_net_mock_monster_reward_cooldown_schema_prepared = true;
+    g_vm_net_mock_rapid_battle_entry_schema_prepared = true;
     return true;
 }
 
-/* Returns false for a storage/identity failure.  A successful call with
- * grantedOut=false means a previous monster victory for this exact role is
- * still inside the server-authoritative eight-second window. */
-static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
-    const vm_net_mock_role_state *role, bool *grantedOut, u32 *remainingMsOut)
+static void vm_net_mock_role_record_rapid_battle_entry(
+    const vm_net_mock_role_state *role, const char *source,
+    const char *scene, u32 enemyId)
 {
     char account_hex[129];
+    char source_hex[97];
+    char scene_hex[257];
     char query[2048];
     char mysql_error[512];
-    vm_mock_mysql_monster_reward_cooldown_context now_context;
-    vm_mock_mysql_monster_reward_cooldown_context previous_context;
+    vm_mock_mysql_rapid_battle_entry_context now_context;
+    vm_mock_mysql_rapid_battle_entry_context previous_context;
     bool transaction_started = false;
     uint64_t elapsed_ms = 0;
-    uint64_t remaining_ms = 0;
+    bool rapid = false;
+    const char *safe_scene = (scene != NULL && scene[0] != 0) ? scene : "-";
+    size_t source_len = source ? strlen(source) : 0;
+    size_t scene_len = strlen(safe_scene);
 
-    if (grantedOut)
-        *grantedOut = false;
-    if (remainingMsOut)
-        *remainingMsOut = 0;
     if (role == NULL || role->roleId == 0 ||
         !vm_net_mock_mysql_account_hex(account_hex) ||
-        !vm_net_mock_role_prepare_monster_reward_cooldown_schema())
+        source_len == 0 || source_len > 48 || scene_len > 128 ||
+        vm_mysql_hex_encode(source, source_len, source_hex, sizeof(source_hex)) == 0 ||
+        vm_mysql_hex_encode(safe_scene, scene_len, scene_hex, sizeof(scene_hex)) == 0 ||
+        !vm_net_mock_role_prepare_rapid_battle_entry_schema())
     {
-        return false;
+        printf("[error][mock-service] rapid_battle_entry_record_invalid role=%u source=%s scene=%s\n",
+               role ? role->roleId : 0, source ? source : "-", safe_scene);
+        return;
     }
 
     memset(&now_context, 0, sizeof(now_context));
@@ -4361,17 +4460,17 @@ static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
     transaction_started = true;
     if (!vm_mysql_query(
             "SELECT CAST(FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000) AS UNSIGNED)",
-            vm_mock_mysql_monster_reward_cooldown_row, &now_context) ||
+            vm_mock_mysql_rapid_battle_entry_row, &now_context) ||
         now_context.invalid || !now_context.found)
     {
         goto failed;
     }
 
     snprintf(query, sizeof(query),
-             "SELECT last_reward_ms FROM account_role_monster_reward_cooldowns "
+             "SELECT last_entry_ms FROM account_role_battle_entry_state "
              "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
              account_hex, role->roleId);
-    if (!vm_mysql_query(query, vm_mock_mysql_monster_reward_cooldown_row,
+    if (!vm_mysql_query(query, vm_mock_mysql_rapid_battle_entry_row,
                         &previous_context) ||
         previous_context.invalid)
     {
@@ -4381,100 +4480,61 @@ static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
     if (previous_context.found)
     {
         if (now_context.value < previous_context.value)
-            remaining_ms = VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS;
+            rapid = true;
         else
         {
             elapsed_ms = now_context.value - previous_context.value;
-            if (elapsed_ms < VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS)
-                remaining_ms = VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS - elapsed_ms;
-        }
-        if (remaining_ms != 0)
-        {
-            if (!vm_mysql_exec("COMMIT"))
-                goto failed;
-            transaction_started = false;
-            if (remainingMsOut)
-                *remainingMsOut = (u32)remaining_ms;
-            return true;
+            rapid = elapsed_ms <= VM_NET_MOCK_RAPID_BATTLE_ENTRY_WINDOW_MS;
         }
     }
 
     snprintf(query, sizeof(query),
-             "INSERT INTO account_role_monster_reward_cooldowns "
-             "(account_id,role_id,last_reward_ms) "
+             "INSERT INTO account_role_battle_entry_state "
+             "(account_id,role_id,last_entry_ms) "
              "VALUES(CAST(X'%s' AS CHAR),%u,%llu) "
-             "ON DUPLICATE KEY UPDATE last_reward_ms=VALUES(last_reward_ms)",
+             "ON DUPLICATE KEY UPDATE last_entry_ms=VALUES(last_entry_ms)",
              account_hex, role->roleId, (unsigned long long)now_context.value);
-    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+    if (!vm_mysql_exec(query))
+        goto failed;
+    if (rapid)
+    {
+        uint64_t interval_ms = now_context.value >= previous_context.value ?
+                                   now_context.value - previous_context.value : 0;
+
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_rapid_battle_entry_audit "
+                 "(account_id,role_id,entered_at_ms,previous_entry_ms,interval_ms,source,scene_name,enemy_id) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%llu,%llu,%llu,X'%s',X'%s',%u)",
+                 account_hex, role->roleId,
+                 (unsigned long long)now_context.value,
+                 (unsigned long long)previous_context.value,
+                 (unsigned long long)interval_ms,
+                 source_hex, scene_hex, enemyId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
         goto failed;
     transaction_started = false;
-    if (grantedOut)
-        *grantedOut = true;
-    return true;
+    if (rapid)
+    {
+        printf("[info][mock-service] rapid_battle_entry_recorded account=%s role=%u interval_ms=%llu source=%s scene=%s enemy=%u\n",
+               g_vm_mock_service_active_account_id ?
+                   g_vm_mock_service_active_account_id : "-",
+               role->roleId,
+               (unsigned long long)(now_context.value >= previous_context.value ?
+                   now_context.value - previous_context.value : 0),
+               source, safe_scene, enemyId);
+    }
+    return;
 
 failed:
     snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
     if (transaction_started)
         (void)vm_mysql_exec("ROLLBACK");
-    printf("[error][mock-service] monster_reward_cooldown_claim_failed account=%s role=%u error=%s\n",
+    printf("[error][mock-service] rapid_battle_entry_record_failed account=%s role=%u error=%s\n",
            g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
            role ? role->roleId : 0, mysql_error);
-    return false;
-}
-
-/* This is deliberately a read-only companion to the transactional claim
- * above.  Automatic scene hangup needs to know whether it may dispatch a
- * killing action without creating an unrepresentable zero-reward automatic
- * terminal.  The database clock remains the authority; scheduler ticks only
- * delay a later poll and are never used to decide eligibility. */
-static bool vm_net_mock_role_get_monster_reward_cooldown_remaining(
-    const vm_net_mock_role_state *role, u32 *remainingMsOut)
-{
-    char account_hex[129];
-    char query[2048];
-    vm_mock_mysql_monster_reward_cooldown_context context;
-
-    if (remainingMsOut != NULL)
-        *remainingMsOut = 0;
-    if (role == NULL || role->roleId == 0 ||
-        !vm_net_mock_mysql_account_hex(account_hex) ||
-        !vm_net_mock_role_prepare_monster_reward_cooldown_schema())
-    {
-        return false;
-    }
-
-    memset(&context, 0, sizeof(context));
-    /* CURRENT_TIMESTAMP(3) is constant for one statement.  Keeping the clock
-     * in the derived row avoids a host-time approximation and treats a server
-     * clock rollback exactly like the claim path: a full cooldown remains. */
-    snprintf(query, sizeof(query),
-             "SELECT CAST(CASE "
-             "WHEN reward_clock.now_ms < last_reward_ms THEN %u "
-             "WHEN reward_clock.now_ms - last_reward_ms < %u THEN "
-             "%u - (reward_clock.now_ms - last_reward_ms) "
-             "ELSE 0 END AS UNSIGNED) "
-             "FROM account_role_monster_reward_cooldowns "
-             "CROSS JOIN (SELECT CAST(FLOOR(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000) "
-             "AS UNSIGNED) AS now_ms) AS reward_clock "
-             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
-             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
-             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
-             VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS,
-             account_hex, role->roleId);
-    if (!vm_mysql_query(query, vm_mock_mysql_monster_reward_cooldown_row,
-                        &context) || context.invalid ||
-        (context.found && context.value > VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS))
-    {
-        printf("[error][mock-service] monster_reward_cooldown_read_failed "
-               "account=%s role=%u error=%s\n",
-               g_vm_mock_service_active_account_id ?
-                   g_vm_mock_service_active_account_id : "-",
-               role->roleId, vm_mysql_last_error());
-        return false;
-    }
-    if (remainingMsOut != NULL && context.found)
-        *remainingMsOut = (u32)context.value;
-    return true;
 }
 
 /*
@@ -7194,6 +7254,10 @@ static void vm_net_mock_role_db_load(void)
     u32 backpackNamespaceMigratedRoles = 0;
     u32 backpackNamespaceRemappedRows = 0;
     u32 backpackNormalizedRoles = 0;
+    u32 overlevelEquipmentRecoveredRoles = 0;
+    u32 overlevelEquipmentRecoveredItems = 0;
+    u32 overlevelEquipmentBlockedRoles = 0;
+    u32 overlevelEquipmentBlockedItems = 0;
     u32 sceneKeyMigratedRoles = 0;
     u32 expCurveMigratedRoles = 0;
     u32 expCurveCappedRoles = 0;
@@ -7442,11 +7506,28 @@ static void vm_net_mock_role_db_load(void)
         u32 reservedSequenceCount =
             vm_net_mock_role_count_reserved_backpack_sequences(role);
         vm_net_mock_role_state beforeNormalize = *role;
+        u32 recoveredEquipmentCount = 0;
+        u32 blockedEquipmentCount = 0;
 
         if (vm_net_mock_role_migrate_legacy_scene_key(role))
         {
             needsSave = true;
             ++sceneKeyMigratedRoles;
+        }
+        if (vm_net_mock_role_recover_overlevel_equipment(
+                role, &recoveredEquipmentCount, &blockedEquipmentCount))
+        {
+            /* The relational writer below persists the cleared equipped rows
+             * and the returned durable backpack instances in one transaction.
+             * This is a state repair, not a combat-stat fallback. */
+            needsSave = true;
+            ++overlevelEquipmentRecoveredRoles;
+            overlevelEquipmentRecoveredItems += recoveredEquipmentCount;
+        }
+        if (blockedEquipmentCount != 0)
+        {
+            ++overlevelEquipmentBlockedRoles;
+            overlevelEquipmentBlockedItems += blockedEquipmentCount;
         }
         vm_net_mock_role_normalize(role);
         if (memcmp(&beforeNormalize, role, sizeof(beforeNormalize)) != 0)
@@ -7480,7 +7561,18 @@ static void vm_net_mock_role_db_load(void)
         printf("[info][mock-service] backpack_normalize_persist roles=%u account=%s source=role-load-relational\n",
                backpackNormalizedRoles,
                g_vm_mock_service_active_account_id ?
-                   g_vm_mock_service_active_account_id : "-");
+               g_vm_mock_service_active_account_id : "-");
+    }
+    if (overlevelEquipmentRecoveredRoles != 0 ||
+        overlevelEquipmentBlockedRoles != 0)
+    {
+        printf("[info][mock-service] equipment_level_state_repair account=%s recovered_roles=%u recovered_items=%u blocked_roles=%u blocked_items=%u action=durable-backpack-return\n",
+               g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+               overlevelEquipmentRecoveredRoles,
+               overlevelEquipmentRecoveredItems,
+               overlevelEquipmentBlockedRoles,
+               overlevelEquipmentBlockedItems);
     }
     if (sceneKeyMigratedRoles != 0)
     {
@@ -8126,6 +8218,118 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     role->nextBackpackSeq = (u16)(item->seq + 1);
     if (seqOut)
         *seqOut = item->seq;
+    return true;
+}
+
+/*
+ * Older administrative/data-import paths could persist a catalog-valid item
+ * in an equipped slot without going through the normal equip request, which
+ * checks levelRequired.  JianghuOL.CBE rebuilds its scene status meter from
+ * every durable equipped row and has no corresponding level check, while the
+ * server correctly excludes over-level rows from battle stats.  The first
+ * invalid state is therefore the persisted equipped row, not the battle
+ * calculation.
+ *
+ * Preserve each durable instance (item, current durability and enhancement)
+ * by returning it to the backpack.  The change is all-or-nothing: when there
+ * are not enough backpack slots, retain the source state and emit an explicit
+ * diagnostic for administrative resolution rather than destroy an item or
+ * partially alter the role.
+ */
+static bool vm_net_mock_role_recover_overlevel_equipment(
+    vm_net_mock_role_state *role, u32 *movedOut, u32 *blockedOut)
+{
+    vm_net_mock_role_state candidate;
+    u32 level = 0;
+    u32 invalidCount = 0;
+    u32 backpackCount = 0;
+
+    if (movedOut)
+        *movedOut = 0;
+    if (blockedOut)
+        *blockedOut = 0;
+    if (role == NULL)
+        return false;
+
+    candidate = *role;
+    /* Apply the established durable-instance normalization to the private
+     * candidate first.  In particular, a legacy row with no stored maximum
+     * receives the catalog maximum before being returned; otherwise this
+     * repair would turn the pre-v5 bootstrap value into a broken backpack
+     * item merely because it also exceeded the level requirement. */
+    vm_net_mock_role_normalize_equipment_instances(&candidate);
+    level = vm_net_mock_role_level_from_exp(candidate.exp);
+    if (level == 0)
+        level = 1;
+
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        const vm_net_mock_equipped_item_state *equipped =
+            &candidate.equippedItems[slot];
+        const vm_net_mock_equipment_catalog_item *catalog = NULL;
+
+        if (equipped->itemId == 0)
+            continue;
+        catalog = vm_net_mock_find_equipment_catalog_item(equipped->itemId);
+        /* Keep unknown/mis-slotted legacy data on the existing unresolved
+         * path.  Its ownership cannot safely be inferred by this repair. */
+        if (catalog != NULL && catalog->slot == slot &&
+            catalog->levelRequired > level)
+        {
+            ++invalidCount;
+        }
+    }
+    if (invalidCount == 0)
+        return false;
+
+    vm_net_mock_role_normalize_backpack(&candidate);
+    backpackCount = vm_net_mock_role_backpack_count(&candidate);
+    if (backpackCount > candidate.backpackCapacity ||
+        invalidCount > (u32)candidate.backpackCapacity - backpackCount ||
+        invalidCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS - backpackCount)
+    {
+        if (blockedOut)
+            *blockedOut = invalidCount;
+        printf("[warn][mock-service] equipment_level_state_repair_blocked role=%u level=%u overlevel_items=%u backpack_rows=%u capacity=%u action=preserve-for-admin\n",
+               role->roleId, level, invalidCount, backpackCount,
+               candidate.backpackCapacity);
+        return false;
+    }
+
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        vm_net_mock_equipped_item_state *equipped =
+            &candidate.equippedItems[slot];
+        const vm_net_mock_equipment_catalog_item *catalog = NULL;
+
+        if (equipped->itemId == 0)
+            continue;
+        catalog = vm_net_mock_find_equipment_catalog_item(equipped->itemId);
+        if (catalog == NULL || catalog->slot != slot ||
+            catalog->levelRequired <= level)
+        {
+            continue;
+        }
+        if (!vm_net_mock_role_append_backpack_equipment_instance(
+                &candidate, equipped, NULL))
+        {
+            /* The capacity preflight above makes this unexpected.  Keep the
+             * original role intact if sequence allocation or a catalog
+             * invariant rejects any one row. */
+            if (blockedOut)
+                *blockedOut = invalidCount;
+            printf("[error][mock-service] equipment_level_state_repair_failed role=%u level=%u slot=%u item=%u action=rollback-preserve\n",
+                   role->roleId, level, slot, equipped->itemId);
+            return false;
+        }
+        memset(equipped, 0, sizeof(*equipped));
+    }
+
+    *role = candidate;
+    if (movedOut)
+        *movedOut = invalidCount;
+    printf("[info][mock-service] equipment_level_state_repair role=%u level=%u moved=%u action=unequip-to-backpack\n",
+           role->roleId, level, invalidCount);
     return true;
 }
 

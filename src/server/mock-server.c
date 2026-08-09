@@ -23,6 +23,12 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
 static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
     const vm_net_mock_request_object *object, u16 *positionXOut);
 
+/* The service owns the progression rule for equipped state.  The catalog
+ * serializes equipment before the role module is included, so keep this
+ * narrow predicate declaration at the aggregation boundary. */
+static bool vm_net_mock_role_equipment_slot_is_usable(
+    const vm_net_mock_role_state *role, u32 slot);
+
 /* Chest configuration belongs to the catalog, while durable world-chat
  * storage and live delivery belong to the social service.  A successful
  * chest opening calls this narrow bridge only after the role mutation has
