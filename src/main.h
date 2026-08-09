@@ -42,6 +42,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
 void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc);
 /* Title 1/1/6 role-select: bind dream HUD visit/remain to this roleId. */
 void agent_dbg0b451a_note_active_role(u32 roleId);
+void vm_host_dbg_note_open14_uplink(const u8 *req, u32 len);
 extern u32 g_agent_timer_obj;
 void SaveCpuContext(u32 *);
 void RestoreCpuContext(u32 *stackPtr);

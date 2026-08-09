@@ -103,8 +103,8 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         "</style></head><body><main class=\"wrap\"><header><div>"
         "<h1>宝箱奖励管理</h1>"
         "<p class=\"sub\">配置青铜/白银/黄金宝箱开出物品；保存后立即生效，无需重启。"
-        "权重越大越容易抽中。黄金宝箱在未配置任何启用行时仍走旧默认规则；"
-        "银/铜箱必须配置后才能开启。</p></div></header>"
+        "权重越大越容易抽中。三种宝箱各自按 chest_item_id 隔离抽取，互不混用；"
+        "对应箱/钥：522↔813、523↔814、524↔815。任一宝箱无启用行时开箱失败。</p></div></header>"
         "<nav class=\"tabs\">"
         "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
         "<a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a>"
@@ -145,9 +145,8 @@ static void vm_mock_admin_render_chest_page(char *response, size_t responseCap,
         vm_net_mock_chest_box_label_utf8(chestItemId),
         vm_net_mock_chest_key_for_box(chestItemId),
         rowCount, enabledCount,
-        enabledCount != 0 ? "MySQL server_chest_rewards" :
-            (chestItemId == VM_NET_MOCK_GOLD_CHEST_ITEM_ID ?
-                 "旧默认规则（尚未导入）" : "空（银/铜需配置）"));
+        enabledCount != 0 ? "MySQL server_chest_rewards（仅本箱）" :
+            "空（需配置启用行后才能开启）");
 
     vm_mock_admin_text_appendf(
         &page,

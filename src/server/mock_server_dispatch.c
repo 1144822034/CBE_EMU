@@ -307,31 +307,74 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
      * 30/1 at the live grid position (unstuck contract).  After battle/map
      * revival, mmGame may still show HP=0 until it consumes an in-scene
      * actorinfo refresh.  Deliver those on scene-poll (or harmless WT) —
-     * never preempt collision 4/1, hangup 2/10, mall open, plain actor-other
-     * 2/10, or moveinfo 2/1.  Stealing those with 1/1/14 mid-fight / before
-     * mall poisoned actor state and flash-crashed mmShop (2026-07-28).
+     * never preempt collision 4/1, hangup 2/10, mall open 1/1/14(actorId),
+     * plain actor-other 2/10, or moveinfo 2/1.  Stealing mall open14 with
+     * fresh_shell/vitals (resp≈1156) flash-crashes mmShop SCR_Render
+     * NULL+0x10 (client_out + 2026-07-28).
+     *
+     * Dream enter 2026-08-05: wt=4/1 len=65 failed full challenge detect
+     * (extra object/fields) but header still kind=4; vitals stole the seat
+     * (builtin-map-actor-vitals-sync) so first foot encounter never started.
+     * Gate on WT kind==4 / object 1/4/1, not only the strict challenge matcher.
+     *
+     * Dream enter NPC talk 2026-08-05: drain arms poll/wt vitals remaining=2;
+     * first 26/1 dialog (request≈30) was answered as builtin-map-actor-
+     * vitals-sync resp=226 → client idle-timeout.  Gate kind==26 / 1/26/1.
      */
-    if (!vm_net_mock_is_challenge_interaction_request(request, requestLen) &&
-        !vm_net_mock_is_hangup_battle_start_request(request, requestLen) &&
-        !vm_net_mock_is_scene_interaction_followup_request(request, requestLen) &&
-        !vm_net_mock_is_actor_other_only10_request(request, requestLen) &&
-        !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
     {
-        hookedLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
-            out, outCap, "wt-dispatch");
-        if (hookedLen)
+        u8 vitalsWtKind = 0;
+        u8 vitalsWtSubtype = 0;
+        bool gotVitalsWtHeader =
+            vm_net_mock_get_wt_header_kind_subtype(request, requestLen,
+                                                   &vitalsWtKind,
+                                                   &vitalsWtSubtype);
+        bool battleFamilyWt = gotVitalsWtHeader && vitalsWtKind == 4;
+        bool dialogFamilyWt = gotVitalsWtHeader && vitalsWtKind == 26;
+        bool challengeObject =
+            vm_net_mock_request_contains_object(request, requestLen, 1, 4, 1);
+        bool dialogObject =
+            vm_net_mock_request_contains_object(request, requestLen, 1, 26, 1);
+        u32 dialogActorId = 0;
+        u32 dialogIndex = 0;
+        u32 serviceValue = 0;
+        bool npcDialog =
+            vm_net_mock_is_npc_dialog_request(request, requestLen,
+                                              &dialogActorId, &dialogIndex) ||
+            vm_net_mock_is_npc_service_dialog_request(request, requestLen,
+                                                      &serviceValue);
+
+        if (!vm_net_mock_is_challenge_interaction_request(request, requestLen) &&
+            !challengeObject &&
+            !battleFamilyWt &&
+            !npcDialog &&
+            !dialogObject &&
+            !dialogFamilyWt &&
+            !vm_net_mock_is_hangup_battle_start_request(request, requestLen) &&
+            !vm_net_mock_is_scene_interaction_followup_request(request,
+                                                              requestLen) &&
+            !vm_net_mock_is_shop_actor_query14_request(request, requestLen) &&
+            !vm_net_mock_is_actor_other_only10_request(request, requestLen) &&
+            !vm_net_mock_is_actor_moveinfo_upload_request(request, requestLen))
         {
-            vm_net_log_handled_packet("builtin-shop-return-scene-enter", request,
-                                      requestLen, hookedLen);
-            return hookedLen;
+            hookedLen = vm_net_mock_try_deliver_pending_shop_return_scene_enter(
+                out, outCap, "wt-dispatch");
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-shop-return-scene-enter",
+                                          request, requestLen, hookedLen);
+                return hookedLen;
+            }
+            hookedLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
+                out, outCap, "wt-dispatch");
+            if (hookedLen)
+            {
+                vm_net_log_handled_packet("builtin-map-actor-vitals-sync",
+                                          request, requestLen, hookedLen);
+                return hookedLen;
+            }
         }
-        hookedLen = vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
-            out, outCap, "wt-dispatch");
-        if (hookedLen)
+        else if (vm_net_mock_is_shop_actor_query14_request(request, requestLen))
         {
-            vm_net_log_handled_packet("builtin-map-actor-vitals-sync", request,
-                                      requestLen, hookedLen);
-            return hookedLen;
         }
     }
 
@@ -441,6 +484,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-npc-service", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_task_list_query_response(request, requestLen,
+                                                           out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-task-list-query", request, requestLen,
                                   hookedLen);
         return hookedLen;
     }
@@ -1079,6 +1131,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_map_heal_skill_response(request, requestLen, out,
+                                                          outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-map-heal-skill", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_item_use_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
@@ -1152,6 +1213,40 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         {
             vm_net_mock_note_backpack_open_cleared_deposit_resync("7/42->17/1+7/42");
             vm_net_log_handled_packet("builtin-backpack-open", request, requestLen, hookedLen);
+            return hookedLen;
+        }
+    }
+
+    if (vm_net_mock_is_pixi_panel_stats_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_pixi_panel_stats_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-pixi-panel-stats", request, requestLen,
+                                      hookedLen);
+            return hookedLen;
+        }
+    }
+
+    if (vm_net_mock_is_pixi_worn_equip_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_pixi_worn_equip_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-pixi-worn-equip", request, requestLen,
+                                      hookedLen);
+            return hookedLen;
+        }
+    }
+
+    if (vm_net_mock_is_pixi_bag_open_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_pixi_bag_open_response(out, outCap);
+        if (hookedLen)
+        {
+            vm_net_mock_note_backpack_open_cleared_deposit_resync("7/23->17/1+30/21");
+            vm_net_log_handled_packet("builtin-pixi-bag-open", request, requestLen,
+                                      hookedLen);
             return hookedLen;
         }
     }

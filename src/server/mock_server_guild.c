@@ -246,6 +246,70 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
  * coordinates.  The page only retains the id, first two bytes and display
  * name today, but serializing every consumed field keeps the stream aligned.
  */
+/*
+ * Pixi-only companion for nearby peers: count of worn slots at enhance >= 16.
+ * Wire (same order as otherinfo, keyed by actorId):
+ *   repeat othernum times: u32 actorId, u8 plus16Count (0..8).
+ * CBE ParseSceneOtherNodeData / HandleFactionOtherInfoResponse look up
+ * othernum/otherinfo by name and ignore this field.
+ */
+static u8 vm_net_mock_session_plus16_count(const vm_mock_service_client_session *session)
+{
+    u8 count = 0;
+
+    if (session == NULL)
+        return 0;
+    for (u8 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (session->onlineEquippedEnhanceLevels[slot] >=
+            (u16)VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
+            ++count;
+    }
+    return count;
+}
+
+static bool vm_net_mock_build_plus16info_from_seeds(const vm_net_mock_scene_role_seed *seeds,
+                                                    u8 roleCount,
+                                                    u8 *plus16Info,
+                                                    u32 plus16InfoCap,
+                                                    u32 *plus16InfoLenOut)
+{
+    u32 pos = 0;
+
+    if (plus16InfoLenOut)
+        *plus16InfoLenOut = 0;
+    if (plus16Info == NULL || plus16InfoCap == 0 || seeds == NULL)
+        return false;
+    for (u8 i = 0; i < roleCount; ++i)
+    {
+        if (!vm_net_mock_seq_put_u32(plus16Info, plus16InfoCap, &pos, seeds[i].actorId) ||
+            !vm_net_mock_seq_put_u8(plus16Info, plus16InfoCap, &pos,
+                                    vm_net_mock_session_plus16_count(seeds[i].session)))
+        {
+            return false;
+        }
+    }
+    if (plus16InfoLenOut)
+        *plus16InfoLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_build_scene_plus16info_blob(const char *scene,
+                                                    u8 *plus16Info,
+                                                    u32 plus16InfoCap,
+                                                    u32 *plus16InfoLenOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 roleCount = 0;
+
+    if (plus16InfoLenOut)
+        *plus16InfoLenOut = 0;
+    roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds,
+                                                    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    return vm_net_mock_build_plus16info_from_seeds(seeds, roleCount, plus16Info,
+                                                    plus16InfoCap, plus16InfoLenOut);
+}
+
 static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
                                                         u8 *otherInfo,
                                                         u32 otherInfoCap,
@@ -1706,13 +1770,14 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     vm_net_mock_scene_role_seed targetSeed;
     vm_mock_service_client_session *sourceSession = vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *sourceRole = vm_net_mock_active_role();
-    const char *sourceAccountId = g_vm_mock_service_active_account_id;
     const char *scene = vm_net_mock_current_scene_name();
+    vm_mock_service_duel *duel = NULL;
     u32 actorId = 0;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 result = 4; /* net_handle_login_or_name_result: player not found. */
-    bool queued = false;
+    bool started = false;
+    u32 startLen = 0;
 
     memset(&targetSeed, 0, sizeof(targetSeed));
     if (out == NULL || outCap < pos ||
@@ -1720,48 +1785,152 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
     {
         return 0;
     }
-    if (sourceSession != NULL && sourceRole != NULL &&
-        vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
-        targetSeed.session != NULL &&
-        targetSeed.session->clientId != sourceSession->clientId)
+    /*
+     * Product rule (2026-08-07): spar no longer waits for peer 4/15/4/16
+     * consent.  If the target is online in the same scene and neither side
+     * is duel-busy, begin the duel immediately.  Inviter gets 4/14 result=1
+     * plus mirrored 4/10 start; peer start stays on startPendingMask for
+     * their next scene-sync poll (same as accepted 4/16+4/9 path).
+     *
+     * Gates: town/city maps forbid spar (same city key as hangup forbid);
+     * either seat below level 25 cannot spar or be sparred.
+     */
+    if (vm_net_mock_scene_is_city_hangup_forbidden(scene))
     {
-        if (vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
-            vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId))
+        result = 7; /* town / city */
+        printf("[info][network] mock_spar_request_reject actor=%u source=%08x "
+               "scene=%s reason=city-map result=7\n",
+               actorId, sourceSession ? sourceSession->clientId : 0,
+               scene ? scene : "-");
+    }
+    else if (sourceSession != NULL && sourceRole != NULL &&
+             vm_net_mock_find_nearby_role_seed_by_actor_id(scene, actorId, &targetSeed) &&
+             targetSeed.session != NULL &&
+             targetSeed.session->clientId != sourceSession->clientId)
+    {
+        u32 sourceLevel = sourceRole->level ? sourceRole->level : 1;
+        u32 targetLevel = targetSeed.level ? targetSeed.level : 1;
+
+        if (sourceSession->onlineLevel != 0 &&
+            sourceSession->onlineLevel > sourceLevel)
         {
-            result = 3; /* busy / cannot accept another modal. */
+            sourceLevel = sourceSession->onlineLevel;
+        }
+        if (targetSeed.session->onlineLevel != 0)
+            targetLevel = targetSeed.session->onlineLevel;
+
+        if (sourceLevel < 25 || targetLevel < 25)
+        {
+            result = 6; /* level gate */
+            printf("[info][network] mock_spar_request_reject actor=%u "
+                   "source=%08x/%u lv=%u target=%08x/%u lv=%u "
+                   "reason=level-lt-25 result=6\n",
+                   actorId, sourceSession->clientId, sourceRole->roleId,
+                   sourceLevel, targetSeed.session->clientId,
+                   targetSeed.session->onlineRoleId, targetLevel);
+        }
+        else if (vm_mock_service_session_duel_blocks_spar(sourceSession->clientId) ||
+            vm_mock_service_session_duel_blocks_spar(targetSeed.session->clientId) ||
+            vm_mock_service_session_trade_blocks_invite(sourceSession->clientId) ||
+            vm_mock_service_session_trade_blocks_invite(targetSeed.session->clientId) ||
+            !targetSeed.session->roleOnline ||
+            !targetSeed.session->sceneVisibleReady ||
+            targetSeed.session->sceneVisiblePending)
+        {
+            result = 3; /* busy / not idle */
             printf("[warn][network] mock_spar_request_busy actor=%u source=%08x "
-                   "target=%08x reason=active-duel\n",
+                   "target=%08x reason=not-idle\n",
                    actorId, sourceSession->clientId,
                    targetSeed.session->clientId);
         }
         else
         {
-            queued = vm_mock_service_session_enqueue_social_notice(
-                targetSeed.session, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE, 0,
-                sourceSession, sourceRole, sourceAccountId);
-            result = queued ? 1 : 3; /* target state cannot accept another modal. */
+            duel = vm_mock_service_duel_begin(sourceSession, targetSeed.session);
+            if (duel != NULL)
+            {
+                result = 1;
+                started = true;
+            }
+            else
+            {
+                result = 3;
+                printf("[warn][network] mock_spar_request_begin_failed actor=%u "
+                       "source=%08x target=%08x reason=duel-slot-or-scene-busy\n",
+                       actorId, sourceSession->clientId,
+                       targetSeed.session->clientId);
+            }
         }
     }
 
-    /* Subtype 14 accepts result=1 without presenting another message; the
-     * sender already displayed "request sent".  Errors 2..7 are rendered by
-     * net_handle_login_or_name_result(0x0101258A). */
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, 14, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
     {
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    if (started && sourceSession != NULL)
+    {
+        /* Append inviter's duel start in the same WT (object count patched). */
+        u8 startBuf[512];
+        int inviterIndex = -1;
+        vm_mock_service_duel *activeDuel =
+            vm_mock_service_duel_find_for_client(sourceSession->clientId,
+                                                &inviterIndex);
+
+        memset(startBuf, 0, sizeof(startBuf));
+        startLen = vm_net_mock_build_duel_start_response(startBuf, sizeof(startBuf),
+                                                         sourceSession);
+        if (startLen > 5 && pos + (startLen - 5) <= outCap)
+        {
+            /* startBuf is a full WT: magic+len+count+objects. Append objects.
+             * out still only has the 4/14 ack object — never read leftover
+             * out[4] from a recycled response buffer (that made count=1 and
+             * dropped the inline 4/10, so only the peer entered battle). */
+            u8 startCount = startBuf[4];
+            u32 copyLen = startLen - 5;
+            memcpy(out + pos, startBuf + 5, copyLen);
+            pos += copyLen;
+            vm_net_mock_finish_wt_packet(out, pos, (u8)(1u + startCount));
+        }
+        else
+        {
+            /* build_duel_start_response already cleared inviter pending; put
+             * it back so the next scene-sync poll can deliver 4/10. */
+            if (startLen > 5 && activeDuel != NULL &&
+                inviterIndex >= 0 && inviterIndex <= 1)
+            {
+                u8 inviterBit = (u8)(1u << inviterIndex);
+                activeDuel->startPendingMask |= inviterBit;
+                activeDuel->startedMask &= (u8)~inviterBit;
+                printf("[warn][network] mock_spar_request_inline_start_dropped "
+                       "actor=%u source=%08x restore_pending bit=%u "
+                       "startLen=%u pos=%u outCap=%u\n",
+                       actorId, sourceSession->clientId, inviterBit,
+                       startLen, pos, outCap);
+            }
+            vm_net_mock_finish_wt_packet(out, pos, 1);
+            startLen = 0;
+        }
+    }
+    else
+    {
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+    }
+
     printf("[info][network] mock_spar_request actor=%u source=%08x/%u "
-           "target=%08x/%u scene=%s queued=%u result=%u resp=%u "
-           "evidence=JianghuOL.CBE:0x0102E624+0x0101258A(subtype14/15)\n",
+           "target=%08x/%u scene=%s started=%u start_inline=%u result=%u resp=%u "
+           "policy=direct-if-idle evidence=JianghuOL.CBE:0x0102E624;mmBattle:0x66CC\n",
            actorId,
            sourceSession ? sourceSession->clientId : 0,
            sourceRole ? sourceRole->roleId : 0,
            targetSeed.session ? targetSeed.session->clientId : 0,
            targetSeed.session ? targetSeed.session->onlineRoleId : 0,
-           scene ? scene : "-", queued ? 1u : 0u, result, pos);
+           scene ? scene : "-",
+           started ? 1u : 0u,
+           startLen > 5 ? 1u : 0u,
+           result,
+           pos);
     return pos;
 }
 

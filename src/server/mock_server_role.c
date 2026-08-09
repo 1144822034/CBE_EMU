@@ -318,6 +318,36 @@ static bool vm_net_mock_scene_monster_admin_reset(const char *scene,
     return true;
 }
 
+/*
+ * Town / city hubs forbid hangup and spar.  Evidence: automonster.dsh lists only
+ * field maps (01桃花岛…28*, never c04临安府_*); live product blocks 临安 etc.
+ * Scene keys: authored `c`+digit towns (c04临安府_06), or sMap aliases that
+ * drop the leading `c` (`4临安府_06`).  Field maps keep a two-digit area id.
+ */
+static bool vm_net_mock_scene_is_city_hangup_forbidden(const char *scene)
+{
+    const char *leaf = scene;
+    unsigned char second = 0;
+
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    for (const char *p = scene; *p != '\0'; ++p)
+    {
+        if (*p == '/' || *p == '\\')
+            leaf = p + 1;
+    }
+    if (leaf[0] == 'c' && leaf[1] >= '0' && leaf[1] <= '9')
+        return true;
+    /* Alias without town "c": single ASCII digit then GBK (not NN field id). */
+    if (leaf[0] >= '1' && leaf[0] <= '9')
+    {
+        second = (unsigned char)leaf[1];
+        if (second >= 0x80u)
+            return true;
+    }
+    return false;
+}
+
 static bool vm_net_mock_select_auto_monster_for_scene(const char *scene,
                                                       u32 *enemyIdOut,
                                                       const char **matchedSceneOut)
@@ -516,6 +546,8 @@ static bool vm_net_mock_role_relocate_dream_kind3_login(
            "action=outdoor-login-keep-dream-kind3-for-instance "
            "evidence=debug-191169-cold-kind3-screen_init_fail\n",
            role->roleId, from, role->scene, role->x, role->y);
+    if (isDream29)
+        (void)vm_net_mock_dream_purge_item_841(role, "dream-login-relocate");
     return true;
 }
 
@@ -2740,8 +2772,8 @@ static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
     if (attrIndex >= 5)
         attrIndex = 0;
     value = base[jobIndex][attrIndex] + (level - 1) * gain[jobIndex][attrIndex];
-    if (value > 999)
-        value = 999;
+    if (value > 65535)
+        value = 65535;
     return (u16)value;
 }
 
@@ -2783,6 +2815,8 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
         return;
     dst->hp += src->hp;
     dst->mp += src->mp;
+    dst->hpPercent += src->hpPercent;
+    dst->mpPercent += src->mpPercent;
     dst->attack += src->attack;
     dst->armor += src->armor;
     dst->strength += src->strength;
@@ -2794,7 +2828,7 @@ static void vm_net_mock_equipment_bonus_add(vm_net_mock_equipment_bonus *dst,
     dst->resist += src->resist;
 }
 
-/* equipment_bonus_scale / _enhance_delta /
+/* equipment_bonus_scale / armor_bonus_scale / _enhance_delta /
  * equipment_bonus_add_unlocked_milestones: defined in mock_server_catalog.c */
 
 static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_state *role,
@@ -2837,11 +2871,11 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
         if (enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         scaled = item->bonus;
-        /* ????????????/???CBE ????????/?????? */
+        /* 物攻满量 M(L)；护甲强化增量减半（物防平衡）。 */
         scaled.attack =
             vm_net_mock_equipment_bonus_scale(scaled.attack, enhanceLevel);
         scaled.armor =
-            vm_net_mock_equipment_bonus_scale(scaled.armor, enhanceLevel);
+            vm_net_mock_equipment_armor_bonus_scale(scaled.armor, enhanceLevel);
         /* scaled.hp = vm_net_mock_equipment_bonus_scale(scaled.hp, enhanceLevel); */
         /* scaled.mp = vm_net_mock_equipment_bonus_scale(scaled.mp, enhanceLevel); */
         /* ??????????????????? add_unlocked_milestones? */
@@ -2897,30 +2931,42 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
 
     /*
      * HP/MP pools use job growth bases only.  Equipment 智慧 must not feed
-     * maxMp (帽子 +16 智慧×3 曾把战斗/HUD 法力抬高数百); 气血%/法力% and
-     * flat HP/MP live in equipment.hp/mp via collect milestones.  Client
-     * wear-apply percent path also multiplies the bare actor pool, not
-     * wisdom-scaled MP.
+     * maxMp (帽子 +16 智慧×3 曾把战斗/HUD 法力抬高数百).  Flat HP/MP
+     * milestones stay absolute; 气血%/法力% use character bare pools
+     * (same rule for both — not item dsh hp/mp columns).
      */
-    stats->maxHp = 90 + level * 8 + stats->endurance * 2 + equipment.hp;
-    stats->maxMp = 70 + level * 9 + stats->baseWisdom * 3 + equipment.mp;
+    {
+        u32 bareHp = 90 + level * 8 + stats->endurance * 2;
+        u32 bareMp = 70 + level * 9 + stats->baseWisdom * 3;
+        u32 hpFromPct = 0;
+        u32 mpFromPct = 0;
+
+        if (equipment.hpPercent != 0)
+            hpFromPct = (bareHp * equipment.hpPercent) / 100u;
+        if (equipment.mpPercent != 0)
+            mpFromPct = (bareMp * equipment.mpPercent) / 100u;
+        /* Fold % into equipment.* so actorinfo bare = max - equipment still holds. */
+        equipment.hp = vm_net_mock_cap_u32(equipment.hp + hpFromPct, 65535);
+        equipment.mp = vm_net_mock_cap_u32(equipment.mp + mpFromPct, 65535);
+        stats->equipment = equipment;
+        stats->maxHp = bareHp + equipment.hp;
+        stats->maxMp = bareMp + equipment.mp;
+    }
     /*
-     * Server battle authority only. Property-panel ?? is actor+0x130 from
-     * weapon item+0xFA apply (JianghuOL.CBE:0x0101002E); ?? is +0x132 from
-     * actorinfo word[4] + armor item+0xF8. Mid-session level-up (0x01017FB6)
-     * adds flat job HP/MP/?/? � not these derivatives. See
-     * docs/re/2026-06-28-player-attribute-model.md �Client Authority.
-     *
-     * Battle attack uses job primary (??? / ??? / ???), not always
-     * strength � see docs/re/2026-07-31-battle-attack-job-primary-attr.md.
+     * Battle + panel overlay share this aggregate
+     * (docs/re/2026-08-04-three-job-balance-pass1.md):
+     *   attack = jobPrimary(base+equip) + equipment.attack
+     * jobPrimary is 天机力 / 幻剑敏 / 鬼道智 (includes role base growth).
+     * Client actor+0x130 still gets weapon FA via wear-apply; host overlay
+     * realign uses this same stats->attack so panel matches battle.
      */
-    stats->attack =
-        6 + level * 2 +
+    stats->attack = vm_net_mock_cap_u32(
         vm_net_mock_role_job_primary_attr(job, stats->strength, stats->agility,
-                                          stats->wisdom) /
-            2 +
-        equipment.attack / 3;
-    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor / 5;
+                                          stats->wisdom) +
+            equipment.attack,
+        65535);
+    /* Panel + PvE/PvP: bare (level/耐力) + full equip.armor — not armor/5. */
+    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor;
     /* ?? = 101 ?? + ????????/??/?????????
      * hitChance = clamp(hit - dodge, 5, 95)????? 101 ????? 0
      * ??? 95% ????? */
@@ -2929,21 +2975,21 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     stats->crit = equipment.crit;
     stats->resist = equipment.resist;
 
-    stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 9999);
-    stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 9999);
-    stats->attack = vm_net_mock_cap_u32(stats->attack, 9999);
-    stats->defense = vm_net_mock_cap_u32(stats->defense, 9999);
-    stats->hit = vm_net_mock_cap_u32(stats->hit, 9999);
-    stats->dodge = vm_net_mock_cap_u32(stats->dodge, 9999);
-    stats->crit = vm_net_mock_cap_u32(stats->crit, 9999);
-    stats->resist = vm_net_mock_cap_u32(stats->resist, 9999);
+    stats->maxHp = vm_net_mock_cap_u32(stats->maxHp, 65535);
+    stats->maxMp = vm_net_mock_cap_u32(stats->maxMp, 65535);
+    stats->attack = vm_net_mock_cap_u32(stats->attack, 65535);
+    stats->defense = vm_net_mock_cap_u32(stats->defense, 65535);
+    stats->hit = vm_net_mock_cap_u32(stats->hit, 65535);
+    stats->dodge = vm_net_mock_cap_u32(stats->dodge, 65535);
+    stats->crit = vm_net_mock_cap_u32(stats->crit, 65535);
+    stats->resist = vm_net_mock_cap_u32(stats->resist, 65535);
 }
 
 static u32 vm_net_mock_battle_apply_signed_stat_change(u32 value, int32_t change,
                                                          u32 max_value)
 {
     if (max_value == 0)
-        max_value = 9999u;
+        max_value = 65535u;
     if (change >= 0)
     {
         uint64_t raised = (uint64_t)value + (uint32_t)change;
@@ -2970,31 +3016,30 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
     primaryBefore = vm_net_mock_role_job_primary_attr(
         stats->job, stats->strength, stats->agility, stats->wisdom);
     stats->strength = vm_net_mock_battle_apply_signed_stat_change(
-        stats->strength, modifier->strength, 9999u);
+        stats->strength, modifier->strength, 65535u);
     stats->agility = vm_net_mock_battle_apply_signed_stat_change(
-        stats->agility, modifier->agility, 9999u);
+        stats->agility, modifier->agility, 65535u);
     stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
-        stats->wisdom, modifier->wisdom, 9999u);
-    /* Attack tracks job-primary/2 (??? / ??? / ???). Hit/dodge/crit/
-     * resist are equipment-only base stats, so only skill.dsh direct combat
-     * deltas apply on those. */
+        stats->wisdom, modifier->wisdom, 65535u);
+    /* Attack tracks full job-primary Δ (base+equip primary already in
+     * strength/agility/wisdom). Hit/dodge/crit/resist stay equipment-only
+     * except skill.dsh direct combat deltas. */
     primaryAfter = vm_net_mock_role_job_primary_attr(
         stats->job, stats->strength, stats->agility, stats->wisdom);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
-        stats->attack, (int32_t)(primaryAfter / 2) -
-                      (int32_t)(primaryBefore / 2), 9999u);
+        stats->attack, (int32_t)primaryAfter - (int32_t)primaryBefore, 65535u);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
-        stats->attack, modifier->attack, 9999u);
+        stats->attack, modifier->attack, 65535u);
     stats->defense = vm_net_mock_battle_apply_signed_stat_change(
-        stats->defense, modifier->defense, 9999u);
+        stats->defense, modifier->defense, 65535u);
     stats->crit = vm_net_mock_battle_apply_signed_stat_change(
-        stats->crit, modifier->crit, 9999u);
+        stats->crit, modifier->crit, 65535u);
     stats->hit = vm_net_mock_battle_apply_signed_stat_change(
-        stats->hit, modifier->hit, 9999u);
+        stats->hit, modifier->hit, 65535u);
     stats->dodge = vm_net_mock_battle_apply_signed_stat_change(
-        stats->dodge, modifier->dodge, 9999u);
+        stats->dodge, modifier->dodge, 65535u);
     stats->resist = vm_net_mock_battle_apply_signed_stat_change(
-        stats->resist, modifier->resist, 9999u);
+        stats->resist, modifier->resist, 65535u);
 }
 
 static void vm_net_mock_role_sync_derived_vitals(vm_net_mock_role_state *role)
@@ -3086,6 +3131,123 @@ static void vm_net_mock_role_default_vitals(const vm_net_mock_role_state *role,
         *mpOut = mp;
     if (mpMaxOut)
         *mpMaxOut = stats.maxMp;
+}
+
+/*
+ * PixiJS_web 人物信息：请求 1/1/21，响应同对象下发 build_player_stats
+ * 全额汇总（基础 + 装备），与 CBE actorinfo 裸半字 / wear-apply 路径分开。
+ * CBE 从不发 1/1/21，检测器可保持窄匹配。
+ */
+static bool vm_net_mock_is_pixi_panel_stats_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    return offset == requestLen &&
+           object.major == 1 &&
+           object.kind == 1 &&
+           object.subtype == 21;
+}
+
+static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_player_stats stats;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 1;
+    u32 hp = 0;
+    u32 hpMax = 0;
+    u32 mp = 0;
+    u32 mpMax = 0;
+    u32 expNext = 0;
+    const char *title = "";
+    const char *spouse = "";
+    char guildName[VM_NET_MOCK_GUILD_NAME_SIZE];
+
+    if (out == NULL || outCap < 16)
+        return 0;
+    if (role == NULL)
+    {
+        printf("[warn][network] mock_pixi_panel_stats reason=no-role\n");
+        return 0;
+    }
+
+    vm_net_mock_role_sync_derived_vitals(role);
+    vm_net_mock_role_build_player_stats(role, &stats);
+    vm_net_mock_role_default_vitals(role, &hp, &hpMax, &mp, &mpMax);
+    title = vm_net_mock_role_title(role);
+    if (title == NULL)
+        title = "";
+    memset(guildName, 0, sizeof(guildName));
+    vm_net_mock_role_guild_info(role, guildName, sizeof(guildName));
+    spouse = vm_net_mock_role_spouse_name(role);
+    if (spouse == NULL)
+        spouse = "\xce\xde"; /* GBK: 无 */
+    expNext = vm_net_mock_role_next_level_start_exp(role->exp);
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 21, &objectStart) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                       role->name[0] ? role->name : "") ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "title", title) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "spouse", spouse) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "guild", guildName) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "level", stats.level) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "job", stats.job) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "hp", hp) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "hpMax", stats.maxHp) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "mp", mp) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "mpMax", stats.maxMp) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "charm", stats.charm) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "strength", stats.strength) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "agility", stats.agility) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "wisdom", stats.wisdom) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "endurance", stats.endurance) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "attack", stats.attack) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "defense", stats.defense) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "hit", stats.hit) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "dodge", stats.dodge) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "crit", stats.crit) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "resist", stats.resist) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "baseStrength",
+                                     stats.baseStrength) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "baseAgility",
+                                     stats.baseAgility) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "baseWisdom",
+                                     stats.baseWisdom) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "eqStrength",
+                                     stats.equipment.strength) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "eqAgility",
+                                     stats.equipment.agility) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "eqWisdom",
+                                     stats.equipment.wisdom) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "eqAttack",
+                                     stats.equipment.attack) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "eqArmor",
+                                     stats.equipment.armor) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", role->exp) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "expNext", expNext) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "money", role->money) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "coolmoney", role->wcoin) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "backpack",
+                                     role->backpackCapacity))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_pixi_panel_stats role=%u level=%u "
+           "str=%u/%u+%u atk=%u def=%u hit=%u dodge=%u crit=%u resist=%u "
+           "hp=%u/%u mp=%u/%u evidence=build_player_stats+1/1/21\n",
+           role->roleId, stats.level, stats.strength, stats.baseStrength,
+           stats.equipment.strength, stats.attack, stats.defense, stats.hit,
+           stats.dodge, stats.crit, stats.resist, hp, stats.maxHp, mp,
+           stats.maxMp);
+    return pos;
 }
 
 typedef enum
@@ -3585,7 +3747,10 @@ static int vm_net_mock_monster_catalog_index(u32 enemyId)
 
 static bool vm_net_mock_monster_catalog_is_custom(u32 enemyId)
 {
-    int index = vm_net_mock_monster_catalog_index(enemyId);
+    int index;
+
+    (void)vm_net_mock_monster_db_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
     return index >= 0 && g_vm_net_mock_monster_custom[index];
 }
 
@@ -4035,9 +4200,14 @@ static bool vm_net_mock_monster_db_load(void)
 
 static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy_raw(u32 enemyId)
 {
-    int index = vm_net_mock_monster_catalog_index(enemyId);
+    int index;
 
+    /* Load MySQL catalog_extra + overrides BEFORE indexing.  Custom ids such as
+     * 203/204 only exist after db_load; indexing first left index=-1 and battle
+     * fell back to the family formula (e.g. spirit Lv43 → 1400 HP) while admin
+     * still showed the saved override. */
     (void)vm_net_mock_monster_db_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
     if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
         return g_vm_net_mock_monster_overrides[index].stats;
     return vm_net_mock_monster_base_stats_for_enemy(enemyId);
@@ -4045,9 +4215,10 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy_raw(u32 ene
 
 static u8 vm_net_mock_monster_family_for_enemy(u32 enemyId)
 {
-    int index = vm_net_mock_monster_catalog_index(enemyId);
+    int index;
 
     (void)vm_net_mock_monster_db_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
     if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
         return g_vm_net_mock_monster_overrides[index].family;
     return vm_net_mock_monster_entry_for_enemy(enemyId).family;
@@ -4058,9 +4229,10 @@ static u8 vm_net_mock_monster_family_for_enemy(u32 enemyId)
  * CBE_BATTLE_BOSS_SKILL=0 still disables all casts in the battle resolver. */
 static bool vm_net_mock_monster_casts_active_skill(u32 enemyId)
 {
-    int index = vm_net_mock_monster_catalog_index(enemyId);
+    int index;
 
     (void)vm_net_mock_monster_db_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
     if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
         return g_vm_net_mock_monster_overrides[index].castSkill != 0;
     return vm_net_mock_monster_entry_for_enemy(enemyId).family ==
@@ -4069,8 +4241,15 @@ static bool vm_net_mock_monster_casts_active_skill(u32 enemyId)
 
 static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId)
 {
-    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy_raw(enemyId);
+    vm_net_mock_monster_stats stats;
 
+    /*
+     * Admin/MySQL and builtin formula both store BASE hp/mp/atk/def.
+     * Battle / scene seeding always apply level (+ boss HP) multipliers here.
+     * Skipping the scale for override rows made configured monsters much
+     * weaker than the same base under the formula path ("属性变少了").
+     */
+    stats = vm_net_mock_monster_stats_for_enemy_raw(enemyId);
     vm_net_mock_monster_stats_apply_combat_attr_multiplier(
         &stats, vm_net_mock_monster_family_for_enemy(enemyId));
     return stats;
@@ -4083,11 +4262,13 @@ static vm_net_mock_monster_stats vm_net_mock_monster_stats_for_enemy(u32 enemyId
 static u8 vm_net_mock_monster_drops_for_enemy(
     u32 enemyId, vm_net_mock_monster_drop *drops, u8 dropCap)
 {
-    int index = vm_net_mock_monster_catalog_index(enemyId);
-    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    int index;
+    vm_net_mock_monster_entry entry;
     u8 total = 0;
 
     (void)vm_net_mock_monster_db_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
+    entry = vm_net_mock_monster_entry_for_enemy(enemyId);
     if (index >= 0 && g_vm_net_mock_monster_overrides[index].used)
     {
         total = g_vm_net_mock_monster_overrides[index].dropCount;
@@ -4573,7 +4754,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_defense(u32 baseDefense)
     if (idx >= 3 || g_mockBattleEnemyAilments[idx].stat.remainingRounds == 0)
         return baseDefense;
     return vm_net_mock_battle_apply_signed_stat_change(
-        baseDefense, g_mockBattleEnemyAilments[idx].stat.defense, 9999u);
+        baseDefense, g_mockBattleEnemyAilments[idx].stat.defense, 65535u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_attack(u32 baseAttack)
@@ -4584,7 +4765,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_attack(u32 baseAttack)
         return baseAttack;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseAttack, g_mockBattleEnemyAilments[idx].stat.attack +
-                        g_mockBattleEnemyAilments[idx].stat.strength / 2, 9999u);
+                        g_mockBattleEnemyAilments[idx].stat.strength / 2, 65535u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_hit(u32 baseHit)
@@ -4595,7 +4776,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_hit(u32 baseHit)
         return baseHit;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseHit, g_mockBattleEnemyAilments[idx].stat.hit +
-                     g_mockBattleEnemyAilments[idx].stat.agility * 2, 9999u);
+                     g_mockBattleEnemyAilments[idx].stat.agility * 2, 65535u);
 }
 
 static u32 vm_net_mock_battle_enemy_ailment_adjust_resist(u32 baseResist)
@@ -4606,7 +4787,7 @@ static u32 vm_net_mock_battle_enemy_ailment_adjust_resist(u32 baseResist)
         return baseResist;
     return vm_net_mock_battle_apply_signed_stat_change(
         baseResist, g_mockBattleEnemyAilments[idx].stat.resist +
-                        g_mockBattleEnemyAilments[idx].stat.wisdom / 2, 9999u);
+                        g_mockBattleEnemyAilments[idx].stat.wisdom / 2, 65535u);
 }
 
 static void vm_net_mock_battle_role_stats_current(vm_net_mock_player_stats *statsOut)
@@ -4648,12 +4829,12 @@ static u32 vm_net_mock_battle_role_defense_default(void)
  *     (wisdomCoeff dominant among ?/?/???)
  *   Player hit = 101 + equipment.hit; dodge/crit/resist = equipment columns only
  *   Monster resist defaults to 0 (CBE_BATTLE_MONSTER_RESIST)
- *   Monster defense defaults to 0 for player?enemy mitigation
- *     (CBE_BATTLE_ENEMY_DEFENSE / CBE_BATTLE_SKILL_ENEMY_DEFENSE)
- *   ????????????????? hit/dodge ???
+ *   Monster NA defense = catalog/MySQL stats.defense (CBE_BATTLE_ENEMY_DEFENSE)
+ *   Offensive skills (physical + spell) mitigate with monster resist %
+ *     (CBE_BATTLE_SKILL_ENEMY_RESIST / CBE_BATTLE_MONSTER_RESIST)
  * Miss/dodge returns damage 0; actioninfo keeps a child with valueA=0 and
- * child_flag=3 (????). Crit sets child_flag=2 (????).
- * Hit that would mitigate to 0 still floors to 1 (????); do not coerce miss.
+ * child_flag=3 (dodge). Crit sets child_flag=2 (crit).
+ * Hit that would mitigate to 0 still floors to 1; do not coerce miss.
  * Env: CBE_BATTLE_DISABLE_COMBAT_ROLLS=1 restores always-hit pre-roll path;
  *      CBE_BATTLE_FORCE_HIT / FORCE_MISS / FORCE_CRIT override rolls.
  */
@@ -4865,10 +5046,9 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_player_stats playerStats;
     u32 attack = 0;
-    /* Monster armor disabled for player hits (same policy as resist=0).
-     * Catalog/admin defense remains on stats for display; override via env. */
-    u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", 0);
-    /* was: stats.defense */
+    /* MySQL/admin defense_value (and formula fallback) owns NA mitigation. */
+    u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE",
+                                            stats.defense);
     u32 monsterDodge = 0;
     u32 pillBonusPercent = 0;
     u32 damage = 0;
@@ -5002,22 +5182,15 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
         }
     }
 
-    if (magical)
-    {
-        mitigation = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_RESIST",
-                                               monsterResist);
-        mitigation = vm_net_mock_battle_enemy_ailment_adjust_resist(mitigation);
-        damage = vm_net_mock_damage_after_resist(rawDamage, mitigation);
-    }
-    else
-    {
-        /* Monster armor disabled for physical skills (same as normal attack). */
-        mitigation = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_DEFENSE",
-                                               0);
-        /* was: monsterStats.defense */
-        mitigation = vm_net_mock_battle_enemy_ailment_adjust_defense(mitigation);
-        damage = vm_net_mock_damage_after_defense(rawDamage, mitigation);
-    }
+    /*
+     * Offensive skills (physical + magical) share resist % mitigation.
+     * Catalog/admin defense applies to NA only; skill path uses secondary
+     * monster resist (default 0 until automonster columns exist).
+     */
+    mitigation = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_RESIST",
+                                           monsterResist);
+    mitigation = vm_net_mock_battle_enemy_ailment_adjust_resist(mitigation);
+    damage = vm_net_mock_damage_after_resist(rawDamage, mitigation);
     if (damage < baseDamage)
         damage = baseDamage;
     damage = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_DAMAGE", damage);
@@ -5040,12 +5213,20 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     return vm_net_mock_min_u32(damage, enemyHpCurrent);
 }
 
-static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)
+/*
+ * Monster → player damage.
+ *   skillMitigateWithResist=0: normal attack — soft armor (护甲) curve
+ *   skillMitigateWithResist=1: monster skill — player 法抗 % only (no 护甲)
+ */
+static u32 vm_net_mock_battle_enemy_damage_to_role_ex(u32 enemyId,
+                                                     u32 roleHpCurrent,
+                                                     bool skillMitigateWithResist)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
     vm_net_mock_player_stats playerStats;
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
     u32 defense = 0;
+    u32 resist = 0;
     u32 monsterHit = 0;
     u32 monsterCrit = 0;
     u32 damage = 0;
@@ -5057,6 +5238,7 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
 
     vm_net_mock_battle_role_stats_current(&playerStats);
     defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE", playerStats.defense);
+    resist = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_RESIST", playerStats.resist);
     vm_net_mock_monster_secondary_combat_stats(stats.level, &monsterHit, NULL,
                                               &monsterCrit, NULL);
     attack = vm_net_mock_battle_enemy_ailment_adjust_attack(attack);
@@ -5070,7 +5252,18 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
         return 0;
     }
 
-    damage = vm_net_mock_damage_after_defense(attack, defense);
+    if (skillMitigateWithResist)
+    {
+        damage = vm_net_mock_damage_after_resist(attack, resist);
+        printf("[info][network] mock_battle_enemy_skill_mitigate enemy=%u "
+               "attack=%u resist=%u damage=%u defense_ignored=%u "
+               "evidence=monster-skill-resist-only\n",
+               enemyId, attack, resist, damage, defense);
+    }
+    else
+    {
+        damage = vm_net_mock_damage_after_defense(attack, defense);
+    }
     if (damage == 0)
         damage = 1;
     critical = vm_net_mock_battle_roll_crit(monsterCrit);
@@ -5079,6 +5272,40 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
         damage = vm_net_mock_battle_apply_crit_damage(damage);
         vm_net_mock_battle_note_outcome_child_flag(VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT);
     }
+    return vm_net_mock_min_u32(damage, roleHpCurrent);
+}
+
+static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)
+{
+    return vm_net_mock_battle_enemy_damage_to_role_ex(enemyId, roleHpCurrent,
+                                                     false);
+}
+
+/* Remitigate an already-connected hit with 法抗 only (no second hit roll). */
+static u32 vm_net_mock_battle_enemy_skill_remitigate_to_role(u32 enemyId,
+                                                            u32 roleHpCurrent,
+                                                            bool keepCrit)
+{
+    vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    vm_net_mock_player_stats playerStats;
+    u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
+    u32 resist = 0;
+    u32 damage = 0;
+
+    if (roleHpCurrent == 0)
+        return 0;
+    vm_net_mock_battle_role_stats_current(&playerStats);
+    resist = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_RESIST", playerStats.resist);
+    attack = vm_net_mock_battle_enemy_ailment_adjust_attack(attack);
+    damage = vm_net_mock_damage_after_resist(attack, resist);
+    if (damage == 0)
+        damage = 1;
+    if (keepCrit)
+        damage = vm_net_mock_battle_apply_crit_damage(damage);
+    printf("[info][network] mock_battle_enemy_skill_mitigate enemy=%u "
+           "attack=%u resist=%u damage=%u crit=%u "
+           "evidence=monster-skill-resist-only\n",
+           enemyId, attack, resist, damage, keepCrit ? 1u : 0u);
     return vm_net_mock_min_u32(damage, roleHpCurrent);
 }
 
@@ -7106,6 +7333,26 @@ static bool vm_net_mock_role_db_save(const char *reason)
     return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL);
 }
 
+/* Persist one role row by role_id (admin money/wcoin may target non-active). */
+static bool vm_net_mock_role_db_save_role(const char *reason, u32 roleId)
+{
+    if (roleId == 0)
+        return vm_net_mock_role_db_save(reason);
+    return vm_net_mock_role_db_save_relational_ex(
+        reason,
+        g_vm_mock_service_active_account_id,
+        &g_vm_net_mock_role_db,
+        g_vm_net_mock_role_db_valid,
+        &g_vm_net_mock_warehouse,
+        true,
+        NULL,
+        NULL,
+        0,
+        false,
+        roleId,
+        NULL);
+}
+
 static void vm_net_mock_role_mark_inventory_dirty(const char *reason)
 {
     bool wasDirty = g_vm_net_mock_role_inventory_dirty;
@@ -7393,6 +7640,39 @@ static u32 vm_net_mock_role_active_combat_pill_attack_bonus_percent(
         return 0;
     }
     return effect.expiresUnix != 0 ? effect.multiplier : 0;
+}
+
+/* Wall-clock seconds until combat-pill expiry; 0 when inactive/due. */
+static u32 vm_net_mock_role_active_combat_pill_remaining_seconds(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+    u32 now = (u32)time(NULL);
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL, &effect) ||
+        effect.expiresUnix == 0 || effect.expiresUnix <= now)
+    {
+        return 0;
+    }
+    return effect.expiresUnix - now;
+}
+
+/* Active combat-pill item id (829/830), or 0 when none. */
+static u32 vm_net_mock_role_active_combat_pill_item_id(
+    const vm_net_mock_role_state *role)
+{
+    vm_net_mock_role_item_effect effect;
+
+    memset(&effect, 0, sizeof(effect));
+    if (!vm_net_mock_role_get_active_timed_item_effect(
+            role, VM_NET_MOCK_ROLE_ITEM_EFFECT_COMBAT_PILL, &effect) ||
+        effect.expiresUnix == 0)
+    {
+        return 0;
+    }
+    return effect.itemId;
 }
 
 /* Exp-card stack ceiling: same multiplier may extend remaining time, but never
@@ -9194,17 +9474,15 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
                 *reasonOut = "backpack-full";
             return false;
         }
-        /* add_backpack may reset stack defaults; restore moved values. */
+        /* add_backpack may reset enhance; restore it.  Never rewrite stack
+         * count — that overwrote bag-side merge (docs/re/2026-08-03-warehouse-
+         * retrieve-stack-overwrite.md). */
         if (addedSeq != 0)
         {
             vm_net_mock_backpack_item_state *added =
                 vm_net_mock_role_find_backpack_item(role, moved.itemId, addedSeq);
             if (added != NULL)
-            {
-                if (vm_net_mock_find_equipment_catalog_item(moved.itemId) == NULL)
-                    added->count = moved.count;
                 added->enhanceLevel = moved.enhanceLevel;
-            }
         }
     }
     /* add_backpack already marked dirty; re-mark after reservoir/enhance fix. */
@@ -9615,6 +9893,92 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
     }
     vm_net_mock_role_normalize_backpack(role);
     return true;
+}
+
+/* Drain `amount` across stacks (seq=0 finds next non-empty).  Each modified
+ * row is recorded for client 7/7 type=2 + 7/11 remaining sync. */
+static bool vm_net_mock_role_consume_backpack_item_amount(
+    vm_net_mock_role_state *role, u32 itemId, u32 amount,
+    vm_net_mock_consume_sync_row *syncRows, u32 syncCap, u32 *syncCountOut)
+{
+    u32 need = amount;
+    u32 syncCount = 0;
+    u32 held = 0;
+    u8 itemCount = 0;
+
+    if (syncCountOut)
+        *syncCountOut = 0;
+    if (role == NULL || itemId == 0 || amount == 0)
+        return false;
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (role->backpackItems[i].itemId == itemId)
+            held += role->backpackItems[i].count;
+    }
+    if (held < amount)
+        return false;
+
+    while (need > 0)
+    {
+        vm_net_mock_backpack_item_state *item =
+            vm_net_mock_role_find_backpack_item(role, itemId, 0);
+        u32 take = 0;
+        u32 remaining = 0;
+        u16 seq = 0;
+
+        if (item == NULL || item->count == 0)
+            return false;
+        seq = item->seq;
+        take = item->count < need ? item->count : need;
+        if (!vm_net_mock_role_consume_backpack_item(role, itemId, seq, take,
+                                                     &remaining))
+        {
+            return false;
+        }
+        if (syncRows != NULL && syncCount < syncCap)
+        {
+            syncRows[syncCount].seq = seq;
+            syncRows[syncCount].itemId = itemId;
+            syncRows[syncCount].remaining = remaining;
+            ++syncCount;
+        }
+        need -= take;
+    }
+    if (syncCountOut)
+        *syncCountOut = syncCount;
+    return true;
+}
+
+/* Purge dream material 841 from backpack memory/DB dirty.  Callers that
+ * own a live session should also arm backpackListResync for 17/1. */
+static u32 vm_net_mock_dream_purge_item_841(vm_net_mock_role_state *role,
+                                            const char *reason)
+{
+    u32 removed = 0;
+    u8 itemCount = 0;
+
+    if (role == NULL)
+        return 0;
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        if (role->backpackItems[i].itemId == 841u &&
+            role->backpackItems[i].count != 0)
+        {
+            removed += role->backpackItems[i].count;
+            role->backpackItems[i].count = 0;
+        }
+    }
+    if (removed == 0)
+        return 0;
+    vm_net_mock_role_normalize_backpack(role);
+    vm_net_mock_role_mark_inventory_dirty(reason ? reason : "dream-leave-purge-841");
+    printf("[info][network] mock_dream_purge_841 role=%u removed=%u reason=%s\n",
+           role->roleId, removed, reason ? reason : "-");
+    return removed;
 }
 
 static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,

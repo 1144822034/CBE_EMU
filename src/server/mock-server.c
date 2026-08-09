@@ -31,13 +31,12 @@ static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
 static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
                                                           u32 remaining);
 
-/* After login equipment 7/7: same-packet aggregated live wear attrs. */
+/* After login equipment 7/7: same-packet tip + HP/MP sync (no host overlay file). */
 static bool vm_mock_service_session_append_login_equip_wear_sync(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u8 equipmentRows);
 
-/* Publish aggregated panel attrs for host realign (login has no FA wear). */
-static void vm_net_mock_publish_panel_attr_overlay(
-    const vm_net_mock_player_stats *stats);
+/* Map HUD vitals: catalog item-use / map-heal update role HP then arm 1/1/14. */
+static void vm_mock_service_session_note_map_vitals_changed(const char *reason);
 
 #include "mock_server_catalog.c"
 

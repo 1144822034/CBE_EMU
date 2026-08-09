@@ -20,8 +20,10 @@ enum
      * timeout is why /admin-418yz6 often answered "请求不完整" after deploy
      * when the body arrived in a later TCP segment.  Keep the receive
      * deadline independent of game protocol-mutex wait time. */
-    VM_MOCK_ADMIN_REQUEST_MAX = 65536,
-    VM_MOCK_ADMIN_RESPONSE_MAX = 524288,
+    /* Map editor POSTs cells_b64 for up to ~64x64 tile grids. */
+    VM_MOCK_ADMIN_REQUEST_MAX = 98304,
+    /* Shared catalogs + 2 MiB headroom; avoid O(npc*catalog) HTML. */
+    VM_MOCK_ADMIN_RESPONSE_MAX = 2097152,
     VM_MOCK_ADMIN_SOCKET_TIMEOUT_MS = 15000,
     /* Cap how long an admin dispatch waits for the shared game-state lock
      * so a busy protocol path returns 503 instead of hanging the browser. */
@@ -518,9 +520,9 @@ done:
 
 enum
 {
-    VM_MOCK_ADMIN_SCENE_FILE_MAX = 512,
-    VM_MOCK_ADMIN_ACTOR_FILE_MAX = 1024,
-    VM_MOCK_ADMIN_XSE_FILE_MAX = 512,
+    VM_MOCK_ADMIN_SCENE_FILE_MAX = 2048,
+    VM_MOCK_ADMIN_ACTOR_FILE_MAX = 2048,
+    VM_MOCK_ADMIN_XSE_FILE_MAX = 2048,
     VM_MOCK_ADMIN_UPDATE_FILE_MAX = 1400,
     VM_MOCK_ADMIN_SHOP_PAGE_SIZE = 50
 };
@@ -596,6 +598,28 @@ static const char g_vm_mock_admin_script[] =
     "if(box6)box6.addEventListener('change',apply);"
     "for(const box of form.querySelectorAll('input[name^=\"service_kind_\"]'))box.addEventListener('change',apply);"
     "apply();}};"
+    "const setupCatalogSelects=()=>{"
+    "for(const select of document.querySelectorAll('select[data-admin-catalog]')){"
+    "const source=document.getElementById(select.dataset.adminCatalog);"
+    "if(!source)continue;"
+    "const current=select.value;"
+    "const emptyLabel=select.dataset.adminEmpty;"
+    "select.innerHTML='';"
+    "if(emptyLabel!==undefined){"
+    "const blank=new Option(emptyLabel,'',!current,!current);"
+    "select.add(blank);}"
+    "else if(select.required&&!current){"
+    "const blank=new Option('\u8bf7\u9009\u62e9','',true,true);blank.disabled=true;select.add(blank);}"
+    "let found=false;"
+    "for(const opt of source.options){"
+    "if(!opt.value&&emptyLabel===undefined)continue;"
+    "const selected=!!current&&opt.value===current;"
+    "if(selected)found=true;"
+    "select.add(new Option(opt.textContent||opt.value,opt.value,selected,selected));}"
+    "if(current&&!found){"
+    "const missing=new Option(current+'\uff08\u8d44\u6e90\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\uff09','',true,true);"
+    "missing.disabled=true;select.add(missing,0);}"
+    "}};"
     "const showAdminNotice=(ok,message)=>{"
     "let box=document.querySelector('#admin-ajax-toast');"
     "if(!box){box=document.createElement('div');box.id='admin-ajax-toast';"
@@ -690,8 +714,148 @@ static const char g_vm_mock_admin_script[] =
     "keep('.shop-list','cbe-admin-shop-scroll');"
     "keep('.update-left','cbe-admin-update-left-scroll');"
     "keep('.update-right','cbe-admin-update-right-scroll');"
-    "setupItemPicker();setupMonsterDrops();setupUpdateFilter();setupNpcKinds();"
-    "setupAjaxForms();});"
+    "setupCatalogSelects();setupItemPicker();setupMonsterDrops();setupUpdateFilter();setupNpcKinds();"
+    "setupAjaxForms();setupMapEditor();});"
+    "const adminRoot=()=>{const p=location.pathname;return p.endsWith('/')?p:p.replace(/[^/]*$/,'');};"
+    "const b64ToU32=(b64)=>{const bin=atob(b64);const n=bin.length>>2;const out=new Uint32Array(n);"
+    "for(let i=0;i<n;i++){const o=i*4;out[i]=bin.charCodeAt(o)|(bin.charCodeAt(o+1)<<8)|(bin.charCodeAt(o+2)<<16)|(bin.charCodeAt(o+3)<<24);}return out;};"
+    "const u32ToB64=(arr)=>{const bytes=new Uint8Array(arr.length*4);for(let i=0;i<arr.length;i++){const v=arr[i]>>>0;const o=i*4;"
+    "bytes[o]=v&255;bytes[o+1]=(v>>>8)&255;bytes[o+2]=(v>>>16)&255;bytes[o+3]=(v>>>24)&255;}"
+    "let s='';for(let i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);return btoa(s);};"
+    "const setupMapEditor=async()=>{"
+    "const root=document.getElementById('map-editor');if(!root)return;"
+    "const scene=root.dataset.scene||'';if(!scene)return;"
+    "const canvas=document.getElementById('map-canvas');const paletteEl=document.getElementById('map-palette');"
+    "const metaEl=document.getElementById('map-cursor-meta');const warnEl=document.getElementById('map-shared-warn');"
+    "const showCol=document.getElementById('map-show-collision');const colMode=document.getElementById('map-collision-mode');"
+    "const catalogEl=document.getElementById('map-sheet-catalog');const filterEl=document.getElementById('map-sheet-filter');"
+    "const previewBox=document.getElementById('map-sheet-preview');const previewImg=document.getElementById('map-sheet-preview-img');"
+    "const previewNameEl=document.getElementById('map-sheet-preview-name');const addBtn=document.getElementById('map-sheet-add');"
+    "const sheetMeta=document.getElementById('map-sheet-meta');"
+    "if(!canvas||!paletteEl||!catalogEl)return;"
+    "const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;"
+    "let tool='paint';let brush=0;let sheetIndex=0;let tileIndex=0;let cells=null;let map=null;let sheets=[];"
+    "let imageNames=[];let availableSheets=[];let selectedCatalog='';let thumbCache={};let dragging=false;let rectStart=null;"
+    "const pack=(si,ti,flags)=>(((flags&15)<<28)|((si&15)<<24)|(ti&0xffffff))>>>0;"
+    "const cellAt=(gx,gy)=>cells[gx*map.rows+gy];"
+    "const setCell=(gx,gy,v)=>{if(gx<0||gy<0||gx>=map.cols||gy>=map.rows)return;cells[gx*map.rows+gy]=v>>>0;};"
+    "const sheetUrl=(name)=>adminRoot()+'tile-sheet.bmp?name='+encodeURIComponent(name);"
+    "const loadSheet=(name)=>new Promise((resolve,reject)=>{if(thumbCache[name]&&thumbCache[name].complete){resolve(thumbCache[name]);return;}"
+    "const img=new Image();img.onload=()=>{thumbCache[name]=img;resolve(img);};img.onerror=reject;img.src=sheetUrl(name)+'&_='+Date.now();});"
+    "const drawMap=()=>{"
+    "if(!map||!cells)return;ctx.clearRect(0,0,canvas.width,canvas.height);"
+    "for(let gx=0;gx<map.cols;gx++)for(let gy=0;gy<map.rows;gy++){"
+    "const packed=cellAt(gx,gy);const si=(packed>>>24)&15;const ti=packed&0xffffff;const sh=sheets[si];"
+    "const dx=gx*map.tileWidth,dy=gy*map.tileHeight;"
+    "if(sh&&sh.img&&sh.tpr>0){const sx=(ti%sh.tpr)*map.tileWidth,sy=((ti/sh.tpr)|0)*map.tileHeight;"
+    "ctx.drawImage(sh.img,sx,sy,map.tileWidth,map.tileHeight,dx,dy,map.tileWidth,map.tileHeight);}"
+    "else{ctx.fillStyle='#f0f';ctx.fillRect(dx,dy,map.tileWidth,map.tileHeight);}"
+    "if(showCol&&showCol.checked){const fl=(packed>>>28)&15;if(fl){ctx.fillStyle=fl===15?'rgba(180,35,24,.35)':'rgba(253,176,34,.35)';"
+    "ctx.fillRect(dx,dy,map.tileWidth,map.tileHeight);ctx.strokeStyle='rgba(255,255,255,.5)';ctx.strokeRect(dx+.5,dy+.5,map.tileWidth-1,map.tileHeight-1);}}"
+    "}};"
+    "const usableCatalog=()=>{const used=new Set(imageNames);const q=((filterEl&&filterEl.value)||'').trim().toLowerCase();"
+    "return availableSheets.filter(n=>!used.has(n)&&(!q||n.toLowerCase().includes(q))).sort((a,b)=>a.localeCompare(b,'zh'));};"
+    "const updatePreviewUi=()=>{const max=map&&map.imageMax?map.imageMax:16;const full=imageNames.length>=max;"
+    "if(previewBox)previewBox.classList.toggle('on',!!selectedCatalog);"
+    "if(previewNameEl)previewNameEl.textContent=selectedCatalog||'';"
+    "if(previewImg){if(selectedCatalog){previewImg.src=sheetUrl(selectedCatalog);previewImg.alt=selectedCatalog;}else{previewImg.removeAttribute('src');}}"
+    "if(addBtn){addBtn.disabled=!selectedCatalog||full||imageNames.includes(selectedCatalog);addBtn.textContent=full?'\\u5df2\\u8fbe\\u4e0a\\u9650':'\\u6dfb\\u52a0\\u6b64\\u56fe\\u96c6';}"
+    "if(sheetMeta)sheetMeta.textContent='\\u56fe\\u96c6 '+imageNames.length+' / '+max+' \\u00b7 \\u53ef\\u6dfb\\u52a0 '+usableCatalog().length;};"
+    "const selectCatalog=(name)=>{selectedCatalog=name||'';updatePreviewUi();"
+    "catalogEl.querySelectorAll('.sheet-card').forEach(c=>c.classList.toggle('on',c.dataset.name===selectedCatalog));};"
+    "const refreshCatalog=()=>{const opts=usableCatalog();const max=map&&map.imageMax?map.imageMax:16;const full=imageNames.length>=max;"
+    "catalogEl.innerHTML='';"
+    "if(!opts.length){const empty=document.createElement('div');empty.className='meta';"
+    "empty.textContent=availableSheets.length?'\\u6ca1\\u6709\\u5339\\u914d\\u7684\\u53ef\\u6dfb\\u52a0\\u56fe\\u96c6':'\\u6ca1\\u6709\\u53ef\\u7528\\u56fe\\u96c6';catalogEl.appendChild(empty);updatePreviewUi();return;}"
+    "if(selectedCatalog&&!opts.includes(selectedCatalog))selectedCatalog='';"
+    "opts.forEach(name=>{const card=document.createElement('div');card.className='sheet-card'+(name===selectedCatalog?' on':'');card.dataset.name=name;"
+    "const thumb=document.createElement('img');thumb.className='thumb';thumb.alt=name;thumb.loading='lazy';thumb.src=sheetUrl(name);"
+    "thumb.onerror=()=>{const ph=document.createElement('div');ph.className='thumb missing';ph.textContent='?';thumb.replaceWith(ph);};"
+    "const label=document.createElement('div');label.className='name';label.textContent=name;"
+    "const btn=document.createElement('button');btn.type='button';btn.textContent='\\u6dfb\\u52a0';btn.disabled=full;"
+    "btn.addEventListener('click',ev=>{ev.stopPropagation();selectCatalog(name);addSheet(name);});"
+    "card.addEventListener('click',()=>selectCatalog(name));"
+    "card.appendChild(thumb);card.appendChild(label);card.appendChild(btn);catalogEl.appendChild(card);});"
+    "updatePreviewUi();};"
+    "const rebuildPalette=()=>{"
+    "paletteEl.innerHTML='';"
+    "imageNames.forEach((name,i)=>{const sh=sheets[i];if(!sh||!sh.img)return;"
+    "const block=document.createElement('div');block.className='palette-sheet';"
+    "const head=document.createElement('div');head.className='palette-sheet-head';"
+    "const title=document.createElement('h3');title.textContent='['+i+'] '+name;head.appendChild(title);"
+    "const rm=document.createElement('button');rm.type='button';rm.className='danger';rm.textContent='\\u79fb\\u9664';"
+    "rm.disabled=imageNames.length<=1;rm.addEventListener('click',()=>removeSheet(i));head.appendChild(rm);"
+    "block.appendChild(head);"
+    "const grid=document.createElement('div');grid.className='palette-grid';"
+    "grid.style.gridTemplateColumns='repeat('+Math.max(1,sh.tpr)+', '+map.tileWidth+'px)';"
+    "for(let ti=0;ti<sh.tpr*sh.tpc;ti++){const c=document.createElement('canvas');c.width=map.tileWidth;c.height=map.tileHeight;"
+    "c.dataset.sheet=String(i);c.dataset.tile=String(ti);const cctx=c.getContext('2d');cctx.imageSmoothingEnabled=false;"
+    "cctx.drawImage(sh.img,(ti%sh.tpr)*map.tileWidth,((ti/sh.tpr)|0)*map.tileHeight,map.tileWidth,map.tileHeight,0,0,map.tileWidth,map.tileHeight);"
+    "c.addEventListener('click',()=>{sheetIndex=i;tileIndex=ti;brush=pack(i,ti,(brush>>>28)&15);"
+    "paletteEl.querySelectorAll('canvas').forEach(x=>x.classList.toggle('on',x===c));});"
+    "if(i===sheetIndex&&ti===tileIndex)c.classList.add('on');grid.appendChild(c);}"
+    "block.appendChild(grid);paletteEl.appendChild(block);});"
+    "refreshCatalog();};"
+    "const removeSheet=async(index)=>{"
+    "if(imageNames.length<=1){showAdminNotice(false,'\\u81f3\\u5c11\\u4fdd\\u7559\\u4e00\\u5f20\\u56fe\\u96c6');return;}"
+    "if(!confirm('\\u79fb\\u9664\\u56fe\\u96c6 '+imageNames[index]+' \\uff1f\\u5f15\\u7528\\u8be5\\u56fe\\u96c6\\u7684\\u683c\\u5b50\\u4f1a\\u6539\\u4e3a\\u7b2c0\\u5f20\\u7b2c0\\u74f6\\u3002'))return;"
+    "for(let n=0;n<cells.length;n++){const packed=cells[n]>>>0;const si=(packed>>>24)&15;const ti=packed&0xffffff;const fl=(packed>>>28)&15;"
+    "if(si===index)cells[n]=pack(0,0,fl);else if(si>index)cells[n]=pack(si-1,ti,fl);}"
+    "imageNames.splice(index,1);sheets.splice(index,1);"
+    "if(sheetIndex===index){sheetIndex=0;tileIndex=0;}else if(sheetIndex>index)sheetIndex--;"
+    "rebuildPalette();drawMap();showAdminNotice(true,'\\u5df2\\u79fb\\u9664\\u56fe\\u96c6');};"
+    "const addSheet=async(name)=>{name=name||selectedCatalog;if(!name)return;const max=map.imageMax||16;"
+    "if(imageNames.includes(name)){showAdminNotice(false,'\\u56fe\\u96c6\\u5df2\\u5728\\u5217\\u8868\\u4e2d');return;}"
+    "if(imageNames.length>=max){showAdminNotice(false,'\\u56fe\\u96c6\\u6570\\u91cf\\u5df2\\u8fbe\\u4e0a\\u9650');return;}"
+    "try{const img=await loadSheet(name);const tpr=(img.width/map.tileWidth)|0;const tpc=(img.height/map.tileHeight)|0;"
+    "if(tpr<=0||tpc<=0)throw new Error('bad sheet');"
+    "imageNames.push(name);sheets.push({img,tpr,tpc,name});sheetIndex=imageNames.length-1;tileIndex=0;selectedCatalog='';"
+    "rebuildPalette();drawMap();showAdminNotice(true,'\\u5df2\\u6dfb\\u52a0 '+name);}catch(_){showAdminNotice(false,'\\u52a0\\u8f7d\\u56fe\\u96c6\\u5931\\u8d25');}};"
+    "const pickAt=(gx,gy)=>{const packed=cellAt(gx,gy);sheetIndex=(packed>>>24)&15;tileIndex=packed&0xffffff;brush=packed;"
+    "paletteEl.querySelectorAll('canvas').forEach(c=>c.classList.toggle('on',(+c.dataset.sheet)===sheetIndex&&(+c.dataset.tile)===tileIndex));};"
+    "const paintAt=(gx,gy)=>{if(tool==='eyedrop'){pickAt(gx,gy);return;}const cur=cellAt(gx,gy);"
+    "if(tool==='collision'){const flags=parseInt(colMode.value,10)||0;setCell(gx,gy,pack((cur>>>24)&15,cur&0xffffff,flags));return;}"
+    "setCell(gx,gy,pack(sheetIndex,tileIndex,(cur>>>28)&15));};"
+    "const fillRect=(x0,y0,x1,y1)=>{const xa=Math.min(x0,x1),xb=Math.max(x0,x1),ya=Math.min(y0,y1),yb=Math.max(y0,y1);"
+    "for(let gx=xa;gx<=xb;gx++)for(let gy=ya;gy<=yb;gy++)paintAt(gx,gy);};"
+    "const gridFromEvent=(ev)=>{const r=canvas.getBoundingClientRect();const scaleX=canvas.width/r.width,scaleY=canvas.height/r.height;"
+    "const x=((ev.clientX-r.left)*scaleX)|0,y=((ev.clientY-r.top)*scaleY)|0;"
+    "return{gx:Math.min(map.cols-1,Math.max(0,(x/map.tileWidth)|0)),gy:Math.min(map.rows-1,Math.max(0,(y/map.tileHeight)|0))};};"
+    "document.querySelectorAll('[data-tool]').forEach(btn=>btn.addEventListener('click',()=>{"
+    "tool=btn.getAttribute('data-tool')||'paint';document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('on',b===btn));}));"
+    "if(showCol)showCol.addEventListener('change',drawMap);"
+    "if(addBtn)addBtn.addEventListener('click',()=>addSheet());"
+    "if(filterEl)filterEl.addEventListener('input',()=>refreshCatalog());"
+    "canvas.addEventListener('mousedown',ev=>{const g=gridFromEvent(ev);dragging=true;if(tool==='rect'){rectStart=g;return;}"
+    "paintAt(g.gx,g.gy);drawMap();});"
+    "canvas.addEventListener('mousemove',ev=>{const g=gridFromEvent(ev);const packed=cellAt(g.gx,g.gy);"
+    "if(metaEl)metaEl.textContent='('+g.gx+','+g.gy+') sheet='+((packed>>>24)&15)+' tile='+(packed&0xffffff)+' flags=0x'+((packed>>>28)&15).toString(16);"
+    "if(!dragging||tool==='rect'||tool==='eyedrop')return;paintAt(g.gx,g.gy);drawMap();});"
+    "window.addEventListener('mouseup',ev=>{if(!dragging)return;dragging=false;if(tool==='rect'&&rectStart){const g=gridFromEvent(ev);fillRect(rectStart.gx,rectStart.gy,g.gx,g.gy);drawMap();rectStart=null;}});"
+    "const saveBtn=document.getElementById('map-save');"
+    "if(saveBtn)saveBtn.addEventListener('click',async()=>{"
+    "if(!map||!cells||!imageNames.length)return;saveBtn.disabled=true;try{"
+    "const body=new URLSearchParams();body.set('action','save-scene-map');body.set('scene',scene);"
+    "body.set('map_name',map.mapName);body.set('cell_count',String(map.cellCount));body.set('cells_b64',u32ToB64(cells));"
+    "body.set('image_names',imageNames.join('\\n'));"
+    "const response=await fetch(adminRoot()+'action',{method:'POST',body,credentials:'same-origin',"
+    "headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json','Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'}});"
+    "const type=(response.headers.get('content-type')||'').toLowerCase();"
+    "if(!type.includes('application/json')){location.assign(response.url||location.href);return;}"
+    "const data=await response.json();const target=data&&data.location?data.location:location.href;location.assign(target);"
+    "}catch(_){showAdminNotice(false,'\\u5730\\u56fe\\u4fdd\\u5b58\\u5931\\u8d25');}finally{saveBtn.disabled=false;}});"
+    "try{"
+    "const res=await fetch(adminRoot()+'map-edit.json?scene='+encodeURIComponent(scene),{credentials:'same-origin'});"
+    "map=await res.json();if(!map||!map.ok)throw new Error('bad map');"
+    "cells=b64ToU32(map.cellsB64);canvas.width=map.width;canvas.height=map.height;"
+    "imageNames=Array.isArray(map.imageNames)?map.imageNames.slice():[];"
+    "availableSheets=Array.isArray(map.availableSheets)?map.availableSheets.slice():[];"
+    "if(warnEl&&map.sharedBy&&map.sharedBy.length){warnEl.hidden=false;warnEl.textContent='\\u8b66\\u544a\\uff1a\\u6b64 .map \\u88ab\\u4ee5\\u4e0b\\u573a\\u666f\\u5171\\u4eab\\uff0c\\u4fdd\\u5b58\\u4f1a\\u4e00\\u5e76\\u5f71\\u54cd\\uff1a '+map.sharedBy.join('\\u3001');}"
+    "sheets=[];for(let i=0;i<imageNames.length;i++){const name=imageNames[i];const img=await loadSheet(name);"
+    "const tpr=(img.width/map.tileWidth)|0;const tpc=(img.height/map.tileHeight)|0;sheets.push({img,tpr,tpc,name});}"
+    "rebuildPalette();drawMap();showAdminNotice(true,'\\u5730\\u56fe\\u5df2\\u52a0\\u8f7d');"
+    "}catch(err){showAdminNotice(false,'\\u5730\\u56fe\\u52a0\\u8f7d\\u5931\\u8d25');}"
+    "};"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -1841,85 +2005,38 @@ static void vm_mock_admin_resource_name_to_utf8(const char *name,
 #endif
 }
 
-static void vm_mock_admin_render_actor_select(
+/* Shared option catalogs (once per page). Compact <select data-admin-catalog>
+ * fields are filled by setupCatalogSelects() so NPC forms stay small. */
+static void vm_mock_admin_render_actor_catalog(
     vm_mock_admin_text *page, const vm_mock_admin_scene_file *actorFiles,
-    u32 actorCount, const char *currentActor)
+    u32 actorCount)
 {
-    bool currentFound = false;
-
     if (page == NULL)
         return;
-    for (u32 i = 0; i < actorCount; ++i)
-    {
-        if (currentActor != NULL && strcmp(actorFiles[i].name, currentActor) == 0)
-        {
-            currentFound = true;
-            break;
-        }
-    }
     vm_mock_admin_text_appendf(
-        page, "<select name=\"actor_resource\" required>");
-    if (currentActor != NULL && currentActor[0] != 0 && !currentFound)
-    {
-        vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>");
-        vm_mock_admin_text_append_html(page, currentActor);
-        vm_mock_admin_text_appendf(page, "（资源不存在，请重新选择）</option>");
-    }
-    if ((currentActor == NULL || currentActor[0] == 0) && actorCount != 0)
-        vm_mock_admin_text_appendf(page, "<option value=\"\" selected disabled>请选择 Actor 资源</option>");
+        page, "<select id=\"admin-actor-options\" hidden>");
     for (u32 i = 0; i < actorCount; ++i)
     {
-        bool selected = currentFound &&
-                        strcmp(actorFiles[i].name, currentActor) == 0;
         vm_mock_admin_text_appendf(page, "<option value=\"");
         vm_mock_admin_text_append_html(page, actorFiles[i].name);
-        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
+        vm_mock_admin_text_appendf(page, "\">");
         vm_mock_admin_text_append_html(page, actorFiles[i].name);
         vm_mock_admin_text_appendf(page, "</option>");
     }
-    if (actorCount == 0)
-        vm_mock_admin_text_appendf(page, "<option value=\"\" disabled>未找到 Actor 资源</option>");
     vm_mock_admin_text_appendf(page, "</select>");
 }
 
-static void vm_mock_admin_render_xse_select(
+static void vm_mock_admin_render_xse_catalog(
     vm_mock_admin_text *page, const vm_mock_admin_scene_file *xseFiles,
-    u32 xseCount, const char *currentScript)
+    u32 xseCount)
 {
-    bool currentFound = false;
-    bool hasCurrent = currentScript != NULL && currentScript[0] != 0;
-
     if (page == NULL)
         return;
-    for (u32 i = 0; i < xseCount; ++i)
-    {
-        if (hasCurrent && strcmp(xseFiles[i].name, currentScript) == 0)
-        {
-            currentFound = true;
-            break;
-        }
-    }
-    vm_mock_admin_text_appendf(page, "<select name=\"script_name\">");
-    if (hasCurrent && !currentFound)
-    {
-        char currentUtf8[192];
-        vm_net_mock_gbk_label_to_utf8(currentScript, currentUtf8,
-                                      sizeof(currentUtf8));
-        vm_mock_admin_text_appendf(
-            page, "<option value=\"\" selected disabled>");
-        vm_mock_admin_text_append_html(page, currentUtf8);
-        vm_mock_admin_text_appendf(
-            page, "（资源不存在，请重新选择）</option>");
-    }
-    vm_mock_admin_text_appendf(
-        page, "<option value=\"\"%s>无脚本</option>",
-        hasCurrent ? "" : " selected");
+    vm_mock_admin_text_appendf(page, "<select id=\"admin-xse-options\" hidden>");
     for (u32 i = 0; i < xseCount; ++i)
     {
         char nameUtf8[192];
         char labelUtf8[288];
-        bool selected = currentFound &&
-                        strcmp(xseFiles[i].name, currentScript) == 0;
 
         vm_net_mock_gbk_label_to_utf8(xseFiles[i].name, nameUtf8,
                                       sizeof(nameUtf8));
@@ -1927,14 +2044,142 @@ static void vm_mock_admin_render_xse_select(
                                        sizeof(labelUtf8));
         vm_mock_admin_text_appendf(page, "<option value=\"");
         vm_mock_admin_text_append_html(page, nameUtf8);
-        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
+        vm_mock_admin_text_appendf(page, "\">");
         vm_mock_admin_text_append_html(page, labelUtf8);
         vm_mock_admin_text_appendf(page, "</option>");
     }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_scene_catalog(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *sceneFiles,
+    u32 sceneCount)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page, "<select id=\"admin-scene-options\" hidden>");
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char sceneUtf8[192];
+        char labelUtf8[288];
+
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, sceneUtf8,
+                                      sizeof(sceneUtf8));
+        vm_mock_admin_scene_label_utf8(&sceneFiles[i], labelUtf8,
+                                       sizeof(labelUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8);
+        vm_mock_admin_text_appendf(page, "\">");
+        vm_mock_admin_text_append_html(page, labelUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+}
+
+static void vm_mock_admin_render_task_datalist(vm_mock_admin_text *page)
+{
+    vm_net_mock_task_definition *tasks = NULL;
+    u32 taskCount = 0;
+
+    if (page == NULL)
+        return;
+    tasks = (vm_net_mock_task_definition *)calloc(
+        VM_NET_MOCK_TASK_CATALOG_MAX, sizeof(*tasks));
+    if (tasks == NULL)
+    {
+        vm_mock_admin_text_appendf(
+            page, "<datalist id=\"admin-task-ids\"></datalist>");
+        return;
+    }
+    taskCount = vm_net_mock_task_admin_list(tasks, VM_NET_MOCK_TASK_CATALOG_MAX);
+    vm_mock_admin_text_appendf(page, "<datalist id=\"admin-task-ids\">");
+    for (u32 i = 0; i < taskCount; ++i)
+    {
+        char nameUtf8[128];
+
+        if (!tasks[i].enabled)
+            continue;
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        vm_net_mock_gbk_label_to_utf8(tasks[i].name, nameUtf8,
+                                      sizeof(nameUtf8));
+        vm_mock_admin_text_appendf(page, "<option value=\"%u\">%u · ",
+                                   tasks[i].taskId, tasks[i].taskId);
+        vm_mock_admin_text_append_html(page, nameUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    vm_mock_admin_text_appendf(page, "</datalist>");
+    free(tasks);
+}
+
+static void vm_mock_admin_render_actor_select(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *actorFiles,
+    u32 actorCount, const char *currentActor)
+{
+    bool hasCurrent = currentActor != NULL && currentActor[0] != 0;
+
+    (void)actorFiles;
+    (void)actorCount;
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<select name=\"actor_resource\" data-admin-catalog=\"admin-actor-options\" required>");
+    if (hasCurrent)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, currentActor);
+        vm_mock_admin_text_appendf(page, "\" selected>");
+        vm_mock_admin_text_append_html(page, currentActor);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"\" selected disabled>请选择 Actor 资源</option>");
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
+    if (actorCount == 0)
+        vm_mock_admin_text_appendf(
+            page, "<p class=\"size\">未找到 Actor 资源。</p>");
+}
+
+static void vm_mock_admin_render_xse_select(
+    vm_mock_admin_text *page, const vm_mock_admin_scene_file *xseFiles,
+    u32 xseCount, const char *currentScript)
+{
+    bool hasCurrent = currentScript != NULL && currentScript[0] != 0;
+    char currentUtf8[192];
+
+    (void)xseFiles;
+    (void)xseCount;
+    if (page == NULL)
+        return;
+    memset(currentUtf8, 0, sizeof(currentUtf8));
+    if (hasCurrent)
+        vm_net_mock_gbk_label_to_utf8(currentScript, currentUtf8,
+                                      sizeof(currentUtf8));
+    vm_mock_admin_text_appendf(
+        page,
+        "<select name=\"script_name\" data-admin-catalog=\"admin-xse-options\" "
+        "data-admin-empty=\"无脚本\">");
+    if (hasCurrent)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"");
+        vm_mock_admin_text_append_html(page, currentUtf8);
+        vm_mock_admin_text_appendf(page, "\" selected>");
+        vm_mock_admin_text_append_html(page, currentUtf8);
+        vm_mock_admin_text_appendf(page, "</option>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"\" selected>无脚本</option>");
+    }
+    vm_mock_admin_text_appendf(page, "</select>");
     if (xseCount == 0)
         vm_mock_admin_text_appendf(
-            page, "<option value=\"\" disabled>未找到 XSE 脚本资源</option>");
-    vm_mock_admin_text_appendf(page, "</select>");
+            page, "<p class=\"size\">未找到 XSE 脚本。</p>");
 }
 
 static void vm_mock_admin_render_npc_service_checkboxes(vm_mock_admin_text *page,
@@ -1987,38 +2232,46 @@ static void vm_mock_admin_render_instance_scene_select(
     u32 sceneCount,
     const char *currentRuntimeScene)
 {
+    char currentUtf8[192];
+    bool found = false;
+
     if (page == NULL)
         return;
-    vm_mock_admin_text_appendf(
-        page, "<select name=\"instance_scene\"><option value=\"\">不传送（仅挑战）</option>");
-    for (u32 i = 0; i < sceneCount; ++i)
+    memset(currentUtf8, 0, sizeof(currentUtf8));
+    for (u32 i = 0; currentRuntimeScene != NULL && currentRuntimeScene[0] != 0 &&
+                    sceneFiles != NULL && i < sceneCount;
+         ++i)
     {
         char runtimeScene[64];
-        char sceneUtf8[192];
-        bool selected = false;
 
         memset(runtimeScene, 0, sizeof(runtimeScene));
-        memset(sceneUtf8, 0, sizeof(sceneUtf8));
         if (!vm_mock_admin_scene_file_to_runtime_key(
                 sceneFiles[i].name, runtimeScene, sizeof(runtimeScene)))
-        {
             continue;
-        }
-        selected = currentRuntimeScene != NULL && currentRuntimeScene[0] != 0 &&
-                   vm_net_mock_scene_names_equal_loose(
-                       currentRuntimeScene, runtimeScene);
-        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, sceneUtf8,
-                                      sizeof(sceneUtf8));
+        if (!vm_net_mock_scene_names_equal_loose(currentRuntimeScene,
+                                                 runtimeScene))
+            continue;
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, currentUtf8,
+                                      sizeof(currentUtf8));
+        found = true;
+        break;
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<select name=\"instance_scene\" data-admin-catalog=\"admin-scene-options\" "
+        "data-admin-empty=\"不传送（仅挑战）\">");
+    if (found)
+    {
         vm_mock_admin_text_appendf(page, "<option value=\"");
-        vm_mock_admin_text_append_html(page, sceneUtf8);
-        vm_mock_admin_text_appendf(page, "\"%s>", selected ? " selected" : "");
-        {
-            char labelUtf8[288];
-            vm_mock_admin_scene_label_utf8(&sceneFiles[i], labelUtf8,
-                                           sizeof(labelUtf8));
-            vm_mock_admin_text_append_html(page, labelUtf8);
-        }
+        vm_mock_admin_text_append_html(page, currentUtf8);
+        vm_mock_admin_text_appendf(page, "\" selected>");
+        vm_mock_admin_text_append_html(page, currentUtf8);
         vm_mock_admin_text_appendf(page, "</option>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(
+            page, "<option value=\"\" selected>不传送（仅挑战）</option>");
     }
     vm_mock_admin_text_appendf(page, "</select>");
 }
@@ -2071,47 +2324,19 @@ static void vm_mock_admin_render_npc_task_select_named(
     u32 currentTaskId,
     const char *emptyLabel)
 {
-    /* Nested under content-page render; keep catalog off the worker stack. */
-    vm_net_mock_task_definition *tasks = NULL;
-    u32 taskCount = 0;
-
     if (page == NULL || fieldName == NULL || fieldName[0] == 0)
         return;
     if (emptyLabel == NULL || emptyLabel[0] == 0)
         emptyLabel = "不绑定任务";
-    tasks = (vm_net_mock_task_definition *)calloc(
-        VM_NET_MOCK_TASK_CATALOG_MAX, sizeof(*tasks));
-    if (tasks == NULL)
-    {
-        vm_mock_admin_text_appendf(
-            page, "<select name=\"%s\"><option value=\"0\">任务目录加载失败</option></select>",
-            fieldName);
-        return;
-    }
-    taskCount = vm_net_mock_task_admin_list(
-        tasks, VM_NET_MOCK_TASK_CATALOG_MAX);
+    /* Options live in the shared #admin-task-ids datalist once per page. */
     vm_mock_admin_text_appendf(
-        page, "<select name=\"%s\"><option value=\"0\"%s>",
-        fieldName, currentTaskId == 0 ? " selected" : "");
+        page,
+        "<input type=\"number\" name=\"%s\" list=\"admin-task-ids\" "
+        "min=\"0\" max=\"4294967295\" value=\"%u\" "
+        "placeholder=\"",
+        fieldName, currentTaskId);
     vm_mock_admin_text_append_html(page, emptyLabel);
-    vm_mock_admin_text_appendf(page, "</option>");
-    for (u32 i = 0; i < taskCount; ++i)
-    {
-        char nameUtf8[128];
-        if (!tasks[i].enabled)
-            continue;
-        memset(nameUtf8, 0, sizeof(nameUtf8));
-        vm_net_mock_gbk_label_to_utf8(tasks[i].name,
-                                      nameUtf8, sizeof(nameUtf8));
-        vm_mock_admin_text_appendf(
-            page, "<option value=\"%u\"%s>%u · ", tasks[i].taskId,
-            currentTaskId == tasks[i].taskId ? " selected" : "",
-            tasks[i].taskId);
-        vm_mock_admin_text_append_html(page, nameUtf8);
-        vm_mock_admin_text_appendf(page, "</option>");
-    }
-    vm_mock_admin_text_appendf(page, "</select>");
-    free(tasks);
+    vm_mock_admin_text_appendf(page, "\">");
 }
 
 static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
@@ -3714,6 +3939,281 @@ done:
     return ok;
 }
 
+static void vm_mock_admin_clear_scene_preview_cache(void)
+{
+    free(g_vm_mock_admin_preview_cache_bmp);
+    g_vm_mock_admin_preview_cache_bmp = NULL;
+    g_vm_mock_admin_preview_cache_bmp_len = 0;
+    g_vm_mock_admin_preview_cache_scene[0] = 0;
+}
+
+static bool vm_mock_admin_base64_encode(const u8 *src, u32 srcLen,
+                                        char *out, size_t outCap,
+                                        u32 *outLen)
+{
+    static const char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    u32 i = 0;
+    u32 o = 0;
+    u32 need = ((srcLen + 2u) / 3u) * 4u;
+
+    if (outLen)
+        *outLen = 0;
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    if (src == NULL && srcLen != 0)
+        return false;
+    if (need + 1u > outCap)
+        return false;
+    while (i + 3u <= srcLen)
+    {
+        u32 n = ((u32)src[i] << 16) | ((u32)src[i + 1] << 8) | (u32)src[i + 2];
+        out[o++] = kAlphabet[(n >> 18) & 63u];
+        out[o++] = kAlphabet[(n >> 12) & 63u];
+        out[o++] = kAlphabet[(n >> 6) & 63u];
+        out[o++] = kAlphabet[n & 63u];
+        i += 3u;
+    }
+    if (i < srcLen)
+    {
+        u32 n = (u32)src[i] << 16;
+        out[o++] = kAlphabet[(n >> 18) & 63u];
+        if (i + 1u < srcLen)
+        {
+            n |= (u32)src[i + 1] << 8;
+            out[o++] = kAlphabet[(n >> 12) & 63u];
+            out[o++] = kAlphabet[(n >> 6) & 63u];
+            out[o++] = '=';
+        }
+        else
+        {
+            out[o++] = kAlphabet[(n >> 12) & 63u];
+            out[o++] = '=';
+            out[o++] = '=';
+        }
+    }
+    out[o] = 0;
+    if (outLen)
+        *outLen = o;
+    return true;
+}
+
+static int vm_mock_admin_base64_decode_value(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return ch - 'A';
+    if (ch >= 'a' && ch <= 'z')
+        return ch - 'a' + 26;
+    if (ch >= '0' && ch <= '9')
+        return ch - '0' + 52;
+    if (ch == '+')
+        return 62;
+    if (ch == '/')
+        return 63;
+    return -1;
+}
+
+static bool vm_mock_admin_base64_decode(const char *src, u8 *out, u32 outCap,
+                                        u32 *outLen)
+{
+    u32 i = 0;
+    u32 o = 0;
+    size_t srcLen = 0;
+
+    if (outLen)
+        *outLen = 0;
+    if (src == NULL || out == NULL)
+        return false;
+    srcLen = strlen(src);
+    if ((srcLen & 3u) != 0)
+        return false;
+    while (i < srcLen)
+    {
+        int a = vm_mock_admin_base64_decode_value(src[i]);
+        int b = vm_mock_admin_base64_decode_value(src[i + 1]);
+        int c = src[i + 2] == '=' ? -2 : vm_mock_admin_base64_decode_value(src[i + 2]);
+        int d = src[i + 3] == '=' ? -2 : vm_mock_admin_base64_decode_value(src[i + 3]);
+        u32 n;
+
+        if (a < 0 || b < 0 || c == -1 || d == -1)
+            return false;
+        if (c == -2 && d != -2)
+            return false;
+        n = ((u32)a << 18) | ((u32)b << 12) |
+            ((u32)(c < 0 ? 0 : c) << 6) | (u32)(d < 0 ? 0 : d);
+        if (o >= outCap)
+            return false;
+        out[o++] = (u8)((n >> 16) & 0xffu);
+        if (c >= 0)
+        {
+            if (o >= outCap)
+                return false;
+            out[o++] = (u8)((n >> 8) & 0xffu);
+        }
+        if (d >= 0)
+        {
+            if (o >= outCap)
+                return false;
+            out[o++] = (u8)(n & 0xffu);
+        }
+        i += 4u;
+    }
+    if (outLen)
+        *outLen = o;
+    return true;
+}
+
+static bool vm_mock_admin_build_map_payload(
+    const vm_mock_admin_scene_preview *preview, const u8 *cells, u32 cellBytes,
+    u8 **payloadOut, u32 *payloadLenOut)
+{
+    u32 namesBytes = 0;
+    u32 total = 0;
+    u32 pos = 0;
+    u8 *out = NULL;
+
+    if (payloadOut)
+        *payloadOut = NULL;
+    if (payloadLenOut)
+        *payloadLenOut = 0;
+    if (preview == NULL || cells == NULL || cellBytes != preview->cellCount * 4u ||
+        preview->imageCount == 0 ||
+        preview->imageCount > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < preview->imageCount; ++i)
+    {
+        size_t nameLen = strlen(preview->imageNames[i]);
+        if (nameLen == 0 || nameLen > 255u)
+            return false;
+        namesBytes += 1u + (u32)nameLen;
+    }
+    total = 4u + namesBytes + 16u + cellBytes;
+    out = (u8 *)malloc(total);
+    if (out == NULL)
+        return false;
+    vm_mock_admin_preview_write_le32(out, 0, preview->imageCount);
+    pos = 4;
+    for (u32 i = 0; i < preview->imageCount; ++i)
+    {
+        size_t nameLen = strlen(preview->imageNames[i]);
+        out[pos++] = (u8)nameLen;
+        memcpy(out + pos, preview->imageNames[i], nameLen);
+        pos += (u32)nameLen;
+    }
+    vm_mock_admin_preview_write_le32(out, pos, preview->width);
+    vm_mock_admin_preview_write_le32(out, pos + 4, preview->height);
+    vm_mock_admin_preview_write_le32(out, pos + 8, preview->tileWidth);
+    vm_mock_admin_preview_write_le32(out, pos + 12, preview->tileHeight);
+    pos += 16;
+    memcpy(out + pos, cells, cellBytes);
+    *payloadOut = out;
+    *payloadLenOut = total;
+    return true;
+}
+
+static bool vm_mock_admin_build_tile_sheet_bmp(const char *imageName,
+                                               u8 **bmpOut, u32 *bmpLenOut,
+                                               u32 *widthOut, u32 *heightOut)
+{
+    u8 *imagePayload = NULL;
+    u32 imagePayloadLen = 0;
+    u8 imageType = 0;
+    GifOutput image;
+    int mallocSize = 0;
+    u16 *canvas = NULL;
+    u8 *bmp = NULL;
+    u32 rowBytes = 0;
+    u32 imageBytes = 0;
+    u32 bmpLen = 0;
+    bool ok = false;
+
+    if (bmpOut)
+        *bmpOut = NULL;
+    if (bmpLenOut)
+        *bmpLenOut = 0;
+    if (widthOut)
+        *widthOut = 0;
+    if (heightOut)
+        *heightOut = 0;
+    memset(&image, 0, sizeof(image));
+    if (imageName == NULL || imageName[0] == 0 ||
+        !vm_net_mock_update_name_is_safe(imageName) ||
+        !vm_net_mock_str_ends_with(imageName, ".gif") ||
+        !vm_mock_admin_load_data_payload(imageName, ".gif", &imagePayload,
+                                         &imagePayloadLen, &imageType) ||
+        imageType != 1 ||
+        gifDecodeExt(imagePayload, &image, 1, &mallocSize) == 0 ||
+        image.pixels == NULL || image.width == 0 || image.height == 0 ||
+        (u32)image.width * (u32)image.height >
+            VM_MOCK_ADMIN_PREVIEW_PIXEL_MAX)
+    {
+        goto done;
+    }
+    canvas = (u16 *)malloc((size_t)image.width * (size_t)image.height *
+                            sizeof(u16));
+    if (canvas == NULL)
+        goto done;
+    {
+        u32 sourcePitch = (u32)image.width +
+                          ((4u - ((u32)image.width & 3u)) & 3u);
+        for (u32 y = 0; y < (u32)image.height; ++y)
+        {
+            memcpy(canvas + y * (u32)image.width,
+                   image.pixels + y * sourcePitch,
+                   (size_t)image.width * sizeof(u16));
+        }
+    }
+    rowBytes = ((u32)image.width * 3u + 3u) & ~3u;
+    imageBytes = rowBytes * (u32)image.height;
+    bmpLen = 54u + imageBytes;
+    bmp = (u8 *)malloc(bmpLen);
+    if (bmp == NULL)
+        goto done;
+    memset(bmp, 0, bmpLen);
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    vm_mock_admin_preview_write_le32(bmp, 2, bmpLen);
+    vm_mock_admin_preview_write_le32(bmp, 10, 54);
+    vm_mock_admin_preview_write_le32(bmp, 14, 40);
+    vm_mock_admin_preview_write_le32(bmp, 18, (u32)image.width);
+    vm_mock_admin_preview_write_le32(bmp, 22, (u32)image.height);
+    vm_mock_admin_preview_write_le16(bmp, 26, 1);
+    vm_mock_admin_preview_write_le16(bmp, 28, 24);
+    vm_mock_admin_preview_write_le32(bmp, 34, imageBytes);
+    vm_mock_admin_preview_write_le32(bmp, 38, 2835);
+    vm_mock_admin_preview_write_le32(bmp, 42, 2835);
+    for (u32 y = 0; y < (u32)image.height; ++y)
+    {
+        u8 *dst = bmp + 54u + ((u32)image.height - 1u - y) * rowBytes;
+        for (u32 x = 0; x < (u32)image.width; ++x)
+        {
+            u16 pixel = canvas[y * (u32)image.width + x];
+            dst[x * 3] = (u8)((pixel & 0x1fu) * 255u / 31u);
+            dst[x * 3 + 1] = (u8)(((pixel >> 5) & 0x3fu) * 255u / 63u);
+            dst[x * 3 + 2] = (u8)(((pixel >> 11) & 0x1fu) * 255u / 31u);
+        }
+    }
+    *bmpOut = bmp;
+    *bmpLenOut = bmpLen;
+    if (widthOut)
+        *widthOut = (u32)image.width;
+    if (heightOut)
+        *heightOut = (u32)image.height;
+    bmp = NULL;
+    ok = true;
+
+done:
+    if (image.owned && image.pixels)
+        free_mem(image.pixels);
+    free(imagePayload);
+    free(canvas);
+    free(bmp);
+    return ok;
+}
+
 static void vm_mock_admin_render_content_page(char *response,
                                               size_t responseCap,
                                               const char *query)
@@ -3853,11 +4353,11 @@ static void vm_mock_admin_render_content_page(char *response,
         ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene-search{margin:0 0 8px;width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.scene .scene-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
         ".create-scene{flex:none;margin:0 0 12px;padding:10px;border:1px solid #e4e7ec;border-radius:8px;background:#f9fafb}.create-scene .fields{grid-template-columns:1fr;gap:8px;margin-top:8px}.create-scene .actions{margin-top:8px}.monster-slots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0}.monster-slots a{color:#175cd3;text-decoration:none;font-size:12px}"
         ".portal-edit,.combat-edit{display:grid;gap:12px;margin-top:10px}.portal-card,.combat-card{border:1px solid #e4e7ec;border-radius:8px;padding:12px;background:#fff}.portal-card h3,.combat-card h3{margin:0 0 8px;font-size:14px}.portal-fields,.combat-fields{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:8px}.portal-fields .wide,.combat-fields .wide{grid-column:span 2}.combat-fields .check{display:flex;align-items:flex-end;padding-bottom:8px}"
-        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
+        ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:flex-start;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap}.preview-head .size{margin-left:auto}.map-edit-link{padding:4px 10px;border-radius:6px;background:#175cd3;color:#fff;text-decoration:none;font-size:12px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.npc-pin.combat .pin-name{background:#b42318}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.facing-badge{position:absolute;right:-13px;bottom:0;min-width:17px;height:17px;padding:0 3px;border:1px solid #fff;border-radius:9px;background:#101828;color:#fff;font-size:11px;font-weight:700;line-height:15px;text-align:center}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-icon.combat{background:#b42318}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.npc-chip.combat{background:#fef3f2;color:#b42318}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.badge.override{background:#fffaeb;color:#b54708}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.service-kinds{display:flex;flex-wrap:wrap;gap:8px 14px;padding:8px 10px;border:1px solid #e4e7ec;border-radius:7px;background:#f9fafb}.service-kind{display:flex;align-items:center;gap:6px;font-size:13px;color:#344054;white-space:nowrap}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-teleport-task,.instance-help{grid-column:1/-1}.instance-help{margin:0;color:#7a2e0e;font-size:12px}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap;text-decoration:none;display:inline-block;text-align:center}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields,.monster-slots{grid-template-columns:1fr 1fr}.instance-scene,.instance-help{grid-column:1/-1}}"
-        "</style><script src=\"/admin.js?v=4\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">场景资源与服务端动态 NPC</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
@@ -3970,6 +4470,10 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_append_html(&page, message);
         vm_mock_admin_text_appendf(&page, "</div>");
     }
+    vm_mock_admin_render_actor_catalog(&page, actorFiles, actorCount);
+    vm_mock_admin_render_xse_catalog(&page, xseFiles, xseCount);
+    vm_mock_admin_render_scene_catalog(&page, sceneFiles, sceneCount);
+    vm_mock_admin_render_task_datalist(&page);
     if (previewReady)
     {
         char encodedScene[512];
@@ -3980,7 +4484,10 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_net_mock_gbk_label_to_utf8(preview.mapName, mapNameUtf8,
                                       sizeof(mapNameUtf8));
         vm_mock_admin_text_appendf(&page,
-            "<div class=\"preview\"><div class=\"preview-head\"><strong>场景预览</strong><span class=\"size\">");
+            "<div class=\"preview\"><div class=\"preview-head\"><strong>场景预览</strong>"
+            "<a class=\"map-edit-link\" href=\"/?tab=mapedit&amp;scene=%s\">编辑地图</a>"
+            "<span class=\"size\">",
+            encodedScene);
         vm_mock_admin_text_append_html(&page, mapNameUtf8);
         vm_mock_admin_text_appendf(&page,
             " · %u×%u · NPC %u%s · 传送点 %u%s</span></div>"
@@ -4564,31 +5071,25 @@ static void vm_mock_admin_render_content_page(char *response,
                 "<input type=\"number\" name=\"entry_id\" min=\"0\" max=\"65535\" value=\"%u\" required></label>"
                 "<label class=\"field\"><span>exit ID</span>"
                 "<input type=\"number\" name=\"target_entry_id\" min=\"0\" max=\"65535\" value=\"%u\" required></label>"
-                "<label class=\"field wide\"><span>目标场景</span><select name=\"target_scene\" required>",
+                "<label class=\"field wide\"><span>目标场景</span>"
+                "<select name=\"target_scene\" data-admin-catalog=\"admin-scene-options\" required>",
                 portal->left, portal->top, portal->right, portal->bottom,
                 portal->spawnX, portal->spawnY, portal->entryId,
                 portal->targetEntryId);
-            for (u32 s = 0; s < sceneCount; ++s)
+            vm_mock_admin_text_appendf(&page, "<option value=\"");
             {
-                char optUtf8[192];
-                char labelUtf8[288];
-                vm_net_mock_gbk_label_to_utf8(sceneFiles[s].name, optUtf8,
-                                              sizeof(optUtf8));
-                vm_mock_admin_scene_label_utf8(&sceneFiles[s], labelUtf8,
-                                               sizeof(labelUtf8));
-                vm_mock_admin_text_appendf(
-                    &page, "<option value=\"");
-                vm_mock_admin_text_append_html(&page, optUtf8);
-                vm_mock_admin_text_appendf(
-                    &page, "\"%s>",
-                    strcmp(sceneFiles[s].name, portal->targetScene) == 0 ?
-                        " selected" : "");
-                vm_mock_admin_text_append_html(&page, labelUtf8);
-                vm_mock_admin_text_appendf(&page, "</option>");
+                char targetOptUtf8[192];
+                memset(targetOptUtf8, 0, sizeof(targetOptUtf8));
+                vm_net_mock_gbk_label_to_utf8(portal->targetScene,
+                                              targetOptUtf8,
+                                              sizeof(targetOptUtf8));
+                vm_mock_admin_text_append_html(&page, targetOptUtf8);
+                vm_mock_admin_text_appendf(&page, "\" selected>");
+                vm_mock_admin_text_append_html(&page, targetOptUtf8);
             }
             vm_mock_admin_text_appendf(
                 &page,
-                "</select></label>"
+                "</option></select></label>"
                 "<label class=\"field\"><span>落脚点 X</span>"
                 "<input type=\"number\" name=\"landing_x\" min=\"0\" max=\"65535\" value=\"%u\"></label>"
                 "<label class=\"field\"><span>落脚点 Y</span>"
@@ -4636,24 +5137,13 @@ static void vm_mock_admin_render_content_page(char *response,
             "<input type=\"number\" name=\"entry_id\" min=\"0\" max=\"65535\" value=\"1\" required></label>"
             "<label class=\"field\"><span>exit ID</span>"
             "<input type=\"number\" name=\"target_entry_id\" min=\"0\" max=\"65535\" value=\"0\" required></label>"
-            "<label class=\"field wide\"><span>目标场景</span><select name=\"target_scene\" required>");
-        for (u32 s = 0; s < sceneCount; ++s)
-        {
-            char optUtf8[192];
-            char labelUtf8[288];
-            vm_net_mock_gbk_label_to_utf8(sceneFiles[s].name, optUtf8,
-                                          sizeof(optUtf8));
-            vm_mock_admin_scene_label_utf8(&sceneFiles[s], labelUtf8,
-                                           sizeof(labelUtf8));
-            vm_mock_admin_text_appendf(&page, "<option value=\"");
-            vm_mock_admin_text_append_html(&page, optUtf8);
-            vm_mock_admin_text_appendf(
-                &page, "\"%s>",
-                strcmp(sceneFiles[s].name, selectedSceneFile) == 0 ?
-                    " selected" : "");
-            vm_mock_admin_text_append_html(&page, labelUtf8);
-            vm_mock_admin_text_appendf(&page, "</option>");
-        }
+            "<label class=\"field wide\"><span>目标场景</span>"
+            "<select name=\"target_scene\" data-admin-catalog=\"admin-scene-options\" required>");
+        vm_mock_admin_text_appendf(&page, "<option value=\"");
+        vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+        vm_mock_admin_text_appendf(&page, "\" selected>");
+        vm_mock_admin_text_append_html(&page, selectedSceneUtf8);
+        vm_mock_admin_text_appendf(&page, "</option>");
         vm_mock_admin_text_appendf(
             &page,
             "</select></label></div>"
@@ -5215,7 +5705,7 @@ static void vm_mock_admin_render_shop_page(char *response,
         ".wrap{max-width:1240px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
         ".card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.shop-card{display:flex;flex-direction:column;min-height:0;flex:1}.summary{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:12px}.badge{padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3}.badge.secret{background:#fff4e5;color:#b54708}.badge.arms{background:#f4f3ff;color:#5925dc}.badge.off{background:#fef3f2;color:#b42318}.filters{display:grid;grid-template-columns:minmax(190px,.7fr) minmax(220px,1.2fr) auto;gap:9px;align-items:end;margin-bottom:12px}.filters label{display:grid;gap:4px}.filters span{font-size:12px;color:#667085}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.shop-list{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid #eaecf0;border-radius:8px}table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:middle}th{position:sticky;top:0;background:#f9fafb;color:#667085;z-index:1}.name{min-width:200px}.section{display:inline-block;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467;font-size:12px;white-space:nowrap}.section.secret{background:#fff4e5;color:#b54708}.section.arms{background:#f4f3ff;color:#5925dc}.row-form{display:grid;grid-template-columns:150px 100px auto;gap:7px;align-items:center}.state{font-size:12px;font-weight:600}.state.on{color:#027a48}.state.off{color:#b42318}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.foot{font-size:12px;color:#667085;margin:10px 0 0}"
         "@media(max-width:760px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:16px 9px;overflow:visible}.shop-card{min-height:700px}.filters,.row-form{grid-template-columns:1fr}.shop-list{min-height:520px}.tabs{overflow:auto}.name{min-width:150px}}"
-        "</style><script src=\"/admin.js?v=4\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">商品价格与上下架状态 · 保存后立即生效</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
@@ -5394,7 +5884,7 @@ static void vm_mock_admin_render_update_page(char *response,
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}h3{font-size:15px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 14px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}"
         ".update-grid{display:grid;grid-template-columns:minmax(390px,.95fr) minmax(440px,1.15fr);gap:16px;flex:1;min-height:0}.pane{min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:12px}.module{border:1px solid #eaecf0;border-radius:8px;padding:12px;margin-top:9px}.module-head{display:flex;justify-content:space-between;gap:10px}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#475467}.badge.on{background:#ecfdf3;color:#027a48}.module form{display:grid;grid-template-columns:100px 1fr auto;gap:8px;align-items:end;margin-top:9px}.publish{display:grid;grid-template-columns:minmax(110px,.7fr) minmax(220px,1.6fr) 90px auto;gap:8px;align-items:end;margin-top:9px}.module label,.publish label{display:grid;gap:4px}.module label span,.publish label span{font-size:12px;color:#667085}.check{display:flex!important;align-items:center;gap:7px;height:36px}.check input{width:auto}input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}.danger{background:#b42318}.notice{padding:10px 12px;border-radius:7px;margin-bottom:12px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.callout{background:#eef4ff;color:#3538cd;border-radius:8px;padding:11px 12px}.published{width:100%%;border-collapse:collapse;margin-top:10px}.published th,.published td{text-align:left;padding:9px 7px;border-bottom:1px solid #eaecf0;vertical-align:middle}.published th{font-size:12px;color:#667085}.inline{display:flex;gap:7px;align-items:center}.foot{font-size:12px;color:#667085}.path{word-break:break-all;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}"
         "@media(max-width:850px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;overflow:visible}.update-grid{grid-template-columns:1fr;flex:none}.pane{overflow:visible}.module form,.publish{grid-template-columns:1fr}}"
-        "</style><script src=\"/admin.js?v=4\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">启动 CBM 模块发布与具名资源下发</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
@@ -5588,7 +6078,7 @@ static void vm_mock_admin_render_task_page(char *response,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>江湖OL 任务管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub,.hint{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff}.logout{background:#fff!important;color:#667085!important;border:1px solid #d0d5dd!important}.grid{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px}.list{height:100%%;overflow:auto;display:flex;flex-direction:column;gap:4px}.task{padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.task:hover,.task.on{background:#eef4ff;color:#175cd3}.task.off{opacity:.55}.editor{overflow:auto}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.fields{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}input,select,textarea{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}textarea{min-height:68px;resize:vertical}.wide{grid-column:1/-1}.group{margin-top:14px;padding:12px;border:1px solid #e4e7ec;border-radius:8px}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}button,.button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;text-decoration:none}.danger{background:#b42318}.secondary{background:#475467}.badge{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#175cd3}"
-        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js?v=4\" defer></script></head><body><main class=\"wrap\">"
+        ".item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-picker-trigger.compact{min-height:32px;font-size:12px}.item-picker-head-actions{display:flex;gap:8px;align-items:center}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto}.grid{grid-template-columns:1fr}.list{max-height:300px}.fields{grid-template-columns:1fr 1fr}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}}</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\">"
         "<div class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">任务定义、奖励与 NPC 对话</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\">退出登录</button></form></div>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab on\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a></nav>"
         "<div class=\"grid\"><aside class=\"card list\"><a class=\"button\" href=\"/?tab=tasks&amp;new=1\">＋ 新增任务</a><h2>任务目录（%u）</h2>",
@@ -5750,6 +6240,10 @@ static void vm_mock_admin_handle_chest_action(vm_mock_service_socket client,
                                               const char *action,
                                               const char *body);
 
+static void vm_mock_admin_render_mapedit_page(char *response,
+                                              size_t responseCap,
+                                              const char *query);
+
 static void vm_mock_admin_render_page(char *response, size_t responseCap,
                                       const char *query)
 {
@@ -5776,6 +6270,11 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     if (strcmp(tab, "content") == 0)
     {
         vm_mock_admin_render_content_page(response, responseCap, query);
+        return;
+    }
+    if (strcmp(tab, "mapedit") == 0)
+    {
+        vm_mock_admin_render_mapedit_page(response, responseCap, query);
         return;
     }
     if (strcmp(tab, "tasks") == 0)
@@ -5838,7 +6337,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
-        "</style><script src=\"/admin.js?v=4\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
+        "</style><script src=\"/admin.js?v=7\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
         "<p class=\"sub\">本机管理端口 · 数据直接保存到 MySQL · 普通钱币以铜为基础单位</p></div>"
         "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab on\" href=\"/?tab=accounts\">账号管理</a>"
@@ -6039,6 +6538,430 @@ static void vm_mock_admin_redirect_content(vm_mock_service_socket client,
              VM_MOCK_ADMIN_ROOT_PATH "?tab=content&scene=%s&status=%s&message=%s",
              sceneEncoded, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_mapedit(vm_mock_service_socket client,
+                                           const char *sceneUtf8,
+                                           const char *status,
+                                           const char *message)
+{
+    char sceneEncoded[512];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1600];
+
+    vm_mock_admin_url_encode(sceneUtf8 ? sceneUtf8 : "",
+                             sceneEncoded, sizeof(sceneEncoded));
+    vm_mock_admin_url_encode(status ? status : "error",
+                             statusEncoded, sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败",
+                             messageEncoded, sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=mapedit&scene=%s&status=%s&message=%s",
+             sceneEncoded, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+enum
+{
+    VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX = 256
+};
+
+static bool vm_mock_admin_map_sheet_name_known(
+    const char names[][64], u32 count, const char *name)
+{
+    if (name == NULL || name[0] == 0)
+        return false;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (strcmp(names[i], name) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* Unique tile GIF names referenced by maps of existing scenes. */
+static u32 vm_mock_admin_collect_map_tile_sheets(char names[][64], u32 namesCap)
+{
+    vm_mock_admin_scene_file *sceneFiles = NULL;
+    char (*mapLeaves)[64] = NULL;
+    u32 sceneCount = 0;
+    u32 mapLeafCount = 0;
+    u32 sheetCount = 0;
+
+    if (names == NULL || namesCap == 0)
+        return 0;
+    sceneFiles = (vm_mock_admin_scene_file *)calloc(
+        VM_MOCK_ADMIN_SCENE_FILE_MAX, sizeof(*sceneFiles));
+    mapLeaves = (char (*)[64])calloc(VM_MOCK_ADMIN_SCENE_FILE_MAX, 64);
+    if (sceneFiles == NULL || mapLeaves == NULL)
+    {
+        free(sceneFiles);
+        free(mapLeaves);
+        return 0;
+    }
+    sceneCount = vm_mock_admin_collect_scene_files(
+        sceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char runtimeScene[64];
+        char mapName[64];
+
+        memset(runtimeScene, 0, sizeof(runtimeScene));
+        memset(mapName, 0, sizeof(mapName));
+        if (!vm_mock_admin_scene_file_to_runtime_key(
+                sceneFiles[i].name, runtimeScene, sizeof(runtimeScene)) ||
+            !vm_mock_admin_scene_map_name(runtimeScene, mapName,
+                                          sizeof(mapName)) ||
+            vm_mock_admin_map_sheet_name_known(mapLeaves, mapLeafCount, mapName) ||
+            mapLeafCount >= VM_MOCK_ADMIN_SCENE_FILE_MAX)
+        {
+            continue;
+        }
+        snprintf(mapLeaves[mapLeafCount], sizeof(mapLeaves[mapLeafCount]), "%s",
+                 mapName);
+        mapLeafCount++;
+    }
+    for (u32 i = 0; i < mapLeafCount && sheetCount < namesCap; ++i)
+    {
+        u8 *mapPayload = NULL;
+        u32 mapPayloadLen = 0;
+        vm_mock_admin_scene_preview preview;
+
+        memset(&preview, 0, sizeof(preview));
+        if (!vm_mock_admin_load_data_payload(mapLeaves[i], ".map", &mapPayload,
+                                             &mapPayloadLen, NULL) ||
+            !vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen,
+                                             mapLeaves[i], &preview))
+        {
+            free(mapPayload);
+            continue;
+        }
+        for (u32 s = 0; s < preview.imageCount && sheetCount < namesCap; ++s)
+        {
+            if (!vm_net_mock_str_ends_with(preview.imageNames[s], ".gif") ||
+                !vm_net_mock_update_name_is_safe(preview.imageNames[s]) ||
+                vm_mock_admin_map_sheet_name_known(names, sheetCount,
+                                                    preview.imageNames[s]))
+            {
+                continue;
+            }
+            snprintf(names[sheetCount], 64, "%s", preview.imageNames[s]);
+            sheetCount++;
+        }
+        free(mapPayload);
+    }
+    free(sceneFiles);
+    free(mapLeaves);
+    return sheetCount;
+}
+
+static bool vm_mock_admin_build_map_edit_json(const char *runtimeScene,
+                                              const char *sceneUtf8,
+                                              char *out, size_t outCap)
+{
+    char mapName[64];
+    char mapNameUtf8[192];
+    char escapedScene[384];
+    char escapedMap[384];
+    u8 *mapPayload = NULL;
+    u32 mapPayloadLen = 0;
+    vm_mock_admin_scene_preview preview;
+    char *cellsB64 = NULL;
+    u32 cellsB64Len = 0;
+    vm_mock_admin_scene_file *sceneFiles = NULL;
+    u32 sceneCount = 0;
+    char (*availableSheets)[64] = NULL;
+    u32 availableCount = 0;
+    vm_mock_admin_text json;
+    bool ok = false;
+    bool firstShared = true;
+
+    if (out == NULL || outCap == 0 || runtimeScene == NULL || runtimeScene[0] == 0)
+        return false;
+    out[0] = 0;
+    memset(mapName, 0, sizeof(mapName));
+    memset(&preview, 0, sizeof(preview));
+    if (!vm_mock_admin_scene_map_name(runtimeScene, mapName, sizeof(mapName)) ||
+        !vm_mock_admin_load_data_payload(mapName, ".map", &mapPayload,
+                                         &mapPayloadLen, NULL) ||
+        !vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen, mapName,
+                                         &preview) ||
+        preview.cells == NULL || preview.cellCount == 0)
+    {
+        goto done;
+    }
+    cellsB64 = (char *)malloc((size_t)preview.cellCount * 4u * 2u + 8u);
+    if (cellsB64 == NULL ||
+        !vm_mock_admin_base64_encode(preview.cells, preview.cellCount * 4u,
+                                     cellsB64,
+                                     (size_t)preview.cellCount * 4u * 2u + 8u,
+                                     &cellsB64Len))
+    {
+        goto done;
+    }
+    vm_net_mock_gbk_label_to_utf8(mapName, mapNameUtf8, sizeof(mapNameUtf8));
+    if (!vm_mock_admin_json_escape(sceneUtf8 ? sceneUtf8 : "", escapedScene,
+                                   sizeof(escapedScene)) ||
+        !vm_mock_admin_json_escape(mapNameUtf8, escapedMap, sizeof(escapedMap)))
+    {
+        goto done;
+    }
+    sceneFiles = (vm_mock_admin_scene_file *)calloc(
+        VM_MOCK_ADMIN_SCENE_FILE_MAX, sizeof(*sceneFiles));
+    if (sceneFiles != NULL)
+        sceneCount = vm_mock_admin_collect_scene_files(
+            sceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
+    availableSheets = (char (*)[64])calloc(VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX,
+                                            64);
+    if (availableSheets != NULL)
+        availableCount = vm_mock_admin_collect_map_tile_sheets(
+            availableSheets, VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX);
+
+    vm_mock_admin_text_init(&json, out, outCap);
+    vm_mock_admin_text_appendf(
+        &json,
+        "{\"ok\":true,\"scene\":\"%s\",\"mapName\":\"%s\",\"width\":%u,"
+        "\"height\":%u,\"tileWidth\":%u,\"tileHeight\":%u,\"cols\":%u,"
+        "\"rows\":%u,\"cellCount\":%u,\"imageMax\":%u,\"imageNames\":[",
+        escapedScene, escapedMap, preview.width, preview.height,
+        preview.tileWidth, preview.tileHeight, preview.cols, preview.rows,
+        preview.cellCount, (u32)VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX);
+    for (u32 i = 0; i < preview.imageCount; ++i)
+    {
+        char nameUtf8[192];
+        char escapedName[384];
+
+        vm_net_mock_gbk_label_to_utf8(preview.imageNames[i], nameUtf8,
+                                      sizeof(nameUtf8));
+        if (!vm_mock_admin_json_escape(nameUtf8, escapedName,
+                                       sizeof(escapedName)))
+            goto done;
+        vm_mock_admin_text_appendf(&json, "%s\"%s\"", i ? "," : "",
+                                   escapedName);
+    }
+    vm_mock_admin_text_appendf(&json, "],\"availableSheets\":[");
+    for (u32 i = 0; i < availableCount; ++i)
+    {
+        char nameUtf8[192];
+        char escapedName[384];
+
+        vm_net_mock_gbk_label_to_utf8(availableSheets[i], nameUtf8,
+                                      sizeof(nameUtf8));
+        if (!vm_mock_admin_json_escape(nameUtf8, escapedName,
+                                       sizeof(escapedName)))
+            goto done;
+        vm_mock_admin_text_appendf(&json, "%s\"%s\"", i ? "," : "",
+                                   escapedName);
+    }
+    vm_mock_admin_text_appendf(&json, "],\"sharedBy\":[");
+    for (u32 i = 0; i < sceneCount; ++i)
+    {
+        char otherRuntime[64];
+        char otherMap[64];
+        char otherUtf8[192];
+        char escapedOther[384];
+
+        memset(otherRuntime, 0, sizeof(otherRuntime));
+        memset(otherMap, 0, sizeof(otherMap));
+        if (!vm_mock_admin_scene_file_to_runtime_key(
+                sceneFiles[i].name, otherRuntime, sizeof(otherRuntime)) ||
+            vm_net_mock_scene_names_equal_loose(otherRuntime, runtimeScene) ||
+            !vm_mock_admin_scene_map_name(otherRuntime, otherMap,
+                                          sizeof(otherMap)) ||
+            strcmp(otherMap, mapName) != 0)
+        {
+            continue;
+        }
+        vm_net_mock_gbk_label_to_utf8(sceneFiles[i].name, otherUtf8,
+                                      sizeof(otherUtf8));
+        if (!vm_mock_admin_json_escape(otherUtf8, escapedOther,
+                                       sizeof(escapedOther)))
+            goto done;
+        vm_mock_admin_text_appendf(&json, "%s\"%s\"", firstShared ? "" : ",",
+                                   escapedOther);
+        firstShared = false;
+    }
+    vm_mock_admin_text_appendf(&json, "],\"cellsB64\":\"%s\"}\n", cellsB64);
+    ok = !json.truncated;
+
+done:
+    free(mapPayload);
+    free(cellsB64);
+    free(sceneFiles);
+    free(availableSheets);
+    return ok;
+}
+
+static void vm_mock_admin_render_mapedit_page(char *response,
+                                              size_t responseCap,
+                                              const char *query)
+{
+    vm_mock_admin_text page;
+    char selectedSceneUtf8[192];
+    char selectedSceneFile[64];
+    char runtimeScene[64];
+    char status[16];
+    char message[256];
+    char encodedScene[512];
+    char mapName[64];
+    char mapNameUtf8[192];
+    vm_mock_admin_scene_preview preview;
+    bool previewReady = false;
+
+    vm_mock_admin_text_init(&page, response, responseCap);
+    memset(selectedSceneUtf8, 0, sizeof(selectedSceneUtf8));
+    memset(selectedSceneFile, 0, sizeof(selectedSceneFile));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    memset(encodedScene, 0, sizeof(encodedScene));
+    memset(mapName, 0, sizeof(mapName));
+    memset(mapNameUtf8, 0, sizeof(mapNameUtf8));
+    memset(&preview, 0, sizeof(preview));
+    (void)vm_mock_admin_form_value(query, "scene", selectedSceneUtf8,
+                                   sizeof(selectedSceneUtf8));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
+    if (selectedSceneUtf8[0] != 0 &&
+        vm_mock_admin_utf8_to_gbk_text(selectedSceneUtf8, selectedSceneFile,
+                                       sizeof(selectedSceneFile), false) &&
+        vm_mock_admin_scene_file_to_runtime_key(selectedSceneFile, runtimeScene,
+                                                sizeof(runtimeScene)))
+    {
+        previewReady = vm_mock_admin_scene_map_name(runtimeScene, mapName,
+                                                    sizeof(mapName)) &&
+                       vm_mock_admin_scene_preview_info(runtimeScene, &preview);
+        vm_net_mock_gbk_label_to_utf8(mapName, mapNameUtf8,
+                                      sizeof(mapNameUtf8));
+    }
+    vm_mock_admin_url_encode(selectedSceneUtf8, encodedScene,
+                             sizeof(encodedScene));
+
+    vm_mock_admin_text_appendf(
+        &page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 地图编辑</title><style>"
+        "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}"
+        "body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}"
+        ".wrap{height:100vh;margin:0 auto;padding:16px 18px;display:flex;flex-direction:column;gap:10px;max-width:1600px}"
+        "header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}"
+        "h1{font-size:22px;margin:0}.sub{color:#667085;margin:4px 0 0}"
+        ".tabs{display:flex;gap:6px;flex-wrap:wrap}.tab{padding:8px 12px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
+        ".notice{padding:10px 12px;border-radius:7px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.warn{background:#fffaeb;color:#7a2e0e}"
+        ".toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:10px}"
+        ".toolbar label{display:flex;align-items:center;gap:4px;font-size:13px}"
+        ".toolbar button,.toolbar .button{border:0;border-radius:6px;padding:7px 11px;background:#175cd3;color:#fff;cursor:pointer}"
+        ".toolbar button.secondary{background:#f2f4f7;color:#344054}.toolbar button.on{outline:2px solid #98a2b3}"
+        ".toolbar button.danger{background:#b42318}.meta{color:#667085;font-size:12px}"
+        ".layout{display:grid;grid-template-columns:340px minmax(0,1fr);gap:12px;flex:1;min-height:0}"
+        ".panel{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:10px;min-height:0;overflow:auto}"
+        ".palette-sheet{margin-bottom:12px}.palette-sheet h3{margin:0;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}"
+        ".palette-sheet-head{display:flex;align-items:center;gap:6px;margin:0 0 6px}"
+        ".palette-sheet-head button{border:0;border-radius:4px;padding:2px 7px;background:#f2f4f7;color:#344054;cursor:pointer;font-size:12px}"
+        ".palette-sheet-head button.danger{background:#fef3f2;color:#b42318}"
+        ".sheet-tools{display:grid;gap:8px;margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid #eaecf0}"
+        ".sheet-tools .title{font-size:13px;font-weight:600;color:#344054}"
+        ".sheet-tools input[type=search]{width:100%%;border:1px solid #d0d5dd;border-radius:6px;padding:7px 9px}"
+        ".sheet-preview{display:none;border:1px solid #e4e7ec;border-radius:8px;padding:8px;background:#f9fafb}"
+        ".sheet-preview.on{display:grid;gap:8px}"
+        ".sheet-preview .preview-head{display:flex;justify-content:space-between;gap:8px;align-items:center}"
+        ".sheet-preview .preview-name{font-size:12px;color:#344054;word-break:break-all}"
+        ".sheet-preview img{max-width:100%%;max-height:120px;image-rendering:pixelated;background:#111;border-radius:4px}"
+        ".sheet-preview button,.sheet-card button{border:0;border-radius:6px;padding:6px 10px;background:#175cd3;color:#fff;cursor:pointer;font-size:12px}"
+        ".sheet-preview button:disabled,.sheet-card button:disabled{opacity:.45;cursor:not-allowed}"
+        ".sheet-catalog{display:grid;gap:6px;max-height:260px;overflow:auto;padding-right:2px}"
+        ".sheet-card{display:grid;grid-template-columns:72px 1fr auto;gap:8px;align-items:center;border:1px solid #e4e7ec;border-radius:8px;padding:6px;background:#fff;cursor:pointer}"
+        ".sheet-card:hover{border-color:#98a2b3}.sheet-card.on{border-color:#175cd3;background:#eef4ff}"
+        ".sheet-card .thumb{width:72px;height:48px;object-fit:contain;image-rendering:pixelated;background:#111;border-radius:4px}"
+        ".sheet-card .thumb.missing{display:grid;place-items:center;color:#98a2b3;font-size:11px}"
+        ".sheet-card .name{font-size:12px;color:#344054;word-break:break-all}"
+        ".palette-grid{display:grid;gap:2px;width:max-content}"
+        ".palette-grid canvas{image-rendering:pixelated;cursor:pointer;border:1px solid #d0d5dd}"
+        ".palette-grid canvas.on{outline:2px solid #175cd3}"
+        ".map-wrap{overflow:auto;background:#111;border-radius:8px;padding:8px;min-height:0}"
+        "#map-canvas{image-rendering:pixelated;cursor:crosshair;display:block;background:#222}"
+        ".logout{background:none;color:#667085;border:1px solid #d0d5dd;border-radius:6px;padding:8px 12px;cursor:pointer}"
+        "@media(max-width:900px){.layout{grid-template-columns:1fr}}"
+        "</style><script src=\"/admin.js?v=10\" defer></script></head><body>"
+        "<main class=\"wrap\" id=\"map-editor\" data-scene=\"");
+    vm_mock_admin_text_append_html(
+        &page, selectedSceneUtf8[0] ? selectedSceneUtf8 : "");
+    vm_mock_admin_text_appendf(
+        &page,
+        "\"><header><div><h1>地图编辑器</h1><p class=\"sub\">");
+    vm_mock_admin_text_append_html(&page, selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择场景");
+    vm_mock_admin_text_appendf(&page, " · ");
+    vm_mock_admin_text_append_html(&page, mapNameUtf8[0] ? mapNameUtf8 : "-");
+    if (previewReady)
+    {
+        vm_mock_admin_text_appendf(
+            &page, " · %u×%u · tile %u×%u · %u sheets</p></div>",
+            preview.width, preview.height, preview.tileWidth, preview.tileHeight,
+            preview.imageCount);
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(&page, "</p></div>");
+    }
+    vm_mock_admin_text_appendf(
+        &page,
+        "<form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
+        "<a class=\"tab\" href=\"/?tab=content&amp;scene=%s\">游戏内容管理</a>"
+        "<a class=\"tab on\" href=\"/?tab=mapedit&amp;scene=%s\">地图编辑</a></nav>",
+        encodedScene, encodedScene);
+    if (status[0] != 0 && message[0] != 0)
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (!previewReady)
+    {
+        vm_mock_admin_text_appendf(
+            &page,
+            "<div class=\"notice error\">无法加载场景地图。请从「游戏内容管理」选择有效场景后再打开编辑器。</div>"
+            "</main></body></html>");
+        return;
+    }
+    vm_mock_admin_text_appendf(
+        &page,
+        "<div id=\"map-shared-warn\" class=\"notice warn\" hidden></div>"
+        "<div class=\"toolbar\">"
+        "<button type=\"button\" data-tool=\"paint\" class=\"on\">画砖</button>"
+        "<button type=\"button\" data-tool=\"rect\" class=\"secondary\">矩形填</button>"
+        "<button type=\"button\" data-tool=\"eyedrop\" class=\"secondary\">吸管</button>"
+        "<button type=\"button\" data-tool=\"collision\" class=\"secondary\">碰撞</button>"
+        "<label>碰撞值 <select id=\"map-collision-mode\">"
+        "<option value=\"0\">开放 0x0</option>"
+        "<option value=\"15\">实体 0xF</option>"
+        "<option value=\"1\">北 0x1</option>"
+        "<option value=\"2\">西 0x2</option>"
+        "<option value=\"4\">南 0x4</option>"
+        "<option value=\"8\">东 0x8</option>"
+        "</select></label>"
+        "<label><input type=\"checkbox\" id=\"map-show-collision\" checked> 显示碰撞</label>"
+        "<button type=\"button\" id=\"map-save\" class=\"danger\">保存并发布</button>"
+        "<a class=\"button secondary\" href=\"/?tab=content&amp;scene=%s\">返回内容页</a>"
+        "<span class=\"meta\" id=\"map-cursor-meta\">-</span></div>"
+        "<div class=\"layout\"><aside class=\"panel\">"
+        "<div class=\"sheet-tools\">"
+        "<div class=\"title\">从现有场景图集添加</div>"
+        "<input type=\"search\" id=\"map-sheet-filter\" placeholder=\"筛选图集名…\" autocomplete=\"off\">"
+        "<div class=\"sheet-preview\" id=\"map-sheet-preview\">"
+        "<div class=\"preview-head\"><span class=\"preview-name\" id=\"map-sheet-preview-name\"></span>"
+        "<button type=\"button\" id=\"map-sheet-add\">添加此图集</button></div>"
+        "<img id=\"map-sheet-preview-img\" alt=\"图集预览\"></div>"
+        "<div class=\"sheet-catalog\" id=\"map-sheet-catalog\"></div>"
+        "<div class=\"meta\" id=\"map-sheet-meta\">图集 0 / 16</div></div>"
+        "<div id=\"map-palette\"></div></aside>"
+        "<section class=\"panel\"><div class=\"map-wrap\"><canvas id=\"map-canvas\" width=\"%u\" height=\"%u\"></canvas></div></section></div>"
+        "</main></body></html>",
+        encodedScene, preview.width, preview.height);
 }
 
 static void vm_mock_admin_redirect_updates(vm_mock_service_socket client,
@@ -7803,6 +8726,320 @@ static void vm_mock_admin_handle_login_server_action(
             "服务器配置已保存；下次登录会收到最新列表");
 }
 
+static bool vm_mock_admin_parse_map_image_names_form(
+    const char *body, char namesOut[][64], u32 namesCap, u32 *countOut,
+    const char **errorOut)
+{
+    char *raw = NULL;
+    char (*catalog)[64] = NULL;
+    u32 catalogCount = 0;
+    u32 count = 0;
+    const char *cursor = NULL;
+
+    if (countOut)
+        *countOut = 0;
+    if (errorOut)
+        *errorOut = "图集列表无效";
+    if (body == NULL || namesOut == NULL || namesCap == 0 || countOut == NULL)
+        return false;
+    raw = (char *)malloc(4096);
+    if (raw == NULL)
+    {
+        if (errorOut)
+            *errorOut = "图集列表内存不足";
+        return false;
+    }
+    if (!vm_mock_admin_form_value(body, "image_names", raw, 4096) || raw[0] == 0)
+    {
+        free(raw);
+        if (errorOut)
+            *errorOut = "缺少图集列表";
+        return false;
+    }
+    catalog = (char (*)[64])calloc(VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX, 64);
+    if (catalog == NULL)
+    {
+        free(raw);
+        if (errorOut)
+            *errorOut = "图集目录内存不足";
+        return false;
+    }
+    catalogCount = vm_mock_admin_collect_map_tile_sheets(
+        catalog, VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX);
+    cursor = raw;
+    while (*cursor != 0 && count < namesCap)
+    {
+        char tokenUtf8[192];
+        char tokenGbk[64];
+        size_t tokenLen = 0;
+        const char *end = cursor;
+
+        while (*end != 0 && *end != '\n' && *end != '\r')
+            end++;
+        tokenLen = (size_t)(end - cursor);
+        while (tokenLen > 0 &&
+               (cursor[tokenLen - 1] == ' ' || cursor[tokenLen - 1] == '\t'))
+            tokenLen--;
+        while (tokenLen > 0 && (*cursor == ' ' || *cursor == '\t'))
+        {
+            cursor++;
+            tokenLen--;
+        }
+        if (tokenLen > 0)
+        {
+            if (tokenLen >= sizeof(tokenUtf8))
+            {
+                free(raw);
+                free(catalog);
+                if (errorOut)
+                    *errorOut = "图集名过长";
+                return false;
+            }
+            memcpy(tokenUtf8, cursor, tokenLen);
+            tokenUtf8[tokenLen] = 0;
+            memset(tokenGbk, 0, sizeof(tokenGbk));
+            if (!vm_mock_admin_utf8_to_gbk_text(tokenUtf8, tokenGbk,
+                                                sizeof(tokenGbk), false) ||
+                !vm_net_mock_update_name_is_safe(tokenGbk) ||
+                !vm_net_mock_str_ends_with(tokenGbk, ".gif"))
+            {
+                free(raw);
+                free(catalog);
+                if (errorOut)
+                    *errorOut = "图集名非法";
+                return false;
+            }
+            if (vm_mock_admin_map_sheet_name_known(namesOut, count, tokenGbk))
+            {
+                free(raw);
+                free(catalog);
+                if (errorOut)
+                    *errorOut = "图集列表含重复项";
+                return false;
+            }
+            {
+                FILE *fp = NULL;
+                bool inCatalog = vm_mock_admin_map_sheet_name_known(
+                    catalog, catalogCount, tokenGbk);
+                bool exists = vm_net_mock_open_server_data_resource(
+                    tokenGbk, ".gif", &fp, NULL, 0);
+                if (fp)
+                    fclose(fp);
+                if (!inCatalog || !exists)
+                {
+                    free(raw);
+                    free(catalog);
+                    if (errorOut)
+                        *errorOut = "图集不在现有场景资源中或不存在";
+                    return false;
+                }
+            }
+            snprintf(namesOut[count], 64, "%s", tokenGbk);
+            count++;
+        }
+        cursor = end;
+        while (*cursor == '\n' || *cursor == '\r')
+            cursor++;
+    }
+    free(raw);
+    free(catalog);
+    if (count == 0 || count > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+    {
+        if (errorOut)
+            *errorOut = count == 0 ? "至少需要一张图集" : "图集数量超过上限";
+        return false;
+    }
+    *countOut = count;
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_mock_admin_map_cells_sheet_indices_valid(const u8 *cells,
+                                                        u32 cellCount,
+                                                        u32 imageCount)
+{
+    if (cells == NULL || cellCount == 0 || imageCount == 0 ||
+        imageCount > VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX)
+        return false;
+    for (u32 i = 0; i < cellCount; ++i)
+    {
+        u32 packed = vm_mock_service_read_le32(cells + i * 4u);
+        u32 sheet = (packed >> 24) & 0x0fu;
+        if (sheet >= imageCount)
+            return false;
+    }
+    return true;
+}
+
+static void vm_mock_admin_handle_save_scene_map(vm_mock_service_socket client,
+                                                const char *body)
+{
+    char sceneUtf8[192];
+    char runtimeScene[64];
+    char mapNameFormUtf8[192];
+    char mapNameFormGbk[64];
+    char expectedMap[64];
+    char cellCountText[32];
+    char *cellsB64 = NULL;
+    u8 *mapPayload = NULL;
+    u32 mapPayloadLen = 0;
+    u8 *newCells = NULL;
+    u32 newCellsLen = 0;
+    u8 *built = NULL;
+    u32 builtLen = 0;
+    vm_mock_admin_scene_preview preview;
+    const char *error = NULL;
+    u32 cellCount = 0;
+    char imageNames[VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX][64];
+    u32 imageCount = 0;
+    const char *publishNames[1 + VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX];
+    u32 publishCount = 0;
+
+    memset(sceneUtf8, 0, sizeof(sceneUtf8));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(mapNameFormUtf8, 0, sizeof(mapNameFormUtf8));
+    memset(mapNameFormGbk, 0, sizeof(mapNameFormGbk));
+    memset(expectedMap, 0, sizeof(expectedMap));
+    memset(cellCountText, 0, sizeof(cellCountText));
+    memset(imageNames, 0, sizeof(imageNames));
+    memset(&preview, 0, sizeof(preview));
+    if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
+                                       runtimeScene, sizeof(runtimeScene)))
+    {
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error", "场景无效");
+        return;
+    }
+    if (!vm_mock_admin_form_value(body, "map_name", mapNameFormUtf8,
+                                  sizeof(mapNameFormUtf8)) ||
+        !vm_mock_admin_utf8_to_gbk_text(mapNameFormUtf8, mapNameFormGbk,
+                                        sizeof(mapNameFormGbk), false) ||
+        !vm_mock_admin_form_value(body, "cell_count", cellCountText,
+                                  sizeof(cellCountText)) ||
+        !vm_net_mock_parse_u32_strict(cellCountText, &cellCount) ||
+        cellCount == 0)
+    {
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "地图保存参数不完整");
+        return;
+    }
+    if (!vm_mock_admin_scene_map_name(runtimeScene, expectedMap,
+                                      sizeof(expectedMap)) ||
+        strcmp(expectedMap, mapNameFormGbk) != 0 ||
+        !vm_net_mock_update_name_is_safe(expectedMap))
+    {
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "地图名与场景不匹配");
+        return;
+    }
+    if (!vm_mock_admin_parse_map_image_names_form(body, imageNames,
+                                                  VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX,
+                                                  &imageCount, &error))
+    {
+        vm_mock_admin_redirect_mapedit(
+            client, sceneUtf8, "error",
+            error && error[0] ? error : "图集列表无效");
+        return;
+    }
+    cellsB64 = (char *)malloc(VM_MOCK_ADMIN_REQUEST_MAX + 1);
+    if (cellsB64 == NULL)
+    {
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "地图保存内存不足");
+        return;
+    }
+    if (!vm_mock_admin_form_value(body, "cells_b64", cellsB64,
+                                  VM_MOCK_ADMIN_REQUEST_MAX + 1) ||
+        cellsB64[0] == 0)
+    {
+        free(cellsB64);
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "缺少地图格子数据");
+        return;
+    }
+    newCells = (u8 *)malloc((size_t)cellCount * 4u);
+    if (newCells == NULL ||
+        !vm_mock_admin_base64_decode(cellsB64, newCells, cellCount * 4u,
+                                     &newCellsLen) ||
+        newCellsLen != cellCount * 4u)
+    {
+        free(cellsB64);
+        free(newCells);
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "地图格子数据解码失败");
+        return;
+    }
+    free(cellsB64);
+    cellsB64 = NULL;
+    if (!vm_mock_admin_load_data_payload(expectedMap, ".map", &mapPayload,
+                                         &mapPayloadLen, NULL) ||
+        !vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen, expectedMap,
+                                         &preview) ||
+        preview.cellCount != cellCount)
+    {
+        free(mapPayload);
+        free(newCells);
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "当前地图尺寸与提交不一致");
+        return;
+    }
+    if (!vm_mock_admin_map_cells_sheet_indices_valid(newCells, cellCount,
+                                                    imageCount))
+    {
+        free(mapPayload);
+        free(newCells);
+        vm_mock_admin_redirect_mapedit(client, sceneUtf8, "error",
+                                       "格子引用了不存在的图集下标");
+        return;
+    }
+    preview.imageCount = imageCount;
+    memset(preview.imageNames, 0, sizeof(preview.imageNames));
+    for (u32 i = 0; i < imageCount; ++i)
+        snprintf(preview.imageNames[i], sizeof(preview.imageNames[i]), "%s",
+                 imageNames[i]);
+    if (!vm_mock_admin_build_map_payload(&preview, newCells, newCellsLen, &built,
+                                         &builtLen) ||
+        !vm_net_mock_write_map_resource_bytes(expectedMap, built, builtLen,
+                                              &error))
+    {
+        free(mapPayload);
+        free(newCells);
+        free(built);
+        vm_mock_admin_redirect_mapedit(
+            client, sceneUtf8, "error",
+            error && error[0] ? error : "写入地图失败");
+        return;
+    }
+    publishNames[publishCount++] = expectedMap;
+    for (u32 i = 0; i < imageCount; ++i)
+        publishNames[publishCount++] = imageNames[i];
+    if (!vm_net_mock_publish_scene_resource(runtimeScene, &error))
+    {
+        if (!vm_net_mock_update_admin_publish_named_files(publishNames,
+                                                          publishCount, &error))
+        {
+            free(mapPayload);
+            free(newCells);
+            free(built);
+            vm_mock_admin_redirect_mapedit(
+                client, sceneUtf8, "error",
+                error ? error : "地图已写入但发布失败");
+            return;
+        }
+    }
+    else
+    {
+        (void)vm_net_mock_update_admin_publish_named_files(publishNames,
+                                                           publishCount, NULL);
+    }
+    vm_mock_admin_clear_scene_preview_cache();
+    free(mapPayload);
+    free(newCells);
+    free(built);
+    vm_mock_admin_redirect_mapedit(client, sceneUtf8, "ok",
+                                   "地图已保存并发布；客户端需重进场景拉取更新");
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
@@ -7826,6 +9063,11 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
     {
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
+        return;
+    }
+    if (strcmp(action, "save-scene-map") == 0)
+    {
+        vm_mock_admin_handle_save_scene_map(client, body);
         return;
     }
     if (strcmp(action, "save-npc") == 0 ||
@@ -8213,6 +9455,279 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         vm_mock_admin_send_response(client, "200 OK",
                                     "application/json; charset=utf-8", NULL,
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
+        return 1;
+    }
+    /* Public id→level map for Pixi nameplates (via gateway proxy).  Only rows
+     * with a loaded server_monsters override; builtin fallback stays client-side. */
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, "/api/monster-levels") == 0)
+    {
+        char *json = NULL;
+        size_t jsonCap = 0;
+        size_t jsonLen = 0;
+        u32 written = 0;
+        int ok = 0;
+
+        (void)vm_net_mock_monster_db_load();
+        jsonCap = 64u + (size_t)g_vm_net_mock_monster_catalog_count * 24u;
+        if (jsonCap < 256u)
+            jsonCap = 256u;
+        json = (char *)malloc(jsonCap);
+        if (json == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"oom\"}\n");
+            return 0;
+        }
+        jsonLen = 0;
+        ok = 1;
+        if (jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "{\"overrides\":{", 14);
+            jsonLen += 14;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < g_vm_net_mock_monster_catalog_count; ++i)
+        {
+            const vm_net_mock_monster_override *override =
+                &g_vm_net_mock_monster_overrides[i];
+            char piece[40];
+            int pieceLen;
+
+            if (!override->used || override->stats.enemyId == 0 ||
+                override->stats.level == 0)
+                continue;
+            pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":%u",
+                                written ? "," : "",
+                                override->stats.enemyId,
+                                override->stats.level);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 4u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++written;
+        }
+        if (ok && jsonLen + 4u < jsonCap)
+        {
+            memcpy(json + jsonLen, "}}\n", 3);
+            jsonLen += 3;
+            json[jsonLen] = 0;
+            vm_mock_admin_send_response(client, "200 OK",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        json);
+        }
+        else
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"build\"}\n");
+        }
+        free(json);
+        return 1;
+    }
+    /* Pixi mall recharge: authenticated create-order (reuse payment core). */
+    if (strcmp(target, "/api/recharge/create") == 0)
+    {
+        char account[64];
+        char password[64];
+        char accountGbk[64];
+        char passwordGbk[64];
+        char accountCanon[64];
+        char roleText[32];
+        char yuanText[32];
+        char typeText[16];
+        char payId[64];
+        char payUrlEscaped[2048];
+        char errorEscaped[256];
+        char json[4096];
+        u32 roleId = 0;
+        u32 yuan = 0;
+        u32 payType = 0;
+        u32 scratchBalance = 0;
+        const char *message = NULL;
+        const char *authPath = "none";
+        bool authed = false;
+        vm_mock_payment_order order;
+        const char *cors =
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Access-Control-Max-Age: 86400\r\n";
+
+        if (strcmp(method, "OPTIONS") == 0)
+        {
+            vm_mock_admin_send_response(client, "204 No Content",
+                                        "text/plain; charset=utf-8", cors, "");
+            return 1;
+        }
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed",
+                                        "application/json; charset=utf-8",
+                                        "Allow: POST, OPTIONS\r\n"
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"method\"}\n");
+            return 0;
+        }
+        memset(account, 0, sizeof(account));
+        memset(password, 0, sizeof(password));
+        memset(accountGbk, 0, sizeof(accountGbk));
+        memset(passwordGbk, 0, sizeof(passwordGbk));
+        memset(accountCanon, 0, sizeof(accountCanon));
+        memset(roleText, 0, sizeof(roleText));
+        memset(yuanText, 0, sizeof(yuanText));
+        memset(typeText, 0, sizeof(typeText));
+        memset(payId, 0, sizeof(payId));
+        memset(payUrlEscaped, 0, sizeof(payUrlEscaped));
+        memset(errorEscaped, 0, sizeof(errorEscaped));
+        memset(json, 0, sizeof(json));
+        memset(&order, 0, sizeof(order));
+        if (!vm_mock_admin_form_value(body, "account", account,
+                                      sizeof(account)) ||
+            !vm_mock_admin_form_value(body, "password", password,
+                                      sizeof(password)) ||
+            !vm_mock_admin_form_value(body, "role_id", roleText,
+                                      sizeof(roleText)) ||
+            !vm_mock_admin_form_value(body, "yuan", yuanText,
+                                      sizeof(yuanText)) ||
+            !vm_mock_admin_form_value(body, "pay_type", typeText,
+                                      sizeof(typeText)) ||
+            !vm_net_mock_parse_u32_strict(roleText, &roleId) || roleId == 0 ||
+            !vm_net_mock_parse_u32_strict(yuanText, &yuan) || yuan == 0 ||
+            !vm_net_mock_parse_u32_strict(typeText, &payType) ||
+            account[0] == 0)
+        {
+            memset(password, 0, sizeof(password));
+            vm_mock_admin_send_response(client, "400 Bad Request",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"充值参数无效\"}\n");
+            return 0;
+        }
+        (void)vm_mock_admin_utf8_to_gbk_text(account, accountGbk,
+                                              sizeof(accountGbk), false);
+        (void)vm_mock_admin_utf8_to_gbk_text(password, passwordGbk,
+                                              sizeof(passwordGbk), false);
+        /* Game WT stores account/password as GBK bytes; HTTP body is UTF-8. */
+        if (password[0] != 0 &&
+            vm_mock_service_account_verify_credentials(account, password))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", account);
+            authed = true;
+            authPath = "password-utf8";
+        }
+        else if (password[0] != 0 && accountGbk[0] != 0 && passwordGbk[0] != 0 &&
+                 vm_mock_service_account_verify_credentials(accountGbk,
+                                                            passwordGbk))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", accountGbk);
+            authed = true;
+            authPath = "password-gbk";
+        }
+        else if (password[0] != 0 && accountGbk[0] != 0 &&
+                 vm_mock_service_account_verify_credentials(accountGbk,
+                                                            password))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", accountGbk);
+            authed = true;
+            authPath = "password-account-gbk";
+        }
+        else if (password[0] != 0 && passwordGbk[0] != 0 &&
+                 vm_mock_service_account_verify_credentials(account,
+                                                            passwordGbk))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", account);
+            authed = true;
+            authPath = "password-pass-gbk";
+        }
+        /*
+         * Pixi already passed WT login. If password re-check mismatches
+         * encoding, accept when role_id belongs to this account (UTF-8/GBK).
+         * Payer still pays real money to that role — not a free grant path.
+         */
+        else if (vm_mock_payment_role_balance(account, roleId, false,
+                                              &scratchBalance))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", account);
+            authed = true;
+            authPath = "role-bind-utf8";
+        }
+        else if (accountGbk[0] != 0 &&
+                 vm_mock_payment_role_balance(accountGbk, roleId, false,
+                                              &scratchBalance))
+        {
+            snprintf(accountCanon, sizeof(accountCanon), "%s", accountGbk);
+            authed = true;
+            authPath = "role-bind-gbk";
+        }
+        memset(password, 0, sizeof(password));
+        memset(passwordGbk, 0, sizeof(passwordGbk));
+        if (!authed || accountCanon[0] == 0)
+        {
+            printf("[warn][payment] api_recharge_auth_failed account_len=%u "
+                   "role=%u\n",
+                   (u32)strlen(account), roleId);
+            vm_mock_admin_send_response(client, "401 Unauthorized",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"账号或密码错误\"}\n");
+            return 0;
+        }
+        printf("[info][payment] api_recharge_auth path=%s role=%u\n",
+               authPath, roleId);
+        if (!vm_mock_payment_create_order(accountCanon, roleId, yuan, payType,
+                                          payId, &message))
+        {
+            const char *err = message && message[0] ? message : "订单创建失败";
+            if (!vm_mock_admin_json_escape(err, errorEscaped,
+                                           sizeof(errorEscaped)))
+                snprintf(errorEscaped, sizeof(errorEscaped), "订单创建失败");
+            snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"error\":\"%s\"}\n", errorEscaped);
+            vm_mock_admin_send_response(client, "400 Bad Request",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        json);
+            return 0;
+        }
+        if (!vm_mock_payment_load_order(payId, false, &order) ||
+            !order.found ||
+            !vm_mock_payment_qr_payload_is_safe(order.payUrl) ||
+            !vm_mock_admin_json_escape(order.payUrl, payUrlEscaped,
+                                       sizeof(payUrlEscaped)) ||
+            !vm_mock_admin_json_escape(order.payId, errorEscaped,
+                                       sizeof(errorEscaped)))
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"订单已创建但支付链接不可用\"}\n");
+            return 0;
+        }
+        snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"payId\":\"%s\",\"payType\":%u,"
+                 "\"priceCents\":%u,\"reallyPriceCents\":%u,\"wcoinAmount\":%u,"
+                 "\"payUrl\":\"%s\",\"status\":%u,\"timeoutMinutes\":%u}\n",
+                 errorEscaped, order.payType, order.priceCents,
+                 order.reallyPriceCents ? order.reallyPriceCents
+                                        : order.priceCents,
+                 order.wcoinAmount, payUrlEscaped, order.status,
+                 order.timeoutMinutes ? order.timeoutMinutes : 5u);
+        printf("[info][payment] api_recharge_create auth=%s role=%u "
+               "type=%u yuan=%u pay_id=%s\n",
+               authPath, roleId, payType, yuan, order.payId);
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/json; charset=utf-8",
+                                    "Access-Control-Allow-Origin: *\r\n", json);
         return 1;
     }
     if (strcmp(method, "GET") == 0 &&
@@ -8732,6 +10247,67 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
         }
         vm_mock_admin_send_binary_response(client, "200 OK", "image/bmp",
                                            bmp, bmpLen);
+        return 1;
+    }
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/map-edit.json") == 0)
+    {
+        char sceneUtf8[192];
+        char runtimeScene[64];
+        char *json = NULL;
+
+        memset(sceneUtf8, 0, sizeof(sceneUtf8));
+        memset(runtimeScene, 0, sizeof(runtimeScene));
+        json = (char *)malloc(VM_MOCK_ADMIN_RESPONSE_MAX);
+        if (json == NULL)
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        NULL, NULL, "内存不足。\n");
+            return 0;
+        }
+        if (!vm_mock_admin_scene_from_form(query, sceneUtf8, sizeof(sceneUtf8),
+                                           runtimeScene, sizeof(runtimeScene)) ||
+            !vm_mock_admin_build_map_edit_json(runtimeScene, sceneUtf8, json,
+                                               VM_MOCK_ADMIN_RESPONSE_MAX))
+        {
+            free(json);
+            vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                        "application/json; charset=utf-8", NULL,
+                                        "{\"ok\":false,\"error\":\"无法加载地图\"}\n");
+            return 0;
+        }
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/json; charset=utf-8", NULL,
+                                    json);
+        free(json);
+        return 1;
+    }
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/tile-sheet.bmp") == 0)
+    {
+        char nameUtf8[192];
+        char nameGbk[64];
+        u8 *bmp = NULL;
+        u32 bmpLen = 0;
+
+        memset(nameUtf8, 0, sizeof(nameUtf8));
+        memset(nameGbk, 0, sizeof(nameGbk));
+        if (!vm_mock_admin_form_value(query, "name", nameUtf8,
+                                      sizeof(nameUtf8)) ||
+            !vm_mock_admin_utf8_to_gbk_text(nameUtf8, nameGbk, sizeof(nameGbk),
+                                            false) ||
+            !vm_mock_admin_build_tile_sheet_bmp(nameGbk, &bmp, &bmpLen, NULL,
+                                                NULL))
+        {
+            free(bmp);
+            vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                        NULL, NULL,
+                                        "地砖图集无法生成预览。\n");
+            return 0;
+        }
+        vm_mock_admin_send_binary_response(client, "200 OK", "image/bmp", bmp,
+                                           bmpLen);
+        free(bmp);
         return 1;
     }
 

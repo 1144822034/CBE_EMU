@@ -1948,16 +1948,39 @@ static void vm_net_mock_sce_combat_spawn_apply_bindings(
     }
 }
 
+static bool vm_net_mock_sce_combat_spawn_scene_uses_wire_real_split(
+    const char *scene)
+{
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
+    for (u32 i = 0; i < g_vm_net_mock_sce_combat_spawn_binding_count; ++i)
+    {
+        const vm_net_mock_sce_combat_spawn_binding *bind =
+            &g_vm_net_mock_sce_combat_spawn_bindings[i];
+        if (!vm_net_mock_scene_names_equal_loose(bind->scene, scene))
+            continue;
+        if (bind->wireActorId != 0 && bind->realActorId != 0 &&
+            bind->wireActorId != bind->realActorId)
+            return true;
+    }
+    return false;
+}
+
 static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
     const char *scene, u32 wireActorId, u32 posx, u32 posy)
 {
     u32 wireOnly = 0;
     u32 wireOnlyCount = 0;
+    bool wireRealUnanimous = true;
+    bool sceneHasSplit = false;
 
     if (wireActorId == 0)
         return 0;
     if (scene == NULL || scene[0] == 0)
         return wireActorId;
+    sceneHasSplit =
+        vm_net_mock_sce_combat_spawn_scene_uses_wire_real_split(scene);
     vm_net_mock_sce_combat_spawn_bindings_ensure_loaded();
     for (u32 i = 0; i < g_vm_net_mock_sce_combat_spawn_binding_count; ++i)
     {
@@ -1978,16 +2001,44 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
         }
         if (bind->wireActorId == wireActorId && bind->realActorId != 0)
         {
-            wireOnly = bind->realActorId;
+            if (wireOnlyCount == 0)
+                wireOnly = bind->realActorId;
+            else if (bind->realActorId != wireOnly)
+                wireRealUnanimous = false;
             ++wireOnlyCount;
         }
     }
-    if (wireOnlyCount == 1u && wireOnly != 0 && wireOnly != wireActorId)
+    /*
+     * Admin maps store real catalog ids while SCE keeps a ParseMinfo wire
+     * (often #200).  Resolve to the real id when unique/unanimous.  Never
+     * silently return the wire keep-id on a split scene — that hid 204→200
+     * formula HP (1400) and made admin overrides look "ignored".
+     */
+    if (wireOnlyCount >= 1u && wireOnly != 0 &&
+        (wireOnlyCount == 1u || wireRealUnanimous))
     {
         printf("[info][network] mock_scene_combat_spawn_remap scene=%s "
-               "pos=(%u,%u) wire=%u real=%u source=wire-unique\n",
-               scene, posx, posy, wireActorId, wireOnly);
+               "pos=(%u,%u) wire=%u real=%u source=%s count=%u\n",
+               scene, posx, posy, wireActorId, wireOnly,
+               wireOnlyCount == 1u ? "wire-unique" : "wire-unanimous",
+               wireOnlyCount);
         return wireOnly;
+    }
+    if (wireOnlyCount >= 1u && !wireRealUnanimous)
+    {
+        printf("[error][network] mock_scene_combat_spawn_remap_ambiguous "
+               "scene=%s pos=(%u,%u) wire=%u count=%u action=refuse "
+               "evidence=no-silent-wire-fallback\n",
+               scene, posx, posy, wireActorId, wireOnlyCount);
+        return 0;
+    }
+    if (sceneHasSplit)
+    {
+        printf("[error][network] mock_scene_combat_spawn_remap_miss "
+               "scene=%s pos=(%u,%u) wire=%u action=refuse "
+               "evidence=no-silent-wire-fallback\n",
+               scene, posx, posy, wireActorId);
+        return 0;
     }
     return wireActorId;
 }
@@ -2425,6 +2476,43 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_daily_accept_limit_column(void)
     return true;
 }
 
+/* Old PK was (scene,actor_id) — one binding per NPC.  Multi-accept needs
+ * (scene,actor_id,task_id).  Drop/recreate FK around the PK change. */
+static bool vm_net_mock_dynamic_npc_tasks_ensure_multi_task_pk(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npc_tasks' "
+            "AND CONSTRAINT_NAME='PRIMARY' AND COLUMN_NAME='task_id'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count != 0)
+        return true;
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_dynamic_npc_tasks "
+        "DROP FOREIGN KEY fk_server_dynamic_npc_tasks_npc");
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "DROP PRIMARY KEY, ADD PRIMARY KEY(scene,actor_id,task_id)") ||
+        !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npc_tasks "
+            "ADD CONSTRAINT fk_server_dynamic_npc_tasks_npc "
+            "FOREIGN KEY(scene,actor_id) REFERENCES server_dynamic_npcs(scene,actor_id) "
+            "ON DELETE CASCADE"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_task_schema "
+           "migration=multi-task-primary-key action=applied\n");
+    return true;
+}
+
 static bool vm_net_mock_npc_task_daily_ensure_table(void)
 {
     return vm_mysql_exec(
@@ -2564,9 +2652,21 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.kind = (u16)number[3];
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
-    row.seed.taskId = number[6];
-    row.seed.taskRepeatable = number[7] != 0;
-    row.seed.taskDailyAcceptLimit = (u16)number[8];
+    row.seed.boundTaskCount = 0;
+    memset(row.seed.boundTasks, 0, sizeof(row.seed.boundTasks));
+    if (number[6] != 0)
+    {
+        if (!vm_net_mock_seed_add_bound_task(&row.seed, number[6],
+                                             number[7] != 0, (u16)number[8]))
+        {
+            ++context->skipped;
+            return true;
+        }
+    }
+    else
+    {
+        vm_net_mock_seed_sync_primary_bound_task(&row.seed);
+    }
     row.seed.instanceX = (u16)number[9];
     row.seed.instanceY = (u16)number[10];
     row.seed.challengeEnemyId = number[11];
@@ -2604,6 +2704,33 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         return true;
     }
 
+    /* LEFT JOIN tasks fans out one NPC into multiple rows — merge bindings. */
+    for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
+    {
+        vm_net_mock_dynamic_npc_override *existing =
+            &g_vm_net_mock_dynamic_npc_overrides[i];
+        if (existing->seed.actorId != row.seed.actorId ||
+            strcmp(existing->scene, row.scene) != 0)
+        {
+            continue;
+        }
+        if (row.seed.boundTaskCount != 0 &&
+            !vm_net_mock_seed_add_bound_task(
+                &existing->seed, row.seed.boundTasks[0].taskId,
+                row.seed.boundTasks[0].repeatable,
+                row.seed.boundTasks[0].dailyAcceptLimit))
+        {
+            ++context->skipped;
+        }
+        return true;
+    }
+
+    if (g_vm_net_mock_dynamic_npc_override_count >=
+        VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX)
+    {
+        ++context->skipped;
+        return true;
+    }
     snprintf(g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].scene,
              sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene), "%s", row.scene);
     g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count].seed = row.seed;
@@ -2658,11 +2785,13 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
                 "daily_accept_limit SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
                 "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
                 "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-                "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
+                "PRIMARY KEY(scene,actor_id,task_id),"
+                "KEY idx_server_dynamic_npc_tasks_task(task_id),"
                 "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
                 "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
             !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
             !vm_net_mock_dynamic_npc_tasks_ensure_daily_accept_limit_column() ||
+            !vm_net_mock_dynamic_npc_tasks_ensure_multi_task_pk() ||
             !vm_net_mock_npc_task_daily_ensure_table() ||
             !vm_mysql_exec(
                 "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
@@ -2694,7 +2823,8 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
                 "COALESCE(server_dynamic_npcs.npc_service_mask,0) "
                 "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
                 "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
-                "USING(scene,actor_id) ORDER BY scene,actor_id",
+                "USING(scene,actor_id) "
+                "ORDER BY scene,actor_id,server_dynamic_npc_tasks.task_id",
                 vm_net_mock_dynamic_npc_row, &context))
         {
             g_vm_net_mock_dynamic_npc_override_count = 0;
@@ -2809,7 +2939,11 @@ static bool vm_net_mock_select_instance_challenge_enemy_for_scene(
         return true;
     }
 
-    /* Challenge-only guides placed inside the current scene (no teleport). */
+    /* Challenge-only guides placed inside the current scene (no teleport).
+     * Outdoor teleport guides (临安使者等) also sit on row->scene with a
+     * filled instanceScene — matching them here lets city hangup start the
+     * dream boss (庆阳宫 2026-08-07).  Only guides with no instance target
+     * are in-place challenge NPCs. */
     for (u32 i = 0; i < g_vm_net_mock_dynamic_npc_override_count; ++i)
     {
         const vm_net_mock_dynamic_npc_override *row =
@@ -2819,6 +2953,7 @@ static bool vm_net_mock_select_instance_challenge_enemy_for_scene(
         if (!row->enabled ||
             !vm_net_mock_npc_has_service(seed, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
             seed->challengeEnemyId == 0 ||
+            seed->instanceScene[0] != 0 ||
             !vm_net_mock_scene_names_equal_loose(scene, row->scene) ||
             !vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId))
         {
@@ -3000,32 +3135,37 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = vm_mysql_last_error();
         return false;
     }
-    if (seed->taskId != 0)
-    {
-        snprintf(query, sizeof(query),
-                 "INSERT INTO server_dynamic_npc_tasks(scene,actor_id,task_id,repeatable,daily_accept_limit) "
-                 "VALUES(X'%s',%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
-                 "task_id=VALUES(task_id),repeatable=VALUES(repeatable),"
-                 "daily_accept_limit=VALUES(daily_accept_limit)",
-                 sceneHex, seed->actorId, seed->taskId,
-                 seed->taskRepeatable ? 1u : 0u,
-                 (u32)seed->taskDailyAcceptLimit);
-    }
-    else
-    {
-        snprintf(query, sizeof(query),
-                 "DELETE FROM server_dynamic_npc_tasks WHERE scene=X'%s' AND actor_id=%u",
-                 sceneHex, seed->actorId);
-    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_dynamic_npc_tasks WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, seed->actorId);
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
         return false;
     }
+    for (u32 bindIndex = 0; bindIndex < seed->boundTaskCount; ++bindIndex)
+    {
+        const vm_net_mock_npc_bound_task *bind = &seed->boundTasks[bindIndex];
+        if (bind->taskId == 0)
+            continue;
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_dynamic_npc_tasks"
+                 "(scene,actor_id,task_id,repeatable,daily_accept_limit) "
+                 "VALUES(X'%s',%u,%u,%u,%u)",
+                 sceneHex, seed->actorId, bind->taskId,
+                 bind->repeatable ? 1u : 0u, (u32)bind->dailyAcceptLimit);
+        if (!vm_mysql_exec(query))
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
     memset(&row, 0, sizeof(row));
     snprintf(row.scene, sizeof(row.scene), "%s", scene);
     row.seed = *seed;
+    vm_net_mock_seed_sync_primary_bound_task(&row.seed);
     row.enabled = enabled;
     if (existing >= 0)
         g_vm_net_mock_dynamic_npc_overrides[existing] = row;
@@ -3033,9 +3173,11 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u mask=0x%x task=%u repeatable=%u daily_limit=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u teleport_task=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u mask=0x%x "
+           "bound_tasks=%u primary_task=%u repeatable=%u daily_limit=%u pos=(%u,%u) "
+           "instance=%s@(%u,%u) enemy=%u min_level=%u teleport_task=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind, seed->serviceMask,
-           seed->taskId, seed->taskRepeatable ? 1u : 0u,
+           seed->boundTaskCount, seed->taskId, seed->taskRepeatable ? 1u : 0u,
            (u32)seed->taskDailyAcceptLimit, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
@@ -3187,6 +3329,60 @@ static u32 vm_net_mock_npc_task_daily_accept_count(u32 roleId,
     return used;
 }
 
+/*
+ * Sum today's accepts for a task_id across every NPC binding.  Daily prereq
+ * chains (e.g. 100004→100005) often sit on different actors/scenes; slot
+ * alignment must not depend on sharing one (scene,actor) key.
+ * docs/re/2026-08-03-instance-guide-bound-task-prereq.md
+ */
+static u32 vm_net_mock_npc_task_daily_accept_count_for_task(u32 roleId,
+                                                             u32 taskId)
+{
+    char accountHex[160];
+    char query[640];
+    u32 used = 0;
+    u32 dayYmd = vm_net_mock_local_day_ymd();
+
+    if (roleId == 0 || taskId == 0 || dayYmd == 0 ||
+        !vm_net_mock_npc_task_daily_ensure_table() ||
+        !vm_net_mock_mysql_account_hex(accountHex))
+    {
+        return 0;
+    }
+    snprintf(query, sizeof(query),
+             "SELECT COALESCE(SUM(accept_count),0) FROM account_role_npc_task_daily "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND "
+             "task_id=%u AND day_ymd=%u",
+             accountHex, roleId, taskId, dayYmd);
+    if (!vm_mysql_query(query, vm_net_mock_npc_task_daily_count_row, &used))
+        return 0;
+    return used;
+}
+
+/*
+ * Max daily_accept_limit across all NPC bindings of this task_id.
+ * Used by prereq day/slot gates — must NOT call select/collect (recursion /
+ * SCE I/O on every available() during 6/14 / dialog).
+ * docs/re/2026-08-03-instance-guide-bound-task-prereq.md
+ */
+static u16 vm_net_mock_npc_task_daily_limit_max_for_task(u32 taskId)
+{
+    char query[320];
+    u32 used = 0;
+
+    if (taskId == 0)
+        return 0;
+    snprintf(query, sizeof(query),
+             "SELECT COALESCE(MAX(daily_accept_limit),0) FROM "
+             "server_dynamic_npc_tasks WHERE task_id=%u",
+             taskId);
+    if (!vm_mysql_query(query, vm_net_mock_npc_task_daily_count_row, &used))
+        return 0;
+    if (used > 0xffffu)
+        return 0xffffu;
+    return (u16)used;
+}
+
 static bool vm_net_mock_npc_task_daily_accept_under_limit(
     u32 roleId, const char *scene, u32 actorId, u32 taskId, u32 dailyLimit)
 {
@@ -3320,13 +3516,70 @@ static bool vm_net_mock_instance_enter_daily_count_row(void *contextValue,
     return true;
 }
 
+/* Last refuse tip from try_consume / build_instance_enter (static GBK). */
+static const char *g_vm_net_mock_instance_enter_refuse_tip = NULL;
+
+static const char *vm_net_mock_instance_enter_last_refuse_tip(void)
+{
+    return g_vm_net_mock_instance_enter_refuse_tip;
+}
+
+static void vm_net_mock_instance_enter_rollback_consume(
+    vm_mock_service_client_session *session, vm_net_mock_role_state *role,
+    const char *targetScene, u32 moneyBefore, u32 wcoinBefore)
+{
+    char accountHex[160];
+    char sceneHex[160];
+    char query[640];
+    u32 dayYmd = 0;
+
+    if (role == NULL || targetScene == NULL || targetScene[0] == 0)
+        return;
+    if (role->money != moneyBefore || role->wcoin != wcoinBefore)
+    {
+        role->money = moneyBefore;
+        role->wcoin = wcoinBefore;
+        vm_net_mock_role_mark_inventory_dirty("instance-enter-cost-rollback");
+    }
+    if (session == NULL || session->accountId[0] == 0)
+        return;
+    dayYmd = vm_net_mock_local_day_ymd();
+    if (dayYmd == 0 ||
+        vm_mysql_hex_encode(session->accountId, strlen(session->accountId),
+                            accountHex, sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(targetScene, strlen(targetScene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE server_instance_enter_daily "
+             "SET enter_count=IF(enter_count>0,enter_count-1,0) "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND "
+             "scene=UNHEX('%s') AND day_ymd=%u",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[warn][network] instance_enter_rollback_daily_fail role=%u "
+               "scene=%s error=%s\n",
+               role->roleId, targetScene, vm_mysql_last_error());
+    }
+    else
+    {
+        printf("[info][network] instance_enter_rollback role=%u scene=%s "
+               "money=%u wcoin=%u\n",
+               role->roleId, targetScene, role->money, role->wcoin);
+    }
+}
+
 /*
- * Returns NULL on success (deducted).  Otherwise a static GBK tip string.
+ * Returns NULL on success (deducted or no rule).  Otherwise a static GBK tip.
  * No rule / all-zero costs+limit ⇒ allow without deduct.
+ * When *didConsumeOut is set, caller must rollback if the enter packet fails.
  */
 static const char *vm_net_mock_instance_enter_try_consume(
     vm_mock_service_client_session *session, vm_net_mock_role_state *role,
-    const char *targetScene)
+    const char *targetScene, bool *didConsumeOut)
 {
     vm_net_mock_instance_enter_rule rule;
     char accountHex[160];
@@ -3344,6 +3597,8 @@ static const char *vm_net_mock_instance_enter_try_consume(
     static const char tipKubao[] =
         "\xbf\xe1\xb1\xa6\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8\xbd\xf8\xc8\xeb\xb8\xb1\xb1\xbe\xa1\xa3"; /* 酷宝不足，无法进入副本。 */
 
+    if (didConsumeOut)
+        *didConsumeOut = false;
     if (session == NULL || role == NULL || targetScene == NULL ||
         targetScene[0] == 0 || session->accountId[0] == 0)
         return NULL;
@@ -3401,6 +3656,8 @@ static const char *vm_net_mock_instance_enter_try_consume(
                role->roleId, targetScene, vm_mysql_last_error());
         return tipQuota;
     }
+    if (didConsumeOut)
+        *didConsumeOut = true;
     printf("[info][network] instance_enter_consume role=%u scene=%s "
            "day=%u used=%u/%u gold=%u kubao=%u money=%u->%u wcoin=%u->%u\n",
            role->roleId, targetScene, dayYmd, used + 1u, rule.dailyLimit,
@@ -4327,6 +4584,92 @@ static bool vm_net_mock_get_scene_nearest_entry_spawn_from_sce(const char *scene
     return true;
 }
 
+/*
+ * Authored n_telestone landing (same signature as Pixi parseSceTeleportStones):
+ *   kind | x | y | 04 00 | 01 00 | 19 00 | … | n_telestone.actor
+ * Settings「脱离卡死」should stand next to this prop, not an edge-portal spawn.
+ */
+static bool vm_net_mock_get_scene_nearest_telestone_pos_from_sce(const char *scene,
+                                                                 u16 fromX,
+                                                                 u16 fromY,
+                                                                 u16 *xOut,
+                                                                 u16 *yOut)
+{
+    static const char marker[] = "n_telestone.actor";
+    u8 data[16384];
+    u32 len = 0;
+    bool found = false;
+    u16 bestX = 0;
+    u16 bestY = 0;
+    unsigned long long bestDistance = 0xffffffffffffffffull;
+
+    if (xOut)
+        *xOut = 0;
+    if (yOut)
+        *yOut = 0;
+    if (scene == NULL || scene[0] == 0)
+        return false;
+    len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    if (len < sizeof(marker) - 1)
+        return false;
+
+    for (u32 i = 0; i + sizeof(marker) - 1 <= len; ++i)
+    {
+        u16 px = 0;
+        u16 py = 0;
+        int dx = 0;
+        int dy = 0;
+        unsigned long long distance = 0;
+        bool coordsOk = false;
+
+        if (memcmp(data + i, marker, sizeof(marker) - 1) != 0)
+            continue;
+        for (u32 delta = 12; delta <= 120 && i >= delta; delta += 2)
+        {
+            u32 back = i - delta;
+            u16 kind = vm_net_mock_read_le16_at(data, back);
+            if (kind < 1 || kind > 32)
+                continue;
+            if (vm_net_mock_read_le16_at(data, back + 6) != 4 ||
+                vm_net_mock_read_le16_at(data, back + 8) != 1 ||
+                vm_net_mock_read_le16_at(data, back + 10) != 0x19)
+            {
+                continue;
+            }
+            px = vm_net_mock_read_le16_at(data, back + 2);
+            py = vm_net_mock_read_le16_at(data, back + 4);
+            if (px >= 16 && py >= 16 && px < 4096 && py < 4096)
+            {
+                coordsOk = true;
+                break;
+            }
+        }
+        if (!coordsOk)
+            continue;
+        dx = (int)px - (int)fromX;
+        dy = (int)py - (int)fromY;
+        distance = (unsigned long long)(dx < 0 ? -dx : dx) *
+                       (unsigned long long)(dx < 0 ? -dx : dx) +
+                   (unsigned long long)(dy < 0 ? -dy : dy) *
+                       (unsigned long long)(dy < 0 ? -dy : dy);
+        if (found && distance >= bestDistance)
+            continue;
+        found = true;
+        bestDistance = distance;
+        bestX = px;
+        bestY = py;
+    }
+
+    if (!found)
+        return false;
+    vm_net_mock_adjust_safe_player_pos_for_scene(scene, &bestX, &bestY);
+    if (xOut)
+        *xOut = bestX;
+    if (yOut)
+        *yOut = bestY;
+    return true;
+}
+
 static bool vm_net_mock_get_scene_reasonable_spawn_from_sce(const char *scene,
                                                             u16 *xOut,
                                                             u16 *yOut,
@@ -4581,7 +4924,16 @@ static bool vm_net_mock_resolve_sce_edge_portal_target(const vm_net_mock_sce_edg
     if (portal == NULL || target == NULL || portal->targetScene[0] == 0)
         return false;
 
-    if (!vm_net_mock_get_scene_entry_spawn_from_sce(portal->targetScene, portal->entryId,
+    /*
+     * Landing is the destination edge portal whose entryId equals the source
+     * portal's entryId (paired reverse door). Admin portal-edit writes the
+     * footfall into that same entryId on the target SCE.
+     * Evidence: docs/re/2026-07-27-admin-scene-portal-edit.md;
+     * 2026-07-25-suoyao-tower (landing by source entry_id); Lin'an SCE pairs
+     * (entryId match → reverse door spawn; targetEntryId often points elsewhere).
+     */
+    if (!vm_net_mock_get_scene_entry_spawn_from_sce(portal->targetScene,
+                                                    portal->entryId,
                                                     &targetX, &targetY))
         return false;
 
@@ -4701,6 +5053,12 @@ static bool vm_net_mock_try_scene_change_source_portal(const char *sourceKind,
     {
         matchMode = "trigger-rect";
     }
+    else if (vm_net_mock_find_sce_edge_portal_by_entry(sourceScene, requestExitId, &portal) &&
+             vm_net_mock_scene_names_equal_loose(portal.targetScene, requestedTargetScene))
+    {
+        /* Pixi / CBE: 2/3.exitID is the source portal entryId (0x07). */
+        matchMode = "source-entry";
+    }
     else if (allowTargetExitMatch &&
              vm_net_mock_find_sce_edge_portal_by_target_exit(sourceScene,
                                                              requestedTargetScene,
@@ -4716,15 +5074,48 @@ static bool vm_net_mock_try_scene_change_source_portal(const char *sourceKind,
 
     if (!vm_net_mock_resolve_sce_edge_portal_target(&portal, &portalTarget))
     {
+        u16 fallbackX = 0;
+        u16 fallbackY = 0;
+        u32 destEntry = portal.entryId;
+
         memset(target, 0, sizeof(*target));
         normalizedTarget = vm_net_mock_scene_name_is_safe(portal.targetScene)
                                ? vm_net_mock_normalize_scene_name_for_enter(portal.targetScene)
                                : portal.targetScene;
         snprintf(target->scene, sizeof(target->scene), "%s", normalizedTarget);
-        target->exitId = portal.entryId;
+        target->exitId = destEntry;
         target->mapType = requestMapType;
         target->hasSceEntry = false;
-        target->needsSceneDownload = vm_net_mock_scene_name_is_download_key(portal.targetScene);
+        /*
+         * download_key only means "well-formed leaf", not "file missing".
+         * Treating every resolve miss as needsDownload left soft 30/2 with
+         * pos=(0,0) and no 27/12 for mock-service / Pixi (UTF-8 mapID used
+         * to fail SCE open before wire→disk leaf conversion).
+         */
+        if (vm_net_mock_get_scene_entry_spawn_from_sce(portal.targetScene,
+                                                        destEntry,
+                                                        &fallbackX,
+                                                        &fallbackY) ||
+            (vm_net_mock_scene_resource_exists(portal.targetScene) &&
+             vm_net_mock_get_scene_reasonable_spawn_from_sce(portal.targetScene,
+                                                              &fallbackX,
+                                                              &fallbackY,
+                                                              NULL)))
+        {
+            target->x = fallbackX;
+            target->y = fallbackY;
+            target->hasSceEntry = true;
+            target->needsSceneDownload = false;
+            printf("[info][network] mock_scene_portal_target_fallback "
+                   "source_kind=%s source=%s target=%s entry=%u targetEntry=%u "
+                   "request_exit=%u match=%s pos=(%u,%u)\n",
+                   sourceKind ? sourceKind : "source",
+                   sourceScene, target->scene, portal.entryId, portal.targetEntryId,
+                   requestExitId, matchMode ? matchMode : "unknown",
+                   target->x, target->y);
+            return true;
+        }
+        target->needsSceneDownload = !vm_net_mock_scene_resource_exists(portal.targetScene);
         if (target->needsSceneDownload)
         {
             vm_autotest_note("mock_scene_portal_missing_target_entry source=%s target=%s entry=%u request_exit=%u action=download-ack\n",
@@ -4739,7 +5130,7 @@ static bool vm_net_mock_try_scene_change_source_portal(const char *sourceKind,
         return false;
     }
 
-    if (requestExitId != portal.targetEntryId)
+    if (requestExitId != portal.entryId && requestExitId != portal.targetEntryId)
     {
         printf("[warn][network] mock_scene_portal_exit_mismatch source_kind=%s source=%s request=%s request_exit=%u portal_entry=%u targetEntry=%u match=%s pos=(%u,%u)\n",
                sourceKind ? sourceKind : "source",
@@ -5412,6 +5803,85 @@ static void vm_net_mock_get_scene_change_target(const u8 *request, u32 requestLe
                    "pos=(%u,%u) exit=%u evidence=current-scene-reload-30/1\n",
                    target->scene, target->x, target->y, exitId);
             return;
+        }
+    }
+
+    /*
+     * Dream/outdoor shop-return early-shell 27/11 can provoke a same-scene
+     * WT2/3 before kind-2 marks current_scene_reload.  Falling through to SCE
+     * safe-spawn (e.g. 29梦境空间_01 → 256,160) cancels shell 30/2 and starts
+     * a third DoLoading that sticks (2026-08-05).
+     */
+    if (exitId == 0)
+    {
+        vm_mock_service_client_session *shopSession =
+            vm_mock_service_get_active_client_session();
+        bool shopReturnSameSceneClear =
+            shopSession != NULL &&
+            ((shopSession->shopReturnLoadingClearPending &&
+              vm_net_mock_scene_name_is_safe(shopSession->shopReturnLoadingClearScene) &&
+              vm_net_mock_scene_names_equal_loose(
+                  shopSession->shopReturnLoadingClearScene, mapId)) ||
+             (shopSession->mapStoneLoadingClearPending &&
+              shopSession->shopReturnNpcCatalogPending &&
+              shopSession->shopReturnNpcCatalogReadyTick == 0 &&
+              vm_net_mock_scene_name_is_safe(shopSession->mapStoneLoadingClearScene) &&
+              vm_net_mock_scene_names_equal_loose(
+                  shopSession->mapStoneLoadingClearScene, mapId)));
+
+        if (shopReturnSameSceneClear)
+        {
+            u16 liveX = 0;
+            u16 liveY = 0;
+            const vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+            if (role != NULL &&
+                vm_net_mock_scene_name_is_safe(role->scene) &&
+                vm_net_mock_scene_names_equal_loose(role->scene, mapId) &&
+                role->x != 0 && role->y != 0)
+            {
+                liveX = role->x;
+                liveY = role->y;
+            }
+            else if (g_vm_net_mock_last_moveinfo_source_valid &&
+                     vm_net_mock_scene_names_equal_loose(
+                         g_vm_net_mock_last_moveinfo_source_scene, mapId) &&
+                     g_vm_net_mock_last_moveinfo_source_x != 0 &&
+                     g_vm_net_mock_last_moveinfo_source_y != 0)
+            {
+                liveX = g_vm_net_mock_last_moveinfo_source_x;
+                liveY = g_vm_net_mock_last_moveinfo_source_y;
+            }
+            else if (!vm_net_mock_read_current_player_grid(NULL, NULL, &liveX, &liveY,
+                                                           NULL, NULL) ||
+                     liveX == 0 || liveY == 0)
+            {
+                liveX = 0;
+                liveY = 0;
+            }
+            if (liveX != 0 && liveY != 0)
+            {
+                snprintf(target->scene, sizeof(target->scene), "%s",
+                         vm_net_mock_normalize_scene_name_for_enter(mapId));
+                target->x = liveX;
+                target->y = liveY;
+                target->exitId = exitId;
+                target->mapType = (target->mapType != 0) ? target->mapType : 2;
+                target->hasSceEntry = false;
+                target->needsSceneDownload = false;
+                printf("[info][network] mock_scene_target_inherit_shop_return "
+                       "scene=%s pos=(%u,%u) exit=%u post_catalog=%u "
+                       "kind2_shell=%u "
+                       "evidence=shell-clear-same-scene-2/3-not-sce-spawn\n",
+                       target->scene, target->x, target->y, exitId,
+                       shopSession->shopReturnLoadingClearPostCatalog ? 1u : 0u,
+                       (shopSession->mapStoneLoadingClearPending &&
+                        shopSession->shopReturnNpcCatalogPending &&
+                        shopSession->shopReturnNpcCatalogReadyTick == 0)
+                           ? 1u
+                           : 0u);
+                return;
+            }
         }
     }
 
@@ -6337,11 +6807,34 @@ static bool vm_net_mock_get_teleport_stone_smap_row_target(
                         : "sce-nearest-entry";
         target->hasSceEntry = true;
     }
-    else if (!targetResourceExists && (dshX != 0 || dshY != 0))
+    else if (dshX != 0 || dshY != 0)
     {
+        /*
+         * Keep the sMap UI marker only when SCE spawn cannot be resolved.
+         * Previously this branch required !targetResourceExists, so a readable
+         * but unspawnable SCE (fopen ok / LZSS or portal scan miss) rejected
+         * the whole map-stone refine — observed on 泰山 children 66-69 while
+         * 野猪林/临安 still worked.
+         */
         target->x = dshX;
         target->y = dshY;
-        posSource = "smap-ui-marker-fallback-missing-sce";
+        posSource = targetResourceExists
+                        ? "smap-ui-marker-fallback-sce-spawn-miss"
+                        : "smap-ui-marker-fallback-missing-sce";
+        vm_net_mock_adjust_safe_player_pos_for_scene(scene, &target->x, &target->y);
+    }
+    else if (targetResourceExists)
+    {
+        u16 width = 0;
+        u16 height = 0;
+        if (!vm_net_mock_get_scene_dimensions_from_sce(scene, &width, &height) ||
+            width == 0 || height == 0)
+        {
+            return false;
+        }
+        target->x = (u16)(width / 2);
+        target->y = (u16)(height / 2);
+        posSource = "sce-dims-center-fallback";
         vm_net_mock_adjust_safe_player_pos_for_scene(scene, &target->x, &target->y);
     }
     else
@@ -6504,16 +6997,45 @@ static bool vm_net_mock_get_teleport_stone_map_target(const u8 *request, u32 req
                          target->scene, dshX, dshY, target->x, target->y,
                          posSource, sceEntryId);
     }
-    else if (!targetResourceExists && (dshX != 0 || dshY != 0))
+    else if (dshX != 0 || dshY != 0)
     {
         /*
-         * The local SCE is unavailable, so the real scene-space entry cannot be
-         * resolved yet. Keep the old marker only as a download-path fallback;
-         * installed scenes must never use sMap.dsh UI coordinates as actor data.
+         * Readable-but-unspawnable SCE used to fail 16/4 entirely (泰山).
+         * Prefer sMap marker over rejecting the confirm target.
          */
         target->x = dshX;
         target->y = dshY;
-        posSource = "smap-ui-marker-fallback-missing-sce";
+        posSource = targetResourceExists
+                        ? "smap-ui-marker-fallback-sce-spawn-miss"
+                        : "smap-ui-marker-fallback-missing-sce";
+        printf("[warn][network] mock_scene_landing_resolve scene=%s smap_marker=(%u,%u) landing=(%u,%u) source=%s exists=%u\n",
+               target->scene, dshX, dshY, target->x, target->y, posSource,
+               targetResourceExists ? 1u : 0u);
+        vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+    }
+    else if (targetResourceExists)
+    {
+        u16 width = 0;
+        u16 height = 0;
+        if (!vm_net_mock_get_scene_dimensions_from_sce(target->scene, &width, &height) ||
+            width == 0 || height == 0)
+        {
+            if (sourceOut)
+                *sourceOut = source;
+            if (posSourceOut)
+                *posSourceOut = "missing-sce-landing";
+            if (smapRowOut)
+                *smapRowOut = dshTargetRowId;
+            if (sceneCountOut)
+                *sceneCountOut = dshSceneCount;
+            if (rowSourceOut)
+                *rowSourceOut = dshRowSource;
+            return false;
+        }
+        target->x = (u16)(width / 2);
+        target->y = (u16)(height / 2);
+        posSource = "sce-dims-center-fallback";
+        vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
     }
     else
     {
@@ -7619,33 +8141,127 @@ static void vm_net_mock_get_current_scene_unstuck_target(vm_net_mock_scene_chang
         fromY = vm_net_mock_scene_spawn_y();
     snprintf(target->scene, sizeof(target->scene), "%s", scene);
 
-    if (vm_net_mock_get_scene_nearest_entry_spawn_from_sce(target->scene,
-                                                           fromX,
-                                                           fromY,
-                                                           &entryX,
-                                                           &entryY,
-                                                           &entryId))
+    /*
+     * Normal CBE「脱离卡死」lands at a nearby teleport stone (n_telestone),
+     * not an edge-portal entry. Prefer same-scene stone; otherwise follow
+     * sMap/wMap to the nearest authored stone scene (death-respawn topology).
+     */
+    if (vm_net_mock_get_scene_nearest_telestone_pos_from_sce(target->scene,
+                                                             fromX,
+                                                             fromY,
+                                                             &entryX,
+                                                             &entryY))
     {
         target->x = entryX;
         target->y = entryY;
-        targetSource = "sce-nearest-entry";
-    }
-    else if (vm_net_mock_get_scene_center_spawn_from_sce(target->scene, &entryX, &entryY))
-    {
-        target->x = entryX;
-        target->y = entryY;
-        targetSource = "sce-center";
+        targetSource = "sce-nearest-telestone";
     }
     else
     {
-        target->x = fromX;
-        target->y = fromY;
-        vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+        char stoneScene[sizeof(target->scene)];
+        u16 stoneX = 0;
+        u16 stoneY = 0;
+        u32 hops = 0;
+        const char *route = NULL;
+
+        stoneScene[0] = 0;
+        if (vm_net_mock_resolve_nearest_teleport_stone_respawn(
+                target->scene,
+                stoneScene,
+                sizeof(stoneScene),
+                &stoneX,
+                &stoneY,
+                NULL,
+                NULL,
+                &hops,
+                &route) &&
+            stoneScene[0] != 0)
+        {
+            snprintf(target->scene, sizeof(target->scene), "%s", stoneScene);
+            /*
+             * sMap rows may omit the town "c" prefix (4临安府_10.sce) while
+             * JHOnlineData stores c04临安府_10.sce. Prefer a key that opens.
+             */
+            if (!vm_net_mock_scene_resource_exists(target->scene) &&
+                target->scene[0] >= '0' && target->scene[0] <= '9')
+            {
+                char alt[sizeof(target->scene)];
+                snprintf(alt, sizeof(alt), "c0%s", target->scene);
+                if (vm_net_mock_scene_resource_exists(alt))
+                    snprintf(target->scene, sizeof(target->scene), "%s", alt);
+                else
+                {
+                    snprintf(alt, sizeof(alt), "c%s", target->scene);
+                    if (vm_net_mock_scene_resource_exists(alt))
+                        snprintf(target->scene, sizeof(target->scene), "%s", alt);
+                }
+            }
+            if (vm_net_mock_get_scene_nearest_telestone_pos_from_sce(
+                    target->scene, 0, 0, &entryX, &entryY))
+            {
+                target->x = entryX;
+                target->y = entryY;
+            }
+            else if (vm_net_mock_get_scene_nearest_telestone_pos_from_sce(
+                         stoneScene, 0, 0, &entryX, &entryY))
+            {
+                target->x = entryX;
+                target->y = entryY;
+            }
+            else
+            {
+                target->x = stoneX;
+                target->y = stoneY;
+            }
+            targetSource = "smap-nearest-telestone";
+            (void)hops;
+            (void)route;
+        }
+        else if (vm_net_mock_get_scene_nearest_entry_spawn_from_sce(target->scene,
+                                                                    fromX,
+                                                                    fromY,
+                                                                    &entryX,
+                                                                    &entryY,
+                                                                    &entryId))
+        {
+            target->x = entryX;
+            target->y = entryY;
+            targetSource = "sce-nearest-entry";
+        }
+        else if (vm_net_mock_get_scene_center_spawn_from_sce(target->scene, &entryX, &entryY))
+        {
+            target->x = entryX;
+            target->y = entryY;
+            targetSource = "sce-center";
+        }
+        else
+        {
+            target->x = fromX;
+            target->y = fromY;
+            vm_net_mock_adjust_safe_player_pos_for_scene(target->scene, &target->x, &target->y);
+        }
     }
     target->exitId = 0;
     target->mapType = 2;
     target->hasSceEntry = strcmp(targetSource, "current-pos") != 0;
     target->needsSceneDownload = false;
+    /*
+     * sMap/town keys may omit the authored "c" prefix. Disk leaves are often
+     * c04临安府_10.sce while topology stores 4临安府_10.sce.
+     */
+    if (target->scene[0] >= '0' && target->scene[0] <= '9')
+    {
+        char alt[sizeof(target->scene)];
+        snprintf(alt, sizeof(alt), "c0%s", target->scene);
+        if (vm_net_mock_scene_resource_exists(alt))
+            snprintf(target->scene, sizeof(target->scene), "%s", alt);
+        else
+        {
+            snprintf(alt, sizeof(alt), "c%s", target->scene);
+            if (vm_net_mock_scene_resource_exists(alt))
+                snprintf(target->scene, sizeof(target->scene), "%s", alt);
+        }
+    }
     if (!vm_net_mock_scene_resource_exists(target->scene))
     {
         printf("[warn][network] mock_unstuck_target_unresolved scene=%s action=preserve-exact-key reason=server-sce-not-found\n",
@@ -8389,6 +9005,8 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
     g_vm_net_mock_teleport_stone_deferred_enter_target = target;
     g_vm_net_mock_teleport_stone_deferred_enter_valid = true;
     g_vm_net_mock_teleport_stone_deferred_enter_tick = g_schedulerTick;
+    g_vm_net_mock_teleport_stone_deferred_enter_client_id =
+        g_vm_mock_service_active_client_id;
     {
         const char *curScene = vm_net_mock_current_scene_name();
         g_vm_net_mock_teleport_stone_same_scene =
@@ -8404,12 +9022,13 @@ static u32 vm_net_mock_build_teleport_stone_confirmed_exit_combo_response(
     else
         vm_net_mock_finish_wt_packet(out, 5, 0);
 
-    printf("[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item_request=%u item_response=%u response_objects=%u deferred_scene=1 scene=%s pos=(%u,%u) same_scene=%u target_source=confirmed-exitID armed_tick=%u resp=%u\n",
+    printf("[info][network] mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item_request=%u item_response=%u response_objects=%u deferred_scene=1 scene=%s pos=(%u,%u) same_scene=%u target_source=confirmed-exitID armed_tick=%u owner_client=%08x resp=%u\n",
            objectCount, exitId, type, itemRequestLen, itemResponseLen,
            itemResponseLen >= 5 ? itemResponse[4] : 0,
            target.scene, target.x, target.y,
            g_vm_net_mock_teleport_stone_same_scene ? 1u : 0u,
            g_vm_net_mock_teleport_stone_deferred_enter_tick,
+           g_vm_net_mock_teleport_stone_deferred_enter_client_id,
            itemResponseLen >= 5 ? itemResponseLen : 5);
     vm_autotest_note("mock_teleport_stone_confirmed_exit_combo request_objects=%u exit=%u type=%u item=%u response_objects=%u response=item-ack-only deferred_scene=1 evidence=runtime:wt16/2-len130+crash:0x01018136/0x01046189/0x01005AF4\n",
                      objectCount, exitId, type, itemObjectLen ? 1u : 0u,
@@ -8423,10 +9042,22 @@ static u32 vm_net_mock_build_teleport_stone_deferred_enter_response(u8 *out,
     vm_net_mock_scene_change_target target;
     u32 pos = 0;
     u32 armedTick = g_vm_net_mock_teleport_stone_deferred_enter_tick;
+    u32 ownerClient = g_vm_net_mock_teleport_stone_deferred_enter_client_id;
 
     if (!g_vm_net_mock_teleport_stone_deferred_enter_valid ||
         out == NULL || outCap < 5)
     {
+        return 0;
+    }
+    /* Another sticky session on the same account must not consume this 30/1. */
+    if (ownerClient != 0 &&
+        g_vm_mock_service_active_client_id != 0 &&
+        ownerClient != g_vm_mock_service_active_client_id)
+    {
+        printf("[info][network] mock_teleport_stone_deferred_enter_skip owner=%08x active=%08x scene=%s evidence=per-client-deferred\n",
+               ownerClient,
+               g_vm_mock_service_active_client_id,
+               g_vm_net_mock_teleport_stone_deferred_enter_target.scene);
         return 0;
     }
     /* A poll queued in the request's own scheduler tick is not a safe phase
@@ -8442,6 +9073,7 @@ static u32 vm_net_mock_build_teleport_stone_deferred_enter_response(u8 *out,
 
     g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
     g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+    g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
     g_vm_net_mock_teleport_stone_subtype3_ack_sent = true;
     g_vm_net_mock_teleport_stone_direct_enter_pending = true;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -8450,9 +9082,24 @@ static u32 vm_net_mock_build_teleport_stone_deferred_enter_response(u8 *out,
     g_vm_net_mock_last_scene_change_fb4_type = 1;
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
                                       "teleport-stone-deferred-target");
+    /*
+     * append_scene_enter already mark_pending (and cleared wait_*).  Pixi/CBE
+     * still need a follow-up that owns nonempty 27/11.  Without wait_post_enter,
+     * scene-poll steals the one-shot (startup-scene-sync-poll) before that
+     * follow-up; same-scene revisits also keep a stale per-client ledger so
+     * post-enter-repeat returns empty-11.  Hold poll + clear ledger here.
+     */
+    {
+        vm_mock_service_client_session *enterSession =
+            vm_mock_service_get_active_client_session();
 
-    printf("[info][network] mock_teleport_stone_deferred_enter scene=%s pos=(%u,%u) armed_tick=%u deliver_tick=%u response=scene-channel-enter-confirm-target resp=%u evidence=separate-network-event\n",
-           target.scene, target.x, target.y, armedTick, g_schedulerTick, pos);
+        g_vm_net_mock_scene_moveinfo_npc_wait_post_enter = true;
+        vm_mock_service_session_clear_scene_npc_catalog_seeded(
+            enterSession, "teleport-stone-deferred-enter");
+    }
+
+    printf("[info][network] mock_teleport_stone_deferred_enter scene=%s pos=(%u,%u) armed_tick=%u deliver_tick=%u owner=%08x response=scene-channel-enter-confirm-target resp=%u evidence=separate-network-event\n",
+           target.scene, target.x, target.y, armedTick, g_schedulerTick, ownerClient, pos);
     vm_autotest_note("mock_teleport_stone_deferred_enter scene=%s pos=(%u,%u) armed_tick=%u deliver_tick=%u response=30/1 evidence=JianghuOL:0x01012E4D/0x01039B8A/0x010396D6 crash-boundary:0x01018136/0x01046189/0x01005AF4\n",
                      target.scene, target.x, target.y, armedTick, g_schedulerTick);
     return pos;
@@ -8533,6 +9180,7 @@ static u32 vm_net_mock_build_teleport_stone_map_transfer_response(const u8 *requ
     g_vm_net_mock_teleport_stone_confirm_target_valid = true;
     g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
     g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+    g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
     g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
     g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
@@ -9484,7 +10132,8 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
     return pos;
 }
 
-#define VM_NET_MOCK_RANKING_PAGE_SIZE 10u
+/* Pixi / board UI: one page = top 20. CBE pageIndex still pages by this size. */
+#define VM_NET_MOCK_RANKING_PAGE_SIZE 20u
 #define VM_NET_MOCK_RANKING_MAX_ROWS 64u
 
 typedef struct

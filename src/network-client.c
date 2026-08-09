@@ -101,6 +101,13 @@ static bool g_vm_scene_allow_one_map_stone_completion_reenter = false;
  */
 static bool g_vm_scene_block_dream_completion_reenter = false;
 /*
+ * mmShop→mmGame kind-2 same-scene 30/1 on 29*: must run one EnterScene to
+ * rebuild SCE type4 battle mapctrl.  First messenger enter still uses
+ * block_dream_completion_reenter; already-on-29* 30/1 uses this allow-once
+ * (2026-08-05 shop-return encounter soft-fail).
+ */
+static bool g_vm_scene_allow_one_dream_shop_return_reenter = false;
+/*
  * 0=off, 1=next EnterSceneByMapName must run (30/1 primary bind),
  * 2=skip further EnterScene (2/3 completion).  Skipping the first call
  * after DF ScreenInit caused pc=0@0x0104d775 (debug-191169).
@@ -214,38 +221,72 @@ static u32 vm_net_mock_apply_remote_observation(
         target.hasSceEntry = true;
         target.needsSceneDownload = false;
 
-        g_vm_net_mock_update_completed_reenter_pending = false;
-        g_vm_net_mock_update_completed_name[0] = 0;
-        g_vm_net_mock_last_completed_scene_change_target_valid = false;
-        g_vm_net_mock_remote_completed_scene_target_serial = 0;
-        g_vm_net_mock_last_scene_change_target = target;
-        g_vm_net_mock_last_scene_change_target_valid = true;
-        ++g_vm_net_mock_last_scene_change_target_serial;
-        if (g_vm_net_mock_last_scene_change_target_serial == 0)
-            g_vm_net_mock_last_scene_change_target_serial = 1;
         /*
-         * Outdoor map-stone: one 27/12+posinfo reenter after deferred 30/1.
-         * Dream 29*: never allow-once; block completion 01018150 instead
-         * (instance DF enter leaves same-reenter guard unarmed).
+         * Snapshot before clearing completed: shop-return kind-2 30/1 must see
+         * the prior dream completion to allow one EnterScene.  Clearing first
+         * made alreadyOnSameDream always false → permanent block_dream
+         * (2026-08-05: server sent 30/1, client never EnterScene).
          */
         {
             bool isDream29 = target.scene[0] == '2' && target.scene[1] == '9';
+            bool priorCompletedSameDream =
+                isDream29 &&
+                g_vm_net_mock_last_completed_scene_change_target_valid &&
+                g_vm_net_mock_last_completed_scene_change_target.scene[0] ==
+                    '2' &&
+                g_vm_net_mock_last_completed_scene_change_target.scene[1] ==
+                    '9' &&
+                vm_net_mock_scene_names_equal_loose(
+                    g_vm_net_mock_last_completed_scene_change_target.scene,
+                    target.scene);
+            bool priorLiveSameDream =
+                isDream29 &&
+                g_vm_net_mock_last_scene_change_target_valid &&
+                !g_vm_scene_block_dream_completion_reenter &&
+                g_vm_dream_enter_scene_gate == 0 &&
+                g_vm_net_mock_last_scene_change_target.scene[0] == '2' &&
+                g_vm_net_mock_last_scene_change_target.scene[1] == '9' &&
+                vm_net_mock_scene_names_equal_loose(
+                    g_vm_net_mock_last_scene_change_target.scene, target.scene);
+            bool alreadyOnSameDream =
+                priorCompletedSameDream || priorLiveSameDream;
+
+            g_vm_net_mock_update_completed_reenter_pending = false;
+            g_vm_net_mock_update_completed_name[0] = 0;
+            g_vm_net_mock_last_completed_scene_change_target_valid = false;
+            g_vm_net_mock_remote_completed_scene_target_serial = 0;
+            g_vm_net_mock_last_scene_change_target = target;
+            g_vm_net_mock_last_scene_change_target_valid = true;
+            ++g_vm_net_mock_last_scene_change_target_serial;
+            if (g_vm_net_mock_last_scene_change_target_serial == 0)
+                g_vm_net_mock_last_scene_change_target_serial = 1;
 
             g_vm_scene_allow_one_map_stone_completion_reenter =
                 observation->sceneSubtype == 1 && !isDream29;
-            g_vm_scene_block_dream_completion_reenter =
-                observation->sceneSubtype == 1 && isDream29;
-            g_vm_dream_enter_scene_gate =
-                g_vm_scene_block_dream_completion_reenter ? 1u : 0u;
+            if (observation->sceneSubtype == 1 && alreadyOnSameDream)
+            {
+                g_vm_scene_allow_one_dream_shop_return_reenter = true;
+                g_vm_scene_block_dream_completion_reenter = false;
+                g_vm_dream_enter_scene_gate = 0;
+            }
+            else
+            {
+                g_vm_scene_allow_one_dream_shop_return_reenter = false;
+                g_vm_scene_block_dream_completion_reenter =
+                    observation->sceneSubtype == 1 && isDream29;
+                g_vm_dream_enter_scene_gate =
+                    g_vm_scene_block_dream_completion_reenter ? 1u : 0u;
+            }
             g_vm_dream_prefer_resume_paused_shell = false;
         }
         printf("[info][screen] remote_scene_target_apply serial=%u subtype=%u "
                "scene=%s pos=(%u,%u) allow_map_stone_reenter=%u "
-               "block_dream_reenter=%u "
+               "allow_dream_shop_return_reenter=%u block_dream_reenter=%u "
                "evidence=WT30/%u-immediately-before-guest-callback\n",
                g_vm_net_mock_last_scene_change_target_serial,
                observation->sceneSubtype, target.scene, target.x, target.y,
                g_vm_scene_allow_one_map_stone_completion_reenter ? 1u : 0u,
+               g_vm_scene_allow_one_dream_shop_return_reenter ? 1u : 0u,
                g_vm_scene_block_dream_completion_reenter ? 1u : 0u,
                observation->sceneSubtype);
         /* #region agent log */
@@ -339,6 +380,7 @@ static void vm_net_mock_finish_remote_observation(u32 sceneTargetSerial)
          * completion block after the guest callback so it cannot stick.
          */
         g_vm_scene_allow_one_map_stone_completion_reenter = false;
+        g_vm_scene_allow_one_dream_shop_return_reenter = false;
         if (wasDream29)
         {
             g_vm_scene_block_dream_completion_reenter = false;
@@ -434,6 +476,68 @@ static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
     *offset = start + objectLen;
     return true;
 }
+
+/*
+ * Title role-select is WT 1/1/6 with actorId/actorID.  Bind dream HUD visit
+ * remain to that role so shop-return poke cannot borrow another character's
+ * visit_ms (or reset to full 60 after a garbage SCE clear).
+ */
+static bool vm_client_packet_be32_field(const u8 *packet, u32 packetLen,
+                                        const char *field, u32 *outValue)
+{
+    u32 fieldLen;
+    if (packet == NULL || field == NULL || packetLen < 6 || outValue == NULL)
+        return false;
+    *outValue = 0;
+    fieldLen = (u32)strlen(field);
+    if (fieldLen == 0 || fieldLen > 0xff)
+        return false;
+    for (u32 i = 0; i + fieldLen + 5 <= packetLen; ++i)
+    {
+        u32 p;
+        u16 valueLen;
+        if (packet[i] != (u8)fieldLen)
+            continue;
+        if (memcmp(packet + i + 1, field, fieldLen) != 0)
+            continue;
+        p = i + 1 + fieldLen;
+        if (p + 2 > packetLen)
+            continue;
+        valueLen = (u16)(((u16)packet[p] << 8) | packet[p + 1]);
+        p += 2;
+        if (valueLen < 4 || p + valueLen > packetLen)
+            continue;
+        *outValue = ((u32)packet[p] << 24) | ((u32)packet[p + 1] << 16) |
+                    ((u32)packet[p + 2] << 8) | (u32)packet[p + 3];
+        return *outValue != 0;
+    }
+    return false;
+}
+
+static void vm_client_note_title_role_select(const u8 *packet, u32 packetLen)
+{
+    u32 offset = 4;
+    vm_client_wt_object object;
+    u32 actorId = 0;
+    bool haveSelect6 = false;
+
+    if (packet == NULL || packetLen < 10 || packet[0] != 'W' || packet[1] != 'T')
+        return;
+    while (offset + 5 <= packetLen &&
+           vm_client_next_wt_object(packet, packetLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == 1 && object.subtype == 6)
+            haveSelect6 = true;
+    }
+    if (!haveSelect6)
+        return;
+    if (!vm_client_packet_be32_field(packet, packetLen, "actorID", &actorId) &&
+        !vm_client_packet_be32_field(packet, packetLen, "actorid", &actorId) &&
+        !vm_client_packet_be32_field(packet, packetLen, "actorId", &actorId))
+        return;
+    agent_dbg0b451a_note_active_role(actorId);
+}
+
 
 typedef struct
 {
@@ -2206,6 +2310,8 @@ static void vm_net_mock_async_drain_completions(void)
             memcpy(g_netMockResponse, completion->response, completion->responseLen);
             g_netMockResponseLen = completion->responseLen;
             g_netMockResponseOffset = 0;
+            vm_client_note_title_role_select(completion->response,
+                                             completion->responseLen);
         }
         g_netDownLinkData += completion->responseLen;
         scheduler_queue_net_event(completion->eventType, responsePtr,
@@ -2363,6 +2469,7 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
     if (uc_mem_read(MTK, dataPtr, request, readLen) != UC_ERR_OK)
         return;
+    vm_client_note_title_role_select(request, readLen);
 #ifdef CBE_PLATFORM_ANDROID
     if (vm_client_is_android_no_account_login(request, readLen))
     {
@@ -2382,6 +2489,9 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
      */
     if (vm_host_coolmall_try_truncate_mall_send(request, readLen))
         return;
+#if defined(CBE_CLIENT_ONLY)
+    vm_host_dbg_note_open14_uplink(request, readLen);
+#endif
     if (!vm_client_enqueue(VM_CLIENT_JOB_DATA, connectId, request, readLen))
     {
         printf("[warn][network] client queue full/reject connect=%u len=%u "

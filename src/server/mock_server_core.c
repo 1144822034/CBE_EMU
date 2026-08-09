@@ -95,11 +95,14 @@ static bool g_vm_net_mock_role_inventory_dirty = false;
 
 typedef struct vm_mock_service_client_session vm_mock_service_client_session;
 
+static vm_mock_service_client_session *vm_mock_service_get_active_client_session(void);
 static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
                                                              u32 *pos);
 static u32 vm_net_mock_take_warehouse_dialog_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
 static void vm_mock_service_session_arm_warehouse_pass_dialog(void);
+static bool vm_mock_service_session_on_dream_instance(
+    const vm_mock_service_client_session *session);
 /* Defined with the session object in mock_server_equipment_npc.c. */
 static u32 vm_net_mock_take_equip_sell_dialog_wire_followup(
     u8 *out, u32 outCap, vm_mock_service_client_session *session);
@@ -754,6 +757,26 @@ static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
         return false;
     }
 
+    /*
+     * subtype-10 player-on-right (Pixi/CBE): player wire 0, monsters wire 1..N
+     * → enemy index N-1.  Needed when battle insight forces enemies=3 on the
+     * hangup non-scene path (no live-node → 4/10).
+     */
+    {
+        u8 enemyCount = vm_net_mock_battle_enemy_count_current();
+
+        if (playerOnRight && side == 1 && enemyCount > 1)
+        {
+            if (wireSlot >= 1 && wireSlot <= enemyCount)
+            {
+                if (enemyIndexOut)
+                    *enemyIndexOut = (u8)(wireSlot - 1);
+                return true;
+            }
+            return false;
+        }
+    }
+
     if (wireSlot == fallbackEnemySlot)
     {
         if (enemyIndexOut)
@@ -787,7 +810,8 @@ static u8 vm_net_mock_battle_first_alive_enemy_wire(bool playerOnRight,
 {
     u8 enemyCount = vm_net_mock_battle_enemy_count_current();
 
-    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side))
+    if (vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side) ||
+        (playerOnRight && side == 1 && enemyCount > 1))
     {
         for (u8 enemyIndex = 0; enemyIndex < enemyCount && enemyIndex < 3; ++enemyIndex)
         {
@@ -797,7 +821,9 @@ static u8 vm_net_mock_battle_first_alive_enemy_wire(bool playerOnRight,
                                                                side,
                                                                fallbackEnemySlot);
         }
-        return 0;
+        return vm_net_mock_battle_use_scene_monster_wire_maps(playerOnRight, side)
+                   ? 0
+                   : fallbackEnemySlot;
     }
     return fallbackEnemySlot;
 }
@@ -832,6 +858,12 @@ static u8 vm_net_mock_battle_enemy_wire_for_index(u8 enemyIndex,
         if (enemyIndex == 1)
             return 3;
         return 0;
+    }
+    if (playerOnRight && side == 1 && enemyCount > 1)
+    {
+        if (enemyIndex >= enemyCount)
+            enemyIndex = (u8)(enemyCount - 1);
+        return (u8)(1 + enemyIndex);
     }
     (void)enemyIndex;
     return fallbackEnemySlot;
@@ -1667,6 +1699,80 @@ static bool vm_net_mock_update_name_is_safe(const char *name)
     return true;
 }
 
+/*
+ * WT18/7 name is normally GBK (feature-phone / CBE).  Some Android hosts put
+ * UTF-8 in the same field; fopen then misses JHOnlineData leaves that exist.
+ * Accept only well-formed UTF-8 with a high byte so GBK Chinese is untouched.
+ */
+static bool vm_net_mock_update_name_is_utf8_text(const char *name)
+{
+    const unsigned char *p = (const unsigned char *)name;
+    bool sawHigh = false;
+
+    if (name == NULL || name[0] == 0)
+        return false;
+    while (*p)
+    {
+        if (*p < 0x80)
+        {
+            ++p;
+            continue;
+        }
+        sawHigh = true;
+        if ((*p & 0xe0) == 0xc0)
+        {
+            if ((p[1] & 0xc0) != 0x80)
+                return false;
+            p += 2;
+        }
+        else if ((*p & 0xf0) == 0xe0)
+        {
+            if ((p[1] & 0xc0) != 0x80 || (p[2] & 0xc0) != 0x80)
+                return false;
+            p += 3;
+        }
+        else if ((*p & 0xf8) == 0xf0)
+        {
+            if ((p[1] & 0xc0) != 0x80 || (p[2] & 0xc0) != 0x80 ||
+                (p[3] & 0xc0) != 0x80)
+                return false;
+            p += 4;
+        }
+        else
+            return false;
+    }
+    return sawHigh;
+}
+
+/* Map a wire leaf to the on-disk GBK leaf when the wire bytes are UTF-8. */
+static bool vm_net_mock_update_wire_to_disk_leaf(const char *wire,
+                                                 char *out,
+                                                 size_t outCap)
+{
+    char gbk[320];
+    char roundTrip[320];
+
+    if (out == NULL || outCap == 0)
+        return false;
+    out[0] = 0;
+    if (wire == NULL || wire[0] == 0 || !vm_net_mock_update_name_is_safe(wire))
+        return false;
+    snprintf(out, outCap, "%s", wire);
+    if (!vm_net_mock_update_name_is_utf8_text(wire))
+        return true;
+
+    memset(gbk, 0, sizeof(gbk));
+    utf8_to_gbk((u8 *)wire, (u8 *)gbk, sizeof(gbk));
+    if (gbk[0] == 0 || !vm_net_mock_update_name_is_safe(gbk))
+        return true;
+    memset(roundTrip, 0, sizeof(roundTrip));
+    gbk_to_utf8((u8 *)gbk, (u8 *)roundTrip, sizeof(roundTrip));
+    if (roundTrip[0] == 0 || strcmp(roundTrip, wire) != 0)
+        return true;
+    snprintf(out, outCap, "%s", gbk);
+    return true;
+}
+
 static bool vm_net_mock_update_resource_path(const char *leaf,
                                              char *out,
                                              size_t outCap)
@@ -2327,7 +2433,7 @@ static long vm_net_mock_file_size(const char *path)
     return size;
 }
 
-static long vm_net_mock_update_file_size(const char *name)
+static long vm_net_mock_update_probe_exact_leaf_size(const char *name)
 {
     char path[1200];
     FILE *fp = NULL;
@@ -2343,10 +2449,73 @@ static long vm_net_mock_update_file_size(const char *name)
     return size;
 }
 
+/*
+ * Resolve WT18/7 request names onto an existing JHOnlineData leaf:
+ * UTF-8 wire → GBK disk name, and extensionless → .sce/.map/.actor/.gif.
+ */
+static long vm_net_mock_update_resolve_existing_leaf(const char *name,
+                                                     char *resolvedOut,
+                                                     size_t resolvedCap)
+{
+    static const char *kSuffixes[] = {".sce", ".map", ".actor", ".gif"};
+    char variants[2][320];
+    char candidate[336];
+    char diskLeaf[320];
+    u32 variantCount = 0;
+    long size = -1;
+
+    if (resolvedOut != NULL && resolvedCap > 0)
+        resolvedOut[0] = 0;
+    if (name == NULL || name[0] == 0 || !vm_net_mock_update_name_is_safe(name))
+        return -1;
+
+    snprintf(variants[variantCount++], sizeof(variants[0]), "%s", name);
+    if (vm_net_mock_update_wire_to_disk_leaf(name, diskLeaf, sizeof(diskLeaf)) &&
+        diskLeaf[0] != 0 && strcmp(diskLeaf, name) != 0)
+    {
+        snprintf(variants[variantCount++], sizeof(variants[0]), "%s", diskLeaf);
+    }
+
+    for (u32 v = 0; v < variantCount; ++v)
+    {
+        size = vm_net_mock_update_probe_exact_leaf_size(variants[v]);
+        if (size > 0)
+        {
+            if (resolvedOut != NULL && resolvedCap > 0)
+                snprintf(resolvedOut, resolvedCap, "%s", variants[v]);
+            return size;
+        }
+        if (strchr(variants[v], '.') != NULL)
+            continue;
+        for (u32 s = 0; s < sizeof(kSuffixes) / sizeof(kSuffixes[0]); ++s)
+        {
+            if (snprintf(candidate, sizeof(candidate), "%s%s", variants[v],
+                         kSuffixes[s]) >= (int)sizeof(candidate))
+                continue;
+            if (!vm_net_mock_update_name_is_safe(candidate))
+                continue;
+            size = vm_net_mock_update_probe_exact_leaf_size(candidate);
+            if (size > 0)
+            {
+                if (resolvedOut != NULL && resolvedCap > 0)
+                    snprintf(resolvedOut, resolvedCap, "%s", candidate);
+                return size;
+            }
+        }
+    }
+    return -1;
+}
+
+static long vm_net_mock_update_file_size(const char *name)
+{
+    return vm_net_mock_update_resolve_existing_leaf(name, NULL, 0);
+}
+
 static bool vm_net_mock_update_named_content_version(const char *name,
                                                      u16 *versionOut)
 {
     char path[1200];
+    char resolved[320];
     FILE *fp = NULL;
     u8 buffer[8192];
     u32 hash = 2166136261u;
@@ -2354,11 +2523,19 @@ static bool vm_net_mock_update_named_content_version(const char *name,
 
     if (versionOut)
         *versionOut = 0;
-    if (!vm_net_mock_update_name_is_safe(name) ||
-        !vm_net_mock_update_resource_path(name, path, sizeof(path)))
-    {
+    if (name == NULL || name[0] == 0)
         return false;
-    }
+    /*
+     * Open via resolved disk leaf (UTF-8 wire → GBK / suffix), but hash the
+     * *wire* name.  Client version probes use the same WT name bytes; hashing
+     * the GBK leaf made UTF-8 clients permanently miss uptodate and re-download
+     * every EnterScene (transfer loading stall, 2026-08-05 dlog).
+     */
+    if (vm_net_mock_update_resolve_existing_leaf(name, resolved,
+                                                  sizeof(resolved)) <= 0)
+        return false;
+    if (!vm_net_mock_update_resource_path(resolved, path, sizeof(path)))
+        return false;
     fp = vm_net_mock_fopen_game_path(path, "rb");
     if (fp == NULL)
         return false;
@@ -2939,6 +3116,12 @@ static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t out
 
     if (hasHighByte)
     {
+        /* Already UTF-8 from some Android WT18/7 hosts — do not double-convert. */
+        if (vm_net_mock_update_name_is_utf8_text(gbk))
+        {
+            snprintf(out, outCap, "%s", gbk);
+            return;
+        }
         gbk_to_utf8((u8 *)gbk, (u8 *)out, outCap);
         if (out[0] != 0)
             return;
@@ -2979,6 +3162,7 @@ static u32 vm_net_mock_load_named_update_payload_exact(
     size_t sourcePathCap)
 {
     char path[1200];
+    char resolved[320];
     static const char *pathFormats[] = {
         /*
          * Named update chunks represent server-side resource downloads. Use the
@@ -2990,15 +3174,24 @@ static u32 vm_net_mock_load_named_update_payload_exact(
         "../web/fs/JHOnlineData/%s",
         "web/fs/JHOnlineData/%s",
     };
+    const char *loadName = payloadName;
 
     if (payloadName == NULL || payloadName[0] == 0 || out == NULL || outCap == 0)
         return 0;
     if (!vm_net_mock_update_name_is_safe(payloadName))
         return 0;
 
+    resolved[0] = 0;
+    if (vm_net_mock_update_resolve_existing_leaf(payloadName, resolved,
+                                                  sizeof(resolved)) > 0 &&
+        resolved[0] != 0)
+    {
+        loadName = resolved;
+    }
+
     /* The configured server resource root is authoritative on both Windows
      * and Linux. Do not accidentally read a stale client cache under bin/. */
-    if (vm_net_mock_update_resource_path(payloadName, path, sizeof(path)))
+    if (vm_net_mock_update_resource_path(loadName, path, sizeof(path)))
     {
         FILE *fp = vm_net_mock_fopen_game_path(path, "rb");
         if (fp != NULL)
@@ -3015,6 +3208,18 @@ static u32 vm_net_mock_load_named_update_payload_exact(
             {
                 if (sourcePath && sourcePathCap)
                     snprintf(sourcePath, sourcePathCap, "%s", path);
+                if (strcmp(loadName, payloadName) != 0)
+                {
+                    char reqUtf8[256];
+                    char resolvedUtf8[256];
+                    vm_net_mock_gbk_label_to_utf8(payloadName, reqUtf8,
+                                                  sizeof(reqUtf8));
+                    vm_net_mock_gbk_label_to_utf8(loadName, resolvedUtf8,
+                                                  sizeof(resolvedUtf8));
+                    printf("[info][network] mock_update_named_resolve request=%s "
+                           "resolved=%s len=%u evidence=WT18/7-utf8-or-suffix-leaf\n",
+                           reqUtf8, resolvedUtf8, len);
+                }
                 return len;
             }
         }
@@ -3022,7 +3227,7 @@ static u32 vm_net_mock_load_named_update_payload_exact(
 
     for (u32 i = 0; i < sizeof(pathFormats) / sizeof(pathFormats[0]); ++i)
     {
-        snprintf(path, sizeof(path), pathFormats[i], payloadName);
+        snprintf(path, sizeof(path), pathFormats[i], loadName);
         u32 len = vm_net_mock_load_response_file(path, out, outCap);
         if (len == 0)
             continue;
@@ -3138,7 +3343,8 @@ static u32 vm_net_mock_load_resource_update_payload(
             /*
              * Catalog publish forces refresh for admin-edited names.  Stock
              * outdoor resources are disk-authoritative: if the file exists
-             * under JHOnlineData, allow version compare / chunk serve even
+             * under JHOnlineData (GBK or UTF-8 wire name, with optional
+             * .sce/.map suffix), allow version compare / chunk serve even
              * when the delivery ledger never listed them.
              */
             if ((published == NULL || !published->enabled) &&
@@ -3148,7 +3354,9 @@ static u32 vm_net_mock_load_resource_update_payload(
                 vm_net_mock_gbk_label_to_utf8(requestedName,
                                               rejectedNameUtf8,
                                               sizeof(rejectedNameUtf8));
-                printf("[warn][network] mock_update_client_miss_reject file=%s reason=not-published protocol=WT18/7\n",
+                printf("[warn][network] mock_update_client_miss_reject file=%s "
+                       "reason=disk-open-failed protocol=WT18/7 "
+                       "evidence=not-ledger-and-jh-online-data-miss\n",
                        rejectedNameUtf8);
                 return 0;
             }
@@ -4447,8 +4655,8 @@ enum
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_PRICE = 1,
     VM_NET_MOCK_SHOP_DEFAULT_ITEM_STOCK = 99,
     VM_NET_MOCK_SHOP_PAGE_SIZE = 10,
-    /* 秘宝页：类别 14 + 上架类别 10 + 其它 server_shop_items 上架非装备。 */
-    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 200,
+    /* 秘宝页：非装备优先（上架/类别14）+ 上架装备；上限需盖住全表. */
+    VM_NET_MOCK_SHOP_SECRET_MAX_ITEMS = 2048,
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
@@ -4966,6 +5174,10 @@ typedef struct
 {
     u32 hp;
     u32 mp;
+    /* Enhance flag=1 气血%/法力% points; applied vs character bare pools in
+     * build_player_stats (not item dsh hp/mp columns). */
+    u32 hpPercent;
+    u32 mpPercent;
     u32 attack;
     u32 armor;
     u32 strength;
@@ -5053,6 +5265,22 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
                                                    u16 seq,
                                                    u32 count,
                                                    u32 *remainingOut);
+enum
+{
+    VM_NET_MOCK_CONSUME_SYNC_MAX = 32
+};
+typedef struct
+{
+    u16 seq;
+    u32 itemId;
+    u32 remaining;
+} vm_net_mock_consume_sync_row;
+/* Consume across stacks; record each touched row for 7/7 type=2 + 7/11. */
+static bool vm_net_mock_role_consume_backpack_item_amount(
+    vm_net_mock_role_state *role, u32 itemId, u32 amount,
+    vm_net_mock_consume_sync_row *syncRows, u32 syncCap, u32 *syncCountOut);
+static u32 vm_net_mock_dream_purge_item_841(vm_net_mock_role_state *role,
+                                            const char *reason);
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
     vm_net_mock_role_state *role, u32 itemId, u16 seq,
     const vm_net_mock_role_item_effect *effect, u32 *remainingOut,
@@ -5072,6 +5300,10 @@ static bool vm_net_mock_role_battle_insight_resume_on_login(
 static u32 vm_net_mock_role_active_battle_exp_bonus_percent(
     const vm_net_mock_role_state *role);
 static u32 vm_net_mock_role_active_battle_insight_remaining_seconds(
+    const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_combat_pill_remaining_seconds(
+    const vm_net_mock_role_state *role);
+static u32 vm_net_mock_role_active_combat_pill_item_id(
     const vm_net_mock_role_state *role);
 static u8 vm_net_mock_role_active_exp_card_flag(void);
 static u8 vm_net_mock_role_active_status_icon_flag(void);
@@ -5128,7 +5360,8 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
                                                 vm_net_mock_player_stats *stats);
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap);
 static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh,
-                                          bool publishOverlay);
+                                          bool publishOverlay, bool shopOpen14);
 /* mallLoadingClear=true: live bare + publishOverlay=false + attr-word cap. */
 static u32 vm_net_mock_build_actor_info_mall_loading_clear(u8 *out, u32 outCap);
+static u32 vm_net_mock_build_actor_info_shop_open14(u8 *out, u32 outCap);
 

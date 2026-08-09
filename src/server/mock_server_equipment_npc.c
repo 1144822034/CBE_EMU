@@ -318,17 +318,10 @@ static u32 vm_net_mock_build_item_equip_response(const u8 *request, u32 requestL
      * 7/8 moves the row and re-runs wear-apply (0x010337c0 → 0x0100FED8).
      * Do NOT append same-packet live 1/1/14: that object is mmShop:0x9DE's
      * actor-state family.  Injecting it on mmGame then opening the mall
-     * flashes the client (debug-a1d304 stopped after shop_open; same class as
-     * docs/re/2026-07-28-post-battle-shop-open-vitals-crash.md).  Panel attrs
-     * come from publish_panel_attr_overlay + host realign.
+     * flashes the client (debug-a1d304; docs/re/2026-07-28-post-battle-
+     * shop-open-vitals-crash.md).  Panel strings come from actor halfwords
+     * after wear-apply (no host overlay file).
      */
-    if (result == 1 && role != NULL)
-    {
-        vm_net_mock_player_stats stEq;
-        memset(&stEq, 0, sizeof(stEq));
-        vm_net_mock_role_build_player_stats(role, &stEq);
-        vm_net_mock_publish_panel_attr_overlay(&stEq);
-    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     printf("[info][network] mock_item_equip type=%u requested_item=%u requested_seq=%u item=%u seq=%u slot=%u old=%u result=%u reason=%s vitals_arm=%u actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x01033544+0x0100FED8+0x0100FA88(live)\n",
@@ -409,18 +402,7 @@ static u32 vm_net_mock_build_item_equip_swap_response(const u8 *request,
         }
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount = 1;
-        /* Same as 7/8: overlay only — no mmGame 1/1/14 after gear swap. */
-        if (result == 1)
-        {
-            vm_net_mock_role_state *swapRole = vm_net_mock_active_role();
-            if (swapRole != NULL)
-            {
-                vm_net_mock_player_stats stSwap;
-                memset(&stSwap, 0, sizeof(stSwap));
-                vm_net_mock_role_build_player_stats(swapRole, &stSwap);
-                vm_net_mock_publish_panel_attr_overlay(&stSwap);
-            }
-        }
+        /* Same as 7/8: no mmGame 1/1/14 after gear swap. */
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
         printf("[info][network] mock_item_equip_swap body=%u bag=%u companion_2_10=%u item=%u old=%u slot=%u result=%u reason=%s actorinfo=%u actorinfo_len=%u resp=%s evidence=JianghuOL.CBE:0x010328D4+0x01033544+0x0100FA88(live)\n",
@@ -716,10 +698,14 @@ static bool vm_net_mock_build_equipment_enhance_material_blob(
  *
  * Equipment 7/7 type=2 (mmGame:0xD04 → item-manager +104 with r2=-1) does not
  * reliably rewrite an existing bag row's full common-extra when attr_count
- * grows (L>=4 强化附加).  Mall exit / relogin rebuild via 17/1 or 30/21
- * does.  After a successful enhance, also push authoritative 17/1(+7/42)
- * and arm a list-only poll fallback.
+ * grows (L>=4 强化附加).  Authoritative 17/1(+7/42) rebuilds the manager, but
+ * must NOT ride inside the 29/3 WT: event_packet_parse_WT caps objects at 10,
+ * and 17/1 re-arms DF_DataPackage_DoLoading without a same-packet 26/0/30/2.
+ * list-only poll (no 26/0) left the progress bar up after success
+ * (docs/re/2026-08-05-enhance-success-progress-stuck.md).  Same-packet keeps
+ * 29/3+7/7+7/11(+money); poll pushes 17/1 then lone 26/0.
  */
+#define VM_NET_MOCK_WT_EVENT7_OBJECT_CAP 10u
 static void vm_net_mock_arm_enhance_backpack_list_resync(u16 equipSeq,
                                                          u32 equipItemId,
                                                          u16 enhanceLevel,
@@ -753,46 +739,69 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
     savedPos = *pos;
     savedObjects = *objectCount;
 
-    for (u32 i = 0; i < syncRows; ++i)
     {
-        u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
-        u8 countInfo[32];
-        u32 itemInfoLen = 0;
-        u32 countInfoLen = 0;
-        u32 objectStart = 0;
+        u8 reserve = 0;
 
-        if (seqs[i] == 0 || itemIds[i] == 0)
-            continue;
-        if (!vm_net_mock_build_item_use_iteminfo_blob(
-                itemInfo, sizeof(itemInfo), seqs[i], itemIds[i], remainings[i],
-                0, &itemInfoLen) ||
-            !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
-                                         &objectStart) ||
-            !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
-            !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
-                                        (u16)itemInfoLen))
-        {
-            *pos = savedPos;
-            *objectCount = savedObjects;
-            return false;
-        }
-        vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        *objectCount += 1;
+        if (syncEquipment && equipSeq != 0 && equipItemId != 0)
+            reserve = (u8)(reserve + 2u);
+        if (syncMoney)
+            reserve = (u8)(reserve + 1u);
+        /*
+         * Inline 17/1(+7/42) is deferred to poll+26/0.  Keep crystal/equip/money
+         * under the event-7 object cap so 29/3 itself is still parseable.
+         */
+        if (includeBackpackList)
+            reserve = (u8)(reserve + 2u);
 
-        if (!vm_net_mock_build_item_use_count_info_blob(
-                countInfo, sizeof(countInfo), seqs[i], remainings[i],
-                &countInfoLen) ||
-            !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
-                                         &objectStart) ||
-            !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,
-                                        (u16)countInfoLen))
+        for (u32 i = 0; i < syncRows; ++i)
         {
-            *pos = savedPos;
-            *objectCount = savedObjects;
-            return false;
+            u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_SCRATCH];
+            u8 countInfo[32];
+            u32 itemInfoLen = 0;
+            u32 countInfoLen = 0;
+            u32 objectStart = 0;
+
+            if (seqs[i] == 0 || itemIds[i] == 0)
+                continue;
+            if ((u32)(*objectCount) + 2u + reserve > VM_NET_MOCK_WT_EVENT7_OBJECT_CAP)
+            {
+                printf("[warn][network] mock_equipment_enhance crystal-sync-budget "
+                       "seq=%u objects=%u reserve=%u action=defer-via-17/1-poll "
+                       "evidence=event_packet_parse_WT-object-cap-10\n",
+                       seqs[i], *objectCount, reserve);
+                break;
+            }
+            if (!vm_net_mock_build_item_use_iteminfo_blob(
+                    itemInfo, sizeof(itemInfo), seqs[i], itemIds[i], remainings[i],
+                    0, &itemInfoLen) ||
+                !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
+                                             &objectStart) ||
+                !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
+                !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                            (u16)itemInfoLen))
+            {
+                *pos = savedPos;
+                *objectCount = savedObjects;
+                return false;
+            }
+            vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            *objectCount += 1;
+
+            if (!vm_net_mock_build_item_use_count_info_blob(
+                    countInfo, sizeof(countInfo), seqs[i], remainings[i],
+                    &countInfoLen) ||
+                !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
+                                             &objectStart) ||
+                !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,
+                                            (u16)countInfoLen))
+            {
+                *pos = savedPos;
+                *objectCount = savedObjects;
+                return false;
+            }
+            vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            *objectCount += 1;
         }
-        vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        *objectCount += 1;
     }
 
     if (syncEquipment && equipSeq != 0 && equipItemId != 0)
@@ -803,9 +812,19 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
         u32 itemInfoLen = 0;
         u32 countInfoLen = 0;
         u32 objectStart = 0;
+        u8 reserve = syncMoney ? 1u : 0u;
 
+        if (includeBackpackList)
+            reserve = (u8)(reserve + 2u);
+        if ((u32)(*objectCount) + 2u + reserve > VM_NET_MOCK_WT_EVENT7_OBJECT_CAP)
+        {
+            printf("[warn][network] mock_equipment_enhance equip-sync-budget "
+                   "seq=%u objects=%u action=skip-inline-equip-7/7 "
+                   "evidence=event_packet_parse_WT-object-cap-10\n",
+                   equipSeq, *objectCount);
+        }
         /* Backpack row count stays instance 1; enhance is in common-extra. */
-        if (!vm_net_mock_build_item_use_iteminfo_blob(
+        else if (!vm_net_mock_build_item_use_iteminfo_blob(
                 itemInfo, sizeof(itemInfo), equipSeq, equipItemId, 1,
                 equipEnhanceLevel, &itemInfoLen) ||
             !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
@@ -818,29 +837,40 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
             *objectCount = savedObjects;
             return false;
         }
-        vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        *objectCount += 1;
-
-        if (!vm_net_mock_build_item_use_count_info_blob(
-                countInfo, sizeof(countInfo), equipSeq, 1, &countInfoLen) ||
-            !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
-                                         &objectStart) ||
-            !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,
-                                        (u16)countInfoLen))
+        else
         {
-            *pos = savedPos;
-            *objectCount = savedObjects;
-            return false;
+            vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            *objectCount += 1;
+
+            if (!vm_net_mock_build_item_use_count_info_blob(
+                    countInfo, sizeof(countInfo), equipSeq, 1, &countInfoLen) ||
+                !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
+                                             &objectStart) ||
+                !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,
+                                            (u16)countInfoLen))
+            {
+                *pos = savedPos;
+                *objectCount = savedObjects;
+                return false;
+            }
+            vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            *objectCount += 1;
         }
-        vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        *objectCount += 1;
     }
 
     if (syncMoney)
     {
         u32 objectStart = 0;
+        u8 reserve = includeBackpackList ? 2u : 0u;
 
-        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0a, 0x1a,
+        if ((u32)(*objectCount) + 1u + reserve > VM_NET_MOCK_WT_EVENT7_OBJECT_CAP)
+        {
+            printf("[warn][network] mock_equipment_enhance money-sync-budget "
+                   "objects=%u action=skip-10/26 "
+                   "evidence=event_packet_parse_WT-object-cap-10\n",
+                   *objectCount);
+        }
+        else if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x0a, 0x1a,
                                          &objectStart) ||
             !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
             !vm_net_mock_put_object_u8(out, outCap, pos, "type", 1) ||
@@ -853,27 +883,39 @@ static bool vm_net_mock_append_equipment_enhance_inventory_sync(
             *objectCount = savedObjects;
             return false;
         }
-        vm_net_mock_finish_wt_object(out, objectStart, *pos);
-        *objectCount += 1;
+        else
+        {
+            vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            *objectCount += 1;
+        }
     }
 
     /*
-     * Authoritative bag list: same contract as warehouse equip deposit /
-     * discard follow-up.  7/7 type=2 alone leaves L>=4 强化附加 missing until
-     * mall exit or relogin rebuilds the item manager.
-     * Transfer replies sync two equips; only one inline 17/1 is safe —
-     * a second full list in the same WT trips client unpack (解包错误).
+     * Authoritative bag list rebuilds L>=4 强化附加, but inline 17/1 in the
+     * 29/3 WT both burns the object cap and re-arms DoLoading.  Callers that
+     * still pass includeBackpackList=true must fit under the remaining budget;
+     * enhance success prefers poll 17/1 + 26/0 instead.
      */
     if (syncEquipment && includeBackpackList)
     {
         u32 listPos = *pos;
         u8 listObjects = *objectCount;
 
-        if (vm_net_mock_append_backpack_items_object(out, outCap, pos))
+        if ((u32)(*objectCount) + 1u > VM_NET_MOCK_WT_EVENT7_OBJECT_CAP)
+        {
+            printf("[warn][network] mock_equipment_enhance bag-list-budget "
+                   "objects=%u action=skip-inline-17/1 "
+                   "evidence=event_packet_parse_WT-object-cap-10\n",
+                   *objectCount);
+        }
+        else if (vm_net_mock_append_backpack_items_object(out, outCap, pos))
         {
             *objectCount += 1;
-            if (vm_net_mock_append_books42_object(out, outCap, pos))
+            if ((u32)(*objectCount) < VM_NET_MOCK_WT_EVENT7_OBJECT_CAP &&
+                vm_net_mock_append_books42_object(out, outCap, pos))
+            {
                 *objectCount += 1;
+            }
             if (listResyncedOut)
                 *listResyncedOut = true;
         }
@@ -1159,10 +1201,15 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                     equipmentItemId = equipment->itemId;
             }
         }
+        /*
+         * Same-packet: crystal/equip 7/7+7/11 + money only.  Do not inline
+         * 17/1 here — it re-opens DoLoading and often exceeds the 10-object
+         * event-7 cap with multi-crystal.  Poll delivers 17/1 then 26/0.
+         */
         inventorySynced = vm_net_mock_append_equipment_enhance_inventory_sync(
             out, outCap, &pos, &objectCount, consumedItemIds, consumedSeqs,
             consumedRemainings, consumedRows, parsed.equipSeq, equipmentItemId,
-            syncedEnhance, syncEquipment, true, true, role->money,
+            syncedEnhance, syncEquipment, true, false, role->money,
             &listResynced);
         if (!inventorySynced)
         {
@@ -1179,13 +1226,22 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         }
         /* Keep client local power/required tables on the new enhance level. */
         if (enhancementSucceeded && syncEquipment &&
-            syncedEnhance <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL &&
-            !vm_net_mock_append_equipment_enhance_rate_table_refresh(
-                out, outCap, &pos, &objectCount, (u8)syncedEnhance))
+            syncedEnhance <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
         {
-            printf("[warn][network] mock_equipment_enhance rate-table-refresh-failed "
-                   "seq=%u level=%u evidence=keep-prior-objects\n",
-                   parsed.equipSeq, syncedEnhance);
+            if ((u32)objectCount + 1u > VM_NET_MOCK_WT_EVENT7_OBJECT_CAP)
+            {
+                printf("[warn][network] mock_equipment_enhance rate-table-budget "
+                       "seq=%u level=%u objects=%u action=skip-inline-29/1 "
+                       "evidence=event_packet_parse_WT-object-cap-10\n",
+                       parsed.equipSeq, syncedEnhance, objectCount);
+            }
+            else if (!vm_net_mock_append_equipment_enhance_rate_table_refresh(
+                    out, outCap, &pos, &objectCount, (u8)syncedEnhance))
+            {
+                printf("[warn][network] mock_equipment_enhance rate-table-refresh-failed "
+                       "seq=%u level=%u evidence=keep-prior-objects\n",
+                       parsed.equipSeq, syncedEnhance);
+            }
         }
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
@@ -1198,7 +1254,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
            parsed.subtype,
            inventorySynced
                ? (enhancementSucceeded
-                      ? "+7/7-type2+7/11-crystal+equip+10/26+17/1+29/1"
+                      ? "+7/7-type2+7/11-crystal+equip+10/26+29/1"
                       : "+7/7-type2+7/11-crystal+10/26")
                : "");
     vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u inv_sync=%u reason=%s response=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+0x0102147C+0x010287C0+0x0103222E\n",
@@ -1209,7 +1265,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                      reason, parsed.subtype,
                      inventorySynced
                          ? (enhancementSucceeded
-                                ? "+7/7-type2+7/11-crystal+equip+10/26+17/1+29/1"
+                                ? "+7/7-type2+7/11-crystal+equip+10/26+29/1"
                                 : "+7/7-type2+7/11-crystal+10/26")
                          : "");
     return pos;
@@ -1436,8 +1492,8 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
         memset(emptyRemainings, 0, sizeof(emptyRemainings));
 
         /*
-         * Narrow transfer sync: double full-bag 17/1 caused 解包错误.
-         * Source: 7/7+7/11; dest: 7/7+7/11+money+one 17/1.
+         * Narrow transfer sync: never double-inline 17/1 (解包错误).  Prefer
+         * 7/7+7/11 for both seats + money; bag list + 26/0 on poll.
          */
         inventorySynced = vm_net_mock_append_equipment_enhance_inventory_sync(
             out, outCap, &pos, &objectCount, emptyIds, emptySeqs,
@@ -1449,7 +1505,7 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             if (!vm_net_mock_append_equipment_enhance_inventory_sync(
                     out, outCap, &pos, &objectCount, emptyIds, emptySeqs,
                     emptyRemainings, 0, parsed.destSeq, dest->itemId,
-                    destLevelAfter, true, true, true, role->money,
+                    destLevelAfter, true, true, false, role->money,
                     &destListOk))
             {
                 inventorySynced = false;
@@ -1457,11 +1513,7 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             else
             {
                 vm_net_mock_arm_enhance_backpack_list_resync(
-                    parsed.sourceSeq, source->itemId, sourceLevelAfter,
-                    listResynced);
-                vm_net_mock_arm_enhance_backpack_list_resync(
-                    parsed.destSeq, dest->itemId, destLevelAfter,
-                    destListOk || listResynced);
+                    parsed.destSeq, dest->itemId, destLevelAfter, false);
             }
         }
     }
@@ -1514,8 +1566,6 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
     const char *forcedSpec = getenv("CBE_BATTLE_ENEMY_COUNT");
     const vm_net_mock_role_state *role;
 
-    if (!useSceneMonsterStart)
-        return 1;
     if (forcedSpec != NULL && forcedSpec[0] != 0)
     {
         u32 forced = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_COUNT", 1);
@@ -1527,20 +1577,25 @@ static u8 vm_net_mock_battle_roll_enemy_count(bool useSceneMonsterStart)
     }
 
     /*
-     * Battle insight (item 828): while active, scene-monster encounters are
-     * fixed at 3 instead of the normal 1..3 roll.  Env CBE_BATTLE_ENEMY_COUNT
-     * above still wins for forced autotest.  Team starts re-check the leader
-     * role in challenge/hangup after the party gate (see battle.c).
+     * Battle insight (item 828): while active, hangup/challenge encounters are
+     * fixed at 3 — including non-scene subtype-10 hangup (Pixi/APK has no
+     * emulator live-node, so most hangup starts take that path).  Env force
+     * above still wins for autotest.  Team starts re-check the leader role in
+     * challenge/hangup after the party gate (see battle.c).
      */
     role = vm_net_mock_active_role();
     if (role != NULL &&
         vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0)
     {
         printf("[info][network] mock_battle_enemy_count_fixed role=%u count=3 "
-               "reason=battle-insight evidence=item.dsh:828\n",
-               role->roleId);
+               "reason=battle-insight%s evidence=item.dsh:828\n",
+               role->roleId,
+               useSceneMonsterStart ? "" : "+subtype10");
         return 3;
     }
+
+    if (!useSceneMonsterStart)
+        return 1;
 
     minCount = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_COUNT_MIN", minCount);
     maxCount = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_COUNT_MAX", maxCount);
@@ -1652,6 +1707,59 @@ static bool vm_net_mock_battle_roll_percent(u32 percent)
     return (vm_net_mock_battle_reward_rand() % 100u) < percent;
 }
 
+/* Commit a successful drop roll into the battle result cache / backpack.
+ * Equipment units are one backpack row each; stackables share one row. */
+static u8 vm_net_mock_battle_commit_drop_grant(
+    u32 itemId, u32 grantedCount, u32 enemyCount,
+    vm_net_mock_battle_drop_result *results, u8 resultCount)
+{
+    u16 grantedSeq = 0;
+
+    if (itemId == 0 || grantedCount == 0 || results == NULL ||
+        resultCount >= VM_NET_MOCK_BATTLE_DROP_RESULT_MAX)
+    {
+        return resultCount;
+    }
+    if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
+    {
+        u32 grantedEquipUnits = 0;
+
+        for (u32 unit = 0;
+             unit < grantedCount &&
+             resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
+             ++unit)
+        {
+            u16 oneSeq = 0;
+
+            if (!vm_net_mock_role_add_backpack_item(itemId, 1, &oneSeq))
+                break;
+            results[resultCount].itemId = itemId;
+            results[resultCount].seq = oneSeq;
+            results[resultCount].count = 1;
+            results[resultCount].enhanceLevel = 0;
+            ++resultCount;
+            ++grantedEquipUnits;
+        }
+        if (grantedEquipUnits != 0)
+        {
+            vm_net_mock_task_progress_after_battle(
+                g_vm_net_mock_battle_enemy_id_current, enemyCount, itemId,
+                grantedEquipUnits);
+        }
+        return resultCount;
+    }
+    if (!vm_net_mock_role_add_backpack_item(itemId, grantedCount, &grantedSeq))
+        return resultCount;
+    results[resultCount].itemId = itemId;
+    results[resultCount].seq = grantedSeq;
+    results[resultCount].count = grantedCount;
+    results[resultCount].enhanceLevel = 0;
+    ++resultCount;
+    vm_net_mock_task_progress_after_battle(
+        g_vm_net_mock_battle_enemy_id_current, enemyCount, itemId, grantedCount);
+    return resultCount;
+}
+
 static u32 vm_net_mock_battle_reward_exp_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
@@ -1738,6 +1846,10 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                g_vm_net_mock_battle_enemy_id_current,
                role ? role->roleId : 0,
                g_mockBattleOperateSessionSerial);
+        /* Victory still happened — advance kill tasks even when drops/EXP
+         * are rate-limited. */
+        vm_net_mock_task_progress_after_battle(
+            g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
         return 1;
     }
 
@@ -1808,94 +1920,130 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                               overrideDrop.ratePercent != 0 ? 1 : 0;
     }
 
-    for (u8 dropIndex = 0;
-         dropIndex < configuredDropCount &&
-         resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
-         ++dropIndex)
+    /*
+     * Drop modes per battle (still one attempt per selected row, not per
+     * defeated enemy; EXP/gold still scale with enemyCount above):
+     * - Task-material rows and 100% rows each keep an independent roll.
+     * - All other eligible rows form one lottery: pick a single row at
+     *   random, then roll that row's configured percent once.
+     */
     {
-        const vm_net_mock_monster_drop *configured =
-            &configuredDrops[dropIndex];
-        u32 rolledDropCount = 0;
-        u32 grantedCount = 0;
-        u32 taskMaterialRemaining = 0;
-        u16 grantedSeq = 0;
-        bool dropIsTaskMaterial = false;
-        bool dropPolicyOk = false;
-        bool dropEligible = false;
+        typedef struct
+        {
+            bool isTaskMaterial;
+            bool policyOk;
+            bool eligible;
+            bool multiRow;
+            u32 remaining;
+        } vm_net_mock_battle_drop_gate;
+        vm_net_mock_battle_drop_gate gates[VM_NET_MOCK_MONSTER_DROP_MAX];
+        u8 lotterySlots[VM_NET_MOCK_MONSTER_DROP_MAX];
+        u8 lotteryCount = 0;
+        u8 lotteryPickSlot = 0;
+        bool lotteryHasPick = false;
 
-        if (configured->itemId != 0 && configured->ratePercent != 0 &&
-            configured->ratePercent <= 100u && role != NULL)
-        {
-            dropPolicyOk = vm_net_mock_task_material_drop_policy(
-                role->roleId, configured->itemId, &dropIsTaskMaterial,
-                &taskMaterialRemaining);
-            dropEligible = dropPolicyOk &&
-                           (!dropIsTaskMaterial || taskMaterialRemaining != 0);
-        }
-        if (dropEligible)
-        {
-            /* One roll per battle per drop row (not once per defeated enemy).
-             * EXP/gold still scale with enemyCount above. */
-            if (vm_net_mock_battle_roll_percent(configured->ratePercent))
-                grantedCount = 1;
-            rolledDropCount = grantedCount;
-            if (dropIsTaskMaterial && grantedCount > taskMaterialRemaining)
-                grantedCount = taskMaterialRemaining;
-        }
-        printf("[info][network] mock_battle_drop_gate enemy=%u role=%u slot=%u item=%u rate=%u "
-               "task_material=%u remaining=%u policy=%s eligible=%u rolled=%u grant=%u\n",
-               g_vm_net_mock_battle_enemy_id_current, role ? role->roleId : 0,
-               (u32)dropIndex + 1u, configured->itemId, configured->ratePercent,
-               dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
-               dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
-               rolledDropCount, grantedCount);
-        if (grantedCount == 0)
-            continue;
-        if (vm_net_mock_find_equipment_catalog_item(configured->itemId) != NULL)
-        {
-            u32 grantedEquipUnits = 0;
+        memset(gates, 0, sizeof(gates));
+        memset(lotterySlots, 0, sizeof(lotterySlots));
 
-            for (u32 unit = 0;
-                 unit < grantedCount &&
-                 resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
-                 ++unit)
+        for (u8 dropIndex = 0; dropIndex < configuredDropCount; ++dropIndex)
+        {
+            const vm_net_mock_monster_drop *configured =
+                &configuredDrops[dropIndex];
+            vm_net_mock_battle_drop_gate *gate = &gates[dropIndex];
+
+            if (configured->itemId != 0 && configured->ratePercent != 0 &&
+                configured->ratePercent <= 100u && role != NULL)
             {
-                u16 oneSeq = 0;
+                gate->policyOk = vm_net_mock_task_material_drop_policy(
+                    role->roleId, configured->itemId, &gate->isTaskMaterial,
+                    &gate->remaining);
+                gate->eligible = gate->policyOk &&
+                                 (!gate->isTaskMaterial || gate->remaining != 0);
+            }
+            /* Task materials stay independent at any configured rate so quest
+             * progress is not starved by competing rare loot rows.  100% rows
+             * are guaranteed when eligible and likewise stay independent. */
+            gate->multiRow =
+                gate->isTaskMaterial || configured->ratePercent >= 100u;
+            if (gate->eligible && !gate->multiRow &&
+                lotteryCount < VM_NET_MOCK_MONSTER_DROP_MAX)
+            {
+                lotterySlots[lotteryCount++] = dropIndex;
+            }
+        }
 
-                if (!vm_net_mock_role_add_backpack_item(configured->itemId, 1,
-                                                        &oneSeq))
+        if (lotteryCount != 0)
+        {
+            lotteryPickSlot =
+                lotterySlots[vm_net_mock_battle_reward_rand() % lotteryCount];
+            lotteryHasPick = true;
+            printf("[info][network] mock_battle_drop_lottery enemy=%u role=%u "
+                   "pool=%u pick_slot=%u\n",
+                   g_vm_net_mock_battle_enemy_id_current,
+                   role ? role->roleId : 0, lotteryCount,
+                   (u32)lotteryPickSlot + 1u);
+        }
+
+        for (u8 dropIndex = 0;
+             dropIndex < configuredDropCount &&
+             resultCount < VM_NET_MOCK_BATTLE_DROP_RESULT_MAX;
+             ++dropIndex)
+        {
+            const vm_net_mock_monster_drop *configured =
+                &configuredDrops[dropIndex];
+            const vm_net_mock_battle_drop_gate *gate = &gates[dropIndex];
+            u32 rolledDropCount = 0;
+            u32 grantedCount = 0;
+            const char *mode = "ineligible";
+            bool selected = false;
+
+            if (gate->eligible)
+            {
+                if (gate->multiRow)
                 {
-                    break;
+                    mode = "multi";
+                    selected = true;
                 }
-                results[resultCount].itemId = configured->itemId;
-                results[resultCount].seq = oneSeq;
-                results[resultCount].count = 1;
-                results[resultCount].enhanceLevel = 0;
-                ++resultCount;
-                ++grantedEquipUnits;
+                else if (lotteryHasPick && dropIndex == lotteryPickSlot)
+                {
+                    mode = "lottery";
+                    selected = true;
+                }
+                else
+                {
+                    mode = "lottery_skip";
+                }
             }
-            if (grantedEquipUnits != 0)
+            if (selected)
             {
-                vm_net_mock_task_progress_after_battle(
-                    g_vm_net_mock_battle_enemy_id_current, enemyCount,
-                    configured->itemId, grantedEquipUnits);
+                if (vm_net_mock_battle_roll_percent(configured->ratePercent))
+                    grantedCount = 1;
+                rolledDropCount = grantedCount;
+                if (gate->isTaskMaterial && grantedCount > gate->remaining)
+                    grantedCount = gate->remaining;
             }
-            continue;
+            printf("[info][network] mock_battle_drop_gate enemy=%u role=%u "
+                   "slot=%u item=%u rate=%u mode=%s task_material=%u "
+                   "remaining=%u policy=%s eligible=%u selected=%u rolled=%u "
+                   "grant=%u\n",
+                   g_vm_net_mock_battle_enemy_id_current,
+                   role ? role->roleId : 0, (u32)dropIndex + 1u,
+                   configured->itemId, configured->ratePercent, mode,
+                   gate->isTaskMaterial ? 1u : 0u, gate->remaining,
+                   gate->policyOk ? "ok" : "unavailable",
+                   gate->eligible ? 1u : 0u, selected ? 1u : 0u,
+                   rolledDropCount, grantedCount);
+            if (grantedCount == 0)
+                continue;
+            resultCount = vm_net_mock_battle_commit_drop_grant(
+                configured->itemId, grantedCount, enemyCount, results,
+                resultCount);
         }
-        if (!vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
-                                                &grantedSeq))
-        {
-            continue;
-        }
-        results[resultCount].itemId = configured->itemId;
-        results[resultCount].seq = grantedSeq;
-        results[resultCount].count = grantedCount;
-        results[resultCount].enhanceLevel = 0;
-        ++resultCount;
-        vm_net_mock_task_progress_after_battle(
-            g_vm_net_mock_battle_enemy_id_current, enemyCount,
-            configured->itemId, grantedCount);
     }
+
+    /* Exactly one kill-progress update per victory (independent of drops). */
+    vm_net_mock_task_progress_after_battle(
+        g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
 
     g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
     g_vm_net_mock_battle_rewarded_exp = rewardExp;
@@ -2211,16 +2359,17 @@ static u32 vm_net_mock_percent_ceil_u32(u32 value, u32 percent)
     return (u32)scaled;
 }
 
-static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
-                                                u32 *expPenaltyOut,
-                                                u32 *moneyPenaltyOut,
-                                                u32 *reviveMpOut,
-                                                char *sceneOut,
-                                                size_t sceneOutCap,
-                                                u16 *xOut,
-                                                u16 *yOut)
+static u32 vm_net_mock_role_apply_death_penalty_to(
+    vm_net_mock_role_state *role,
+    const char *reason,
+    u32 *expPenaltyOut,
+    u32 *moneyPenaltyOut,
+    u32 *reviveMpOut,
+    char *sceneOut,
+    size_t sceneOutCap,
+    u16 *xOut,
+    u16 *yOut)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
     char sourceScene[64];
     char nearestStoneScene[64];
     const char *respawnScene = NULL;
@@ -2239,6 +2388,7 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     u32 moneyPenalty = 0;
     u32 reviveHp = 0;
     u32 reviveMp = 0;
+    vm_net_mock_role_state *activeRole = NULL;
 
     if (expPenaltyOut)
         *expPenaltyOut = 0;
@@ -2331,10 +2481,14 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     vm_net_mock_role_normalize(role);
     vm_net_mock_role_mark_inventory_dirty(reason ? reason : "battle-death");
 
-    g_mockBattleRoleHpCurrent = role->hp;
-    g_mockBattleRoleHpMax = role->hpMax;
-    g_mockBattleRoleMpCurrent = role->mp;
-    g_mockBattleRoleMpMax = role->mpMax;
+    activeRole = vm_net_mock_active_role();
+    if (activeRole == role)
+    {
+        g_mockBattleRoleHpCurrent = role->hp;
+        g_mockBattleRoleHpMax = role->hpMax;
+        g_mockBattleRoleMpCurrent = role->mp;
+        g_mockBattleRoleMpMax = role->mpMax;
+    }
 
     printf("[info][network] mock_death_penalty reason=%s level=%u->%u exp=%u->%u exp_penalty=%u money_penalty=%u respawn_scene=%s source_smap=%u target_smap=%u route=%s hops=%u pos=(%u,%u)\n",
            reason ? reason : "battle-death", levelBefore, role->level,
@@ -2360,6 +2514,27 @@ static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
     if (yOut)
         *yOut = role->y;
     return role->hp;
+}
+
+static u32 vm_net_mock_role_apply_death_penalty(const char *reason,
+                                                u32 *expPenaltyOut,
+                                                u32 *moneyPenaltyOut,
+                                                u32 *reviveMpOut,
+                                                char *sceneOut,
+                                                size_t sceneOutCap,
+                                                u16 *xOut,
+                                                u16 *yOut)
+{
+    return vm_net_mock_role_apply_death_penalty_to(
+        vm_net_mock_active_role(),
+        reason,
+        expPenaltyOut,
+        moneyPenaltyOut,
+        reviveMpOut,
+        sceneOut,
+        sceneOutCap,
+        xOut,
+        yOut);
 }
 
 static void vm_net_mock_save_player_pos_state(const char *scene, u16 x, u16 y, const char *reason)
@@ -2602,6 +2777,14 @@ static vm_net_mock_scene_change_target g_vm_net_mock_teleport_stone_deferred_ent
 static bool g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
 static u32 g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
 /*
+ * Owner of the armed deferred 30/1.  Account-mirrored globals are shared by
+ * every sticky session on the same login; without an owner id the other
+ * client's scene-poll (or stale_map_transfer_clear) can steal/clear Pixi's
+ * map-stone enter while CBE still looks fine — observed on 泰山 while CBE
+ * remained online on the same account.
+ */
+static u32 g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
+/*
  * Confirmed map-stone whose final scene matches the player's current scene.
  * Same-scene transfers often never emit WT6/1; wait_wt6 must not defer 27/11.
  */
@@ -2762,6 +2945,7 @@ typedef struct vm_mock_service_account_state
     vm_net_mock_scene_change_target teleportStoneDeferredEnterTarget;
     bool teleportStoneDeferredEnterValid;
     u32 teleportStoneDeferredEnterTick;
+    u32 teleportStoneDeferredEnterClientId;
     bool teleportStoneSameScene;
     vm_net_mock_scene_change_target taskTransportPendingTarget;
     bool taskTransportPendingValid;
@@ -2990,6 +3174,7 @@ typedef struct
     u32 taskId;
     u32 actorId;
     bool repeatable;
+    u16 dailyAcceptLimit;
     char scene[64];
 } vm_mock_service_task_offer_context;
 
@@ -3005,6 +3190,12 @@ typedef struct vm_mock_service_client_session
     char accountId[64];
     bool roleOnline;
     bool onlinePresenceValid;
+    /*
+     * Set by account-login takeover: next poll/data from this clientId gets a
+     * force-offline tip (1/3/3) then the TCP session ends.  accountId is
+     * already cleared so drop-no-account alone would leave CBE/Pixi hanging.
+     */
+    bool accountKickedPending;
     u32 onlineRoleId;
     char onlineRoleName[32];
     char onlineRoleTitle[32];
@@ -3065,6 +3256,53 @@ typedef struct vm_mock_service_client_session
      * catalog (传送后二次 DoLoading 卡住 2026-08-01).
      */
     bool shopReturnWarmNpcDelivered;
+    /*
+     * Per-client: nonempty 27/11 already delivered for this scene visit.
+     * Shop-open warm capture and poll once-seed must NOT use process-global
+     * g_vm_net_mock_scene_moveinfo_npc_seeded — that flag is shared across
+     * sticky account mirrors and races multi-client / mark_pending (梦境出商城
+     * 2026-08-05: early-shell then startup-scene-sync-poll third DoLoading).
+     */
+    bool sceneNpcCatalogSeeded;
+    char sceneNpcCatalogSeededScene[64];
+    /*
+     * Scene already had type-21 seed this visit when mmShop opened (from
+     * sceneNpcCatalogSeeded).  Client map/NPC *resources* stay warm; shop-
+     * return force re-emits 27/11 without clearing a shared global seeded bit.
+     */
+    bool shopReturnNpcResourcesWarm;
+    /*
+     * Dream / warm-resource shop-return: restore type-21 on the FINAL shell
+     * 30/2 packet (27/11+30/2) — never after the map is already visible.
+     * Deferred catalog poll is a forced second DoLoading (用户 2026-08-05).
+     */
+    bool shopReturnNpcInlineOnShell;
+    /*
+     * Dream mmShop→mmGame drops SCE type4 battle mapctrl; same-scene kind-2
+     * 30/1 is host-suppressed (same-suppressed-dream-reenter).  Foot 4/1 must
+     * use HAS_FOLLOWUP lone 4/10 until the player leaves 29* (2026-08-05).
+     */
+    bool shopReturnDreamNeedNonSceneBattle;
+    /*
+     * Dream shop-return skipped kind-2 EnterScene (match outdoor warm).  Next
+     * PvE settlement_exit must tear down with 4/8 only — full 4/11 type=0
+     * reopens DoLoading on that fragile shell and later poll 30/2 cannot
+     * recover (6ba47803 2026-08-05 idle-timeout after arm-poll-30/2).
+     */
+    bool shopReturnDreamNeedSettleBarClear;
+    /*
+     * Legacy: 续 12 used this to arm deferred 30/1 for instance timer after
+     * warm kind2_skip.  That third EnterScene multi-loaded / stuck the bar
+     * (2026-08-05).  note_dream_shop_return_kind2_skip now keeps this false;
+     * busy_ack only drops a stale bit.  Timer-without-EnterScene unresolved.
+     */
+    bool shopReturnDreamNeedHudRebuild;
+    /*
+     * Armed while map-stone 30/2 runs for dream-hud-timer-rebuild.  Forces the
+     * kind2DreamShellClear hold on target_valid (no catalog pending on this
+     * warm path) so ResetDownloadState waits for ScreenInit.
+     */
+    bool shopReturnDreamHudMapStoneHold;
     /* Second clear window after deferred 27/11 (longer gap/remaining). */
     bool shopReturnLoadingClearPostCatalog;
     /*
@@ -3187,6 +3425,16 @@ typedef struct vm_mock_service_client_session
     bool sparExitMessageQueued;
     /* Experiment: grant +1 durable EXP once so 4/7 is not a zero-exp delta. */
     bool sparExitExpGranted;
+    /* True after spar-lose death penalty (same as PvE 1/7/14 ordinary path). */
+    bool sparExitPenaltyApplied;
+    /* Amounts applied by sparDeathPenalty — shown on 4/7 fdata / 1/3/3 tip. */
+    u32 sparDeathExpPenalty;
+    u32 sparDeathMoneyPenalty;
+    /* After 4/8 tear-down, deliver 30/1 to nearest telestone for the loser. */
+    bool sparDeathRespawnPending;
+    char sparDeathRespawnScene[64];
+    u16 sparDeathRespawnX;
+    u16 sparDeathRespawnY;
     /* True after 4/7 settle delivered; next phase is 4/8+4/11+4/9. */
     bool sparSettleDelivered;
     /* Set on 4/8 tear-down; delivered after sparResultNotBeforeTick via
@@ -3288,6 +3536,8 @@ typedef struct vm_mock_service_client_session
     bool dreamHudTtlArmed;
     u32 dreamHudTtlRoleId;
     u32 dreamHudExpireAtMs;
+    /* One-shot 1-minute remaining tip while dreamHudTtlArmed. */
+    bool dreamHudWarnSent;
     /*
      * Dream 29* instance enter: next WT18/7 for 29* SCE must not return
      * uptodate — force a cold payload so DF uses 502* allocation instead of
@@ -3339,6 +3589,12 @@ typedef struct vm_mock_service_client_session
     bool coolmallDialogPending;
     bool coolmallOpenWaitMap;
     u32 coolmallDialogTick;
+    /*
+     * mmShop exit peel-to-root: deliver title role-select parity
+     * (1/1/6+1/1/15) on poll — bare 30/1 does not ScreenInit outdoor.
+     */
+    bool pendingMmshopExitRoleRelogin;
+    u32 pendingMmshopExitRoleReloginTick;
     u8 coolmallBrowseSubtype; /* 5..13 mall page subtype */
     u16 coolmallBrowsePage;
     /* Skill trainer list page (26/1 OPEN_SKILLS_BASE | page). */
@@ -3956,6 +4212,8 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->teleportStoneDeferredEnterTarget = g_vm_net_mock_teleport_stone_deferred_enter_target;
     state->teleportStoneDeferredEnterValid = g_vm_net_mock_teleport_stone_deferred_enter_valid;
     state->teleportStoneDeferredEnterTick = g_vm_net_mock_teleport_stone_deferred_enter_tick;
+    state->teleportStoneDeferredEnterClientId =
+        g_vm_net_mock_teleport_stone_deferred_enter_client_id;
     state->teleportStoneSameScene = g_vm_net_mock_teleport_stone_same_scene;
     state->taskTransportPendingTarget = g_vm_net_mock_task_transport_pending_target;
     state->taskTransportPendingValid = g_vm_net_mock_task_transport_pending_valid;
@@ -4131,6 +4389,8 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_teleport_stone_deferred_enter_target = state->teleportStoneDeferredEnterTarget;
     g_vm_net_mock_teleport_stone_deferred_enter_valid = state->teleportStoneDeferredEnterValid;
     g_vm_net_mock_teleport_stone_deferred_enter_tick = state->teleportStoneDeferredEnterTick;
+    g_vm_net_mock_teleport_stone_deferred_enter_client_id =
+        state->teleportStoneDeferredEnterClientId;
     g_vm_net_mock_teleport_stone_same_scene = state->teleportStoneSameScene;
     g_vm_net_mock_task_transport_pending_target = state->taskTransportPendingTarget;
     g_vm_net_mock_task_transport_pending_valid = state->taskTransportPendingValid;
@@ -4601,19 +4861,20 @@ static void vm_net_mock_arm_enhance_backpack_list_resync(u16 equipSeq,
     if (session == NULL || equipSeq == 0 || equipItemId == 0)
         return;
     /*
-     * Poll fallback when the enhance UI path does not consume the in-packet
-     * 17/1 (backpack component inactive).  listOnly skips warehouse 26/0.
+     * Poll 17/1 rebuilds bag attrs after enhance.  Always follow with 26/0 —
+     * listOnly skipped the busy-ack and left DF_DataPackage_DoLoading up
+     * (docs/re/2026-08-05-enhance-success-progress-stuck.md).
      */
     session->backpackListResyncPending = true;
     session->backpackListResyncPhase = 1;
-    session->backpackListResyncListOnly = true;
+    session->backpackListResyncListOnly = false;
     session->backpackListResyncTick = g_schedulerTick;
     session->backpackResyncRemoveSeq = equipSeq;
     session->backpackResyncRemoveItemId = equipItemId;
     g_netMockBackpackGridSeededRoleId = 0;
     printf("[info][network] mock_equipment_enhance bag-list-arm "
            "seq=%u item=%u enhance=%u inline_17=%u "
-           "evidence=17/1+7/42-after-enhance-attrs\n",
+           "evidence=poll-17/1+26/0-after-enhance-attrs\n",
            equipSeq, equipItemId, enhanceLevel, inlineListOk ? 1 : 0);
 }
 
@@ -4689,6 +4950,61 @@ static void vm_mock_service_session_arm_task_prompt_refresh(const char *scene)
            session->clientId, scene);
 }
 
+static void vm_mock_service_session_note_scene_npc_catalog_seeded(
+    vm_mock_service_client_session *session,
+    const char *scene,
+    u8 npcNum)
+{
+    if (session == NULL || npcNum == 0u || !vm_net_mock_scene_name_is_safe(scene))
+        return;
+    session->sceneNpcCatalogSeeded = true;
+    snprintf(session->sceneNpcCatalogSeededScene,
+             sizeof(session->sceneNpcCatalogSeededScene), "%s", scene);
+    /*
+     * mmShop exit window: first nonempty type-21 restore (type27 once_or_empty,
+     * early-shell force, or catalog deliver) owns warm delivery.  Mark here so
+     * a later early-shell / startup-poll cannot emit a second nonempty 27/11.
+     */
+    if (session->shopReturnLoadingClearPending ||
+        session->shopReturnNpcInlineOnShell ||
+        session->shopReturnNpcCatalogPending)
+    {
+        session->shopReturnWarmNpcDelivered = true;
+        session->shopReturnNpcInlineOnShell = false;
+    }
+}
+
+static void vm_mock_service_session_clear_scene_npc_catalog_seeded(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    if (session == NULL || !session->sceneNpcCatalogSeeded)
+        return;
+    printf("[info][mock-service] scene_npc_catalog_seeded_clear client=%08x "
+           "scene=%s reason=%s evidence=per-client-seed-not-process-global\n",
+           session->clientId,
+           session->sceneNpcCatalogSeededScene[0]
+               ? session->sceneNpcCatalogSeededScene
+               : "-",
+           reason ? reason : "-");
+    session->sceneNpcCatalogSeeded = false;
+    session->sceneNpcCatalogSeededScene[0] = 0;
+}
+
+static bool vm_mock_service_session_scene_npc_catalog_seeded_for(
+    const vm_mock_service_client_session *session,
+    const char *scene)
+{
+    if (session == NULL || !session->sceneNpcCatalogSeeded ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        session->sceneNpcCatalogSeededScene[0] == 0)
+    {
+        return false;
+    }
+    return vm_net_mock_scene_names_equal_loose(
+        session->sceneNpcCatalogSeededScene, scene);
+}
+
 static int vm_mock_service_duel_client_index(const vm_mock_service_duel *duel,
                                              u32 clientId)
 {
@@ -4741,6 +5057,134 @@ static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
     }
 }
 
+static void vm_mock_service_session_apply_spar_death_penalty(
+    vm_mock_service_client_session *session,
+    const char *reason)
+{
+    vm_mock_service_account_state *account = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    char respawnScene[64];
+    u16 respawnX = 0;
+    u16 respawnY = 0;
+    u32 expPenalty = 0;
+    u32 moneyPenalty = 0;
+    u32 reviveMp = 0;
+    u32 reviveHp = 0;
+    u32 i = 0;
+
+    if (session == NULL || session->sparExitPenaltyApplied)
+        return;
+    if (session->accountId[0] == 0 || session->onlineRoleId == 0)
+        return;
+    account = vm_mock_service_account_find_or_create(session->accountId);
+    if (account == NULL)
+        return;
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+    vm_mock_service_account_restore(account);
+    g_vm_mock_service_active_client_id = session->clientId;
+    if (!vm_mock_service_account_ensure_role_db_loaded(account) ||
+        !g_vm_net_mock_role_db_valid)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return;
+    }
+
+    for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == session->onlineRoleId)
+        {
+            role = &g_vm_net_mock_role_db.roles[i];
+            break;
+        }
+    }
+    if (role == NULL)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return;
+    }
+
+    g_vm_net_mock_role_db.activeRoleId = role->roleId;
+    /* Death penalty requires durable HP==0 (PvE 1/7/14 ordinary path). */
+    role->hp = 0;
+    memset(respawnScene, 0, sizeof(respawnScene));
+    reviveHp = vm_net_mock_role_apply_death_penalty_to(
+        role,
+        reason ? reason : "spar-defeat",
+        &expPenalty,
+        &moneyPenalty,
+        &reviveMp,
+        respawnScene,
+        sizeof(respawnScene),
+        &respawnX,
+        &respawnY);
+    if (reviveHp == 0)
+    {
+        printf("[warn][mock-service] spar_death_penalty_skip client=%08x role=%u "
+               "reason=%s detail=apply-returned-0\n",
+               session->clientId, session->onlineRoleId,
+               reason ? reason : "spar-defeat");
+    }
+    else
+    {
+        session->onlineHp = role->hp;
+        session->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+        session->onlineMp = role->mp;
+        session->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+        if (vm_net_mock_scene_name_is_safe(role->scene))
+        {
+            snprintf(session->onlineScene, sizeof(session->onlineScene), "%s",
+                     role->scene);
+            session->onlineX = role->x;
+            session->onlineY = role->y;
+        }
+        session->sparDeathRespawnPending = true;
+        snprintf(session->sparDeathRespawnScene,
+                 sizeof(session->sparDeathRespawnScene),
+                 "%s",
+                 respawnScene[0] ? respawnScene : role->scene);
+        session->sparDeathRespawnX = respawnX ? respawnX : role->x;
+        session->sparDeathRespawnY = respawnY ? respawnY : role->y;
+        session->sparDeathExpPenalty = expPenalty;
+        session->sparDeathMoneyPenalty = moneyPenalty;
+        /* Block winner-style +1exp/+1gold on status7. */
+        session->sparExitExpGranted = true;
+        session->sparExitPenaltyApplied = true;
+        printf("[info][mock-service] spar_death_penalty client=%08x role=%u "
+               "exp_penalty=%u money_penalty=%u revive=%u/%u scene=%s "
+               "pos=(%u,%u) reason=%s evidence=PvE-death-parity\n",
+               session->clientId, role->roleId, expPenalty, moneyPenalty,
+               role->hp, role->mp,
+               session->sparDeathRespawnScene,
+               session->sparDeathRespawnX, session->sparDeathRespawnY,
+               reason ? reason : "spar-defeat");
+    }
+
+    if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
+        vm_net_mock_role_db_save(reason ? reason : "spar-defeat");
+    vm_mock_service_account_capture(account);
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+}
+
 static void vm_mock_service_duel_arm_observer_exit(
     vm_mock_service_duel *duel,
     int observerIndex)
@@ -4764,9 +5208,9 @@ static void vm_mock_service_duel_arm_observer_exit(
     if (targetHp == 0)
         targetHp = duel->hpMax[observerIndex];
     /*
-     * Spar end: two-phase with +1 exp (zero-exp 4/7 crashed).
-     * Phase1 4/7 fills banner; hold; phase2 4/8+4/11+4/9 tears down.
-     * Same-WT 4/7+4/8 left an empty banner.
+     * Spar end: two-phase with settle 4/7 then 4/8+4/11+4/9 tear-down.
+     * Loser (battle HP=0) takes the same death penalty as PvE ordinary
+     * 1/7/14 (10% level progress EXP, 5% copper, 30% revive, telestone).
      */
     observer->sparExitWasDead = (battleHp == 0);
     observer->sparExitRecoverHp =
@@ -4776,21 +5220,41 @@ static void vm_mock_service_duel_arm_observer_exit(
     observer->sparExitRecoverMp = 0;
     observer->sparExitMessageQueued = false;
     observer->sparExitExpGranted = false;
+    observer->sparExitPenaltyApplied = false;
+    observer->sparDeathExpPenalty = 0;
+    observer->sparDeathMoneyPenalty = 0;
+    observer->sparDeathRespawnPending = false;
+    observer->sparDeathRespawnScene[0] = 0;
+    observer->sparDeathRespawnX = 0;
+    observer->sparDeathRespawnY = 0;
     observer->sparSettleDelivered = false;
     observer->sparResultMessageArmed = false;
     observer->sparResultNotBeforeTick = 0;
     (void)battleMp;
     (void)targetMp;
+    if (observer->sparExitWasDead)
+    {
+        vm_mock_service_session_apply_spar_death_penalty(
+            observer, "spar-defeat");
+        /* Recover display delta after penalty revive (30% max). */
+        if (observer->onlineHp > battleHp)
+            observer->sparExitRecoverHp = observer->onlineHp - battleHp;
+        else if (observer->sparExitRecoverHp == 0)
+            observer->sparExitRecoverHp = observer->onlineHp ? observer->onlineHp : 1;
+    }
     holdTicks = vm_net_mock_env_u32("CBE_DUEL_EXIT_REDELIVER_TICKS", 300);
     if (holdTicks < 90)
         holdTicks = 90;
     observer->sparExitRedeliverUntilTick = g_schedulerTick + holdTicks;
     printf("[info][mock-service] duel_exit_arm observer=%08x serial=%u "
-           "battle_hp=%u/%u dead=%u recover_hp=%u until=%u "
-           "exit=4/6+type3+4/7 then 4/8+4/11+4/9 (+1exp)\n",
+           "battle_hp=%u/%u dead=%u penalty=%u recover_hp=%u until=%u "
+           "exit=4/6+type3+4/7 then 4/8+4/11+4/9%s\n",
            observer->clientId, duel->serial, battleHp, duel->hpMax[observerIndex],
-           observer->sparExitWasDead ? 1u : 0u, observer->sparExitRecoverHp,
-           observer->sparExitRedeliverUntilTick);
+           observer->sparExitWasDead ? 1u : 0u,
+           observer->sparExitPenaltyApplied ? 1u : 0u,
+           observer->sparExitRecoverHp,
+           observer->sparExitRedeliverUntilTick,
+           observer->sparExitWasDead ? " (+death-penalty)" : " (+1exp win)");
 }
 
 static void vm_mock_service_duel_arm_both_exits(vm_mock_service_duel *duel)
@@ -4805,22 +5269,61 @@ static void vm_mock_service_duel_cancel_for_client(u32 clientId,
                                                     const char *reason)
 {
     int index = -1;
+    int peerIndex = -1;
     vm_mock_service_duel *duel = vm_mock_service_duel_find_for_client(clientId,
                                                                       &index);
     u8 peerBit = 0;
+    u8 startedMask = 0;
 
     if (duel == NULL || index < 0)
         return;
-    peerBit = (u8)(1u << (1 - index));
+    peerIndex = 1 - index;
+    peerBit = (u8)(1u << peerIndex);
+    startedMask = duel->startedMask;
     printf("[info][mock-service] duel_cancel serial=%u client=%08x peer=%08x "
-           "started=%02x reason=%s\n",
-           duel->serial, clientId, duel->clientIds[1 - index],
-           duel->startedMask, reason ? reason : "cancel");
+           "started=%02x finished=%u reason=%s\n",
+           duel->serial, clientId, duel->clientIds[peerIndex],
+           startedMask, duel->finished ? 1u : 0u,
+           reason ? reason : "cancel");
+
+    if (duel->finished)
+    {
+        /* Departing seat drops; keep peer terminal if still owed. */
+        duel->terminalPendingMask = (u8)(duel->terminalPendingMask & peerBit);
+        duel->startPendingMask = 0;
+        vm_mock_service_duel_release_if_done(duel);
+        return;
+    }
+
+    /*
+     * Pre-start invite/slot cancel: neither seat entered Battle.cbm — drop
+     * without death penalty.
+     */
+    if (startedMask == 0)
+    {
+        memset(duel, 0, sizeof(*duel));
+        return;
+    }
+
+    /*
+     * Mid-spar disconnect / quit: departing seat forfeits (HP=0), peer wins.
+     * Same death penalty as a normal spar kill for the loser.
+     */
+    duel->hp[index] = 0;
     duel->finished = true;
     duel->startPendingMask = 0;
+    duel->roundCommitMask = 0;
+    duel->roundCommitOperate[0] = 0;
+    duel->roundCommitOperate[1] = 0;
     memset(duel->events, 0, sizeof(duel->events));
-    duel->terminalPendingMask = (u8)(duel->startedMask & peerBit);
+    vm_mock_service_duel_arm_observer_exit(duel, index);
+    vm_mock_service_duel_arm_observer_exit(duel, peerIndex);
+    duel->terminalPendingMask = (u8)(startedMask & peerBit);
     duel->terminalNotBeforeTick = g_schedulerTick;
+    printf("[info][mock-service] duel_forfeit serial=%u loser=%08x winner=%08x "
+           "peer_terminal=%02x reason=%s evidence=offline-quit-lose+PvE-death\n",
+           duel->serial, clientId, duel->clientIds[peerIndex],
+           duel->terminalPendingMask, reason ? reason : "cancel");
     vm_mock_service_duel_release_if_done(duel);
 }
 
@@ -4839,6 +5342,9 @@ static void vm_mock_service_session_arm_shop_return_kind2_reenter(
     const char *reason);
 static void vm_mock_service_session_arm_shop_return_busy_ack(
     vm_mock_service_client_session *session);
+static void vm_mock_service_session_note_dream_shop_return_kind2_skip(
+    vm_mock_service_client_session *session,
+    const char *scene);
 static void vm_mock_service_session_cancel_map_actor_vitals_sync(
     vm_mock_service_client_session *session,
     const char *reason);
@@ -4885,7 +5391,7 @@ static void vm_mock_service_clear_stale_map_transfer_for_shop(
         return;
 
     printf("[info][mock-service] stale_map_transfer_clear client=%08x "
-           "scene=%s reason=%s deferred=%u direct=%u map=%u target=%u "
+           "scene=%s reason=%s deferred=%u deferred_owner=%08x direct=%u map=%u target=%u "
            "map_stone_clear=%u map_stone_remaining=%u "
            "evidence=mmShop-scene-already-ready\n",
            session->clientId,
@@ -4895,14 +5401,21 @@ static void vm_mock_service_clear_stale_map_transfer_for_shop(
                                       : "-"),
            reason ? reason : "-",
            g_vm_net_mock_teleport_stone_deferred_enter_valid ? 1u : 0u,
+           g_vm_net_mock_teleport_stone_deferred_enter_client_id,
            g_vm_net_mock_teleport_stone_direct_enter_pending ? 1u : 0u,
            g_vm_net_mock_teleport_stone_map_enter_pending ? 1u : 0u,
            g_vm_net_mock_last_scene_change_target_valid ? 1u : 0u,
            hadMapStoneClear ? 1u : 0u,
            hadMapStoneClear ? (u32)session->mapStoneLoadingClearRemaining : 0u);
 
-    g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
-    g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+    /* Do not erase another client's armed map-stone 30/1. */
+    if (g_vm_net_mock_teleport_stone_deferred_enter_client_id == 0 ||
+        g_vm_net_mock_teleport_stone_deferred_enter_client_id == session->clientId)
+    {
+        g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+        g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
+    }
     g_vm_net_mock_teleport_stone_direct_enter_pending = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
@@ -4973,11 +5486,22 @@ static int vm_mock_service_mmshop_open14_is_combo_trailing(u32 ackOrd)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
+    u32 shellAge = 0;
 
     if (session == NULL || !session->mmShopShellActive)
         return 0;
-    /* First already_open after combo: dual-open guard. */
-    return session->mmShopOpenMarkSource == 1 && ackOrd == 1;
+    if (session->mmShopOpenMarkSource != 1 || ackOrd != 1)
+        return 0;
+    /*
+     * post-fix14: exit was ack=1/markSrc=1 at shellAge=361 (enter open14
+     * missing).  Combo trailing is only the near-arm first ack.
+     */
+    if (session->mmShopShellArmedTick != 0 &&
+        g_schedulerTick >= session->mmShopShellArmedTick)
+        shellAge = g_schedulerTick - session->mmShopShellArmedTick;
+    if (shellAge > 90u)
+        return 0;
+    return 1;
 }
 
 static void vm_mock_service_shop_open14_trace(const char *line)
@@ -4998,6 +5522,7 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
     vm_mock_service_client_session *session = vm_mock_service_get_active_client_session();
     const char *scene = vm_net_mock_current_scene_name();
     bool changed = false;
+    bool firstOpen = false;
 
     if (session == NULL)
         return;
@@ -5016,8 +5541,9 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
     session->shopSceneNpcReseedPending = true;
     snprintf(session->shopSceneNpcReseedScene,
              sizeof(session->shopSceneNpcReseedScene), "%s", scene);
+    firstOpen = !session->mmShopShellActive;
     /* Only reset on inactive→active; re-mark (info14/page) must keep ack ordinal. */
-    if (!session->mmShopShellActive)
+    if (firstOpen)
     {
         session->shopActorQueryAckCount = 0;
         session->mmShopShellArmedTick = g_schedulerTick;
@@ -5027,12 +5553,41 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
             session->mmShopOpenMarkSource = 1;
         else
             session->mmShopOpenMarkSource = 2;
+        /*
+         * Capture resource warmth once from THIS client's seed ledger.
+         * Remakes (open14/info14) must not overwrite to 0.
+         *
+         * mmShop clears client type-21 for THIS player — clear the per-client
+         * catalog ledger after capture so shop-return once_or_empty / force can
+         * re-emit nonempty 27/11.  Leaving the ledger set made type27 return
+         * empty-11 first (poison) then early-shell / poll-hold left NPCs missing
+         * while the bar stayed clear (2026-08-05 user: 场景正常 NPC 不刷新).
+         * Do not clear process-global seeded (multi-client).
+         */
+        session->shopReturnNpcResourcesWarm =
+            vm_mock_service_session_scene_npc_catalog_seeded_for(session, scene);
+        if (session->sceneNpcCatalogSeeded)
+        {
+            vm_mock_service_session_clear_scene_npc_catalog_seeded(
+                session, "shop-open-mmShop-clears-type21");
+        }
+        printf("[info][mock-service] shop_return_resources_warm_capture "
+               "client=%08x scene=%s warm=%u source=%s "
+               "evidence=per-client-warm-then-clear-ledger-for-reemit\n",
+               session->clientId, scene,
+               session->shopReturnNpcResourcesWarm ? 1u : 0u,
+               source ? source : "-");
     }
     session->mmShopShellActive = true;
     /*
      * Hold login wear drip while mmShop is up; poll builder already no-ops
      * when mmShopShellActive.  Do not cancel — resume after shop-return.
      */
+    /*
+     * Stale coolmall unstuck / overnight peel can leave waitMap armed and
+     * steal exit into kind2 DoLoading.  Normal 江湖商城 open owns the shell.
+     */
+    session->coolmallOpenWaitMap = false;
     /*
      * Opening mmShop proves the map shell is walkable enough for the client.
      * Drop leftover map-stone / teleport lifecycle so exit post-catalog 30/2
@@ -5052,6 +5607,10 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
                                                           "shop-open");
     session->shopReturnWarmNpcDelivered = false;
     session->shopReturnKind2Completed = false;
+    session->shopReturnDreamNeedNonSceneBattle = false;
+    session->shopReturnDreamNeedSettleBarClear = false;
+    session->shopReturnDreamNeedHudRebuild = false;
+    session->shopReturnDreamHudMapStoneHold = false;
     
     vm_mock_service_session_cancel_map_actor_vitals_sync(session,
                                                         "shop-open");
@@ -6389,11 +6948,10 @@ static const char *vm_mock_service_session_take_spar_result_text(
     vm_mock_service_client_session *session,
     const char *phase)
 {
-    /* GBK: 挑战成功 / 挑战失败 */
+    /* GBK: 挑战成功 / 挑战失败 经验-%u 金钱-%u */
     static const char sparWinGbk[] =
         "\xcc\xf8\xd5\xbd\xb3\xc9\xb9\xa6";
-    static const char sparLoseGbk[] =
-        "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc";
+    static char sparLoseBuf[96];
     const char *text = NULL;
 
     if (session == NULL || !session->sparResultMessageArmed)
@@ -6408,10 +6966,22 @@ static const char *vm_mock_service_session_take_spar_result_text(
     if (session->sparExitMessageQueued)
         return NULL;
     session->sparExitMessageQueued = true;
-    text = session->sparExitWasDead ? sparLoseGbk : sparWinGbk;
+    if (session->sparExitWasDead)
+    {
+        snprintf(sparLoseBuf, sizeof(sparLoseBuf),
+                 "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
+                 " \xbe\xad\xd1\xe9-%u"
+                 " \xbd\xf0\xc7\xae-%u",
+                 session->sparDeathExpPenalty,
+                 session->sparDeathMoneyPenalty);
+        text = sparLoseBuf;
+    }
+    else
+        text = sparWinGbk;
     printf("[info][mock-service] spar_result_take observer=%08x dead=%u "
-           "phase=%s bytes=%u\n",
+           "exp_penalty=%u money_penalty=%u phase=%s bytes=%u\n",
            session->clientId, session->sparExitWasDead ? 1u : 0u,
+           session->sparDeathExpPenalty, session->sparDeathMoneyPenalty,
            phase ? phase : "-", (u32)strlen(text));
     return text;
 }
@@ -6472,9 +7042,14 @@ static bool vm_mock_world_chat_store(
     accountLen = strlen(accountId);
     sourceNameLen = strlen(sourceName);
     messageLen = strlen(message);
+    /* Columns are VARBINARY(15)/(81): clamp instead of rejecting long GBK names
+     * (onlineRoleName is 32 bytes) or slightly-overlong chat payloads. */
+    if (sourceNameLen > 15)
+        sourceNameLen = 15;
+    if (messageLen > 81)
+        messageLen = 81;
     if (accountLen == 0 || accountLen >= sizeof(source->accountId) ||
-        sourceNameLen == 0 || sourceNameLen > 15 ||
-        messageLen == 0 || messageLen > 81 ||
+        sourceNameLen == 0 || messageLen == 0 ||
         !vm_mock_world_chat_table_ensure() ||
         vm_mysql_hex_encode(accountId, accountLen,
                             accountHex, sizeof(accountHex)) == 0 ||
@@ -6483,6 +7058,10 @@ static bool vm_mock_world_chat_store(
         vm_mysql_hex_encode(message, messageLen,
                             messageHex, sizeof(messageHex)) == 0)
     {
+        printf("[warn][mock-service] world_chat_store_reject source=%08x/%u "
+               "account_len=%u name_len=%u msg_len=%u\n",
+               source->clientId, source->onlineRoleId,
+               (u32)accountLen, (u32)strlen(sourceName), (u32)strlen(message));
         return false;
     }
     snprintf(query, sizeof(query),
@@ -6643,12 +7222,55 @@ static bool vm_mock_service_active_session_team_encounter_blocked(void)
     return !vm_mock_service_team_is_leader(team, session->clientId);
 }
 
+static bool vm_mock_service_session_on_dream_instance(const vm_mock_service_client_session *session)
+{
+    return session != NULL &&
+           vm_net_mock_scene_name_is_safe(session->sceneVisibleScene) &&
+           session->sceneVisibleScene[0] == '2' &&
+           session->sceneVisibleScene[1] == '9';
+}
+
+/* Purge dream material 841 on leave; arm list-only 17/1 poll for UI sync. */
+static u32 vm_net_mock_dream_purge_item_841_and_resync(vm_net_mock_role_state *role,
+                                                       const char *reason)
+{
+    vm_mock_service_client_session *session = NULL;
+    u32 removed = vm_net_mock_dream_purge_item_841(role, reason);
+
+    if (removed == 0)
+        return 0;
+    session = vm_mock_service_get_active_client_session();
+    if (session != NULL)
+    {
+        session->backpackListResyncPending = true;
+        session->backpackListResyncPhase = 1;
+        session->backpackListResyncListOnly = true;
+        session->backpackListResyncTick = g_schedulerTick;
+        g_netMockBackpackGridSeededRoleId = 0;
+    }
+    printf("[info][network] mock_dream_purge_841_resync role=%u removed=%u "
+           "reason=%s action=17/1-list-resync\n",
+           role ? role->roleId : 0, removed, reason ? reason : "-");
+    return removed;
+}
+
 static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_session *leader)
 {
     vm_mock_service_team *team = NULL;
+    static const char dreamTeamBanGbk[] =
+        "\xc3\xce\xbe\xb5\xb8\xb1\xb1\xbe\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 梦境副本禁止组队 */
 
     if (leader == NULL || leader->clientId == 0 || leader->onlineRoleId == 0)
         return NULL;
+    if (vm_mock_service_session_on_dream_instance(leader))
+    {
+        (void)vm_mock_service_session_enqueue_system_message(leader,
+                                                             dreamTeamBanGbk);
+        printf("[info][mock-service] team_create_blocked_dream leader=%08x/%u "
+               "evidence=dream-ops-no-team\n",
+               leader->clientId, leader->onlineRoleId);
+        return NULL;
+    }
     team = vm_mock_service_team_find_for_client(leader->clientId);
     if (team != NULL)
         return team;
@@ -6680,12 +7302,32 @@ static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_
 static bool vm_mock_service_team_add_member(vm_mock_service_team *team,
                                             vm_mock_service_client_session *member)
 {
+    static const char dreamTeamBanGbk[] =
+        "\xc3\xce\xbe\xb5\xb8\xb1\xb1\xbe\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 梦境副本禁止组队 */
+
     if (team == NULL || !team->active || member == NULL || member->clientId == 0 ||
         member->onlineRoleId == 0 || team->memberCount >= VM_MOCK_SERVICE_TEAM_MEMBER_MAX ||
         vm_mock_service_team_contains_client(team, member->clientId) ||
         vm_mock_service_team_find_for_client(member->clientId) != NULL)
     {
         return false;
+    }
+    {
+        vm_mock_service_client_session *leader =
+            vm_mock_service_find_client_session(team->leaderClientId);
+        if (vm_mock_service_session_on_dream_instance(member) ||
+            vm_mock_service_session_on_dream_instance(leader))
+        {
+            (void)vm_mock_service_session_enqueue_system_message(member,
+                                                                 dreamTeamBanGbk);
+            if (leader != NULL && leader->clientId != member->clientId)
+                (void)vm_mock_service_session_enqueue_system_message(
+                    leader, dreamTeamBanGbk);
+            printf("[info][mock-service] team_add_blocked_dream leader=%08x "
+                   "member=%08x/%u evidence=dream-ops-no-team\n",
+                   team->leaderClientId, member->clientId, member->onlineRoleId);
+            return false;
+        }
     }
     member->pendingTeamBattleSerial = 0;
     team->memberClientIds[team->memberCount++] = member->clientId;
@@ -7149,11 +7791,32 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
     {
         char clearScene[64];
         bool wasPostCatalog = session->shopReturnLoadingClearPostCatalog;
+        u8 rem = session->shopReturnLoadingClearRemaining;
         const char *kind2Scene = NULL;
 
         snprintf(clearScene, sizeof(clearScene), "%s",
                  session->shopReturnLoadingClearScene);
         kind2Scene = clearScene[0] ? clearScene : scene;
+        /*
+         * Post-catalog never dripped (cold arm remaining=8, lite=3): timeline
+         * moveinfo does NOT prove the second DoLoading closed — canceling here
+         * skips all ResetDownloadState and leaves the bar up (梦境 2026-08-05:
+         * catalog cold then moveinfo-live-post-catalog remaining=8).
+         */
+        if (wasPostCatalog &&
+            rem >= (session->shopReturnLoadingClearLite ? 3u : 8u))
+        {
+            printf("[info][mock-service] shop_return_loading_clear_keep "
+                   "client=%08x scene=%s remaining=%u lite=%u "
+                   "reason=moveinfo-before-any-post-catalog-30/2 "
+                   "evidence=second-DoLoading-still-needs-drip\n",
+                   session->clientId,
+                   kind2Scene != NULL ? kind2Scene : "-",
+                   (u32)rem,
+                   session->shopReturnLoadingClearLite ? 1u : 0u);
+        }
+        else
+        {
         /*
          * Walkable moveinfo means DoLoading already closed enough for menus.
          * Cancel remaining poll 30/2.  NPC maps: catalog 27/11 already restored
@@ -7179,6 +7842,8 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
         else if (wasPostCatalog)
         {
             vm_mock_service_session_arm_shop_return_busy_ack(session);
+            vm_mock_service_session_note_dream_shop_return_kind2_skip(
+                session, kind2Scene);
             printf("[info][mock-service] shop_return_kind2_skip "
                    "client=%08x scene=%s reason=npc-catalog-live-no-reenter "
                    "via=moveinfo-live-post-catalog "
@@ -7194,6 +7859,8 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
         }
         else
         {
+            vm_mock_service_session_note_dream_shop_return_kind2_skip(
+                session, kind2Scene);
             printf("[info][mock-service] shop_return_kind2_skip "
                    "client=%08x scene=%s reason=npc-shell-only-no-catalog "
                    "via=moveinfo-live "
@@ -7201,6 +7868,7 @@ static void vm_mock_service_session_store_moveinfo(vm_mock_service_client_sessio
                    session->clientId,
                    kind2Scene != NULL ? kind2Scene : "-");
         }
+        } /* else: allow moveinfo-live cancel */
     }
 }
 
@@ -7224,11 +7892,13 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
     /*
      * Scene transfer (map-stone / portal) owns its own 30/1+30/2 lifecycle.
      * Leftover map-stone or shop-return poll 30/2 must not inject into a NEW
-     * transfer.  Exception: shop-return kind-2 same-scene 30/1 rearms a
-     * post-catalog clear that must survive the client's follow-up 2/3
-     * (临安府_05: scene-target-remember cancelled remaining=8 → stuck).
+     * transfer.  Exception: same-scene shop-return clear (shell or post-
+     * catalog) must survive client follow-up 2/3.
+     *   - 临安府_05: post-catalog remaining=8 cancelled → stuck
+     *   - 梦境 early-shell 27/11: shell remaining=5 cancelled + SCE spawn
+     *     (256,160) → third DoLoading stuck (2026-08-05)
      */
-    if (session->shopReturnLoadingClearPostCatalog &&
+    if (session->shopReturnLoadingClearPending &&
         scene != NULL &&
         vm_net_mock_scene_name_is_safe(session->shopReturnLoadingClearScene) &&
         vm_net_mock_scene_names_equal_loose(session->shopReturnLoadingClearScene,
@@ -7238,21 +7908,58 @@ static void vm_mock_service_session_mark_scene_pending(vm_mock_service_client_se
         if (session->shopReturnLoadingClearRemaining < 2u)
             session->shopReturnLoadingClearRemaining = 2;
         printf("[info][mock-service] shop_return_loading_clear_hold client=%08x "
-               "scene=%s remaining=%u reason=same-scene-kind2-reenter "
-               "evidence=keep-post-catalog-30/2\n",
+               "scene=%s remaining=%u post_catalog=%u "
+               "reason=same-scene-shop-return-2/3 "
+               "evidence=keep-shell-or-post-catalog-30/2\n",
                session->clientId,
                session->shopReturnLoadingClearScene,
-               (u32)session->shopReturnLoadingClearRemaining);
+               (u32)session->shopReturnLoadingClearRemaining,
+               session->shopReturnLoadingClearPostCatalog ? 1u : 0u);
     }
     else
     {
         vm_mock_service_session_cancel_shop_return_loading_clear(
             session, reason ? reason : "scene-pending");
     }
-    vm_mock_service_session_cancel_shop_return_kind2_reenter(
-        session, reason ? reason : "scene-pending");
-    vm_mock_service_session_cancel_shop_return_npc_catalog(
-        session, reason ? reason : "scene-pending");
+    /*
+     * Same-scene shop-return 2/3 is noise from early 27/11 / kind-2, not a
+     * real leave.  Keep armed kind-2 so dream battle mapctrl can still fire.
+     */
+    if (!(session->shopReturnLoadingClearPending &&
+          scene != NULL &&
+          vm_net_mock_scene_name_is_safe(session->shopReturnLoadingClearScene) &&
+          vm_net_mock_scene_names_equal_loose(session->shopReturnLoadingClearScene,
+                                              scene)))
+    {
+        vm_mock_service_session_cancel_shop_return_kind2_reenter(
+            session, reason ? reason : "scene-pending");
+        vm_mock_service_session_cancel_shop_return_npc_catalog(
+            session, reason ? reason : "scene-pending");
+    }
+    if (session->shopReturnDreamNeedNonSceneBattle &&
+        (scene == NULL || scene[0] != '2' || scene[1] != '9'))
+    {
+        session->shopReturnDreamNeedNonSceneBattle = false;
+        printf("[info][mock-service] shop_return_dream_nonscene_battle_clear "
+               "client=%08x new_scene=%s via=%s "
+               "evidence=leave-29-restore-subtype5\n",
+               session->clientId, scene ? scene : "-",
+               reason ? reason : "scene-pending");
+    }
+    /*
+     * Cross-scene leave: drop this client's NPC catalog ledger so the next
+     * enter can deliver nonempty 27/11.  Same-scene shop-return 2/3 must keep
+     * the ledger (warm early-shell already restored type-21).
+     */
+    if (session->sceneNpcCatalogSeeded &&
+        (scene == NULL ||
+         session->sceneNpcCatalogSeededScene[0] == 0 ||
+         !vm_net_mock_scene_names_equal_loose(session->sceneNpcCatalogSeededScene,
+                                              scene)))
+    {
+        vm_mock_service_session_clear_scene_npc_catalog_seeded(
+            session, reason ? reason : "scene-pending");
+    }
     /*
      * Kind-2 30/1 arms a short map-stone clear for EnterScene settle.  Same-
      * scene client 2/3 must not drop it (蓬莱 shop-return after teleport).
@@ -7406,6 +8113,7 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
 
 static u32 vm_net_mock_build_map_actor_fresh_shell_sync_response(u8 *out,
                                                                  u32 outCap);
+static u32 vm_net_mock_build_active_role_relogin_response(u8 *out, u32 outCap);
 
 static void vm_mock_service_session_cancel_map_actor_vitals_sync(
     vm_mock_service_client_session *session,
@@ -7459,13 +8167,11 @@ static bool vm_mock_service_session_append_login_equip_wear_sync(
     /*
      * Unsolicited 7/8 stuck login.  Do NOT append live 1/1/14 here: that
      * object is mmShop:0x9DE's actor-state family.  Login→mmGame 1/1/14 then
-     * mall open flashes (debug-a1d304: shop_open then silence; same class as
-     * 2026-07-28-post-battle-shop-open-vitals-crash).  Overlay + tip only.
-     * Login fresh actorinfo already carries equipment-inclusive HP/MP pools.
+     * mall open flashes (debug-a1d304).  Tip + HP/MP sync only; panel uses
+     * actorinfo / wear-apply halfwords (no host overlay file).
      */
     memset(&st, 0, sizeof(st));
     vm_net_mock_role_build_player_stats(role, &st);
-    vm_net_mock_publish_panel_attr_overlay(&st);
     if (st.maxHp > 0)
         role->hp = st.maxHp;
     if (st.maxMp > 0)
@@ -7492,7 +8198,7 @@ static bool vm_mock_service_session_append_login_equip_wear_sync(
     (void)outCap;
     printf("[info][mock-service] login_equip_wear_sync_once client=%08x "
            "rows=%u wear_7_8=0 live_len=0 hp=%u/%u mp=%u/%u str=%u atk=%u "
-           "tip=equip-attrs-synced evidence=overlay-tip-no-mmGame-1/1/14\n",
+           "tip=equip-attrs-synced evidence=no-host-overlay-file\n",
            session ? session->clientId : 0, (unsigned)equipmentRows, role->hp,
            role->hpMax, role->mp, role->mpMax, st.strength, st.attack);
     
@@ -7554,6 +8260,30 @@ static void vm_mock_service_session_arm_map_actor_vitals_sync(
            freshShellEnter ? 1u : 0u);
 }
 
+static void vm_mock_service_session_note_map_vitals_changed(const char *reason)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (role == NULL)
+        return;
+    vm_net_mock_role_sync_derived_vitals(role);
+    if (session != NULL && session->onlinePresenceValid &&
+        session->onlineRoleId == role->roleId)
+    {
+        session->onlineHp = role->hp;
+        session->onlineHpMax = role->hpMax ? role->hpMax : role->hp;
+        session->onlineMp = role->mp;
+        session->onlineMpMax = role->mpMax ? role->mpMax : role->mp;
+    }
+    vm_mock_service_session_arm_map_actor_vitals_sync(session, 0, 0, false);
+    printf("[info][mock-service] map_vitals_note reason=%s role=%u hp=%u/%u "
+           "mp=%u/%u\n",
+           reason ? reason : "-", role->roleId, role->hp, role->hpMax, role->mp,
+           role->mpMax);
+}
+
 static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
     u8 *out,
     u32 outCap,
@@ -7572,6 +8302,13 @@ static u32 vm_net_mock_try_deliver_pending_map_actor_vitals_sync(
     {
         return 0;
     }
+    /*
+     * Hold while mmShop owns the shell — wt/poll 1/1/14 or fresh_shell 1/1/6
+     * on top of mmShop is SCR_Render NULL+0x10 (client_out resp=1156,
+     * 2026-07-28).  shop-open already cancels pending; this covers races.
+     */
+    if (session->mmShopShellActive)
+        return 0;
     /*
      * Dream drain bar clear: do not let poll/wt 1/1/6 steal seats from
      * armed 29* ResetDownloadState (debug-191169 clear_rem=3 at offline).
@@ -7813,6 +8550,13 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparExitWasDead = false;
     session->sparExitMessageQueued = false;
     session->sparExitExpGranted = false;
+    session->sparExitPenaltyApplied = false;
+    session->sparDeathExpPenalty = 0;
+    session->sparDeathMoneyPenalty = 0;
+    session->sparDeathRespawnPending = false;
+    session->sparDeathRespawnScene[0] = 0;
+    session->sparDeathRespawnX = 0;
+    session->sparDeathRespawnY = 0;
     session->sparSettleDelivered = false;
     session->sparResultMessageArmed = false;
     session->sparResultNotBeforeTick = 0;
@@ -7862,6 +8606,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->dreamHudTtlArmed = false;
     session->dreamHudTtlRoleId = 0;
     session->dreamHudExpireAtMs = 0;
+    session->dreamHudWarnSent = false;
     session->dreamForceColdSceResync = false;
     session->shopReturnLoadingClearPending = false;
     session->shopReturnLoadingClearRemaining = 0;
@@ -7874,6 +8619,14 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->shopReturnNpcCatalogScene[0] = 0;
     session->shopReturnNpcCatalogReadyTick = 0;
     session->shopReturnWarmNpcDelivered = false;
+    session->shopReturnNpcResourcesWarm = false;
+    session->shopReturnNpcInlineOnShell = false;
+    session->sceneNpcCatalogSeeded = false;
+    session->sceneNpcCatalogSeededScene[0] = 0;
+    session->shopReturnDreamNeedNonSceneBattle = false;
+    session->shopReturnDreamNeedSettleBarClear = false;
+    session->shopReturnDreamNeedHudRebuild = false;
+    session->shopReturnDreamHudMapStoneHold = false;
     session->shopReturnLoadingClearPostCatalog = false;
     session->shopReturnLoadingClearLite = false;
     session->npcShopBrowseValid = false;
@@ -7892,6 +8645,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->coolmallDialogPending = false;
     session->coolmallDialogTick = 0;
     session->coolmallOpenWaitMap = false;
+    session->pendingMmshopExitRoleRelogin = false;
+    session->pendingMmshopExitRoleReloginTick = 0;
     session->coolmallBrowseSubtype = 0;
     session->coolmallBrowsePage = 0;
     session->equipSellDialogTick = 0;
@@ -7959,13 +8714,15 @@ static const char *vm_mock_service_find_session_account(u32 clientId)
     return session ? session->accountId : NULL;
 }
 
-/* A CBE client restart allocates a new transport client id.  A direct process
- * exit does not necessarily emit CBMS CLIENT_DISCONNECT, so waiting for the
- * heartbeat timeout would leave the prior incarnation visible as a second
+/* A CBE/Pixi client restart allocates a new transport client id.  A direct
+ * process exit does not necessarily emit CBMS CLIENT_DISCONNECT, so waiting for
+ * the heartbeat timeout would leave the prior incarnation visible as a second
  * copy of the same role during the next scene's 2/10 baseline.  Authentication
  * is the authoritative ownership boundary: one account has one live service
  * session.  Reuse the normal offline transition so team/trade/duel state is
- * removed consistently before the new client enters a scene. */
+ * removed consistently before the new client enters a scene — and arm
+ * accountKickedPending so the displaced client is told to leave on its next
+ * request instead of silently sharing account globals. */
 static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
                                                      const char *accountId)
 {
@@ -7979,17 +8736,19 @@ static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
         vm_mock_service_client_session *next = session->next;
 
         if (session->clientId != authenticatedClientId &&
-            strcmp(session->accountId, accountId) == 0 &&
-            (session->roleOnline || session->onlinePresenceValid ||
-             session->sceneVisibleReady))
+            session->accountId[0] != 0 &&
+            strcmp(session->accountId, accountId) == 0)
         {
-            printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s\n",
+            printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s role_online=%u presence=%u scene_ready=%u action=kick-offline\n",
                    accountId,
                    authenticatedClientId,
                    session->clientId,
                    session->onlineRoleId,
-                   session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-");
-            
+                   session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-",
+                   session->roleOnline ? 1u : 0u,
+                   session->onlinePresenceValid ? 1u : 0u,
+                   session->sceneVisibleReady ? 1u : 0u);
+            session->accountKickedPending = true;
             vm_mock_service_account_flush_for_session(session, "account-login-takeover");
             vm_mock_service_session_mark_offline(session, "account-login-takeover");
             vm_mock_service_session_unbind_account(session);
@@ -8340,17 +9099,21 @@ static void vm_mock_service_session_cancel_map_stone_loading_clear(
     if (session == NULL || !session->mapStoneLoadingClearPending)
         return;
     printf("[info][mock-service] map_stone_loading_clear_cancel client=%08x "
-           "armed_scene=%s remaining=%u reason=%s\n",
+           "armed_scene=%s remaining=%u reason=%s settle=%u\n",
            session->clientId,
            session->mapStoneLoadingClearScene[0]
                ? session->mapStoneLoadingClearScene
                : "-",
            (u32)session->mapStoneLoadingClearRemaining,
-           reason ? reason : "-");
+           reason ? reason : "-",
+           session->dreamExitReenterSettleRequired ? 1u : 0u);
     session->mapStoneLoadingClearPending = false;
     session->mapStoneLoadingClearRemaining = 0;
     session->mapStoneLoadingClearTick = 0;
     session->mapStoneLoadingClearScene[0] = 0;
+    session->shopReturnDreamHudMapStoneHold = false;
+    /* Drop reenter gate when the owed outdoor clear is cancelled/expired. */
+    session->dreamExitReenterSettleRequired = false;
 }
 
 static void vm_mock_service_session_arm_map_stone_loading_clear(
@@ -8413,19 +9176,59 @@ static void vm_mock_service_session_cancel_shop_return_npc_catalog(
     vm_mock_service_client_session *session,
     const char *reason)
 {
-    if (session == NULL || !session->shopReturnNpcCatalogPending)
+    if (session == NULL)
         return;
-    printf("[info][mock-service] shop_return_npc_catalog_cancel client=%08x "
-           "scene=%s reason=%s\n",
-           session->clientId,
-           session->shopReturnNpcCatalogScene[0]
-               ? session->shopReturnNpcCatalogScene
-               : "-",
-           reason ? reason : "-");
+    if (session->shopReturnNpcCatalogPending)
+    {
+        printf("[info][mock-service] shop_return_npc_catalog_cancel client=%08x "
+               "scene=%s reason=%s\n",
+               session->clientId,
+               session->shopReturnNpcCatalogScene[0]
+                   ? session->shopReturnNpcCatalogScene
+                   : "-",
+               reason ? reason : "-");
+    }
     session->shopReturnNpcCatalogPending = false;
     session->shopReturnNpcCatalogScene[0] = 0;
     session->shopReturnNpcCatalogReadyTick = 0;
     session->shopReturnWarmNpcDelivered = false;
+    session->shopReturnNpcResourcesWarm = false;
+    session->shopReturnNpcInlineOnShell = false;
+}
+
+static void vm_mock_service_session_note_dream_shop_return_kind2_skip(
+    vm_mock_service_client_session *session,
+    const char *scene)
+{
+    if (session == NULL || !vm_net_mock_scene_name_is_safe(scene))
+        return;
+    if (scene[0] != '2' || scene[1] != '9')
+        return;
+    /*
+     * Outdoor-warm contract (续 10): NPC maps skip kind-2 30/1 entirely.
+     * 续 12 armed NeedHudRebuild → busy_ack deferred 30/1 for the instance
+     * timer; that third EnterScene reopened multi-load + stuck bar
+     * (588cdfc4 2026-08-05).  Keep settle-bar-only; HUD timer without
+     * EnterScene remains unresolved (client-local ctor, no WT).
+     */
+    session->shopReturnDreamNeedSettleBarClear = true;
+    session->shopReturnDreamNeedHudRebuild = false;
+    session->shopReturnDreamHudMapStoneHold = false;
+    session->shopReturnKind2Completed = true;
+    if (session->pendingShopReturnSceneEnter)
+    {
+        vm_mock_service_session_cancel_shop_return_kind2_reenter(
+            session, "kind2-skip-warm-no-hud-30/1");
+    }
+    printf("[info][mock-service] shop_return_dream_settle_bar_arm "
+           "client=%08x scene=%s "
+           "evidence=kind2-skip-shell-settlement-exit-4/8-only\n",
+           session->clientId, scene);
+    printf("[info][mock-service] shop_return_dream_hud_rebuild_skip "
+           "client=%08x scene=%s "
+           "evidence=warm-single-load-forbids-deferred-30/1 "
+           "unresolved=instance-timer-without-EnterScene\n",
+           session->clientId, scene);
 }
 
 static void vm_mock_service_session_arm_shop_return_busy_ack(
@@ -8460,6 +9263,13 @@ static void vm_mock_service_session_cancel_shop_return_kind2_reenter(
     session->pendingShopReturnSceneEnterScene[0] = 0;
     session->pendingShopReturnSceneEnterX = 0;
     session->pendingShopReturnSceneEnterY = 0;
+    if (session->shopReturnDreamNeedHudRebuild)
+    {
+        session->shopReturnDreamNeedHudRebuild = false;
+        printf("[info][mock-service] shop_return_dream_hud_rebuild_cancel "
+               "client=%08x reason=%s\n",
+               session->clientId, reason ? reason : "-");
+    }
 }
 
 static void vm_mock_service_session_arm_shop_return_kind2_reenter(
@@ -8560,7 +9370,10 @@ static void vm_mock_service_session_arm_shop_return_kind2_reenter(
     if (reason != NULL &&
         (strcmp(reason, "moveinfo-live-post-catalog") == 0 ||
          strcmp(reason, "moveinfo-live") == 0 ||
-         strcmp(reason, "loading-clear-timeout") == 0))
+         strcmp(reason, "loading-clear-timeout") == 0 ||
+         strcmp(reason, "dream-battle-mapctrl-moveinfo") == 0 ||
+         strcmp(reason, "dream-battle-mapctrl") == 0 ||
+         strcmp(reason, "dream-hud-timer-rebuild") == 0))
     {
         session->pendingShopReturnSceneEnterEarliestTick = g_schedulerTick;
     }
@@ -8699,6 +9512,7 @@ static void vm_mock_service_finish_shop_return_rehydrate(
     if (session == NULL || !vm_net_mock_scene_name_is_safe(scene))
         return;
 
+
     /*
      * Shop open arms g_netMockShop17ListPending for mall page sync.  Leaving it
      * set after mmShop closes hijacks the next backpack 17/1 with shop rows so
@@ -8733,13 +9547,61 @@ static void vm_mock_service_finish_shop_return_rehydrate(
      */
     if (session->shopSceneNpcReseedPending)
     {
+        u8 npcCount = vm_net_mock_scene_room_npc_seed_count(scene);
+
+        /*
+         * post-test23/24: mmShop clears type-21.  If follow-up never forced a
+         * nonempty 27/11 (warm=0), arm poll catalog before consuming reseed —
+         * otherwise NPCs stay missing after a successful exit.
+         */
+        if (!session->shopReturnWarmNpcDelivered && npcCount > 0u &&
+            !session->shopReturnNpcCatalogPending &&
+            !session->shopReturnNpcInlineOnShell)
+        {
+            bool dreamScene = scene[0] == '2' && scene[1] == '9';
+
+            /*
+             * Warm outdoor / dream 29*: early-shell nonempty 27/11 in the
+             * shell 30/2 window (type27-inject; no same-packet 30/2).  One
+             * DoLoading only — kind-2 same-scene EnterScene is outdoor's
+             * empty-map path, not NPC maps (user 2026-08-05: match 野外).
+             *
+             * Prior dream defer_after_kind2 skipped early 27/11 then armed
+             * dream-battle-mapctrl 30/1 → second bar + WT18/7 stuck.
+             */
+            if (dreamScene || session->shopReturnNpcResourcesWarm)
+            {
+                session->shopReturnNpcInlineOnShell = true;
+                printf("[info][mock-service] shop_return_npc_inline_on_shell "
+                       "client=%08x scene=%s npcnum=%u dream=%u warm=%u "
+                       "evidence=early-shell-27/11-before-30/2\n",
+                       session->clientId, scene, (u32)npcCount,
+                       dreamScene ? 1u : 0u,
+                       session->shopReturnNpcResourcesWarm ? 1u : 0u);
+            }
+            else
+            {
+                session->shopReturnNpcCatalogPending = true;
+                snprintf(session->shopReturnNpcCatalogScene,
+                         sizeof(session->shopReturnNpcCatalogScene), "%s",
+                         scene);
+                session->shopReturnNpcCatalogReadyTick = g_schedulerTick;
+                printf("[info][mock-service] shop_return_npc_catalog_defer "
+                       "client=%08x scene=%s npcnum=%u via=rehydrate-missed-warm "
+                       "evidence=post-test24-mmShop-clears-type21\n",
+                       session->clientId, scene, (u32)npcCount);
+            }
+        }
         printf("[info][mock-service] scene_npc_reseed_consume client=%08x "
-               "scene=%s reason=shop-return-rehydrate "
-               "evidence=one-shot-mmShop-exit\n",
+               "scene=%s reason=shop-return-rehydrate warm=%u catalog_pending=%u "
+               "inline_shell=%u evidence=one-shot-mmShop-exit\n",
                session->clientId,
                session->shopSceneNpcReseedScene[0]
                    ? session->shopSceneNpcReseedScene
-                   : scene);
+                   : scene,
+               session->shopReturnWarmNpcDelivered ? 1u : 0u,
+               session->shopReturnNpcCatalogPending ? 1u : 0u,
+               session->shopReturnNpcInlineOnShell ? 1u : 0u);
         session->shopSceneNpcReseedPending = false;
         session->shopSceneNpcReseedScene[0] = 0;
     }
@@ -8883,6 +9745,8 @@ static bool vm_mock_service_team_member_has_nonzero_battle_hp(
 static const char *vm_mock_service_session_team_battle_not_ready_reason(
     const vm_mock_service_client_session *session)
 {
+    const vm_mock_service_account_state *account = NULL;
+
     if (session == NULL)
         return "missing-session";
     if (session->mmShopShellActive)
@@ -8899,6 +9763,32 @@ static const char *vm_mock_service_session_team_battle_not_ready_reason(
     }
     if (!session->sceneVisibleReady || session->sceneVisiblePending)
         return "scene-not-ready";
+    /*
+     * Prior-fight settle panel still owns Battle.cbm until delayed 4/8.
+     * Hangup/challenge must not arm the next shared 1/4/5 while any same-scene
+     * seat still owes tear-down — otherwise the seat misses start and the
+     * round barrier waits on an un-entered actor
+     * (docs/re/2026-08-05-team-hangup-peer-settle-stall.md).
+     *
+     * Do NOT key off AwaitingSettlement alone: hangup skip-4/8 keeps that bit
+     * set on the leader until the next start clears Battle.cbm.
+     */
+    if (session->accountId[0] != 0)
+        account = vm_mock_service_account_find(session->accountId);
+    if (account != NULL &&
+        (account->mockBattleSettlementExitPending != 0 ||
+         account->mockBattlePostExitSettlePending != 0))
+    {
+        /*
+         * A seat that stopped polling (frozen / disconnecting) still carries
+         * settle-pending until heartbeat-timeout.  Do not block team hangup
+         * forever on a non-recent presence — that seat will be removed or
+         * will not join the next start either way.
+         */
+        if (!vm_mock_service_session_presence_is_recent(session))
+            return NULL;
+        return "settle-pending";
+    }
     return NULL;
 }
 
@@ -9593,7 +10483,8 @@ static bool vm_mock_service_account_add_role_wcoin(const char *accountId,
         role->wcoin = before - (u32)deduct;
         after = role->wcoin;
     }
-    if (!vm_net_mock_role_db_save(delta > 0 ? "admin-wcoin-add" : "admin-wcoin-deduct"))
+    if (!vm_net_mock_role_db_save_role(
+            delta > 0 ? "admin-wcoin-add" : "admin-wcoin-deduct", role->roleId))
     {
         role->wcoin = before;
         vm_mock_service_account_capture(state);
@@ -9644,7 +10535,7 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
     before = role->money;
     after = (0xffffffffu - before < amount) ? 0xffffffffu : before + amount;
     role->money = after;
-    if (!vm_net_mock_role_db_save("admin-money-add"))
+    if (!vm_net_mock_role_db_save_role("admin-money-add", role->roleId))
     {
         role->money = before;
         vm_mock_service_account_capture(state);
@@ -9804,21 +10695,36 @@ enum
     /* Keep the complete server-side scene catalog separate from the four rows
      * that the client can safely instantiate. */
     VM_NET_MOCK_SCENE_NPC_CATALOG_MAX = 32,
+    /* Max server-managed accept bindings per dynamic NPC
+     * (server_dynamic_npc_tasks rows).  Dialog still shares the 7-option
+     * 26/1 budget with service entries. */
+    VM_NET_MOCK_NPC_BOUND_TASK_MAX = 8,
     VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID = 20022,
     VM_NET_MOCK_TEST_TASK_ID = 900001
 };
 
 typedef struct
 {
-    u32 actorId;
-    /* Optional server-managed task binding.  SCE/XSE actors keep this zero
-     * and continue to discover their tasks from the script resource. */
     u32 taskId;
-    /* This is a property of the dynamic NPC binding, not a client-side task
-     * flag.  It authorizes replacing a persisted completed (state 3) row only
-     * after this NPC has actually offered the task to the active session. */
+    /* Binding-scoped: authorize re-offer after state=3 for this NPC only. */
+    bool repeatable;
+    /* 0 = unlimited daily accepts for this binding. */
+    u16 dailyAcceptLimit;
+} vm_net_mock_npc_bound_task;
+
+typedef struct
+{
+    u32 actorId;
+    /*
+     * Server-managed accept bindings (0..BOUND_TASK_MAX).  SCE/XSE-only actors
+     * keep boundTaskCount=0 and discover tasks from the script resource.
+     * taskId/taskRepeatable/taskDailyAcceptLimit mirror boundTasks[0] for
+     * instance-guide / legacy single-binding call sites.
+     */
+    u32 boundTaskCount;
+    vm_net_mock_npc_bound_task boundTasks[VM_NET_MOCK_NPC_BOUND_TASK_MAX];
+    u32 taskId;
     bool taskRepeatable;
-    /* 0 = unlimited daily accepts for server-managed task NPCs. */
     u16 taskDailyAcceptLimit;
     u32 challengeEnemyId;
     u16 x;
@@ -9837,6 +10743,62 @@ typedef struct
     char scriptName[64];
     char instanceScene[64];
 } vm_net_mock_scene_npcinfo_seed;
+
+static void vm_net_mock_seed_sync_primary_bound_task(
+    vm_net_mock_scene_npcinfo_seed *seed)
+{
+    if (seed == NULL)
+        return;
+    if (seed->boundTaskCount == 0)
+    {
+        seed->taskId = 0;
+        seed->taskRepeatable = false;
+        seed->taskDailyAcceptLimit = 0;
+        return;
+    }
+    seed->taskId = seed->boundTasks[0].taskId;
+    seed->taskRepeatable = seed->boundTasks[0].repeatable;
+    seed->taskDailyAcceptLimit = seed->boundTasks[0].dailyAcceptLimit;
+}
+
+static bool vm_net_mock_seed_add_bound_task(vm_net_mock_scene_npcinfo_seed *seed,
+                                            u32 taskId, bool repeatable,
+                                            u16 dailyAcceptLimit)
+{
+    if (seed == NULL || taskId == 0)
+        return false;
+    for (u32 i = 0; i < seed->boundTaskCount; ++i)
+    {
+        if (seed->boundTasks[i].taskId == taskId)
+        {
+            seed->boundTasks[i].repeatable = repeatable;
+            seed->boundTasks[i].dailyAcceptLimit = dailyAcceptLimit;
+            vm_net_mock_seed_sync_primary_bound_task(seed);
+            return true;
+        }
+    }
+    if (seed->boundTaskCount >= VM_NET_MOCK_NPC_BOUND_TASK_MAX)
+        return false;
+    seed->boundTasks[seed->boundTaskCount].taskId = taskId;
+    seed->boundTasks[seed->boundTaskCount].repeatable = repeatable;
+    seed->boundTasks[seed->boundTaskCount].dailyAcceptLimit = dailyAcceptLimit;
+    seed->boundTaskCount += 1;
+    vm_net_mock_seed_sync_primary_bound_task(seed);
+    return true;
+}
+
+static const vm_net_mock_npc_bound_task *vm_net_mock_seed_find_bound_task(
+    const vm_net_mock_scene_npcinfo_seed *seed, u32 taskId)
+{
+    if (seed == NULL || taskId == 0)
+        return NULL;
+    for (u32 i = 0; i < seed->boundTaskCount; ++i)
+    {
+        if (seed->boundTasks[i].taskId == taskId)
+            return &seed->boundTasks[i];
+    }
+    return NULL;
+}
 
 typedef struct
 {
@@ -10247,6 +11209,96 @@ static bool vm_net_mock_write_scene_resource_bytes(const char *scene,
         *errorOut = "ok";
     printf("[info][mock-admin] scene_resource_write scene=%s path=%s decoded=%u compressed=%u\n",
            scene, path, decodedLen, compressedLen);
+
+done:
+    if (fp != NULL)
+        fclose(fp);
+    free(encoded);
+    free(fileBuf);
+    return ok;
+}
+
+/*
+ * Write an unwrapped .map payload as LZSS type-2 JHOnlineData resource.
+ * Unlike scene writes, this does not require SCE2 magic and does not mirror
+ * extensionless twins.
+ */
+static bool vm_net_mock_write_map_resource_bytes(const char *mapLeaf,
+                                                 const u8 *decoded,
+                                                 u32 decodedLen,
+                                                 const char **errorOut)
+{
+    char path[1200];
+    u8 *encoded = NULL;
+    u8 *fileBuf = NULL;
+    u32 compressedLen = 0;
+    u32 blockLen = 0;
+    FILE *fp = NULL;
+    bool ok = false;
+
+    if (errorOut)
+        *errorOut = "写入地图失败";
+    if (mapLeaf == NULL || mapLeaf[0] == 0 || decoded == NULL ||
+        decodedLen == 0 || !vm_net_mock_update_name_is_safe(mapLeaf) ||
+        !vm_net_mock_str_ends_with(mapLeaf, ".map"))
+    {
+        return false;
+    }
+    memset(path, 0, sizeof(path));
+    if (!vm_net_mock_update_resource_path(mapLeaf, path, sizeof(path)))
+    {
+        if (errorOut)
+            *errorOut = "找不到地图资源路径";
+        return false;
+    }
+    encoded = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_ENCODE_MAX);
+    fileBuf = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_ENCODE_MAX + 16u);
+    if (encoded == NULL || fileBuf == NULL)
+    {
+        if (errorOut)
+            *errorOut = "地图写入内存不足";
+        goto done;
+    }
+    compressedLen = vm_net_mock_encode_lzss_literals(
+        decoded, decodedLen, encoded, VM_NET_MOCK_SCE_EDIT_ENCODE_MAX);
+    if (compressedLen == 0)
+    {
+        if (errorOut)
+            *errorOut = "地图 LZSS 编码失败";
+        goto done;
+    }
+    blockLen = 1u + 4u + 4u + compressedLen;
+    if (4u + blockLen > VM_NET_MOCK_SCE_EDIT_ENCODE_MAX + 16u)
+    {
+        if (errorOut)
+            *errorOut = "地图编码后超过大小上限";
+        goto done;
+    }
+    vm_net_mock_store_le32(fileBuf, 0, blockLen);
+    fileBuf[4] = 2;
+    vm_net_mock_store_be32(fileBuf, 5, compressedLen);
+    vm_net_mock_store_be32(fileBuf, 9, decodedLen);
+    memcpy(fileBuf + 13, encoded, compressedLen);
+    fp = vm_net_mock_fopen_game_path(path, "wb");
+    if (fp == NULL)
+    {
+        if (errorOut)
+            *errorOut = "无法打开地图文件写入";
+        goto done;
+    }
+    if (fwrite(fileBuf, 1, 4u + blockLen, fp) != 4u + blockLen)
+    {
+        if (errorOut)
+            *errorOut = "写入地图文件失败";
+        goto done;
+    }
+    fclose(fp);
+    fp = NULL;
+    ok = true;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] map_resource_write map=%s path=%s decoded=%u compressed=%u\n",
+           mapLeaf, path, decodedLen, compressedLen);
 
 done:
     if (fp != NULL)

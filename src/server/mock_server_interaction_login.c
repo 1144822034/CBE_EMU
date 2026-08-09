@@ -39,6 +39,87 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                session->instanceChallengeEnemyId, requestedEnemyId, ageTicks,
                scene ? scene : "-", session->instanceChallengeScene);
     }
+    /*
+     * Dream after mmShop: subtype-5 soft-fails without battle mapctrl.
+     * Prefer kind-2 30/1 + client allow_dream_shop_return_reenter.  Keep this
+     * HAS_FOLLOWUP 4/10 arm only as fallback if the flag is still set
+     * (kind-2 cancelled / client not rebuilt).
+     */
+    if (session != NULL && session->shopReturnDreamNeedNonSceneBattle &&
+        vm_net_mock_is_challenge_interaction_request(request, requestLen) &&
+        !session->instanceChallengePending &&
+        !session->instanceChallengeBattlePending)
+    {
+        const char *visible = vm_net_mock_client_visible_scene_name();
+        const char *battleScene =
+            vm_net_mock_scene_name_is_safe(visible) ? visible : scene;
+        u32 wireId = 0;
+        u32 index = 0;
+        u32 posx = 0;
+        u32 posy = 0;
+        u32 enemyId = 0;
+        u32 pos = 5;
+        u8 objectCount = 0;
+        const u8 *moveInfo = NULL;
+        u16 moveInfoLen = 0;
+        bool hasMoveinfo = false;
+
+        if (vm_net_mock_scene_name_is_safe(battleScene) &&
+            battleScene[0] == '2' && battleScene[1] == '9' &&
+            vm_net_mock_get_object_u32_field(request, requestLen, "id",
+                                             &wireId) &&
+            wireId != 0)
+        {
+            (void)vm_net_mock_get_object_u32_field(request, requestLen, "index",
+                                                    &index);
+            (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx",
+                                                    &posx);
+            (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy",
+                                                    &posy);
+            enemyId = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
+                battleScene, wireId, posx, posy);
+            if (enemyId == 0)
+            {
+                printf("[error][network] mock_shop_return_dream_battle_remap_refuse "
+                       "client=%08x scene=%s wire=%u index=%u pos=(%u,%u) "
+                       "evidence=no-silent-wire-fallback\n",
+                       session->clientId, battleScene, wireId, index, posx,
+                       posy);
+                return 0;
+            }
+            hasMoveinfo = vm_net_mock_get_object_blob_field(
+                request, requestLen, "moveinfo", &moveInfo, &moveInfoLen);
+            if (hasMoveinfo)
+            {
+                if (!vm_net_mock_append_actor_moveinfo_empty_ack_object(
+                        out, outCap, &pos))
+                    return 0;
+                objectCount = 1;
+            }
+            vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+            session->instanceChallengeBattlePending = true;
+            session->instanceChallengeBattleWireCount = 0;
+            session->instanceChallengeActorId = wireId;
+            session->instanceChallengeEnemyId = enemyId;
+            session->instanceChallengeX =
+                posx != 0 ? (u16)posx : (u16)1;
+            session->instanceChallengeY =
+                posy != 0 ? (u16)posy : (u16)1;
+            session->instanceChallengeTick = g_schedulerTick;
+            snprintf(session->instanceChallengeScene,
+                     sizeof(session->instanceChallengeScene), "%s",
+                     battleScene);
+            printf("[info][network] mock_shop_return_dream_battle_followup_arm "
+                   "client=%08x scene=%s wire=%u real=%u index=%u "
+                   "pos=(%u,%u) primary_objects=%u "
+                   "battle_delivery=data-followup "
+                   "evidence=post-mmShop-no-mapctrl-HAS_FOLLOWUP-4/10\n",
+                   session->clientId, battleScene, wireId, enemyId, index,
+                   posx, posy, objectCount);
+            return pos;
+        }
+    }
     return vm_net_mock_build_challenge_interaction_response_ex(
         request, requestLen, out, outCap, false);
 }
@@ -526,30 +607,36 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
             return true;
         }
         /*
-         * Nonempty 27/11 on follow-up when type27 did not inject.  No
-         * same-packet 30/2 — 26/0 cannot clear DF; poll drip owns
-         * ResetDownloadState (docs/re/2026-07-27-shop-return-loading-stall.md).
+         * Force nonempty 27/11 (mmShop cleared type-21).  Do not use
+         * once_or_empty — empty-11 + warm_delivered left NPCs missing
+         * (post-test23).
          */
-        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
-        if (!vm_net_mock_append_scene_npcs11_once_or_empty(
-                out, outCap, pos, currentScene,
-                "shop-return-followup-warm"))
-            return false;
-        *objectCount += 1;
-        activeSession->shopReturnWarmNpcDelivered = true;
-        activeSession->shopReturnNpcCatalogPending = false;
-        activeSession->shopReturnNpcCatalogScene[0] = 0;
-        activeSession->shopReturnNpcCatalogReadyTick = 0;
-        activeSession->shopSceneNpcReseedPending = false;
-        activeSession->shopSceneNpcReseedScene[0] = 0;
-        printf("[info][mock-service] shop_return_npc_warm_immediate "
-               "client=%08x scene=%s npcnum=%u via=followup "
-               "prior_seeded=%u "
-               "evidence=27/11-then-poll-30/2-no-same-packet\n",
-               activeSession->clientId,
-               currentScene,
-               (u32)npcCount,
-               priorSeeded ? 1u : 0u);
+        {
+            u8 forcedNpc = 0;
+
+            if (!vm_net_mock_append_scene_npcs11_shop_return_force(
+                    out, outCap, pos, currentScene,
+                    "shop-return-followup-warm", &forcedNpc))
+                return false;
+            *objectCount += 1;
+            if (forcedNpc > 0)
+            {
+                activeSession->shopReturnWarmNpcDelivered = true;
+                activeSession->shopReturnNpcCatalogPending = false;
+                activeSession->shopReturnNpcCatalogScene[0] = 0;
+                activeSession->shopReturnNpcCatalogReadyTick = 0;
+                activeSession->shopSceneNpcReseedPending = false;
+                activeSession->shopSceneNpcReseedScene[0] = 0;
+            }
+            printf("[info][mock-service] shop_return_npc_warm_immediate "
+                   "client=%08x scene=%s npcnum=%u via=followup "
+                   "prior_seeded=%u "
+                   "evidence=27/11-force-then-poll-30/2\n",
+                   activeSession->clientId,
+                   currentScene,
+                   (u32)forcedNpc,
+                   priorSeeded ? 1u : 0u);
+        }
         return true;
     }
 
@@ -1327,6 +1414,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
                  sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene),
                  "%s", currentScene ? currentScene : "");
+        vm_mock_service_session_note_scene_npc_catalog_seeded(
+            vm_mock_service_get_active_client_session(), currentScene, 1);
     }
     else if (!keepBusinessGate &&
         includeSkillBooks &&
@@ -1715,6 +1804,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
         snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
                  sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene),
                  "%s", currentScene ? currentScene : "");
+        vm_mock_service_session_note_scene_npc_catalog_seeded(
+            vm_mock_service_get_active_client_session(), currentScene, 1);
     }
     return pos;
 }
@@ -2329,6 +2420,28 @@ static u32 vm_net_mock_build_battle_death_prompt_followup_response(const u8 *req
     return pos;
 }
 
+static bool vm_net_mock_is_shop_actor_query14_request(const u8 *request, u32 requestLen)
+{
+    u32 offset = 4;
+    u32 actorId = 0;
+    vm_net_mock_request_object object;
+
+    if (request == NULL || requestLen < 9)
+        return false;
+    if (request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+        return false;
+    if (offset != requestLen)
+        return false;
+    if (object.major != 1 || object.kind != 1 || object.subtype != 14)
+        return false;
+    if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorId",
+                                          &actorId))
+        return false;
+    return true;
+}
+
 static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 requestLen,
                                                          u8 *out, u32 outCap)
 {
@@ -2373,48 +2486,15 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     wcoin = vm_net_mock_role_wcoin_balance(activeRole);
 
     /*
-     * already_open (exit 0x162C or combo trailing open14):
-     * Never attach 1/1/14 here — actor_state SCR NULL+0x10 on live mmShop.
-     * status+money alone does not clear *[r9+0x2868]+0x10; arm host flag so
-     * client drops the shop-loading byte (and download-busy if still armed).
-     * shop_open14_trace: combo exit was trailing=1 resp=79 with NO flag → stuck.
+     * 01769c21 contract (restored post-test23): EVERY open14 is the same
+     * five-object family ending with 1/1/14 actorinfo (bareDefense, full
+     * wire).  mmShop:0x9DE clears loading only on that actor-state branch.
+     *
+     * Rejected deviations (debug-25c74d):
+     * - shell family-4 no actor -> stuck communication bar
+     * - live/capped/zero-paint actor -> SCR_Render NULL+0x10
+     * - host peel/kind2 -> outdoor gone, no poll, stuck on transition
      */
-    if (vm_mock_service_mmshop_shell_is_active())
-    {
-        u32 ackOrd = vm_mock_service_shop_actor_query_ack_ordinal();
-        char trace[256];
-        FILE *fp;
-
-        if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
-            return 0;
-        if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
-            return 0;
-        vm_net_mock_finish_wt_packet(out, pos, 2);
-        fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_mmshop_loading_clear.flag",
-                   "w");
-        if (fp != NULL)
-        {
-            fputs("1\n", fp);
-            fclose(fp);
-        }
-        snprintf(trace, sizeof(trace),
-                 "already_open ack=%u status+money host_clear=1 resp=%u",
-                 ackOrd, pos);
-        vm_mock_service_shop_open14_trace(trace);
-        printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u "
-               "pages=skip actor_state=skip already_open=1 ack=%u "
-               "host_clear=1 resp=%u "
-               "evidence=0x162C-host-clear-no-actorinfo\n",
-               actorId,
-               activeRole ? activeRole->roleId : 0,
-               wcoin,
-               ackOrd,
-               pos);
-        vm_autotest_note("mock_shop_open14 already_open=1 host_clear=1 "
-                         "status+money evidence=mmShop:0x162C+host-flag\n");
-        return pos;
-    }
-
     if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
         return 0;
     if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
@@ -2426,42 +2506,48 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
                                                     &secretTotalItems, &secretRows,
                                                     &secretItemInfoLen))
         return 0;
-    actorInfoLen = 0;
-    vm_net_mock_finish_wt_packet(out, pos, 4);
+    /*
+     * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch and
+     * clears the shop loading flag there, so keep this object last.
+     */
+    if (!vm_net_mock_append_shop_actor_state14_object_open14(out, outCap, &pos,
+                                                             &actorInfoLen))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 5);
     g_netMockShop17ListPending = 1;
     g_netMockBackpackGridSeededRoleId = 0;
     vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
-    /* No seed_ack — combo trailing uses mark_src; sole exit uses mall_clear. */
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
     {
         char trace[192];
+        u32 shell = vm_mock_service_mmshop_shell_is_active() ? 1u : 0u;
         snprintf(trace, sizeof(trace),
-                 "first_open family-4 mark_src=open14 page5=%u resp=%u",
-                 page5Index, pos);
+                 "open14 family-5 actor=%u shell=%u page5=%u resp=%u",
+                 actorInfoLen, shell, page5Index, pos);
         vm_mock_service_shop_open14_trace(trace);
     }
-    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline "
-           "actor_state=skip page5=%u page6=0 secret_total=%u "
-           "secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u "
-           "weapon_iteminfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s "
-           "evidence=first-open-family-4\n",
+    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u "
+           "pages=inline actor_state=last page5=%u page6=0 secret_total=%u "
+           "secret_rows=%u secret_iteminfo_len=%u actorinfo_len=%u "
+           "grid_reseed=1 secret_ids=%s weapon_ids=%s "
+           "evidence=01769c21-family5+bareDefense-full-wire\n",
            actorId,
            activeRole ? activeRole->roleId : 0,
            wcoin,
            page5Index,
-           totalItems,
-           pageRows,
-           itemInfoLen,
            secretTotalItems,
            secretRows,
            secretItemInfoLen,
+           actorInfoLen,
            page5Ids,
            secretIds);
-    vm_autotest_note("mock_shop_open14 pages=inline actor_state=skip "
-                     "evidence=mmShop:0x9DE-family-4-first-open\n");
+    vm_autotest_note("mock_shop_open14 actorId=%u pages=inline actor_state=last "
+                     "actorinfo_len=%u evidence=01769c21-restore-post-test23\n",
+                     actorId, actorInfoLen);
     return pos;
 }
+
 
 static bool vm_net_mock_is_shop_info14_request(const u8 *request, u32 requestLen, u8 *subtypeOut)
 {
@@ -2657,7 +2743,8 @@ static bool vm_net_mock_shop_calculate_cost(u32 itemId, u32 count,
         *unitPriceOut = unitPrice;
     if (costOut)
         *costOut = cost;
-    return item != NULL && item->enabled;
+    /* 商城 14/3 已停售装备；装备改走 NPC/其它路径。 */
+    return item != NULL && item->enabled && item->isEquip == 0;
 }
 
 static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestLen,
@@ -2926,6 +3013,22 @@ static u32 vm_net_mock_build_shop_buy14_response(const u8 *request, u32 requestL
            g_netMockBackpackPreferRoleListAfterShopBuy,
            result ? 1 : 0,
            respLabel);
+    /*
+     * Non-flask buy success: ask host to clear mmShop loading if 0x9DE
+     * finish path left the bar up (purchase-success stall).
+     * Flask keeps pending 30/21+7/11 peel — do not host-clear.
+     */
+    if (result == 1 && !armFlaskBackpackDeliver && !syncActorInfoOnBuy)
+    {
+        FILE *fp = fopen(
+            "d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_mmshop_loading_clear.flag",
+            "w");
+        if (fp != NULL)
+        {
+            fputs("1\n", fp);
+            fclose(fp);
+        }
+    }
     vm_autotest_note("mock_shop_buy14 type=%u item=%u count=%u unit=%u cost=%u wcoin=%u/%u money=%u/%u copper_grant=%u seq=%u result=%u direct_gold=%u map_revived=%u flask_reservoir=%u flask_pending_bag=%u response=%s evidence=mmShop:0x9DE+JianghuOL:0x01039952/0x01033544 mmGame:0x0D04\n",
                      type, itemId, count, unitPrice, cost, wcoinBefore, wcoinAfter,
                      moneyBefore, moneyAfter, copperGranted,
@@ -3095,7 +3198,7 @@ static const char *vm_net_mock_actor_preview_image_name(u8 actorJob, u8 actorSex
 
 static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_actor_info_ex(out, outCap, false, true);
+    return vm_net_mock_build_actor_info_ex(out, outCap, false, true, false);
 }
 
 /*
@@ -3107,12 +3210,27 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
 
 static u32 vm_net_mock_build_actor_info_mall_loading_clear(u8 *out, u32 outCap)
 {
-    return vm_net_mock_build_actor_info_ex(out, outCap, true, false);
+    return vm_net_mock_build_actor_info_ex(out, outCap, true, false, false);
+}
+
+/*
+ * 01769c21 shop open14 parity: full wire layout + bareDefense attrs, no
+ * overlay.  Live-subset / bare+eq / zero-paint paths SCR'd on exit
+ * (post-test16/17); host peel left transition with no poll (post-test22).
+ */
+static u32 vm_net_mock_build_actor_info_shop_open14(u8 *out, u32 outCap)
+{
+    return vm_net_mock_build_actor_info_ex(out, outCap, false, false, true);
 }
 
 static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh,
-                                          bool publishOverlay)
+                                          bool publishOverlay, bool shopOpen14)
 {
+    if (shopOpen14)
+    {
+        liveRefresh = false;
+        publishOverlay = false;
+    }
     u32 pos = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
@@ -3181,15 +3299,16 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
                                     &roleMpDefault,
                                     &roleMaxMpDefault);
     /*
-     * primaryBaseMax / secondaryBaseMax are the bare pools without equipment
-     * HP/MP column bonuses.  primaryDisplayMax / secondaryDisplayMax keep the
-     * full totals that already include equip.dsh 生命/法力变化.
+     * primaryBaseMax / secondaryBaseMax: bare pools (no equip HP/MP column).
+     * primaryDisplayMax / secondaryDisplayMax: ALSO bare.
      *
-     * Runtime: battle start already seeds the full total (e.g. 426 = 386+40).
-     * After battle the client property page was observed at 466 (=426+40), i.e.
-     * it re-applies local equipment bonuses on top of a value that already
-     * included them.  Keeping the wire "base" field bare stops that second add
-     * from double-counting while the display field and battleinfo stay full.
+     * Client wear-apply re-adds equip.dsh 气血/法力 (flat + %).  Seeding
+     * displayMax as the already-full server total made the property page
+     * show full+equip again (e.g. 11553→16608, 4153→6006) while battle
+     * correctly used build_player_stats full via battleinfo.
+     * docs/re/2026-08-05-panel-hp-mp-double-count-bare-display.md
+     *
+     * Current HP/MP still live against the full pool (role vitals / battle).
      */
     {
         u32 bareHpMax = (playerStats.maxHp > playerStats.equipment.hp)
@@ -3198,6 +3317,8 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
         u32 bareMpMax = (playerStats.maxMp > playerStats.equipment.mp)
                             ? (playerStats.maxMp - playerStats.equipment.mp)
                             : playerStats.maxMp;
+        u32 fullHpMax = playerStats.maxHp ? playerStats.maxHp : roleMaxHpDefault;
+        u32 fullMpMax = playerStats.maxMp ? playerStats.maxMp : roleMaxMpDefault;
 
         primaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_HP_CURRENT",
                                              vm_net_mock_env_u32("CBE_ACTOR_HP", roleHpDefault));
@@ -3205,12 +3326,12 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
         secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
                                                vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
         secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", bareMpMax);
-        primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX",
-                                                playerStats.maxHp ? playerStats.maxHp
-                                                                  : roleMaxHpDefault);
-        secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX",
-                                                   playerStats.maxMp ? playerStats.maxMp
-                                                                    : roleMaxMpDefault);
+        primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", bareHpMax);
+        secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", bareMpMax);
+        if (primaryCurrent > fullHpMax)
+            primaryCurrent = fullHpMax;
+        if (secondaryCurrent > fullMpMax)
+            secondaryCurrent = fullMpMax;
     }
     if (roleLevel == 0)
         roleLevel = 1;
@@ -3226,15 +3347,11 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
         primaryDisplayMax = primaryBaseMax;
     if (secondaryDisplayMax == 0)
         secondaryDisplayMax = secondaryBaseMax;
-    /* Current HP/MP live against the full (equipment-inclusive) pool. */
-    if (primaryCurrent > primaryDisplayMax)
-        primaryCurrent = primaryDisplayMax;
-    if (secondaryCurrent > secondaryDisplayMax)
-        secondaryCurrent = secondaryDisplayMax;
 
     /*
      * Paint-8 / parse_actorinfo 六字.
      *
+     * shopOpen14 (01769c21): full wire + bareDefense — exit 0x9DE contract.
      * Login (live=0): FULL equipment-inclusive words — login 7/7 has no
      * wear-apply FA/F8; panel overlay covers 物攻/闪躲/暴击.
      *
@@ -3244,7 +3361,41 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
      * into mmShop actor-state corrupts page state.  Wear-apply F8/FA still
      * owns combat halfwords; panel uses overlay.
      */
-    if (liveRefresh)
+    if (shopOpen14)
+    {
+        /* Exact 01769c21 attr words for mmShop open14 actor-state. */
+        actorStrength =
+            (u16)vm_net_mock_cap_u32(playerStats.baseStrength, 65535);
+        actorAgility =
+            (u16)vm_net_mock_cap_u32(playerStats.baseAgility, 65535);
+        actorWisdom =
+            (u16)vm_net_mock_cap_u32(playerStats.baseWisdom, 65535);
+        actorEndurance =
+            (u16)vm_net_mock_cap_u32(playerStats.baseEndurance, 65535);
+        actorCharm = (u16)vm_net_mock_cap_u32(playerStats.charm, 65535);
+        actorAttrWords[0] =
+            vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH", actorStrength);
+        actorAttrWords[1] =
+            vm_net_mock_env_u32("CBE_ACTOR_ATTR_AGILITY", actorAgility);
+        actorAttrWords[2] =
+            vm_net_mock_env_u32("CBE_ACTOR_ATTR_HIT", playerStats.hit);
+        actorAttrWords[3] =
+            vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM",
+                                vm_net_mock_cap_u32(playerStats.wisdom, 65535));
+        {
+            /* Wire bare armor halfword; wear-apply F8 adds equip.armor.
+             * defense is already bare+full armor after 2026-08-05 unify. */
+            u32 bareDefense =
+                (playerStats.defense > playerStats.equipment.armor)
+                    ? (playerStats.defense - playerStats.equipment.armor)
+                    : playerStats.defense;
+            if (bareDefense > 65535u)
+                bareDefense = 65535u;
+            actorAttrWords[4] =
+                vm_net_mock_env_u32("CBE_ACTOR_ATTR_ARMOR", bareDefense);
+        }
+    }
+    else if (liveRefresh)
     {
         actorStrength =
             (u16)vm_net_mock_cap_u32(playerStats.baseStrength, 65535);
@@ -3264,10 +3415,10 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
         actorAttrWords[3] =
             vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM", actorWisdom);
         {
-            u32 armorContrib = playerStats.equipment.armor / 5u;
-            u32 bareDefense = (playerStats.defense > armorContrib)
-                                  ? (playerStats.defense - armorContrib)
-                                  : playerStats.defense;
+            u32 bareDefense =
+                (playerStats.defense > playerStats.equipment.armor)
+                    ? (playerStats.defense - playerStats.equipment.armor)
+                    : playerStats.defense;
             if (bareDefense > 65535u)
                 bareDefense = 65535u;
             actorAttrWords[4] =
@@ -3295,13 +3446,7 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
             vm_net_mock_env_u32("CBE_ACTOR_ATTR_WISDOM",
                                 vm_net_mock_cap_u32(playerStats.wisdom, 65535));
         {
-            u32 armorContrib = playerStats.equipment.armor / 5u;
-            u32 bareDefense = (playerStats.defense > armorContrib)
-                                  ? (playerStats.defense - armorContrib)
-                                  : playerStats.defense;
-            u32 armorWord = bareDefense + playerStats.equipment.armor;
-            if (armorWord > 65535u)
-                armorWord = 65535u;
+            u32 armorWord = vm_net_mock_cap_u32(playerStats.defense, 65535);
             actorAttrWords[4] =
                 vm_net_mock_env_u32("CBE_ACTOR_ATTR_ARMOR", armorWord);
         }
@@ -3316,17 +3461,15 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
     actorAttrWords[5] =
         vm_net_mock_env_u32("CBE_ACTOR_ATTR_RESIST", 0);
     /*
-     * Mall loading-clear (live + !publishOverlay): keep wire words in the
-     * proven-safe band (role456 w4≈5870 OK; role1 full 38815 SCR NULL+0x10).
+     * Mall loading-clear (live + !publishOverlay): zero paint-8 words.
+     * Cap alone (8000) still SCR'd on trailing open14 (debug-25c74d
+     * post-fix2).  This blob is only for 0x9DE loading-clear, not attrs.
      */
     if (liveRefresh && !publishOverlay)
     {
         u32 i;
         for (i = 0; i < 6; ++i)
-        {
-            if (actorAttrWords[i] > VM_NET_MOCK_MALL_LOADING_ATTR_WORD_CAP)
-                actorAttrWords[i] = VM_NET_MOCK_MALL_LOADING_ATTR_WORD_CAP;
-        }
+            actorAttrWords[i] = 0;
     }
     actorGap0CC0 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC0", 0);
     actorGap0CC4 = vm_net_mock_env_u32("CBE_ACTOR_GAP0CC4", 0);
@@ -3346,13 +3489,8 @@ static u32 vm_net_mock_build_actor_info_ex(u8 *out, u32 outCap, bool liveRefresh
            playerStats.equipment.armor, playerStats.wisdom, playerStats.hit,
            playerStats.dodge, playerStats.crit, playerStats.resist);
     
-    /*
-     * Shop loading-clear 1/1/14 must not refresh the attr overlay: mall is not
-     * an attribute authority (user contract + debug-a1d304 shop crashes when
-     * open packets were tied to gear words).
-     */
-    if (publishOverlay)
-        vm_net_mock_publish_panel_attr_overlay(&playerStats);
+    /* Panel uses actorinfo / wear-apply halfwords; no host overlay file. */
+    (void)publishOverlay;
     actorSummaryStatus = vm_net_mock_env_u32("CBE_ACTOR_STATUS_WORD", roleLevel);
     shortLabel = vm_net_mock_env_str("CBE_ACTOR_SHORT_LABEL", vm_net_mock_role_title(role));
 
@@ -4545,6 +4683,57 @@ static u32 vm_net_mock_build_title_role_delete_response(const u8 *request,
     return pos;
 }
 
+static u32 vm_net_mock_build_active_role_relogin_response(u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 actorInfoLen = 0;
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (out == NULL || outCap < pos || role == NULL)
+        return 0;
+
+    /*
+     * Same lifecycle reset as title role-select (1/1/6+1/1/15).  Subtype-6
+     * creates the first scene shell via scene_runtime_init_and_sync.
+     */
+    g_vm_net_mock_title_role_scene_followup_pending = true;
+    g_netMockBackpackGridSeededRoleId = 0;
+    g_netMockShop17ListPending = 0;
+    g_netMockBackpackPreferRoleListAfterShopBuy = 0;
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_last_current_scene_reload_valid = false;
+    g_vm_net_mock_teleport_stone_subtype3_ack_sent = false;
+    g_vm_net_mock_teleport_stone_direct_enter_pending = false;
+    g_vm_net_mock_teleport_stone_map_enter_pending = false;
+    g_vm_net_mock_teleport_stone_confirm_target_valid = false;
+    if (g_vm_net_mock_teleport_stone_deferred_enter_client_id == 0 ||
+        g_vm_net_mock_teleport_stone_deferred_enter_client_id ==
+            g_vm_mock_service_active_client_id)
+    {
+        g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+        g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+        g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
+    }
+    g_vm_net_mock_teleport_stone_same_scene = false;
+    g_vm_net_mock_task_transport_pending_valid = false;
+    g_vm_net_mock_task_transport_pending_task_id = 0;
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    vm_net_mock_mark_scene_moveinfo_npc_seed_pending(role->scene);
+
+    if (!vm_net_mock_append_login_success_object(out, outCap, &pos, 6, true,
+                                                  &actorInfoLen))
+        return 0;
+    if (!vm_net_mock_append_title_mode15_result_object(out, outCap, &pos))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    printf("[info][network] mock_active_role_relogin role=%u scene=%s "
+           "actorinfo_len=%u response=1/1/6+1/1/15 "
+           "evidence=title-role-select-parity\n",
+           role->roleId, role->scene, actorInfoLen);
+    return pos;
+}
+
 static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
     u32 pos = 5;
@@ -4602,8 +4791,14 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
         g_vm_net_mock_teleport_stone_direct_enter_pending = false;
         g_vm_net_mock_teleport_stone_map_enter_pending = false;
         g_vm_net_mock_teleport_stone_confirm_target_valid = false;
-        g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
-        g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+        if (g_vm_net_mock_teleport_stone_deferred_enter_client_id == 0 ||
+            g_vm_net_mock_teleport_stone_deferred_enter_client_id ==
+                g_vm_mock_service_active_client_id)
+        {
+            g_vm_net_mock_teleport_stone_deferred_enter_valid = false;
+            g_vm_net_mock_teleport_stone_deferred_enter_tick = 0;
+            g_vm_net_mock_teleport_stone_deferred_enter_client_id = 0;
+        }
         g_vm_net_mock_teleport_stone_same_scene = false;
         g_vm_net_mock_task_transport_pending_valid = false;
         g_vm_net_mock_task_transport_pending_task_id = 0;

@@ -47,6 +47,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    
     /* #region agent log */
     if (type == UC_MEM_WRITE)
     {

@@ -3244,7 +3244,7 @@ static bool vm_file_try_download_named_resource(const char *normalizedPath)
                 snprintf(dataBuf, sizeof(dataBuf), "{\"file\":\"%.80s\"}", leaf);
                 agent_dbg0b451a_log("H9", "main.c:res", "timer_asset_uptodate",
                                     dataBuf);
-                printf("[info][hud-timer] timer_asset_uptodate file=%s\n", leaf);
+                //printf("[info][hud-timer] timer_asset_uptodate file=%s\n", leaf);
             }
             /* #endregion */
 #endif
@@ -3963,53 +3963,6 @@ static int vm_host_attr_value_base_usable(u32 valueBase, u16 stride)
     return 1;
 }
 
-/*
- * Server publishes aggregated panel attrs when actorinfo / wear sync / equip
- * runs.  Login cannot FA-apply; fill wear-only zeros from here.  Prefer live
- * actor halfwords when non-zero (real 7/8 wear already applied).
- */
-#define CBE_PANEL_ATTR_OVERLAY_PATH \
-    "d:/works/my/jianghu/CBE_EMU_pay/bin/cbe_panel_attr_overlay.txt"
-
-static int vm_host_read_panel_attr_overlay(u16 *str, u16 *agi, u16 *wis,
-                                           u16 *atk, u16 *armor, u16 *dodge,
-                                           u16 *hit, u16 *crit, u16 *resist,
-                                           u16 *charm, u32 *genOut)
-{
-    FILE *fp;
-    unsigned gen = 0, s = 0, a = 0, w = 0, at = 0, ar = 0, d = 0, h = 0, c = 0,
-             r = 0, ch = 0, hp = 0, mp = 0;
-
-    if (str == NULL || agi == NULL || wis == NULL || atk == NULL || armor == NULL ||
-        dodge == NULL || hit == NULL || crit == NULL || resist == NULL || charm == NULL)
-        return 0;
-    fp = fopen(CBE_PANEL_ATTR_OVERLAY_PATH, "r");
-    if (fp == NULL)
-        return 0;
-    if (fscanf(fp, "%u %u %u %u %u %u %u %u %u %u %u %u %u", &gen, &s, &a, &w,
-               &at, &ar, &d, &h, &c, &r, &ch, &hp, &mp) < 11)
-    {
-        fclose(fp);
-        return 0;
-    }
-    fclose(fp);
-    *str = (u16)(s > 65535u ? 65535u : s);
-    *agi = (u16)(a > 65535u ? 65535u : a);
-    *wis = (u16)(w > 65535u ? 65535u : w);
-    *atk = (u16)(at > 65535u ? 65535u : at);
-    *armor = (u16)(ar > 65535u ? 65535u : ar);
-    *dodge = (u16)(d > 65535u ? 65535u : d);
-    *hit = (u16)(h > 65535u ? 65535u : h);
-    *crit = (u16)(c > 65535u ? 65535u : c);
-    *resist = (u16)(r > 65535u ? 65535u : r);
-    *charm = (u16)(ch > 65535u ? 65535u : ch);
-    if (genOut != NULL)
-        *genOut = gen;
-    (void)hp;
-    (void)mp;
-    return 1;
-}
-
 /* Set at wear-apply epilogue: 5CAC combat halfwords look unequipped. */
 static int g_agent_wear_combat_bare = 0;
 
@@ -4194,40 +4147,7 @@ static void vm_host_realign_attr_panel_value_rows(void)
     s_lastWis = wis;
     s_lastWearBare = g_agent_wear_combat_bare;
 
-    /*
-     * Overlay is panel authority when present (published on actorinfo / equip).
-     * debug-a1d304 unequip: overlay str=219 but sticky strA/B=2195; zero-fill
-     * kept 2195. Prefer overlay for all panel rows (strings only).
-     */
-    {
-        u16 ovStr = 0, ovAgi = 0, ovWis = 0, ovAtk = 0, ovArmor = 0, ovDodge = 0,
-            ovHit = 0, ovCrit = 0, ovResist = 0, ovCharm = 0;
-        u32 ovGen = 0;
-        u16 beforeStr = str, beforeAtk = atk, beforeArmor = armor;
-        int ovOk = vm_host_read_panel_attr_overlay(
-            &ovStr, &ovAgi, &ovWis, &ovAtk, &ovArmor, &ovDodge, &ovHit, &ovCrit,
-            &ovResist, &ovCharm, &ovGen);
-        if (ovOk)
-        {
-            str = ovStr;
-            agi = ovAgi;
-            wis = ovWis;
-            atk = ovAtk;
-            armor = ovArmor;
-            dodge = ovDodge;
-            hit = ovHit;
-            crit = ovCrit;
-            resist = ovResist;
-            if (ovCharm != 0 || charm84 == 0)
-                charm84 = ovCharm;
-            s_lastStr = str;
-            s_lastAgi = agi;
-            s_lastWis = wis;
-            
-        }
-    }
-
-    
+    /* Panel strings from actor halfwords only (host overlay file removed). */
     if ((actorA == 0 && actorB == 0) || valueBase == 0)
         return;
     if (stride < 4 || stride > 24)
@@ -4243,8 +4163,6 @@ static void vm_host_realign_attr_panel_value_rows(void)
     vm_host_write_attr_panel_row(valueBase, stride, 16u, hit);
     vm_host_write_attr_panel_row(valueBase, stride, 17u, crit);
     vm_host_write_attr_panel_row(valueBase, stride, 18u, resist);
-
-    
 }
 
 /*
@@ -4255,25 +4173,19 @@ static void vm_host_realign_attr_panel_value_rows(void)
 static void agent_dbg0b451a_log(const char *hypothesisId, const char *location,
                                 const char *message, const char *dataJson)
 {
-    FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
-    if (fp == NULL)
-        return;
-    fprintf(fp,
-            "{\"sessionId\":\"0b451a\",\"runId\":\"emu-hud-timer\","
-            "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
-            "\"data\":%s,\"timestamp\":%lld}\n",
-            hypothesisId ? hypothesisId : "",
-            location ? location : "",
-            message ? message : "",
-            dataJson ? dataJson : "{}",
-            (long long)time(NULL) * 1000LL);
-    fclose(fp);
-}
-
-void agent_dbg0b451a_note_active_role(u32 roleId)
-{
-    /* Title 1/1/6 role-select binder for dream HUD forensics. */
-    (void)roleId;
+    //FILE *fp = fopen("d:/works/my/jianghu/CBE_EMU_pay/debug-0b451a.log", "a");
+    //if (fp == NULL)
+     //   return;
+    //fprintf(fp,
+     //       "{\"sessionId\":\"0b451a\",\"runId\":\"emu-hud-timer\","
+      //      "\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\","
+     //       "\"data\":%s,\"timestamp\":%lld}\n",
+      //      hypothesisId ? hypothesisId : "",
+      //      location ? location : "",
+       //     message ? message : "",
+      //      dataJson ? dataJson : "{}",
+       //     (long long)time(NULL) * 1000LL);
+    //fclose(fp);
 }
 
 static int agent_dbg0b451a_parse_hhmm(const char *text, u32 *minutesOut)
@@ -4327,39 +4239,242 @@ static int agent_dbg0b451a_parse_hhmm(const char *text, u32 *minutesOut)
     return 0;
 }
 
-static u8 g_agent_dream_hud_watch = 0;
+/*
+ * Dream HUD visit/remain is per-role.  Three local clients are three
+ * processes; same-process title rebind (role 1 → 455) must not share
+ * visit_ms or shop-return will poke the wrong remaining (or full 60).
+ */
+enum { AGENT_DREAM_HUD_ROLE_MAX = 8 };
+typedef struct
+{
+    u32 roleId;
+    u8 used;
+    u8 watch;
+    u8 pokeDone;
+    u32 visitMs;
+    u32 lastRemain;
+    u32 lastPollMs;
+} agent_dream_hud_role_t;
+
+static agent_dream_hud_role_t g_agent_dream_hud_roles[AGENT_DREAM_HUD_ROLE_MAX];
+static u32 g_agent_dream_hud_active_role_id = 0;
 /* Non-static: hookRam.c watches writes to obj+0x10. */
 u32 g_agent_timer_obj = 0;
-static u32 g_agent_timer_last_poll_ms = 0;
-static u32 g_agent_timer_last_remain = 0xffffffffu;
-static u8 g_agent_timer_remain_poke_done = 0;
+static u32 g_agent_dream_hud_ttl_ms = 0; /* 0 = unread; mirror server file */
 
-/* Forensic one-shot: force remain=60 (HUD MM:SS 01:00).
- * Server treats the same contract as **60 wall minutes** (tick ~1/min). */
+static agent_dream_hud_role_t *agent_dream_hud_find_slot(u32 roleId)
+{
+    u32 i;
+    if (roleId == 0)
+        return NULL;
+    for (i = 0; i < AGENT_DREAM_HUD_ROLE_MAX; ++i)
+    {
+        if (g_agent_dream_hud_roles[i].used &&
+            g_agent_dream_hud_roles[i].roleId == roleId)
+            return &g_agent_dream_hud_roles[i];
+    }
+    return NULL;
+}
+
+static agent_dream_hud_role_t *agent_dream_hud_alloc_slot(u32 roleId)
+{
+    u32 i;
+    agent_dream_hud_role_t *slot;
+    if (roleId == 0)
+        return NULL;
+    slot = agent_dream_hud_find_slot(roleId);
+    if (slot != NULL)
+        return slot;
+    for (i = 0; i < AGENT_DREAM_HUD_ROLE_MAX; ++i)
+    {
+        if (!g_agent_dream_hud_roles[i].used)
+        {
+            memset(&g_agent_dream_hud_roles[i], 0,
+                   sizeof(g_agent_dream_hud_roles[i]));
+            g_agent_dream_hud_roles[i].used = 1;
+            g_agent_dream_hud_roles[i].roleId = roleId;
+            g_agent_dream_hud_roles[i].lastRemain = 0xffffffffu;
+            return &g_agent_dream_hud_roles[i];
+        }
+    }
+    printf("[warn][hud-timer] dream_hud_role_slots_full drop_role=%u "
+           "reuse_slot0_for=%u\n",
+           g_agent_dream_hud_roles[0].roleId, roleId);
+    memset(&g_agent_dream_hud_roles[0], 0, sizeof(g_agent_dream_hud_roles[0]));
+    g_agent_dream_hud_roles[0].used = 1;
+    g_agent_dream_hud_roles[0].roleId = roleId;
+    g_agent_dream_hud_roles[0].lastRemain = 0xffffffffu;
+    return &g_agent_dream_hud_roles[0];
+}
+
+static agent_dream_hud_role_t *agent_dream_hud_active_slot(int create)
+{
+    agent_dream_hud_role_t *slot;
+    if (g_agent_dream_hud_active_role_id == 0)
+        return NULL;
+    slot = agent_dream_hud_find_slot(g_agent_dream_hud_active_role_id);
+    if (slot != NULL || !create)
+        return slot;
+    return agent_dream_hud_alloc_slot(g_agent_dream_hud_active_role_id);
+}
+
+void agent_dbg0b451a_note_active_role(u32 roleId)
+{
+    agent_dream_hud_role_t *slot;
+    if (roleId == 0)
+        return;
+    if (g_agent_dream_hud_active_role_id == roleId)
+        return;
+    slot = agent_dream_hud_alloc_slot(roleId);
+    g_agent_dream_hud_active_role_id = roleId;
+    g_agent_timer_obj = 0;
+    printf("[info][hud-timer] dream_hud_active_role role=%u visit_ms=%u "
+           "last_remain=%u watch=%u evidence=title-1/1/6-per-role\n",
+           roleId,
+           slot ? slot->visitMs : 0u,
+           slot ? slot->lastRemain : 0xffffffffu,
+           slot && slot->watch ? 1u : 0u);
+}
+
+static int agent_dream_hud_watch_active(void)
+{
+    agent_dream_hud_role_t *slot = agent_dream_hud_active_slot(0);
+    return slot != NULL && slot->watch;
+}
+
+/* Reject garbage SCE names (mmShop noise) that must not clear visit_ms. */
+static int agent_dbg0b451a_scene_name_plausible(const char *name)
+{
+    size_t i;
+    size_t n;
+    if (name == NULL || name[0] == 0 || name[0] == '-')
+        return 0;
+    n = strlen(name);
+    if (n < 4 || n >= 80)
+        return 0;
+    for (i = 0; i < n; ++i)
+    {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20 || c == 0x7f)
+            return 0;
+    }
+    if (name[0] == '2' && name[1] == '9')
+        return 1;
+    if ((name[0] >= '0' && name[0] <= '9') || name[0] == 'c' || name[0] == 'C')
+        return 1;
+    return 0;
+}
+
+static u32 agent_dbg0b451a_dream_hud_ttl_ms(void)
+{
+    static int cached = 0;
+    FILE *fp = NULL;
+    unsigned long parsed = 0;
+    static const char *paths[] = {
+        "bin/JHOnlineData/dream_hud_ttl_ms.txt",
+        "JHOnlineData/dream_hud_ttl_ms.txt",
+        "web/fs/JHOnlineData/dream_hud_ttl_ms.txt",
+        "../bin/JHOnlineData/dream_hud_ttl_ms.txt"
+    };
+
+    if (cached)
+        return g_agent_dream_hud_ttl_ms ? g_agent_dream_hud_ttl_ms
+                                       : (60u * 60u * 1000u);
+    g_agent_dream_hud_ttl_ms = 60u * 60u * 1000u;
+    for (u32 i = 0; fp == NULL && i < sizeof(paths) / sizeof(paths[0]); ++i)
+        fp = fopen(paths[i], "rb");
+    if (fp != NULL)
+    {
+        if (fscanf(fp, "%lu", &parsed) == 1 &&
+            parsed >= 1000ul && parsed <= (7ul * 24ul * 3600ul * 1000ul))
+            g_agent_dream_hud_ttl_ms = (u32)parsed;
+        fclose(fp);
+    }
+    cached = 1;
+    return g_agent_dream_hud_ttl_ms;
+}
+
+static u32 agent_dbg0b451a_dream_remain_start_units(void)
+{
+    u32 ttlMs = agent_dbg0b451a_dream_hud_ttl_ms();
+    u32 units = (ttlMs + 59999u) / 60000u;
+    if (units < 1u)
+        units = 1u;
+    if (units > 3600u)
+        units = 3600u;
+    return units;
+}
+
+/* remain units: start→MM:SS; tick ~1 unit / wall minute. Per active role. */
+static u32 agent_dbg0b451a_dream_remain_units(void)
+{
+    u32 nowMs;
+    u32 elapsedMin;
+    u32 startUnits;
+    u32 fromVisit;
+    u32 fromLast;
+    agent_dream_hud_role_t *slot = agent_dream_hud_active_slot(0);
+
+    startUnits = agent_dbg0b451a_dream_remain_start_units();
+    if (slot == NULL || slot->visitMs == 0)
+        return startUnits;
+    nowMs = SDL_GetTicks();
+    if (nowMs < slot->visitMs)
+        return startUnits;
+    elapsedMin = (nowMs - slot->visitMs) / 60000u;
+    fromVisit = (elapsedMin >= startUnits) ? 1u : (startUnits - elapsedMin);
+
+    if (slot->lastRemain != 0xffffffffu &&
+        slot->lastRemain >= 1u &&
+        slot->lastRemain <= 3600u &&
+        slot->lastPollMs != 0 &&
+        nowMs >= slot->lastPollMs)
+    {
+        u32 burned = (nowMs - slot->lastPollMs) / 60000u;
+        if (burned >= slot->lastRemain)
+            fromLast = 1u;
+        else
+            fromLast = slot->lastRemain - burned;
+        return (fromLast < fromVisit) ? fromLast : fromVisit;
+    }
+    return fromVisit;
+}
+
+/* Sync HUD remain after ScreenInit (~29285) to visit-relative units.
+ * First enter → start units; shop-return rebuild → remaining, not full 60. */
 static void agent_dbg0b451a_poke_remain_1m00(void)
 {
     u32 oldRemain = 0;
-    u32 newRemain = 60u; /* 0h 1m 0s → MM:SS=01:00, HH:MM=00:01, HH:SS=00:00 */
-    char dataBuf[240];
+    u32 newRemain;
+    u32 elapsedMs = 0;
+    char dataBuf[320];
+    agent_dream_hud_role_t *slot = agent_dream_hud_active_slot(0);
 
-    if (g_agent_timer_remain_poke_done || !g_agent_dream_hud_watch ||
-        g_agent_timer_obj == 0)
+    if (slot == NULL || slot->pokeDone || !slot->watch || g_agent_timer_obj == 0)
         return;
     oldRemain = vm_get_var(g_agent_timer_obj + 0x10u);
-    if (oldRemain < 60u || oldRemain > 86400u)
+    if (oldRemain < 1u || oldRemain > 86400u)
         return;
+    newRemain = agent_dbg0b451a_dream_remain_units();
+    if (oldRemain == newRemain)
+        return;
+    if (slot->visitMs != 0)
+    {
+        u32 nowMs = SDL_GetTicks();
+        if (nowMs >= slot->visitMs)
+            elapsedMs = nowMs - slot->visitMs;
+    }
     vm_set_var(g_agent_timer_obj + 0x10u, newRemain);
-    g_agent_timer_remain_poke_done = 1;
-    g_agent_timer_last_remain = newRemain;
+    slot->pokeDone = 1;
+    slot->lastRemain = newRemain;
     snprintf(dataBuf, sizeof(dataBuf),
-             "{\"obj\":\"%08x\",\"old\":%u,\"new\":%u,"
-             "\"expect_mmss\":\"01:00\",\"expect_hhmm\":\"00:01\","
-             "\"expect_hhss\":\"00:00\"}",
-             g_agent_timer_obj, oldRemain, newRemain);
-    agent_dbg0b451a_log("H20", "main.c:poke", "timer_remain_poke_1m00", dataBuf);
-    printf("[info][hud-timer] POKE remain %u -> %u (expect MM:SS=01:00 "
-           "HH:MM=00:01 HH:SS=00:00)\n",
-           oldRemain, newRemain);
+             "{\"obj\":\"%08x\",\"old\":%u,\"new\":%u,\"elapsedMs\":%u,"
+             "\"visitMs\":%u,\"role\":%u}",
+             g_agent_timer_obj, oldRemain, newRemain, elapsedMs,
+             slot->visitMs, slot->roleId);
+    agent_dbg0b451a_log("L", "main.c:poke", "timer_remain_poke_visit", dataBuf);
+    //printf("[info][hud-timer] POKE remain %u -> %u (visit elapsed_ms=%u role=%u)\n",
+       //    oldRemain, newRemain, elapsedMs, slot->roleId);
 }
 
 void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc)
@@ -4376,8 +4491,8 @@ void agent_dbg0b451a_on_timer_remain_write(u32 addr, u32 size, u32 value, u32 pc
              addr, size, value, value / 3600u, (value % 3600u) / 60u, value % 60u, pc,
              SDL_GetTicks());
     agent_dbg0b451a_log("H18", "main.c:mem", "timer_remain_write", dataBuf);
-    printf("[info][hud-timer] timer_remain_write value=%u (%u:%02u:%02u) pc=%08x\n",
-           value, value / 3600u, (value % 3600u) / 60u, value % 60u, pc);
+    //printf("[info][hud-timer] timer_remain_write value=%u (%u:%02u:%02u) pc=%08x\n",
+      //     value, value / 3600u, (value % 3600u) / 60u, value % 60u, pc);
     ++s_wrLogs;
 }
 
@@ -4391,9 +4506,11 @@ static void agent_dbg0b451a_poll_timer_remain(const char *reason)
     u16 d0 = 0, d1 = 0, d2 = 0, d3 = 0;
     static u8 s_lastBlink = 0xffu;
     static u32 s_blinkChangeLogs = 0;
-    char dataBuf[360];
+    char dataBuf[400];
+    agent_dream_hud_role_t *slot = agent_dream_hud_active_slot(0);
+    u32 prevRemain;
 
-    if (!g_agent_dream_hud_watch || g_agent_timer_obj == 0)
+    if (slot == NULL || !slot->watch || g_agent_timer_obj == 0)
         return;
     nowWall = SDL_GetTicks();
     remain = vm_get_var(g_agent_timer_obj + 0x10u);
@@ -4401,24 +4518,25 @@ static void agent_dbg0b451a_poll_timer_remain(const char *reason)
     blinkLast = vm_get_var(g_agent_timer_obj + 0x14u);
     blink = 0;
     uc_mem_read(MTK, g_agent_timer_obj + 0x18u, &blink, 1);
-    /* Log immediately when colon blink flag toggles (expect ~1Hz). */
     if (blink != s_lastBlink && s_blinkChangeLogs < 20u)
     {
         snprintf(dataBuf, sizeof(dataBuf),
                  "{\"obj\":\"%08x\",\"blink\":%u,\"prev\":%u,\"blinkLast\":%u,"
-                 "\"remain\":%u,\"wall\":%u}",
+                 "\"remain\":%u,\"wall\":%u,\"role\":%u}",
                  g_agent_timer_obj, (unsigned)blink, (unsigned)s_lastBlink,
-                 blinkLast, remain, nowWall);
+                 blinkLast, remain, nowWall, slot->roleId);
         agent_dbg0b451a_log("H19", "main.c:poll", "timer_colon_blink", dataBuf);
-        printf("[info][hud-timer] timer_colon_blink %u->%u remain=%u wall=%u\n",
-               (unsigned)s_lastBlink, (unsigned)blink, remain, nowWall);
+       // printf("[info][hud-timer] timer_colon_blink %u->%u remain=%u wall=%u "
+          //     "role=%u\n",
+          //     (unsigned)s_lastBlink, (unsigned)blink, remain, nowWall,
+           //    slot->roleId);
         s_lastBlink = blink;
         ++s_blinkChangeLogs;
     }
-    if (g_agent_timer_last_poll_ms != 0 &&
-        (nowWall - g_agent_timer_last_poll_ms) < 1000u)
+    if (slot->lastPollMs != 0 && (nowWall - slot->lastPollMs) < 1000u)
         return;
-    g_agent_timer_last_poll_ms = nowWall;
+    slot->lastPollMs = nowWall;
+    prevRemain = slot->lastRemain;
     d0 = vm_get_var_short(g_agent_timer_obj);
     d1 = vm_get_var_short(g_agent_timer_obj + 2u);
     d2 = vm_get_var_short(g_agent_timer_obj + 4u);
@@ -4426,23 +4544,23 @@ static void agent_dbg0b451a_poll_timer_remain(const char *reason)
     snprintf(dataBuf, sizeof(dataBuf),
              "{\"obj\":\"%08x\",\"remain\":%u,\"lastTick\":%u,\"blink\":%u,"
              "\"blinkLast\":%u,\"wall\":%u,\"hhmmss\":\"%u:%02u:%02u\","
-             "\"dig\":\"%u%u:%u%u\",\"deltaRemain\":%d,\"reason\":\"%s\"}",
+             "\"dig\":\"%u%u:%u%u\",\"deltaRemain\":%d,\"reason\":\"%s\","
+             "\"role\":%u}",
              g_agent_timer_obj, remain, lastTick, (unsigned)blink, blinkLast,
              nowWall, remain / 3600u, (remain % 3600u) / 60u, remain % 60u,
              (unsigned)d0, (unsigned)d1, (unsigned)d2, (unsigned)d3,
-             (g_agent_timer_last_remain == 0xffffffffu)
-                 ? 0
-                 : (int)remain - (int)g_agent_timer_last_remain,
-             reason ? reason : "-");
+             (prevRemain == 0xffffffffu) ? 0 : (int)remain - (int)prevRemain,
+             reason ? reason : "-", slot->roleId);
     agent_dbg0b451a_log("H19", "main.c:poll", "timer_remain_poll", dataBuf);
-    printf("[info][hud-timer] timer_remain_poll obj=%08x remain=%u "
-           "(%u:%02u:%02u) blink=%u lastTick=%u wall=%u deltaRemain=%d\n",
-           g_agent_timer_obj, remain, remain / 3600u, (remain % 3600u) / 60u,
-           remain % 60u, (unsigned)blink, lastTick, nowWall,
-           (g_agent_timer_last_remain == 0xffffffffu)
-               ? 0
-               : (int)remain - (int)g_agent_timer_last_remain);
-    g_agent_timer_last_remain = remain;
+    //printf("[info][hud-timer] timer_remain_poll obj=%08x remain=%u "
+       //    "(%u:%02u:%02u) blink=%u lastTick=%u wall=%u deltaRemain=%d "
+       //    "role=%u\n",
+       //    g_agent_timer_obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+       //    remain % 60u, (unsigned)blink, lastTick, nowWall,
+       //    (prevRemain == 0xffffffffu) ? 0 : (int)remain - (int)prevRemain,
+       //    slot->roleId);
+    if (remain >= 1u && remain <= 3600u)
+        slot->lastRemain = remain;
 }
 /* After first clock colon, sample nearby clip blits for digit glyphs. */
 static u8 g_agent_digit_sample_armed = 0;
@@ -4629,9 +4747,9 @@ static void agent_dbg0b451a_scan_heap_for_clock(u32 minutes)
                  minutes, totalHits, totalAscii, hitBuf, ctxBuf,
                  g_lastSceLoadName);
         agent_dbg0b451a_log("H7", "main.c:heap_scan", "heap_clock_scan", dataBuf);
-        printf("[info][hud-timer] heap_clock_scan min=%u hits=%u ascii=%u "
-               "sce=%s ctx=%s\n",
-               minutes, totalHits, totalAscii, g_lastSceLoadName, ctxBuf);
+        //printf("[info][hud-timer] heap_clock_scan min=%u hits=%u ascii=%u "
+         //      "sce=%s ctx=%s\n",
+           //    minutes, totalHits, totalAscii, g_lastSceLoadName, ctxBuf);
         ++s_heapLogs;
     }
 }
@@ -4639,32 +4757,80 @@ static void agent_dbg0b451a_scan_heap_for_clock(u32 minutes)
 static void agent_dbg0b451a_on_dream_sce(const char *name)
 {
     static char s_lastArm[96];
-    char dataBuf[200];
-    if (name == NULL || name[0] != '2' || name[1] != '9')
+    char dataBuf[280];
+    u8 freshVisit = 0;
+    agent_dream_hud_role_t *slot;
+
+    if (name == NULL || name[0] == 0 || name[0] == '-')
         return;
-    g_agent_dream_hud_watch = 1;
-    /* Re-enter after eject recreates/resets timer to ~29285; allow poke again. */
-    g_agent_timer_remain_poke_done = 0;
+    if (!agent_dbg0b451a_scene_name_plausible(name))
+    {
+        static u32 s_ignoreLogs = 0;
+        if (s_ignoreLogs < 8u)
+        {
+            printf("[info][hud-timer] dream_hud_sce_ignore name_bytes=%u "
+                   "c0=0x%02x evidence=not-plausible-scene\n",
+                   (u32)strlen(name), (unsigned)(unsigned char)name[0]);
+            ++s_ignoreLogs;
+        }
+        return;
+    }
+    slot = agent_dream_hud_active_slot(1);
+    if (slot == NULL)
+    {
+        printf("[warn][hud-timer] dream_hud_sce_no_role sce=%.40s "
+               "action=skip-until-title-1/1/6\n",
+               name);
+        return;
+    }
+    if (name[0] != '2' || name[1] != '9')
+    {
+        if (slot->watch || slot->visitMs != 0)
+        {
+            snprintf(dataBuf, sizeof(dataBuf),
+                     "{\"sce\":\"%.80s\",\"prevVisitMs\":%u,\"role\":%u}", name,
+                     slot->visitMs, slot->roleId);
+            agent_dbg0b451a_log("L", "main.c:dream_sce", "dream_hud_visit_clear",
+                                dataBuf);
+            //printf("[info][hud-timer] dream_hud_visit_clear sce=%s role=%u\n",
+              //     name, slot->roleId);
+        }
+        slot->watch = 0;
+        slot->visitMs = 0;
+        slot->pokeDone = 0;
+        slot->lastRemain = 0xffffffffu;
+        slot->lastPollMs = 0;
         g_agent_timer_obj = 0;
-    g_agent_timer_last_remain = 0xffffffffu;
+        s_lastArm[0] = 0;
+        return;
+    }
+    if (slot->visitMs == 0)
+    {
+        slot->visitMs = SDL_GetTicks();
+        slot->lastRemain = 0xffffffffu;
+        slot->lastPollMs = 0;
+        freshVisit = 1;
+    }
+    slot->watch = 1;
+    slot->pokeDone = 0;
+    g_agent_timer_obj = 0;
     if (g_lastSceLoadName[0] == '-' || g_lastSceLoadName[0] == 0)
         snprintf(g_lastSceLoadName, sizeof(g_lastSceLoadName), "%s", name);
-    /* Allow a second arm after ScreenInit (same scene) for a late heap scan. */
-    if (s_lastArm[0] && strcmp(s_lastArm, name) == 0 &&
-        g_agent_dream_hud_watch == 1)
-    {
-        /* Still rescan heap once more when re-armed (enter-after-init). */
-    }
     snprintf(s_lastArm, sizeof(s_lastArm), "%s", name);
     snprintf(dataBuf, sizeof(dataBuf),
-             "{\"sce\":\"%.80s\",\"r9\":\"%08x\"}", name,
-             Global_R9 ? Global_R9 : 0u);
-    agent_dbg0b451a_log("H7", "main.c:dream_sce", "dream_hud_watch_arm", dataBuf);
-    printf("[info][hud-timer] dream_hud_watch_arm sce=%s r9=%08x\n", name,
-           Global_R9 ? Global_R9 : 0u);
+             "{\"sce\":\"%.80s\",\"r9\":\"%08x\",\"visitMs\":%u,\"fresh\":%u,"
+             "\"remainUnits\":%u,\"role\":%u}",
+             name, Global_R9 ? Global_R9 : 0u, slot->visitMs,
+             (unsigned)freshVisit, agent_dbg0b451a_dream_remain_units(),
+             slot->roleId);
+    agent_dbg0b451a_log("L", "main.c:dream_sce", "dream_hud_watch_arm", dataBuf);
+    //printf("[info][hud-timer] dream_hud_watch_arm sce=%s r9=%08x visit_ms=%u "
+      //     "fresh=%u remain_units=%u role=%u\n",
+        //   name, Global_R9 ? Global_R9 : 0u, slot->visitMs,
+        //   (unsigned)freshVisit, agent_dbg0b451a_dream_remain_units(),
+        //   slot->roleId);
     agent_dbg0b451a_scan_r9_for_minutes(485, 0, -1, -1, "dream-sce");
     agent_dbg0b451a_scan_heap_for_clock(485);
-    /* Also hunt remaining-seconds form 485*60=29100. */
     agent_dbg0b451a_scan_heap_for_clock(29100);
 }
 
@@ -4714,9 +4880,9 @@ static void agent_dbg0b451a_note_hhmm(const char *source, const char *text, int 
                  source ? source : "?", safeText, safeFmt, minutes, x, y, lr, pc);
         agent_dbg0b451a_log(minutes >= 60u ? "H1" : "H1b", "main.c:hhmm",
                             "hhmm_observed", dataBuf);
-        printf("[info][hud-timer] hhmm src=%s text=%s min=%u xy=(%d,%d) lr=%08x "
-               "fmt=%s\n",
-               source ? source : "?", safeText, minutes, x, y, lr, safeFmt);
+        //printf("[info][hud-timer] hhmm src=%s text=%s min=%u xy=(%d,%d) lr=%08x "
+         //      "fmt=%s\n",
+          //     source ? source : "?", safeText, minutes, x, y, lr, safeFmt);
     }
     snprintf(s_lastText, sizeof(s_lastText), "%s", text);
     s_lastMin = minutes;
@@ -4748,7 +4914,7 @@ static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
         s_alive = 1;
         agent_dbg0b451a_log("H6", "main.c:alive", "client_draw_alive",
                             "{\"ok\":1}");
-        printf("[info][hud-timer] client_draw_alive instrumentation active\n");
+       // printf("[info][hud-timer] client_draw_alive instrumentation active\n");
     }
     while (gbkText[len] != 0 && len < 32u)
         ++len;
@@ -4764,7 +4930,7 @@ static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
         if (ch == ':' || (ch >= '0' && ch <= '9') || ch == 0xA3)
             hasDigit = 1;
     }
-    if (g_agent_dream_hud_watch)
+    if (agent_dream_hud_watch_active())
         interesting = (y >= 0 && y <= 64) || hasDigit;
     else
         interesting = hasDigit && y >= 0 && y <= 48;
@@ -4790,19 +4956,19 @@ static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
                  "{\"text\":\"%s\",\"hex\":\"%s\",\"len\":%u,\"x\":%d,\"y\":%d,"
                  "\"lr\":\"%08x\",\"sce\":\"%.40s\",\"watch\":%u}",
                  safe, hex, len, x, y, lr, g_lastSceLoadName,
-                 (unsigned)g_agent_dream_hud_watch);
+                 (unsigned)agent_dream_hud_watch_active());
         agent_dbg0b451a_log("H4", "main.c:topright", "topright_draw", dataBuf);
-        printf("[info][hud-timer] topright text=%s hex=%s xy=(%d,%d) lr=%08x "
-               "sce=%s watch=%u\n",
-               safe, hex, x, y, lr, g_lastSceLoadName,
-               (unsigned)g_agent_dream_hud_watch);
+       // printf("[info][hud-timer] topright text=%s hex=%s xy=(%d,%d) lr=%08x "
+         //      "sce=%s watch=%u\n",
+         //      safe, hex, x, y, lr, g_lastSceLoadName,
+          //     (unsigned)agent_dream_hud_watch_active());
     }
     ++s_trLogs;
     /*
      * Clock colon candidate: lone ':' near top-right (debug: 205,75).
      * Digits of 08:05 are NOT text draws — likely image glyphs (H5/H8).
      */
-    if (g_agent_dream_hud_watch && len == 1 && gbkText[0] == ':' && x >= 180 &&
+    if (agent_dream_hud_watch_active() && len == 1 && gbkText[0] == ':' && x >= 180 &&
         y >= 0 && y <= 100)
     {
         static u32 s_colonLogs = 0;
@@ -4811,8 +4977,8 @@ static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
                  "{\"x\":%d,\"y\":%d,\"lr\":\"%08x\",\"sce\":\"%.40s\"}", x, y,
                  lr, g_lastSceLoadName);
         agent_dbg0b451a_log("H8", "main.c:colon", "clock_colon_draw", dataBuf);
-        printf("[info][hud-timer] clock_colon_draw xy=(%d,%d) lr=%08x\n", x, y,
-               lr);
+        //printf("[info][hud-timer] clock_colon_draw xy=(%d,%d) lr=%08x\n", x, y,
+         //      lr);
         /* Arm a short window to catch digit clip blits around the colon. */
         g_agent_digit_sample_armed = 64;
         if (s_colonLogs < 4u)
@@ -4864,8 +5030,8 @@ static void agent_dbg0b451a_note_topright_draw(const u8 *gbkText, int x, int y)
                          x, y, lr, sp, regBuf, stkBuf);
                 agent_dbg0b451a_log("H10", "main.c:colon", "clock_colon_ctx",
                                     dataBuf2);
-                printf("[info][hud-timer] clock_colon_ctx regs=%s stk=%s\n",
-                       regBuf, stkBuf);
+                //printf("[info][hud-timer] clock_colon_ctx regs=%s stk=%s\n",
+                   //    regBuf, stkBuf);
             }
         }
         ++s_colonLogs;
@@ -4884,7 +5050,7 @@ static void agent_dbg0b451a_note_topright_image(u32 imageInfo, int x, int y)
     if (s_imgLogs >= 48u)
         return;
     /* Colon sits at y=75; previous y<=48 filter missed digit sprites. */
-    inClockBand = (g_agent_dream_hud_watch && y >= 0 && y <= 100 &&
+    inClockBand = (agent_dream_hud_watch_active() && y >= 0 && y <= 100 &&
                    x >= (LCD_WIDTH / 2 - 40));
     if (!inClockBand && (y < 0 || y > 48 || x < (LCD_WIDTH / 2)))
         return;
@@ -4900,12 +5066,12 @@ static void agent_dbg0b451a_note_topright_image(u32 imageInfo, int x, int y)
                  "{\"img\":\"%08x\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,"
                  "\"lr\":\"%08x\",\"sce\":\"%.40s\",\"watch\":%u}",
                  imageInfo, x, y, srcW, srcH, lr, g_lastSceLoadName,
-                 (unsigned)g_agent_dream_hud_watch);
+                 (unsigned)agent_dream_hud_watch_active());
         agent_dbg0b451a_log("H5", "main.c:img", "topright_image", dataBuf);
-        printf("[info][hud-timer] topright_image img=%08x xy=(%d,%d) wh=(%d,%d) "
-               "lr=%08x watch=%u\n",
-               imageInfo, x, y, srcW, srcH, lr,
-               (unsigned)g_agent_dream_hud_watch);
+       // printf("[info][hud-timer] topright_image img=%08x xy=(%d,%d) wh=(%d,%d) "
+          //     "lr=%08x watch=%u\n",
+           //    imageInfo, x, y, srcW, srcH, lr,
+            //   (unsigned)agent_dream_hud_watch_active());
     }
     ++s_imgLogs;
 }
@@ -4936,7 +5102,7 @@ static void agent_dbg0b451a_note_clip_draw(const char *api)
     int isTimerIcon = 0;
     int digit = -1;
 
-    if (!g_agent_dream_hud_watch)
+    if (!agent_dream_hud_watch_active())
         return;
     uc_reg_read(MTK, UC_ARM_REG_R0, &dstInfo);
     uc_reg_read(MTK, UC_ARM_REG_R1, &srcInfo);
@@ -4984,10 +5150,10 @@ static void agent_dbg0b451a_note_clip_draw(const char *api)
                  dstY, (unsigned)srcW, (unsigned)srcH, lr, digit,
                  isDigitSheet ? "digit" : (isTimerIcon ? "icon" : "other"));
         agent_dbg0b451a_log("H9", "main.c:clip", "clock_clip_blit", dataBuf);
-        printf("[info][hud-timer] clock_clip_blit kind=%s digit=%d sx=%u "
-               "dst=(%d,%d) sheet=%ux%u lr=%08x\n",
-               isDigitSheet ? "digit" : (isTimerIcon ? "icon" : "other"), digit,
-               srcX, dstX, dstY, (unsigned)srcW, (unsigned)srcH, lr);
+        //printf("[info][hud-timer] clock_clip_blit kind=%s digit=%d sx=%u "
+         //      "dst=(%d,%d) sheet=%ux%u lr=%08x\n",
+          //     isDigitSheet ? "digit" : (isTimerIcon ? "icon" : "other"), digit,
+          //     srcX, dstX, dstY, (unsigned)srcW, (unsigned)srcH, lr);
     }
     if (isTimerIcon)
         ++s_iconLogs;
@@ -5034,8 +5200,8 @@ static void agent_dbg0b451a_note_clip_draw(const char *api)
                      "\"src\":\"%08x\"}",
                      digit, srcX, dstX, dstY, lr, sp, regBuf, stkBuf, srcInfo);
             agent_dbg0b451a_log("H11", "main.c:clip", "digit_blit_ctx", dataBuf2);
-            printf("[info][hud-timer] digit_blit_ctx digit=%d regs=%s stk=%s\n",
-                   digit, regBuf, stkBuf);
+            //printf("[info][hud-timer] digit_blit_ctx digit=%d regs=%s stk=%s\n",
+             //      digit, regBuf, stkBuf);
         }
         /* H12: scan R9 object for hour/min pair matching this paint. */
         if (Global_R9 && digit >= 0)
@@ -5154,8 +5320,8 @@ static void agent_dbg0b451a_note_clip_draw(const char *api)
                          digit, digit, foundBuf);
                 agent_dbg0b451a_log("H13", "main.c:timer", "timer_obj_scan",
                                     dataBuf4);
-                printf("[info][hud-timer] timer_obj_scan blit=%d cands=%s\n",
-                       digit, foundBuf);
+                //printf("[info][hud-timer] timer_obj_scan blit=%d cands=%s\n",
+                 //      digit, foundBuf);
             }
         }
         ++s_digitCtxLogs;
@@ -6259,6 +6425,90 @@ static void vm_host_pump_coolmall_after_exit(void)
 }
 
 #if defined(CBE_CLIENT_ONLY)
+static u32 g_mmshopExitReloginArmedUntil = 0;
+static u32 g_mmshopTrailingCleared = 0;
+static u32 g_mmshopPendingExitRelogin = 0;
+/* Right-soft armed: after open14+loading_clear, pop mmShop only (no re-login). */
+static u32 g_mmshopExitPopArmed = 0;
+static u32 g_mmshopPendingExitPop = 0;
+
+static int vm_host_wt_is_open14_actor_query(const u8 *req, u32 len)
+{
+    u32 off = 4;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return 0;
+    if (off + 5u > len)
+        return 0;
+    /* major=1 kind=1 subtype=14 */
+    if (req[off] != 1 || req[off + 1] != 1 || req[off + 2] != 14)
+        return 0;
+    return 1;
+}
+
+void vm_host_dbg_note_open14_uplink(const u8 *req, u32 len)
+{
+    int looks = 0;
+    int isOpen14 = 0;
+
+    if (req == NULL || len < 9 || req[0] != 'W' || req[1] != 'T')
+        return;
+    if (len > 64)
+        return;
+    if (vmAddedScreen != 0)
+        looks = vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen);
+    isOpen14 = vm_host_wt_is_open14_actor_query(req, len);
+    /*
+     * post-test19: exit open14 must not peel+relogin (entry-root stall).
+     * Right-soft or post-trailing open14 arms pop-only after loading_clear.
+     */
+    if (looks && isOpen14 &&
+        (g_mmshopExitPopArmed || g_mmshopTrailingCleared))
+        g_mmshopPendingExitPop = 1;
+    if (!looks)
+    {
+        g_mmshopTrailingCleared = 0;
+        g_mmshopPendingExitRelogin = 0;
+        g_mmshopExitPopArmed = 0;
+        g_mmshopPendingExitPop = 0;
+    }
+}
+
+
+/* Buy-confirm dialog: left/center=确定 or 购买 — do not force exit-relogin. */
+static int vm_host_mmshop_softkey_is_buy_confirm(void)
+{
+    static const u8 kOk[] = {0xC8, 0xB7, 0xB6, 0xA8};   /* 确定 */
+    static const u8 kBuy[] = {0xB9, 0xBA, 0xC2, 0xF2}; /* 购买 */
+
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kOk, sizeof(kOk)))
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyLeftCache, kBuy, sizeof(kBuy)))
+        return 1;
+    if (vm_softkey_eq_gbk(g_softkeyCenterCache, kOk, sizeof(kOk)))
+        return 1;
+    return 0;
+}
+
+/*
+ * Legacy host peel entry (disabled as primary exit).  post-test23 restores
+ * 01769c21 packet actor-state; peel broke scene poll (post-test22).
+ */
+static void vm_host_mmshop_exit_relogin_role(const char *reason)
+{
+    printf("[info][screen] mmshop_exit_relogin_disabled reason=%s "
+           "evidence=01769c21-packet-open14\n",
+           reason ? reason : "-");
+    (void)reason;
+}
+
+/*
+ * Server arms bin/cbe_mmshop_loading_clear.flag on every already_open ack
+ * (status+money).  Clear mmShop 0x162C loading at *(r9+0x2868)+0x10 and the
+ * download-busy pair so 「正在和服务器通信」 can drop.  Pump after net
+ * dispatch as well — flag is written by the remote server before the
+ * response is delivered.
+ */
 /*
  * Server arms bin/cbe_mmshop_loading_clear.flag on every already_open ack
  * (status+money).  Clear mmShop 0x162C loading at *(r9+0x2868)+0x10 and the
@@ -6318,7 +6568,25 @@ static void vm_host_pump_mmshop_loading_clear_flag(void)
         fputs("0\n", fp);
         fclose(fp);
     }
-    vm_host_clear_mmshop_loading_now("flag");
+    vm_host_clear_mmshop_loading_now("pre-callback");
+    /*
+     * post-test23: exit must clear via 01769c21 open14 actor-state (0x9DE),
+     * not host peel.  Peel left transition depth=2 with no scene poll
+     * (post-test22).  Ignore exit-pop arm; CBE pops mmShop after 0x9DE.
+     */
+    if (g_mmshopPendingExitPop || g_mmshopExitPopArmed)
+    {
+        printf("[info][screen] mmshop_exit_pop_skip reason=01769c21-packet-actor "
+               "pending=%u armed=%u evidence=post-test22-peel-no-poll\n",
+               g_mmshopPendingExitPop, g_mmshopExitPopArmed);
+        g_mmshopPendingExitPop = 0;
+        g_mmshopExitPopArmed = 0;
+    }
+    else if (vmAddedScreen != 0 &&
+             vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen))
+    {
+        g_mmshopTrailingCleared = 1;
+    }
 }
 #endif
 
@@ -15361,7 +15629,24 @@ static bool hook_vm_manager_ctrl_func(u32 address)
     else if (idx == 4)
     {
         u32 pos = vm_get_var(tmp5);
-        vm_set_call_result(vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, false));
+        u32 hit = vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, false);
+#if defined(CBE_CLIENT_ONLY)
+        /* Right softkey hit on mmShop: peel disabled (01769c21 path). */
+        if (hit && pos == 2 &&
+            vmAddedScreen != 0 &&
+            vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen) &&
+            !vm_host_mmshop_softkey_is_buy_confirm())
+        {
+            u32 beforeUntil = g_mmshopExitReloginArmedUntil;
+            vm_host_mmshop_exit_relogin_role("touch-right-soft");
+            if (g_mmshopExitReloginArmedUntil != beforeUntil)
+            {
+                vm_set_call_result(0);
+                return true;
+            }
+        }
+#endif
+        vm_set_call_result(hit);
     }
     else if (idx == 9)
     {
@@ -15379,7 +15664,23 @@ static bool hook_vm_manager_ctrl_func(u32 address)
     else if (idx == 17)
     {
         u32 pos = vm_get_var(tmp5);
-        vm_set_call_result(vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, true));
+        u32 hit = vm_ctrl_tp_press_softkey_bar(tmp1, tmp2, tmp3, tmp4, pos, true);
+#if defined(CBE_CLIENT_ONLY)
+        if (hit && pos == 2 &&
+            vmAddedScreen != 0 &&
+            vm_host_screen_destroy_looks_like_mmshop(vmAddedScreen) &&
+            !vm_host_mmshop_softkey_is_buy_confirm())
+        {
+            u32 beforeUntil = g_mmshopExitReloginArmedUntil;
+            vm_host_mmshop_exit_relogin_role("touch-right-soft-ucs2");
+            if (g_mmshopExitReloginArmedUntil != beforeUntil)
+            {
+                vm_set_call_result(0);
+                return true;
+            }
+        }
+#endif
+        vm_set_call_result(hit);
     }
     else if (idx == 18)
     {
@@ -16369,6 +16670,22 @@ static bool hook_vm_manager_screen_func(u32 address)
                            activeTarget ? activeTarget->y : 0,
                            activeTarget ? activeTarget->exitId : 0);
                 }
+                else if (g_vm_scene_allow_one_dream_shop_return_reenter)
+                {
+                    acceptChange = true;
+                    g_vm_scene_allow_one_dream_shop_return_reenter = false;
+                    vm_scene_same_reenter_remember_target(activeTarget);
+                    printf("[info][screen] screen_mgr "
+                           "same-reenter-allowed-once-dream-shop-return "
+                           "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                           "evidence=kind2-30/1-rebuild-battle-mapctrl\n",
+                           lastAddress,
+                           g_vm_net_mock_last_scene_change_target_serial,
+                           activeTarget ? activeTarget->scene : "",
+                           activeTarget ? activeTarget->x : 0,
+                           activeTarget ? activeTarget->y : 0,
+                           activeTarget ? activeTarget->exitId : 0);
+                }
                 else
 #endif
                 {
@@ -16393,6 +16710,33 @@ static bool hook_vm_manager_screen_func(u32 address)
                 }
             }
 #if defined(CBE_CLIENT_ONLY)
+            else if (g_vm_scene_allow_one_dream_shop_return_reenter &&
+                     activeTarget != NULL &&
+                     g_vm_net_mock_last_scene_change_target_valid &&
+                     activeTarget->scene[0] == '2' &&
+                     activeTarget->scene[1] == '9' &&
+                     vm_net_mock_scene_names_equal_loose(
+                         activeTarget->scene,
+                         g_vm_net_mock_last_scene_change_target.scene))
+            {
+                /*
+                 * Shop-return kind-2: same_reenter guard may be unarmed
+                 * (already on dream shell).  Still allow one ScreenInit.
+                 */
+                acceptChange = true;
+                g_vm_scene_allow_one_dream_shop_return_reenter = false;
+                vm_scene_same_reenter_remember_target(activeTarget);
+                printf("[info][screen] screen_mgr "
+                       "dream-shop-return-reenter-allowed "
+                       "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                       "evidence=kind2-30/1-no-same-reenter-guard\n",
+                       lastAddress,
+                       g_vm_net_mock_last_scene_change_target_serial,
+                       activeTarget->scene,
+                       activeTarget->x,
+                       activeTarget->y,
+                       activeTarget->exitId);
+            }
             else if (g_vm_scene_block_dream_completion_reenter &&
                      activeTarget != NULL &&
                      g_vm_net_mock_last_scene_change_target_valid &&
@@ -16401,30 +16745,60 @@ static bool hook_vm_manager_screen_func(u32 address)
                          g_vm_net_mock_last_scene_change_target.scene))
             {
                 /*
-                 * Fallback if EnterScene body runs without hitting the
-                 * 01018150 entry intercept (vm_host_intercept_dream_...).
-                 * Prefer entry skip: reject here still leaves half-open
-                 * loading after busy was armed.
+                 * Fallback for *completion* reenter only.
+                 * Primary EnterScene after pass_first sets gate=2 and must
+                 * still change mmGame: layer hop 29*_01→_02 keeps the same
+                 * screen object (tmp1==vmAddedScreen), while outdoor→_01
+                 * often allocates a new one and skips this whole branch.
+                 * Suppressing gate=2 aborts ScreenInit and leaves the
+                 * map-stone bar (client: pass_first then
+                 * same-suppressed-dream-reenter; server: hold then
+                 * map_stone_kind2_target_settle / idle-timeout).
                  */
-                acceptChange = false;
-                g_vm_scene_block_dream_completion_reenter = false;
-                g_vm_dream_enter_scene_gate = 0;
-                vm_host_clear_download_busy("same-suppressed-dream-reenter");
-                printf("[info][screen] screen_mgr same-suppressed-dream-reenter "
-                       "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
-                       "evidence=fallback-after-entry-intercept-miss\n",
-                       lastAddress,
-                       g_vm_net_mock_last_scene_change_target_serial,
-                       activeTarget->scene,
-                       activeTarget->x,
-                       activeTarget->y,
-                       activeTarget->exitId);
-                vm_autotest_note("screen_mgr idx=%u type=same-suppressed-dream-reenter "
-                                 "caller=%08x screen=%08x added=%08x scene=%s "
-                                 "pos=(%u,%u) exit=%u\n",
-                                 idx, lastAddress, tmp1, vmAddedScreen,
-                                 activeTarget->scene, activeTarget->x,
-                                 activeTarget->y, activeTarget->exitId);
+                if (g_vm_dream_enter_scene_gate == 2u)
+                {
+                    acceptChange = true;
+                    vm_scene_same_reenter_remember_target(activeTarget);
+                    printf("[info][screen] screen_mgr dream-primary-enter-accept "
+                           "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                           "gate=2 evidence=pass-first-layer-hop-same-mmGame\n",
+                           lastAddress,
+                           g_vm_net_mock_last_scene_change_target_serial,
+                           activeTarget->scene,
+                           activeTarget->x,
+                           activeTarget->y,
+                           activeTarget->exitId);
+                    vm_autotest_note("screen_mgr idx=%u type=dream-primary-enter-accept "
+                                     "caller=%08x screen=%08x added=%08x scene=%s "
+                                     "pos=(%u,%u) exit=%u gate=2\n",
+                                     idx, lastAddress, tmp1, vmAddedScreen,
+                                     activeTarget->scene, activeTarget->x,
+                                     activeTarget->y, activeTarget->exitId);
+                }
+                else
+                {
+                    u32 suppressGate = g_vm_dream_enter_scene_gate;
+                    acceptChange = false;
+                    g_vm_scene_block_dream_completion_reenter = false;
+                    g_vm_dream_enter_scene_gate = 0;
+                    vm_host_clear_download_busy("same-suppressed-dream-reenter");
+                    printf("[info][screen] screen_mgr same-suppressed-dream-reenter "
+                           "caller=%08x serial=%u scene=%s pos=(%u,%u) exit=%u "
+                           "gate=%u evidence=fallback-after-entry-intercept-miss\n",
+                           lastAddress,
+                           g_vm_net_mock_last_scene_change_target_serial,
+                           activeTarget->scene,
+                           activeTarget->x,
+                           activeTarget->y,
+                           activeTarget->exitId,
+                           (unsigned)suppressGate);
+                    vm_autotest_note("screen_mgr idx=%u type=same-suppressed-dream-reenter "
+                                     "caller=%08x screen=%08x added=%08x scene=%s "
+                                     "pos=(%u,%u) exit=%u\n",
+                                     idx, lastAddress, tmp1, vmAddedScreen,
+                                     activeTarget->scene, activeTarget->x,
+                                     activeTarget->y, activeTarget->exitId);
+                }
             }
 #endif
             else
@@ -18762,8 +19136,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     if (((u32)address & ~1u) == 0x01022426u)
     {
         /*
-         * Property page fills valueBase here.  Apply overlay for wear-only
-         * rows (物攻 etc.) — login six words lack FA/jump attrs.
+         * Property page fills valueBase here.  Realign panel strings from
+         * actor halfwords (login six words lack FA/jump attrs until wear).
          */
         u32 vb = 0;
         if (Global_R9 != 0)
@@ -18812,9 +19186,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              pc, r0, r1, r4, r5, lr, SDL_GetTicks());
                     agent_dbg0b451a_log("H18", "main.c:hook", "timer_tick_window",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_tick_window pc=%08x r0=%08x "
-                           "r1=%u r4=%08x r5=%08x lr=%08x\n",
-                           pc, r0, r1, r4, r5, lr);
+                   // printf("[info][hud-timer] timer_tick_window pc=%08x r0=%08x "
+                     //      "r1=%u r4=%08x r5=%08x lr=%08x\n",
+                     //      pc, r0, r1, r4, r5, lr);
                 }
                 ++s_winLogs;
             }
@@ -18838,13 +19212,13 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              "{\"obj\":\"%08x\",\"remain\":%u,\"hhmmss\":\"%u:%02u:%02u\","
                              "\"lr\":\"%08x\",\"watch\":%u}",
                              obj, remain, remain / 3600u, (remain % 3600u) / 60u,
-                             remain % 60u, lr, (unsigned)g_agent_dream_hud_watch);
+                             remain % 60u, lr, (unsigned)agent_dream_hud_watch_active());
                     agent_dbg0b451a_log("H14", "main.c:hook", "timer_remain_set",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_remain_set obj=%08x remain=%u "
-                           "(%u:%02u:%02u) lr=%08x\n",
-                           obj, remain, remain / 3600u, (remain % 3600u) / 60u,
-                           remain % 60u, lr);
+                    //printf("[info][hud-timer] timer_remain_set obj=%08x remain=%u "
+                     //      "(%u:%02u:%02u) lr=%08x\n",
+                     //      obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                     //      remain % 60u, lr);
                     ++s_setLogs;
                 }
             }
@@ -18873,10 +19247,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              (remain % 3600u) / 60u, remain % 60u, lr);
                     agent_dbg0b451a_log("H16", "main.c:hook", "timer_remain_alt_set",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_remain_alt_set obj=%08x "
-                           "remain=%u r5=%u (%u:%02u:%02u) lr=%08x\n",
-                           obj, remain, r5, remain / 3600u,
-                           (remain % 3600u) / 60u, remain % 60u, lr);
+                    //printf("[info][hud-timer] timer_remain_alt_set obj=%08x "
+                     //      "remain=%u r5=%u (%u:%02u:%02u) lr=%08x\n",
+                     //      obj, remain, r5, remain / 3600u,
+                     //      (remain % 3600u) / 60u, remain % 60u, lr);
                     ++s_altSetLogs;
                 }
             }
@@ -18909,10 +19283,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              remain % 60u, fl64, fl68, fl6c, lr);
                     agent_dbg0b451a_log("H15", "main.c:hook", "timer_paint_enter",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_paint_enter obj=%08x remain=%u "
-                           "(%u:%02u:%02u) flags@sp=%u/%u/%u lr=%08x\n",
-                           obj, remain, remain / 3600u, (remain % 3600u) / 60u,
-                           remain % 60u, fl64, fl68, fl6c, lr);
+                   // printf("[info][hud-timer] timer_paint_enter obj=%08x remain=%u "
+                     //      "(%u:%02u:%02u) flags@sp=%u/%u/%u lr=%08x\n",
+                     //      obj, remain, remain / 3600u, (remain % 3600u) / 60u,
+                      //     remain % 60u, fl64, fl68, fl6c, lr);
                 }
                 ++s_paintLogs;
             }
@@ -18934,38 +19308,46 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
             remain = r4 ? vm_get_var(r4 + 0x10u) : 0;
             if (r4 != 0 && remain >= 1000u && remain <= 86400u)
                 g_agent_timer_obj = r4;
-            /* H20: lock dream HUD remain to 60 sec-units → screen 01:00.
-             * Server TTL is 60 minutes (see dream_hud_ttl_arm).  Re-poke
-             * whenever remain drifts above 60 (re-enter resets to ~29285). */
-            if (g_agent_dream_hud_watch && g_agent_timer_obj != 0)
+            if (agent_dream_hud_watch_active() && g_agent_timer_obj != 0)
             {
+                agent_dream_hud_role_t *hudSlot = agent_dream_hud_active_slot(0);
                 u32 pokeOld = vm_get_var(g_agent_timer_obj + 0x10u);
-                u32 pokeNew = 60u;
-                if (pokeOld != pokeNew && pokeOld >= 60u && pokeOld <= 86400u)
+                u32 pokeNew = agent_dbg0b451a_dream_remain_units();
+                if (hudSlot != NULL && pokeOld != pokeNew && pokeOld >= 1000u &&
+                    pokeOld <= 86400u)
                 {
                     volatile u32 pokeSink = 0;
+                    u32 elapsedMs = 0;
+                    if (hudSlot->visitMs != 0)
+                    {
+                        u32 nowMs = SDL_GetTicks();
+                        if (nowMs >= hudSlot->visitMs)
+                            elapsedMs = nowMs - hudSlot->visitMs;
+                    }
                     vm_set_var(g_agent_timer_obj + 0x10u, pokeNew);
                     pokeSink = vm_get_var(g_agent_timer_obj + 0x10u);
-                    g_agent_timer_remain_poke_done = 1;
-                    g_agent_timer_last_remain = pokeSink;
+                    hudSlot->pokeDone = 1;
+                    if (pokeSink >= 1u && pokeSink <= 3600u)
+                        hudSlot->lastRemain = pokeSink;
                     /* #region agent log */
                     {
-                        char dataBuf[240];
+                        char dataBuf[320];
                         snprintf(dataBuf, sizeof(dataBuf),
                                  "{\"obj\":\"%08x\",\"old\":%u,\"new\":%u,\"readback\":%u,"
-                                 "\"expect_mmss\":\"01:00\",\"expect_hhmm\":\"00:01\","
-                                 "\"expect_hhss\":\"00:00\"}",
-                                 g_agent_timer_obj, pokeOld, pokeNew, pokeSink);
-                        agent_dbg0b451a_log("H20", "main.c:poke",
-                                            "timer_remain_poke_1m00", dataBuf);
+                                 "\"elapsedMs\":%u,\"visitMs\":%u,\"role\":%u}",
+                                 g_agent_timer_obj, pokeOld, pokeNew, pokeSink,
+                                 elapsedMs, hudSlot->visitMs, hudSlot->roleId);
+                        agent_dbg0b451a_log("L", "main.c:poke",
+                                            "timer_remain_poke_visit", dataBuf);
                     }
                     /* #endregion */
-                    printf("[info][hud-timer] H20_POKE old=%u new=%u readback=%u "
-                           "expect MM:SS=01:00 HH:MM=00:01 HH:SS=00:00\n",
-                           pokeOld, pokeNew, pokeSink);
+                    printf("[info][hud-timer] L_POKE old=%u new=%u readback=%u "
+                           "elapsed_ms=%u role=%u\n",
+                           pokeOld, pokeNew, pokeSink, elapsedMs, hudSlot->roleId);
                     remain = pokeSink;
                 }
             }
+
             agent_dbg0b451a_poll_timer_remain("paint_flags");
             if (s_flagLogs < 6u)
             {
@@ -18992,9 +19374,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              r4 ? vm_get_var(r4 + 0xcu) : 0u);
                     agent_dbg0b451a_log("H15", "main.c:hook", "timer_paint_flags",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_paint_flags r4=%08x remain=%u "
-                           "f64/68/6c=%u/%u/%u slots=%s\n",
-                           r4, remain, fl64, fl68, fl6c, vtBuf);
+                    //printf("[info][hud-timer] timer_paint_flags r4=%08x remain=%u "
+                    //       "f64/68/6c=%u/%u/%u slots=%s\n",
+                     //      r4, remain, fl64, fl68, fl6c, vtBuf);
                 }
                 ++s_flagLogs;
             }
@@ -19026,10 +19408,10 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              (unsigned)slot8, (unsigned)slota);
                     agent_dbg0b451a_log("H15", "main.c:hook", "timer_min_ones_digit",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_min_ones r4=%08x r2=%u "
-                           "slots=%u:%u sec=%u:%u\n",
-                           r4, r2, (unsigned)slot4, (unsigned)slot6,
-                           (unsigned)slot8, (unsigned)slota);
+                   // printf("[info][hud-timer] timer_min_ones r4=%08x r2=%u "
+                    //       "slots=%u:%u sec=%u:%u\n",
+                    //       r4, r2, (unsigned)slot4, (unsigned)slot6,
+                       //    (unsigned)slot8, (unsigned)slota);
                 }
                 ++s_digLogs;
             }
@@ -19054,9 +19436,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
                              obj, a1, a2, lr);
                     agent_dbg0b451a_log("H14", "main.c:hook", "timer_ctor",
                                         dataBuf);
-                    printf("[info][hud-timer] timer_ctor obj=%08x r1=%u r2=%u "
-                           "lr=%08x\n",
-                           obj, a1, a2, lr);
+                   // printf("[info][hud-timer] timer_ctor obj=%08x r1=%u r2=%u "
+                     //      "lr=%08x\n",
+                      //     obj, a1, a2, lr);
                 }
                 ++s_ctorLogs;
             }
