@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -93,6 +93,20 @@ if ([string]::IsNullOrEmpty($php)) { $php = (Get-Command php -ErrorAction Stop).
 $serverProcess = $null
 $clientProcess = $null
 $oldEnvironment = @{}
+$clientScenario = if ($Scenario -eq 'hangup-auto-vitals-flask-v1') {
+    # The native client scenario already knows the identical 95/295,80/205
+    # expected result and performs its read-only scene-HUD-node assertion.
+    'hangup-auto-vitals-recovery-v1'
+} elseif ($Scenario -eq 'hangup-auto-restart-delay-v1') {
+    # Terminal recovery and restart timing must exercise product-mode hangup:
+    # the client closes its rendered 4/7 through the normal 25/5 path, then a
+    # later scene poll starts the next round.  Do not inject a second manual
+    # hangup tap here, because that is intentionally rejected during the
+    # five-second inter-round interval.
+    'hangup-auto-reward-continue-v1'
+} else {
+    $Scenario
+}
 
 try {
     & $php $fixture create $database | Tee-Object -FilePath (Join-Path $runDir 'fixture.log') -Append
@@ -104,13 +118,17 @@ try {
     # fixture writes only to the uniquely named automation schema.
     $fixtureProfile = if ($Scenario -in @('scene-teleport-stone-probe-v1', 'title-module-update-v1')) {
         'teleport-stone-c00'
+    } elseif ($Scenario -eq 'hangup-auto-vitals-recovery-v1') {
+        'hangup-vitals'
+    } elseif ($Scenario -eq 'hangup-auto-vitals-flask-v1') {
+        'hangup-vitals-flask'
     } else {
         'hangup-peach'
     }
     & $php $fixture seed $database $fixtureProfile | Tee-Object -FilePath (Join-Path $runDir 'fixture.log') -Append
     if ($LASTEXITCODE -ne 0) { throw 'fixture seed failed' }
 
-    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT','CBE_BATTLE_ENEMY_COUNT','CBE_BATTLE_ENEMY_HP')) {
+    foreach ($name in @('CBE_MYSQL_HOST','CBE_MYSQL_PORT','CBE_MYSQL_USER','CBE_MYSQL_PASSWORD','CBE_MYSQL_DATABASE','CBE_RESOURCE_ROOT','CBE_BATTLE_ENEMY_COUNT','CBE_BATTLE_ENEMY_HP','CBE_HANGUP_AUTO_CONFIRM','CBE_BATTLE_RECOVER_HP','CBE_BATTLE_RECOVER_MP')) {
         $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
     $env:CBE_MYSQL_HOST = if ($env:CBE_AUTOMATION_MYSQL_HOST) { $env:CBE_AUTOMATION_MYSQL_HOST } else { '127.0.0.1' }
@@ -120,16 +138,43 @@ try {
     $env:CBE_MYSQL_DATABASE = $database
     $env:CBE_RESOURCE_ROOT = $serverResourceRoot
     # These are per-run service fixtures, not user-server configuration.  The
-    # cancel case keeps three high-HP targets alive until the native cancel
-    # button is dispatched; the terminal case exercises the original three
-    # one-hit enemies and must reach the next hangup round without a tap.
+    # The cancel case keeps three high-HP targets alive until the native
+    # cancel button is dispatched.  The ordinary terminal scenarios retain
+    # three one-hit enemies.  The direct-restart probe deliberately uses one
+    # enemy per round so it reaches two complete, real client settlements
+    # within its bounded scenario runtime.  The three-second audit is not an
+    # outcome requirement here: normal result-panel animation may legitimately
+    # make those two battle-entry timestamps farther apart.
     if ($Scenario -eq 'hangup-auto-cancel-v1') {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '100'
     } elseif ($Scenario -in @('hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1')) {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '20'
+    } elseif ($Scenario -in @('hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) {
+        $env:CBE_BATTLE_ENEMY_COUNT = '1'
+        $env:CBE_BATTLE_ENEMY_HP = '20'
     }
+    # This product-mode fixture verifies the real client-owned result-panel
+    # exit: the helper observes a rendered 4/7, sends one hardware tap, and
+    # waits for the client's resulting 25/5 before the server may open round 2.
+    $env:CBE_HANGUP_AUTO_CONFIRM = if ($Scenario -in @('hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) { '1' } else { '0' }
+    if ($Scenario -eq 'hangup-auto-vitals-recovery-v1') {
+        $env:CBE_BATTLE_RECOVER_HP = '15'
+        $env:CBE_BATTLE_RECOVER_MP = '10'
+    } else {
+        Remove-Item Env:CBE_BATTLE_RECOVER_HP -ErrorAction SilentlyContinue
+        Remove-Item Env:CBE_BATTLE_RECOVER_MP -ErrorAction SilentlyContinue
+    }
+    [pscustomobject]@{
+        runner_scenario = $Scenario
+        client_input_scenario = $clientScenario
+        fixture_profile = $fixtureProfile
+        service_port = $ServicePort
+        admin_port = $AdminPort
+        configured_recover_hp = $env:CBE_BATTLE_RECOVER_HP
+        configured_recover_mp = $env:CBE_BATTLE_RECOVER_MP
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'test-plan.json') -Encoding utf8
 
     $serverProcess = Start-Process -FilePath $server -WorkingDirectory $runDir -PassThru `
         -ArgumentList "--mock-service-only", "--mock-service-bind=127.0.0.1", "--mock-service-port=$ServicePort", "--mock-admin-port=$AdminPort", "--resource-root=$serverResourceRoot" `
@@ -177,8 +222,8 @@ try {
     # title-module probe purposely sends no input: it stops at the native
     # module-updater terminal state before the title screen accepts controls.
     $titleActions = '5000:key:f,17000:key:f,19000:key:q,23000:key:f,29000:key:f,35000:key:f'
-    $clientArguments = @("--automation-scenario=$Scenario", "--automation-artifacts=$runDir")
-    if ($Scenario -ne 'title-module-update-v1') {
+    $clientArguments = @("--automation-scenario=$clientScenario", "--automation-artifacts=$runDir")
+    if ($clientScenario -ne 'title-module-update-v1') {
         $clientArguments += '--automation-title-driver=timed-title-v1'
         $clientArguments += "--actions=$titleActions"
     }
@@ -199,6 +244,108 @@ try {
     Write-Host "automation run directory: $runDir"
     if ($result.result -ne 'passed') {
         throw "scenario failed at $($result.stage): $($result.reason)"
+    }
+    if ($Scenario -in @('hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) {
+        # The isolated server trace proves the terminal contract; the old
+        # 4/11+4/9 terminal workaround is forbidden.  The vital-recovery
+        # scenario intentionally stops after the first client-owned 25/5 and
+        # its read-only scene-node assertion; restart timing is covered by its
+        # dedicated scenario.
+        $serverLogPath = Join-Path $runDir 'server.stdout.log'
+        $serverLog = Get-Content -Raw -LiteralPath $serverLogPath
+        $rewardedSettlements = [regex]::Matches($serverLog, 'mock_battle_settle .*reward_claimed=1').Count
+        $suppressedSettlements = [regex]::Matches($serverLog, 'mock_battle_settle .*reward_claimed=0').Count
+        $legacyClose = [regex]::IsMatch($serverLog, 'mock_battle_terminal_close_deliver .*response=4/11\+4/9')
+        # `01桃花岛_01.sce` begins with five b_flowers01 placements.  Its
+        # first actor_id=105 combat record is therefore client scene row 6,
+        # not combat ordinal 1.  The old ordinal response sometimes survived
+        # by the client scanning an already-active node, but it crashes when
+        # that node is not active at the first battle frame.  Require the
+        # direct 4/5 index contract rather than accepting that accidental scan.
+        $runtimeSceneStarts = [regex]::Matches(
+            $serverLog,
+            'mock_hangup_battle_start .*subtype=5 runtime_index=6 pos=\(295,57\) target_source=sce-static-node-order'
+        ).Count
+        $vitalRecoveryPattern = if ($Scenario -eq 'hangup-auto-vitals-flask-v1') {
+            'mock_battle_settle .*vitals=95/295,80/205 recover=15/10 auto_recover=15/10 configured_recover=0/0 .*role=810001'
+        } else {
+            'mock_battle_settle .*vitals=95/295,80/205 recover=15/10 auto_recover=0/0 configured_recover=15/10 .*role=810001'
+        }
+        $vitalRecoveryRows = [regex]::Matches($serverLog, $vitalRecoveryPattern).Count
+        $flaskConsumptionRows = [regex]::Matches(
+            $serverLog,
+            'mock_battle_auto_flask role=810001 hp=15 mp=10 rows=2 response=4/7\+7/11'
+        ).Count
+        $nextBattleStartsFromRecoveredVitals = [regex]::Matches(
+            $serverLog,
+            'mock_hangup_battle_start .*roleid=810001 rolehp=95/295 rolemp=80/205 '
+        ).Count
+        # The scene probe is a read-only snapshot emitted after the native
+        # 4/7 parser has returned to the scene renderer.  It is evidence that
+        # the client-owned actor state received the same delta; no CBE memory
+        # is written by this runner.
+        $clientAutomationLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'automation.log')
+        $clientSceneVitalRows = [regex]::Matches(
+            $clientAutomationLog,
+            'automation_hangup_vital_scene_observed .*actorId=810001 battleHp=95/295 battleMp=80/205'
+        ).Count
+        # InitActionSlot_B (mmBattle 0x6DBC) reads 4/6.teaminfo before the
+        # terminal 4/7 is parsed.  Require the serialised action cache value
+        # to match the later 4/7 result, not merely the service's next start.
+        $terminalActionVitalRows = [regex]::Matches(
+            $serverLog,
+            'mock_battle_terminal_action_vitals role=810001 hp=95/295 mp=80/205 source=4/6-teaminfo-before-4/7'
+        ).Count
+        $restartDeadlineRows = [regex]::Matches(
+            $serverLog,
+            'scene_hangup_round_complete .*next_tick=(\d+) delay_ms=5000 '
+        )
+        $restartDelaySatisfied = $false
+        foreach ($deadline in $restartDeadlineRows) {
+            $following = $serverLog.Substring($deadline.Index + $deadline.Length)
+            $nextStart = [regex]::Match($following, 'mock_hangup_battle_start .*tick=(\d+) ')
+            $deadlineTick = [Convert]::ToUInt32($deadline.Groups[1].Value)
+            $nextStartTick = if ($nextStart.Success) {
+                [Convert]::ToUInt32($nextStart.Groups[1].Value)
+            } else {
+                0
+            }
+            if ($nextStart.Success -and $nextStartTick -ge $deadlineTick) {
+                $restartDelaySatisfied = $true
+                break
+            }
+        }
+        [pscustomobject]@{
+            rewarded_settlements = $rewardedSettlements
+            suppressed_settlements = $suppressedSettlements
+            legacy_terminal_close = $legacyClose
+            runtime_scene_starts = $runtimeSceneStarts
+            vital_recovery_rows = $vitalRecoveryRows
+            flask_consumption_rows = $flaskConsumptionRows
+            next_battle_starts_from_recovered_vitals = $nextBattleStartsFromRecoveredVitals
+            client_scene_vital_rows = $clientSceneVitalRows
+            terminal_action_vital_rows = $terminalActionVitalRows
+            restart_deadline_rows = $restartDeadlineRows.Count
+            restart_delay_satisfied = $restartDelaySatisfied
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'rapid-entry-evidence.json') -Encoding utf8
+        $isVitalScenario = $Scenario -in @('hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1')
+        $requiredSettlements = if ($isVitalScenario) { 1 } else { 2 }
+        $requiredRuntimeStarts = if ($isVitalScenario) { 1 } else { 2 }
+        if ($rewardedSettlements -lt $requiredSettlements -or $suppressedSettlements -ne 0 -or $legacyClose -or $runtimeSceneStarts -lt $requiredRuntimeStarts) {
+            throw 'hangup contract evidence missing: expected the required rewarded 4/7 settlements, no suppressed settlement, no 4/11+4/9 terminal close, and the required native runtime-index 4/5 starts'
+        }
+        if ($isVitalScenario -and
+            ($vitalRecoveryRows -lt 1 -or $clientSceneVitalRows -lt 1 -or
+             $terminalActionVitalRows -lt 1)) {
+            throw 'vital recovery contract evidence missing: expected matching terminal 4/6 teaminfo and 4/7 recovery plus the client scene actor HP/MP 95/295,80/205 after its native 25/5 exit'
+        }
+        if ($Scenario -eq 'hangup-auto-vitals-flask-v1' -and $flaskConsumptionRows -lt 1) {
+            throw 'vital flask contract evidence missing: expected one 802/803 reservoir settlement with 15/10 recovery and two native 7/11 count updates'
+        }
+        if ($Scenario -eq 'hangup-auto-restart-delay-v1' -and
+            (-not $restartDelaySatisfied)) {
+            throw 'hangup restart delay evidence missing: expected a 5000 ms round deadline and the following native 4/5 start at or after that deadline'
+        }
     }
     Write-Host "$Scenario passed"
 }

@@ -205,9 +205,13 @@ typedef struct
     u32 wisdomCoeff;
     u8 rawJob;
     u8 levelRequired;
-    /* skill.dsh `目标指向`: 2=friendly group, 3=one enemy, 4=enemy group. */
+    /* skill.dsh `目标指向`: 0=self, 1=one friendly, 2=friendly group,
+     * 3=one enemy, 4=enemy group. */
     u8 targetDirection;
     u8 durationRounds;
+    /* skill.dsh column 25 (`效果`) distinguishes the non-HP target effects
+     * (currently silence=1, dispel=2 and revive=3) from an ordinary spell. */
+    u8 effectKind;
     /* Timed battle modifiers from skill.dsh columns 16..24.  They are kept
      * signed because defensive spell rows may trade one attribute for another. */
     int32_t strengthChange;
@@ -462,6 +466,7 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
                                                u32 wisdomCoeff,
                                                u32 targetDirection,
                                                u32 durationRounds,
+                                               u32 effectKind,
                                                int32_t strengthChange,
                                                int32_t agilityChange,
                                                int32_t wisdomChange,
@@ -499,6 +504,7 @@ static bool vm_net_mock_add_skill_catalog_item(u32 skillId, u32 rawJob,
                                 (levelRequired > 255 ? 255 : levelRequired));
     skill->targetDirection = (u8)(targetDirection > 255 ? 255 : targetDirection);
     skill->durationRounds = (u8)(durationRounds > 255 ? 255 : durationRounds);
+    skill->effectKind = (u8)(effectKind > 255 ? 255 : effectKind);
     skill->strengthChange = strengthChange;
     skill->agilityChange = agilityChange;
     skill->wisdomChange = wisdomChange;
@@ -671,6 +677,7 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
         u32 wisdomCoeff = 0;
         u32 targetDirection = 0;
         u32 durationRounds = 0;
+        u32 effectKind = 0;
         int32_t strengthChange = 0;
         int32_t agilityChange = 0;
         int32_t wisdomChange = 0;
@@ -756,6 +763,9 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
             case 24:
                 resistChange = vm_net_mock_parse_dsh_s32(value, valueLen, 0);
                 break;
+            case 25:
+                effectKind = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
+                break;
             case 29:
                 strengthCoeff = vm_net_mock_parse_dsh_u32(value, valueLen, 0);
                 break;
@@ -781,6 +791,7 @@ static u32 vm_net_mock_load_skill_catalog_dsh(const char *path)
                                                wisdomCoeff,
                                                targetDirection,
                                                durationRounds,
+                                               effectKind,
                                                strengthChange,
                                                agilityChange,
                                                wisdomChange,
@@ -817,16 +828,19 @@ static u32 vm_net_mock_load_skill_catalog(void)
     {
         (void)vm_net_mock_add_skill_catalog_item(1, 0, 1, 14, 50, 10,
                                                 -130, 50, 0, 0, 3, 0,
+                                                0,
                                                 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xcd\xf2\xbd\xa3\xd6\xef\xcf\xc9\x31",
                                                 9);
         (void)vm_net_mock_add_skill_catalog_item(101, 1, 1, 1, 50, 20,
                                                 -75, 0, 50, 0, 3, 0,
+                                                0,
                                                 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xb7\xe7\xce\xe8\xc8\xd0\xd0\xd0\x31",
                                                 9);
         (void)vm_net_mock_add_skill_catalog_item(201, 2, 1, 7, 50, 5,
                                                 -30, 0, 0, 110, 3, 0,
+                                                0,
                                                 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                 (const u8 *)"\xe7\xca\xd1\xd7\xbb\xc3\xb7\xa8\x31",
                                                 9);
@@ -1293,9 +1307,18 @@ static void vm_net_mock_role_service_sync_equipment(
         /* This is a read-through UI/service cache only.  The role's equipped
          * instance is the unique durable authority; persisting this cache was
          * what previously reset or detached durability after a move. */
-        state->equipmentItemIds[slot] = role->equippedItems[slot].itemId;
-        state->durability[slot] = role->equippedItems[slot].durability;
-        state->durabilityMax[slot] = role->equippedItems[slot].durabilityMax;
+        if (vm_net_mock_role_equipment_slot_is_usable(role, slot))
+        {
+            state->equipmentItemIds[slot] = role->equippedItems[slot].itemId;
+            state->durability[slot] = role->equippedItems[slot].durability;
+            state->durabilityMax[slot] = role->equippedItems[slot].durabilityMax;
+        }
+        else
+        {
+            state->equipmentItemIds[slot] = 0;
+            state->durability[slot] = 0;
+            state->durabilityMax[slot] = 0;
+        }
     }
 }
 
@@ -1417,7 +1440,7 @@ static u32 vm_net_mock_role_service_repair_cost(
     vm_net_mock_role_service_sync_equipment(state, role);
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        if (role->equippedItems[slot].itemId == 0 ||
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot) ||
             state->durability[slot] >= state->durabilityMax[slot])
         {
             continue;
@@ -1452,7 +1475,7 @@ static bool vm_net_mock_role_service_repair_all(vm_net_mock_role_state *role,
     role->money -= cost;
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        if (role->equippedItems[slot].itemId == 0 ||
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot) ||
             state->durability[slot] >= state->durabilityMax[slot])
         {
             continue;
@@ -1486,7 +1509,7 @@ static void vm_net_mock_role_service_apply_battle_wear(
     before = *role;
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        if (role->equippedItems[slot].itemId == 0 ||
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot) ||
             role->equippedItems[slot].durability == 0)
             continue;
         --role->equippedItems[slot].durability;
@@ -4368,7 +4391,8 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
     {
         u32 itemId = role->equippedItems[slot].itemId;
 
-        if (itemId != 0 && vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
+        if (itemId != 0 &&
+            vm_net_mock_role_equipment_slot_is_usable(role, slot))
             ++rowCount;
     }
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
@@ -4385,7 +4409,7 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
          * attributes.  For item ids >= 1000 it writes current-count to the
          * equipment current-durability field at item+272. */
         if (itemId == 0 || item->durabilityMax == 0 ||
-            vm_net_mock_find_equipment_catalog_item(itemId) == NULL)
+            !vm_net_mock_role_equipment_slot_is_usable(role, slot))
             continue;
         if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
@@ -6304,7 +6328,6 @@ static u32 g_vm_net_mock_battle_enemy_id_current = VM_NET_MOCK_BATTLE_POISON_SLI
 static u32 g_vm_net_mock_battle_role_id_current = VM_NET_MOCK_ROLE_DEFAULT_ID;
 static u32 g_vm_net_mock_battle_reward_rng = 0;
 static u32 g_vm_net_mock_battle_settlement_sent_serial = 0;
-static u32 g_vm_net_mock_battle_no_reward_terminal_serial = 0;
 static u32 g_vm_net_mock_battle_drop_refresh_sent_serial = 0;
 static u32 g_vm_net_mock_battle_recovered_serial = 0;
 static char g_vm_net_mock_scene_moveinfo_npc_pending_scene[64];

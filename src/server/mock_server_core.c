@@ -51,6 +51,18 @@ typedef struct
     int32_t resist;
 } vm_net_mock_battle_stat_modifier;
 
+/* Enemy-side state is also battle-local.  skill.dsh encodes damage-over-time,
+ * silence and stat reductions separately from the immediate action child, so
+ * none of these fields may leak into the persistent monster catalog. */
+typedef struct
+{
+    vm_net_mock_battle_stat_modifier modifier;
+    u8 dotRounds;
+    u8 silenceRounds;
+    u32 dotDamage;
+    u32 effectIndex;
+} vm_net_mock_battle_enemy_effect;
+
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
 static u32 g_netMockBackpackGridSeededRoleId = 0;
@@ -85,6 +97,11 @@ static u8 g_vm_net_mock_team_battle_group_modifier_changed_mask = 0;
  * replaces it with the acting member's shared snapshot. */
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_active_modifier_current;
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_solo_modifier;
+static vm_net_mock_battle_enemy_effect
+    g_vm_net_mock_battle_enemy_effects_current[3];
+static u8 g_vm_net_mock_battle_enemy_effect_changed_mask = 0;
+static vm_net_mock_battle_stat_modifier
+    g_vm_net_mock_battle_active_enemy_modifier_current;
 /* The ordinary solo builder bundles monster actions with every offensive
  * operation.  During a synchronized party battle this flag is armed only for
  * the last still-alive member that has not acted in the current round. */
@@ -4444,8 +4461,10 @@ enum
     VM_NET_MOCK_ROLE_DEFAULT_HP = 120,
     VM_NET_MOCK_ROLE_DEFAULT_MP = 100,
     VM_NET_MOCK_ROLE_DEFAULT_MONEY = 0,
-    /* Monster rewards are server-rate-limited per persisted account/role. */
-    VM_NET_MOCK_BATTLE_REWARD_COOLDOWN_MS = 8000,
+    /* Rapid battle entries are audited per persisted account/role.  The
+     * audit is observational only and must not alter a valid battle's result
+     * or client protocol lifecycle. */
+    VM_NET_MOCK_RAPID_BATTLE_ENTRY_WINDOW_MS = 3000,
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 1,
     VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT = 60,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
@@ -5016,9 +5035,9 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
                                           u16 itemSeq, u32 *remainingOut);
 static void vm_net_mock_practise_mark_offline(const char *accountId,
                                               u32 roleId);
-static bool vm_net_mock_role_try_claim_monster_reward_cooldown(
-    const vm_net_mock_role_state *role, bool *grantedOut,
-    u32 *remainingMsOut);
+static void vm_net_mock_role_record_rapid_battle_entry(
+    const vm_net_mock_role_state *role, const char *source,
+    const char *scene, u32 enemyId);
 static bool vm_mock_service_mysql_authority_prepare(void);
 static bool vm_mock_service_mysql_authority_seal(void);
 static bool vm_mock_service_mysql_authority_is_sealed(void);

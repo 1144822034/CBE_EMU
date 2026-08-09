@@ -880,8 +880,7 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                                 u16 *dropSeqOut,
                                                 u32 *dropCountOut,
                                                 bool *dropGrantedOut,
-                                                bool *rewardGrantedOut,
-                                                u32 *cooldownRemainingMsOut)
+                                                bool *rewardGrantedOut)
 {
     u32 rewardExp = 0;
     u32 dropItemId = 0;
@@ -897,8 +896,6 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     u32 expCardMultiplier = 1;
     u32 battleInsightBonusPercent = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
-    bool cooldownGranted = false;
-    u32 cooldownRemainingMs = 0;
 
     if (dropItemIdOut)
         *dropItemIdOut = 0;
@@ -910,8 +907,6 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         *dropGrantedOut = false;
     if (rewardGrantedOut)
         *rewardGrantedOut = false;
-    if (cooldownRemainingMsOut)
-        *cooldownRemainingMsOut = 0;
 
     if (g_mockBattleOperateSessionSerial == 0)
         return 0;
@@ -932,43 +927,10 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         return 0;
     }
 
-    if (!vm_net_mock_role_try_claim_monster_reward_cooldown(
-            role, &cooldownGranted, &cooldownRemainingMs))
-    {
-        /* A terminal 4/7 still has to reach the real client parser.  Mark this
-         * battle session as settled with a zero award so a later duplicate
-         * status packet cannot turn a persistence failure into a speculative
-         * reward. */
-        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
-        g_vm_net_mock_battle_rewarded_exp = 0;
-        memset(g_vm_net_mock_battle_rewarded_drops, 0,
-               sizeof(g_vm_net_mock_battle_rewarded_drops));
-        g_vm_net_mock_battle_rewarded_drop_result_count = 0;
-        vm_autotest_note("mock_battle_reward_claim action=storage-denied role=%u session=%u\n",
-                         role ? role->roleId : 0,
-                         g_mockBattleOperateSessionSerial);
-        return 0;
-    }
-    if (!cooldownGranted)
-    {
-        g_vm_net_mock_battle_rewarded_serial = g_mockBattleOperateSessionSerial;
-        g_vm_net_mock_battle_rewarded_exp = 0;
-        memset(g_vm_net_mock_battle_rewarded_drops, 0,
-               sizeof(g_vm_net_mock_battle_rewarded_drops));
-        g_vm_net_mock_battle_rewarded_drop_result_count = 0;
-        if (cooldownRemainingMsOut)
-            *cooldownRemainingMsOut = cooldownRemainingMs;
-        printf("[info][network] mock_battle_reward_cooldown action=blocked account=%s role=%u enemy=%u remaining_ms=%u session=%u\n",
-               g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
-               role ? role->roleId : 0,
-               g_vm_net_mock_battle_enemy_id_current,
-               cooldownRemainingMs, g_mockBattleOperateSessionSerial);
-        vm_autotest_note("mock_battle_reward_cooldown action=blocked role=%u enemy=%u remaining_ms=%u session=%u\n",
-                         role ? role->roleId : 0,
-                         g_vm_net_mock_battle_enemy_id_current,
-                         cooldownRemainingMs, g_mockBattleOperateSessionSerial);
-        return 0;
-    }
+    /* A battle session may only award once, but every distinct legal battle
+     * awards normally.  Rapid-entry recording is deliberately independent of
+     * this settlement path so a database audit failure can never create an
+     * unrepresentable zero-delta 4/7 result. */
     if (rewardGrantedOut)
         *rewardGrantedOut = true;
 
@@ -1217,7 +1179,6 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
     u32 dropCount = 0;
     bool dropGranted = false;
     bool rewardGranted = false;
-    u32 cooldownRemainingMs = 0;
     /* A shared party victory is not invalidated because this particular
      * observer was knocked out earlier in the same battle.  Preserve its
      * actual zero HP, but settle the victory/reward once under its own role
@@ -1225,15 +1186,9 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
     bool victory = g_mockBattleEnemyHpCurrent == 0 &&
                    (forceTeamVictory || roleHp > 0);
     bool rewardAlreadyGranted = false;
-    /* A zero-delta victory uses the native no-result close path (4/11+4/9),
-     * not 4/7.  Since 4/7 is the only established carrier for this automatic
-     * MP recovery, keep persistent and displayed battle state identical until
-     * a protocol-backed out-of-battle status update is available. */
-    u32 recoverMp =
-        g_vm_net_mock_battle_no_reward_terminal_serial ==
-                g_mockBattleOperateSessionSerial
-            ? 0
-            : vm_net_mock_battle_recover_mp_value();
+    /* Automatic MP recovery uses the same persistent/displayed-state contract
+     * as every other victory. */
+    u32 recoverMp = vm_net_mock_battle_recover_mp_value();
     bool mpRecoveryApplied = false;
 
     if (role == NULL)
@@ -1245,8 +1200,7 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
                                                          &dropSeq,
                                                          &dropCount,
                                                          &dropGranted,
-                                                         &rewardGranted,
-                                                         &cooldownRemainingMs);
+                                                         &rewardGranted);
         if (!rewardAlreadyGranted && rewardGranted)
             rewardGold = vm_net_mock_mul_capped_u32(
                 vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_GOLD",
@@ -1264,14 +1218,13 @@ static void vm_net_mock_battle_save_terminal_role_state(const char *reason,
      * completed-state helper below.  The durable-state serial guard makes a
      * repeated terminal response harmless. */
     vm_net_mock_role_service_apply_battle_wear(role);
-    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u reward_claimed=%u cooldown_remaining_ms=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
+    vm_autotest_note("mock_battle_terminal_save reason=%s enemy=%u enemies=%u victory=%u team_victory=%u reward_claimed=%u apply_exp=%u gold=%u total_exp=%u level=%u hp=%u mp=%u recover_mp=%u recovered=%u drop=%u seq=%u count=%u\n",
                      reason ? reason : "terminal",
                      g_vm_net_mock_battle_enemy_id_current,
                      vm_net_mock_battle_enemy_count_current(),
                       victory ? 1 : 0,
                       forceTeamVictory ? 1 : 0,
                       rewardGranted ? 1 : 0,
-                      cooldownRemainingMs,
                       rewardExp,
                      statusGold,
                      role->exp,
@@ -1857,7 +1810,6 @@ typedef struct vm_mock_service_account_state
     u32 battleRoleIdCurrent;
     u32 battleRewardRng;
     u32 battleSettlementSentSerial;
-    u32 battleNoRewardTerminalSerial;
     u32 battleDropRefreshSentSerial;
     u32 battleRecoveredSerial;
 
@@ -2008,6 +1960,11 @@ typedef struct
 typedef struct
 {
     bool valid;
+    /* The native mmBattle type-1 playback path consumes the companion
+     * teaminfo blob before actioninfo.  Keep whether this queued action
+     * required that field so the round merger can preserve it when the last
+     * party member releases the shared action list. */
+    bool includesTeamInfo;
     u32 serial;
     u32 sourceClientId;
     u8 memberIndex;
@@ -2240,6 +2197,7 @@ typedef struct
     u32 battleMemberMpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     vm_net_mock_battle_stat_modifier
         battleMemberModifiers[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    vm_net_mock_battle_enemy_effect battleEnemyEffects[3];
     u8 battleRoundActedMask;
     u32 battleRoundSerial;
     bool battleRoundTerminalPending;
@@ -2375,7 +2333,6 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->battleRoleIdCurrent = g_vm_net_mock_battle_role_id_current;
     state->battleRewardRng = g_vm_net_mock_battle_reward_rng;
     state->battleSettlementSentSerial = g_vm_net_mock_battle_settlement_sent_serial;
-    state->battleNoRewardTerminalSerial = g_vm_net_mock_battle_no_reward_terminal_serial;
     state->battleDropRefreshSentSerial = g_vm_net_mock_battle_drop_refresh_sent_serial;
     state->battleRecoveredSerial = g_vm_net_mock_battle_recovered_serial;
 
@@ -2493,8 +2450,6 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_vm_net_mock_battle_role_id_current = state->battleRoleIdCurrent;
     g_vm_net_mock_battle_reward_rng = state->battleRewardRng;
     g_vm_net_mock_battle_settlement_sent_serial = state->battleSettlementSentSerial;
-    g_vm_net_mock_battle_no_reward_terminal_serial =
-        state->battleNoRewardTerminalSerial;
     g_vm_net_mock_battle_drop_refresh_sent_serial = state->battleDropRefreshSentSerial;
     g_vm_net_mock_battle_recovered_serial = state->battleRecoveredSerial;
 
@@ -4313,6 +4268,201 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     }
 }
 
+/* Account access is owned by a small relational record rather than by the
+ * credential row or a role snapshot.  A risk-admin ban must survive process
+ * restart, apply to every role of the account, and never be confused with a
+ * bad password.  The game transport serializes request processing and admin
+ * actions with the same protocol mutex, so clearing all matching sessions
+ * after this row commits is an atomic lifecycle boundary from the client's
+ * point of view: no later request can retain the old account binding. */
+typedef struct
+{
+    bool found;
+    bool invalid;
+    char reason[129];
+} vm_mock_service_account_ban_query;
+
+static bool g_vm_mock_service_account_ban_schema_prepared = false;
+
+static bool vm_mock_service_account_ban_row(void *contextValue,
+                                            unsigned int columnCount,
+                                            const char *const *values,
+                                            const size_t *lengths)
+{
+    vm_mock_service_account_ban_query *query =
+        (vm_mock_service_account_ban_query *)contextValue;
+    size_t reasonLen = 0;
+
+    if (query == NULL || query->found || columnCount != 1 ||
+        values == NULL || lengths == NULL || values[0] == NULL ||
+        !vm_mysql_hex_decode(values[0], lengths[0], query->reason,
+                             sizeof(query->reason) - 1, &reasonLen) ||
+        reasonLen == 0 || reasonLen >= sizeof(query->reason))
+    {
+        if (query != NULL)
+            query->invalid = true;
+        return true;
+    }
+    query->reason[reasonLen] = 0;
+    query->found = true;
+    return true;
+}
+
+static bool vm_mock_service_account_ban_schema_prepare(void)
+{
+    if (g_vm_mock_service_account_ban_schema_prepared)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_access_bans ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "banned_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),"
+            "banned_reason VARBINARY(128) NOT NULL,"
+            "PRIMARY KEY(account_id),"
+            "CONSTRAINT fk_account_access_bans_account "
+            "FOREIGN KEY(account_id) REFERENCES accounts(account_id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][mock-service] account_ban_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
+    g_vm_mock_service_account_ban_schema_prepared = true;
+    return true;
+}
+
+/* Returns false only when authority could not be checked.  Callers must not
+ * turn that failure into a successful login, because it would weaken an
+ * existing ban if the database connection is unhealthy. */
+static bool vm_mock_service_account_access_ban_check(const char *accountId,
+                                                     bool *bannedOut,
+                                                     char *reasonOut,
+                                                     size_t reasonOutCap)
+{
+    char accountHex[129];
+    char sql[512];
+    vm_mock_service_account_ban_query query;
+
+    if (bannedOut != NULL)
+        *bannedOut = false;
+    if (reasonOut != NULL && reasonOutCap != 0)
+        reasonOut[0] = 0;
+    if (accountId == NULL || accountId[0] == 0 ||
+        vm_mysql_hex_encode(accountId, strlen(accountId), accountHex,
+                            sizeof(accountHex)) == 0 ||
+        !vm_mock_service_account_ban_schema_prepare())
+    {
+        return false;
+    }
+    memset(&query, 0, sizeof(query));
+    snprintf(sql, sizeof(sql),
+             "SELECT HEX(banned_reason) FROM account_access_bans "
+             "WHERE account_id=CAST(X'%s' AS CHAR) LIMIT 1", accountHex);
+    if (!vm_mysql_query(sql, vm_mock_service_account_ban_row, &query) ||
+        query.invalid)
+    {
+        return false;
+    }
+    if (query.found)
+    {
+        if (bannedOut != NULL)
+            *bannedOut = true;
+        if (reasonOut != NULL && reasonOutCap != 0)
+            snprintf(reasonOut, reasonOutCap, "%s", query.reason);
+    }
+    return true;
+}
+
+static u32 vm_mock_service_account_disconnect_bound_sessions(const char *accountId,
+                                                              const char *reason)
+{
+    vm_mock_service_client_session *session =
+        g_vm_mock_service_client_sessions;
+    u32 disconnected = 0;
+
+    if (accountId == NULL || accountId[0] == 0)
+        return 0;
+    while (session != NULL)
+    {
+        vm_mock_service_client_session *next = session->next;
+
+        if (strcmp(session->accountId, accountId) == 0)
+        {
+            vm_mock_service_session_mark_offline(
+                session, reason ? reason : "account-access-ban");
+            /* Marking the role offline is deliberately not enough: a title
+             * login request with empty credentials would otherwise reuse the
+             * session's account id.  Clear only after the standard offline
+             * transition has released all role-owned state. */
+            session->accountId[0] = 0;
+            ++disconnected;
+        }
+        session = next;
+    }
+    return disconnected;
+}
+
+static bool vm_mock_service_account_ban_for_rapid_battle(const char *accountId,
+                                                          u32 *disconnectedOut,
+                                                          const char **errorOut)
+{
+    static const char reason[] = "risk:rapid-battle-entry-within-3s";
+    char accountHex[129];
+    char reasonHex[sizeof(reason) * 2 + 1];
+    char sql[1024];
+
+    if (disconnectedOut != NULL)
+        *disconnectedOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "account ban failed";
+    if (accountId == NULL || accountId[0] == 0 ||
+        !vm_mock_service_account_exists(accountId))
+    {
+        if (errorOut != NULL)
+            *errorOut = "account not found";
+        return false;
+    }
+    if (vm_mysql_hex_encode(accountId, strlen(accountId), accountHex,
+                            sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(reason, strlen(reason), reasonHex,
+                            sizeof(reasonHex)) == 0 ||
+        !vm_mock_service_account_ban_schema_prepare())
+    {
+        if (errorOut != NULL)
+            *errorOut = "account ban storage unavailable";
+        return false;
+    }
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO account_access_bans(account_id,banned_at,banned_reason) "
+             "VALUES(CAST(X'%s' AS CHAR),CURRENT_TIMESTAMP(3),X'%s') "
+             "ON DUPLICATE KEY UPDATE banned_at=VALUES(banned_at),"
+             "banned_reason=VALUES(banned_reason)",
+             accountHex, reasonHex);
+    if (!vm_mysql_exec(sql))
+    {
+        if (errorOut != NULL)
+            *errorOut = "account ban storage failed";
+        printf("[error][mock-admin] risk_account_ban_save_failed account=%s error=%s\n",
+               accountId, vm_mysql_last_error());
+        return false;
+    }
+    if (disconnectedOut != NULL)
+    {
+        *disconnectedOut = vm_mock_service_account_disconnect_bound_sessions(
+            accountId, "risk-account-ban");
+    }
+    else
+    {
+        (void)vm_mock_service_account_disconnect_bound_sessions(
+            accountId, "risk-account-ban");
+    }
+    printf("[warn][mock-admin] risk_account_banned account=%s reason=%s disconnected=%u\n",
+           accountId, reason,
+           disconnectedOut != NULL ? *disconnectedOut : 0u);
+    if (errorOut != NULL)
+        *errorOut = NULL;
+    return true;
+}
+
 static void vm_mock_service_mark_active_session_scene_pending(const vm_net_mock_scene_change_target *target,
                                                               const char *reason)
 {
@@ -4487,7 +4637,11 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineSex = role->sex;
     session->onlineLevel = (u16)(role->level ? role->level : 1);
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
-        session->onlineEquippedItemIds[slot] = role->equippedItems[slot].itemId;
+    {
+        session->onlineEquippedItemIds[slot] =
+            vm_net_mock_role_equipment_slot_is_usable(role, slot) ?
+                role->equippedItems[slot].itemId : 0;
+    }
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;
     session->onlineMp = mp;
@@ -4722,6 +4876,7 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     /* Timed skill effects are scoped to this battle instance.  A new battle
      * must never inherit a previous encounter's modifier rows. */
     memset(team->battleMemberModifiers, 0, sizeof(team->battleMemberModifiers));
+    memset(team->battleEnemyEffects, 0, sizeof(team->battleEnemyEffects));
     for (u8 i = 0; i < participantCount; ++i)
     {
         vm_mock_service_client_session *member =
@@ -5045,6 +5200,110 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
         *beforeOut = before;
     if (afterOut)
         *afterOut = after;
+    vm_mock_service_close_account_role_db_for_management(state, false);
+    return true;
+}
+
+/* The level displayed by the client is derived from cumulative EXP.  Keep the
+ * coherent role mutation separate from its admin persistence boundary so both
+ * the HTTP action and its deterministic regression exercise the exact same
+ * level/EXP/vitals contract. */
+static bool vm_mock_service_role_apply_admin_level(vm_net_mock_role_state *role,
+                                                   u32 requestedLevel)
+{
+    u32 targetExp = 0;
+
+    if (role == NULL || requestedLevel == 0 ||
+        requestedLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+    {
+        return false;
+    }
+    targetExp = vm_net_mock_role_level_start_exp(requestedLevel);
+    if (targetExp == 0xffffffffu)
+        return false;
+    role->level = requestedLevel;
+    role->exp = targetExp;
+    /* Rebuild level/equipment-derived HP and MP maxima, while preserving the
+     * role's current vitality subject to the new maxima.  Setting a level is
+     * not a recovery operation. */
+    vm_net_mock_role_sync_derived_vitals(role);
+    return true;
+}
+
+/* An admin level change updates the level and the cumulative EXP in one
+ * account snapshot; changing only role->level would be normalized back from
+ * the old EXP on the next login.  Keep it offline-only for the same reason as
+ * position recovery: a live session owns a separate in-memory role snapshot
+ * and could otherwise later overwrite this committed state. */
+static bool vm_mock_service_account_set_role_level(const char *accountId,
+                                                   const char *roleSelector,
+                                                   u32 requestedLevel,
+                                                   const char **messageOut)
+{
+    vm_mock_service_account_state *state = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state before;
+    u32 targetExp = 0;
+
+    if (messageOut)
+        *messageOut = "角色等级设置失败";
+    if (accountId == NULL || accountId[0] == 0 ||
+        roleSelector == NULL || roleSelector[0] == 0 ||
+        requestedLevel == 0 || requestedLevel > VM_NET_MOCK_ROLE_LEVEL_CAP)
+    {
+        if (messageOut)
+            *messageOut = "角色或等级参数无效";
+        return false;
+    }
+    if (vm_mock_service_account_has_live_role_session(accountId))
+    {
+        if (messageOut)
+            *messageOut = "账号角色仍在线，请先返回标题并稍候刷新后再设置等级";
+        return false;
+    }
+
+    state = vm_mock_service_open_account_role_db_for_management(accountId,
+                                                                  messageOut);
+    if (state == NULL)
+        return false;
+    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
+    if (role == NULL)
+    {
+        if (messageOut)
+            *messageOut = "角色不存在";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+
+    before = *role;
+    if (!vm_mock_service_role_apply_admin_level(role, requestedLevel))
+    {
+        if (messageOut)
+            *messageOut = "目标等级不在经验曲线范围内";
+        vm_mock_service_close_account_role_db_for_management(state, true);
+        return false;
+    }
+    targetExp = role->exp;
+    if (!vm_net_mock_role_db_save_relational("admin-set-role-level", NULL,
+                                             NULL, 0, true, NULL, NULL))
+    {
+        *role = before;
+        vm_mock_service_account_capture(state);
+        if (messageOut)
+            *messageOut = "角色等级保存失败，未修改角色数据";
+        printf("[error][mock-admin] role_level_set_failed account=%s role=%u target_level=%u target_exp=%u error=%s\n",
+               accountId, before.roleId, requestedLevel, targetExp,
+               vm_mysql_last_error());
+        vm_mock_service_close_account_role_db_for_management(state, false);
+        return false;
+    }
+
+    vm_mock_service_account_capture(state);
+    printf("[info][mock-admin] role_level_set account=%s role=%u old_level=%u old_exp=%u new_level=%u new_exp=%u hp=%u/%u mp=%u/%u action=commit\n",
+           accountId, role->roleId, before.level, before.exp, role->level,
+           role->exp, role->hp, role->hpMax, role->mp, role->mpMax);
+    if (messageOut)
+        *messageOut = "角色等级已更新，经验已重置为该等级起点";
     vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
 }

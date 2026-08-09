@@ -336,6 +336,8 @@ static bool vm_mock_service_login_requires_auth(const vm_mock_service_login_requ
 static bool vm_mock_service_authenticate_login_request(const vm_mock_service_login_request *login,
                                                        const char **errorOut)
 {
+    bool banned = false;
+
     if (errorOut)
         *errorOut = "account or password error";
     if (login == NULL || !vm_mock_service_login_requires_auth(login))
@@ -347,6 +349,23 @@ static bool vm_mock_service_authenticate_login_request(const vm_mock_service_log
     }
     if (!vm_mock_service_account_verify_credentials(login->userName, login->password))
         return false;
+    /* Credentials only prove identity.  Account access is a distinct
+     * persisted authority managed by the risk-role page; checking it here is
+     * the one gateway for every native login path (including title/login
+     * requests handled by mock_server_interaction_login.c). */
+    if (!vm_mock_service_account_access_ban_check(login->userName, &banned,
+                                                  NULL, 0))
+    {
+        if (errorOut)
+            *errorOut = "account access unavailable";
+        return false;
+    }
+    if (banned)
+    {
+        if (errorOut)
+            *errorOut = "account suspended";
+        return false;
+    }
     return true;
 }
 

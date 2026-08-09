@@ -34,8 +34,8 @@ Success response:
 - `1/2/10`: empty actor-other acknowledgement.
 - `1/2/2`: the selected scene monster's HP/MP seed.
 - `1/4/5`: scene-monster battle start. Its `battleinfo` contains the server
-  SCE2 combat-spawn tuple and local player vitals; the client copies the
-  monster model from its existing scene node.
+  SCE2-derived **runtime static-scene-node** tuple and local player vitals; the
+  client copies the monster model from its existing scene node.
 - Optional `1/4/11`: auto-battle UI flag, controlled by
   `CBE_HANGUP_BATTLE_AUTO_FLAG`.
 - When the request contains a trailing movement upload, one empty `1/2/1`
@@ -61,8 +61,10 @@ Failure response:
 - `CBE_HANGUP_BATTLE_ENEMY_ID` can force a monster id for debugging only.
 - The service chooses the monster **type** from `automonster.dsh` and selects
   its first matching SCE2 combat spawn from the server-owned scene resource.
-  `HandleBattleStartMsg(0x66CC)` resolves that source tuple by coordinate if
-  its SCE ordinal differs from the client's live node slot.
+  Its battle index includes all preceding static prop placements, because
+  `HandleBattleStartMsg(0x66CC)` indexes the complete client scene table, not
+  a combat-only list.  See
+  [`2026-08-09-hangup-runtime-scene-node-index.md`](2026-08-09-hangup-runtime-scene-node-index.md).
 
 ## Implementation Notes
 
@@ -108,7 +110,8 @@ The server/source resource contract is now sufficient for a real scene start:
   `(index=6,pos=(295,57))` and `(index=8,pos=(146,349))`. Thus the source
   resource's coordinates are present in the live client node table.
 - `0x66CC` first tests its supplied index then scans active kind-2 nodes by
-  `node+240/+244` coordinates. The SCE ordinal need not equal the live slot.
+  `node+240/+244` coordinates. The battleinfo must therefore carry the
+  SCE-derived **complete static scene-node index**, not a combat ordinal.
 - `scene_node_update_move_blob(0x01012A76)` seeds HP/MP at the first active
   actor-id match. The hangup selector also chooses the first matching SCE
   combat spawn, so its preceding `2/2` and the `4/5` source refer to the same
@@ -131,8 +134,8 @@ returns `2/10 + 25/11` instead of fabricating a player-template battle.
 Expected trace:
 
 ```text
-mock_hangup_battle_start source=request ... subtype=5 index=<sce ordinal> pos=(<x>,<y>)
-  target_source=sce-combat-spawn-coordinate
+mock_hangup_battle_start source=request ... subtype=5 runtime_index=<static node index> pos=(<x>,<y>)
+  target_source=sce-static-node-order
   ... response=2/10+2/2+4/5[+4/11][+2/1]
 ```
 

@@ -1,5 +1,6 @@
 /*
- * Lightweight regression for the admin HTTP framing and monster-list setup.
+ * Lightweight regression for the admin HTTP framing and monster-list/drop
+ * editor setup.
  *
  * Build from the repository root (Windows MinGW example):
  *   gcc -DNETWORK_SUPPORT -DCBE_SERVER_ONLY -g -O2 -std=gnu11 -ffunction-sections
@@ -20,7 +21,7 @@
 #include "../src/main.c"
 #undef main
 
-int main(void)
+int main(int argc, char **argv)
 {
     const char requestHeader[] =
         "POST /admin-418yz6/action HTTP/1.1\r\n"
@@ -55,6 +56,33 @@ int main(void)
         fprintf(stderr, "monster search is not owned by the shared admin script\n");
         return 1;
     }
-    puts("admin request-length regression passed: 24KiB body + shared monster search");
+    if (strstr(g_vm_mock_admin_script, "const setupMonsterDrops") == NULL ||
+        strstr(g_vm_mock_admin_script, "monster-drop-picker-modal") == NULL ||
+        strstr(g_vm_mock_admin_script, "data-monster-drop-add") == NULL ||
+        strstr(g_vm_mock_admin_script, "需求等级") == NULL ||
+        strstr(g_vm_mock_admin_script, "option.dataset.level") == NULL)
+    {
+        fprintf(stderr,
+                "monster bulk-drop picker or equipment metadata is missing "
+                "from the shared admin script\n");
+        return 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "--write-js") == 0)
+    {
+        FILE *file = fopen(argv[2], "wb");
+
+        if (file == NULL ||
+            fwrite(g_vm_mock_admin_script, 1,
+                   strlen(g_vm_mock_admin_script), file) !=
+                strlen(g_vm_mock_admin_script))
+        {
+            if (file != NULL)
+                fclose(file);
+            fprintf(stderr, "failed to export shared admin JavaScript\n");
+            return 1;
+        }
+        fclose(file);
+    }
+    puts("admin request-length regression passed: 24KiB body + monster search + bulk drops");
     return 0;
 }
