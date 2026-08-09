@@ -2220,7 +2220,13 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     u32 operate = 0;
     u8 index8 = 0;
     u8 operate8 = 0;
-    u8 actionInfo[128];
+    /* A final party member can contribute one three-target player action and
+     * three monster counter actions in the same 4/6.  The captured-round
+     * contract already permits up to VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX;
+     * keeping this local staging buffer smaller made the second member's
+     * otherwise valid WT 4/2 fall through as unhandled before the round could
+     * be released. */
+    u8 actionInfo[VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX];
     u32 actionInfoLen = 0;
     u32 responseObjectCount = 1;
     u8 actorSlot = 0;
@@ -3008,7 +3014,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     u32 operate = 0;
     u8 index8 = 0;
     u8 operate8 = 0;
-    u8 actionInfo[128];
+    /* Keep the relaxed 4/2 builder on the same actioninfo bound as the
+     * normal builder.  It is a wire-layout adapter, not a lower-capacity
+     * battle implementation. */
+    u8 actionInfo[VM_MOCK_SERVICE_TEAM_BATTLE_ROUND_ACTION_INFO_MAX];
     u32 actionInfoLen = 0;
     u32 responseObjectCount = 1;
     u8 requestKind = 0;

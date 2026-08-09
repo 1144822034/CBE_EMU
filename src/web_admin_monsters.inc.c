@@ -39,8 +39,8 @@ static void vm_mock_admin_render_monster_drop_rows(
         visibleRows = VM_NET_MOCK_MONSTER_DROP_MAX;
     vm_mock_admin_text_appendf(
         page,
-        "<div class=\"monster-drop-manager\" data-monster-drop-manager data-monster-drop-cap=\"%u\"><div class=\"drop-tools\"><div class=\"drop-tool-card\"><span class=\"inventory-form-tag add\">批量添加掉落</span><label class=\"field\"><span>新增项默认概率（%%）</span><input type=\"number\" data-monster-drop-default-rate min=\"1\" max=\"100\" value=\"100\"></label><button class=\"secondary\" type=\"button\" data-monster-drop-open>多选掉落物品</button><button type=\"button\" data-monster-drop-add disabled>加入掉落（0）</button></div><div class=\"drop-tool-card\"><span class=\"inventory-form-tag remove\">管理已有掉落</span><label class=\"field\"><span>掉落分类</span><select data-monster-drop-current-category>",
-        VM_NET_MOCK_MONSTER_DROP_MAX);
+        "<div class=\"monster-drop-manager\" data-monster-drop-manager data-monster-drop-cap=\"%u\"><div class=\"drop-tools\"><div class=\"drop-tool-card\"><span class=\"inventory-form-tag add\">批量添加掉落</span><label class=\"field\"><span>新增项默认概率（%%）</span><input type=\"number\" data-monster-drop-default-rate min=\"1\" max=\"100\" value=\"100\"></label><button class=\"secondary\" type=\"button\" data-monster-drop-open>多选掉落物品</button><button type=\"button\" data-monster-drop-add disabled>加入掉落（0）</button></div><div class=\"drop-tool-card\"><span class=\"inventory-form-tag remove\">管理已有掉落</span><span class=\"hint\">已配置 %u 项，可在弹窗内筛选、编辑概率或移除。</span><button class=\"secondary\" type=\"button\" data-monster-drop-current-open aria-haspopup=\"dialog\">管理已有掉落（%u）</button></div></div><div class=\"item-modal monster-current-modal\" data-monster-drop-current-modal role=\"dialog\" aria-modal=\"true\" aria-label=\"管理怪物已有掉落\" hidden><section class=\"item-picker-panel monster-current-panel\" style=\"width:min(960px,100%%)\"><div class=\"item-picker-head\"><div><h3>管理已有掉落</h3><p>修改后的概率与移除结果会随“保存怪物属性”一并提交。</p></div><button class=\"item-picker-close\" type=\"button\" data-monster-drop-current-close aria-label=\"关闭已有掉落\">×</button></div><div class=\"item-picker-tools\"><label><span>掉落分类</span><select data-monster-drop-current-category>",
+        VM_NET_MOCK_MONSTER_DROP_MAX, monster->dropCount, monster->dropCount);
     vm_mock_admin_render_catalog_category_options(page, "全部掉落分类");
     vm_mock_admin_text_appendf(
         page,
@@ -48,7 +48,7 @@ static void vm_mock_admin_render_monster_drop_rows(
     vm_mock_admin_render_catalog_quality_options(page, "全部品质");
     vm_mock_admin_text_appendf(
         page,
-        "</select></label><button class=\"secondary\" type=\"button\" data-monster-drop-select-current>全选当前筛选</button><button class=\"danger\" type=\"button\" data-monster-drop-remove-current disabled>移除已选（0）</button></div></div><div class=\"drop-list\" id=\"monster-drop-list\">");
+        "</select></label></div><div class=\"npc-stock-picker-actions\"><button class=\"secondary\" type=\"button\" data-monster-drop-select-current>全选当前筛选</button><button class=\"danger\" type=\"button\" data-monster-drop-remove-current disabled>移除已选（0）</button></div><div class=\"drop-list\" id=\"monster-drop-list\" style=\"flex:1;min-height:0;overflow:auto;padding:0 20px 20px\">");
     for (u8 slot = 0; slot < VM_NET_MOCK_MONSTER_DROP_MAX; ++slot)
     {
         char pickerId[48];
@@ -79,7 +79,7 @@ static void vm_mock_admin_render_monster_drop_rows(
     }
     vm_mock_admin_text_appendf(
         page,
-        "</div><p class=\"hint\">每条掉落独立按概率投掷；同一物品不能重复配置。批量选择只会填入空槽位，加入后仍可逐项调整概率。保存怪物属性后才会提交本次掉落修改。</p></div>");
+        "</div><p class=\"hint\" style=\"margin:0 20px 16px\">每条掉落独立按概率投掷；同一物品不能重复配置。批量选择只会填入空槽位，加入后仍可逐项调整概率。保存怪物属性后才会提交本次掉落修改。</p></section></div></div>");
 }
 
 static void vm_mock_admin_render_monster_page(char *response,
