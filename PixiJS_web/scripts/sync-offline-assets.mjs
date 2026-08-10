@@ -31,6 +31,13 @@ function resolveFontFile(fileName, candidates) {
   return null;
 }
 
+function resolveFont16Sky() {
+  return resolveFontFile("font_16_sky.uc3", [
+    path.join(repoRoot, "web", "fs", "font_16_sky.uc3"),
+    path.join(repoRoot, "bin", "font_16_sky.uc3"),
+  ]);
+}
+
 function resolveGb16Font() {
   return resolveFontFile("gb16.uc2.uc3", [
     path.join(repoRoot, "web", "fs", "gb16.uc2.uc3"),
@@ -98,6 +105,15 @@ console.log(`[sync-offline-assets] JHOnlineData ← ${dataSrc}`);
 rmrf(dataDest);
 copyDir(dataSrc, dataDest);
 
+const skySrc = resolveFont16Sky();
+if (!skySrc) {
+  console.error("[sync-offline-assets] missing font_16_sky.uc3");
+  process.exit(1);
+}
+const skyDest = path.join(publicDir, "font_16_sky.uc3");
+fs.copyFileSync(skySrc, skyDest);
+console.log(`[sync-offline-assets] font_16_sky.uc3 ← ${skySrc}`);
+
 const gb16Src = resolveGb16Font();
 if (!gb16Src) {
   console.error("[sync-offline-assets] missing gb16.uc2.uc3");
@@ -108,25 +124,13 @@ fs.copyFileSync(gb16Src, gb16Dest);
 console.log(`[sync-offline-assets] gb16.uc2.uc3 ← ${gb16Src}`);
 
 const fontGbSrc = resolveFontGb();
-if (fontGbSrc) {
-  const fontDest = path.join(publicDir, "font_gb.uc3");
-  fs.copyFileSync(fontGbSrc, fontDest);
-  console.log(`[sync-offline-assets] font_gb.uc3 ← ${fontGbSrc}`);
-} else {
-  console.warn("[sync-offline-assets] font_gb.uc3 not found (optional fallback)");
-}
-
-const yaheiSrc = path.join(repoRoot, "web", "fs", "YaHei Consolas Hybrid.ttf");
-const yaheiDest = path.join(publicDir, "YaHeiConsolasHybrid.ttf");
-if (fs.existsSync(yaheiSrc)) {
-  fs.copyFileSync(yaheiSrc, yaheiDest);
-  console.log(`[sync-offline-assets] YaHeiConsolasHybrid.ttf ← ${yaheiSrc}`);
-} else {
-  console.error(
-    "[sync-offline-assets] missing YaHei Consolas Hybrid.ttf (required UI font)",
-  );
+if (!fontGbSrc) {
+  console.error("[sync-offline-assets] missing font_gb.uc3");
   process.exit(1);
 }
+const fontDest = path.join(publicDir, "font_gb.uc3");
+fs.copyFileSync(fontGbSrc, fontDest);
+console.log(`[sync-offline-assets] font_gb.uc3 ← ${fontGbSrc}`);
 
 const verSrc = resolveClientCodeVersion();
 const verDest = path.join(publicDir, "client_code_version.txt");

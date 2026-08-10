@@ -22,6 +22,12 @@ const JOBS = ["天机", "幻剑", "鬼道"];
 /** Full-body front stand (CBE dir=3), keyed by actor resource. */
 const bodyCache = new Map<string, Texture>();
 
+/** Leave a strip under the CBE panel so footer tip is not clipped by the frame. */
+const PANEL_TOP = 40;
+const TIP_STRIP_H = 24;
+const PANEL_H = LCD_HEIGHT - SOFTKEY_H - PANEL_TOP - TIP_STRIP_H;
+const FOOTER_TIP_Y = PANEL_TOP + PANEL_H + 5;
+
 /**
  * Character select —「选择人物登录」slots with full-body stand preview.
  * OK opens delete confirm: type the role name, then 确定.
@@ -54,13 +60,13 @@ export class RoleScreen extends Container {
     );
     this.addChild(this.bannerGfx);
     drawLocBanner(this.bannerGfx, this, "选择人物登录", 8);
-    drawCbePanel(this.frame, 6, 40, LCD_WIDTH - 12, LCD_HEIGHT - SOFTKEY_H - 52, CBE.bgDeep);
+    drawCbePanel(this.frame, 6, PANEL_TOP, LCD_WIDTH - 12, PANEL_H, CBE.bgDeep);
     this.addChild(this.frame);
     this.addChild(this.rowsHost, this.confirmHost);
 
     this.tipLabel = makePixelText("OK键删除 · 需输入角色名确认", 11, CBE.inkTip);
     this.tipLabel.anchor.set(0.5, 0);
-    this.tipLabel.position.set(LCD_WIDTH / 2, LCD_HEIGHT - SOFTKEY_H - 20);
+    this.tipLabel.position.set(LCD_WIDTH / 2, FOOTER_TIP_Y);
     this.addChild(this.tipLabel);
 
     this.ime.onChange = (v) => {

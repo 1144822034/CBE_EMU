@@ -233,6 +233,11 @@ export class BattleScreen extends Container {
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
   /**
+   * Playback finished and battle should leave to world (4/8 / finished without
+   * a settle panel). Settlement uses onSettleConfirm instead.
+   */
+  onExitReady: (() => void) | null = null;
+  /**
    * Bottom party vitals / world HUD sync — fired when HP/MP actually lands
    * during actioninfo playback (not at 4/6 packet arrival).
    */
@@ -589,6 +594,11 @@ export class BattleScreen extends Container {
       this.playbackBusy = false;
       // Ensure final teaminfo MP landed (HP stays on actioninfo deltas only).
       this.applyRightTeaminfo(up.rightHp, /* mpOnly */ true);
+      if (up.settlement) {
+        // 4/7.hp/mp are recovery deltas (flask / settle recover). Apply onto
+        // the local seat so world HUD matches post-settle durable vitals.
+        this.applySettlementRecover(up.settlement);
+      }
       this.notifyVitalsChanged();
       if (up.settlement) {
         this.showSettlement(up.settlement);
@@ -597,12 +607,15 @@ export class BattleScreen extends Container {
         this.menuOpen = false;
         this.redrawMenu();
         this.refreshAutoBannerVisibility();
+        // 4/7+4/8 often share one WT — keep settle panel; confirm owns leave.
         return;
       }
       if (up.finished) {
         this.menuOpen = false;
         this.redrawMenu();
         this.refreshAutoBannerVisibility();
+        // Final deferred vitals already notified above; leave after playback.
+        this.onExitReady?.();
         return;
       }
       // Death arms revival confirm on server — no 4/7/4/8 until 1/7/14.
@@ -624,6 +637,8 @@ export class BattleScreen extends Container {
   }
 
   hide(): void {
+    // Flush last known seat vitals before tearing state (world HUD sync).
+    if (this.state) this.notifyVitalsChanged();
     this.visible = false;
     this.state = null;
     this.hangupActive = false;
@@ -1650,7 +1665,7 @@ export class BattleScreen extends Container {
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     const opts = this.deathPromptOptions();
-    const h = 70 + opts.length * 18;
+    const h = 80 + opts.length * 18;
     const box = new Graphics();
     drawCbePanel(box, 20, 100, LCD_WIDTH - 40, h, CBE.bgPanelDark);
     this.settleHost.addChild(box);
@@ -1664,7 +1679,7 @@ export class BattleScreen extends Container {
     ];
     lines.forEach((t, i) => {
       const lab = new BitmapLabel();
-      lab.position.set(32, 108 + i * 16);
+      lab.position.set(32, 112 + i * 18);
       const hi =
         i >= 2 &&
         i < 2 + opts.length &&
@@ -1839,6 +1854,25 @@ export class BattleScreen extends Container {
   private notifyVitalsChanged(): void {
     this.refreshBottomHud();
     this.onVitalsChanged?.();
+  }
+
+  /** Apply 4/7 recover hp/mp deltas onto the observer / first right seat. */
+  private applySettlementRecover(s: BattleSettlement): void {
+    if (!this.state) return;
+    const recoverHp = s.recoverHp | 0;
+    const recoverMp = s.recoverMp | 0;
+    if (!recoverHp && !recoverMp) return;
+    const selfId = (this.visuals.selfId ?? 0) >>> 0;
+    const row =
+      (selfId ? this.state.right.find((r) => r.id === selfId) : undefined) ||
+      this.state.right[0];
+    if (!row) return;
+    if (recoverHp > 0) {
+      row.hp = Math.max(0, Math.min(row.maxHp, row.hp + recoverHp));
+    }
+    if (recoverMp > 0) {
+      row.mp = Math.max(0, Math.min(row.maxMp, row.mp + recoverMp));
+    }
   }
 
   /** Apply server valueA HP delta onto the battle-state unit for `wire`. */
@@ -2098,15 +2132,21 @@ export class BattleScreen extends Container {
       }
 
       const actor = this.unitForWire(rec.actorWire);
-      const firstTarget = rec.children[0]
-        ? this.unitForWire(rec.children[0].wire)
-        : null;
+      const offensiveGroup =
+        rec.children.length > 1 && rec.children.some((c) => c.delta < 0);
+      const enemyWires = offensiveGroup ? this.livingEnemyWires() : [];
+      const childWires = rec.children.map((c, i) => {
+        if (!offensiveGroup || enemyWires.length === 0) return c.wire;
+        const tgt = this.unitForWire(c.wire);
+        // Hangup subtype-10 + stale scene child wire 0 paints on the player
+        // for 天机/幻剑/鬼道 group skills alike — retarget to living enemies.
+        if (tgt && this.state!.left.includes(tgt.side)) return c.wire;
+        return enemyWires[Math.min(i, enemyWires.length - 1)]!;
+      });
+      const firstTarget =
+        childWires[0] != null ? this.unitForWire(childWires[0]) : null;
       const isSkill = rec.type === 1 || rec.type === 2;
-      // Group skills (目标指向=2/4) put one child per target — FX on every child.
-      // Same as manual: trust server actioninfo wires (no hangup remap).
-      const fxWires = rec.children.length
-        ? rec.children.map((c) => c.wire)
-        : [rec.actorWire];
+      const fxWires = childWires.length ? childWires : [rec.actorWire];
       const effectIndex =
         isSkill && rec.effectIndex != null && rec.effectIndex > 0
           ? rec.effectIndex
@@ -2123,23 +2163,35 @@ export class BattleScreen extends Container {
             motion,
             (async () => {
               await sleep(120);
-              await this.playSkillEffects(effectIndex, fxWires, actor);
+              await this.playSkillEffects(
+                effectIndex,
+                fxWires,
+                actor,
+                /* fallbackToActor */ !offensiveGroup,
+              );
             })(),
           ]);
         } else {
           await motion;
         }
       } else if (effectIndex > 0) {
-        await this.playSkillEffects(effectIndex, fxWires, actor);
+        await this.playSkillEffects(
+          effectIndex,
+          fxWires,
+          actor,
+          !offensiveGroup,
+        );
       }
 
-      for (const c of rec.children) {
-        const tgt = this.unitForWire(c.wire);
+      for (let i = 0; i < rec.children.length; i++) {
+        const c = rec.children[i]!;
+        const wire = childWires[i] ?? c.wire;
+        const tgt = this.unitForWire(wire);
         if (tgt && c.delta < 0 && c.flag !== 3) {
           void this.playHitMotion(tgt);
         }
-        this.spawnFloatAtWire(c.wire, c.delta, c.flag, rec.effectText);
-        this.applyWireHpDelta(c.wire, c.delta);
+        this.spawnFloatAtWire(wire, c.delta, c.flag, rec.effectText);
+        this.applyWireHpDelta(wire, c.delta);
       }
       if (isSkill) {
         this.applyCasterMpFromTeaminfo(up.rightHp, rec.actorWire);
@@ -2150,13 +2202,15 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Play eidolon FX on every resolved wire; if none resolve, fall back to the
-   * actor (monster cast on missing player wire used to skip FX entirely).
+   * Play eidolon FX on every resolved wire.
+   * Offensive group skills must not fall back onto the caster — hangup wire
+   * desync used to paint 荒魂劫火/天火熔身/雷震八方 on 本方.
    */
   private async playSkillEffects(
     effectIndex: number,
     wires: number[],
     actor: UnitView | null,
+    fallbackToActor = true,
   ): Promise<void> {
     const actorName = await eidolonActorForIndex(effectIndex);
     if (!actorName) {
@@ -2169,7 +2223,13 @@ export class BattleScreen extends Container {
       const view = this.unitForWire(w);
       if (view) spots.push({ x: view.feetX, y: view.feetY - 24 });
     }
-    if (!spots.length && actor) {
+    if (!spots.length && !fallbackToActor) {
+      for (const w of this.livingEnemyWires()) {
+        const view = this.unitForWire(w);
+        if (view) spots.push({ x: view.feetX, y: view.feetY - 24 });
+      }
+    }
+    if (!spots.length && fallbackToActor && actor) {
       spots.push({ x: actor.feetX, y: actor.feetY - 24 });
     }
     if (!spots.length) {
@@ -2354,7 +2414,7 @@ export class BattleScreen extends Container {
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     const box = new Graphics();
-    drawCbePanel(box, 20, 100, LCD_WIDTH - 40, 150, CBE.bgPanelDark);
+    drawCbePanel(box, 20, 96, LCD_WIDTH - 40, 160, CBE.bgPanelDark);
     this.settleHost.addChild(box);
     const spar = this.isSparBattle();
     const lose =
@@ -2375,7 +2435,7 @@ export class BattleScreen extends Container {
     ].filter(Boolean);
     lines.forEach((t, i) => {
       const lab = new BitmapLabel();
-      lab.position.set(32, 108 + i * 16);
+      lab.position.set(32, 110 + i * 18);
       void lab.setText(t, i === 0 ? SETTLE_GOLD : CBE.inkBody, {
         outline: false,
         maxWidth: LCD_WIDTH - 64,
@@ -2384,7 +2444,6 @@ export class BattleScreen extends Container {
     });
   }
 }
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

@@ -83,7 +83,7 @@ export async function createRechargeOrder(opts: {
       error?: string;
     };
     if (!data || typeof data !== "object") {
-      return { ok: false, error: "充值服务响应无效" };
+      return { ok: false, error: "赞助服务响应无效" };
     }
     if (data.ok === true && typeof data.payUrl === "string" && data.payUrl) {
       return {
@@ -105,8 +105,8 @@ export async function createRechargeOrder(opts: {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.warn(`[recharge] create failed ${target}`, e);
-    if (/abort/i.test(msg)) return { ok: false, error: "充值请求超时" };
-    return { ok: false, error: "充值服务暂不可用" };
+    if (/abort/i.test(msg)) return { ok: false, error: "赞助请求超时" };
+    return { ok: false, error: "赞助服务暂不可用" };
   }
 }
 

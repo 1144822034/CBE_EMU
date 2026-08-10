@@ -1,21 +1,28 @@
 /**
- * Mobile IME bridge for canvas login fields.
+ * Mobile IME bridge for canvas login / register fields.
  * Canvas taps alone often fail to open the soft keyboard (Pixi preventDefault).
  * Real <input> overlays over the field boxes receive the touch directly.
  */
 import { setImeShellActive } from "./imeShell";
 
-export type LoginImeField = "user" | "pass";
+export type LoginImeField = "user" | "pass" | "pass2";
 
 export type LoginImeLcdRect = { x: number; y: number; w: number; h: number };
+
+export type LoginImeRects = {
+  user: LoginImeLcdRect;
+  pass: LoginImeLcdRect;
+  pass2?: LoginImeLcdRect;
+};
 
 export class LoginIme {
   private userInput: HTMLInputElement;
   private passInput: HTMLInputElement;
+  private pass2Input: HTMLInputElement;
   private host: HTMLElement | null = null;
   private visible = false;
   private shellHeld = false;
-  private lastRects: { user: LoginImeLcdRect; pass: LoginImeLcdRect } | null = null;
+  private lastRects: LoginImeRects | null = null;
   private onResize: (() => void) | null = null;
   private ro: ResizeObserver | null = null;
 
@@ -26,6 +33,7 @@ export class LoginIme {
   constructor() {
     this.userInput = makeFieldInput("text", "username", "账号");
     this.passInput = makeFieldInput("password", "current-password", "密码");
+    this.pass2Input = makeFieldInput("password", "new-password", "确认密码");
 
     const wire = (el: HTMLInputElement, field: LoginImeField) => {
       el.addEventListener("focus", () => {
@@ -43,20 +51,27 @@ export class LoginIme {
     };
     wire(this.userInput, "user");
     wire(this.passInput, "pass");
+    wire(this.pass2Input, "pass2");
   }
 
   /** Soft sync: never overwrite the focused field (caret / composition). */
-  setValues(user: string, password: string): void {
+  setValues(user: string, password: string, pass2 = ""): void {
     if (document.activeElement !== this.userInput) this.userInput.value = user;
     if (document.activeElement !== this.passInput) this.passInput.value = password;
+    if (document.activeElement !== this.pass2Input) this.pass2Input.value = pass2;
   }
 
   /** Hard sync after programmatic edits (paste / non-IME keyboard). */
-  forceValues(user: string, password: string): void {
+  forceValues(user: string, password: string, pass2 = ""): void {
     const active = document.activeElement;
     this.userInput.value = user;
     this.passInput.value = password;
-    if (active === this.userInput || active === this.passInput) {
+    this.pass2Input.value = pass2;
+    if (
+      active === this.userInput ||
+      active === this.passInput ||
+      active === this.pass2Input
+    ) {
       const el = active as HTMLInputElement;
       try {
         const len = el.value.length;
@@ -70,12 +85,13 @@ export class LoginIme {
   isFocused(): boolean {
     return (
       document.activeElement === this.userInput ||
-      document.activeElement === this.passInput
+      document.activeElement === this.passInput ||
+      document.activeElement === this.pass2Input
     );
   }
 
-  /** Show / reposition overlays for login mode (LCD coords of the input boxes). */
-  show(rects: { user: LoginImeLcdRect; pass: LoginImeLcdRect }): void {
+  /** Show / reposition overlays (LCD coords of the input boxes). */
+  show(rects: LoginImeRects): void {
     this.lastRects = rects;
     const host = document.getElementById("phone-wrap");
     if (!host) return;
@@ -83,10 +99,12 @@ export class LoginIme {
       this.host = host;
       host.appendChild(this.userInput);
       host.appendChild(this.passInput);
+      host.appendChild(this.pass2Input);
     }
     this.visible = true;
     this.armInput(this.userInput, true);
     this.armInput(this.passInput, true);
+    this.armInput(this.pass2Input, !!rects.pass2);
     if (!this.shellHeld) {
       this.shellHeld = true;
       setImeShellActive(true);
@@ -111,6 +129,7 @@ export class LoginIme {
     this.blur();
     this.armInput(this.userInput, false);
     this.armInput(this.passInput, false);
+    this.armInput(this.pass2Input, false);
     if (this.shellHeld) {
       this.shellHeld = false;
       setImeShellActive(false);
@@ -119,9 +138,11 @@ export class LoginIme {
 
   focus(field: LoginImeField, value: string): void {
     if (!this.visible) return;
-    const el = field === "user" ? this.userInput : this.passInput;
-    const other = field === "user" ? this.passInput : this.userInput;
-    other.blur();
+    if (field === "pass2" && !this.lastRects?.pass2) return;
+    const el = this.inputFor(field);
+    for (const other of [this.userInput, this.passInput, this.pass2Input]) {
+      if (other !== el) other.blur();
+    }
     this.armInput(el, true);
     el.value = value;
     el.focus({ preventScroll: true });
@@ -137,6 +158,7 @@ export class LoginIme {
   blur(): void {
     this.userInput.blur();
     this.passInput.blur();
+    this.pass2Input.blur();
   }
 
   /** When off: hide + inert so D-pad taps cannot reopen the soft keyboard. */
@@ -146,6 +168,12 @@ export class LoginIme {
     el.tabIndex = on ? 0 : -1;
     el.style.pointerEvents = on ? "auto" : "none";
     el.style.display = on ? "block" : "none";
+  }
+
+  private inputFor(field: LoginImeField): HTMLInputElement {
+    if (field === "pass") return this.passInput;
+    if (field === "pass2") return this.pass2Input;
+    return this.userInput;
   }
 
   destroy(): void {
@@ -160,6 +188,7 @@ export class LoginIme {
     this.hide();
     this.userInput.remove();
     this.passInput.remove();
+    this.pass2Input.remove();
     this.host = null;
   }
 
@@ -194,6 +223,7 @@ export class LoginIme {
     };
     place(this.userInput, this.lastRects.user);
     place(this.passInput, this.lastRects.pass);
+    if (this.lastRects.pass2) place(this.pass2Input, this.lastRects.pass2);
   }
 }
 

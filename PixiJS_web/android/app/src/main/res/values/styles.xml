@@ -16,12 +16,11 @@
     </style>
 
     <!--
-      Android 8.0 (API 26): Theme.SplashScreen + android:background=@drawable
-      can throw Resources$NotFoundException / ColorStateList errors on OEM builds.
-      Use classic windowBackground for the launch theme; BridgeActivity then
-      switches to AppTheme.NoActionBar after onCreate.
+      Android 8.0 (API 26): avoid Theme.SplashScreen + drawable splash
+      (OEM ColorStateList / Resources$NotFoundException). Classic
+      windowBackground only — no Capacitor logo splash image.
     -->
     <style name="AppTheme.NoActionBarLaunch" parent="AppTheme.NoActionBar">
-        <item name="android:windowBackground">@drawable/splash</item>
+        <item name="android:windowBackground">@color/splashBackground</item>
     </style>
 </resources>

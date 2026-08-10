@@ -14,6 +14,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \
 	src/server/mock_server_arena.c \
+	src/server/mock_server_auction.c \
 	src/server/mock_server_social.c \
 	src/server/mock_server_battle.c \
 	src/server/mock_server_interaction_login.c \

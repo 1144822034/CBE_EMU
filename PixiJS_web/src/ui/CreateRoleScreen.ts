@@ -15,6 +15,13 @@ import {
   composeMapActor,
   loadActor,
 } from "../resources/actor";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 const SEXES = ["男", "女"];
@@ -22,6 +29,12 @@ const SEXES = ["男", "女"];
 type Field = "sex" | "job" | "name";
 
 const bodyCache = new Map<string, Texture>();
+
+/** Leave a strip under the CBE panel so footer tip is not clipped by the frame. */
+const PANEL_TOP = 40;
+const TIP_STRIP_H = 24;
+const PANEL_H = LCD_HEIGHT - SOFTKEY_H - PANEL_TOP - TIP_STRIP_H;
+const FOOTER_TIP_Y = PANEL_TOP + PANEL_H + 5;
 
 /**
  * Title create-role form: sex → job → name (mmTitle create rows).
@@ -38,6 +51,7 @@ export class CreateRoleScreen extends Container {
   private bannerGfx = new Graphics();
   private frame = new Graphics();
   private ime = new ChatIme();
+  private toast: PanelTipState = createPanelTipState();
   /** Name field box in LCD coords (label sits to the left, not under the box). */
   private nameBox = { x: 72, y: 0, w: LCD_WIDTH - 96, h: 26 };
   /** Bumped on open/close so async preview redraw cannot remount IME after leave. */
@@ -53,12 +67,12 @@ export class CreateRoleScreen extends Container {
     );
     this.addChild(this.bannerGfx);
     drawLocBanner(this.bannerGfx, this, "创建角色", 8);
-    drawCbePanel(this.frame, 6, 40, LCD_WIDTH - 12, LCD_HEIGHT - SOFTKEY_H - 52, CBE.bgDeep);
+    drawCbePanel(this.frame, 6, PANEL_TOP, LCD_WIDTH - 12, PANEL_H, CBE.bgDeep);
     this.addChild(this.frame);
     this.addChild(this.previewHost, this.rowsHost);
 
     this.tipText = makePixelText("左右改选项 · 点名字输入", 11, CBE.inkTip);
-    this.tipText.position.set(14, LCD_HEIGHT - SOFTKEY_H - 22);
+    this.tipText.position.set(14, FOOTER_TIP_Y);
     this.addChild(this.tipText);
 
     this.ime.onChange = (v) => {
@@ -76,6 +90,7 @@ export class CreateRoleScreen extends Container {
     this.jobIndex = 0;
     this.nameValue = "";
     this.tipText.text = "左右改选项 · 点名字输入";
+    clearPanelTip(this.toast);
     this.redraw();
     void this.refreshPreview();
     this.syncNameIme();
@@ -83,6 +98,7 @@ export class CreateRoleScreen extends Container {
 
   close(): void {
     this.openGen += 1;
+    clearPanelTip(this.toast);
     this.ime.hide();
   }
 
@@ -93,12 +109,21 @@ export class CreateRoleScreen extends Container {
 
   destroy(options?: Parameters<Container["destroy"]>[0]): void {
     this.openGen += 1;
+    clearPanelTip(this.toast);
     this.ime.destroy();
     super.destroy(options);
   }
 
   setTip(text: string): void {
     this.tipText.text = text;
+  }
+
+  /** Centered opaque toast (e.g. 名已被注册). */
+  showTip(text: string, ms = 1500): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
   }
 
   move(delta: number): void {
@@ -265,5 +290,6 @@ export class CreateRoleScreen extends Container {
     });
 
     this.syncNameIme();
+    drawPanelTipOverlay(this, this.toast);
   }
 }

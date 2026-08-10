@@ -12,6 +12,7 @@ import {
   makePixelText,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
+import { isSoundEnabled } from "../audio/GameBgm";
 
 export type MenuLeaf =
   | "mall"
@@ -30,7 +31,9 @@ export type MenuLeaf =
   | "leave_game"
   | "leave_team"
   | "quick_repair"
-  | "hangup";
+  | "hangup"
+  | "font"
+  | "sound";
 
 type MenuNode = {
   label: string;
@@ -65,10 +68,12 @@ const ROOT: MenuNode[] = [
   {
     label: "系统设置",
     children: [
+      { label: "离开游戏", leaf: "leave_game" },     
       { label: "脱离卡死", leaf: "unstuck" },
-      { label: "离开游戏", leaf: "leave_game" },
       { label: "离开队伍", leaf: "leave_team" },
       { label: "快速修理", leaf: "quick_repair" },
+      { label: "开关声音", leaf: "sound" },
+      { label: "字体切换", leaf: "font" },
       { label: "挂机战斗", leaf: "hangup" },
     ],
   },
@@ -154,7 +159,16 @@ export class MenuScreen extends Container {
   private currentLabels(): string[] {
     if (this.level === 1) return ROOT.map((n) => n.label);
     const kids = this.subParent?.children ?? [];
-    return [...kids.map((c) => c.label), "返回"];
+    return [
+      ...kids.map((c) =>
+        c.leaf === "sound"
+          ? isSoundEnabled()
+            ? "关闭声音"
+            : "开启声音"
+          : c.label,
+      ),
+      "返回",
+    ];
   }
 
   private redraw(): void {

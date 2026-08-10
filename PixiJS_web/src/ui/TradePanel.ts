@@ -123,6 +123,9 @@ export class TradePanel extends Container {
     setPanelTipSticky(
       this.toast,
       "交易步骤\n①选物/设金 → ②提交报价\n③双方确认交易",
+      () => {
+        if (this.visible) this.redraw();
+      },
     );
     this.redraw();
   }
@@ -139,8 +142,9 @@ export class TradePanel extends Container {
   setPeerOffer(offer: TradeOfferView): void {
     this.peerOffer = offer;
     this.status = "对方报价已更新，需重新确认";
+    // Peer 21/6 only invalidates prior confirmations (server clears confirmedMask).
+    // Keep local offerSubmitted so 「确认交易」 stays enabled; do not force re-submit.
     this.waitingPeer = false;
-    this.offerSubmitted = false;
     if (this.visible) this.redraw();
   }
 

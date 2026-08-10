@@ -8,6 +8,14 @@
  * then count×{u16 key LE, u32 offset}.
  */
 
+import {
+  getUc3FontId,
+  getUc3FontUrl,
+  setUc3FontId,
+  type Uc3FontId,
+  uc3FontOption,
+} from "./uiFontPreference";
+
 export type Uc3Font = {
   width: number;
   height: number;
@@ -17,12 +25,17 @@ export type Uc3Font = {
   url: string;
 };
 
-/** Trial: full Unicode 16×16 pack. Fall back path kept for CBE subset. */
-export const UC3_FONT_URL = "/gb16.uc2.uc3";
+/** Default pack when preference missing. */
+export const UC3_FONT_URL = "/font_16_sky.uc3";
 
 let cached: Uc3Font | null = null;
 let loadPromise: Promise<Uc3Font> | null = null;
 let cachedUrl: string | null = null;
+
+/** Currently loaded pack URL (or preferred URL before load). */
+export function activeUc3FontUrl(): string {
+  return cachedUrl ?? getUc3FontUrl();
+}
 
 function decodeGbkChar(lo: number, hi: number): number | null {
   try {
@@ -86,27 +99,48 @@ function parseUc3(buf: Uint8Array, url: string): Uc3Font {
   return { width, height, glyphs, url };
 }
 
-export async function loadUc3Font(url = UC3_FONT_URL): Promise<Uc3Font> {
-  if (cached && cachedUrl === url) return cached;
-  if (loadPromise && cachedUrl === url) return loadPromise;
-  cachedUrl = url;
-  loadPromise = (async () => {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${url} HTTP ${res.status}`);
+export async function loadUc3Font(url?: string): Promise<Uc3Font> {
+  const target = url ?? getUc3FontUrl();
+  if (cached && cachedUrl === target) return cached;
+  if (loadPromise) {
+    try {
+      const font = await loadPromise;
+      if (cachedUrl === target) return font;
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const pending = (async () => {
+    const res = await fetch(target);
+    if (!res.ok) throw new Error(`${target} HTTP ${res.status}`);
     const buf = new Uint8Array(await res.arrayBuffer());
-    cached = parseUc3(buf, url);
+    const font = parseUc3(buf, target);
+    cached = font;
+    cachedUrl = target;
     console.info(
-      `[font] ${url} ${cached.width}x${cached.height} glyphs=${cached.glyphs.size}`,
+      `[font] ${target} ${font.width}x${font.height} glyphs=${font.glyphs.size}`,
     );
-    return cached;
+    return font;
   })();
+  loadPromise = pending;
   try {
-    return await loadPromise;
+    return await pending;
   } catch (e) {
-    loadPromise = null;
-    cachedUrl = null;
+    if (loadPromise === pending) {
+      loadPromise = null;
+      cached = null;
+      cachedUrl = null;
+    }
     throw e;
   }
+}
+
+/** Persist preference, clear cache, and load the chosen pack. */
+export async function applyUc3FontId(id: Uc3FontId): Promise<Uc3Font> {
+  setUc3FontId(id);
+  clearUc3FontCache();
+  return loadUc3Font(uc3FontOption(id).url);
 }
 
 /** Drop cache (tests / hot-swap font URL). */
@@ -114,6 +148,10 @@ export function clearUc3FontCache(): void {
   cached = null;
   loadPromise = null;
   cachedUrl = null;
+}
+
+export function currentUc3FontId(): Uc3FontId {
+  return getUc3FontId();
 }
 
 export function fontCellWidth(font: Uc3Font, cp: number): number {

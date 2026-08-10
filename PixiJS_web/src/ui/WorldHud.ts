@@ -3,20 +3,14 @@ import {
   CBE,
   LCD_HEIGHT,
   LCD_WIDTH,
-  SOFTKEY_H,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
-  drawCbePanel,
   drawLocBanner,
   makePixelText,
 } from "./constants";
-import {
-  BitmapLabel,
-  UC3_CELL,
-  measureUiTextWidth,
-  wrapUiText,
-} from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
 import { DigitStrip, tryLoadUiTexture, uiSprite } from "./UiAssets";
+import { SLOT_FRAME_SIZE } from "./ItemArt";
 import { colorForChatType } from "./ChatPanel";
 import {
   composeActorFrameIndex,
@@ -25,6 +19,12 @@ import {
 } from "../resources/actor";
 import { fetchResourceBytes } from "../resources/loader";
 import { lookupSMapAlias } from "../resources/smap";
+import {
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 /** Top shortcut icons → system overlays. */
 export type HudIconAction = "status" | "bag" | "quest" | "social" | "mall";
@@ -66,9 +66,18 @@ const HANG_BTN_W = 52;
 /** Status / chrome slots (absolute LCD y inside top band). */
 const STATUS_BG_Y = 28;
 const STATUS_BG_H = 36; // → y63
-const PORTRAIT_X = 4;
-const PORTRAIT_Y = 35;
-const PORTRAIT_INNER = 26;
+/**
+ * Portrait frame = handkuang.gif (25×25), shared with equip slots.
+ * Evidence: reference-shots/000017 gold ring vs handkuang @ (3,37) → 97/100 gold hit;
+ * ui_selectchar excluded (blue halo leaks onto olive HUD).
+ */
+const PORTRAIT_FRAME_X = 3;
+const PORTRAIT_FRAME_Y = 37;
+/** Blue interior of handkuang (probe: 3..21 inclusive → 19×19). */
+const PORTRAIT_PAD = 3;
+const PORTRAIT_INNER = SLOT_FRAME_SIZE - PORTRAIT_PAD * 2; // 19
+const PORTRAIT_X = PORTRAIT_FRAME_X + PORTRAIT_PAD;
+const PORTRAIT_Y = PORTRAIT_FRAME_Y + PORTRAIT_PAD;
 const TIAO_X = 34;
 const TIAO_Y = 38;
 const ICON_X0 = 91;
@@ -83,12 +92,13 @@ const CHAT_LINE_H = UC3_CELL;
 /** Party mates overlay map, stacked under EXP strip. */
 const PARTY_Y0 = WORLD_TOP_H + 1;
 const PARTY_SLOT_H = 30;
-const PARTY_FACE = 22;
+const PARTY_FACE = PORTRAIT_INNER;
 const PARTY_MAX = 3;
 
 type PartySlot = {
   root: Container;
   portrait: Container;
+  /** Leader mark (Graphics crown; vip_effect.gif is「斗」status, not VIP). */
   crown: Graphics;
   hpFill: Graphics;
   spFill: Graphics;
@@ -105,6 +115,7 @@ export class WorldHud extends Container {
 
   private locText: BitmapLabel;
   private portraitHost = new Container();
+  private portraitFrameHost = new Container();
   private tiaoHost = new Container();
   private hpFill = new Graphics();
   private spFill = new Graphics();
@@ -125,6 +136,7 @@ export class WorldHud extends Container {
   private partyHost = new Container();
   private partySlots: PartySlot[] = [];
   private partyTiao: Texture | null = null;
+  private handkuangTex: Texture | null = null;
 
   /**
    * Dream 29* instance countdown (CBE local timer; no WT packet).
@@ -140,12 +152,7 @@ export class WorldHud extends Container {
   private dreamSceneKey = "";
 
   /** Center toast for「修」buff list / short world tips. */
-  private tipHost = new Container();
-  private tipBox = new Graphics();
-  private tipLabels: BitmapLabel[] = [];
-  private tipText = "";
-  private tipUntil = 0;
-  private tipTimer: ReturnType<typeof setTimeout> | null = null;
+  private toast: PanelTipState = createPanelTipState();
 
   /** tiao.gif black-slot geometry (probe-tiao / probe-hud-boxes). */
   private static readonly FILL_X = 18;
@@ -158,11 +165,8 @@ export class WorldHud extends Container {
     super();
     this.eventMode = "static";
     this.sortableChildren = true;
-    this.tipHost.eventMode = "none";
-    this.tipHost.zIndex = 100;
-    this.tipHost.addChild(this.tipBox);
-    this.tipHost.visible = false;
-    this.addChild(this.top, this.bottom, this.tipHost);
+    this.toast.host.zIndex = 100;
+    this.addChild(this.top, this.bottom, this.toast.host);
     this.bottom.y = LCD_HEIGHT - WORLD_BOTTOM_H;
     this.bottom.eventMode = "static";
 
@@ -185,16 +189,11 @@ export class WorldHud extends Container {
     this.top.addChild(bannerGfx);
     this.locText = drawLocBanner(bannerGfx, this.top, "场景", 2);
 
-    // Gold portrait frame (handkuang.gif is item-slot, not face frame)
-    this.top.addChild(
-      new Graphics()
-        .rect(PORTRAIT_X - 1, PORTRAIT_Y - 1, PORTRAIT_INNER + 2, PORTRAIT_INNER + 2)
-        .fill({ color: 0x201810 })
-        .stroke({ width: 2, color: 0xd4a820 }),
-    );
+    // handkuang.gif portrait frame (same asset as equip slots); art in mountArt.
+    this.portraitFrameHost.position.set(PORTRAIT_FRAME_X, PORTRAIT_FRAME_Y);
+    this.top.addChild(this.portraitFrameHost);
     this.portraitHost.position.set(PORTRAIT_X, PORTRAIT_Y);
     this.top.addChild(this.portraitHost);
-    this.top.addChild(drawCrown(PORTRAIT_X + 1, PORTRAIT_Y - 6));
 
     this.tiaoHost.position.set(TIAO_X, TIAO_Y);
     this.tiaoHost.addChild(this.hpFill, this.spFill);
@@ -273,6 +272,14 @@ export class WorldHud extends Container {
     if (this.artReady) return;
     this.artReady = true;
 
+    this.handkuangTex = await tryLoadUiTexture("handkuang.gif");
+    if (this.handkuangTex) {
+      this.portraitFrameHost.removeChildren().forEach((c) => c.destroy());
+      this.portraitFrameHost.addChild(
+        uiSprite(this.handkuangTex, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE),
+      );
+    }
+
     const tiao = await tryLoadUiTexture("tiao.gif");
     if (tiao) {
       this.tiaoHost.addChildAt(uiSprite(tiao), 0);
@@ -324,11 +331,8 @@ export class WorldHud extends Container {
       spr.position.set(hangX, 0);
       this.bottom.addChild(spr);
     }
-    const swords = drawCrossedSwords(hangX + 4, 3);
-    swords.eventMode = "none";
-    this.bottom.addChild(swords);
     this.hangLabel.eventMode = "none";
-    this.hangLabel.position.set(hangX + 32, SOFT_H / 2);
+    this.hangLabel.position.set(hangX + HANG_BTN_W / 2, SOFT_H / 2);
     this.bottom.addChild(this.hangLabel);
 
     const home = await tryLoadUiTexture("UIxia3.gif");
@@ -517,17 +521,26 @@ export class WorldHud extends Container {
     const root = new Container();
     root.y = index * PARTY_SLOT_H;
 
-    const frame = new Graphics()
-      .rect(PORTRAIT_X - 1, 0, PARTY_FACE + 2, PARTY_FACE + 2)
-      .fill({ color: 0x201810 })
-      .stroke({ width: 1, color: 0xd4a820 });
-    root.addChild(frame);
+    const frameHost = new Container();
+    frameHost.position.set(PORTRAIT_FRAME_X, 0);
+    if (this.handkuangTex) {
+      frameHost.addChild(
+        uiSprite(this.handkuangTex, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE),
+      );
+    } else {
+      frameHost.addChild(
+        new Graphics()
+          .rect(0, 0, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE)
+          .stroke({ width: 1, color: 0xd4a820 }),
+      );
+    }
+    root.addChild(frameHost);
 
     const portrait = new Container();
-    portrait.position.set(PORTRAIT_X, 1);
+    portrait.position.set(PORTRAIT_X, PORTRAIT_PAD);
     root.addChild(portrait);
 
-    const crown = drawCrown(PORTRAIT_X + 1, -5);
+    const crown = drawCrown(PORTRAIT_FRAME_X + 1, -5);
     crown.visible = false;
     root.addChild(crown);
 
@@ -607,74 +620,10 @@ export class WorldHud extends Container {
 
   /** Green center toast (增益列表 / short feedback). */
   showTip(text: string, ms = 1200): void {
-    const msg = text.trim();
-    if (!msg) return;
-    this.tipText = msg;
-    this.tipUntil = Date.now() + ms;
-    if (this.tipTimer) clearTimeout(this.tipTimer);
-    this.tipTimer = setTimeout(() => {
-      this.tipTimer = null;
-      if (Date.now() >= this.tipUntil) this.clearTip();
-    }, ms + 20);
-    void this.redrawTip();
-  }
-
-  private clearTip(): void {
-    this.tipText = "";
-    this.tipUntil = 0;
-    if (this.tipTimer) {
-      clearTimeout(this.tipTimer);
-      this.tipTimer = null;
-    }
-    for (const t of this.tipLabels) t.destroy();
-    this.tipLabels = [];
-    this.tipBox.clear();
-    this.tipHost.visible = false;
-  }
-
-  private async redrawTip(): Promise<void> {
-    for (const t of this.tipLabels) t.destroy();
-    this.tipLabels = [];
-    this.tipBox.clear();
-    if (!this.tipText || Date.now() >= this.tipUntil) {
-      this.tipHost.visible = false;
-      return;
-    }
-    const padFrame = 6;
-    const padX = 10;
-    const padY = 8;
-    const lineH = 16;
-    const maxInner = LCD_WIDTH - 28 - padFrame * 2;
-    const textMax = Math.max(40, maxInner - padX * 2);
-    const lines = wrapUiText(this.tipText, textMax);
-    const boxH = padY * 2 + lines.length * lineH;
-    const boxW = Math.min(
-      maxInner,
-      Math.max(96, ...lines.map((l) => measureUiTextWidth(l))) + padX * 2,
-    );
-    const bx = Math.floor((LCD_WIDTH - boxW) / 2) - padFrame;
-    const by =
-      Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame;
-    // Same opaque CBE panel as battle settlement.
-    drawCbePanel(
-      this.tipBox,
-      bx,
-      by,
-      boxW + padFrame * 2,
-      boxH + padFrame * 2,
-      CBE.bgPanelDark,
-    );
-    const cx = Math.floor(LCD_WIDTH / 2);
-    for (let i = 0; i < lines.length; i++) {
-      const label = new BitmapLabel();
-      label.anchor.set(0.5, 0);
-      await label.setText(lines[i]!, CBE.inkTipGreen, { outline: false });
-      label.position.set(cx, by + padFrame + padY + i * lineH);
-      this.tipHost.addChild(label);
-      this.tipLabels.push(label);
-    }
-    this.addChild(this.tipHost);
-    this.tipHost.visible = true;
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) drawPanelTipOverlay(this, this.toast);
+    }, ms);
   }
 
   pushChat(line: string, type?: number): void {
@@ -769,6 +718,7 @@ function dreamSceneLeaf(scene: string): string {
     .toLowerCase();
 }
 
+/** Simple leader crown (vip_effect.gif is the「斗」status tile, not a crown). */
 function drawCrown(x: number, y: number): Graphics {
   const g = new Graphics();
   g.moveTo(x, y + 7)
@@ -779,14 +729,6 @@ function drawCrown(x: number, y: number): Graphics {
     .lineTo(x, y + 7)
     .fill({ color: 0xe8c040 });
   g.rect(x + 1, y + 7, 14, 2).fill({ color: 0xd4a820 });
-  return g;
-}
-
-function drawCrossedSwords(x: number, y: number): Graphics {
-  const g = new Graphics();
-  g.position.set(x, y);
-  g.moveTo(1, 1).lineTo(13, 13).stroke({ width: 2, color: 0xc8a060 });
-  g.moveTo(13, 1).lineTo(1, 13).stroke({ width: 2, color: 0xa87840 });
   return g;
 }
 

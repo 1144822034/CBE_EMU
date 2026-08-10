@@ -5,16 +5,17 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-/** JS bridge: start/stop hangup foreground keepalive while AFK. */
+/** JS bridge: start/stop foreground keepalive (in-world or hangup). */
 @CapacitorPlugin(name = "HangupKeepAlive")
 public class HangupKeepAlivePlugin extends Plugin {
     @PluginMethod
     public void start(PluginCall call) {
         try {
-            HangupKeepAliveService.start(getContext().getApplicationContext());
+            String mode = call.getString("mode", HangupKeepAliveService.MODE_HANGUP);
+            HangupKeepAliveService.start(getContext().getApplicationContext(), mode);
             call.resolve();
         } catch (Exception e) {
-            call.reject("hangup keepalive start failed", e);
+            call.reject("keepalive start failed", e);
         }
     }
 
@@ -24,7 +25,7 @@ public class HangupKeepAlivePlugin extends Plugin {
             HangupKeepAliveService.stop(getContext().getApplicationContext());
             call.resolve();
         } catch (Exception e) {
-            call.reject("hangup keepalive stop failed", e);
+            call.reject("keepalive stop failed", e);
         }
     }
 }

@@ -71,6 +71,8 @@ import {
   buildBattleItemUseRequest,
   buildBattleDeathPromptRequest,
   isBattleMedicineOrFlask,
+  parseBagItems,
+  parseBagItemUpdates,
   type BagItem,
 } from "../src/net/protocolExtras";
 import { WtBuilder, SeqWriter } from "../src/net/wt";
@@ -319,9 +321,31 @@ assert(buildBattleStartRequest(1, 0, 1, 1).length > 10, "fight");
   };
   assert(isBattleMedicineOrFlask(flask), "flask battle usable");
   assert(
+    isBattleMedicineOrFlask({ ...flask, category: 0 }),
+    "flask usable even if bag.category stale 0",
+  );
+  assert(
     !isBattleMedicineOrFlask({ ...flask, kind: "equip", itemId: 1001 }),
     "equip not battle medicine",
   );
+  // Lone 7/7 type=1 (battle drop) must not look like a full bag snapshot.
+  const info = new SeqWriter()
+    .u8(1)
+    .i16(99)
+    .u32(9001)
+    .u32(1)
+    .i16(0)
+    .i16(0)
+    .u8(0)
+    .finish();
+  const dropB = new WtBuilder();
+  dropB.object(1, 7, 7).u8("type", 1).raw("iteminfo", info);
+  const dropOnly = dropB.finishResponse();
+  const dropPkt = ingestPacket(dropOnly);
+  assert(!!dropPkt, "7/7 drop packet");
+  assert(parseBagItems(dropPkt!).length === 0, "7/7 alone not full bag");
+  const merged = parseBagItemUpdates(dropPkt!);
+  assert(merged.length === 1 && merged[0]!.seq === 99, "7/7 merge-by-seq");
 }
 assert(buildSceneStartupFollowupRequest().length === 49, "followup wt49 with 12/1");
 assert(buildLearnedSkillsRefreshRequest().length === 14, "skill refresh wt14");

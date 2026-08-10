@@ -28,7 +28,8 @@ import java.nio.charset.StandardCharsets;
 /**
  * Pay URL launcher.
  * Alipay V免签 returns https://qr.alipay.com/fkx… — open as-is via ACTION_VIEW
- * (no setPackage). Album-scan of that QR on some Alipay builds lands on 名片;
+ * (no setPackage); JS also shows QR overlay as dual insurance.
+ * Album-scan of that QR on some Alipay builds lands on 名片;
  * Intent VIEW of the https URL is the working path (matches account-center
  * 「打开支付链接」).
  */
@@ -156,7 +157,8 @@ public class PayLauncherPlugin extends Plugin {
             opened = openExternalView(url);
         }
 
-        boolean needQr = wxp || !opened;
+        /* Alipay: JS always shows QR as dual insurance; still hint needQr. */
+        boolean needQr = wxp || !opened || alipay;
         if (!opened && !wxp) {
             toast("无法自动打开支付，请用二维码");
         }

@@ -14,23 +14,33 @@ import android.os.PowerManager;
 import android.util.Log;
 
 /**
- * Foreground service while hangup intent is armed so OEM Doze / WebView pause
- * is less likely to kill scene-poll. Complements MainActivity WakeLock.
+ * Foreground service while the player is in-world (or hangup-armed) so OEM Doze
+ * / background WebView freeze is less likely to kill scene-poll. Complements
+ * MainActivity WakeLock + resumeTimers.
  */
 public class HangupKeepAliveService extends Service {
     private static final String TAG = "PixiHangupKeepAlive";
     public static final String ACTION_START = "com.jianghu.pixijs.action.HANGUP_KEEPALIVE_START";
     public static final String ACTION_STOP = "com.jianghu.pixijs.action.HANGUP_KEEPALIVE_STOP";
+    public static final String EXTRA_MODE = "keepalive_mode";
+    public static final String MODE_ONLINE = "online";
+    public static final String MODE_HANGUP = "hangup";
 
     private static final String CHANNEL_ID = "pixijs_hangup_keepalive";
     private static final int NOTIFICATION_ID = 19092;
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    private String mode = MODE_HANGUP;
 
     public static void start(Context context) {
+        start(context, MODE_HANGUP);
+    }
+
+    public static void start(Context context, String mode) {
         Intent intent = new Intent(context, HangupKeepAliveService.class);
         intent.setAction(ACTION_START);
+        intent.putExtra(EXTRA_MODE, mode != null ? mode : MODE_HANGUP);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent);
         } else {
@@ -58,17 +68,24 @@ public class HangupKeepAliveService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (intent != null) {
+            String next = intent.getStringExtra(EXTRA_MODE);
+            if (next != null && next.length() > 0) {
+                mode = next;
+            }
+        }
+
         ensureNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
         acquireLocks();
-        Log.i(TAG, "hangup keepalive foreground active");
+        Log.i(TAG, "keepalive foreground active mode=" + mode);
         return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
         releaseLocks();
-        Log.i(TAG, "hangup keepalive stopped");
+        Log.i(TAG, "keepalive stopped");
         super.onDestroy();
     }
 
@@ -102,14 +119,22 @@ public class HangupKeepAliveService extends Service {
             pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent contentIntent = PendingIntent.getActivity(this, 0, launch, pendingFlags);
 
+        boolean hangup = MODE_HANGUP.equals(mode);
+        int titleRes = hangup
+                ? R.string.hangup_keepalive_notification_title
+                : R.string.online_keepalive_notification_title;
+        int textRes = hangup
+                ? R.string.hangup_keepalive_notification_text
+                : R.string.online_keepalive_notification_text;
+
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             builder = new Notification.Builder(this, CHANNEL_ID);
         } else {
             builder = new Notification.Builder(this);
         }
-        builder.setContentTitle(getString(R.string.hangup_keepalive_notification_title))
-                .setContentText(getString(R.string.hangup_keepalive_notification_text))
+        builder.setContentTitle(getString(titleRes))
+                .setContentText(getString(textRes))
                 .setSmallIcon(R.drawable.ic_stat_hangup_keepalive)
                 .setContentIntent(contentIntent)
                 .setOngoing(true)

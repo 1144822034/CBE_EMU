@@ -1,19 +1,14 @@
 import { Container, Sprite, Text, Texture } from "pixi.js";
 import {
+  activeUc3FontUrl,
   loadUc3Font,
   renderUc3ToRgba,
-  UC3_FONT_URL,
 } from "../resources/uc3Font";
-import {
-  preferSystemFont,
-  SYSTEM_FONT_FALLBACK,
-  uiFontFamily,
-} from "../resources/systemFont";
+import { SYSTEM_FONT_FALLBACK, uiFontFamily } from "../resources/systemFont";
 import { rgbaToTexture } from "../render/rgbaTexture";
 
 /**
- * OS fallback stack when the TTF is not yet loaded.
- * Live face comes from {@link uiFontFamily} (YaHei Consolas Hybrid).
+ * OS fallback stack for rare non-UC3 paths / HTML softkeys.
  */
 export const UI_FONT_FAMILY = SYSTEM_FONT_FALLBACK;
 
@@ -98,6 +93,8 @@ const OUTLINE_8: ReadonlyArray<readonly [number, number]> = [
 
 const uc3TexCache = new Map<string, Texture>();
 const crispTexCache = new Map<string, Texture>();
+type Uc3LabelHost = { rebake(): Promise<void>; destroyed: boolean };
+const liveLabels = new Set<Uc3LabelHost>();
 
 function uc3CacheKey(
   text: string,
@@ -108,7 +105,28 @@ function uc3CacheKey(
   smooth: boolean,
   maxWidth?: number,
 ): string {
-  return `${UC3_FONT_URL}\0${UC3_CELL}\0${text}\0${color.toString(16)}\0${outline ? 1 : 0}\0${outlineColor.toString(16)}\0${outlineThin ? 1 : 0}\0${smooth ? 1 : 0}\0${maxWidth ?? ""}`;
+  return `${activeUc3FontUrl()}\0${UC3_CELL}\0${text}\0${color.toString(16)}\0${outline ? 1 : 0}\0${outlineColor.toString(16)}\0${outlineThin ? 1 : 0}\0${smooth ? 1 : 0}\0${maxWidth ?? ""}`;
+}
+
+/** Drop baked UC3 textures after a font pack switch. */
+export function clearUc3TexCache(): void {
+  for (const tex of uc3TexCache.values()) {
+    try {
+      tex.destroy(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  uc3TexCache.clear();
+}
+
+/** Re-bake every live UC3 label after `applyUc3FontId`. */
+export async function refreshAllUc3Labels(): Promise<void> {
+  const jobs: Promise<void>[] = [];
+  for (const label of [...liveLabels]) {
+    if (!label.destroyed) jobs.push(label.rebake());
+  }
+  await Promise.all(jobs);
 }
 
 function crispCacheKey(
@@ -223,7 +241,7 @@ function bakeCrispSystem(
 }
 
 /**
- * Dual-mode label: system font (default) or UC3 bitmap (`uc3: true` for titles).
+ * Dual-mode label: UC3 bitmap (default). System TTF path kept but unused.
  */
 export class BitmapLabel extends Container {
   private pixiText: Text | null = null;
@@ -238,8 +256,8 @@ export class BitmapLabel extends Container {
   /** undefined = wrap when maxWidth set; false = single line. */
   private _wordWrap: boolean | undefined;
   private _fontSize = UI_FONT_SIZE;
-  /** Default system TTF; `?uc3=1` opts into bitmap glyphs. */
-  private _uc3 = !preferSystemFont();
+  /** Default UC3 bitmap glyphs. */
+  private _uc3 = true;
   /** Hard-edge bake when uc3:false. */
   private _crisp = true;
   private _bakeSs = 1;
@@ -258,6 +276,18 @@ export class BitmapLabel extends Container {
   constructor() {
     super();
     this.eventMode = "none";
+    liveLabels.add(this);
+  }
+
+  /** Force UC3 re-bake with current text/style (font pack switch). */
+  async rebake(): Promise<void> {
+    if (!this._uc3 || !this._text) return;
+    await this.rerender();
+  }
+
+  destroy(options?: Parameters<Container["destroy"]>[0]): void {
+    liveLabels.delete(this);
+    super.destroy(options);
   }
 
   get style(): { fill: number } {
@@ -305,10 +335,8 @@ export class BitmapLabel extends Container {
       if (opts.fontSize != null) this._fontSize = opts.fontSize;
       if (opts.crisp != null) this._crisp = opts.crisp;
     }
-    // Global TTF wins; only `?uc3=1` (preferSystemFont=false) honors uc3 opts.
-    if (preferSystemFont()) this._uc3 = false;
-    else if (opts?.uc3 != null) this._uc3 = opts.uc3;
-    else this._uc3 = true;
+    // Always UC3 for LCD UI (TTF retired).
+    this._uc3 = opts?.uc3 !== false;
     await this.rerender();
   }
 

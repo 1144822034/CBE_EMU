@@ -4,7 +4,7 @@ import { unwrapResource } from "./src/resources/lzss.ts";
 import { decodeLkv2Gif } from "./src/resources/lkv2Gif.ts";
 
 const root = "../bin/JHOnlineData";
-const out: Array<[string, number, number, number]> = [];
+const out: [string, number, number, number][] = [];
 for (const name of fs.readdirSync(root)) {
   if (!name.toLowerCase().endsWith(".gif")) continue;
   try {
@@ -13,7 +13,10 @@ for (const name of fs.readdirSync(root)) {
       out.push([name, g.width, g.height, g.width / 16]);
     } else if (g.width === 16 && g.height >= 32 && g.height % 16 === 0) {
       out.push([name, g.width, g.height, -(g.height / 16)]);
-    } else if (name.toLowerCase().includes("kuang") || name.toLowerCase().includes("icon")) {
+    } else if (
+      (g.width === 25 || g.height === 25) &&
+      name.toLowerCase().includes("kuang")
+    ) {
       out.push([name, g.width, g.height, 0]);
     }
   } catch {
@@ -21,4 +24,4 @@ for (const name of fs.readdirSync(root)) {
   }
 }
 out.sort((a, b) => a[0].localeCompare(b[0]));
-for (const row of out) console.log(row.join("\t"));
+console.log(JSON.stringify(out));

@@ -136,7 +136,9 @@ export class WorldMapPanel extends Container {
 
   private setConfirmTip(alias: string): void {
     this.confirmTip = `您需要花费1个传送石\n瞬移到${alias}`;
-    setPanelTipSticky(this.toast, this.confirmTip);
+    setPanelTipSticky(this.toast, this.confirmTip, () => {
+      if (this.visible) this.redraw();
+    });
   }
 
   private clearConfirmTip(): void {

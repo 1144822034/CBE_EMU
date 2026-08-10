@@ -1,5 +1,4 @@
 import { Container, Graphics } from "pixi.js";
-import { preferSystemFont } from "../resources/systemFont";
 import { BitmapLabel } from "./BitmapLabel";
 
 /** Palette sampled from live CBE screenshots (PixiJS_web/reference-shots/*-game.png). */
@@ -171,9 +170,8 @@ export function drawLocBanner(
 }
 
 /**
- * Create UI text. Default = YaHei Consolas Hybrid TTF (crisp bake).
- * Opt into UC3 pointillism with `?uc3=1` or explicit `{ uc3: true }` in that mode.
- * `size` is the system-font px size.
+ * Create UI text. Default = preferred UC3 pack.
+ * `size` is ignored for UC3 cell sizing.
  */
 export function makePixelText(
   text: string,
@@ -195,7 +193,7 @@ export function makePixelText(
     outline: opts?.outline === true,
     outlineColor: opts?.stroke,
     outlineThin: opts?.strokeWidth != null ? opts.strokeWidth <= 1 : undefined,
-    uc3: preferSystemFont() ? false : opts?.uc3 !== false,
+    uc3: opts?.uc3 !== false,
     smooth: opts?.smooth === true,
     crisp: opts?.crisp !== false,
   });

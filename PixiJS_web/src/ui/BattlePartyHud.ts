@@ -6,6 +6,7 @@ import {
   tryLoadUiTexture,
   uiSprite,
 } from "./UiAssets";
+import { SLOT_FRAME_SIZE } from "./ItemArt";
 import { BitmapLabel } from "./BitmapLabel";
 import {
   composeActorFrameIndex,
@@ -19,8 +20,9 @@ const SP_FILL = 0x40e060;
 /** xuetiao.gif inner track — fill draws ABOVE opaque black pixels. */
 const BAR_FILL = { x: 5, y: 4, w: 34, h: 3 } as const;
 const SLOT_W = 78;
-/** Face slot — same as earlier battle HUD (frame, not giant empty pad). */
-const PORTRAIT = 22;
+/** Face inside handkuang.gif (25×25, pad 3 → 19×19). */
+const PORTRAIT_PAD = 3;
+const PORTRAIT = SLOT_FRAME_SIZE - PORTRAIT_PAD * 2;
 /**
  * Layout (screenshot):
  *   [face] name
@@ -56,6 +58,7 @@ export class BattlePartyHud extends Container {
   private panel = new Graphics();
   private ready = false;
   private xuetiao: Texture | null = null;
+  private handkuang: Texture | null = null;
   private hpLabTex: Texture | null = null;
   private spLabTex: Texture | null = null;
   private jobIndex = 0;
@@ -81,6 +84,7 @@ export class BattlePartyHud extends Container {
   async mount(): Promise<void> {
     if (this.ready) return;
     this.xuetiao = await tryLoadUiTexture("xuetiao.gif");
+    this.handkuang = await tryLoadUiTexture("handkuang.gif");
     const hpsp = await tryLoadUiTexture("ui_hpsp.gif");
     if (hpsp && hpsp.height >= 10) {
       this.hpLabTex = new Texture({
@@ -185,16 +189,21 @@ export class BattlePartyHud extends Container {
   private async makeSlot(): Promise<SlotArt> {
     const root = new Container();
     const portrait = new Container();
-    // Gold frame around face (screenshot).
-    portrait.addChild(
-      new Graphics()
-        .rect(0, 0, PORTRAIT + 2, PORTRAIT + 2)
-        .fill({ color: 0x101810 })
-        .stroke({ width: 1, color: 0xd4c489 }),
-    );
+    // HUD/battle face frame = handkuang.gif (same as world HUD / equip slots).
+    if (this.handkuang) {
+      portrait.addChild(
+        uiSprite(this.handkuang, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE),
+      );
+    } else {
+      portrait.addChild(
+        new Graphics()
+          .rect(0, 0, SLOT_FRAME_SIZE, SLOT_FRAME_SIZE)
+          .stroke({ width: 1, color: 0xd4c489 }),
+      );
+    }
     portrait.position.set(2, 2);
 
-    const colX = PORTRAIT + 8;
+    const colX = SLOT_FRAME_SIZE + 8;
     const name = new BitmapLabel();
     // System font at 1× so name stays readable beside the HP bar.
     name.scale.set(1);
@@ -302,7 +311,7 @@ export class BattlePartyHud extends Container {
       const spr = new Sprite(tex);
       spr.width = PORTRAIT;
       spr.height = PORTRAIT;
-      spr.position.set(1, 1);
+      spr.position.set(PORTRAIT_PAD, PORTRAIT_PAD);
       slot.portrait.addChild(spr);
     } catch (e) {
       console.warn("[battle-hud] portrait", actorName, e);

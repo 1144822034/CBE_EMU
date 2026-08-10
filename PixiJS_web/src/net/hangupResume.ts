@@ -13,8 +13,11 @@ export type HangupResumeSnapshot = {
   savedAt: number;
 };
 
+/** Native FGS mode: in-world online vs AFK hangup (stronger copy). */
+export type NativeKeepAliveMode = "online" | "hangup";
+
 interface HangupKeepAlivePlugin {
-  start(): Promise<void>;
+  start(options?: { mode?: NativeKeepAliveMode }): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -63,11 +66,33 @@ export function clearHangupResumeStorage(): void {
   }
 }
 
-/** APK foreground service while hangup intent is armed; no-op on web. */
+/**
+ * APK foreground service so OEM Doze / WebView pause does not kill gateway WS.
+ * Hangup mode wins over plain online; both off → stop.
+ */
+export async function syncNativeKeepAlive(opts: {
+  inWorld: boolean;
+  hangup: boolean;
+}): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    if (opts.hangup) {
+      await HangupKeepAlive.start({ mode: "hangup" });
+    } else if (opts.inWorld) {
+      await HangupKeepAlive.start({ mode: "online" });
+    } else {
+      await HangupKeepAlive.stop();
+    }
+  } catch (e) {
+    console.warn("[keepalive] native", e);
+  }
+}
+
+/** @deprecated prefer syncNativeKeepAlive — hangup-only toggle kept for call sites. */
 export async function setHangupNativeKeepAlive(on: boolean): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   try {
-    if (on) await HangupKeepAlive.start();
+    if (on) await HangupKeepAlive.start({ mode: "hangup" });
     else await HangupKeepAlive.stop();
   } catch (e) {
     console.warn("[hangup] native keepalive", e);

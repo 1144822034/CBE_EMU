@@ -148,6 +148,8 @@ export async function showPayQrOverlay(opts: {
   personalCode?: boolean;
   /** Alipay: do not auto open 扫一扫 (album path can land on 名片). */
   skipAutoAlbum?: boolean;
+  /** Alipay Intent already opened — QR is backup. */
+  dualInsurance?: boolean;
 }): Promise<boolean> {
   const payUrl = (opts.payUrl || "").trim();
   if (!payUrl) return false;
@@ -165,6 +167,11 @@ export async function showPayQrOverlay(opts: {
   const alipay = isAlipayChannel(channel);
   const appName = alipay ? "支付宝" : "微信";
   const btnColor = alipay ? "#1677ff" : "#07c160";
+  const alipayHint = opts.dualInsurance
+    ? "已尝试打开支付宝。若未跳转或付款失败，请用下方二维码（另一台手机扫，或截图后扫）。" +
+      "个人收款码须输入上方金额（完全一致）。勿用本机相册识码（易误开「名片」）。"
+    : "V免签为个人收款码（非商家码）。请用支付宝扫此码，并输入上方金额（须完全一致）。" +
+      "勿用本机相册识码（易误开「名片」）；可用另一台手机扫，或截图后给他人扫。";
 
   const root = document.createElement("div");
   root.id = "pix-pay-qr-overlay";
@@ -181,8 +188,7 @@ export async function showPayQrOverlay(opts: {
     '<div style="color:#b54708;font-size:12px;margin-bottom:8px;text-align:left;background:#fffaeb;' +
     'border:1px solid #fedf89;border-radius:8px;padding:8px 10px">' +
     (alipay
-      ? "V免签为个人收款码（非商家码）。请用支付宝扫此码，并输入上方金额（须完全一致）。" +
-        "勿用本机相册识码（易误开「名片」）；可用另一台手机扫，或截图后给他人扫。"
+      ? alipayHint
       : `本机无法扫自己屏幕上的码。<br>请点下方「保存到相册并打开${appName}」，` +
         `再在${appName}：扫一扫 → 相册 → 选刚保存的二维码。`) +
     "</div>" +

@@ -6,7 +6,7 @@
  *   PIX_GATEWAY_HOST / PIX_GATEWAY_PORT — listen bind (default 0.0.0.0:19092)
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
- *     (monster-levels, recharge/create; default same host as TCP, port 19091)
+ *     (monster-levels, recharge/create, register; default same host as TCP, port 19091)
  *
  * Each CBMS request opens a short-lived TCP to the mock service (CBE host model).
  * Do NOT close the WebSocket on a single TCP failure — the browser session must
@@ -272,6 +272,10 @@ const server = http.createServer((req, res) => {
     proxyAdminApi(req, res, "/api/recharge/create", { methods: ["POST"] });
     return;
   }
+  if (path === "/api/register") {
+    proxyAdminApi(req, res, "/api/register", { methods: ["POST"] });
+    return;
+  }
   if (path === "/healthz") {
     sendJson(res, 200, { ok: true, service: "pix-ws-gateway" });
     return;
@@ -296,6 +300,9 @@ server.listen(listenPort, listenHost, () => {
   );
   console.log(
     `[ws-gateway] http /api/recharge/create -> http://${adminHost}:${adminPort}/api/recharge/create`,
+  );
+  console.log(
+    `[ws-gateway] http /api/register -> http://${adminHost}:${adminPort}/api/register`,
   );
   if (tips.length) {
     console.log(`[ws-gateway] phone / LAN: ${tips.join("  ")}`);

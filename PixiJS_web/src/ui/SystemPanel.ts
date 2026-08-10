@@ -10,6 +10,15 @@ import {
 import { BitmapLabel, measureUiTextWidth } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
 import {
+  EQUIP_ICON_SIZE,
+  SLOT_FRAME_SIZE,
+  equipIconTextureSync,
+  mountEquipIconOnly,
+  mountEquipSlot,
+  slotFrameTextureSync,
+  warmEquipArt,
+} from "./ItemArt";
+import {
   isChestBoxItem,
   type BagItem,
   type CharacterStats,
@@ -17,7 +26,12 @@ import {
   type ShopGoods,
 } from "../net/protocolExtras";
 import { isMapHealSkill, type BattleSkillRow } from "../resources/skill";
-import { qualityColor, WORN_SLOT_NAMES } from "../resources/itemCatalog";
+import {
+  defaultCategoryForBodySlot,
+  lookupItemSync,
+  qualityColor,
+  WORN_SLOT_NAMES,
+} from "../resources/itemCatalog";
 import {
   actorResourceForJobSex,
   composeMapActor,
@@ -217,7 +231,7 @@ export class SystemPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   /** Transient UI sprites (jin/yin/tong); cleared each redraw. */
-  private uiSprites: Sprite[] = [];
+  private uiSprites: Container[] = [];
   private kind: SystemKind = "bag";
   private mode: ViewMode = "list";
   private cursorIndex = 0;
@@ -233,6 +247,9 @@ export class SystemPanel extends Container {
   private bagMoney = 0;
   /** Actor backpack capacity (default 20). */
   private bagCapacity = 20;
+  /** handkuang + equipico warmed for worn panel. */
+  private equipArtReady = false;
+  private equipArtLoading = false;
   /** Cached JHOnlineData currency icons. */
   private moneyTex: { jin: Texture | null; yin: Texture | null; tong: Texture | null } | null =
     null;
@@ -602,7 +619,7 @@ export class SystemPanel extends Container {
   /** Mall footer 充值: prompt yuan then pick 支付宝/微信. */
   beginMallRecharge(): void {
     if (this.kind !== "mall") return;
-    const raw = window.prompt("充值金额(元)", "1");
+    const raw = window.prompt("赞助金额(元)", "1");
     if (raw == null) return;
     const yuan = Math.floor(Number(String(raw).trim()));
     if (!Number.isFinite(yuan) || yuan < 1) {
@@ -926,7 +943,7 @@ export class SystemPanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
-    for (const s of this.uiSprites) s.destroy();
+    for (const s of this.uiSprites) s.destroy({ children: true });
     this.uiSprites = [];
     for (const h of this.hitSprites) h.destroy();
     this.hitSprites = [];
@@ -976,7 +993,7 @@ export class SystemPanel extends Container {
       this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
 
       if (this.mode === "recharge_pay") {
-        this.addLabel(`充值 ${this.rechargeYuan} 元`, x + 10, y + 46, CBE.inkTipGreen);
+        this.addLabel(`赞助 ${this.rechargeYuan} 元`, x + 10, y + 46, CBE.inkTipGreen);
         this.addLabel("选择支付方式", x + 10, y + 64, CBE.inkLabel);
         this.actionLabels.forEach((label, i) => {
           const hi = i === this.actionCursor;
@@ -1021,13 +1038,14 @@ export class SystemPanel extends Container {
     this.addLabelCentered("装备", LCD_WIDTH / 2, pillY + pillH / 2, CBE.ink);
 
     const softY = y + h - PANEL_BOTTOM_PAD;
-    // Compact slots → more room for attr lines below; actor shows full body in center.
-    const slotSize = 24;
-    const slotGapY = 4;
+    // handkuang 25×25; leave room for attr lines + center full-body actor.
+    this.ensureEquipArt();
+    const slotSize = SLOT_FRAME_SIZE;
+    const slotGapY = 3;
     const gridTop = pillY + pillH + 8;
     const gridH = 4 * slotSize + 3 * slotGapY;
-    const leftX = x + 12;
-    const rightX = x + w - 12 - slotSize;
+    const leftX = x + 10;
+    const rightX = x + w - 10 - slotSize;
     const actorCx = LCD_WIDTH / 2;
     const actorCy = gridTop + gridH / 2;
 
@@ -1044,6 +1062,7 @@ export class SystemPanel extends Container {
       this.uiSprites.push(spr);
     }
 
+    const frameTex = slotFrameTextureSync();
     this.brokenSlotRects = [];
     for (let i = 0; i < EQUIP_SLOT_UI.length; i++) {
       const ui = EQUIP_SLOT_UI[i]!;
@@ -1053,26 +1072,29 @@ export class SystemPanel extends Container {
       const broken = !!worn && worn.durability === 0;
       const focused =
         i === this.cursorIndex && (this.mode === "list" || this.mode === "actions");
-      this.box
-        .rect(sx, sy, slotSize, slotSize)
-        .fill({
-          color: broken ? 0x401010 : worn ? CBE.bgPanel : CBE.bgPanelDark,
-        })
-        .stroke({
-          width: focused ? 2 : broken ? 2 : 1,
-          color: focused ? EQUIP_CURSOR : broken ? EQUIP_BROKEN_RED : CBE.borderDim,
-        });
-      if (worn) {
-        const q = broken ? EQUIP_BROKEN_RED_HI : qualityColor(worn.quality);
+      const cat = worn
+        ? (lookupItemSync(worn.itemId)?.category ?? defaultCategoryForBodySlot(ui.slot))
+        : defaultCategoryForBodySlot(ui.slot);
+      const iconTex = equipIconTextureSync(cat);
+      const host = new Container();
+      host.position.set(sx, sy);
+      mountEquipSlot(host, frameTex, iconTex, {
+        category: cat,
+        empty: !worn,
+        broken,
+      });
+      this.addChild(host);
+      this.uiSprites.push(host);
+      if (focused || broken) {
         this.box
-          .rect(sx + 2, sy + 2, slotSize - 4, slotSize - 4)
-          .fill({ color: broken ? EQUIP_BROKEN_RED : q, alpha: broken ? 0.32 : 0.22 });
-        this.addLabelCentered(ui.label, sx + slotSize / 2, sy + slotSize / 2, q);
-        if (broken) {
-          this.brokenSlotRects.push({ x: sx, y: sy, w: slotSize, h: slotSize });
-        }
-      } else {
-        this.addLabelCentered(ui.label, sx + slotSize / 2, sy + slotSize / 2, CBE.inkLabel);
+          .rect(sx - 1, sy - 1, slotSize + 2, slotSize + 2)
+          .stroke({
+            width: 2,
+            color: focused ? EQUIP_CURSOR : EQUIP_BROKEN_RED,
+          });
+      }
+      if (broken) {
+        this.brokenSlotRects.push({ x: sx, y: sy, w: slotSize, h: slotSize });
       }
     }
     this.paintBrokenGlowOverlay();
@@ -1138,6 +1160,7 @@ export class SystemPanel extends Container {
 
   /** Replace flow: bag equips for focused body part + detail + 替换/返回. */
   private drawEquipReplacePanel(x: number, y: number, w: number, h: number): void {
+    this.ensureEquipArt();
     const part = EQUIP_REPLACE_PART[this.equipFocusSlot] ?? "部位";
     const pillW = Math.min(160, 28 + part.length * 14 + 56);
     const pillH = 22;
@@ -1168,9 +1191,19 @@ export class SystemPanel extends Container {
       if (!it) break;
       const hi = idx === this.cursorIndex;
       if (hi) this.box.rect(x + 10, ry, w - 20, 17).fill({ color: CBE.select });
+      const cat =
+        lookupItemSync(it.itemId)?.category ??
+        defaultCategoryForBodySlot(this.equipFocusSlot);
+      const iconSpr = mountEquipIconOnly(
+        this,
+        equipIconTextureSync(cat),
+        x + 14,
+        ry + Math.floor((17 - EQUIP_ICON_SIZE) / 2),
+      );
+      if (iconSpr) this.uiSprites.push(iconSpr);
       this.addLabel(
         `${formatBagName(it)} X${it.count}`,
-        x + 16,
+        x + 14 + EQUIP_ICON_SIZE + 4,
         ry + 1,
         hi ? CBE.ink : qualityColor(it.quality),
       );
@@ -1360,6 +1393,22 @@ export class SystemPanel extends Container {
       this.moneyTexLoading = false;
       if (this.visible && this.kind === "bag") this.redraw();
     });
+  }
+
+  /** Prefetch handkuang.gif + equipico.gif tiles for worn / replace UI. */
+  private ensureEquipArt(): void {
+    if (this.equipArtReady || this.equipArtLoading) return;
+    this.equipArtLoading = true;
+    void warmEquipArt()
+      .then(() => {
+        this.equipArtReady = true;
+        this.equipArtLoading = false;
+        if (this.visible && this.kind === "equip") this.redraw();
+      })
+      .catch((e) => {
+        console.warn("[system] equip art", e);
+        this.equipArtLoading = false;
+      });
   }
 
 
@@ -1893,7 +1942,7 @@ export class SystemPanel extends Container {
     if (this.kind === "mall" && this.mall && this.mode === "list") {
       this.addLabel(`酷宝 ${this.mall.coolmoney}`, x + 10, footY, CBE.inkTip);
       const rechargeX = x + w - 48;
-      this.addLabel("充值", rechargeX, footY, CBE.inkTipGreen);
+      this.addLabel("赞助", rechargeX, footY, CBE.inkTipGreen);
       const hit = new Container();
       hit.position.set(rechargeX - 4, footY - 2);
       hit.hitArea = new Rectangle(0, 0, 44, 18);

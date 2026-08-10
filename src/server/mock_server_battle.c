@@ -1830,6 +1830,20 @@ static u8 vm_net_mock_battle_apply_player_attack_targets(
 
     if (targetWireSlots == NULL || damageValues == NULL || deathWireSlots == NULL)
         return 0;
+    /*
+     * Hangup insight forces enemies=3 on subtype-10 (player wire 0).  A stale
+     * scene-wire flag would emit child wires [2,3,0] and paint wire 0 onto the
+     * player for 天机/幻剑/鬼道 group skills alike.  Keep maps only for true
+     * subtype-5 scene starts.
+     */
+    if (g_mockBattleSceneMonsterStartActive == 0 &&
+        g_mockBattleStartUsesSceneWireMaps != 0)
+    {
+        printf("[warn][network] mock_battle_clear_stale_scene_wire_maps "
+               "enemies=%u evidence=hangup-subtype10-group-self-hit\n",
+               vm_net_mock_battle_enemy_count_current());
+        g_mockBattleStartUsesSceneWireMaps = 0;
+    }
     vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
                                           &defaultPlayerSlot, &defaultEnemySlot);
     playerSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_PLAYER_WIRE_SLOT",
@@ -7921,14 +7935,14 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
             {
                 u32 naReference = vm_net_mock_damage_after_defense(
                     sourceStats.attack ? sourceStats.attack : 1u,
-                    targetStats.defense);
+                    vm_net_mock_battle_mitigation_defense(&targetStats));
                 rawDamage = vm_net_mock_battle_soft_boost_single_skill_vs_na(
                     rawDamage, naReference, skill);
             }
         }
         else
         {
-            mitigation = targetStats.defense;
+            mitigation = vm_net_mock_battle_mitigation_defense(&targetStats);
             rawDamage = vm_net_mock_env_u32_if_set(
                 "CBE_DUEL_DAMAGE",
                 vm_net_mock_damage_after_defense(rawDamage, mitigation));
@@ -12875,17 +12889,35 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     g_vm_net_mock_battle_formula_enemy_index = 0xff;
     ++g_mockBattleOperateSessionSerial;
     vm_net_mock_battle_reset_last_operate_target();
-    if (hangupSeedOperate != 0)
     {
         u8 defaultPlayerSlot = 0;
         u8 defaultEnemySlot = 1;
         vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
                                               &defaultPlayerSlot, &defaultEnemySlot);
-        vm_net_mock_battle_remember_last_operate(defaultEnemySlot, hangupSeedOperate,
-                                                 true);
-        printf("[info][network] mock_hangup_seed_last_operate operate=%u "
-               "index=%u evidence=pixi-hangup-skill-for-synth\n",
-               hangupSeedOperate, defaultEnemySlot);
+        if (hangupSeedOperate != 0)
+        {
+            vm_net_mock_battle_remember_last_operate(defaultEnemySlot, hangupSeedOperate,
+                                                     true);
+            printf("[info][network] mock_hangup_seed_last_operate operate=%u "
+                   "index=%u evidence=pixi-hangup-skill-for-synth\n",
+                   hangupSeedOperate, defaultEnemySlot);
+        }
+        else if (g_mockBattleLastOperateValid != 0)
+        {
+            /* Loop re-entry: rebind index to this fight's wire table so a
+             * leftover subtype-5 monster wire 0 is not replayed as player. */
+            if (g_mockBattleLastIndex == defaultPlayerSlot ||
+                !vm_net_mock_battle_enemy_wire_is_alive(
+                    (u8)g_mockBattleLastIndex, playerOnRight, battleSide,
+                    defaultEnemySlot))
+            {
+                printf("[info][network] mock_hangup_rebind_last_index "
+                       "from=%u to=%u operate=%u evidence=wire-table-rearm\n",
+                       g_mockBattleLastIndex, defaultEnemySlot,
+                       g_mockBattleLastOperate);
+                g_mockBattleLastIndex = defaultEnemySlot;
+            }
+        }
     }
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;

@@ -231,11 +231,16 @@ export function buildHangupStartRequest(opts?: {
 }): Uint8Array {
   const b = new WtBuilder();
   const o = b.object(1, 2, 10).u8("Type", 2);
-  if (opts?.enemyId != null && opts.enemyId !== 0) {
-    o.u32("id", opts.enemyId >>> 0)
-      .u32("index", (opts.index ?? 0) >>> 0)
-      .u32("posx", (opts.posx ?? 0) >>> 0)
-      .u32("posy", (opts.posy ?? 0) >>> 0);
+  const posx = (opts?.posx ?? 0) >>> 0;
+  const posy = (opts?.posy ?? 0) >>> 0;
+  // Live-node needs pos; id may be 0 when only coords are known.
+  if (posx !== 0 && posy !== 0) {
+    o.u32("id", (opts?.enemyId ?? 0) >>> 0)
+      .u32("index", (opts?.index ?? 0) >>> 0)
+      .u32("posx", posx)
+      .u32("posy", posy);
+  } else if (opts?.enemyId != null && opts.enemyId !== 0) {
+    o.u32("id", opts.enemyId >>> 0).u32("index", (opts.index ?? 0) >>> 0);
   }
   if (opts?.operate != null && opts.operate !== 0) {
     o.u32("Operate", opts.operate >>> 0);
@@ -1321,6 +1326,12 @@ export type BattleSettlement = {
   /** Display deltas when client baseline known. */
   expGain: number;
   goldGain: number;
+  /**
+   * 4/7.hp / 4/7.mp — settle recovery deltas (auto-flask / recover), not absolute
+   * vitals. Applied onto battle seat HP/MP before leaving to the world HUD.
+   */
+  recoverHp: number;
+  recoverMp: number;
   fdata: string;
   result: number;
 };
@@ -1650,6 +1661,8 @@ export function parseBattleAction(packet: WtPacket): BattleActionUpdate | null {
     const curExp = fieldU32(settleObj, "curexp");
     const percentExp = fieldU32(settleObj, "persentexp");
     const result = fieldU32(settleObj, "result");
+    const recoverHp = fieldU32(settleObj, "hp");
+    const recoverMp = fieldU32(settleObj, "mp");
     const fRaw = findField(settleObj, "fdata");
     const fdata = fRaw ? decodeFieldString(fRaw) : "";
     settlement = {
@@ -1661,10 +1674,13 @@ export function parseBattleAction(packet: WtPacket): BattleActionUpdate | null {
       percentExp,
       expGain: 0,
       goldGain: 0,
+      recoverHp,
+      recoverMp,
       fdata,
       result,
     };
     log += ` · 结算 EXP=${expTotal} 金=${goldTotal}`;
+    if (recoverHp || recoverMp) log += ` 回血蓝=${recoverHp}/${recoverMp}`;
     if (fdata) log += ` ${fdata.slice(0, 12)}`;
   }
   if (exit) log += " · 退出战斗";
@@ -2045,12 +2061,17 @@ export type BagItem = {
 /**
  * Battle「物品」menu: HP/MP medicines (item.dsh category 10) and flasks 802/803.
  * Excludes EXP-only cards and non-restore props; never equipment.
+ * Prefer live item.dsh via lookupItemSync — bag.category may be 0 when the row
+ * was enriched before catalogs warmed.
  */
 export function isBattleMedicineOrFlask(it: BagItem): boolean {
-  if (it.kind !== "item" || it.seq <= 0 || it.count <= 0) return false;
+  if (it.seq <= 0 || it.count <= 0) return false;
   if (it.itemId === 802 || it.itemId === 803) return true;
-  if (it.category !== 10) return false;
   const cat = lookupItemSync(it.itemId);
+  const kind = cat?.kind ?? it.kind;
+  if (kind !== "item") return false;
+  const category = cat?.category ?? it.category;
+  if (category !== 10) return false;
   if (cat) return cat.hpChange !== 0 || cat.mpChange !== 0;
   return it.usable;
 }
@@ -2188,15 +2209,19 @@ function enrichBagRow(
 }
 
 /**
- * Parse backpack/worn blobs from a packet.
+ * Parse a full backpack snapshot from a packet.
  * - 17/1: u8 n; repeat u32 itemId + common-extra (no seq on wire)
  * - 30/21: repeat u32 itemId, i16 seq, u32 count, common-extra
- * - 7/7: type u8 + iteminfo rows { i16 seq, u32 itemId, u32 count, extra }
  *
  * When both 17/1 and 30/21 are present (Pixi 7/23), keep 17/1 row order but
  * overlay real seq/count from the grid (matched by itemId occurrence order).
  * Prefer 17/1 alone over a truncated lone 30/21; never invent seq from row index
  * when a grid seq is available — fake seq makes 7/15 report「宝箱不存在」。
+ *
+ * Do NOT treat `7/7 type=1` as a full snapshot. Those rows are incremental
+ * (battle drops / warehouse / shop peel) and must merge via
+ * `parseBagItemUpdates` — otherwise a lone drop packet replaces the whole bag
+ * and battle「物品」loses medicines/flasks (docs/re/2026-08-07-pixijs-system-panels.md).
  */
 export function parseBagItems(packet: WtPacket): BagItem[] {
   const from17 = parseBagItems17(packet);
@@ -2206,7 +2231,7 @@ export function parseBagItems(packet: WtPacket): BagItem[] {
   }
   if (from17.length) return from17;
   if (fromGrid.length) return fromGrid;
-  return parseItemManager77(packet).bag;
+  return [];
 }
 
 /** Overlay 30/21 seq/count onto 17/1 rows (same itemId order / multiset). */

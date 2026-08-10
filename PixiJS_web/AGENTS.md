@@ -4,26 +4,24 @@
 
 ## 字体（强制）
 
-**LCD 内文字默认 `YaHei Consolas Hybrid` TTF**（`BitmapLabel` crisp bake，`smooth: false`）。  
-源文件：`web/fs/YaHei Consolas Hybrid.ttf` → `/YaHeiConsolasHybrid.ttf`（约 14.5MB；`sync-offline-assets` 会拷进 `public/` / APK）。  
-回退点阵：`?uc3=1` 或 `localStorage.pix_uc3=1` → `gb16.uc2.uc3`。HTML 软键走 DOM，用 `--ui-font`。
+**LCD 内文字仅 UC3 硬点阵**（`BitmapLabel`，`smooth: false`）。  
+默认 `font_16_sky.uc3`；可在 **菜单 → 系统设置 → 字体切换** 选：
 
-| 用途 | 实现 | 说明 |
-|------|------|------|
-| 聊天、背包、面板、战斗 UI | `BitmapLabel` / `makePixelText` 默认 | 系统 TTF + crisp bake |
-| 多色/逐字文案 | `layoutSameColorRuns` + Label | 同色同行合并 |
-| 地图头顶名（己方/玩家/怪/NPC） | 系统 TTF + `outline: true, outlineThin: true` | 细描边；传送石名无描边 |
-| 称号头顶条、战斗倒计时 DigitStrip | GIF | 图片字体，不动 |
-| 调试：UC3 点阵 | `?uc3=1` | 旧 CBE 硬像素 |
+| id | 文件 | 说明 |
+|----|------|------|
+| sky | `font_16_sky.uc3` | 天空点阵（默认） |
+| gb16 | `gb16.uc2.uc3` | 全字库 |
+| gb | `font_gb.uc3` | 经典 CBE 子集 |
 
-- 入口：`BitmapLabel`（`src/ui/BitmapLabel.ts`）、`makePixelText`（`src/ui/constants.ts`）
-- 加载：启动 `loadSystemFont()`（`src/resources/systemFont.ts`）
-- 系统字号默认 `UI_FONT_SIZE=12`；换行按 `wrapUiText` / 字号估算
-- 可见软键是 HTML `#sk-left`；画布 `SoftkeyBar` 默认隐藏
+偏好写入 `localStorage.pix_uc3_font`。HTML 软键走 DOM 系统字体栈。
+
+- 入口：`BitmapLabel` / `makePixelText`；偏好 `src/resources/uiFontPreference.ts`
+- 加载：启动 `loadUc3Font()`；切换 `applyUc3FontId` + `refreshAllUc3Labels`
+- 显示字号：`UC3_CELL=14`（源 16 缩小一号）
 
 ## 地图名条
 
-地点条背景为 **LCD 全宽**（240px），居中白字；见 `drawLocBanner`。
+地点条背景为 **LCD 全宽**（240px），居中 UC3 白字；见 `drawLocBanner`。
 
 ## Android APK
 

@@ -1,0 +1,31 @@
+-- Instance enter daily quota + cost (gold=金, kubao=酷宝/wcoin).
+-- scene = target instance scene key (e.g. 29梦境空间_01). daily_limit 0 = unlimited.
+
+CREATE TABLE IF NOT EXISTS server_instance_enter_rules (
+  scene VARBINARY(64) NOT NULL,
+  daily_limit INT UNSIGNED NOT NULL DEFAULT 0,
+  gold_cost INT UNSIGNED NOT NULL DEFAULT 0,
+  kubao_cost INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (scene)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS server_instance_enter_daily (
+  account_id VARBINARY(64) NOT NULL,
+  role_id INT UNSIGNED NOT NULL,
+  scene VARBINARY(64) NOT NULL,
+  day_ymd INT UNSIGNED NOT NULL,
+  enter_count INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (account_id, role_id, scene, day_ymd)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS server_scene_display_names (
+  scene VARBINARY(64) NOT NULL,
+  display_name VARBINARY(32) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (scene)
+) ENGINE=InnoDB;

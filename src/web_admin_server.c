@@ -9748,6 +9748,124 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                     "Access-Control-Allow-Origin: *\r\n", json);
         return 1;
     }
+    /* Pixi title-screen register: same create path as /user/register. */
+    if (strcmp(target, "/api/register") == 0)
+    {
+        char account[64];
+        char password[64];
+        char accountEscaped[128];
+        char errorEscaped[256];
+        char json[512];
+        const char *message = NULL;
+        const char *createMessage = NULL;
+        const char *cors =
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Access-Control-Max-Age: 86400\r\n";
+
+        if (strcmp(method, "OPTIONS") == 0)
+        {
+            vm_mock_admin_send_response(client, "204 No Content",
+                                        "text/plain; charset=utf-8", cors, "");
+            return 1;
+        }
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed",
+                                        "application/json; charset=utf-8",
+                                        "Allow: POST, OPTIONS\r\n"
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"method\"}\n");
+            return 0;
+        }
+        memset(account, 0, sizeof(account));
+        memset(password, 0, sizeof(password));
+        memset(accountEscaped, 0, sizeof(accountEscaped));
+        memset(errorEscaped, 0, sizeof(errorEscaped));
+        memset(json, 0, sizeof(json));
+        if (!vm_mock_admin_form_value(body, "account", account,
+                                      sizeof(account)) ||
+            !vm_mock_admin_form_value(body, "password", password,
+                                      sizeof(password)) ||
+            account[0] == 0 || password[0] == 0)
+        {
+            memset(password, 0, sizeof(password));
+            vm_mock_admin_send_response(client, "400 Bad Request",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"账号或密码参数不完整\"}\n");
+            return 0;
+        }
+        if (!vm_mock_user_valid_registration(account, password, &message))
+        {
+            const char *err =
+                message && message[0] ? message : "注册参数无效";
+            memset(password, 0, sizeof(password));
+            if (!vm_mock_admin_json_escape(err, errorEscaped,
+                                           sizeof(errorEscaped)))
+                snprintf(errorEscaped, sizeof(errorEscaped), "注册参数无效");
+            snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"error\":\"%s\"}\n", errorEscaped);
+            vm_mock_admin_send_response(client, "400 Bad Request",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        json);
+            return 0;
+        }
+        if (!vm_mock_service_account_create_record(account, password,
+                                                   &createMessage))
+        {
+            const char *err = "账号注册失败，请稍后重试";
+            int statusConflict = 0;
+            if (createMessage &&
+                strcmp(createMessage, "account already exists") == 0)
+            {
+                err = "该账号名已被注册";
+                statusConflict = 1;
+            }
+            else if (createMessage &&
+                     strcmp(createMessage, "account db unavailable") == 0)
+            {
+                err = "账号库暂不可用";
+            }
+            memset(password, 0, sizeof(password));
+            if (!vm_mock_admin_json_escape(err, errorEscaped,
+                                           sizeof(errorEscaped)))
+                snprintf(errorEscaped, sizeof(errorEscaped),
+                         "账号注册失败，请稍后重试");
+            snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"error\":\"%s\"}\n", errorEscaped);
+            printf("[warn][user-web] api_register account=%s result=rejected "
+                   "detail=%s\n",
+                   account[0] ? account : "-",
+                   createMessage ? createMessage : "-");
+            vm_mock_admin_send_response(
+                client,
+                statusConflict ? "409 Conflict" : "400 Bad Request",
+                "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin: *\r\n", json);
+            return 0;
+        }
+        memset(password, 0, sizeof(password));
+        if (!vm_mock_admin_json_escape(account, accountEscaped,
+                                       sizeof(accountEscaped)))
+        {
+            vm_mock_admin_send_response(client, "500 Internal Server Error",
+                                        "application/json; charset=utf-8",
+                                        "Access-Control-Allow-Origin: *\r\n",
+                                        "{\"ok\":false,\"error\":\"注册响应无效\"}\n");
+            return 0;
+        }
+        snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"account\":\"%s\"}\n", accountEscaped);
+        printf("[info][user-web] api_register account=%s result=success\n",
+               account);
+        vm_mock_admin_send_response(client, "200 OK",
+                                    "application/json; charset=utf-8",
+                                    "Access-Control-Allow-Origin: *\r\n", json);
+        return 1;
+    }
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/payment/qrcode.js") == 0)
         return vm_mock_admin_send_payment_qrcode_script(client);

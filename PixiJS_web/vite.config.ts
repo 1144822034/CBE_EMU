@@ -36,10 +36,6 @@ function resolveFontPath(requestName: string): string | null {
       path.join(repoRoot, "web", "fs", "font_gb.uc3"),
       path.join(repoRoot, "JianghuOL", "app", "src", "main", "assets", "font_gb.uc3"),
     ],
-    // Global LCD UI font (~14.5MB); also copied by sync-offline-assets → public/.
-    "/YaHeiConsolasHybrid.ttf": [
-      path.join(repoRoot, "web", "fs", "YaHei Consolas Hybrid.ttf"),
-    ],
   };
   const candidates = byName[requestName] ?? [];
   for (const candidate of candidates) {
@@ -113,8 +109,7 @@ function jhOnlineDataPlugin(): Plugin {
     if (
       fontReq === "/gb16.uc2.uc3" ||
       fontReq === "/font_16_sky.uc3" ||
-      fontReq === "/font_gb.uc3" ||
-      fontReq === "/YaHeiConsolasHybrid.ttf"
+      fontReq === "/font_gb.uc3"
     ) {
       const fontPath = resolveFontPath(fontReq);
       if (!fontPath) {
@@ -122,9 +117,7 @@ function jhOnlineDataPlugin(): Plugin {
         res.end(`missing ${fontReq}`);
         return;
       }
-      const contentType =
-        fontReq.endsWith(".ttf") ? "font/ttf" : "application/octet-stream";
-      res.setHeader("Content-Type", contentType);
+      res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Cache-Control", "no-cache");
       if (req.method === "HEAD") {
         res.statusCode = 200;

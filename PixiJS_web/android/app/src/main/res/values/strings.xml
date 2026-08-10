@@ -4,8 +4,10 @@
     <string name="title_activity_main">江湖OL</string>
     <string name="package_name">com.jianghu.pixijs</string>
     <string name="custom_url_scheme">com.jianghu.pixijs</string>
-    <string name="hangup_keepalive_channel_name">挂机保活</string>
-    <string name="hangup_keepalive_channel_desc">挂机时保持网络与心跳，避免息屏断线</string>
+    <string name="hangup_keepalive_channel_name">游戏网络保活</string>
+    <string name="hangup_keepalive_channel_desc">进图或挂机时保持网络与心跳，避免切后台/息屏断线</string>
     <string name="hangup_keepalive_notification_title">江湖OL 挂机中</string>
     <string name="hangup_keepalive_notification_text">正在挂机，点此返回游戏</string>
+    <string name="online_keepalive_notification_title">江湖OL 游戏中</string>
+    <string name="online_keepalive_notification_text">保持在线，点此返回游戏</string>
 </resources>

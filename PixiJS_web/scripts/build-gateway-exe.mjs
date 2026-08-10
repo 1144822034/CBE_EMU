@@ -1,7 +1,8 @@
 /**
  * Bundle ws-gateway.mjs + ws → CJS, then inject into a copy of node.exe (SEA).
  *
- * Output: dist/gateway/ws-gateway.exe
+ * Output: gateway-release/ws-gateway.exe
+ * (Separate from vite `dist/` so `build:android` / cap sync will not wipe it.)
  *
  * Usage:
  *   node scripts/build-gateway-exe.mjs
@@ -22,7 +23,8 @@ import { createRequire } from "node:module";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
-const outDir = join(root, "dist", "gateway");
+/** Outside vite webDir (`dist`) — Android APK builds wipe `dist/`. */
+const outDir = join(root, "gateway-release");
 const bundlePath = join(outDir, "ws-gateway.cjs");
 const seaConfigPath = join(outDir, "sea-config.json");
 const blobPath = join(outDir, "sea-prep.blob");
@@ -112,5 +114,5 @@ if (postjectCli) {
 
 console.log(`[gateway:exe] done → ${exePath}`);
 console.log(
-  "[gateway:exe] run: dist\\gateway\\ws-gateway.exe  [wsPort] [tcpHost] [tcpPort] [listenHost]",
+  "[gateway:exe] run: gateway-release\\ws-gateway.exe  [wsPort] [tcpHost] [tcpPort] [listenHost]",
 );

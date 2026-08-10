@@ -52,7 +52,7 @@ Vite 监听 `0.0.0.0` 时可在同 Wi‑Fi 打开 `http://<pc-ip>:5173`；gatewa
 npm run smoke          # 离线 decode / scene / protocol / actor
 npm run smoke:live     # 经 gateway 打 1/12 取服列表
 npm run gateway        # Node 版 WS↔TCP 网关（:19092 → :19090）
-npm run gateway:exe    # 打包 dist/gateway/ws-gateway.exe（无需本机 Node 即可跑）
+npm run gateway:exe    # 打包 gateway-release/ws-gateway.exe（勿放 dist，避免 Android 出包清掉）
 ```
 
 取证短记：`docs/re/2026-08-06-pixijs-live-core-loop.md`、`docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md`、`docs/re/2026-08-08-pixijs-ws-gateway-exe.md`。

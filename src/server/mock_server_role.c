@@ -2983,7 +2983,9 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
                                           stats->wisdom) +
             equipment.attack,
         65535);
-    /* Panel + PvE/PvP: bare (level/耐力) + full equip.armor — not armor/5. */
+    /* Panel / actorinfo: bare (level/耐力) + full equip.armor.
+     * Soft-curve NA mitigation uses equip.armor/5 via
+     * vm_net_mock_battle_mitigation_defense (K=2000 curve). */
     stats->defense = 4 + level + stats->endurance / 2 + equipment.armor;
     /* ?? = 101 ?? + ????????/??/?????????
      * hitChance = clamp(hit - dodge, 5, 95)????? 101 ????? 0
@@ -3105,18 +3107,43 @@ static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp)
     return false;
 }
 
+/*
+ * Soft armor curve for normal attacks:
+ *   damage = (attack * K + defense / 2) / (K + defense), K=2000
+ * Floor 1.  Player panel defense stays full; callers pass mitigation defense
+ * (bare + equip.armor/5) for role targets.  Monster catalog defense is used as-is.
+ */
 static u32 vm_net_mock_damage_after_defense(u32 attack, u32 defense)
 {
+    const u32 kSoft = 2000u;
     uint64_t scaled = 0;
 
     if (attack == 0)
         attack = 1;
-    scaled = ((uint64_t)attack * 100ull + defense / 2u) / (100u + defense);
+    scaled = ((uint64_t)attack * (uint64_t)kSoft + defense / 2u) /
+             ((uint64_t)kSoft + (uint64_t)defense);
     if (scaled == 0)
         scaled = 1;
     if (scaled > 0xffffffffull)
         scaled = 0xffffffffull;
     return (u32)scaled;
+}
+
+/* Combat NA only: keep panel stats->defense full, scale equip armor by /5. */
+static u32 vm_net_mock_battle_mitigation_defense(
+    const vm_net_mock_player_stats *stats)
+{
+    u32 bare = 0;
+    u32 equipArmor = 0;
+
+    if (stats == NULL)
+        return 0;
+    equipArmor = stats->equipment.armor;
+    if (stats->defense > equipArmor)
+        bare = stats->defense - equipArmor;
+    else
+        bare = stats->defense;
+    return bare + equipArmor / 5u;
 }
 
 static void vm_net_mock_role_default_vitals(const vm_net_mock_role_state *role,
@@ -4830,7 +4857,7 @@ static u32 vm_net_mock_battle_role_defense_default(void)
 {
     vm_net_mock_player_stats stats;
     vm_net_mock_battle_role_stats_current(&stats);
-    return stats.defense;
+    return vm_net_mock_battle_mitigation_defense(&stats);
 }
 
 /*
@@ -4841,11 +4868,12 @@ static u32 vm_net_mock_battle_role_defense_default(void)
  * crit~1+), so provisional contract:
  *   hitChance = clamp(attacker.hit - defender.dodge, 5, 95)
  *   critChance = clamp(attacker.crit, 0, 100); crit multiplies by 150%
- *   physical mitigation = damage_after_defense(raw, defense)
+ *   physical mitigation = damage_after_defense(raw, defense)  (K=2000)
  *   spell mitigation   = damage_after_resist(raw, resist)
  *     resist is a percent reduction, clamped to 70%
  *     (wisdomCoeff dominant among ?/?/???)
  *   Player hit = 101 + equipment.hit; dodge/crit/resist = equipment columns only
+ *   Player NA defense = bare + equip.armor/5 (panel still full armor)
  *   Monster resist defaults to 0 (CBE_BATTLE_MONSTER_RESIST)
  *   Monster NA defense = catalog/MySQL stats.defense (CBE_BATTLE_ENEMY_DEFENSE)
  *   Offensive skills (physical + spell) mitigate with monster resist %
@@ -5233,7 +5261,8 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
 
 /*
  * Monster → player damage.
- *   skillMitigateWithResist=0: normal attack — soft armor (护甲) curve
+ *   skillMitigateWithResist=0: normal attack — soft armor
+ *     (bare + equip.armor/5, K=2000)
  *   skillMitigateWithResist=1: monster skill — player 法抗 % only (no 护甲)
  */
 static u32 vm_net_mock_battle_enemy_damage_to_role_ex(u32 enemyId,
@@ -5255,7 +5284,9 @@ static u32 vm_net_mock_battle_enemy_damage_to_role_ex(u32 enemyId,
         return 0;
 
     vm_net_mock_battle_role_stats_current(&playerStats);
-    defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE", playerStats.defense);
+    defense = vm_net_mock_env_u32_if_set(
+        "CBE_BATTLE_ROLE_DEFENSE",
+        vm_net_mock_battle_mitigation_defense(&playerStats));
     resist = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_RESIST", playerStats.resist);
     vm_net_mock_monster_secondary_combat_stats(stats.level, &monsterHit, NULL,
                                               &monsterCrit, NULL);

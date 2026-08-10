@@ -35,6 +35,11 @@ const PORTAL_ACTOR = "n_teleporter.actor";
 const WALK_PX_PER_MS = 1 / (1000 / 60);
 /** Cap one tick so a long hitch cannot teleport past collision samples. */
 const WALK_DT_CLAMP_MS = 50;
+/** Map-corner status strip (修/拍/斗/练). */
+const STATUS_BADGE_SIZE = 17;
+const STATUS_BADGE_PITCH = 20;
+const STATUS_BADGE_X0 = 4;
+const STATUS_BADGE_Y = 4;
 
 /**
  * World map camera inside the CBE LCD map band (below HUD, above softkeys).
@@ -102,6 +107,10 @@ export class SceneView {
   private plus16Sparkles = new Plus16Sparkles();
   private xiuBadge = new Container();
   private paiBadge = new Container();
+  /** Hangup / auto-fight 「斗」— vip_effect.gif, after 修/拍. */
+  private douBadge = new Container();
+  /** Training buff 「练」— training.gif, after 斗. */
+  private lianBadge = new Container();
   private paiBlink = false;
   private paiBlinkPhase = 0;
   private mapPreview: MapPreview | null = null;
@@ -150,14 +159,8 @@ export class SceneView {
     this.world.addChild(this.player);
     this.root.addChild(this.clip);
 
-    this.xiuBadge.position.set(4, 4);
-    this.xiuBadge.zIndex = 20;
-    this.xiuBadge.eventMode = "static";
-    this.xiuBadge.cursor = "pointer";
-    this.xiuBadge.hitArea = {
-      contains: (px: number, py: number) =>
-        px >= 0 && py >= 0 && px <= 18 && py <= 18,
-    };
+    // Status strip on map top-left: 修 → 拍 → 斗 → 练 (17px cells, pitch 20).
+    this.mountStatusBadgeSlot(this.xiuBadge, 0);
     this.xiuBadge.on("pointertap", (e) => {
       e.stopPropagation();
       this.onXiuTap?.();
@@ -165,20 +168,25 @@ export class SceneView {
     this.root.addChild(this.xiuBadge);
     void this.mountXiuArt();
 
-    this.paiBadge.position.set(24, 4);
-    this.paiBadge.zIndex = 20;
-    this.paiBadge.eventMode = "static";
-    this.paiBadge.cursor = "pointer";
-    this.paiBadge.hitArea = {
-      contains: (px: number, py: number) =>
-        px >= 0 && py >= 0 && px <= 18 && py <= 18,
-    };
+    this.mountStatusBadgeSlot(this.paiBadge, 1);
     this.paiBadge.on("pointertap", (e) => {
       e.stopPropagation();
       this.onPaiTap?.();
     });
     this.root.addChild(this.paiBadge);
     void this.mountPaiArt();
+
+    this.mountStatusBadgeSlot(this.douBadge, 2);
+    this.douBadge.visible = false;
+    this.douBadge.eventMode = "none";
+    this.root.addChild(this.douBadge);
+    void this.mountGifBadge(this.douBadge, "vip_effect.gif");
+
+    this.mountStatusBadgeSlot(this.lianBadge, 3);
+    this.lianBadge.visible = false;
+    this.lianBadge.eventMode = "none";
+    this.root.addChild(this.lianBadge);
+    void this.mountGifBadge(this.lianBadge, "training.gif");
 
     window.addEventListener("keydown", (e) => {
       if (!this.inputEnabled) return;
@@ -566,50 +574,13 @@ export class SceneView {
   }
 
   private async mountXiuArt(): Promise<void> {
-    const tex = await tryLoadUiTexture("UIRed.gif");
-    this.xiuBadge.removeChildren().forEach((c) => c.destroy());
-    if (tex) {
-      const spr = new Sprite(tex);
-      spr.width = 16;
-      spr.height = 16;
-      this.xiuBadge.addChild(spr);
-    } else {
-      this.xiuBadge.addChild(
-        new Graphics()
-          .rect(0, 0, 16, 16)
-          .fill({ color: 0xc02828 })
-          .stroke({ width: 1, color: 0xe8c080 }),
-      );
-    }
-    const label = new BitmapLabel();
-    await label.setText("修", 0xffe080, { outline: false });
-    label.position.set(Math.floor((16 - label.width) / 2), Math.floor((16 - label.height) / 2));
-    this.xiuBadge.addChild(label);
+    // Dark plate + cream edge (matches baked 斗/练 style). Do NOT use UIRed.gif
+    // bright fill — it washes the glyph and looks like a solid red square.
+    await this.mountTextStatusBadge(this.xiuBadge, "修", 0x2a1008, 0xe8d8a0);
   }
 
   private async mountPaiArt(): Promise<void> {
-    const tex = await tryLoadUiTexture("UIRed.gif");
-    this.paiBadge.removeChildren().forEach((c) => c.destroy());
-    if (tex) {
-      const spr = new Sprite(tex);
-      spr.width = 16;
-      spr.height = 16;
-      this.paiBadge.addChild(spr);
-    } else {
-      this.paiBadge.addChild(
-        new Graphics()
-          .rect(0, 0, 16, 16)
-          .fill({ color: 0x2858c0 })
-          .stroke({ width: 1, color: 0xe8c080 }),
-      );
-    }
-    const label = new BitmapLabel();
-    await label.setText("拍", 0xffe080, { outline: false });
-    label.position.set(
-      Math.floor((16 - label.width) / 2),
-      Math.floor((16 - label.height) / 2),
-    );
-    this.paiBadge.addChild(label);
+    await this.mountTextStatusBadge(this.paiBadge, "拍", 0x081828, 0xa8d8e8);
   }
 
   /** Flash「拍」when auction claims / refunds are pending. */
@@ -619,6 +590,58 @@ export class SceneView {
       this.paiBadge.alpha = 1;
       this.paiBlinkPhase = 0;
     }
+  }
+
+  /** Hangup/auto 「斗」tile after 修/拍. */
+  setDouVisible(on: boolean): void {
+    this.douBadge.visible = !!on;
+  }
+
+  /** Training-buff 「练」tile after 斗. */
+  setLianVisible(on: boolean): void {
+    this.lianBadge.visible = !!on;
+  }
+
+  private mountStatusBadgeSlot(host: Container, index: number): void {
+    host.position.set(STATUS_BADGE_X0 + index * STATUS_BADGE_PITCH, STATUS_BADGE_Y);
+    host.zIndex = 20;
+    host.eventMode = "static";
+    host.cursor = "pointer";
+    host.hitArea = {
+      contains: (px: number, py: number) =>
+        px >= 0 && py >= 0 && px <= STATUS_BADGE_SIZE && py <= STATUS_BADGE_SIZE,
+    };
+  }
+
+  private async mountTextStatusBadge(
+    host: Container,
+    text: string,
+    fill: number,
+    border: number,
+  ): Promise<void> {
+    host.removeChildren().forEach((c) => c.destroy());
+    const plate = new Graphics()
+      .rect(0, 0, STATUS_BADGE_SIZE, STATUS_BADGE_SIZE)
+      .fill({ color: fill })
+      .stroke({ width: 1, color: border });
+    host.addChild(plate);
+    const label = new BitmapLabel();
+    await label.setText(text, 0xffe080, { outline: false });
+    label.position.set(
+      Math.floor((STATUS_BADGE_SIZE - label.width) / 2),
+      Math.floor((STATUS_BADGE_SIZE - label.height) / 2),
+    );
+    host.addChild(label);
+  }
+
+  private async mountGifBadge(host: Container, name: string): Promise<void> {
+    const tex = await tryLoadUiTexture(name);
+    host.removeChildren().forEach((c) => c.destroy());
+    if (!tex) return;
+    const spr = new Sprite(tex);
+    spr.width = STATUS_BADGE_SIZE;
+    spr.height = STATUS_BADGE_SIZE;
+    host.addChild(spr);
   }
 
   resetCamera(): void {

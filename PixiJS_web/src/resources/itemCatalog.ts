@@ -85,6 +85,43 @@ export function mapEquipCategoryToSlot(category: number): number {
   return -1;
 }
 
+/**
+ * equip.dsh 类别 → equipico.gif tile index (0..9).
+ * Sheet is 160×16 = ten 16×16 icons aligned with categories 0–9.
+ */
+export function equipCategoryIconIndex(category: number): number {
+  const c = category | 0;
+  if (c >= 0 && c <= 9) return c;
+  return 0;
+}
+
+/**
+ * Empty worn body slot → default equipico tile (weapon empty → 剑=7).
+ * Body slots: 0 weapon, 1 helm … 7 ring.
+ */
+export function defaultCategoryForBodySlot(slot: number): number {
+  switch (slot | 0) {
+    case 0:
+      return 7; // 剑
+    case 1:
+      return 0; // 帽
+    case 2:
+      return 1; // 衣
+    case 3:
+      return 2; // 披
+    case 4:
+      return 3; // 束
+    case 5:
+      return 4; // 裤
+    case 6:
+      return 5; // 鞋
+    case 7:
+      return 6; // 饰
+    default:
+      return 0;
+  }
+}
+
 function parseItemRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
   const map = new Map<number, ItemCatalogRow>();
   for (const cells of parseDshRows(raw)) {

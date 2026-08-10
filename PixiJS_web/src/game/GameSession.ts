@@ -200,18 +200,22 @@ import {
 } from "../net/protocolArena";
 import {
   buildAuctionBidRequest,
+  buildAuctionBuyoutRequest,
   buildAuctionCancelRequest,
   buildAuctionClaimRequest,
+  buildAuctionClaimsListRequest,
   buildAuctionCreateRequest,
   buildAuctionListRequest,
   buildAuctionMineRequest,
   buildAuctionStatusRequest,
   parseAuctionClaim,
+  parseAuctionClaimsList,
   parseAuctionEvent,
   parseAuctionList,
   parseAuctionOpResult,
   parseAuctionStatus,
   type AuctionClaimResult,
+  type AuctionClaimRow,
   type AuctionEvent,
   type AuctionListing,
   type AuctionOpResult,
@@ -264,7 +268,7 @@ import {
 import {
   clearHangupResumeStorage,
   readHangupResume,
-  setHangupNativeKeepAlive,
+  syncNativeKeepAlive,
   writeHangupResume,
   type HangupResumeSnapshot,
 } from "../net/hangupResume";
@@ -561,7 +565,7 @@ export class GameSession {
       this.accountPass = snap.password;
       this.selectedServerId = snap.serverId || 1;
       this.selectedRoleId = snap.roleId >>> 0;
-      void setHangupNativeKeepAlive(true);
+      void this.refreshNativeKeepAlive();
     }
   }
 
@@ -842,6 +846,9 @@ export class GameSession {
     if (!this.transport) throw new Error("未连接（请重新登录）");
     const trimmed = name.trim();
     if (!trimmed) throw new Error("请输入角色名");
+    if (this.roles.some((r) => r.name === trimmed)) {
+      throw new Error("名已被注册");
+    }
     if (this.roles.length >= TITLE_ROLE_MAX) {
       throw new Error(`角色已满（最多${TITLE_ROLE_MAX}个）`);
     }
@@ -862,9 +869,11 @@ export class GameSession {
       }
       if (ack.result !== 0 || !ack.actorId) {
         const tip =
-          ack.result === 1 && this.roles.length >= TITLE_ROLE_MAX
-            ? `角色已满（最多${TITLE_ROLE_MAX}个）`
-            : `创建失败（result=${ack.result}）`;
+          ack.result === 2
+            ? "名已被注册"
+            : ack.result === 1 && this.roles.length >= TITLE_ROLE_MAX
+              ? `角色已满（最多${TITLE_ROLE_MAX}个）`
+              : `创建失败（result=${ack.result}）`;
         throw new Error(tip);
       }
       created = {
@@ -1621,13 +1630,13 @@ export class GameSession {
   clearHangupDesired(): void {
     this.hangupDesired = false;
     clearHangupResumeStorage();
-    void setHangupNativeKeepAlive(false);
+    void this.refreshNativeKeepAlive();
   }
 
   markHangupDesired(): void {
     this.hangupDesired = true;
     this.persistHangupResume();
-    void setHangupNativeKeepAlive(true);
+    void this.refreshNativeKeepAlive();
   }
 
   private persistHangupResume(): void {
@@ -2067,24 +2076,69 @@ export class GameSession {
     return null;
   }
 
-  async fetchAuctionBoard(): Promise<{
+  async fetchAuctionBoard(opts?: {
+    browsePage?: number;
+    minePage?: number;
+    claimPage?: number;
+  }): Promise<{
     rows: AuctionListing[];
     mine: AuctionListing[];
+    claims: AuctionClaimRow[];
     status: AuctionStatus | null;
+    browsePage: number;
+    minePage: number;
+    claimPage: number;
+    browseHasMore: boolean;
+    mineHasMore: boolean;
+    claimHasMore: boolean;
   }> {
-    if (!this.transport) return { rows: [], mine: [], status: null };
+    const browsePage = Math.max(0, opts?.browsePage ?? 0);
+    const minePage = Math.max(0, opts?.minePage ?? 0);
+    const claimPage = Math.max(0, opts?.claimPage ?? 0);
+    if (!this.transport) {
+      return {
+        rows: [],
+        mine: [],
+        claims: [],
+        status: null,
+        browsePage,
+        minePage,
+        claimPage,
+        browseHasMore: false,
+        mineHasMore: false,
+        claimHasMore: false,
+      };
+    }
     const statusBodies = await this.transport.exchange(
       0,
       buildAuctionStatusRequest(),
     );
     this.handleBodies(statusBodies);
-    const listBodies = await this.transport.exchange(0, buildAuctionListRequest(0));
+    const listBodies = await this.transport.exchange(
+      0,
+      buildAuctionListRequest(browsePage),
+    );
     this.handleBodies(listBodies);
-    const mineBodies = await this.transport.exchange(0, buildAuctionMineRequest(0));
+    const mineBodies = await this.transport.exchange(
+      0,
+      buildAuctionMineRequest(minePage),
+    );
     this.handleBodies(mineBodies);
+    const claimBodies = await this.transport.exchange(
+      0,
+      buildAuctionClaimsListRequest(claimPage),
+    );
+    this.handleBodies(claimBodies);
     let rows: AuctionListing[] = [];
     let mine: AuctionListing[] = [];
+    let claims: AuctionClaimRow[] = [];
     let status: AuctionStatus | null = null;
+    let browseHasMore = false;
+    let mineHasMore = false;
+    let claimHasMore = false;
+    let browsePageOut = browsePage;
+    let minePageOut = minePage;
+    let claimPageOut = claimPage;
     for (const body of statusBodies) {
       try {
         const st = parseAuctionStatus(decodeWtPacket(body));
@@ -2096,7 +2150,11 @@ export class GameSession {
     for (const body of listBodies) {
       try {
         const list = parseAuctionList(decodeWtPacket(body), 2);
-        if (list) rows = list.rows;
+        if (list) {
+          rows = list.rows;
+          browseHasMore = list.hasMore;
+          browsePageOut = list.pageIndex;
+        }
       } catch {
         /* ignore */
       }
@@ -2104,18 +2162,58 @@ export class GameSession {
     for (const body of mineBodies) {
       try {
         const list = parseAuctionList(decodeWtPacket(body), 3);
-        if (list) mine = list.rows;
+        if (list) {
+          mine = list.rows;
+          mineHasMore = list.hasMore;
+          minePageOut = list.pageIndex;
+        }
       } catch {
         /* ignore */
       }
     }
-    return { rows, mine, status };
+    for (const body of claimBodies) {
+      try {
+        const list = parseAuctionClaimsList(decodeWtPacket(body));
+        if (list) {
+          claims = list.rows;
+          claimHasMore = list.hasMore;
+          claimPageOut = list.pageIndex;
+          if (status) {
+            status = { ...status, pendingClaims: list.pendingClaims };
+          } else {
+            status = {
+              enabled: true,
+              blink: list.pendingClaims > 0,
+              pendingClaims: list.pendingClaims,
+              feePercents: [2, 4, 6, 8],
+              minBidStep: 1,
+              currencyMask: 3,
+            };
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      rows,
+      mine,
+      claims,
+      status,
+      browsePage: browsePageOut,
+      minePage: minePageOut,
+      claimPage: claimPageOut,
+      browseHasMore,
+      mineHasMore,
+      claimHasMore,
+    };
   }
 
   async auctionCreate(opts: {
     bagSeq: number;
     count: number;
     startPrice: number;
+    buyoutPrice: number;
     currency: number;
     durationTier: number;
   }): Promise<AuctionOpResult | null> {
@@ -2149,6 +2247,24 @@ export class GameSession {
     for (const body of bodies) {
       try {
         const r = parseAuctionOpResult(decodeWtPacket(body), 5);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async auctionBuyout(listingId: number): Promise<AuctionOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildAuctionBuyoutRequest(listingId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionOpResult(decodeWtPacket(body), 9);
         if (r) return r;
       } catch {
         /* ignore */
@@ -2530,9 +2646,8 @@ export class GameSession {
     await warmItemCatalogs();
     // Keep prior rows for seq/durability merge inside handleBodies (30/21 does
     // not carry equip current durability; CBE keeps item+0x110 across reopen).
+    // Do not onBag([]) while awaiting — that clears battle「物品」mid-fight.
     const retained = this.bagItems;
-    this.bagItems = [];
-    this.cb.onBag?.(this.bagItems);
     const bodies = await this.transport.exchange(0, buildBagOpenRequest());
     this.bagItems = retained;
     this.handleBodies(bodies);
@@ -3692,6 +3807,16 @@ export class GameSession {
     }
     this.teamMembers = roster.members;
     this.teamLeaderId = roster.leaderId;
+    const self = roster.members.find(
+      (m) => (m.id >>> 0) === (this.selectedRoleId >>> 0),
+    );
+    if (self) {
+      this.hp = self.hp;
+      this.hpMax = Math.max(self.hpMax, self.hp, 1);
+      this.mp = self.mp;
+      this.mpMax = Math.max(self.mpMax, self.mp, 1);
+      this.emitVitals();
+    }
     this.cb.onTeamUpdate?.(roster);
   }
 
@@ -3747,7 +3872,10 @@ export class GameSession {
   }
 
   private startPoll(): void {
-    this.stopPoll();
+    if (this.pollTimer != null) {
+      window.clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     this.pollTimer = window.setInterval(() => {
       void this.pollOnce();
       // Flush partial move buffer if stalled.
@@ -3755,6 +3883,7 @@ export class GameSession {
         void this.flushMove();
       }
     }, 2500);
+    void this.refreshNativeKeepAlive();
   }
 
   private stopPoll(): void {
@@ -3762,6 +3891,16 @@ export class GameSession {
       window.clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    void this.refreshNativeKeepAlive();
+  }
+
+  /** APK FGS: in-world online, or hangup-armed (even before scene). */
+  private refreshNativeKeepAlive(): void {
+    const inWorld = this.pollTimer != null || !!this.scene;
+    void syncNativeKeepAlive({
+      inWorld,
+      hangup: this.hangupDesired,
+    });
   }
 
   /** Keep gateway WS warm while parked on server/role list (no in-world poll yet). */
@@ -3796,6 +3935,9 @@ export class GameSession {
       if (this.transport instanceof LiveTransport) {
         await this.transport.ensureConnected();
         await this.transport.ping();
+        if (this.pollTimer != null) {
+          void this.pollOnce();
+        }
         await this.tryRearmHangup("wake");
         return;
       }
@@ -3833,20 +3975,19 @@ export class GameSession {
       if (recovered) void this.tryRearmHangup("poll-recovered");
     } catch (e) {
       this.pollFailStreak++;
-      if (this.hangupDesired) {
-        try {
-          await this.ensureLiveSocket();
-          const bodies = await runPoll();
-          this.handleBodies(bodies);
-          this.pollFailStreak = 0;
-          if (!this.inBattle) {
-            this.setPhase("inworld", `heartbeat ok · ${this.transport!.mode}`);
-          }
-          void this.tryRearmHangup("poll-retry");
-          return;
-        } catch {
-          /* fall through */
+      // Any in-world poll failure: one immediate WS heal + retry (not hangup-only).
+      try {
+        await this.ensureLiveSocket();
+        const bodies = await runPoll();
+        this.handleBodies(bodies);
+        this.pollFailStreak = 0;
+        if (!this.inBattle) {
+          this.setPhase("inworld", `heartbeat ok · ${this.transport!.mode}`);
         }
+        void this.tryRearmHangup("poll-retry");
+        return;
+      } catch {
+        /* fall through */
       }
       this.setPhase("poll-error", e instanceof Error ? e.message : String(e));
       if (this.hangupDesired && this.pollFailStreak >= 3) {
@@ -4206,6 +4347,14 @@ export class GameSession {
             ? { ...m, hp: h.hp, hpMax: h.hpMax, mp: h.mp, mpMax: h.mpMax }
             : m,
         );
+        // Self 5/11 is the post-battle map HUD authority (no ordinary 1/1/14).
+        if ((h.id >>> 0) === (this.selectedRoleId >>> 0)) {
+          this.hp = h.hp;
+          this.hpMax = Math.max(h.hpMax, h.hp, 1);
+          this.mp = h.mp;
+          this.mpMax = Math.max(h.mpMax, h.mp, 1);
+          this.emitVitals();
+        }
         this.cb.onTeamUpdate?.({
           members: this.teamMembers,
           leaderId: this.teamLeaderId,
