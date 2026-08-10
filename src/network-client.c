@@ -141,6 +141,7 @@ typedef struct
     u8 major;
     u8 kind;
     u8 subtype;
+    const u8 *payload;
     u16 payloadLen;
 } vm_client_wt_object;
 
@@ -149,18 +150,19 @@ static bool vm_client_next_wt_object(const u8 *packet, u32 packetLen,
 {
     u32 start;
     u16 objectLen;
-    if (packet == NULL || offset == NULL || *offset < 4 || *offset + 5 > packetLen)
+    if (packet == NULL || offset == NULL || *offset < 5 || *offset + 6 > packetLen)
         return false;
     start = *offset;
-    objectLen = (u16)(((u16)packet[start + 3] << 8) | packet[start + 4]);
-    if (objectLen < 5 || start + objectLen > packetLen)
+    objectLen = (u16)(((u16)packet[start + 4] << 8) | packet[start + 5]);
+    if (objectLen < 6 || start + objectLen > packetLen)
         return false;
     if (object != NULL)
     {
         object->major = packet[start];
         object->kind = packet[start + 1];
         object->subtype = packet[start + 2];
-        object->payloadLen = (u16)(objectLen - 5);
+        object->payload = packet + start + 6;
+        object->payloadLen = (u16)(objectLen - 6);
     }
     *offset = start + objectLen;
     return true;
@@ -175,20 +177,68 @@ static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
     packet[4] = objectCount;
 }
 
+static bool vm_client_object_has_u8_field(const vm_client_wt_object *object,
+                                          const char *field, u8 expected)
+{
+    u32 fieldLen = field ? (u32)strlen(field) : 0;
+    const u8 *payload = object ? object->payload : NULL;
+    u32 payloadLen = object ? object->payloadLen : 0;
+
+    if (payload == NULL || fieldLen == 0 || fieldLen > 0xff)
+        return false;
+    for (u32 offset = 0; offset + fieldLen + 6 <= payloadLen; ++offset)
+    {
+        u32 valueLen = 0;
+        u32 valueStart = 0;
+
+        if (payload[offset] != (u8)fieldLen ||
+            memcmp(payload + offset + 1, field, fieldLen) != 0)
+        {
+            continue;
+        }
+        valueLen = ((u32)payload[offset + 1 + fieldLen] << 8) |
+                   (u32)payload[offset + 2 + fieldLen];
+        valueStart = offset + 3 + fieldLen;
+        if (valueLen != 3 || valueStart + valueLen > payloadLen ||
+            payload[valueStart] != 0 || payload[valueStart + 1] != 1)
+        {
+            continue;
+        }
+        return payload[valueStart + 2] == expected;
+    }
+    return false;
+}
+
+typedef enum
+{
+    VM_CLIENT_ITEM_FOLLOWUP_NONE = 0,
+    VM_CLIENT_ITEM_FOLLOWUP_USE_LIST,
+    VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE
+} vm_client_item_followup_kind;
+
 static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
                                             u8 *followup, u32 followupCap,
-                                            u32 *followupLen)
+                                            u32 *followupLen,
+                                            vm_client_item_followup_kind *kindOut)
 {
-    u32 offset = 4;
+    u32 offset = 5;
     u32 primaryPos = 5;
     u32 followPos = 5;
     u8 primaryCount = 0;
     u8 followCount = 0;
+    u8 seenCount = 0;
     bool haveItemUse = false;
+    u8 itemListCount = 0;
+    u8 npcDialogCount = 0;
+    u8 npcPurchaseAddCount = 0;
+    vm_client_item_followup_kind followupKind =
+        VM_CLIENT_ITEM_FOLLOWUP_NONE;
     vm_client_wt_object object;
 
     if (followupLen != NULL)
         *followupLen = 0;
+    if (kindOut != NULL)
+        *kindOut = VM_CLIENT_ITEM_FOLLOWUP_NONE;
     if (response == NULL || responseLen == NULL || *responseLen < 10 ||
         response[0] != 'W' || response[1] != 'T' ||
         followup == NULL || followupCap < 5)
@@ -200,14 +250,40 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
         if (object.major == 1 && object.kind == 7 && object.subtype == 1)
             haveItemUse = true;
         if (object.major == 1 && object.kind == 17 && object.subtype == 1)
-            ++followCount;
-        else
-            ++primaryCount;
+            ++itemListCount;
+        if (object.major == 1 && object.kind == 26 && object.subtype == 1)
+            ++npcDialogCount;
+        if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
+            vm_client_object_has_u8_field(&object, "type", 1))
+        {
+            ++npcPurchaseAddCount;
+        }
+        ++seenCount;
     }
-    if (offset != *responseLen || !haveItemUse || followCount == 0 || primaryCount == 0)
+    if (offset != *responseLen || seenCount != response[4])
         return false;
 
-    offset = 4;
+    /* Existing item-use flow: the business acknowledgement must complete
+     * before its full backpack-list follow-up reaches the list owner. */
+    if (haveItemUse && itemListCount != 0)
+    {
+        followupKind = VM_CLIENT_ITEM_FOLLOWUP_USE_LIST;
+    }
+    /* NPC service purchase is a different pairing.  Its success dialog owns
+     * the action=1 callback; 7/7 type=1 belongs to the mmGame item manager.
+     * Restrict the split to this exact two-object contract so unrelated scene
+     * or item responses cannot have objects reordered. */
+    else if (seenCount == 2 && npcDialogCount == 1 &&
+             npcPurchaseAddCount == 1)
+    {
+        followupKind = VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE;
+    }
+    else
+    {
+        return false;
+    }
+
+    offset = 5;
     primaryPos = 5;
     followPos = 5;
     primaryCount = 0;
@@ -219,7 +295,13 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
         if (!vm_client_next_wt_object(response, *responseLen, &offset, &object))
             return false;
         objectLen = offset - start;
-        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+        bool isFollowup =
+            (followupKind == VM_CLIENT_ITEM_FOLLOWUP_USE_LIST &&
+             object.major == 1 && object.kind == 17 && object.subtype == 1) ||
+            (followupKind == VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE &&
+             object.major == 1 && object.kind == 7 && object.subtype == 7 &&
+             vm_client_object_has_u8_field(&object, "type", 1));
+        if (isFollowup)
         {
             if (followPos + objectLen > followupCap || followCount == 0xff)
                 return false;
@@ -239,6 +321,8 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     *responseLen = primaryPos;
     if (followupLen != NULL)
         *followupLen = followPos;
+    if (kindOut != NULL)
+        *kindOut = followupKind;
     return true;
 }
 
@@ -437,8 +521,16 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
     if (ok && eventType != NULL && *eventType == 7 && responseLen != NULL &&
         followup != NULL && followupLen != NULL)
     {
-        (void)vm_client_extract_item_followup(response, responseLen,
-                                              followup, followupCap, followupLen);
+        vm_client_item_followup_kind followupKind =
+            VM_CLIENT_ITEM_FOLLOWUP_NONE;
+        if (vm_client_extract_item_followup(response, responseLen,
+                                            followup, followupCap, followupLen,
+                                            &followupKind) &&
+            followupKind == VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE)
+        {
+            printf("[info][network] remote_npc_purchase_backpack_followup "
+                   "primary=26/1 followup=7/7-type1 delivery=separate-event\n");
+        }
     }
     return ok;
 }

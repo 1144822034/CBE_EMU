@@ -212,6 +212,7 @@ independent transaction.”
 - `php tmp/teleport-stone-cancel-retry-regression.php 19094`: passed, including
   the atomic `16/2 + 16/3` confirmation path and the independent `16/1 +
   2/10` retry frame.
-- `php tmp/npc-purchase-equipment-swap-regression.php run 19094`: passed;
-  occupied-slot `7/9` replacement remains its dedicated atomic contract.
+- `scripts/run-npc-purchase-equipment-swap-automation.ps1`: passed in its
+  isolated schema; occupied-slot `7/9` replacement remains its dedicated
+  atomic contract.
 - `make -j2` and `make boundary-check`: passed.

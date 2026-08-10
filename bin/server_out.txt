@@ -12,10 +12,370 @@
 [info][network] mock_xse_validate script=06野猪林林冲.xse strings=19 task_refs=2 direct_dialogs=7 offer_len=0 completed_len=0 idle_len=60
 [info][network] mock_xse_validate script=信箱.xse strings=1 task_refs=0 direct_dialogs=1 offer_len=0 completed_len=0 idle_len=28
 [info][network] mock_xse_catalog_validate loaded=4 expected=4 task_refs=5 source=web/fs/JHOnlineData evidence=XSE0+task.dsh
-[info][mock-admin] native_npc_db_load overrides=1 inventory=84
-[info][mock-admin] dynamic_npc_db_load rows=19 skipped=0 quarantined=0 migrated=0 parent_migrated=0
+[info][mock-admin] native_npc_db_load overrides=1 inventory=522
+[info][mock-admin] dynamic_npc_db_load rows=22 skipped=0 quarantined=0 migrated=0 parent_migrated=0
 [info][network] mock_scene_npc_exact_validate scene=c00蓬莱仙岛_01.sce rows=2 total=2 guojing=0 policy=exact-scene-only
 [info][network] mock_scene_npc_service_validate scene=00蓬莱仙岛_02.sce rows=3 total=3 blacksmith=1 monkey=1 test_task_npc=0 policy=production-catalog-only
 [info][mock-service] listening=127.0.0.1:19090
 [info][mock-admin] listening=http://0.0.0.0:19091/
 [info][mock-service] concurrency workers=4 queue=128 state_model=serialized-legacy-context
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=0 error=no MySQL error detail
+[info][network] mock_update_version request=18/9 result=0x00 identity=f197ad82 source=delivery-ledger configured=0/0/0/0
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=0 error=no MySQL error detail
+[info][mock-service] account_cache_acquire account=21642502 entries=1 reason=session-login
+[info][mock-service] session_bind client=cf8d2c83 account=21642502 displaced=0
+[info][mock-service] equipment_instance_schema_prepare storage=relational
+[info][network] mock_item_effect_catalog total=230 source=item.dsh
+[warn][mock-service] equipment_level_state_repair_blocked role=10036 level=34 overlevel_items=8 backpack_rows=100 capacity=100 action=preserve-for-admin
+[info][mock-service] equipment_level_state_repair account=21642502 recovered_roles=0 recovered_items=0 blocked_roles=1 blocked_items=8 action=durable-backpack-return
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] login_server_catalog_load rows=1 enabled=1 skipped=0 source=mysql
+[info][network] mock_login_alt12_server_list result=1 servernum=1 issued=0 user=- resp=141
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_grid_reseed role=10036 reason=title-role-select next=group-type1-30/21 evidence=JianghuOL.CBE:0x01039952
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_team_member_row observer=cf8d2c83 member=cf8d2c83/10036 wire=10036 sex_group=1 job_index=2 online=0 hp=615/615 mp=890/925 wire_order=hp-mp-hpmax-mpmax
+[info][network] mock_team_solo_groupinfo observer=cf8d2c83 role=10036 groupinfo_len=48 lifecycle=login-self-roster
+[info][network] mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=49 stored_rows=100 iteminfo_len=1323
+[info][network] mock_backpack_reservoir_seed role=10036 rows=3 info_len=33 response=7/11 evidence=JianghuOL.CBE:0x1033544
+[info][network] mock_equipment_login role=10036 rows=0 iteminfo_len=3 response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_scene_npc_catalog scene=c04临安府_07.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=204 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_07.sce npcNum=3 npcInfoLen=204
+[info][mock-service] task_prompt_refresh_arm client=cf8d2c83 scene=c04临安府_07.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=startup-scene-followup-immediate scene=c04临安府_07.sce source=27/11-catalog npcnum=3 npcinfo_len=204 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][mock-service] scene_npc_lifecycle_seed client=cf8d2c83 scene=c04临安府_07.sce phase=startup-scene-followup-immediate npcnum=3 objects=1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998
+[info][network] mock_role_service_load account=21642502 role=10036 skills=30 durability_source=role-instance invalid=0
+[info][network] mock_skill_catalog total=74 source=skill.dsh
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_backpack_items role=10036 capacity=64 rows=49 stored_rows=100 iteminfo_len=836 layout=bootstrap-compact
+[info][network] mock_task_list role=10036 tasknum=1 persisted_active=1 taskinfo_len=83 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10036 scene=c04临安府_07.sce tasknum=0 taskinfo_len=0 persisted=2 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[debug][mock-service] movement_rate_reset client=cf8d2c83 reason=scene-ready
+[info][mock-service] session_online client=cf8d2c83 account=21642502 role=10036 name=武林盟主 scene=c04临安府_07.sce pos=(66,207) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10049 bytes=14 depth=1
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10049 bytes=18 depth=2
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10061 bytes=46 depth=3
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10037 bytes=8 depth=4
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10049 bytes=10 depth=5
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10061 bytes=30 depth=6
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10258 bytes=44 depth=7
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10271 bytes=8 depth=8
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10275 bytes=12 depth=9
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10258 bytes=36 depth=10
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10278 bytes=24 depth=11
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10271 bytes=22 depth=12
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10258 bytes=34 depth=13
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10275 bytes=30 depth=14
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10135 bytes=8 depth=15
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10275 bytes=18 depth=16
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10280 bytes=38 depth=17
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10128 bytes=16 depth=18
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10264 bytes=1 depth=19
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10302 bytes=8 depth=20
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10128 bytes=10 depth=21
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10405 bytes=8 depth=22
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10128 bytes=6 depth=23
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10405 bytes=16 depth=24
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10024 bytes=44 depth=25
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10024 bytes=46 depth=26
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10024 bytes=46 depth=27
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10036 bytes=44 depth=28
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=world source=00000000/10024 bytes=46 depth=29
+[info][mock-service] world_chat_history_queue target=cf8d2c83 queued=29 skipped=0 limit=30
+[info][mock-service] chat_notice_queue target=cf8d2c83 type=system source=00000000/0 bytes=16 depth=30
+[info][mock-service] scene_ready client=cf8d2c83 account=21642502 scene=c04临安府_07.sce pos=(66,207) reason=scene-task-subset-followup
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10049 bytes=14 age_ticks=0
+[info][mock-service] scene_ready_messages client=cf8d2c83 scene=c04临安府_07.sce objects=1 reason=scene-task-subset-followup delivery=same-scene-completion evidence=JianghuOL.CBE:0x01012FB4+0x010126C6
+[debug][mock-service] movement_rate_reset client=cf8d2c83 reason=scene-pending
+[info][mock-service] scene_pending client=cf8d2c83 account=21642502 scene=c04临安府_07.sce pos=(66,207) reason=scene-target-remember
+[info][network] mock_scene_target_remember serial=1 scene=c04临安府_07.sce pos=(66,207) exit=0
+[debug][mock-service] movement_rate_reset client=cf8d2c83 reason=scene-ready
+[info][mock-service] scene_ready client=cf8d2c83 account=21642502 scene=c04临安府_07.sce pos=(66,207) reason=scene-target-complete
+[info][network] mock_scene_target_direct_completed scene=c04临安府_07.sce pos=(66,207) exit=0 reason=scene-startup-followup-complete
+[debug][mock-service] role_position_save_skip role=10036 scene=c04临安府_07.sce pos=(66,207) reason=scene-startup-followup-complete unchanged=1
+[info][network] mock_scene_startup_followup_complete scene=c04临安府_07.sce pos=(66,207) source=scene-task-subset-followup objects=10 resp=1693 action=no-second-scene-enter
+[info][network] mock_task_list role=10036 tasknum=1 persisted_active=1 taskinfo_len=83 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10036 scene=c04临安府_07.sce tasknum=0 taskinfo_len=0 persisted=2 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] task_prompt_refresh_deliver client=cf8d2c83 scene=c04临安府_07.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10049 bytes=18 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10061 bytes=46 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10037 bytes=8 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10049 bytes=10 age_ticks=2
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10061 bytes=30 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10258 bytes=44 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10271 bytes=8 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10275 bytes=12 age_ticks=4
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10258 bytes=36 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10278 bytes=24 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10271 bytes=22 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10258 bytes=34 age_ticks=6
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10275 bytes=30 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10135 bytes=8 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10275 bytes=18 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10280 bytes=38 age_ticks=8
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10128 bytes=16 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10264 bytes=1 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10302 bytes=8 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10128 bytes=10 age_ticks=10
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10405 bytes=8 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10128 bytes=6 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10405 bytes=16 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10024 bytes=44 age_ticks=12
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10024 bytes=46 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10024 bytes=46 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10036 bytes=44 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=world source=00000000/10024 bytes=46 age_ticks=14
+[info][mock-service] chat_notice_deliver observer=cf8d2c83 type=system source=00000000/0 bytes=16 age_ticks=16
+[info][network] mock_npc_dialog actor=30000 index=0 name=防具商人 script=- scene=c04临安府_07.sce catalog_match=1 service_kind=4 scene_entity_kind=0 native=0 service_action=3858759681 task_offer=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=64 objects=1 resp=97 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)
+[info][network] mock_npc_service action=armor-categories opcode=e6000001 value=1 role=10036 job=3 level=34 result=0 options=7 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=299 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-category opcode=e8000001 value=1 role=10036 job=3 level=34 result=0 options=6 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=339 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-buy opcode=e9001389 value=5001 role=10036 job=3 level=34 result=0 options=6 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=339 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-buy opcode=e9001389 value=5001 role=10036 job=3 level=34 result=0 options=6 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=339 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=48 stored_rows=99 iteminfo_len=2379 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=5001 seq=35 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2504
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=47 stored_rows=98 iteminfo_len=2310 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=9001 seq=34 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2435
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=46 stored_rows=97 iteminfo_len=2241 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=3001 seq=36 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2366
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=45 stored_rows=96 iteminfo_len=2172 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=8001 seq=37 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2297
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=44 stored_rows=95 iteminfo_len=2103 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=7001 seq=38 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2228
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=43 stored_rows=94 iteminfo_len=2034 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=40002 seq=39 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2159
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=42 stored_rows=93 iteminfo_len=1965 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=13501 seq=51 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2090
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=41 stored_rows=92 iteminfo_len=1896 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=13501 seq=70 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=2021
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=40 stored_rows=91 iteminfo_len=1827 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=13501 seq=71 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1952
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=39 stored_rows=90 iteminfo_len=1758 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=29308 seq=55 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1883
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=38 stored_rows=89 iteminfo_len=1689 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=13501 seq=72 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1814
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=37 stored_rows=88 iteminfo_len=1620 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=13501 seq=73 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1745
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=36 stored_rows=87 iteminfo_len=1551 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=19103 seq=56 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1676
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=35 stored_rows=86 iteminfo_len=1482 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=50016 seq=54 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1607
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=34 stored_rows=85 iteminfo_len=1413 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=50015 seq=58 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1538
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=33 stored_rows=84 iteminfo_len=1344 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=50013 seq=42 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1469
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=32 stored_rows=83 iteminfo_len=1275 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=5001 seq=131 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1400
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=31 stored_rows=82 iteminfo_len=1206 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=40154 seq=68 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1331
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=30 stored_rows=81 iteminfo_len=1137 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=30009 seq=67 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1262
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=29 stored_rows=80 iteminfo_len=1068 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=23508 seq=66 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1193
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=28 stored_rows=79 iteminfo_len=999 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=15003 seq=65 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1124
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=27 stored_rows=78 iteminfo_len=930 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=40079 seq=74 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=1055
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=26 stored_rows=77 iteminfo_len=861 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=40079 seq=64 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=986
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_backpack_items role=10036 capacity=64 rows=25 stored_rows=76 iteminfo_len=792 layout=detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[info][network] mock_item_discard item=40159 seq=63 count=1 request_count=default-one remaining=0 result=1 refresh=7/4+17/1+7/42+7/11 resp=917
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_npc_dialog actor=30000 index=0 name=防具商人 script=- scene=c04临安府_07.sce catalog_match=1 service_kind=4 scene_entity_kind=0 native=0 service_action=3858759681 task_offer=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=64 objects=1 resp=97 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)
+[info][network] mock_npc_service action=armor-categories opcode=e6000001 value=1 role=10036 job=3 level=34 result=0 options=7 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=299 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-category opcode=e8000001 value=1 role=10036 job=3 level=34 result=0 options=6 money=51638 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=339 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-buy opcode=e9001389 value=5001 role=10036 job=3 level=34 result=1 options=6 money=51582 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=329 inventory_sync=deferred-native-backpack-query evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_moveinfo_source pos=(106,207) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_npc_dialog actor=30001 index=0 name=药品商人 script=- scene=c04临安府_07.sce catalog_match=1 service_kind=5 scene_entity_kind=0 native=0 service_action=3875536897 task_offer=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=64 objects=1 resp=97 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)
+[info][network] mock_moveinfo_source pos=(130,207) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_npc_service action=shop-category opcode=e7000001 value=1 role=10036 job=3 level=34 result=0 options=6 money=51582 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=344 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-buy opcode=e900012d value=301 role=10036 job=3 level=34 result=1 options=6 money=51507 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=334 inventory_sync=deferred-native-backpack-query evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_moveinfo_source pos=(170,207) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_moveinfo_source pos=(198,207) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_moveinfo_source pos=(170,207) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_npc_dialog actor=30002 index=0 name=武器商人 script=- scene=c04临安府_07.sce catalog_match=1 service_kind=1 scene_entity_kind=0 native=0 service_action=3774873601 task_offer=0 task_accepted=0 task_state=0 task_completed_now=0 task_option_action=0 xse_dialogs=0 dialog_len=70 objects=1 resp=103 evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)
+[info][network] mock_npc_service action=weapon-categories opcode=e1000001 value=1 role=10036 job=3 level=34 result=0 options=3 money=51507 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=161 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-category opcode=e8000008 value=8 role=10036 job=3 level=34 result=0 options=6 money=51507 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=338 inventory_sync=not-applicable evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[info][network] mock_npc_service action=shop-buy opcode=e90003e9 value=1001 role=10036 job=3 level=34 result=1 options=6 money=51439 skill_eligible=0 skill_learned=0 skill_level_locked=0 next_skill=0 next_level=0 next_price=0 objects=1 resp=328 inventory_sync=deferred-native-backpack-query evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_moveinfo_source pos=(170,247) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][network] mock_moveinfo_source pos=(170,279) reason=moveinfo-upload-timeline scene=c04临安府_07.sce
+[info][mock-service] scene_npc_reseed_arm client=cf8d2c83 scene=c04临安府_07.sce trigger=shop-open source=scene-interaction-followup delivery=next-scene-followup
+[info][network] mock_shop_scene_interaction_combo page5=0 page6=0 secret_total=8 secret_rows=8 secret_iteminfo_len=387 secret_ids=800,801,806,807,808,813,814,815 weapon_total=80 weapon_rows=10 weapon_iteminfo_len=1013 weapon_ids=10001,10002,10003,10004,10005,10006,10007,10008 actorOther=1 fb11=0 fb4=0 books=0 grid_reseed=1
+[info][network] mock_shop_open14 actorId=10036 role=10036 wcoin=47614 pages=inline actor_state=last page5=0 page6=0 secret_total=8 secret_rows=8 secret_iteminfo_len=387 weapon_total=80 weapon_rows=10 weapon_iteminfo_len=1013 actorinfo_len=240 grid_reseed=1 secret_ids=800,801,806,807,808,813,814,815 weapon_ids=10001,10002,10003,10004,10005,10006,10007,10008
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_team_member_row observer=cf8d2c83 member=cf8d2c83/10036 wire=10036 sex_group=1 job_index=2 online=1 hp=615/615 mp=890/925 wire_order=hp-mp-hpmax-mpmax
+[info][network] mock_team_solo_groupinfo observer=cf8d2c83 role=10036 groupinfo_len=48 lifecycle=login-self-roster
+[info][network] mock_backpack_grid role=10036 kind=30 subtype=21 gridnum=28 stored_rows=79 iteminfo_len=756
+[info][network] mock_backpack_reservoir_seed role=10036 rows=3 info_len=33 response=7/11 evidence=JianghuOL.CBE:0x1033544
+[info][network] mock_equipment_login role=10036 rows=0 iteminfo_len=3 response=7/7-type2 evidence=mmGame:0x0D04+JianghuOL:0x01032B8A
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_scene_npc_catalog scene=c04临安府_07.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=204 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_07.sce npcNum=3 npcInfoLen=204
+[info][mock-service] task_prompt_refresh_arm client=cf8d2c83 scene=c04临安府_07.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=shop-return-scene-followup-reseed scene=c04临安府_07.sce source=27/11-catalog npcnum=3 npcinfo_len=204 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][mock-service] scene_npc_lifecycle_seed client=cf8d2c83 scene=c04临安府_07.sce phase=shop-return-scene-followup-reseed npcnum=3 objects=1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998
+[info][network] mock_task_list role=10036 tasknum=1 persisted_active=1 taskinfo_len=83 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10036 scene=c04临安府_07.sce tasknum=0 taskinfo_len=0 persisted=2 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] shop_scene_return_complete client=cf8d2c83 scene=c04临安府_07.sce source=scene-task-subset-followup completion=30/2-posinfo-reenter
+[info][network] mock_shop_return_task_subset_complete scene=c04临安府_07.sce objects=7 resp=571 completion=30/2-posinfo-reenter evidence=JianghuOL.CBE:0x01039770+0x0103993C
+[info][network] mock_scene_npc_catalog scene=c04临安府_07.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=204 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_07.sce npcNum=3 npcInfoLen=204
+[info][mock-service] task_prompt_refresh_arm client=cf8d2c83 scene=c04临安府_07.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=startup-scene-sync-poll scene=c04临安府_07.sce source=27/11-catalog npcnum=3 npcinfo_len=204 once=1 evidence=JianghuOL.CBE:0x01037998
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[debug][mock-service] moveinfo_clear client=cf8d2c83 reason=scene-pending
+[debug][mock-service] movement_rate_reset client=cf8d2c83 reason=scene-pending
+[info][mock-service] scene_pending client=cf8d2c83 account=21642502 scene=c04临安府_07.sce pos=(219,57) reason=scene-target-remember
+[info][network] mock_scene_target_remember serial=2 scene=c04临安府_07.sce pos=(219,57) exit=0
+[info][network] mock_scene_npc_catalog scene=c04临安府_07.sce source=service-dynamic delivery=initial actors=3 selected=3 rows=3 dynamic=3 truncated=0 npcinfo_len=204 resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48
+[info][network] vm_net_mock_append_fb_target_scene_npcs11_object: scene=c04临安府_07.sce npcNum=3 npcInfoLen=204
+[info][mock-service] task_prompt_refresh_arm client=cf8d2c83 scene=c04临安府_07.sce evidence=JianghuOL.CBE:0x01037998->0x01017C6C
+[info][network] mock_scene_npc_seed phase=post-enter-completion scene=c04临安府_07.sce source=27/11-catalog npcnum=3 npcinfo_len=204 once=1 evidence=JianghuOL.CBE:0x01037998
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[debug][mock-service] movement_rate_reset client=cf8d2c83 reason=scene-ready
+[info][mock-service] scene_ready client=cf8d2c83 account=21642502 scene=c04临安府_07.sce pos=(219,57) reason=scene-target-complete
+[info][network] mock_scene_change_post_enter_followup scene=c04临安府_07.sce pos=(219,57) objects=5 resp=424
+[info][network] mock_task_list role=10036 tasknum=1 persisted_active=1 taskinfo_len=83 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[info][network] mock_task_candidates role=10036 scene=c04临安府_07.sce tasknum=0 taskinfo_len=0 persisted=2 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][mock-service] task_prompt_refresh_deliver client=cf8d2c83 scene=c04临安府_07.sce objects=2 evidence=JianghuOL.CBE:0x0104726C(cases1,14)->0x01017C6C
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[info][network] mock_training_book_list role=10036 books=1 bytes=15 source=7/42 evidence=JianghuOL.CBE:0x0100FD30,mmGame:0x00003AA8
+[error][network] mock_ranking_page_query_failed type=0 page=0 role=10036 error=no MySQL error detail
+[debug][mock-service] task_state_request_snapshot role=10036 rows=2 ok=1
+[info][network] mock_task_list role=10036 tasknum=1 persisted_active=1 taskinfo_len=83 source=task.dsh+xse evidence=JianghuOL.CBE:0x0104726C(case1)+0x01046D24
+[debug][mock-service] scene_npc_request_snapshot scene=c04临安府_07.sce selected=3 total=3 dynamic=3
+[info][network] mock_task_candidates role=10036 scene=c04临安府_07.sce tasknum=0 taskinfo_len=0 persisted=2 npc_rows=3 npc_total=3 source=task.dsh+xse evidence=JianghuOL.CBE:0x01046E00+0x01017C6C(prompt2)
+[info][network] mock_scene_resource_followup_repeat_ack scene=c04临安府_07.sce objects=5 resp=267 age=8 recent=1 shop_return=0 completion=none

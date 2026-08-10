@@ -70,10 +70,10 @@ state is force-written.
 
 ## Regression
 
-`tmp/npc-purchase-equipment-swap-regression.php` creates an isolated role with
-`1001` equipped and backpack row `7001=1002`, sends the client-shaped
-`1/7/9 {body=1,bag=7001}` request through a real mock-service TCP connection,
-and verifies both `1/7/9 {result=1}` and MySQL state:
+`scripts/run-npc-purchase-equipment-swap-automation.ps1` creates an isolated
+role with `1001` equipped and backpack row `7001=1002`, sends the
+client-shaped `1/7/9 {body=1,bag=7001}` request through a real mock-service
+TCP connection, and verifies both `1/7/9 {result=1}` and MySQL state:
 
 ```text
 equipment slot 0 = 1002

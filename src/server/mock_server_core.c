@@ -4445,7 +4445,10 @@ enum
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
     VM_NET_MOCK_ROLE_LEVEL_CAP = 70,
     VM_NET_MOCK_EQUIP_SLOT_COUNT = 8,
-    VM_NET_MOCK_BATTLE_DROP_RESULT_MAX = 8,
+    /* 1/7/7 type=1 starts with a u8 row count. Match the configurable
+     * monster-drop catalog instead of retaining its former eight-row UI
+     * limit, while remaining comfortably inside one WT response object. */
+    VM_NET_MOCK_BATTLE_DROP_RESULT_MAX = 64,
     /* 6/4 awardinfo carries a u8 row count.  Keep task rewards below the
      * battle-row ceiling so the server, admin and client-safe wire builder
      * share one bounded multi-item contract. */
