@@ -3651,6 +3651,21 @@ static bool vm_net_mock_put_object_string(u8 *out, u32 outCap, u32 *pos, const c
     return vm_net_mock_put_object_blob(out, outCap, pos, name, (const u8 *)value, (u16)strlen(value));
 }
 
+/* Most WT text fields are length-delimited and must not include a trailing
+ * byte.  A few legacy handlers instead pass GetString() straight to libc-like
+ * `%s` formatting.  Those fields must retain the protocol's blob wrapper but
+ * include a terminal NUL in its inner payload. */
+static bool vm_net_mock_put_object_cstring(u8 *out, u32 outCap, u32 *pos,
+                                           const char *name, const char *value)
+{
+    size_t valueLen = value ? strlen(value) : 0;
+    if (valueLen >= 0xffff)
+        return false;
+    return vm_net_mock_put_object_blob(out, outCap, pos, name,
+                                       (const u8 *)(value ? value : ""),
+                                       (u16)(valueLen + 1));
+}
+
 static bool vm_net_mock_begin_wt_object(u8 *out, u32 outCap, u32 *pos, u8 major, u8 kind, u8 subtype, u32 *objectStart)
 {
     if (*pos + 6 > outCap)
