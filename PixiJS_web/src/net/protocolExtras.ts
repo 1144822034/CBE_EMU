@@ -2524,6 +2524,9 @@ export function hangupActiveFromChatLine(text: string): boolean | null {
   if (text.includes("已停止挂机")) return false;
   if (text.includes("不能挂机")) return false;
   if (text.includes("挂机失败")) return false;
+  // Stop-after keeps server auto for this fight; hangupActive stays true.
+  // Callers still clear hangupDesired so keepalive will not re-arm.
+  if (text.includes("下一场完成后挂机停止")) return null;
   if (text.includes("已开始挂机")) return true;
   return null;
 }

@@ -1,4 +1,5 @@
 import { Container, Graphics } from "pixi.js";
+import { preferSystemFont } from "../resources/systemFont";
 import { BitmapLabel } from "./BitmapLabel";
 
 /** Palette sampled from live CBE screenshots (PixiJS_web/reference-shots/*-game.png). */
@@ -160,9 +161,9 @@ export function drawLocBanner(
     .lineTo(LCD_WIDTH, y)
     .stroke({ width: 1, color: CBE.borderDim });
 
-  // Map title: font_gb.uc3 hard pixels (CBE LCD).
+  // Map title — follows global TTF (or ?uc3=1 bitmap).
   const t = new BitmapLabel();
-  t.show(text, CBE.ink, { uc3: true, outline: false, smooth: false });
+  t.show(text, CBE.ink, { outline: false, smooth: false });
   t.anchor.set(0.5, 0.5);
   t.position.set(Math.round(LCD_WIDTH / 2), Math.round(y + h / 2));
   labelHost.addChild(t);
@@ -170,9 +171,9 @@ export function drawLocBanner(
 }
 
 /**
- * Create UI text. Default = font_gb.uc3 hard pointillism (mobile-sharp on
- * pixelated canvas). HTML softkeys stay DOM; Pixi has no separate mobile font.
- * `size` applies only when `{ uc3: false }` (system font).
+ * Create UI text. Default = YaHei Consolas Hybrid TTF (crisp bake).
+ * Opt into UC3 pointillism with `?uc3=1` or explicit `{ uc3: true }` in that mode.
+ * `size` is the system-font px size.
  */
 export function makePixelText(
   text: string,
@@ -194,7 +195,7 @@ export function makePixelText(
     outline: opts?.outline === true,
     outlineColor: opts?.stroke,
     outlineThin: opts?.strokeWidth != null ? opts.strokeWidth <= 1 : undefined,
-    uc3: opts?.uc3 !== false,
+    uc3: preferSystemFont() ? false : opts?.uc3 !== false,
     smooth: opts?.smooth === true,
     crisp: opts?.crisp !== false,
   });

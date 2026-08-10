@@ -5,6 +5,8 @@ dist/
 .vite/
 public/JHOnlineData/
 public/font_gb.uc3
+public/gb16.uc2.uc3
+public/YaHeiConsolasHybrid.ttf
 public/client_code_version.txt
 android/app/build/
 android/.gradle/

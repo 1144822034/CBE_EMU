@@ -262,6 +262,13 @@ import {
   type GameTransport,
 } from "../net/Transport";
 import {
+  clearHangupResumeStorage,
+  readHangupResume,
+  setHangupNativeKeepAlive,
+  writeHangupResume,
+  type HangupResumeSnapshot,
+} from "../net/hangupResume";
+import {
   resolveLearnedSkills,
   type BattleSkillRow,
 } from "../resources/skill";
@@ -366,6 +373,8 @@ export type SessionCallbacks = {
   onChat?: (lines: { type: number; text: string }[]) => void;
   /** Same-account login takeover — return to title. */
   onAccountKicked?: (reason: string) => void;
+  /** Hangup soft/hard resume status tip for UI. */
+  onHangupResumeStatus?: (message: string) => void;
   /** Item use / chest open success or failure (also pushed as chat). */
   onItemUseFeedback?: (fb: ItemUseFeedback) => void;
   onBag?: (items: BagItem[]) => void;
@@ -428,6 +437,11 @@ export class GameSession {
   hangupSkillOperate = 0;
   /** True after 2/10 hangup request until leave/stop. Drives server encounters. */
   hangupActive = false;
+  /**
+   * Player intent to keep hangup running across disconnect/relogin.
+   * Distinct from hangupActive (server chat authority).
+   */
+  hangupDesired = false;
   /**
    * In-battle [自动] switch (client-side 4/11). No auto-encounter — only
    * auto-operates after the player is already in battle.
@@ -532,8 +546,24 @@ export class GameSession {
     done: boolean;
   } | null = null;
   private titleKeepaliveTimer: number | null = null;
+  private hangupRearmInFlight = false;
+  private lastHangupRearmAt = 0;
+  private hardResumeInFlight = false;
+  private lastHardResumeAt = 0;
+  private pollFailStreak = 0;
 
-  constructor(private readonly cb: SessionCallbacks) {}
+  constructor(private readonly cb: SessionCallbacks) {
+    const snap = readHangupResume();
+    if (snap) {
+      this.hangupDesired = true;
+      this.hangupSkillOperate = snap.operate | 0;
+      this.accountUser = snap.user;
+      this.accountPass = snap.password;
+      this.selectedServerId = snap.serverId || 1;
+      this.selectedRoleId = snap.roleId >>> 0;
+      void setHangupNativeKeepAlive(true);
+    }
+  }
 
   setCredentials(user: string, password: string): void {
     this.accountUser = user;
@@ -577,6 +607,7 @@ export class GameSession {
    * Account credentials are kept only so the login form can resubmit.
    */
   logout(): void {
+    this.clearHangupDesired();
     this.resetLocalSession(true);
     this.setPhase("idle", "logged-out");
   }
@@ -646,7 +677,9 @@ export class GameSession {
     this.hangupActive = false;
     this.autoBattleActive = false;
     this.lastBattleOperate = null;
-    this.hangupSkillOperate = 0;
+    // Keep configured hangup skill across role-bound wipes when resume intent
+    // is armed (hard reconnect / selectRole before re-arm).
+    if (!this.hangupDesired) this.hangupSkillOperate = 0;
     this.hasServerPos = false;
     this.x = 0;
     this.y = 0;
@@ -700,6 +733,8 @@ export class GameSession {
 
   /** Account takeover: stop live session and notify UI. */
   private forceAccountKick(reason: string): void {
+    // Other-client login — do not fight them with auto re-login.
+    this.clearHangupDesired();
     this.stopPoll();
     this.stopTitleKeepalive();
     this.transport?.close();
@@ -1582,8 +1617,162 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
+  /** Persist / clear hangup intent (player wants AFK hangup across disconnect). */
+  clearHangupDesired(): void {
+    this.hangupDesired = false;
+    clearHangupResumeStorage();
+    void setHangupNativeKeepAlive(false);
+  }
+
+  markHangupDesired(): void {
+    this.hangupDesired = true;
+    this.persistHangupResume();
+    void setHangupNativeKeepAlive(true);
+  }
+
+  private persistHangupResume(): void {
+    if (!this.hangupDesired) return;
+    const user = (this.accountUser || "").trim();
+    const roleId = this.selectedRoleId >>> 0;
+    if (!user || !roleId) return;
+    const snap: HangupResumeSnapshot = {
+      desired: true,
+      user,
+      password: this.accountPass || "",
+      serverId: this.selectedServerId || 1,
+      roleId,
+      operate: this.hangupSkillOperate | 0,
+      savedAt: Date.now(),
+    };
+    writeHangupResume(snap);
+  }
+
+  hasHangupResumePending(): boolean {
+    return this.hangupDesired || !!readHangupResume();
+  }
+
+  /** Apply server hangup chat lines to local flags / intent. */
+  private applyHangupChatFlag(text: string): void {
+    // Player already asked to stop; never let stop-after / reject re-arm intent.
+    if (text.includes("下一场完成后挂机停止")) {
+      this.clearHangupDesired();
+      return;
+    }
+    const flag = hangupActiveFromChatLine(text);
+    if (flag == null) return;
+    this.hangupActive = flag;
+    if (text.includes("不能挂机") || text.includes("挂机失败")) {
+      this.clearHangupDesired();
+      return;
+    }
+    if (flag) {
+      this.markHangupDesired();
+    }
+    // 「已停止挂机」only clears hangupActive; hangupDesired stays unless the
+    // player already called clearHangupDesired (stop tap) or logout.
+  }
+
+  /**
+   * Soft re-arm: send 2/10 again when intent is on but server hangup dropped
+   * (WS flash / presence timeout). Cooldown + in-flight guard.
+   */
+  async tryRearmHangup(reason: string): Promise<void> {
+    if (!this.hangupDesired || this.hangupActive || this.inBattle) return;
+    if (!this.transport || !this.selectedRoleId) return;
+    if (this.hangupRearmInFlight || this.hardResumeInFlight) return;
+    if (!this.scene && !this.loadedScene) return;
+    const now = Date.now();
+    if (now - this.lastHangupRearmAt < 5000) return;
+    this.hangupRearmInFlight = true;
+    this.lastHangupRearmAt = now;
+    try {
+      this.cb.onHangupResumeStatus?.("连接恢复，正在恢复挂机…");
+      console.info("[session] hangup rearm", reason);
+      await this.startHangup();
+    } catch (e) {
+      console.warn("[session] hangup rearm failed", reason, e);
+    } finally {
+      this.hangupRearmInFlight = false;
+    }
+  }
+
+  /**
+   * Hard resume: full login → select server → select role → startHangup.
+   * Only when hangupDesired / stored snapshot is present.
+   */
+  async resumeFromHangupStorage(): Promise<boolean> {
+    const snap = readHangupResume();
+    if (!snap?.desired) return false;
+    if (this.hardResumeInFlight || this.roleSelectInFlight) return false;
+    const now = Date.now();
+    if (now - this.lastHardResumeAt < 30000) return false;
+    this.hardResumeInFlight = true;
+    this.lastHardResumeAt = now;
+    this.hangupDesired = true;
+    this.hangupSkillOperate = snap.operate | 0;
+    this.setCredentials(snap.user, snap.password);
+    this.selectedServerId = snap.serverId || 1;
+    try {
+      this.cb.onHangupResumeStatus?.("连接恢复，正在恢复挂机…");
+      await this.start({ user: snap.user, password: snap.password });
+      const sid =
+        this.servers.find((s) => s.serverId === (snap.serverId || 0))?.serverId ??
+        this.servers[0]?.serverId;
+      if (sid == null) throw new Error("无可用服务器");
+      this.selectedServerId = sid;
+      await this.confirmServer(sid);
+      const roleId = snap.roleId >>> 0;
+      if (!this.roles.some((r) => r.roleId === roleId)) {
+        throw new Error("恢复挂机失败：角色不存在");
+      }
+      this.hangupSkillOperate = snap.operate | 0;
+      this.hangupDesired = true;
+      await this.selectRole(roleId);
+      this.persistHangupResume();
+      await this.tryRearmHangup("hard-resume");
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("[session] hangup hard resume", msg);
+      this.cb.onHangupResumeStatus?.(msg);
+      return false;
+    } finally {
+      this.hardResumeInFlight = false;
+    }
+  }
+
+  /**
+   * Player-requested hangup stop (HUD / battle 关闭).
+   * Always clears resume intent first so keepalive cannot re-arm after stop.
+   * When already in battle (or hangupActive), still send 2/10 even if local
+   * hangupActive desynced — startHangup would otherwise take the START branch
+   * and markHangupDesired again.
+   */
+  async stopHangup(): Promise<void> {
+    this.clearHangupDesired();
+    if (!this.transport) return;
+    // Map-side cancel of pending resume only — 2/10 here would START hangup.
+    if (!this.hangupActive && !this.inBattle) {
+      this.setPhase("hangup", "stop intent cleared");
+      return;
+    }
+    this.setPhase("hangup", "2/10 stop");
+    const bodies = await this.transport.exchange(
+      0,
+      buildHangupStartRequest({
+        operate: this.hangupSkillOperate | 0,
+      }),
+    );
+    this.handleBodies(bodies);
+  }
+
   async startHangup(): Promise<void> {
     if (!this.transport) return;
+    if (this.hangupActive) {
+      await this.stopHangup();
+      return;
+    }
+    this.markHangupDesired();
     // Optimistic arm for same-packet battle start; cleared on 「已停止挂机」.
     this.hangupActive = true;
     this.setPhase("hangup", "2/10 Type=2");
@@ -1642,6 +1831,7 @@ export class GameSession {
       }),
     );
     this.handleBodies(bodies);
+    if (this.hangupDesired) this.persistHangupResume();
   }
 
   async openDesignations(): Promise<DesignationPage | null> {
@@ -3601,25 +3791,67 @@ export class GameSession {
 
   /** After screen-off / app resume: re-open gateway if OEM killed the WS. */
   async wakeFromBackground(): Promise<void> {
-    if (!(this.transport instanceof LiveTransport)) return;
+    if (this.hardResumeInFlight) return;
     try {
-      await this.transport.ensureConnected();
-      await this.transport.ping();
+      if (this.transport instanceof LiveTransport) {
+        await this.transport.ensureConnected();
+        await this.transport.ping();
+        await this.tryRearmHangup("wake");
+        return;
+      }
+      // Transport gone while hangup intent armed — hard resume.
+      if (this.hangupDesired || readHangupResume()) {
+        await this.resumeFromHangupStorage();
+      }
     } catch (e) {
       console.warn("[session] wake reconnect", e);
+      if (this.hangupDesired || readHangupResume()) {
+        void this.resumeFromHangupStorage();
+      }
     }
   }
 
   private async pollOnce(): Promise<void> {
-    if (!this.transport) return;
+    if (!this.transport) {
+      if (this.hangupDesired && !this.hardResumeInFlight) {
+        void this.resumeFromHangupStorage();
+      }
+      return;
+    }
+    const runPoll = () =>
+      this.transport!.exchange(CBMS_FLAG_SCENE_POLL, new Uint8Array(0));
     try {
-      const bodies = await this.transport.exchange(CBMS_FLAG_SCENE_POLL, new Uint8Array(0));
+      const bodies = await runPoll();
       this.handleBodies(bodies);
+      const recovered = this.pollFailStreak > 0;
+      this.pollFailStreak = 0;
       if (!this.inBattle) {
         this.setPhase("inworld", `heartbeat ok · ${this.transport.mode}`);
       }
+      // Only re-arm after a transport recovery — not on every healthy poll
+      // (death/stop chat must not immediately start another fight).
+      if (recovered) void this.tryRearmHangup("poll-recovered");
     } catch (e) {
+      this.pollFailStreak++;
+      if (this.hangupDesired) {
+        try {
+          await this.ensureLiveSocket();
+          const bodies = await runPoll();
+          this.handleBodies(bodies);
+          this.pollFailStreak = 0;
+          if (!this.inBattle) {
+            this.setPhase("inworld", `heartbeat ok · ${this.transport!.mode}`);
+          }
+          void this.tryRearmHangup("poll-retry");
+          return;
+        } catch {
+          /* fall through */
+        }
+      }
       this.setPhase("poll-error", e instanceof Error ? e.message : String(e));
+      if (this.hangupDesired && this.pollFailStreak >= 3) {
+        void this.resumeFromHangupStorage();
+      }
     }
   }
 
@@ -4112,11 +4344,11 @@ export class GameSession {
 
       const chats = parseChatNotices(packet);
       if (chats.length) {
-        this.cb.onChat?.(chats.map((c) => ({ type: c.type, text: c.text })));
+        // Apply hangup flags before UI so onChat sees the updated hangupActive.
         for (const c of chats) {
-          const flag = hangupActiveFromChatLine(c.text);
-          if (flag != null) this.hangupActive = flag;
+          this.applyHangupChatFlag(c.text);
         }
+        this.cb.onChat?.(chats.map((c) => ({ type: c.type, text: c.text })));
         if (chats.some((c) => isAccountKickChatLine(c.text))) {
           this.forceAccountKick("账号已在其他地方登录，你被强制下线");
           return;
@@ -4209,8 +4441,7 @@ export class GameSession {
 
       const hang = parseHangupNotice(packet);
       if (hang) {
-        const flag = hangupActiveFromChatLine(hang);
-        if (flag != null) this.hangupActive = flag;
+        this.applyHangupChatFlag(hang);
         this.cb.onHangup?.(hang);
       }
 

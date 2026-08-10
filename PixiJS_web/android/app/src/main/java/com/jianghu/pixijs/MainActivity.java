@@ -28,6 +28,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(PayLauncherPlugin.class);
+        registerPlugin(HangupKeepAlivePlugin.class);
         super.onCreate(savedInstanceState);
         acquireCpuWakeLock();
         // Defer settings intent: some Android 8 OEMs crash if started during onCreate.

@@ -1,5 +1,10 @@
 import { actorResourceForJobSex, uiActorResourceForJobSex } from "./resources/actor";
 import { loadUc3Font } from "./resources/uc3Font";
+import {
+  loadSystemFont,
+  setPreferSystemFont,
+  uc3FontRequested,
+} from "./resources/systemFont";
 import { Application, Graphics } from "pixi.js";
 import { loadSceneIndex, loadSceneMap } from "./resources/loader";
 import {
@@ -236,10 +241,22 @@ async function main(): Promise<void> {
     new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),
   );
 
-  try {
-    await loadUc3Font();
-  } catch (e) {
-    console.warn("[boot] uc3 font", e);
+  // Default: YaHei Consolas Hybrid. Opt back to UC3 with ?uc3=1.
+  if (uc3FontRequested()) {
+    setPreferSystemFont(false);
+    try {
+      await loadUc3Font();
+    } catch (e) {
+      console.warn("[boot] uc3 font", e);
+    }
+  } else {
+    setPreferSystemFont(true);
+    try {
+      const ok = await loadSystemFont();
+      if (!ok) console.warn("[boot] sysfont missing; falling back to OS stack");
+    } catch (e) {
+      console.warn("[boot] sysfont", e);
+    }
   }
 
   // server_monsters overrides via gateway → admin; builtin fallback on failure.
@@ -1538,6 +1555,12 @@ async function main(): Promise<void> {
       setChromeStatus(reason, true);
       showPhase("splash");
     },
+    onHangupResumeStatus: (message) => {
+      if (!message) return;
+      hud.pushChat(`[挂]${message}`);
+      showGameTip(message);
+      setChromeStatus(message);
+    },
     onItemUseFeedback: (fb) => {
       showGameTip(fb.message);
     },
@@ -2813,6 +2836,7 @@ async function main(): Promise<void> {
     if (action === 260) {
       dialog.hide();
       session.hangupSkillOperate = value | 0;
+      if (session.hangupDesired) session.markHangupDesired();
       // Keep in-battle [自动] in sync with the configured hangup skill.
       session.lastBattleOperate = value | 0;
       const tip =
@@ -3020,10 +3044,10 @@ dialog.hide();
       );
     }
   };
-  /** Same 2/10 Type=2 as HUD 挂机 — mid-fight stop-after / 已停止挂机. */
+  /** Dedicated stopHangup — always clears hangupDesired (keepalive must not re-arm). */
   battle.onHangupCancel = () => {
     hud.pushChat("[挂] 请求停止挂机…");
-    void session.startHangup();
+    void session.stopHangup();
   };
   battle.onVitalsChanged = () => {
     const vitals = battle.allyVitals();
@@ -3044,10 +3068,10 @@ dialog.hide();
   hud.onMenu = () => showPhase("menu");
   hud.onHome = () => cycleMapUi();
   hud.onHangup = () => {
-    // Already hanging: second tap = stop-after / 已停止挂机 (same 2/10).
-    if (session.hangupActive) {
+    // Active hangup, or armed resume intent: always stop / cancel re-arm.
+    if (session.hangupActive || session.hangupDesired) {
       hud.pushChat("[挂] 请求停止挂机…");
-      void session.startHangup();
+      void session.stopHangup();
       return;
     }
     // Idle: pick skill first, then startHangup on confirm (action 260).
@@ -3675,6 +3699,21 @@ dialog.hide();
   window.addEventListener("focus", () => {
     void session.wakeFromBackground();
   });
+
+  // Cold start after process kill: silent re-login + re-arm hangup.
+  if (session.hasHangupResumePending()) {
+    title.setStatus("连接恢复，正在恢复挂机…");
+    setChromeStatus("连接恢复，正在恢复挂机…");
+    void session.resumeFromHangupStorage().then((ok) => {
+      if (ok) {
+        showPhase("world");
+        setChromeStatus("挂机已恢复");
+      } else {
+        showPhase("splash");
+        title.setStatus("挂机恢复失败，请重新登录");
+      }
+    });
+  }
 
   app.ticker.add(() => {
     if (phase === "battle") battle.tick(app.ticker.deltaMS);

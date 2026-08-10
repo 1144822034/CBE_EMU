@@ -341,8 +341,8 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Banner 关闭 while hangup — same 2/10 Type=2 as HUD 挂机 (stop-after /
-   * 已停止挂机). Does not locally clear hangupActive; server chat is authority.
+   * Banner 关闭 while hangup — session.stopHangup (clear intent + 2/10).
+   * Does not locally clear hangupActive; server chat is authority.
    */
   closeHangup(): void {
     if (!this.hangupActive) return;

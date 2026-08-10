@@ -4,15 +4,21 @@ import {
   renderUc3ToRgba,
   UC3_FONT_URL,
 } from "../resources/uc3Font";
+import {
+  preferSystemFont,
+  SYSTEM_FONT_FALLBACK,
+  uiFontFamily,
+} from "../resources/systemFont";
 import { rgbaToTexture } from "../render/rgbaTexture";
 
 /**
- * Fallback system stack when `{ uc3: false }` (nameplate experiments only).
- * LCD UI defaults to `font_gb.uc3` — Pixi has no special “mobile font”;
- * HTML softkeys stay DOM-sharp outside the pixelated canvas.
+ * OS fallback stack when the TTF is not yet loaded.
+ * Live face comes from {@link uiFontFamily} (YaHei Consolas Hybrid).
  */
-export const UI_FONT_FAMILY =
-  'SimSun, "Songti SC", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+export const UI_FONT_FAMILY = SYSTEM_FONT_FALLBACK;
+
+/** Live CSS stack (custom TTF first when loaded). */
+export { uiFontFamily };
 
 /** System-font size when `uc3: false`. UC3 source glyphs are 16×16. */
 export const UI_FONT_SIZE = 12;
@@ -160,7 +166,7 @@ function bakeCrispSystem(
   const outlineStep = ss;
 
   const measure = document.createElement("canvas").getContext("2d")!;
-  measure.font = `400 ${fs}px ${UI_FONT_FAMILY}`;
+  measure.font = `400 ${fs}px ${uiFontFamily()}`;
   measure.textBaseline = "alphabetic";
 
   let textW = 1;
@@ -183,7 +189,7 @@ function bakeCrispSystem(
   canvas.width = Math.max(1, w);
   canvas.height = Math.max(1, h);
   const ctx = canvas.getContext("2d")!;
-  ctx.font = `400 ${fs}px ${UI_FONT_FAMILY}`;
+  ctx.font = `400 ${fs}px ${uiFontFamily()}`;
   ctx.textBaseline = "alphabetic";
   ctx.imageSmoothingEnabled = false;
 
@@ -232,8 +238,8 @@ export class BitmapLabel extends Container {
   /** undefined = wrap when maxWidth set; false = single line. */
   private _wordWrap: boolean | undefined;
   private _fontSize = UI_FONT_SIZE;
-  /** Default: CBE font_gb.uc3 hard pixels (readable on mobile LCD upscale). */
-  private _uc3 = true;
+  /** Default system TTF; `?uc3=1` opts into bitmap glyphs. */
+  private _uc3 = !preferSystemFont();
   /** Hard-edge bake when uc3:false. */
   private _crisp = true;
   private _bakeSs = 1;
@@ -297,9 +303,12 @@ export class BitmapLabel extends Container {
       if (opts.maxWidth != null) this._maxWidth = opts.maxWidth;
       if (opts.wordWrap != null) this._wordWrap = opts.wordWrap;
       if (opts.fontSize != null) this._fontSize = opts.fontSize;
-      if (opts.uc3 != null) this._uc3 = opts.uc3;
       if (opts.crisp != null) this._crisp = opts.crisp;
     }
+    // Global TTF wins; only `?uc3=1` (preferSystemFont=false) honors uc3 opts.
+    if (preferSystemFont()) this._uc3 = false;
+    else if (opts?.uc3 != null) this._uc3 = opts.uc3;
+    else this._uc3 = true;
     await this.rerender();
   }
 
@@ -398,7 +407,7 @@ export class BitmapLabel extends Container {
     const wrap =
       this._wordWrap ?? (this._maxWidth != null && this._maxWidth > 0);
     const style: Record<string, unknown> = {
-      fontFamily: UI_FONT_FAMILY,
+      fontFamily: uiFontFamily(),
       fontSize: this._fontSize,
       fill: this._color,
       align: "left" as const,

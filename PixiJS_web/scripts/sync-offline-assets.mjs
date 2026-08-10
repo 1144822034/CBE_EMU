@@ -116,6 +116,18 @@ if (fontGbSrc) {
   console.warn("[sync-offline-assets] font_gb.uc3 not found (optional fallback)");
 }
 
+const yaheiSrc = path.join(repoRoot, "web", "fs", "YaHei Consolas Hybrid.ttf");
+const yaheiDest = path.join(publicDir, "YaHeiConsolasHybrid.ttf");
+if (fs.existsSync(yaheiSrc)) {
+  fs.copyFileSync(yaheiSrc, yaheiDest);
+  console.log(`[sync-offline-assets] YaHeiConsolasHybrid.ttf ← ${yaheiSrc}`);
+} else {
+  console.error(
+    "[sync-offline-assets] missing YaHei Consolas Hybrid.ttf (required UI font)",
+  );
+  process.exit(1);
+}
+
 const verSrc = resolveClientCodeVersion();
 const verDest = path.join(publicDir, "client_code_version.txt");
 let verNum = 0;
