@@ -7679,7 +7679,7 @@ static bool vm_net_mock_scene_hangup_live_auto_battle(
 
 static u32 vm_net_mock_build_challenge_interaction_response_ex(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap,
-    bool forceNonSceneStart)
+    bool forceNonSceneStart, bool forceSceneMonsterStart)
 {
     u32 pos = 5;
     u32 objectStart = 0;
@@ -7718,8 +7718,9 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     bool playerOnRight = vm_net_mock_battle_player_on_right();
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
-    bool useSceneMonsterStart = !forceNonSceneStart && playerOnRight &&
-                                vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_START", 1) != 0;
+    bool useSceneMonsterStart = forceSceneMonsterStart ||
+                                (!forceNonSceneStart && playerOnRight &&
+                                 vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_START", 1) != 0);
     u8 battleStartSubtype = useSceneMonsterStart ? 5 : 10;
     bool seedSceneMonsterMoveinfo = useSceneMonsterStart &&
                                     vm_net_mock_env_u8("CBE_BATTLE_SCENE_MONSTER_MOVEINFO", 1) != 0;
@@ -7736,7 +7737,8 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     u32 responseObjectCount = 1;
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
 
-    if (outCap < pos || !vm_net_mock_is_challenge_interaction_request(request, requestLen))
+    if (outCap < pos || (forceNonSceneStart && forceSceneMonsterStart) ||
+        !vm_net_mock_is_challenge_interaction_request(request, requestLen))
         return 0;
     vm_net_mock_role_default_vitals(role,
                                     &roleHpDefault,
@@ -7816,6 +7818,29 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     sceneMonsterPosX = posx;
     sceneMonsterPosY = posy;
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(id);
+    /* A genuine non-scene instance challenge has no client-owned scene row
+     * and stays on 4/10.  The action13 scene-monster path reaches this builder
+     * only after its client index was checked against the current SCE spawn;
+     * its synthetic request restores that exact spawn's x/y and forces 4/5.
+     * A generic collision already supplies the same live tuple directly. */
+    if (forceNonSceneStart)
+    {
+        printf("[info][network] mock_direct_challenge_start client=%08x scene=%s "
+               "enemy=%u action=retain-4/10 reason=isolated-instance-contract "
+               "evidence=mmBattle:0x67AC\n",
+               activeSession != NULL ? activeSession->clientId : 0,
+               activeSession != NULL ? activeSession->sceneVisibleScene : "-",
+               requestedEnemyId);
+    }
+    else
+    {
+        /* A collision supplies the live tuple itself.  The validated action13
+         * path reconstructs that same tuple; both remain authoritative because
+         * duplicate monster ids are legal. */
+        sceneMonsterIndex = index;
+        sceneMonsterPosX = posx;
+        sceneMonsterPosY = posy;
+    }
     /* A boss is one durable opponent.  Group play is encouraged by its
      * authoritative stats rather than by refusing an otherwise valid combat
      * request; never let the normal random encounter roll clone it. */

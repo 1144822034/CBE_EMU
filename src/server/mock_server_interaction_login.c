@@ -1,3 +1,64 @@
+static u32 vm_net_mock_build_direct_scene_challenge_unready_response(
+    u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos) ||
+        !vm_net_mock_append_info_banner_text11_object(
+            out, outCap, &pos,
+            "\xCC\xF4\xD5\xBD\xC4\xBF\xB1\xEA\xC9\xD0\xCE\xB4\xBC\xD3\xD4\xD8"
+            "\xA3\xAC\xC7\xEB\xD6\xD8\xD0\xC2\xBD\xF8\xC8\xEB\xB3\xA1\xBE\xB0"
+            "\xBA\xF3\xD6\xD8\xCA\xD4\xA1\xA3")) /* 挑战目标尚未加载，请重新进入场景后重试。 */
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    return pos;
+}
+
+/* SendNPCInteractReq(action13) has the matching node index but deliberately
+ * writes posx/posy as zero.  mmBattle subtype 5 needs the real SCE spawn x/y,
+ * so reconstruct the same 4/1 grammar only after the caller has verified the
+ * client index against that exact visible scene spawn. */
+static u32 vm_net_mock_build_direct_scene_challenge_battle_response(
+    const u8 *request, u32 requestLen, u32 enemyId, u32 sceneIndex,
+    u32 sceneX, u32 sceneY, u8 *out, u32 outCap)
+{
+    u8 synthetic[192];
+    u32 requestPos = 9;
+    u32 objectStart = 4;
+
+    if (request == NULL || requestLen == 0 || enemyId == 0 ||
+        sceneIndex == 0 || sceneIndex >= 25 || sceneX == 0 || sceneY == 0)
+    {
+        return 0;
+    }
+    memset(synthetic, 0, sizeof(synthetic));
+    synthetic[0] = 'W';
+    synthetic[1] = 'T';
+    synthetic[objectStart] = 1;
+    synthetic[objectStart + 1] = 4;
+    synthetic[objectStart + 2] = 1;
+    if (!vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "id", enemyId) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "index", sceneIndex) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posx", sceneX) ||
+        !vm_net_mock_put_object_u32(synthetic, sizeof(synthetic), &requestPos,
+                                    "posy", sceneY))
+    {
+        return 0;
+    }
+    synthetic[2] = (u8)(requestPos >> 8);
+    synthetic[3] = (u8)requestPos;
+    synthetic[objectStart + 3] = (u8)((requestPos - objectStart) >> 8);
+    synthetic[objectStart + 4] = (u8)(requestPos - objectStart);
+    return vm_net_mock_build_challenge_interaction_response_ex(
+        synthetic, requestPos, out, outCap, false, true);
+}
+
 static u32 vm_net_mock_build_challenge_interaction_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -12,20 +73,66 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                                          &requestedEnemyId))
     {
         u32 ageTicks = g_schedulerTick - session->instanceChallengeTick;
+        u32 requestedSceneIndex = 0;
+        u32 expectedSceneIndex = 0;
+        u32 expectedSceneX = 0;
+        u32 expectedSceneY = 0;
+        bool directSceneMonster =
+            session->instanceChallengeDirectSceneMonster;
         bool valid = ageTicks <= (60u * 1000u / VM_SCHED_FRAME_MS) &&
                      requestedEnemyId == session->instanceChallengeEnemyId &&
                      vm_net_mock_scene_name_is_safe(scene) &&
                      vm_net_mock_scene_names_equal_exact(
                          scene, session->instanceChallengeScene);
 
+        if (directSceneMonster)
+        {
+            bool requestCarriesSceneIndex =
+                vm_net_mock_get_object_u32_field(request, requestLen, "index",
+                                                 &requestedSceneIndex);
+
+            valid = valid && requestCarriesSceneIndex &&
+                    requestedSceneIndex != 0 &&
+                    vm_net_mock_select_sce_combat_spawn(
+                        scene, requestedEnemyId, &expectedSceneIndex,
+                        &expectedSceneX, &expectedSceneY) &&
+                    requestedSceneIndex == expectedSceneIndex;
+        }
+
         session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
         if (valid)
         {
-            u32 responseLen = vm_net_mock_build_challenge_interaction_response_ex(
-                request, requestLen, out, outCap, true);
-            printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) response=4/10 resp=%u evidence=JianghuOL.CBE:0x010492B0(case13)->0x01037ED4+mmBattle:0x67AC\n",
+            u32 responseLen = directSceneMonster
+                                  ? vm_net_mock_build_direct_scene_challenge_battle_response(
+                                        request, requestLen, requestedEnemyId,
+                                        expectedSceneIndex, expectedSceneX,
+                                        expectedSceneY, out, outCap)
+                                  : vm_net_mock_build_challenge_interaction_response_ex(
+                                        request, requestLen, out, outCap,
+                                        true, false);
+            printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) req_index=%u response=%s resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC/0x67AC\n",
                    session->clientId, session->instanceChallengeActorId,
-                   requestedEnemyId, ageTicks, scene, responseLen);
+                   requestedEnemyId, ageTicks, scene, requestedSceneIndex,
+                   directSceneMonster ? "2/2+4/5-scene" : "4/10-direct",
+                   responseLen);
+            session->instanceChallengeActorId = 0;
+            session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeX = 0;
+            session->instanceChallengeY = 0;
+            session->instanceChallengeTick = 0;
+            session->instanceChallengeScene[0] = 0;
+            return responseLen;
+        }
+        if (directSceneMonster)
+        {
+            u32 responseLen = vm_net_mock_build_direct_scene_challenge_unready_response(
+                out, outCap);
+            printf("[warn][network] mock_direct_scene_challenge_reject client=%08x actor=%u expected_enemy=%u requested_enemy=%u req_index=%u expected_index=%u age_ticks=%u scene=%s reason=live-node-unready response=2/10+25/11 resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC\n",
+                   session->clientId, session->instanceChallengeActorId,
+                   session->instanceChallengeEnemyId, requestedEnemyId,
+                   requestedSceneIndex, expectedSceneIndex, ageTicks,
+                   scene ? scene : "-", responseLen);
             session->instanceChallengeActorId = 0;
             session->instanceChallengeEnemyId = 0;
             session->instanceChallengeX = 0;
@@ -40,7 +147,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                scene ? scene : "-", session->instanceChallengeScene);
     }
     return vm_net_mock_build_challenge_interaction_response_ex(
-        request, requestLen, out, outCap, false);
+        request, requestLen, out, outCap, false, false);
 }
 
 static u32 vm_net_mock_build_special_scene_interaction_response(const u8 *request, u32 requestLen,

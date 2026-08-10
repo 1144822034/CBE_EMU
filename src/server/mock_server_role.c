@@ -2798,38 +2798,121 @@ static const vm_net_mock_monster_entry g_vm_net_mock_monster_entries[] = {
     {300, 55, VM_NET_MOCK_MONSTER_BOSS, 0, 0}
 };
 
+/* `automonster.dsh` supplies the historic balancing defaults, but it is not
+ * the complete identity source: named bosses can exist only as kind-3 combat
+ * nodes in a shipped SCE2 scene.  Keep those two concerns separate.  The
+ * scene parser extends this runtime catalog once, before any ID validation,
+ * persistence lookup or administrator listing is attempted. */
+/* The authoritative list consists of the shipped catalog plus SCE2 combat
+ * records.  Administrator-deployed scene combat spawns may introduce more
+ * distinct stable ids, so retain room for a full content pass rather than
+ * silently omitting the tail of the catalog. */
+enum { VM_NET_MOCK_MONSTER_CATALOG_MAX = 256 };
+static vm_net_mock_monster_entry
+    g_vm_net_mock_monster_catalog_entries[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+static u32 g_vm_net_mock_monster_catalog_count = 0;
+static bool g_vm_net_mock_monster_catalog_loaded = false;
+static bool g_vm_net_mock_monster_catalog_loading = false;
+
+static void vm_net_mock_monster_catalog_seed_base_entries(void)
+{
+    if (g_vm_net_mock_monster_catalog_count != 0)
+        return;
+    memcpy(g_vm_net_mock_monster_catalog_entries,
+           g_vm_net_mock_monster_entries,
+           sizeof(g_vm_net_mock_monster_entries));
+    g_vm_net_mock_monster_catalog_count =
+        (u32)(sizeof(g_vm_net_mock_monster_entries) /
+              sizeof(g_vm_net_mock_monster_entries[0]));
+}
+
+static int vm_net_mock_monster_catalog_index_loaded(u32 enemyId)
+{
+    for (u32 i = 0; i < g_vm_net_mock_monster_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_monster_catalog_entries[i].enemyId == enemyId)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* SCE2 records identify an actor, name and map but do not carry the original
+ * server's combat family/level table.  SCE-only actors are therefore seeded
+ * as editable boss candidates with a conservative level bucket; persisted
+ * administrator values become authoritative as soon as they are saved. */
+static int vm_net_mock_monster_catalog_add_scene_entry(u32 enemyId)
+{
+    vm_net_mock_monster_entry entry;
+    int existing = -1;
+
+    if (enemyId == 0 || enemyId > 0xffffu)
+        return -1;
+    existing = vm_net_mock_monster_catalog_index_loaded(enemyId);
+    if (existing >= 0)
+        return existing;
+    if (g_vm_net_mock_monster_catalog_count >=
+        VM_NET_MOCK_MONSTER_CATALOG_MAX)
+        return -1;
+
+    memset(&entry, 0, sizeof(entry));
+    entry.enemyId = (u16)enemyId;
+    entry.family = VM_NET_MOCK_MONSTER_BOSS;
+    if (enemyId >= 200)
+        entry.level = 45;
+    else if (enemyId >= 120)
+        entry.level = 50;
+    else if (enemyId >= 100)
+        entry.level = 30;
+    else if (enemyId >= 70)
+        entry.level = 20;
+    else if (enemyId >= 30)
+        entry.level = 10;
+    else
+        entry.level = 3;
+
+    g_vm_net_mock_monster_catalog_entries[
+        g_vm_net_mock_monster_catalog_count] = entry;
+    return (int)g_vm_net_mock_monster_catalog_count++;
+}
+
 static vm_net_mock_monster_override
-    g_vm_net_mock_monster_overrides[sizeof(g_vm_net_mock_monster_entries) /
-                                    sizeof(g_vm_net_mock_monster_entries[0])];
+    g_vm_net_mock_monster_overrides[VM_NET_MOCK_MONSTER_CATALOG_MAX];
 static bool g_vm_net_mock_monster_db_loaded = false;
 static bool g_vm_net_mock_monster_db_valid = false;
+
+/* A deployed scene-battle-monster release changes the authoritative SCE2
+ * source.  Invalidate only the derived identity index; persistent monster
+ * overrides remain valid because they are keyed by the stable monster id.
+ * The next normal lookup rebuilds the catalog from the real scene files. */
+static void vm_net_mock_monster_catalog_invalidate(void)
+{
+    if (g_vm_net_mock_monster_catalog_loading)
+        return;
+    g_vm_net_mock_monster_catalog_loaded = false;
+    g_vm_net_mock_monster_catalog_count = 0;
+    memset(g_vm_net_mock_monster_catalog_entries, 0,
+           sizeof(g_vm_net_mock_monster_catalog_entries));
+}
 
 static bool vm_net_mock_monster_enemy_id_known(u32 enemyId)
 {
     if (enemyId == 0 || enemyId > 0xffffu)
         return false;
-    for (u32 i = 0;
-         i < sizeof(g_vm_net_mock_monster_entries) /
-                 sizeof(g_vm_net_mock_monster_entries[0]);
-         ++i)
-    {
-        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
-            return true;
-    }
-    return false;
+    vm_net_mock_monster_catalog_ensure_loaded();
+    return vm_net_mock_monster_catalog_index_loaded(enemyId) >= 0;
 }
 
 static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId)
 {
     vm_net_mock_monster_entry fallback;
+    int index = -1;
 
     if (enemyId == 0)
         enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
-    for (u32 i = 0; i < sizeof(g_vm_net_mock_monster_entries) / sizeof(g_vm_net_mock_monster_entries[0]); ++i)
-    {
-        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
-            return g_vm_net_mock_monster_entries[i];
-    }
+    vm_net_mock_monster_catalog_ensure_loaded();
+    index = vm_net_mock_monster_catalog_index_loaded(enemyId);
+    if (index >= 0)
+        return g_vm_net_mock_monster_catalog_entries[index];
 
     memset(&fallback, 0, sizeof(fallback));
     fallback.enemyId = (enemyId <= 0xffffu) ? (u16)enemyId : VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
@@ -2849,11 +2932,12 @@ static vm_net_mock_monster_entry vm_net_mock_monster_entry_for_enemy(u32 enemyId
     return fallback;
 }
 
-/* Monster defaults are deliberately derived from the same no-equipment player
- * model that authoritative battle damage uses.  This is a balancing policy,
- * not a claim about an unrecovered original-server formula: all three jobs
- * are constructed at the requested level and the weakest survivability and
- * combat columns form the encounter floor. */
+/* Monster defaults use the same complete player-stat calculation as battle.
+ * The baseline outfit is deliberately limited to equip.dsh quality 0 items:
+ * for each slot it chooses the highest requirement not above the monster
+ * level, and for the weapon slot it chooses the matching job category.  This
+ * is a balancing policy selected for the mock server, not a claim that the
+ * unrecovered original server used this exact formula. */
 typedef struct
 {
     u32 hp;
@@ -2876,37 +2960,101 @@ static u32 vm_net_mock_monster_scale_ceil(u32 value, u32 numerator,
     return (u32)scaled;
 }
 
+static const vm_net_mock_equipment_catalog_item *
+vm_net_mock_monster_quality_zero_item_for_slot(u32 level, u32 job, u32 slot)
+{
+    const vm_net_mock_equipment_catalog_item *best = NULL;
+    u32 bestPrimary = 0;
+    u32 weaponCategory = 6u + job; /* jobs 1..3: sword/dagger/staff */
+    u32 total = vm_net_mock_load_equipment_catalog();
+
+    for (u32 i = 0; i < total; ++i)
+    {
+        const vm_net_mock_equipment_catalog_item *candidate =
+            &g_vm_net_mock_equipment_catalog[i];
+        u32 primary = 0;
+
+        if (candidate->quality != 0 || candidate->slot != slot ||
+            candidate->levelRequired > level)
+        {
+            continue;
+        }
+        if (slot == 0 && candidate->category != weaponCategory)
+            continue;
+        primary = slot == 0 ? candidate->bonus.attack : candidate->bonus.armor;
+        if (best == NULL || candidate->levelRequired > best->levelRequired ||
+            (candidate->levelRequired == best->levelRequired &&
+             primary > bestPrimary) ||
+            (candidate->levelRequired == best->levelRequired &&
+             primary == bestPrimary && candidate->itemId > best->itemId))
+        {
+            best = candidate;
+            bestPrimary = primary;
+        }
+    }
+    return best;
+}
+
+static bool vm_net_mock_monster_quality_zero_reference_for_job(
+    u32 requestedLevel, u32 requestedJob, vm_net_mock_player_stats *statsOut)
+{
+    vm_net_mock_role_state role;
+    u32 level = requestedLevel;
+    u32 job = requestedJob;
+
+    if (statsOut == NULL)
+        return false;
+    if (level == 0)
+        level = 1;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+    if (job == 0 || job > 3)
+        job = 1;
+
+    memset(&role, 0, sizeof(role));
+    role.level = level;
+    role.exp = vm_net_mock_role_level_start_exp(level);
+    role.job = (u8)job;
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        const vm_net_mock_equipment_catalog_item *item =
+            vm_net_mock_monster_quality_zero_item_for_slot(level, job, slot);
+
+        /* A low-level quality-0 outfit may not yet have a valid item for a
+         * slot.  Leaving only that slot empty is intentional; synthesizing a
+         * future-level item would no longer be an honest same-level reference. */
+        if (item == NULL)
+            continue;
+        role.equippedItems[slot].itemId = item->itemId;
+        role.equippedItems[slot].durability = item->durabilityMax;
+        role.equippedItems[slot].durabilityMax = item->durabilityMax;
+    }
+    vm_net_mock_role_build_player_stats_impl(&role, statsOut, true, false);
+    return true;
+}
+
 static void vm_net_mock_monster_level_reference_for_level(
     u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
 {
-    vm_net_mock_role_state role;
     vm_net_mock_player_stats stats;
-    u32 level = requestedLevel;
 
     if (reference == NULL)
         return;
     memset(reference, 0, sizeof(*reference));
-    if (level == 0)
-        level = 1;
-    /* Role creation and level-up persistence cap real characters at 70.  A
-     * malformed catalog level must not invent a stronger player baseline than
-     * the server can actually create. */
-    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
-        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
-
     for (u32 job = 1; job <= 3; ++job)
     {
-        memset(&role, 0, sizeof(role));
-        role.level = level;
-        role.job = job;
-        vm_net_mock_role_build_base_player_stats(&role, &stats);
-        if (job == 1 || stats.maxHp < reference->hp)
+        if (!vm_net_mock_monster_quality_zero_reference_for_job(
+                requestedLevel, job, &stats))
+        {
+            continue;
+        }
+        if (reference->hp == 0 || stats.maxHp < reference->hp)
             reference->hp = stats.maxHp;
-        if (job == 1 || stats.maxMp < reference->mp)
+        if (reference->mp == 0 || stats.maxMp < reference->mp)
             reference->mp = stats.maxMp;
-        if (job == 1 || stats.attack < reference->attack)
+        if (reference->attack == 0 || stats.attack < reference->attack)
             reference->attack = stats.attack;
-        if (job == 1 || stats.defense < reference->defense)
+        if (reference->defense == 0 || stats.defense < reference->defense)
             reference->defense = stats.defense;
     }
 }
@@ -2967,11 +3115,16 @@ static void vm_net_mock_monster_family_scale(
         *defenseScaleOut = defense;
 }
 
-static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
+/* Keep the baseline calculation independently callable for a persisted
+ * level/family override.  Admin combat-stat reset must use the monster's
+ * current configured level and family, not silently revert either one to the
+ * catalog entry. */
+static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_entry(
+    const vm_net_mock_monster_entry *entryValue)
 {
-    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    vm_net_mock_monster_entry entry;
     vm_net_mock_monster_stats stats;
-    u32 level = entry.level ? entry.level : 1;
+    u32 level = 1;
     vm_net_mock_monster_level_reference reference;
     u32 hpScale = 1000;
     u32 mpScale = 1000;
@@ -2982,6 +3135,10 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
     u32 normalAttack = 0;
     u32 normalDefense = 0;
 
+    memset(&entry, 0, sizeof(entry));
+    if (entryValue != NULL)
+        entry = *entryValue;
+    level = entry.level ? entry.level : 1;
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
@@ -3040,10 +3197,9 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
         break;
     case VM_NET_MOCK_MONSTER_BOSS:
         /* Bosses must be defeated through party durability and combined damage,
-         * not through an artificial admission check.  A level-matched naked
-         * solo role falls before it can exhaust this pool, while a real party
-         * with coordinated healing, equipment and combined actions can make
-         * progress through the unchanged team-battle contract. */
+         * not through an artificial admission check.  The level-matched
+         * quality-0 reference gives this pool a real equipped-player scale,
+         * while coordinated healing and combined actions make progress. */
         stats.hp = vm_net_mock_monster_scale_ceil(reference.attack, 28, 1);
         stats.mp = 24 + level * 6;
         stats.attack = vm_net_mock_monster_scale_ceil(
@@ -3082,17 +3238,17 @@ static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 en
     return stats;
 }
 
+static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
+{
+    vm_net_mock_monster_entry entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+
+    return vm_net_mock_monster_base_stats_for_entry(&entry);
+}
+
 static int vm_net_mock_monster_catalog_index(u32 enemyId)
 {
-    for (u32 i = 0;
-         i < sizeof(g_vm_net_mock_monster_entries) /
-                 sizeof(g_vm_net_mock_monster_entries[0]);
-         ++i)
-    {
-        if (g_vm_net_mock_monster_entries[i].enemyId == enemyId)
-            return (int)i;
-    }
-    return -1;
+    vm_net_mock_monster_catalog_ensure_loaded();
+    return vm_net_mock_monster_catalog_index_loaded(enemyId);
 }
 
 typedef struct
@@ -3459,6 +3615,78 @@ mysql_failed:
     if (errorOut)
         *errorOut = "怪物配置保存失败，请检查服务端 MySQL 日志";
     return false;
+}
+
+/* Recalculate only mutable combat values.  The server's default formula is
+ * parametrised by level and family, therefore an override must retain those
+ * two current settings while HP/MP/attack/defense are regenerated.  Saving
+ * the complete row through the existing transactional writer preserves
+ * reward and drop ownership exactly as the administrator configured it. */
+static bool vm_net_mock_monster_admin_reset_combat_stats(
+    u32 enemyId, const char **errorOut)
+{
+    vm_net_mock_monster_admin_row row;
+    vm_net_mock_monster_entry entry;
+    vm_net_mock_monster_stats defaults;
+    vm_net_mock_monster_override *override = NULL;
+    int index = -1;
+
+    if (errorOut)
+        *errorOut = "怪物目录中不存在该 ID";
+    index = vm_net_mock_monster_catalog_index(enemyId);
+    if (index < 0)
+        return false;
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+
+    override = &g_vm_net_mock_monster_overrides[index];
+    if (!override->used)
+    {
+        /* No database row means all four values already come from precisely
+         * this baseline.  Avoid materialising a redundant override. */
+        if (errorOut)
+            *errorOut = "ok";
+        printf("[info][mock-admin] monster_combat_stats_reset id=%u source=server-default action=noop\n",
+               enemyId);
+        return true;
+    }
+
+    entry = vm_net_mock_monster_entry_for_enemy(enemyId);
+    entry.level = override->stats.level;
+    entry.family = override->family;
+    defaults = vm_net_mock_monster_base_stats_for_entry(&entry);
+
+    memset(&row, 0, sizeof(row));
+    row.enemyId = enemyId;
+    row.level = override->stats.level;
+    row.family = override->family;
+    row.hp = defaults.hp;
+    row.mp = defaults.mp;
+    row.attack = defaults.attack;
+    row.defense = defaults.defense;
+    row.exp = override->stats.exp;
+    row.gold = override->stats.gold;
+    row.dropCount = override->dropCount;
+    if (row.dropCount != 0)
+    {
+        memcpy(row.drops, override->drops,
+               sizeof(row.drops[0]) * row.dropCount);
+    }
+    if (!vm_net_mock_monster_admin_save(&row, errorOut))
+        return false;
+
+    printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=reward-and-drops\n",
+           row.enemyId, row.level, row.family, row.hp, row.mp, row.attack,
+           row.defense);
+    return true;
 }
 
 static bool vm_net_mock_monster_admin_reset(u32 enemyId,

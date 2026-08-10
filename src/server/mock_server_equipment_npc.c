@@ -2138,12 +2138,22 @@ typedef struct vm_mock_service_client_session
     bool instanceChallengePending;
     bool instanceChallengeBattlePending;
     bool instanceChallengeDirectPending;
+    /* action13 can either address a current-scene kind-3 monster (4/5) or
+     * begin an isolated instance encounter (4/10).  Retain that origin until
+     * the immediate 4/1 request is verified. */
+    bool instanceChallengeDirectSceneMonster;
     u32 instanceChallengeActorId;
     u32 instanceChallengeEnemyId;
     u16 instanceChallengeX;
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
     char instanceChallengeScene[64];
+    /* The SCE loader first creates static placements, then 27/11 appends the
+     * selected NPC rows.  Keep the exact emitted count per visible scene so
+     * a later 4/5 battle start can address the same client-owned node table
+     * rather than recomputing a role-dependent catalog. */
+    u8 sceneNpcNodeCount;
+    char sceneNpcNodeScene[64];
     /* Scene hangup is an online-session control, not durable role data. */
     bool sceneHangupEnabled;
     bool sceneHangupRestartPending;
@@ -4251,6 +4261,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->instanceChallengePending = false;
     session->instanceChallengeBattlePending = false;
     session->instanceChallengeDirectPending = false;
+    session->instanceChallengeDirectSceneMonster = false;
     session->instanceChallengeActorId = 0;
     session->instanceChallengeEnemyId = 0;
     session->instanceChallengeX = 0;
@@ -4395,6 +4406,42 @@ static u32 vm_mock_service_account_disconnect_bound_sessions(const char *account
              * login request with empty credentials would otherwise reuse the
              * session's account id.  Clear only after the standard offline
              * transition has released all role-owned state. */
+            session->accountId[0] = 0;
+            ++disconnected;
+        }
+        session = next;
+    }
+    return disconnected;
+}
+
+/* A selected-role admin repair must not evict a different role that happens
+ * to belong to the same account.  There is no retained TCP socket in a
+ * service session (each request owns and closes its transport socket), so the
+ * established server-side disconnect boundary is: run the normal offline
+ * lifecycle, then clear the account binding.  The next packet from this
+ * client can no longer restore or save the stale role state. */
+static u32 vm_mock_service_account_disconnect_role_sessions(const char *accountId,
+                                                            u32 roleId,
+                                                            const char *reason)
+{
+    vm_mock_service_client_session *session =
+        g_vm_mock_service_client_sessions;
+    u32 disconnected = 0;
+
+    if (accountId == NULL || accountId[0] == 0 || roleId == 0)
+        return 0;
+    while (session != NULL)
+    {
+        vm_mock_service_client_session *next = session->next;
+
+        if (strcmp(session->accountId, accountId) == 0 &&
+            session->onlineRoleId == roleId)
+        {
+            vm_mock_service_session_mark_offline(
+                session, reason ? reason : "admin-role-position-reset");
+            /* Match the existing account-ban disconnect contract: offline
+             * state alone is insufficient because empty-credential title
+             * requests may otherwise reuse the old session binding. */
             session->accountId[0] = 0;
             ++disconnected;
         }
@@ -4974,10 +5021,9 @@ static void vm_mock_service_close_account_role_db_for_management(vm_mock_service
         accountId, "admin-management-close");
 }
 
-/* A web-admin repair is deliberately offline-only.  The role database is
- * restored into the account-local cache while it is edited; allowing that to
- * race an in-game session would let a later position save overwrite the repair
- * (or make the live scene and persisted scene disagree). */
+/* Level changes retain their existing account-wide offline contract because
+ * they rebuild the active role's derived vitals.  Position recovery has a
+ * narrower, role-specific disconnect path below and must not use this helper. */
 static bool vm_mock_service_account_has_live_role_session(const char *accountId)
 {
     const vm_mock_service_client_session *session =
@@ -5012,6 +5058,8 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
     char sourceScene[64];
     u16 targetX = 0;
     u16 targetY = 0;
+    u32 targetRoleId = 0;
+    u32 disconnected = 0;
 
     if (messageOut)
         *messageOut = "角色位置重置失败";
@@ -5031,13 +5079,6 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
             *messageOut = "目标场景不是服务端存在的精确 SCE 资源";
         return false;
     }
-    if (vm_mock_service_account_has_live_role_session(accountId))
-    {
-        if (messageOut)
-            *messageOut = "账号角色仍在线，请先返回标题并稍候刷新后再重置";
-        return false;
-    }
-
     state = vm_mock_service_open_account_role_db_for_management(accountId,
                                                                   messageOut);
     if (state == NULL)
@@ -5070,6 +5111,7 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
     }
 
     before = *role;
+    targetRoleId = role->roleId;
     snprintf(role->scene, sizeof(role->scene), "%s", targetScene);
     role->x = targetX;
     role->y = targetY;
@@ -5091,12 +5133,22 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
     }
 
     vm_mock_service_account_capture(state);
-    printf("[info][mock-admin] role_selected_scene_reset account=%s role=%u source_scene=%s source_pos=(%u,%u) target_scene=%s target_pos=(%u,%u) landing_source=SCE action=commit\n",
-           accountId, role->roleId, sourceScene, before.x, before.y,
-           targetScene, targetX, targetY);
-    if (messageOut)
-        *messageOut = "已重置到指定场景的安全落点，重新进入游戏后生效";
+    /* The relational writer above is the commit boundary.  Only after it
+     * succeeds may the matching live role be invalidated; otherwise a failed
+     * repair must leave its current session untouched.  Close the management
+     * view first: marking its last session offline may release this account
+     * state, so no role-db pointer may be used after that transition. */
     vm_mock_service_close_account_role_db_for_management(state, false);
+    state = NULL;
+    disconnected = vm_mock_service_account_disconnect_role_sessions(
+        accountId, targetRoleId, "admin-role-position-reset");
+    printf("[info][mock-admin] role_selected_scene_reset account=%s role=%u source_scene=%s source_pos=(%u,%u) target_scene=%s target_pos=(%u,%u) landing_source=SCE disconnected=%u action=commit\n",
+           accountId, targetRoleId, sourceScene, before.x, before.y,
+           targetScene, targetX, targetY, disconnected);
+    if (messageOut)
+        *messageOut = disconnected != 0
+                          ? "已重置位置并断开该角色连接，请重新登录"
+                          : "已重置到指定场景的安全落点，重新进入游戏后生效";
     return true;
 }
 
@@ -5586,7 +5638,7 @@ static void vm_net_mock_scene_npc_request_cache_end(void)
     g_vm_net_mock_scene_npc_request_cache.active = false;
 }
 
-static bool vm_net_mock_ensure_actor_resource_published(
+static bool vm_net_mock_ensure_actor_resource_available(
     const char *actorResource, const char **errorOut);
 
 static u32 vm_net_mock_select_scene_npcinfo_seeds(
@@ -5607,7 +5659,11 @@ static u32 vm_net_mock_decode_lzss_resource_stream(const u8 *res, u32 resLen,
 
     if (res == NULL || out == NULL || resLen < 9 || outCap == 0)
         return 0;
-    if (res[0] != 1 && res[0] != 2)
+    /* Resource type 1 is a literal, uncompressed payload.  Only type 2
+     * carries the nine-byte LZSS header consumed below.  Treating type 1 as
+     * LZSS used to let a malformed scene deployment round-trip through the
+     * server while the client passed the embedded header to its SCE loader. */
+    if (res[0] != 2)
         return 0;
 
     compressedLen = vm_net_mock_read_be32_at(res, 1);
@@ -5777,16 +5833,26 @@ static u32 vm_net_mock_load_scene_resource(const char *scene, u8 *out, u32 outCa
     {
         u32 declaredLen = vm_net_mock_read_le16_at(raw, 0) |
                           ((u32)vm_net_mock_read_le16_at(raw, 2) << 16);
-        if (declaredLen != 0 && declaredLen <= rawLen - 4 &&
-            (raw[4] == 1 || raw[4] == 2))
+        if (declaredLen != 0 && declaredLen <= rawLen - 4 && raw[4] == 2)
         {
             decodedLen = vm_net_mock_decode_lzss_resource_stream(raw + 4,
-                                                                 declaredLen,
-                                                                 out,
-                                                                 outCap);
+                                                                  declaredLen,
+                                                                  out,
+                                                                  outCap);
             if (decodedLen != 0 && vm_net_mock_scene_payload_start(out, decodedLen) != 0)
                 return decodedLen;
             return 0;
+        }
+        if (declaredLen > 1 && declaredLen <= rawLen - 4 && raw[4] == 1)
+        {
+            decodedLen = declaredLen - 1u;
+            if (decodedLen > outCap ||
+                vm_net_mock_scene_payload_start(raw + 5, decodedLen) == 0)
+            {
+                return 0;
+            }
+            memcpy(out, raw + 5, decodedLen);
+            return decodedLen;
         }
     }
 

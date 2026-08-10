@@ -1,4 +1,12 @@
-# Jianghu OL Game Content Update Workflow
+# Jianghu OL Game Content Update Workflow (retired 2026-08-10)
+
+> This record describes the earlier named-resource publication workflow.
+> That workflow was removed on 2026-08-10: it no longer has an admin entry,
+> publication catalog, or WT 18/7 server-side authorization gate.  The
+> current authoritative contract is documented in
+> [2026-08-10-content-update-mysql-authority.md](2026-08-10-content-update-mysql-authority.md).
+> Historical packet evidence below remains useful, but its former
+> implementation and admin steps must not be restored.
 
 ## Scope
 

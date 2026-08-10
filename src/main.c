@@ -10589,6 +10589,100 @@ static void vm_note_sce_load_entry_pc(u32 pc)
                      pc, ctx, namePtr, name, dp, vmAddedScreen, g_currentScreenThis, g_screenStackCount);
 }
 
+/*
+ * Read-only SCE entity-callback probe.  LoadSceneDataFromStream parses the
+ * SCE2 header and prop layer itself, then invokes a scene-specific callback
+ * at 0x010064B2 for the trailing scene entity data.  A generated scene can
+ * be byte-valid yet fail to produce a live node, so the callback target is
+ * the first contract boundary to inspect.  The loader entry is traced too:
+ * this distinguishes a null callback from a scene path that never invokes
+ * this loader.  This probe deliberately does not alter guest registers,
+ * memory, PC, or callback timing; it only records normal call arguments.
+ *
+ * It is opt-in because every scene load would otherwise add diagnostic noise.
+ * Launch the client with CBE_TRACE_SCE_ENTITY_CALLBACK=1 and inspect
+ * logs/sce-entity-callback.log.  The trace is kept separate from production
+ * network logs so it can be removed after the callback grammar is recovered.
+ */
+static void vm_trace_sce_entity_callback_pc(u32 pc)
+{
+    const char *enabled = NULL;
+    u32 stream = 0;
+    u32 offsetPtr = 0;
+    u32 callback = 0;
+    u32 lr = 0;
+    u32 streamOffset = 0;
+    u8 header[96];
+    char mapName[80];
+    size_t mapNameLen = 0;
+    FILE *trace = NULL;
+
+    if ((pc != 0x01006204 && pc != 0x010064B2) || MTK == NULL)
+        return;
+    enabled = getenv("CBE_TRACE_SCE_ENTITY_CALLBACK");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+    {
+        return;
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &stream);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &offsetPtr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &callback);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (pc == 0x01006204)
+    {
+        trace = fopen("logs/sce-entity-callback.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "sce_entity_loader entry pc=%08x controller=%08x resource=%08x "
+                    "callback=%08x lr=%08x\\n",
+                    pc, stream, offsetPtr, callback, lr);
+            fclose(trace);
+        }
+        printf("[info][scene] sce_entity_loader entry pc=%08x controller=%08x "
+               "resource=%08x callback=%08x lr=%08x\\n",
+               pc, stream, offsetPtr, callback, lr);
+        return;
+    }
+    if (offsetPtr != 0)
+        (void)uc_mem_read(MTK, offsetPtr, &streamOffset, sizeof(streamOffset));
+    memset(header, 0, sizeof(header));
+    if (stream != 0)
+        (void)uc_mem_read(MTK, stream, header, sizeof(header));
+    snprintf(mapName, sizeof(mapName), "-");
+    if (memcmp(header, "SCE2", 4) == 0 && header[10] != 0 &&
+        11u + header[10] <= sizeof(header))
+    {
+        mapNameLen = header[10];
+        if (mapNameLen >= sizeof(mapName))
+            mapNameLen = sizeof(mapName) - 1u;
+        memcpy(mapName, header + 11, mapNameLen);
+        mapName[mapNameLen] = 0;
+    }
+    trace = fopen("logs/sce-entity-callback.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "sce_entity_callback before-blx pc=%08x callback=%08x "
+                "stream=%08x offset_ptr=%08x offset=%u lr=%08x map=%s "
+                "next=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                pc, callback, stream, offsetPtr, streamOffset, lr, mapName,
+                streamOffset < sizeof(header) ? header[streamOffset] : 0,
+                streamOffset + 1u < sizeof(header) ? header[streamOffset + 1u] : 0,
+                streamOffset + 2u < sizeof(header) ? header[streamOffset + 2u] : 0,
+                streamOffset + 3u < sizeof(header) ? header[streamOffset + 3u] : 0,
+                streamOffset + 4u < sizeof(header) ? header[streamOffset + 4u] : 0,
+                streamOffset + 5u < sizeof(header) ? header[streamOffset + 5u] : 0,
+                streamOffset + 6u < sizeof(header) ? header[streamOffset + 6u] : 0,
+                streamOffset + 7u < sizeof(header) ? header[streamOffset + 7u] : 0);
+        fclose(trace);
+    }
+    printf("[info][scene] sce_entity_callback pc=%08x callback=%08x stream=%08x "
+           "offset=%u lr=%08x map=%s\n",
+           pc, callback, stream, streamOffset, lr, mapName);
+}
+
 static void vm_trace_read_guest_string(u32 ptr, char *out, size_t outSize)
 {
     u8 first = 0;
@@ -18487,6 +18581,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
     vm_hangup_vital_forensics_note_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);
+    vm_trace_sce_entity_callback_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))
