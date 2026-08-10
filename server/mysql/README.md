@@ -194,6 +194,30 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_normalize
 坐标、XSE、任务或副本绑定。后台此后不会再提供 `n_girl.actor` 作为动态 NPC 的
 可选模型；未迁移的旧行会被运行时停用并提示管理员修正，而不会下发给客户端。
 
+已有动态 NPC 需要自定义客户端对话中“服务入口”的名称和说明时，停止 mock-service
+后执行一次：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_dynamic_npc_dialog_options.sql
+```
+
+脚本只给 `server_dynamic_npcs` 增加 `service_option_name` 和
+`service_option_description` 两列；它们只影响已选“对话服务功能”在客户端 NPC 对话
+中的显示文字，不会改变服务类型、商品、修理、技能或任务流程。服务启动也会检查并补齐
+这两列；已由服务自动补齐时不要重复执行该一次性脚本。
+
+动态 NPC 或原生 NPC 覆盖需要同时提供多个服务（例如接任务同时副本传送、同时经营
+武器和药品）时，停服执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_npc_multiple_services.sql
+```
+
+该脚本建立 `server_npc_services`。旧的单一 `npc_kind` / `service_kind` 不会被批量改写：
+没有对应关系行时，服务仍按旧单服务兼容；通过新后台保存某个 NPC 后，才为该 NPC 写入
+完整服务集合。每个服务可单独填写对话选项名称和说明，留空即使用服务默认文案。`service_kind=0`
+是“已显式配置但没有直连服务”的内部标记，不能手工作为业务服务使用。
+
 将旧版蓬莱初始场景别名统一为 `c00蓬莱仙岛_01.sce` 时，停止
 mock-service 后执行：
 
@@ -253,6 +277,8 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、首项奖励和三阶段 NPC 对话。
 - `server_task_reward_items`：任务的有序多项物品奖励；存在记录时覆盖 `server_tasks` 的首项奖励兼容字段。
 - `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
+- `server_dynamic_npcs`：服务端动态 NPC 的场景位置、Actor、任务/XSE 与旧单服务兼容字段；新服务集合优先保存于 `server_npc_services`。
+- `server_npc_services`：按场景和 Actor 保存动态 NPC 或原生 NPC 覆盖的有序多服务集合，以及每项可选的对话名称/说明；只允许现有 parser-backed `action=1` 服务种类，任务仍由动态 NPC 任务绑定独立生成 `action=4`。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。

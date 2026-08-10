@@ -3363,15 +3363,81 @@ static bool vm_net_mock_npc_service_kind_uses_inventory(u16 serviceKind)
            serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT;
 }
 
+/* Keep visible labels coupled to the already implemented private type=2
+ * service values.  The database may only override name/description; it never
+ * supplies an arbitrary client action or opcode. */
+static bool vm_net_mock_npc_service_option_default(
+    const vm_net_mock_scene_npcinfo_seed *seed, u16 serviceKind,
+    const char **nameOut, const char **descriptionOut, u32 *valueOut)
+{
+    const char *name = NULL;
+    const char *description = NULL;
+    u32 value = 0;
+
+    if (seed == NULL || nameOut == NULL || descriptionOut == NULL ||
+        valueOut == NULL)
+    {
+        return false;
+    }
+    switch (serviceKind)
+    {
+    case VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT:
+        name = "\xb2\xe9\xbf\xb4\xbf\xc9\xb9\xba\xc2\xf2\xce\xe4\xc6\xf7"; /* 查看可购买武器 */
+        description = "\xce\xe4\xc6\xf7\xc9\xcc\xb5\xea"; /* 武器商店 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON;
+        break;
+    case VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR:
+        name = "\xd0\xde\xc0\xed\xc8\xab\xb2\xbf\xd7\xb0\xb1\xb8"; /* 修理全部装备 */
+        description = "\xd7\xb0\xb1\xb8\xd0\xde\xc0\xed"; /* 装备修理 */
+        value = VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL;
+        break;
+    case VM_NET_MOCK_NPC_KIND_SKILL_TRAINER:
+        name = "\xd1\xa7\xcf\xb0\xbc\xbc\xc4\xdc"; /* 学习技能 */
+        description = "\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6"; /* 技能导师 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS;
+        break;
+    case VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT:
+        name = "\xb9\xba\xc2\xf2\xb7\xc0\xbe\xdf"; /* 购买防具 */
+        description = "\xb7\xc0\xbe\xdf\xc9\xcc\xb5\xea"; /* 防具商店 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR;
+        break;
+    case VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT:
+        name = "\xb9\xba\xc2\xf2\xd2\xa9\xc6\xb7"; /* 购买药品 */
+        description = "\xd2\xa9\xc6\xb7\xc9\xcc\xb5\xea"; /* 药品商店 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE;
+        break;
+    case VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE:
+        if (seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
+            return false;
+        name = "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xd3\xeb\xcc\xf4\xd5\xbd"; /* 副本传送与挑战 */
+        description = "\xb8\xb1\xb1\xbe\xcf\xf2\xb5\xbc"; /* 副本向导 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE | seed->actorId;
+        break;
+    case VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER:
+        name = "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8"; /* 出售装备 */
+        description = "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
+        break;
+    default:
+        return false;
+    }
+    *nameOut = name;
+    *descriptionOut = description;
+    *valueOut = value;
+    return true;
+}
+
 static void vm_net_mock_npc_service_context_record(
     vm_mock_service_client_session *session, const vm_net_mock_role_state *role,
-    const char *scene, const vm_net_mock_scene_npcinfo_seed *seed)
+    const char *scene, const vm_net_mock_scene_npcinfo_seed *seed,
+    u32 serviceMask)
 {
     if (session == NULL)
         return;
     memset(&session->npcServiceContext, 0,
            sizeof(session->npcServiceContext));
     if (role == NULL || scene == NULL || seed == NULL || seed->actorId == 0 ||
+        serviceMask == 0 ||
         !vm_net_mock_scene_name_is_safe(scene))
     {
         return;
@@ -3379,9 +3445,18 @@ static void vm_net_mock_npc_service_context_record(
     session->npcServiceContext.active = true;
     session->npcServiceContext.roleId = role->roleId;
     session->npcServiceContext.actorId = seed->actorId;
-    session->npcServiceContext.serviceKind = seed->kind;
+    session->npcServiceContext.serviceMask = serviceMask;
     snprintf(session->npcServiceContext.scene,
              sizeof(session->npcServiceContext.scene), "%s", scene);
+}
+
+static bool vm_net_mock_npc_service_context_has(
+    const vm_mock_service_npc_context *context, u16 serviceKind)
+{
+    u32 bit = vm_net_mock_npc_service_kind_mask(serviceKind);
+
+    return context != NULL && bit != 0 &&
+           (context->serviceMask & bit) != 0;
 }
 
 static const vm_mock_service_npc_context *
@@ -3401,13 +3476,20 @@ vm_net_mock_npc_service_context_get(const vm_mock_service_client_session *sessio
 }
 
 static bool vm_net_mock_npc_shop_selector_allowed_for_service(
-    u32 selector, u16 serviceKind)
+    u32 selector, u32 serviceMask)
 {
-    if (serviceKind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)
+    if ((serviceMask & vm_net_mock_npc_service_kind_mask(
+                           VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)) != 0)
+    {
         return selector >= 8u && selector <= 10u;
-    if (serviceKind == VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)
+    }
+    if ((serviceMask & vm_net_mock_npc_service_kind_mask(
+                           VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)) != 0)
+    {
         return selector >= 1u && selector <= 7u;
-    return serviceKind == VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT &&
+    }
+    return (serviceMask & vm_net_mock_npc_service_kind_mask(
+                               VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT)) != 0 &&
            selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR;
 }
 
@@ -3436,11 +3518,14 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     bool taskAlreadyAccepted = false;
     bool taskCompletedNow = false;
     bool showTaskOption = false;
-    const char *serviceOptionName = NULL;
-    const char *serviceOptionDescription = NULL;
-    u32 serviceOptionValue = 0;
-    u8 serviceOptionCount = 0;
-    u8 dialog[1024];
+    vm_net_mock_npc_service_option
+        configuredServices[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
+    u32 configuredServiceCount = 0;
+    u32 emittedServiceCount = 0;
+    u32 emittedServiceMask = 0;
+    bool servicesConfigured = false;
+    u32 taskEntryCount = 0;
+    u8 dialog[3072];
     u32 dialogLen = 0;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -3452,6 +3537,10 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     {
         return 0;
     }
+    /* A type=2 subrequest carries no NPC identity.  Clear any previous menu
+     * authorization before building this response so a malformed/oversized
+     * new menu can never retain a stale actor's service mask. */
+    vm_net_mock_npc_service_context_record(session, NULL, NULL, NULL, 0);
 
     memset(seeds, 0, sizeof(seeds));
     seedCount = vm_net_mock_collect_scene_npcinfo_seeds(scene, seeds,
@@ -3474,6 +3563,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     memset(optionTasks, 0, sizeof(optionTasks));
     memset(optionSubmits, 0, sizeof(optionSubmits));
     memset(completedTaskIds, 0, sizeof(completedTaskIds));
+    memset(configuredServices, 0, sizeof(configuredServices));
     activeRole = vm_net_mock_active_role();
     if (matchedSeed != NULL && matchedSeed->scriptName[0] != 0 &&
         vm_net_mock_load_xse_summary(matchedSeed->scriptName, &xseSummary) &&
@@ -3751,64 +3841,59 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         }
     }
 
-    if (matchedSeed != NULL)
+    if (matchedSeed != NULL &&
+        !vm_net_mock_npc_service_options_resolve(
+            scene, matchedSeed->actorId, matchedSeed->kind,
+            matchedSeed->serviceOptionName,
+            matchedSeed->serviceOptionDescription, configuredServices,
+            VM_NET_MOCK_NPC_SERVICE_OPTION_MAX, &configuredServiceCount,
+            &servicesConfigured))
     {
-        switch (matchedSeed->kind)
-        {
-        case VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT:
-            serviceOptionName = "\xb2\xe9\xbf\xb4\xbf\xc9\xb9\xba\xc2\xf2\xce\xe4\xc6\xf7"; /* 查看可购买武器 */
-            serviceOptionDescription = "\xce\xe4\xc6\xf7\xc9\xcc\xb5\xea"; /* 武器商店 */
-            serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON;
-            break;
-        case VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR:
-            serviceOptionName = "\xd0\xde\xc0\xed\xc8\xab\xb2\xbf\xd7\xb0\xb1\xb8"; /* 修理全部装备 */
-            serviceOptionDescription = "\xd7\xb0\xb1\xb8\xd0\xde\xc0\xed"; /* 装备修理 */
-            serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL;
-            break;
-        case VM_NET_MOCK_NPC_KIND_SKILL_TRAINER:
-            serviceOptionName = "\xd1\xa7\xcf\xb0\xbc\xbc\xc4\xdc"; /* 学习技能 */
-            serviceOptionDescription = "\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6"; /* 技能导师 */
-            serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS;
-            break;
-        case VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT:
-            serviceOptionName = "\xb9\xba\xc2\xf2\xb7\xc0\xbe\xdf"; /* 购买防具 */
-            serviceOptionDescription = "\xb7\xc0\xbe\xdf\xc9\xcc\xb5\xea"; /* 防具商店 */
-            serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR;
-            break;
-        case VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT:
-            serviceOptionName = "\xb9\xba\xc2\xf2\xd2\xa9\xc6\xb7"; /* 购买药品 */
-            serviceOptionDescription = "\xd2\xa9\xc6\xb7\xc9\xcc\xb5\xea"; /* 药品商店 */
-            serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE;
-            break;
-        case VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE:
-            if (matchedSeed->actorId <= VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)
-            {
-                serviceOptionName = "\xb8\xb1\xb1\xbe\xb4\xab\xcb\xcd\xd3\xeb\xcc\xf4\xd5\xbd"; /* 副本传送与挑战 */
-                serviceOptionDescription = "\xb8\xb1\xb1\xbe\xcf\xf2\xb5\xbc"; /* 副本向导 */
-                serviceOptionValue = VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE |
-                                     matchedSeed->actorId;
-            }
-            break;
-        case VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER:
-            serviceOptionName =
-                "\xb3\xf6\xca\xdb\xd7\xb0\xb1\xb8"; /* 出售装备 */
-            serviceOptionDescription =
-                "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
-            serviceOptionValue =
-                VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
-            break;
-        default:
-            break;
-        }
-        serviceOptionCount = serviceOptionValue != 0 ? 1 : 0;
+        /* Dialog text and task actions remain valid even when an admin-owned
+         * service configuration is unavailable.  Do not invent a fallback
+         * opcode from incomplete data; emit no action-1 services instead. */
+        configuredServiceCount = 0;
+        servicesConfigured = false;
+        printf("[error][mock-admin] npc_service_options_resolve_failed scene=%s actor=%u error=%s\n",
+               scene ? scene : "-", matchedSeed->actorId,
+               vm_mysql_last_error());
     }
-    /* A nested private service request does not carry actor identity.  Record
-     * the exact clicked NPC only when we actually exposed its service option;
-     * any ordinary dialog clears stale merchant context. */
-    vm_net_mock_npc_service_context_record(
-        session, activeRole, scene,
-        serviceOptionCount != 0 ? matchedSeed : NULL);
 
+    taskEntryCount =
+        (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u) +
+        optionCount;
+    if (taskEntryCount > VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS)
+    {
+        /* Task entries retain priority because their action=4 progression is
+         * already active.  Trim only the tail in the same deterministic order
+         * used to build optionTasks. */
+        optionCount = VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS -
+                      (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID &&
+                               showTaskOption
+                           ? 1u
+                           : 0u);
+        taskEntryCount = VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS;
+    }
+    for (u32 serviceIndex = 0;
+         serviceIndex < configuredServiceCount &&
+         taskEntryCount + emittedServiceCount < VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS;
+         ++serviceIndex)
+    {
+        const char *defaultName = NULL;
+        const char *defaultDescription = NULL;
+        u32 serviceValue = 0;
+
+        if (!vm_net_mock_npc_service_option_default(
+                matchedSeed, configuredServices[serviceIndex].kind,
+                &defaultName, &defaultDescription, &serviceValue) ||
+            serviceValue == 0)
+        {
+            continue;
+        }
+        ++emittedServiceCount;
+        emittedServiceMask |= vm_net_mock_npc_service_kind_mask(
+            configuredServices[serviceIndex].kind);
+    }
     /* ParseNPCDialogData(0x010380E8) consumes the raw sequence as:
      * dialog-kind:u8, main-text:string, option-count:u8, then each option as
      * display-type:u8/name:string/action:u8/value:u32/description:string,
@@ -3821,9 +3906,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
         !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen, dialogText) ||
         !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen,
-                                (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID &&
-                                 showTaskOption ? 1u : 0u) + optionCount +
-                                    serviceOptionCount))
+                                taskEntryCount + emittedServiceCount))
     {
         return 0;
     }
@@ -3843,19 +3926,42 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             return 0;
         }
     }
-    if (serviceOptionCount != 0)
+    for (u32 serviceIndex = 0, emitted = 0;
+         serviceIndex < configuredServiceCount && emitted < emittedServiceCount;
+         ++serviceIndex)
     {
+        const char *defaultName = NULL;
+        const char *defaultDescription = NULL;
+        const char *serviceName = NULL;
+        const char *serviceDescription = NULL;
+        u32 serviceValue = 0;
+
+        if (!vm_net_mock_npc_service_option_default(
+                matchedSeed, configuredServices[serviceIndex].kind,
+                &defaultName, &defaultDescription, &serviceValue) ||
+            serviceValue == 0)
+        {
+            continue;
+        }
+        serviceName = configuredServices[serviceIndex].optionName[0] != 0
+                          ? configuredServices[serviceIndex].optionName
+                          : defaultName;
+        serviceDescription =
+            configuredServices[serviceIndex].optionDescription[0] != 0
+                ? configuredServices[serviceIndex].optionDescription
+                : defaultDescription;
         if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
-                                        serviceOptionName) ||
+                                        serviceName) ||
             !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
             !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
-                                     serviceOptionValue) ||
+                                     serviceValue) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
-                                        serviceOptionDescription))
+                                        serviceDescription))
         {
             return 0;
         }
+        ++emitted;
     }
     for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
     {
@@ -3902,6 +4008,13 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     vm_net_mock_finish_wt_packet(out, pos,
                                  (u8)(1u + (taskCompletedNow ? 1u : 0u) +
                                       completedTaskCount));
+    /* A nested private service request does not carry actor identity.  Bind
+     * only the concrete subset actually written into the successfully
+     * encoded dialog; clipped/invalid rows must not be callable merely
+     * because they exist in SQL. */
+    vm_net_mock_npc_service_context_record(
+        session, activeRole, scene,
+        emittedServiceMask != 0 ? matchedSeed : NULL, emittedServiceMask);
     /* The later action=4 task request contains only task id. Record exactly
      * the options in the delivered dialog after every packet object has been
      * built, preserving whether that id was authorized for acceptance or
@@ -3921,7 +4034,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             scene);
     }
 
-    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u service_kind=%u scene_entity_kind=%u native=%u service_action=%u task_offer=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
+    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u legacy_service_kind=%u scene_entity_kind=%u native=%u service_configured=%u service_count=%u service_mask=%08x task_options=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
            actorId,
            index,
            matchedSeed && matchedSeed->displayName[0] ? matchedSeed->displayName : "-",
@@ -3931,7 +4044,9 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
            matchedSeed ? matchedSeed->kind : 0u,
            matchedSeed ? matchedSeed->sceneEntityKind : 0u,
            matchedSeed && matchedSeed->nativeSceneActor ? 1u : 0u,
-           serviceOptionValue,
+           servicesConfigured ? 1u : 0u,
+           emittedServiceCount,
+           emittedServiceMask,
            (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u) + optionCount,
            taskAlreadyAccepted ? 1u : 0u,
            taskState.state,
@@ -3983,10 +4098,15 @@ static bool vm_net_mock_npc_shop_item_matches_selector(
      * here makes a fully enabled private merchant look empty whenever the
      * same DSH item is hidden from the mall. */
     if (item == NULL || item->itemId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
-        context == NULL || !vm_net_mock_npc_service_kind_uses_inventory(
-                               context->serviceKind) ||
+        context == NULL ||
+        (!vm_net_mock_npc_service_context_has(
+             context, VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT) &&
+         !vm_net_mock_npc_service_context_has(
+             context, VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT) &&
+         !vm_net_mock_npc_service_context_has(
+             context, VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT)) ||
         !vm_net_mock_npc_shop_selector_allowed_for_service(
-            selector, context->serviceKind))
+            selector, context->serviceMask))
     {
         return false;
     }
@@ -4278,6 +4398,8 @@ vm_net_mock_instance_guide_seed(u32 actorId)
 {
     const char *scene = vm_net_mock_current_scene_name();
     static vm_net_mock_scene_npcinfo_seed resolved[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+    vm_net_mock_npc_service_option
+        services[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
     u32 selected = 0;
 
     if (scene == NULL || actorId == 0)
@@ -4289,8 +4411,24 @@ vm_net_mock_instance_guide_seed(u32 actorId)
         scene, resolved, VM_NET_MOCK_SCENE_NPCINFO_MAX, NULL, NULL);
     for (u32 i = 0; i < selected; ++i)
     {
-        if (resolved[i].actorId == actorId &&
-            resolved[i].kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+        u32 serviceCount = 0;
+
+        if (resolved[i].actorId != actorId)
+            continue;
+        memset(services, 0, sizeof(services));
+        /* `kind` is now only the legacy compatibility projection.  A
+         * multi-service NPC may list a weapon shop first and its instance
+         * guide later, so selecting by this field would incorrectly make the
+         * emitted instance action unresolvable.  Resolve the same effective
+         * service set that produced the parent dialog instead. */
+        if (vm_net_mock_npc_service_options_resolve(
+                scene, actorId, resolved[i].kind,
+                resolved[i].serviceOptionName,
+                resolved[i].serviceOptionDescription, services,
+                VM_NET_MOCK_NPC_SERVICE_OPTION_MAX, &serviceCount, NULL) &&
+            vm_net_mock_npc_service_options_has_kind(
+                services, serviceCount,
+                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE))
         {
             return &resolved[i];
         }
@@ -4657,7 +4795,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                      : (operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE
                             ? "instance-enter"
                             : "instance-challenge");
-        if (instanceSeed == NULL)
+        if (instanceSeed == NULL ||
+            !vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
+            shopContext->actorId != instanceSeed->actorId)
         {
             dialogText =
                 "\xb8\xb1\xb1\xbe\xc5\xe4\xd6\xc3\xd2\xd1\xca\xa7\xd0\xa7\xa1\xa3"; /* 副本配置已失效。 */
@@ -4727,8 +4868,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         static const u8 weaponSelectors[] = {8, 9, 10};
 
         action = "weapon-categories";
-        if (shopContext == NULL || shopContext->serviceKind !=
-                                       VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT))
         {
             dialogText =
                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
@@ -4758,8 +4899,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR)
     {
         action = "armor-categories";
-        if (shopContext == NULL || shopContext->serviceKind !=
-                                       VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT))
         {
             dialogText =
                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
@@ -4826,7 +4967,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         if (!vm_net_mock_npc_shop_selector_is_valid(selector) ||
             shopContext == NULL ||
             !vm_net_mock_npc_shop_selector_allowed_for_service(
-                selector, shopContext->serviceKind))
+                selector, shopContext->serviceMask))
         {
             dialogText =
                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
@@ -5011,6 +5152,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             operation == VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE;
 
         action = saleRequest ? "equipment-sell" : "equipment-sell-list";
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER))
+        {
+            dialogText =
+                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+        }
+        else
+        {
         dialogText =
             "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa3\xba"; /* 请选择要出售的装备： */
 
@@ -5144,6 +5293,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             dialogText =
                 "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xb3\xf6\xca\xdb\xb5\xc4\xd7\xb0\xb1\xb8\xa1\xa3"; /* 当前没有可出售的装备。 */
         }
+        }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL)
     {
@@ -5151,6 +5301,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         u32 repairCost = 0;
 
         action = "repair-all";
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_EQUIPMENT_REPAIR))
+        {
+            dialogText =
+                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+        }
+        else
+        {
         serviceState = vm_net_mock_role_service_state_get(role);
         repairCost = vm_net_mock_role_service_repair_cost(serviceState, role,
                                                           &repairCount);
@@ -5172,6 +5330,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 "\xd7\xb0\xb1\xb8\xd2\xd1\xc8\xab\xb2\xbf\xd0\xde\xb8\xb4\xa1\xa3"; /* 装备已全部修复。 */
             result = 1;
         }
+        }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS ||
              operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
@@ -5180,6 +5339,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         action = operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE
                      ? "skill-learn"
                      : "skill-list";
+        if (!vm_net_mock_npc_service_context_has(
+                shopContext, VM_NET_MOCK_NPC_KIND_SKILL_TRAINER))
+        {
+            dialogText =
+                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+        }
+        else
+        {
         serviceState = vm_net_mock_role_service_state_get(role);
         snprintf(dialogTextStorage, sizeof(dialogTextStorage), "%s%u%s",
                  "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xa8\xb5\xb1\xc7\xb0", /* 请选择要学习的技能（当前 */
@@ -5298,6 +5465,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 dialogText =
                     "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xd4\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3"; /* 当前没有可以学习的技能。 */
             }
+        }
         }
     }
 

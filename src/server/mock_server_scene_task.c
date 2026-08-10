@@ -872,6 +872,8 @@ static bool vm_net_mock_npc_shop_inventory_db_row(
     return true;
 }
 
+static bool vm_net_mock_npc_service_options_table_ensure(void);
+
 static bool vm_net_mock_native_npc_db_load(void)
 {
     if (g_vm_net_mock_native_npc_db_loaded)
@@ -902,6 +904,7 @@ static bool vm_net_mock_native_npc_db_load(void)
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id,item_id),"
             "KEY idx_server_npc_shop_inventory_npc(scene,actor_id)) ENGINE=InnoDB") ||
+        !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_mysql_query(
             "SELECT HEX(scene),actor_id,service_kind,enabled "
             "FROM server_native_npc_overrides ORDER BY scene,actor_id",
@@ -920,6 +923,310 @@ static bool vm_net_mock_native_npc_db_load(void)
            g_vm_net_mock_native_npc_override_count,
            g_vm_net_mock_npc_shop_inventory_count);
     return true;
+}
+
+/* A service row is intentionally independent of the dynamic-NPC and native
+ * override tables: both kinds of scene actor use the same 26/1 action=1
+ * contract.  Kind zero is a persisted marker for an explicitly empty service
+ * set, so an administrator can remove all services without falling back to a
+ * legacy single npc_kind value. */
+typedef struct
+{
+    bool configured;
+    bool invalid;
+    u32 count;
+    vm_net_mock_npc_service_option
+        options[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
+} vm_net_mock_npc_service_options_context;
+
+/* Keep schema installation on the catalog-load/admin paths.  NPC dialogue
+ * handling only performs a read from this table; doing CREATE TABLE for each
+ * click would add a DDL round-trip to a hot client packet path. */
+static bool vm_net_mock_npc_service_options_table_ensure(void)
+{
+    return vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_npc_services ("
+        "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
+        "service_kind SMALLINT UNSIGNED NOT NULL,"
+        "sort_order TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "option_name VARBINARY(64) NOT NULL DEFAULT '',"
+        "option_description VARBINARY(96) NOT NULL DEFAULT '',"
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(scene,actor_id,service_kind),"
+        "KEY idx_server_npc_services_dialog(scene,actor_id,sort_order,service_kind)"
+        ") ENGINE=InnoDB");
+}
+
+static bool vm_net_mock_npc_service_options_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_npc_service_options_context *context =
+        (vm_net_mock_npc_service_options_context *)contextValue;
+    vm_net_mock_npc_service_option option;
+    u32 kind = 0;
+    u32 sortOrder = 0;
+
+    memset(&option, 0, sizeof(option));
+    if (context == NULL || columnCount != 4 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &kind) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &sortOrder) ||
+        kind > VM_NET_MOCK_NPC_KIND_MAX || sortOrder > 0xffu)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->configured = true;
+    if (kind == VM_NET_MOCK_NPC_KIND_NORMAL)
+    {
+        char ignoredName[64];
+        char ignoredDescription[96];
+
+        memset(ignoredName, 0, sizeof(ignoredName));
+        memset(ignoredDescription, 0, sizeof(ignoredDescription));
+        if (!vm_net_mock_dynamic_npc_decode_hex(values[2], lengths[2],
+                                                ignoredName,
+                                                sizeof(ignoredName)) ||
+            !vm_net_mock_dynamic_npc_decode_hex(values[3], lengths[3],
+                                                ignoredDescription,
+                                                sizeof(ignoredDescription)) ||
+            ignoredName[0] != 0 || ignoredDescription[0] != 0)
+        {
+            context->invalid = true;
+        }
+        return true;
+    }
+    if (context->count >= VM_NET_MOCK_NPC_SERVICE_OPTION_MAX ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[2], lengths[2],
+                                            option.optionName,
+                                            sizeof(option.optionName)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[3], lengths[3],
+                                            option.optionDescription,
+                                            sizeof(option.optionDescription)))
+    {
+        context->invalid = true;
+        return true;
+    }
+    for (u32 i = 0; i < context->count; ++i)
+    {
+        if (context->options[i].kind == (u16)kind)
+        {
+            context->invalid = true;
+            return true;
+        }
+    }
+    option.kind = (u16)kind;
+    option.sortOrder = (u8)sortOrder;
+    context->options[context->count++] = option;
+    return true;
+}
+
+/* Resolve the effective configuration for a concrete `(scene, actor)`.
+ * No relation rows preserves historical one-kind NPCs; a marker row converts
+ * that legacy fallback into an explicitly empty set. */
+static bool vm_net_mock_npc_service_options_resolve(
+    const char *scene, u32 actorId, u16 legacyKind, const char *legacyName,
+    const char *legacyDescription, vm_net_mock_npc_service_option *options,
+    u32 optionCap, u32 *optionCountOut, bool *configuredOut)
+{
+    vm_net_mock_npc_service_options_context context;
+    char sceneHex[64 * 2 + 1];
+    char query[512];
+
+    if (optionCountOut != NULL)
+        *optionCountOut = 0;
+    if (configuredOut != NULL)
+        *configuredOut = false;
+    if (scene == NULL || actorId == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        (options == NULL && optionCap != 0) ||
+        optionCap < VM_NET_MOCK_NPC_SERVICE_OPTION_MAX ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT service_kind,sort_order,HEX(option_name),HEX(option_description) "
+             "FROM server_npc_services WHERE scene=X'%s' AND actor_id=%u "
+             "ORDER BY sort_order,service_kind",
+             sceneHex, actorId);
+    if (!vm_mysql_query(query, vm_net_mock_npc_service_options_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (!context.configured && legacyKind != VM_NET_MOCK_NPC_KIND_NORMAL)
+    {
+        vm_net_mock_npc_service_option legacy;
+
+        if (legacyKind > VM_NET_MOCK_NPC_KIND_MAX)
+            return false;
+        memset(&legacy, 0, sizeof(legacy));
+        legacy.kind = legacyKind;
+        if (legacyName != NULL)
+            snprintf(legacy.optionName, sizeof(legacy.optionName), "%s",
+                     legacyName);
+        if (legacyDescription != NULL)
+            snprintf(legacy.optionDescription,
+                     sizeof(legacy.optionDescription), "%s",
+                     legacyDescription);
+        context.options[0] = legacy;
+        context.count = 1;
+    }
+    if (context.count != 0 && options != NULL)
+        memcpy(options, context.options,
+               context.count * sizeof(context.options[0]));
+    if (optionCountOut != NULL)
+        *optionCountOut = context.count;
+    if (configuredOut != NULL)
+        *configuredOut = context.configured;
+    return true;
+}
+
+static bool vm_net_mock_npc_service_options_has_kind(
+    const vm_net_mock_npc_service_option *options, u32 optionCount,
+    u16 serviceKind)
+{
+    if (options == NULL || serviceKind == VM_NET_MOCK_NPC_KIND_NORMAL ||
+        serviceKind > VM_NET_MOCK_NPC_KIND_MAX)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < optionCount; ++i)
+    {
+        if (options[i].kind == serviceKind)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_npc_service_options_validate(
+    const vm_net_mock_npc_service_option *options, u32 optionCount)
+{
+    if ((options == NULL && optionCount != 0) ||
+        optionCount > VM_NET_MOCK_NPC_SERVICE_OPTION_MAX)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < optionCount; ++i)
+    {
+        if (options[i].kind == VM_NET_MOCK_NPC_KIND_NORMAL ||
+            options[i].kind > VM_NET_MOCK_NPC_KIND_MAX ||
+            strlen(options[i].optionName) >= sizeof(options[i].optionName) ||
+            strlen(options[i].optionDescription) >=
+                sizeof(options[i].optionDescription))
+        {
+            return false;
+        }
+        for (u32 other = 0; other < i; ++other)
+        {
+            if (options[other].kind == options[i].kind)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Caller owns an active transaction.  The marker is written even for an
+ * empty set, which is the durable distinction between “nothing configured”
+ * and “remove every direct service”. */
+static bool vm_net_mock_npc_service_options_replace_in_transaction(
+    const char *scene, u32 actorId,
+    const vm_net_mock_npc_service_option *options, u32 optionCount,
+    const char **errorOut)
+{
+    char sceneHex[64 * 2 + 1];
+    char query[1024];
+
+    if (errorOut != NULL)
+        *errorOut = "NPC service options are invalid";
+    if (scene == NULL || actorId == 0 || !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_npc_service_options_validate(options, optionCount) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_services WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_npc_services(scene,actor_id,service_kind,sort_order,option_name,option_description) "
+             "VALUES(X'%s',%u,0,0,X'',X'')",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    for (u32 i = 0; i < optionCount; ++i)
+    {
+        char nameHex[sizeof(options[i].optionName) * 2 + 1];
+        char descriptionHex[sizeof(options[i].optionDescription) * 2 + 1];
+
+        nameHex[0] = 0;
+        descriptionHex[0] = 0;
+        if ((options[i].optionName[0] != 0 &&
+             vm_mysql_hex_encode(options[i].optionName,
+                                 strlen(options[i].optionName), nameHex,
+                                 sizeof(nameHex)) == 0) ||
+            (options[i].optionDescription[0] != 0 &&
+             vm_mysql_hex_encode(options[i].optionDescription,
+                                 strlen(options[i].optionDescription),
+                                 descriptionHex, sizeof(descriptionHex)) == 0))
+        {
+            if (errorOut != NULL)
+                *errorOut = "NPC service option text encoding failed";
+            return false;
+        }
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_npc_services(scene,actor_id,service_kind,sort_order,option_name,option_description) "
+                 "VALUES(X'%s',%u,%u,%u,X'%s',X'%s')",
+                 sceneHex, actorId, options[i].kind, options[i].sortOrder,
+                 nameHex, descriptionHex);
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    if (errorOut != NULL)
+        *errorOut = "ok";
+    return true;
+
+failed:
+    if (errorOut != NULL)
+        *errorOut = vm_mysql_last_error();
+    return false;
+}
+
+static bool vm_net_mock_npc_service_options_admin_replace(
+    const char *scene, u32 actorId,
+    const vm_net_mock_npc_service_option *options, u32 optionCount,
+    const char **errorOut)
+{
+    bool transactionStarted = false;
+
+    if (errorOut != NULL)
+        *errorOut = "NPC service options are invalid";
+    if (!vm_net_mock_npc_service_options_table_ensure() ||
+        !vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    if (!vm_net_mock_npc_service_options_replace_in_transaction(
+            scene, actorId, options, optionCount, errorOut) ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut != NULL && (*errorOut == NULL || strcmp(*errorOut, "ok") == 0))
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static int vm_net_mock_native_npc_override_find_exact(const char *scene,
@@ -1050,18 +1357,25 @@ static u32 vm_net_mock_npc_shop_inventory_resolve_unit_price(
 
 static bool vm_net_mock_native_npc_admin_save_override(
     const char *scene, u32 actorId, u16 serviceKind, bool enabled,
+    const vm_net_mock_npc_service_option *serviceOptions,
+    u32 serviceOptionCount, bool replaceServiceOptions,
     const char **errorOut)
 {
     char sceneHex[sizeof(g_vm_net_mock_native_npc_overrides[0].scene) * 2 + 1];
     char query[768];
     vm_net_mock_native_npc_override row;
     int existing = -1;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "native NPC override is invalid";
     if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
         serviceKind > VM_NET_MOCK_NPC_KIND_MAX ||
+        (replaceServiceOptions &&
+         !vm_net_mock_npc_service_options_validate(serviceOptions,
+                                                    serviceOptionCount)) ||
         vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
     {
         return false;
@@ -1079,12 +1393,26 @@ static bool vm_net_mock_native_npc_admin_save_override(
              "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
              "service_kind=VALUES(service_kind),enabled=VALUES(enabled)",
              sceneHex, actorId, serviceKind, enabled ? 1u : 0u);
-    if (!vm_mysql_exec(query))
+    if (!vm_mysql_exec("START TRANSACTION"))
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
         return false;
     }
+    transactionStarted = true;
+    if (!vm_mysql_exec(query))
+    {
+        goto failed;
+    }
+    if (replaceServiceOptions &&
+        !vm_net_mock_npc_service_options_replace_in_transaction(
+            scene, actorId, serviceOptions, serviceOptionCount, errorOut))
+    {
+        goto failed;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
     memset(&row, 0, sizeof(row));
     snprintf(row.scene, sizeof(row.scene), "%s", scene);
     row.actorId = actorId;
@@ -1100,6 +1428,13 @@ static bool vm_net_mock_native_npc_admin_save_override(
     printf("[info][mock-admin] native_npc_override_save scene=%s actor=%u service=%u enabled=%u\n",
            scene, actorId, serviceKind, enabled ? 1u : 0u);
     return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_native_npc_admin_delete_override(
@@ -1108,10 +1443,12 @@ static bool vm_net_mock_native_npc_admin_delete_override(
     char sceneHex[sizeof(g_vm_net_mock_native_npc_overrides[0].scene) * 2 + 1];
     char query[512];
     int existing = -1;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "native NPC override not found";
     if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_net_mock_scene_name_is_safe(scene) || actorId == 0 ||
         vm_mysql_hex_encode(scene, strlen(scene), sceneHex, sizeof(sceneHex)) == 0)
     {
@@ -1120,15 +1457,20 @@ static bool vm_net_mock_native_npc_admin_delete_override(
     existing = vm_net_mock_native_npc_override_find_exact(scene, actorId);
     if (existing < 0)
         return false;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_services "
+             "WHERE scene=X'%s' AND actor_id=%u", sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
     snprintf(query, sizeof(query),
              "DELETE FROM server_native_npc_overrides "
              "WHERE scene=X'%s' AND actor_id=%u", sceneHex, actorId);
-    if (!vm_mysql_exec(query))
-    {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
-    }
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
     if ((u32)existing + 1 < g_vm_net_mock_native_npc_override_count)
     {
         memmove(&g_vm_net_mock_native_npc_overrides[existing],
@@ -1145,6 +1487,13 @@ static bool vm_net_mock_native_npc_admin_delete_override(
     printf("[info][mock-admin] native_npc_override_delete scene=%s actor=%u\n",
            scene, actorId);
     return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_npc_shop_inventory_admin_save(
@@ -1610,6 +1959,51 @@ static bool vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column(void)
     return true;
 }
 
+/* Existing databases predate customizable NPC service-menu text.  Keep this
+ * migration at the configuration owner, and run it before selecting the
+ * fields, rather than silently treating a missing column as an empty label. */
+static bool vm_net_mock_dynamic_npc_ensure_service_option_columns(void)
+{
+    vm_net_mock_dynamic_npc_column_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npcs' "
+            "AND COLUMN_NAME='service_option_name'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count == 0 && !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npcs "
+            "ADD COLUMN service_option_name VARBINARY(64) NOT NULL DEFAULT '' "
+            "AFTER script_name"))
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='server_dynamic_npcs' "
+            "AND COLUMN_NAME='service_option_description'",
+            vm_net_mock_dynamic_npc_column_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (context.count == 0 && !vm_mysql_exec(
+            "ALTER TABLE server_dynamic_npcs "
+            "ADD COLUMN service_option_description VARBINARY(96) NOT NULL DEFAULT '' "
+            "AFTER service_option_name"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] dynamic_npc_schema migration=service-option-text action=ready\n");
+    return true;
+}
+
 /* Every dynamic-NPC scene key is a client resource key.  Both a placement
  * scene and an instance target must name the exact downloadable SCE file;
  * accepting a bare name here makes a distinct SQL key which later collides
@@ -1708,8 +2102,8 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
         transactionStarted = true;
         snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_dynamic_npcs("
-                 "scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
-                 "SELECT X'%s',actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled "
+                 "scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled) "
+                 "SELECT X'%s',actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled "
                  "FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
                  canonicalHex, legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
@@ -1750,6 +2144,14 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
         if (!vm_mysql_exec(query))
             goto failed;
         snprintf(query, sizeof(query),
+                 "INSERT IGNORE INTO server_npc_services("
+                 "scene,actor_id,service_kind,sort_order,option_name,option_description) "
+                 "SELECT X'%s',actor_id,service_kind,sort_order,option_name,option_description "
+                 "FROM server_npc_services WHERE scene=X'%s' AND actor_id=%u",
+                 canonicalHex, legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
                  "INSERT IGNORE INTO server_npc_shop_inventory(scene,actor_id,item_id,unit_price,enabled) "
                  "SELECT X'%s',actor_id,item_id,unit_price,enabled FROM server_npc_shop_inventory "
                  "WHERE scene=X'%s' AND actor_id=%u",
@@ -1758,6 +2160,11 @@ static bool vm_net_mock_dynamic_npc_parent_scene_apply_migrations(
             goto failed;
         snprintf(query, sizeof(query),
                  "DELETE FROM server_npc_shop_inventory WHERE scene=X'%s' AND actor_id=%u",
+                 legacyHex, migration->actorId);
+        if (!vm_mysql_exec(query))
+            goto failed;
+        snprintf(query, sizeof(query),
+                 "DELETE FROM server_npc_services WHERE scene=X'%s' AND actor_id=%u",
                  legacyHex, migration->actorId);
         if (!vm_mysql_exec(query))
             goto failed;
@@ -1865,10 +2272,11 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
     u32 number[12];
+    bool hasInstanceConfiguration = false;
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 17 ||
+    if (context == NULL || columnCount != 19 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -1884,16 +2292,22 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             row.seed.displayName, sizeof(row.seed.displayName)) ||
         !vm_net_mock_dynamic_npc_decode_hex(values[8], lengths[8],
                                             row.seed.scriptName, sizeof(row.seed.scriptName)) ||
-        !vm_mock_mysql_parse_u32(values[9], lengths[9], &number[5]) || number[5] > 1u ||
-        !vm_mock_mysql_parse_u32(values[10], lengths[10], &number[6]) ||
-        !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[7]) || number[7] > 1u ||
-        !vm_net_mock_dynamic_npc_decode_hex(values[12], lengths[12],
+        !vm_net_mock_dynamic_npc_decode_hex(values[9], lengths[9],
+                                            row.seed.serviceOptionName,
+                                            sizeof(row.seed.serviceOptionName)) ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[10], lengths[10],
+                                            row.seed.serviceOptionDescription,
+                                            sizeof(row.seed.serviceOptionDescription)) ||
+        !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[5]) || number[5] > 1u ||
+        !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[6]) ||
+        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[7]) || number[7] > 1u ||
+        !vm_net_mock_dynamic_npc_decode_hex(values[14], lengths[14],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
-        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[8]) || number[8] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[14], lengths[14], &number[9]) || number[9] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[11]) || number[11] > 0xffu)
+        !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffu)
     {
         if (context != NULL)
             ++context->skipped;
@@ -1912,6 +2326,14 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
     row.seed.instanceMinLevel = (u16)number[11];
+    /* The parent `npc_kind` is now only a compatibility projection.  Instance
+     * settings belong to the independent child row and may be used by a
+     * multi-service NPC whose first selected service is not the instance
+     * guide. */
+    hasInstanceConfiguration = row.seed.instanceScene[0] != 0 ||
+                               row.seed.instanceX != 0 ||
+                               row.seed.instanceY != 0 ||
+                               row.seed.challengeEnemyId != 0;
     if (context->scanningParentSceneMigrations)
     {
         char canonicalScene[sizeof(row.scene)];
@@ -1932,8 +2354,7 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         }
         return true;
     }
-    if (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
-        row.seed.instanceScene[0] != 0)
+    if (hasInstanceConfiguration && row.seed.instanceScene[0] != 0)
     {
         char configuredScene[sizeof(row.seed.instanceScene)];
 
@@ -1975,10 +2396,12 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         strlen(row.seed.displayName) >= 30 ||
         strlen(row.seed.actorResource) >= 30 ||
         strlen(row.seed.scriptName) >= 32 ||
+        strlen(row.seed.serviceOptionName) >= sizeof(row.seed.serviceOptionName) ||
+        strlen(row.seed.serviceOptionDescription) >= sizeof(row.seed.serviceOptionDescription) ||
         !vm_net_mock_str_ends_with(row.seed.actorResource, ".actor") ||
         (row.seed.scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(row.seed.scriptName, ".xse")) ||
-        (row.seed.kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+        (hasInstanceConfiguration &&
          ((row.seed.instanceScene[0] == 0 && row.seed.challengeEnemyId == 0) ||
           (row.seed.instanceScene[0] != 0 &&
            (!vm_net_mock_str_ends_with(row.seed.instanceScene, ".sce") ||
@@ -2012,7 +2435,8 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
 {
     return vm_mysql_query(
         "SELECT HEX(scene),actor_id,pos_x,pos_y,npc_kind,orientation,"
-        "HEX(actor_resource),HEX(display_name),HEX(script_name),enabled,"
+        "HEX(actor_resource),HEX(display_name),HEX(script_name),"
+        "HEX(service_option_name),HEX(service_option_description),enabled,"
         "COALESCE(server_dynamic_npc_tasks.task_id,0),"
         "COALESCE(server_dynamic_npc_tasks.repeatable,0),"
         "COALESCE(HEX(server_dynamic_npc_instances.target_scene),''),"
@@ -2040,6 +2464,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
     memset(&context, 0, sizeof(context));
 
     if (!vm_net_mock_native_npc_db_load() ||
+        !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npcs ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -2047,7 +2472,10 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "npc_kind SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "orientation SMALLINT UNSIGNED NOT NULL DEFAULT 0,"
             "actor_resource VARBINARY(64) NOT NULL,display_name VARBINARY(32) NOT NULL,"
-            "script_name VARBINARY(64) NOT NULL DEFAULT '',enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+            "script_name VARBINARY(64) NOT NULL DEFAULT '',"
+            "service_option_name VARBINARY(64) NOT NULL DEFAULT '',"
+            "service_option_description VARBINARY(96) NOT NULL DEFAULT '',"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id)) ENGINE=InnoDB") ||
@@ -2061,6 +2489,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
             "CONSTRAINT fk_server_dynamic_npc_tasks_npc FOREIGN KEY(scene,actor_id) "
             "REFERENCES server_dynamic_npcs(scene,actor_id) ON DELETE CASCADE) ENGINE=InnoDB") ||
         !vm_net_mock_dynamic_npc_tasks_ensure_repeatable_column() ||
+        !vm_net_mock_dynamic_npc_ensure_service_option_columns() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_instances ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -2213,18 +2642,24 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     const char *scene,
     const vm_net_mock_scene_npcinfo_seed *seed,
     bool enabled,
+    const vm_net_mock_npc_service_option *serviceOptions,
+    u32 serviceOptionCount, bool replaceServiceOptions,
     const char **errorOut)
 {
     char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
     char actorHex[sizeof(seed->actorResource) * 2 + 1];
     char nameHex[sizeof(seed->displayName) * 2 + 1];
     char scriptHex[sizeof(seed->scriptName) * 2 + 1];
+    char serviceOptionNameHex[sizeof(seed->serviceOptionName) * 2 + 1];
+    char serviceOptionDescriptionHex[sizeof(seed->serviceOptionDescription) * 2 + 1];
     char instanceSceneHex[sizeof(seed->instanceScene) * 2 + 1];
     char query[2048];
     int existing = -1;
     vm_net_mock_dynamic_npc_override row;
     vm_net_mock_scene_npcinfo_seed normalizedSeed;
     const char *publishError = NULL;
+    bool transactionStarted = false;
+    bool hasInstanceService = false;
 
     if (errorOut)
         *errorOut = "invalid dynamic npc";
@@ -2232,7 +2667,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         return false;
     normalizedSeed = *seed;
     seed = &normalizedSeed;
-    if (!vm_net_mock_dynamic_npc_db_load())
+    if (!vm_net_mock_dynamic_npc_db_load() ||
+        !vm_net_mock_npc_service_options_table_ensure())
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
@@ -2245,16 +2681,31 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = "n_girl.actor 不能作为动态 NPC 使用；请改选 n_woman1.actor";
         return false;
     }
+    if (replaceServiceOptions &&
+        !vm_net_mock_npc_service_options_validate(serviceOptions,
+                                                   serviceOptionCount))
+    {
+        if (errorOut)
+            *errorOut = "NPC service options are invalid";
+        return false;
+    }
+    hasInstanceService = replaceServiceOptions
+                             ? vm_net_mock_npc_service_options_has_kind(
+                                   serviceOptions, serviceOptionCount,
+                                   VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+                             : seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE;
     if (!vm_net_mock_scene_name_is_safe(scene) ||
         seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
         seed->kind > VM_NET_MOCK_NPC_KIND_MAX ||
         seed->displayName[0] == 0 || strlen(seed->displayName) >= 30 ||
         seed->actorResource[0] == 0 || strlen(seed->actorResource) >= 30 ||
         strlen(seed->scriptName) >= 32 ||
+        strlen(seed->serviceOptionName) >= sizeof(seed->serviceOptionName) ||
+        strlen(seed->serviceOptionDescription) >= sizeof(seed->serviceOptionDescription) ||
         !vm_net_mock_str_ends_with(seed->actorResource, ".actor") ||
         (seed->scriptName[0] != 0 &&
          !vm_net_mock_str_ends_with(seed->scriptName, ".xse")) ||
-        (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+        (hasInstanceService &&
          ((seed->instanceScene[0] == 0 && seed->challengeEnemyId == 0) ||
           (seed->instanceScene[0] != 0 &&
            (!vm_net_mock_str_ends_with(seed->instanceScene, ".sce") ||
@@ -2298,7 +2749,17 @@ static bool vm_net_mock_dynamic_npc_admin_save(
                             nameHex, sizeof(nameHex)) == 0 ||
         (seed->scriptName[0] != 0 &&
          vm_mysql_hex_encode(seed->scriptName, strlen(seed->scriptName),
-                             scriptHex, sizeof(scriptHex)) == 0))
+                             scriptHex, sizeof(scriptHex)) == 0) ||
+        (seed->serviceOptionName[0] != 0 &&
+         vm_mysql_hex_encode(seed->serviceOptionName,
+                             strlen(seed->serviceOptionName),
+                             serviceOptionNameHex,
+                             sizeof(serviceOptionNameHex)) == 0) ||
+        (seed->serviceOptionDescription[0] != 0 &&
+         vm_mysql_hex_encode(seed->serviceOptionDescription,
+                             strlen(seed->serviceOptionDescription),
+                             serviceOptionDescriptionHex,
+                             sizeof(serviceOptionDescriptionHex)) == 0))
     {
         if (errorOut)
             *errorOut = "NPC text encoding failed";
@@ -2306,6 +2767,10 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     }
     if (seed->scriptName[0] == 0)
         scriptHex[0] = 0;
+    if (seed->serviceOptionName[0] == 0)
+        serviceOptionNameHex[0] = 0;
+    if (seed->serviceOptionDescription[0] == 0)
+        serviceOptionDescriptionHex[0] = 0;
     instanceSceneHex[0] = 0;
     if (seed->instanceScene[0] != 0 &&
         vm_mysql_hex_encode(seed->instanceScene, strlen(seed->instanceScene),
@@ -2316,21 +2781,28 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         return false;
     }
     snprintf(query, sizeof(query),
-             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,enabled) "
-             "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',%u) "
+             "INSERT INTO server_dynamic_npcs(scene,actor_id,pos_x,pos_y,npc_kind,orientation,actor_resource,display_name,script_name,service_option_name,service_option_description,enabled) "
+             "VALUES(X'%s',%u,%u,%u,%u,%u,X'%s',X'%s',X'%s',X'%s',X'%s',%u) "
              "ON DUPLICATE KEY UPDATE pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
              "npc_kind=VALUES(npc_kind),orientation=VALUES(orientation),"
              "actor_resource=VALUES(actor_resource),display_name=VALUES(display_name),"
-             "script_name=VALUES(script_name),enabled=VALUES(enabled)",
+             "script_name=VALUES(script_name),service_option_name=VALUES(service_option_name),"
+             "service_option_description=VALUES(service_option_description),enabled=VALUES(enabled)",
              sceneHex, seed->actorId, seed->x, seed->y, seed->kind,
-             seed->orientation, actorHex, nameHex, scriptHex, enabled ? 1u : 0u);
-    if (!vm_mysql_exec(query))
+             seed->orientation, actorHex, nameHex, scriptHex,
+             serviceOptionNameHex, serviceOptionDescriptionHex, enabled ? 1u : 0u);
+    if (!vm_mysql_exec("START TRANSACTION"))
     {
         if (errorOut)
             *errorOut = vm_mysql_last_error();
         return false;
     }
-    if (seed->kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+    transactionStarted = true;
+    if (!vm_mysql_exec(query))
+    {
+        goto failed;
+    }
+    if (hasInstanceService)
     {
         snprintf(query, sizeof(query),
                  "INSERT INTO server_dynamic_npc_instances(scene,actor_id,target_scene,target_x,target_y,challenge_enemy_id,minimum_level) "
@@ -2348,11 +2820,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
                  sceneHex, seed->actorId);
     }
     if (!vm_mysql_exec(query))
-    {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
-    }
+        goto failed;
     if (seed->taskId != 0)
     {
         snprintf(query, sizeof(query),
@@ -2369,11 +2837,17 @@ static bool vm_net_mock_dynamic_npc_admin_save(
                  sceneHex, seed->actorId);
     }
     if (!vm_mysql_exec(query))
+        goto failed;
+    if (replaceServiceOptions &&
+        !vm_net_mock_npc_service_options_replace_in_transaction(
+            scene, seed->actorId, serviceOptions, serviceOptionCount,
+            errorOut))
     {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
+        goto failed;
     }
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
     memset(&row, 0, sizeof(row));
     snprintf(row.scene, sizeof(row.scene), "%s", scene);
     row.seed = *seed;
@@ -2384,14 +2858,22 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
+           seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
            seed->taskId, seed->taskRepeatable ? 1u : 0u, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
            seed->instanceMinLevel, seed->actorResource,
            seed->scriptName[0] ? seed->scriptName : "-");
     return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static bool vm_net_mock_dynamic_npc_admin_delete_override(
@@ -2400,10 +2882,12 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     char sceneHex[sizeof(g_vm_net_mock_dynamic_npc_overrides[0].scene) * 2 + 1];
     char query[512];
     int existing = -1;
+    bool transactionStarted = false;
 
     if (errorOut)
         *errorOut = "dynamic npc override not found";
     if (!vm_net_mock_dynamic_npc_db_load() ||
+        !vm_net_mock_npc_service_options_table_ensure() ||
         !vm_net_mock_scene_name_is_safe(scene) || actorId == 0)
     {
         return false;
@@ -2414,15 +2898,25 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     {
         return false;
     }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_services WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_npc_shop_inventory WHERE scene=X'%s' AND actor_id=%u",
+             sceneHex, actorId);
+    if (!vm_mysql_exec(query))
+        goto failed;
     snprintf(query, sizeof(query),
              "DELETE FROM server_dynamic_npcs WHERE scene=X'%s' AND actor_id=%u",
              sceneHex, actorId);
-    if (!vm_mysql_exec(query))
-    {
-        if (errorOut)
-            *errorOut = vm_mysql_last_error();
-        return false;
-    }
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
     if ((u32)existing + 1 < g_vm_net_mock_dynamic_npc_override_count)
     {
         memmove(&g_vm_net_mock_dynamic_npc_overrides[existing],
@@ -2438,6 +2932,13 @@ static bool vm_net_mock_dynamic_npc_admin_delete_override(
     printf("[info][mock-admin] dynamic_npc_override_delete scene=%s actor=%u\n",
            scene, actorId);
     return true;
+
+failed:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (errorOut)
+        *errorOut = vm_mysql_last_error();
+    return false;
 }
 
 static u32 vm_net_mock_append_builtin_scene_npcinfo_seeds(

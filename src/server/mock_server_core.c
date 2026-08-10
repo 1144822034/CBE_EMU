@@ -4556,9 +4556,32 @@ enum
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER = 7,
     VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER,
+    /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
+     * Tasks and direct NPC services share this one client-owned list. */
+    VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
+    VM_NET_MOCK_NPC_SERVICE_OPTION_MAX = VM_NET_MOCK_NPC_KIND_MAX,
     VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX = 32,
     VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS = 7
 };
+
+/* A configured NPC service is only an already parser-backed action=1 service.
+ * It deliberately does not expose arbitrary action/value pairs to the admin
+ * UI.  task bindings remain separate action=4 entries. */
+typedef struct
+{
+    u16 kind;
+    u8 sortOrder;
+    char optionName[64];
+    char optionDescription[96];
+} vm_net_mock_npc_service_option;
+
+static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
+{
+    return kind > VM_NET_MOCK_NPC_KIND_NORMAL &&
+                   kind <= VM_NET_MOCK_NPC_KIND_MAX
+               ? (1u << kind)
+               : 0u;
+}
 
 /* action=1 in task_hall_activate_selected_entry sends 26/1{type=2,id=value}.
  * Use a private high-byte namespace for nested service menus; catalog ids live

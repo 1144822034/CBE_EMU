@@ -2048,7 +2048,9 @@ typedef struct
     bool active;
     u32 roleId;
     u32 actorId;
-    u16 serviceKind;
+    /* Only the action-1 services actually emitted for this exact NPC dialog
+     * are authorized for the private type=2 follow-up request. */
+    u32 serviceMask;
     char scene[64];
 } vm_mock_service_npc_context;
 
@@ -5550,6 +5552,11 @@ typedef struct
     char actorResource[64];
     char displayName[32];
     char scriptName[64];
+    /* A non-normal dynamic NPC may override the one parser-backed service
+     * entry shown in its 26/1 dialog.  The service kind remains the action
+     * authority; these strings only replace the visible title and detail. */
+    char serviceOptionName[64];
+    char serviceOptionDescription[96];
     char instanceScene[64];
     bool nativeSceneActor;
 } vm_net_mock_scene_npcinfo_seed;
