@@ -3894,6 +3894,36 @@ static bool vm_net_mock_get_response_object_entry_field(
     return false;
 }
 
+/* `1/4/6.teaminfo` is not a vm_net_mock_put_object_blob() value.  The
+ * mmBattle parser consumes its entry payload directly as 14-byte overlapped
+ * rows (00 04, role-id, hp, mp), so every service-side reader must use the
+ * response-entry accessor rather than the nested-blob accessor. */
+static bool vm_net_mock_get_battle_teaminfo_raw_field(
+    const u8 *packet,
+    u32 packetLen,
+    const u8 **teamInfoOut,
+    u16 *teamInfoLenOut)
+{
+    const u8 *teamInfo = NULL;
+    u16 teamInfoLen = 0;
+
+    if (teamInfoOut)
+        *teamInfoOut = NULL;
+    if (teamInfoLenOut)
+        *teamInfoLenOut = 0;
+    if (!vm_net_mock_get_response_object_entry_field(
+            packet, packetLen, 4, 6, "teaminfo", &teamInfo, &teamInfoLen) ||
+        teamInfo == NULL || teamInfoLen == 0 || (teamInfoLen % 14u) != 0)
+    {
+        return false;
+    }
+    if (teamInfoOut)
+        *teamInfoOut = teamInfo;
+    if (teamInfoLenOut)
+        *teamInfoLenOut = teamInfoLen;
+    return true;
+}
+
 static u8 vm_mock_service_team_battle_alive_mask(const vm_mock_service_team *team)
 {
     u8 mask = 0;
@@ -4025,9 +4055,8 @@ static bool vm_mock_service_team_battle_capture_round_action(
     pending->sourceClientId = context->session ? context->session->clientId : 0;
     pending->memberIndex = context->memberIndex;
     pending->actionCount = actionCount;
-    pending->includesTeamInfo = vm_net_mock_get_object_blob_field(
-        response, responseLen, "teaminfo", &teamInfo, &teamInfoLen) &&
-        teamInfo != NULL && teamInfoLen != 0;
+    pending->includesTeamInfo = vm_net_mock_get_battle_teaminfo_raw_field(
+        response, responseLen, &teamInfo, &teamInfoLen);
     pending->actionInfoLen = actionInfoLen;
     memcpy(pending->actionInfo, actionInfo, actionInfoLen);
     printf("[info][mock-service] team_battle_round_capture battle=%u round=%u "
@@ -4139,10 +4168,9 @@ static u32 vm_net_mock_merge_team_battle_round_response(
     {
         return 0;
     }
-    includesTeamInfo = vm_net_mock_get_object_blob_field(
-        currentResponse, currentResponseLen, "teaminfo",
-        &currentTeamInfo, &currentTeamInfoLen) &&
-        currentTeamInfo != NULL && currentTeamInfoLen != 0;
+    includesTeamInfo = vm_net_mock_get_battle_teaminfo_raw_field(
+        currentResponse, currentResponseLen,
+        &currentTeamInfo, &currentTeamInfoLen);
 
     for (;;)
     {
@@ -6292,8 +6320,8 @@ static void vm_net_mock_rewrite_team_battle_teaminfo_wire_ids(
     if (packet == NULL || team == NULL || observer == NULL ||
         team->battleMemberCount < 2 ||
         team->battleMemberCount > VM_MOCK_SERVICE_TEAM_MEMBER_MAX ||
-        !vm_net_mock_get_object_blob_field(packet, packetLen,
-                                           "teaminfo", &teamInfo, &teamInfoLen) ||
+        !vm_net_mock_get_battle_teaminfo_raw_field(packet, packetLen,
+                                                    &teamInfo, &teamInfoLen) ||
         teamInfo == NULL || teamInfoLen != (u16)(team->battleMemberCount * 14u))
     {
         return;

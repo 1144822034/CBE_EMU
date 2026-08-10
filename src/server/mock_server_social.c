@@ -3894,6 +3894,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         vm_mock_service_client_session *source =
             vm_mock_service_find_client_session(notice->sourceClientId);
         u32 sourceWireId = 0;
+        char sourceNameHex[sizeof(notice->sourceName) * 2 + 1];
+        size_t sourceNameLen = 0;
 
         if (source == NULL || !source->roleOnline ||
             source->onlineRoleId != notice->sourceRoleId ||
@@ -3908,9 +3910,28 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
          * HandleGuildJoinConfirm(0x01011ED0), which sends 1/5/3.  Use the
          * exact actor id that represents this remote player to `observer`;
          * guest persistent role ids collide with the observer's own 10001. */
+        while (sourceNameLen < sizeof(notice->sourceName) &&
+               notice->sourceName[sourceNameLen] != '\0')
+        {
+            ++sourceNameLen;
+        }
+        if (sourceNameLen == sizeof(notice->sourceName) ||
+            !vm_mysql_hex_encode(notice->sourceName, sourceNameLen,
+                                 sourceNameHex, sizeof(sourceNameHex)))
+        {
+            snprintf(sourceNameHex, sizeof(sourceNameHex), "invalid-c-string");
+        }
+        /* Forensics only: the client consumes 5/2.name verbatim in
+         * net_handle_group_info(0x01011F3A).  Keep this byte-level trace
+         * until a live garbled-name reproduction identifies the first
+         * divergent boundary; it intentionally performs no transcoding. */
+        printf("[info][mock-service] team_invite_name_wire observer=%08x source=%08x/%u "
+               "wire_id=%u wt=5/2 field=name encoding=raw-gbk bytes=%u hex=%s\n",
+               observer->clientId, notice->sourceClientId, notice->sourceRoleId,
+               sourceWireId, (u32)sourceNameLen, sourceNameHex);
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 2, &objectStart) ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
-            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+            !vm_net_mock_put_object_cstring(out, outCap, pos, "name", notice->sourceName))
         {
             return -1;
         }
@@ -3989,6 +4010,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         u32 sourceWireId = source ? vm_mock_service_team_member_wire_id(observer, source)
                                   : notice->sourceRoleId;
         u8 result = notice->result;
+        char sourceNameHex[sizeof(notice->sourceName) * 2 + 1];
+        size_t sourceNameLen = 0;
 
         /* The login 5/10 response establishes the inviter's local row.  The
          * native result path is therefore 5/4 now, followed by the queued
@@ -4001,11 +4024,28 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         {
             result = 0;
         }
+        while (sourceNameLen < sizeof(notice->sourceName) &&
+               notice->sourceName[sourceNameLen] != '\0')
+        {
+            ++sourceNameLen;
+        }
+        if (sourceNameLen == sizeof(notice->sourceName) ||
+            !vm_mysql_hex_encode(notice->sourceName, sourceNameLen,
+                                 sourceNameHex, sizeof(sourceNameHex)))
+        {
+            snprintf(sourceNameHex, sizeof(sourceNameHex), "invalid-c-string");
+        }
+        /* Forensics only: subtype 4 also feeds `name` directly into a `%s`
+         * confirmation/message template in net_handle_group_info. */
+        printf("[info][mock-service] team_result_name_wire observer=%08x source=%08x/%u "
+               "wire_id=%u wt=5/4 result=%u field=name encoding=raw-gbk bytes=%u hex=%s\n",
+               observer->clientId, notice->sourceClientId, notice->sourceRoleId,
+               sourceWireId, result, (u32)sourceNameLen, sourceNameHex);
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4, &objectStart) ||
             sourceWireId == 0 ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
             !vm_net_mock_put_object_u8(out, outCap, pos, "result", result) ||
-            !vm_net_mock_put_object_string(out, outCap, pos, "name", notice->sourceName))
+            !vm_net_mock_put_object_cstring(out, outCap, pos, "name", notice->sourceName))
         {
             return -1;
         }
