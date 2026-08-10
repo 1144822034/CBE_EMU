@@ -354,6 +354,8 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npcs` (
   `actor_resource` VARBINARY(64) NOT NULL,
   `display_name` VARBINARY(32) NOT NULL,
   `script_name` VARBINARY(64) NOT NULL DEFAULT '',
+  `service_option_name` VARBINARY(64) NOT NULL DEFAULT '',
+  `service_option_description` VARBINARY(96) NOT NULL DEFAULT '',
   `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -390,6 +392,24 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
     FOREIGN KEY (`scene`, `actor_id`)
     REFERENCES `server_dynamic_npcs` (`scene`, `actor_id`)
     ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Direct NPC dialog services are a set, not a replacement for task bindings.
+-- service_kind=0 is the explicit “configured but no direct service” marker;
+-- 1..7 are the existing parser-backed action=1 service kinds.  Rows are
+-- shared by dynamic NPCs and scene-native NPC overrides, so no foreign key is
+-- used here: native actors do not have a server_dynamic_npcs parent row.
+CREATE TABLE IF NOT EXISTS `server_npc_services` (
+  `scene` VARBINARY(64) NOT NULL,
+  `actor_id` INT UNSIGNED NOT NULL,
+  `service_kind` SMALLINT UNSIGNED NOT NULL,
+  `sort_order` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `option_name` VARBINARY(64) NOT NULL DEFAULT '',
+  `option_description` VARBINARY(96) NOT NULL DEFAULT '',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`scene`, `actor_id`, `service_kind`),
+  KEY `idx_server_npc_services_dialog` (`scene`, `actor_id`, `sort_order`, `service_kind`)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS `server_monsters` (

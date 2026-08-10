@@ -4182,6 +4182,94 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     return 1;
 }
 
+/*
+ * A scene battle start subtype 5 resolves every right-side role through the
+ * CBE group manager's already-imported roster.  A leader can touch a monster
+ * before its next scene poll has delivered the accepted-invite result (5/4)
+ * and the member delta (5/5).  In that case 4/5 must not overtake those
+ * normal group objects: HandleBattleStartMsg(0x66CC) would otherwise create a
+ * right-side slot with no roster/template row.
+ *
+ * This is deliberately restricted to notices that describe members of the
+ * very team entering battle.  It neither drains chat/unrelated social work
+ * nor invents a roster snapshot.  The emitted bytes are the same native 5/4
+ * and 5/5 forms used by the ordinary scene-poll path; after they have been
+ * appended the queue entries are consumed so a later poll cannot append the
+ * member a second time.
+ */
+static int vm_net_mock_append_team_battle_roster_preamble(
+    u8 *out,
+    u32 outCap,
+    u32 *pos,
+    vm_mock_service_client_session *observer,
+    const vm_mock_service_team *team)
+{
+    int appended = 0;
+
+    if (out == NULL || pos == NULL || observer == NULL || team == NULL ||
+        !team->active || !vm_mock_service_team_contains_client(team, observer->clientId))
+    {
+        return -1;
+    }
+
+    /* Preserve the client lifecycle: for a newly accepted member, 5/4 marks
+     * the existing local leader state before 5/5 appends that member. */
+    for (u32 pass = 0; pass < 2; ++pass)
+    {
+        const u8 expectedType = pass == 0
+                                    ? VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_RESULT
+                                    : VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN;
+
+        for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+        {
+            vm_mock_service_social_notice *notice = &observer->socialNotices[i];
+            vm_mock_service_client_session *source = NULL;
+            u32 sourceWireId = 0;
+            u32 objectStart = 0;
+
+            if (notice->type != expectedType || notice->result != (pass == 0 ? 1 : 0))
+                continue;
+            source = vm_mock_service_find_client_session(notice->sourceClientId);
+            if (source == NULL || source->onlineRoleId != notice->sourceRoleId ||
+                !vm_mock_service_team_contains_client(team, source->clientId))
+            {
+                continue;
+            }
+
+            if (pass == 0)
+            {
+                sourceWireId = vm_mock_service_team_member_wire_id(observer, source);
+                if (sourceWireId == 0 ||
+                    !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 5, 4,
+                                                 &objectStart) ||
+                    !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
+                    !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+                    !vm_net_mock_put_object_cstring(out, outCap, pos, "name",
+                                                     notice->sourceName))
+                {
+                    return -1;
+                }
+                vm_net_mock_finish_wt_object(out, objectStart, *pos);
+            }
+            else if (!vm_net_mock_append_team_member_join_object(
+                         out, outCap, pos, observer, source))
+            {
+                return -1;
+            }
+
+            printf("[info][mock-service] team_battle_roster_preamble observer=%08x "
+                   "member=%08x/%u update=5/%u source=team-battle-start\n",
+                   observer->clientId,
+                   source->clientId,
+                   source->onlineRoleId,
+                   pass == 0 ? 4u : 5u);
+            memset(notice, 0, sizeof(*notice));
+            ++appended;
+        }
+    }
+    return appended;
+}
+
 static int vm_net_mock_append_scene_sync_trade_object(
     u8 *out,
     u32 outCap,

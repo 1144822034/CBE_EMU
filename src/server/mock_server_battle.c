@@ -201,6 +201,7 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
     u32 mp = 0;
     u32 mpMax = 0;
     u8 partyCount = 0;
+    int rosterPreambleCount = 0;
 
     if (out == NULL || outCap < pos || observer == NULL ||
         observer->pendingTeamBattleSerial == 0)
@@ -234,6 +235,10 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
         &partyCount);
     if (battleInfoLen == 0 || battleInfoLen > 0xffff)
         return 0;
+    rosterPreambleCount = vm_net_mock_append_team_battle_roster_preamble(
+        out, outCap, &pos, observer, team);
+    if (rosterPreambleCount < 0 || rosterPreambleCount > 0xfd)
+        return 0;
     if (!vm_net_mock_append_scene_monster_moveinfo2_object(
             out, outCap, &pos,
             team->battleEnemyId,
@@ -250,7 +255,7 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 2);
+    vm_net_mock_finish_wt_packet(out, pos, (u8)(2 + rosterPreambleCount));
 
     hpMax = observer->onlineHpMax ? observer->onlineHpMax : 1;
     hp = observer->onlineHp;
@@ -297,7 +302,7 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
     observer->pendingTeamBattleSerial = 0;
     printf("[info][mock-service] team_battle_deliver serial=%u observer=%08x "
            "leader=%08x enemy=%u scene=%s party=%u subtype=5 side=%u "
-           "objects=2 resp=%u evidence=mmBattle:0x7BD0->0x66CC\n",
+           "roster_preamble=%d objects=%u resp=%u evidence=mmBattle:0x7BD0->0x66CC\n",
            pendingSerial,
            observer->clientId,
            team->battleLeaderClientId,
@@ -305,6 +310,8 @@ static u32 vm_net_mock_build_pending_team_battle_start_response(
            team->battleScene,
            partyCount,
            team->battleSide,
+           rosterPreambleCount,
+           (u32)(2 + rosterPreambleCount),
            pos);
     return pos;
 }
@@ -6823,6 +6830,7 @@ static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u3
     u32 operate = 0;
     u32 responseLen = 0;
     bool saved = false;
+    bool activeTeamReplay = false;
     const char *selection = "bootstrap-physical";
     const char *mode = "solo";
     u8 previousReplayInflight = 0;
@@ -6834,7 +6842,7 @@ static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u3
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         offset != requestLen || object.major != 1 || object.kind != 4 ||
         object.subtype != 12 || object.payloadLen != 0 ||
-        source->onlineRoleId == 0 || g_vm_net_mock_battle_auto_enabled == 0)
+        source->onlineRoleId == 0)
     {
         return 0;
     }
@@ -6847,12 +6855,32 @@ static u32 vm_net_mock_build_battle_auto12_replay_response(const u8 *request, u3
     }
     else if (team != NULL && team->battleActive && !team->battleFinished)
     {
+        if (!vm_mock_service_team_battle_contains_client(team, source->clientId))
+            return 0;
         mode = "team";
+        activeTeamReplay = true;
     }
     else if (g_mockBattleOperateSessionArmed == 0 &&
              !vm_net_mock_current_screen_is_battle())
     {
         return 0;
+    }
+
+    /* The client keeps its own automatic-action state across a completed
+     * team battle.  Its next BattleAutoAction_TimerTick(0x2952) therefore
+     * emits this exact empty 4/12 after the new 4/5 start.  The process-wide
+     * mock flag is deliberately reset at an ordinary result-panel close and
+     * cannot veto that newer client proof.  Scope this recovery only to an
+     * active team member; solo and duel paths still require the explicit
+     * 4/11(type=1) acknowledgement state below. */
+    if (!activeTeamReplay && g_vm_net_mock_battle_auto_enabled == 0)
+        return 0;
+    if (activeTeamReplay && g_vm_net_mock_battle_auto_enabled == 0)
+    {
+        vm_net_mock_battle_auto_arm();
+        printf("[info][network] mock_team_battle_auto_resume source=%08x "
+               "role=%u battle=%u evidence=client-4/12-after-4/5\n",
+               source->clientId, source->onlineRoleId, team->battleSerial);
     }
 
     saved = g_vm_net_mock_battle_auto_last_operation_valid != 0 &&
@@ -7702,6 +7730,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     bool prefillEnemyTemplate = false;
     bool prefillPlayerTemplate = false;
     bool continueSceneHangup = false;
+    int teamBattleRosterPreambleCount = 0;
     u8 hangupAutoFlagType = (u8)vm_net_mock_env_u32(
         "CBE_HANGUP_BATTLE_AUTO_FLAG", 1);
     u32 responseObjectCount = 1;
@@ -7865,6 +7894,24 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     }
     if (battleInfoLen == 0 || battleInfoLen > 0xffff)
         return 0;
+
+    /* The right-side ids in subtype-5 battleinfo are resolved only from the
+     * CBE's imported group roster.  If the accepted-invite 5/4 -> 5/5 delta
+     * is still queued, serialize that exact native delta before 2/2 + 4/5;
+     * otherwise this 4/1 can overtake it and leave an unresolved right slot. */
+    if (useSceneMonsterStart && activeTeam != NULL && activeSession != NULL &&
+        teamBattleScene != NULL && teamBattlePartyCount >= 2)
+    {
+        teamBattleRosterPreambleCount =
+            vm_net_mock_append_team_battle_roster_preamble(
+                out, outCap, &pos, activeSession, activeTeam);
+        if (teamBattleRosterPreambleCount < 0 ||
+            teamBattleRosterPreambleCount > (int)(0xffu - responseObjectCount))
+        {
+            return 0;
+        }
+        responseObjectCount += (u32)teamBattleRosterPreambleCount;
+    }
 
     if (prefillEnemyTemplate)
     {
@@ -8048,10 +8095,11 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
             battleSide,
             &teamBattleQueuedCount);
         printf("[info][network] mock_team_battle_start leader=%08x party=%u "
-               "queued=%u response=%u source=leader-4/1\n",
+               "queued=%u roster_preamble=%d response=%u source=leader-4/1\n",
                activeSession->clientId,
                teamBattlePartyCount,
                teamBattleQueuedCount,
+               teamBattleRosterPreambleCount,
                pos);
     }
     return pos;
