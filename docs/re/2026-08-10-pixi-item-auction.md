@@ -10,9 +10,23 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 上架：选背包物品 → 设起拍价（铜币或酷宝）与时长档 → **先扣手续费并删除背包物品**，再写入拍卖行。
 - 手续费：`fee = max(1, startPrice * feePercent / 100)`；`feePercent = base(2) + tier * perTier(2)`（1/6/12/24 时 → **2/4/6/8%**）。
 - 竞拍：同货币出价；被超价后拍金进入 **待领退款**（不自动入账）。
+- 禁止同 `roleId` 与同 `accountId` 自拍。
+- 全服同时在售（`status=OPEN`）最多 **50** 件；另有每人 `max_active_listings`（默认 20）。
 - 超时无出价：下架，卖家待领 **超时退物**。
 - 超时有出价：下架成交；卖家待领 **拍金**，赢家待领 **物品**。
-- 「拍」有待领时闪烁；领取走 claim 幂等。
+- 「拍」有待领时闪烁；领取走 claim 幂等（先占位 `claimed=1` 再发货）。
+
+## 防刷加固（2026-08-10）
+
+| 路径 | 契约 |
+|------|------|
+| claim | `UPDATE claimed=1 WHERE claimed=0` 且 `ROW_COUNT()=1` 后才 credit/发物；失败则回滚占位 |
+| bid | 条件更新（匹配原 `high_bidder`/`current_price`/`OPEN`）成功后才写退款 claim；事务提交后通知 |
+| settle | 事务 + `ROW_COUNT()=1` 才插卖家/赢家 claim；提交后再 notify |
+| cancel | 先回背包，再 `CANCELLED`；更新失败则回滚背包 |
+| self | 同账号禁止出价 |
+
+仍开放风险：低起拍价搬家（手续费按起拍价）；未做成交抽佣。
 
 ## 协议（Pixi WT kind=42）
 
@@ -53,4 +67,8 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - [ ] 无出价超时 → 卖家领取物品
 - [ ] 有出价超时 → 卖家领钱、赢家领物，列表下架
 - [ ] 有出价不可撤；无出价可撤回背包
+- [ ] 同账号出价被拒 `self-account`
+- [ ] 全服 OPEN≥50 时上架返回 `global-limit`
+- [ ] 背包满撤拍不丢物（仍 OPEN）
+- [ ] claim 重复请求不双发
 - [ ] `make -j2`；Pixi `tsc --noEmit`

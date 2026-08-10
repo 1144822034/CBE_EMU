@@ -34,7 +34,9 @@ enum
     VM_MOCK_AUCTION_EVT_EXPIRED = 4,
     VM_MOCK_AUCTION_PAGE_SIZE = 12,
     VM_MOCK_AUCTION_NOTICE_MAX = 48,
-    VM_MOCK_AUCTION_EXPIRE_BATCH = 32
+    VM_MOCK_AUCTION_EXPIRE_BATCH = 32,
+    /* Server-wide cap on concurrent OPEN listings. */
+    VM_MOCK_AUCTION_MAX_GLOBAL_OPEN = 50
 };
 
 typedef struct
@@ -346,6 +348,37 @@ static bool vm_mock_auction_u32_row(void *contextValue, unsigned int columnCount
     return vm_mock_mysql_parse_u32(values[0], lengths[0], idOut);
 }
 
+/* UPDATE/INSERT success alone is not enough — 0-row updates still return true. */
+static bool vm_mock_auction_exec_affected(const char *sql, u32 *affectedOut)
+{
+    u32 affected = 0;
+
+    if (affectedOut != NULL)
+        *affectedOut = 0;
+    if (sql == NULL || !vm_mysql_exec(sql))
+        return false;
+    if (!vm_mysql_query("SELECT ROW_COUNT()", vm_mock_auction_u32_row, &affected))
+        return false;
+    if (affectedOut != NULL)
+        *affectedOut = affected;
+    return true;
+}
+
+static bool vm_mock_auction_tx_begin(void)
+{
+    return vm_mysql_exec("START TRANSACTION");
+}
+
+static bool vm_mock_auction_tx_commit(void)
+{
+    return vm_mysql_exec("COMMIT");
+}
+
+static void vm_mock_auction_tx_rollback(void)
+{
+    (void)vm_mysql_exec("ROLLBACK");
+}
+
 static bool vm_mock_auction_charge(vm_net_mock_role_state *role, u8 currency,
                                    u32 amount, const char *reason)
 {
@@ -382,10 +415,10 @@ static bool vm_mock_auction_credit(vm_net_mock_role_state *role, u8 currency,
                                          role->roleId);
 }
 
-static bool vm_mock_auction_insert_claim(u32 roleId, const char *accountId, u8 kind,
-                                         u32 listingId, u32 itemId, u32 itemCount,
-                                         u16 enhanceLevel, u32 moneyAmount,
-                                         u32 wcoinAmount)
+static bool vm_mock_auction_insert_claim_ex(u32 roleId, const char *accountId, u8 kind,
+                                            u32 listingId, u32 itemId, u32 itemCount,
+                                            u16 enhanceLevel, u32 moneyAmount,
+                                            u32 wcoinAmount, bool notify)
 {
     char accountEsc[160];
     char query[768];
@@ -404,8 +437,19 @@ static bool vm_mock_auction_insert_claim(u32 roleId, const char *accountId, u8 k
              (u32)enhanceLevel, moneyAmount, wcoinAmount);
     if (!vm_mysql_exec(query))
         return false;
-    vm_mock_auction_notify_role(roleId, listingId, VM_MOCK_AUCTION_EVT_CLAIM, 0);
+    if (notify)
+        vm_mock_auction_notify_role(roleId, listingId, VM_MOCK_AUCTION_EVT_CLAIM, 0);
     return true;
+}
+
+static bool vm_mock_auction_insert_claim(u32 roleId, const char *accountId, u8 kind,
+                                         u32 listingId, u32 itemId, u32 itemCount,
+                                         u16 enhanceLevel, u32 moneyAmount,
+                                         u32 wcoinAmount)
+{
+    return vm_mock_auction_insert_claim_ex(roleId, accountId, kind, listingId, itemId,
+                                            itemCount, enhanceLevel, moneyAmount,
+                                            wcoinAmount, true);
 }
 
 static u32 vm_mock_auction_pending_claim_count(u32 roleId)
@@ -531,6 +575,8 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
     char sellerAccount[64];
     char highAccount[64];
     char query[320];
+    u32 affected = 0;
+    bool sold = false;
 
     if (!vm_mock_auction_load_listing(listingId, &row) ||
         row.status != VM_MOCK_AUCTION_ST_OPEN)
@@ -549,14 +595,28 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
              listingId);
     (void)vm_mysql_query(query, vm_mock_auction_copy_str_row, highAccount);
 
-    if (row.highBidderRoleId != 0 && row.currentPrice > 0)
+    if (sellerAccount[0] == 0)
+        return false;
+
+    sold = (row.highBidderRoleId != 0 && row.currentPrice > 0);
+    if (sold && highAccount[0] == 0)
+        return false;
+
+    if (!vm_mock_auction_tx_begin())
+        return false;
+
+    if (sold)
     {
         snprintf(query, sizeof(query),
                  "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
-                 "AND status=%u",
-                 VM_MOCK_AUCTION_ST_SOLD, listingId, VM_MOCK_AUCTION_ST_OPEN);
-        if (!vm_mysql_exec(query))
+                 "AND status=%u AND high_bidder_role_id=%u AND current_price=%u",
+                 VM_MOCK_AUCTION_ST_SOLD, listingId, VM_MOCK_AUCTION_ST_OPEN,
+                 row.highBidderRoleId, row.currentPrice);
+        if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
+        {
+            vm_mock_auction_tx_rollback();
             return false;
+        }
         snprintf(query, sizeof(query),
                  "UPDATE server_auction_bids SET status=%u WHERE listing_id=%u "
                  "AND bidder_role_id=%u AND status=%u",
@@ -565,20 +625,44 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
         (void)vm_mysql_exec(query);
 
         if (row.currency == VM_MOCK_AUCTION_CUR_WCOIN)
-            (void)vm_mock_auction_insert_claim(
-                row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT,
-                listingId, 0, 0, 0, 0, row.currentPrice);
-        else
-            (void)vm_mock_auction_insert_claim(
-                row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT,
-                listingId, 0, 0, 0, row.currentPrice, 0);
+        {
+            if (!vm_mock_auction_insert_claim_ex(
+                    row.sellerRoleId, sellerAccount,
+                    VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT, listingId, 0, 0, 0, 0,
+                    row.currentPrice, false))
+            {
+                vm_mock_auction_tx_rollback();
+                return false;
+            }
+        }
+        else if (!vm_mock_auction_insert_claim_ex(
+                     row.sellerRoleId, sellerAccount,
+                     VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT, listingId, 0, 0, 0,
+                     row.currentPrice, 0, false))
+        {
+            vm_mock_auction_tx_rollback();
+            return false;
+        }
 
-        if (highAccount[0] != 0)
-            (void)vm_mock_auction_insert_claim(
+        if (!vm_mock_auction_insert_claim_ex(
                 row.highBidderRoleId, highAccount,
                 VM_MOCK_AUCTION_CLAIM_WINNER_ITEM, listingId, row.itemId,
-                row.itemCount, row.enhanceLevel, 0, 0);
+                row.itemCount, row.enhanceLevel, 0, 0, false))
+        {
+            vm_mock_auction_tx_rollback();
+            return false;
+        }
 
+        if (!vm_mock_auction_tx_commit())
+        {
+            vm_mock_auction_tx_rollback();
+            return false;
+        }
+
+        vm_mock_auction_notify_role(row.sellerRoleId, listingId,
+                                    VM_MOCK_AUCTION_EVT_CLAIM, 0);
+        vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
+                                    VM_MOCK_AUCTION_EVT_CLAIM, 0);
         vm_mock_auction_notify_role(row.sellerRoleId, listingId,
                                     VM_MOCK_AUCTION_EVT_SOLD, row.currentPrice);
         vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
@@ -592,13 +676,28 @@ static bool vm_mock_auction_settle_listing(u32 listingId)
     {
         snprintf(query, sizeof(query),
                  "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
-                 "AND status=%u",
+                 "AND status=%u AND high_bidder_role_id=0",
                  VM_MOCK_AUCTION_ST_EXPIRED, listingId, VM_MOCK_AUCTION_ST_OPEN);
-        if (!vm_mysql_exec(query))
+        if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
+        {
+            vm_mock_auction_tx_rollback();
             return false;
-        (void)vm_mock_auction_insert_claim(
-            row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_ITEM_RETURN,
-            listingId, row.itemId, row.itemCount, row.enhanceLevel, 0, 0);
+        }
+        if (!vm_mock_auction_insert_claim_ex(
+                row.sellerRoleId, sellerAccount, VM_MOCK_AUCTION_CLAIM_ITEM_RETURN,
+                listingId, row.itemId, row.itemCount, row.enhanceLevel, 0, 0,
+                false))
+        {
+            vm_mock_auction_tx_rollback();
+            return false;
+        }
+        if (!vm_mock_auction_tx_commit())
+        {
+            vm_mock_auction_tx_rollback();
+            return false;
+        }
+        vm_mock_auction_notify_role(row.sellerRoleId, listingId,
+                                    VM_MOCK_AUCTION_EVT_CLAIM, 0);
         vm_mock_auction_notify_role(row.sellerRoleId, listingId,
                                     VM_MOCK_AUCTION_EVT_EXPIRED, 0);
         printf("[info][mock-service] auction_expired listing=%u seller=%u item=%u\n",
@@ -832,6 +931,7 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
     u32 expireUnix = 0;
     u32 listingId = 0;
     u32 activeCount = 0;
+    u32 globalCount = 0;
     char accountEsc[160];
     char nameHex[96];
     char query[1024];
@@ -883,6 +983,15 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
         count = bag->count;
     if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
         count = 1;
+    globalCount = 0;
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM server_auction_listings WHERE status=%u",
+             VM_MOCK_AUCTION_ST_OPEN);
+    (void)vm_mysql_query(query, vm_mock_auction_u32_row, &globalCount);
+    if (globalCount >= VM_MOCK_AUCTION_MAX_GLOBAL_OPEN)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
+                                                   7, 0, "global-limit");
+    activeCount = 0;
     snprintf(query, sizeof(query),
              "SELECT COUNT(*) FROM server_auction_listings "
              "WHERE seller_role_id=%u AND status=%u",
@@ -967,9 +1076,11 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
     u32 amount = 0;
     vm_mock_auction_listing_row row;
     char accountEsc[160];
+    char sellerAccount[64];
     char prevAccount[64];
     char query[768];
     u32 minNeed = 0;
+    u32 affected = 0;
     vm_net_mock_role_state before;
 
     if (request == NULL || out == NULL ||
@@ -994,6 +1105,16 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
     if (row.sellerRoleId == role->roleId)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 4,
                                                    listingId, "self");
+    sellerAccount[0] = 0;
+    snprintf(query, sizeof(query),
+             "SELECT seller_account_id FROM server_auction_listings "
+             "WHERE listing_id=%u LIMIT 1",
+             listingId);
+    (void)vm_mysql_query(query, vm_mock_auction_copy_str_row, sellerAccount);
+    if (sellerAccount[0] != 0 &&
+        strcmp(sellerAccount, session->accountId) == 0)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 4,
+                                                   listingId, "self-account");
     if (row.highBidderRoleId == role->roleId)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 5,
                                                    listingId, "already-high");
@@ -1003,6 +1124,11 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
     if (amount < minNeed)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 6,
                                                    listingId, "low");
+    if (vm_mysql_hex_encode(session->accountId, strlen(session->accountId), accountEsc,
+                            sizeof(accountEsc)) == 0)
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 8,
+                                                   listingId, "encode");
+
     before = *role;
     if (!vm_mock_auction_charge(role, row.currency, amount, "auction-bid"))
     {
@@ -1010,6 +1136,7 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 7,
                                                    listingId, "balance");
     }
+
     prevAccount[0] = 0;
     if (row.highBidderRoleId != 0)
     {
@@ -1018,53 +1145,110 @@ static u32 vm_net_mock_build_auction_bid_response(const u8 *request, u32 request
                  "WHERE listing_id=%u LIMIT 1",
                  listingId);
         (void)vm_mysql_query(query, vm_mock_auction_copy_str_row, prevAccount);
-        if (prevAccount[0] != 0)
-        {
-            if (row.currency == VM_MOCK_AUCTION_CUR_WCOIN)
-                (void)vm_mock_auction_insert_claim(
-                    row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
-                    listingId, 0, 0, 0, 0, row.currentPrice);
-            else
-                (void)vm_mock_auction_insert_claim(
-                    row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
-                    listingId, 0, 0, 0, row.currentPrice, 0);
-            snprintf(query, sizeof(query),
-                     "UPDATE server_auction_bids SET status=%u WHERE listing_id=%u "
-                     "AND bidder_role_id=%u AND status=%u",
-                     VM_MOCK_AUCTION_BID_OUTBID, listingId, row.highBidderRoleId,
-                     VM_MOCK_AUCTION_BID_ACTIVE);
-            (void)vm_mysql_exec(query);
-            vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
-                                        VM_MOCK_AUCTION_EVT_OUTBID, row.currentPrice);
-        }
     }
-    if (vm_mysql_hex_encode(session->accountId, strlen(session->accountId), accountEsc,
-                            sizeof(accountEsc)) == 0)
-    {
-        *role = before;
-        (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
-        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 8,
-                                                   listingId, "encode");
-    }
-    snprintf(query, sizeof(query),
-             "UPDATE server_auction_listings SET current_price=%u,"
-             "high_bidder_role_id=%u,high_bidder_account_id=CAST(X'%s' AS CHAR) "
-             "WHERE listing_id=%u AND status=%u",
-             amount, role->roleId, accountEsc, listingId, VM_MOCK_AUCTION_ST_OPEN);
-    if (!vm_mysql_exec(query))
+
+    if (!vm_mock_auction_tx_begin())
     {
         *role = before;
         (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 9,
-                                                   listingId, "update");
+                                                   listingId, "tx");
     }
+
+    /*
+     * Conditional takeover: only the first bidder that matches the observed
+     * high/price snapshot wins. Refund claim is written AFTER this update.
+     */
+    if (row.highBidderRoleId == 0)
+        snprintf(query, sizeof(query),
+                 "UPDATE server_auction_listings SET current_price=%u,"
+                 "high_bidder_role_id=%u,high_bidder_account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE listing_id=%u AND status=%u AND high_bidder_role_id=0 AND "
+                 "current_price=%u",
+                 amount, role->roleId, accountEsc, listingId, VM_MOCK_AUCTION_ST_OPEN,
+                 row.currentPrice);
+    else
+        snprintf(query, sizeof(query),
+                 "UPDATE server_auction_listings SET current_price=%u,"
+                 "high_bidder_role_id=%u,high_bidder_account_id=CAST(X'%s' AS CHAR) "
+                 "WHERE listing_id=%u AND status=%u AND high_bidder_role_id=%u AND "
+                 "current_price=%u",
+                 amount, role->roleId, accountEsc, listingId, VM_MOCK_AUCTION_ST_OPEN,
+                 row.highBidderRoleId, row.currentPrice);
+
+    if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
+    {
+        vm_mock_auction_tx_rollback();
+        *role = before;
+        (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 10,
+                                                   listingId, "conflict");
+    }
+
+    if (row.highBidderRoleId != 0 && prevAccount[0] != 0)
+    {
+        if (row.currency == VM_MOCK_AUCTION_CUR_WCOIN)
+        {
+            if (!vm_mock_auction_insert_claim_ex(
+                    row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
+                    listingId, 0, 0, 0, 0, row.currentPrice, false))
+            {
+                vm_mock_auction_tx_rollback();
+                *role = before;
+                (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
+                return vm_net_mock_build_auction_op_result(
+                    out, outCap, VM_MOCK_AUCTION_WT_BID, 11, listingId, "refund");
+            }
+        }
+        else if (!vm_mock_auction_insert_claim_ex(
+                     row.highBidderRoleId, prevAccount, VM_MOCK_AUCTION_CLAIM_BID_REFUND,
+                     listingId, 0, 0, 0, row.currentPrice, 0, false))
+        {
+            vm_mock_auction_tx_rollback();
+            *role = before;
+            (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
+            return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID,
+                                                       11, listingId, "refund");
+        }
+        snprintf(query, sizeof(query),
+                 "UPDATE server_auction_bids SET status=%u WHERE listing_id=%u "
+                 "AND bidder_role_id=%u AND status=%u",
+                 VM_MOCK_AUCTION_BID_OUTBID, listingId, row.highBidderRoleId,
+                 VM_MOCK_AUCTION_BID_ACTIVE);
+        (void)vm_mysql_exec(query);
+    }
+
     snprintf(query, sizeof(query),
              "INSERT INTO server_auction_bids ("
              "listing_id,bidder_role_id,bidder_account_id,amount,currency,status) "
              "VALUES (%u,%u,CAST(X'%s' AS CHAR),%u,%u,%u)",
              listingId, role->roleId, accountEsc, amount, (u32)row.currency,
              VM_MOCK_AUCTION_BID_ACTIVE);
-    (void)vm_mysql_exec(query);
+    if (!vm_mysql_exec(query))
+    {
+        vm_mock_auction_tx_rollback();
+        *role = before;
+        (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 12,
+                                                   listingId, "bid-row");
+    }
+
+    if (!vm_mock_auction_tx_commit())
+    {
+        vm_mock_auction_tx_rollback();
+        *role = before;
+        (void)vm_net_mock_role_db_save_role("auction-bid-rollback", role->roleId);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 13,
+                                                   listingId, "commit");
+    }
+
+    if (row.highBidderRoleId != 0 && prevAccount[0] != 0)
+    {
+        vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
+                                    VM_MOCK_AUCTION_EVT_CLAIM, 0);
+        vm_mock_auction_notify_role(row.highBidderRoleId, listingId,
+                                    VM_MOCK_AUCTION_EVT_OUTBID, row.currentPrice);
+    }
     printf("[info][mock-service] auction_bid listing=%u role=%u amount=%u cur=%u\n",
            listingId, role->roleId, amount, row.currency);
     return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_BID, 1,
@@ -1083,6 +1267,8 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
     vm_mock_auction_listing_row row;
     char query[256];
     u16 seq = 0;
+    u32 affected = 0;
+    vm_net_mock_role_state before;
 
     if (request == NULL || out == NULL ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -1105,19 +1291,39 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
     if (row.highBidderRoleId != 0)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
                                                    5, listingId, "has-bid");
-    snprintf(query, sizeof(query),
-             "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
-             "AND status=%u",
-             VM_MOCK_AUCTION_ST_CANCELLED, listingId, VM_MOCK_AUCTION_ST_OPEN);
-    if (!vm_mysql_exec(query))
-        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
-                                                   6, listingId, "update");
+
+    /* Return item first; only then mark cancelled so bag-full cannot destroy items. */
+    before = *role;
     if (!vm_net_mock_role_add_backpack_item_to_role(role, row.itemId, row.itemCount,
                                                     row.enhanceLevel, &seq,
                                                     "auction-cancel"))
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
                                                    7, listingId, "bag-full");
-    (void)vm_net_mock_role_db_save_role("auction-cancel", role->roleId);
+
+    snprintf(query, sizeof(query),
+             "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
+             "AND status=%u AND seller_role_id=%u AND high_bidder_role_id=0",
+             VM_MOCK_AUCTION_ST_CANCELLED, listingId, VM_MOCK_AUCTION_ST_OPEN,
+             role->roleId);
+    if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
+    {
+        *role = before;
+        (void)vm_net_mock_role_db_save_role("auction-cancel-rollback", role->roleId);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
+                                                   6, listingId, "update");
+    }
+    if (!vm_net_mock_role_db_save_role("auction-cancel", role->roleId))
+    {
+        *role = before;
+        (void)vm_net_mock_role_db_save_role("auction-cancel-rollback", role->roleId);
+        snprintf(query, sizeof(query),
+                 "UPDATE server_auction_listings SET status=%u WHERE listing_id=%u "
+                 "AND status=%u",
+                 VM_MOCK_AUCTION_ST_OPEN, listingId, VM_MOCK_AUCTION_ST_CANCELLED);
+        (void)vm_mysql_exec(query);
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
+                                                   8, listingId, "save");
+    }
     session->backpackListResyncPending = true;
     return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL, 1,
                                                listingId, "ok");
@@ -1184,6 +1390,8 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
     u8 blob[1024];
     u32 blobLen = 0;
     u32 pending = 0;
+    u32 affected = 0;
+    vm_net_mock_role_state before;
 
     if (out == NULL || outCap < 5 || request == NULL ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -1207,6 +1415,22 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
     {
         bool ok = true;
         u16 seq = 0;
+
+        /*
+         * Reserve first (claimed=1) so a crash after credit cannot re-grant.
+         * Delivery failure releases the reservation.
+         */
+        snprintf(query, sizeof(query),
+                 "UPDATE server_auction_claims SET claimed=1 WHERE claim_id=%u "
+                 "AND role_id=%u AND claimed=0",
+                 rows[i].claimId, role->roleId);
+        if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
+        {
+            failed += 1;
+            continue;
+        }
+
+        before = *role;
         if (rows[i].kind == VM_MOCK_AUCTION_CLAIM_ITEM_RETURN ||
             rows[i].kind == VM_MOCK_AUCTION_CLAIM_WINNER_ITEM)
         {
@@ -1234,17 +1458,16 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         }
         else
             ok = false;
+
         if (!ok)
         {
-            failed += 1;
-            continue;
-        }
-        snprintf(query, sizeof(query),
-                 "UPDATE server_auction_claims SET claimed=1 WHERE claim_id=%u "
-                 "AND claimed=0",
-                 rows[i].claimId);
-        if (!vm_mysql_exec(query))
-        {
+            *role = before;
+            (void)vm_net_mock_role_db_save_role("auction-claim-release", role->roleId);
+            snprintf(query, sizeof(query),
+                     "UPDATE server_auction_claims SET claimed=0 WHERE claim_id=%u "
+                     "AND role_id=%u AND claimed=1",
+                     rows[i].claimId, role->roleId);
+            (void)vm_mysql_exec(query);
             failed += 1;
             continue;
         }
