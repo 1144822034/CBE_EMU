@@ -394,6 +394,32 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    /*
+     * Hangup (2/10 Type=2 + 25/3) before shop/scene/catalog detectors.  A late
+     * seat previously let parse/builder miss fall through to
+     * unimplemented-handler tip「功能暂未实现(1/2/10)」.
+     */
+    if (vm_net_mock_is_hangup_battle_start_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_hangup_battle_start_response(request, requestLen,
+                                                                   out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-hangup-battle-start", request,
+                                      requestLen, hookedLen);
+            return hookedLen;
+        }
+        hookedLen = vm_net_mock_build_hangup_owned_soft_fail_response(
+            out, outCap, "builder-zero-after-hangup-parse");
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-hangup-battle-start-soft-fail",
+                                      request, requestLen, hookedLen);
+            return hookedLen;
+        }
+        return 0;
+    }
+
     if (vm_net_mock_is_actor_type_control_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_actor_type_control_ack_response(request, requestLen, out, outCap);
@@ -634,6 +660,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-settings-unstuck", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_arena_protocol_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-arena41", request, requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_auction_protocol_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-auction42", request, requestLen, hookedLen);
         return hookedLen;
     }
 
@@ -1460,13 +1500,6 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-challenge-interaction", request, requestLen, hookedLen);
-        return hookedLen;
-    }
-
-    hookedLen = vm_net_mock_build_hangup_battle_start_response(request, requestLen, out, outCap);
-    if (hookedLen)
-    {
-        vm_net_log_handled_packet("builtin-hangup-battle-start", request, requestLen, hookedLen);
         return hookedLen;
     }
 

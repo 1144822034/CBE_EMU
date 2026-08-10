@@ -19,6 +19,14 @@ import {
   type WMapNode,
   type WorldMapCatalog,
 } from "../resources/worldMap";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  setPanelTipSticky,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 type Mode = "world" | "region" | "confirm";
 
@@ -57,6 +65,9 @@ export class WorldMapPanel extends Container {
   private kuang: Texture | null = null;
   private kuangSel: Texture | null = null;
   private artReady = false;
+  private toast: PanelTipState = createPanelTipState();
+  /** Sticky confirm copy restored after transient tips (e.g. 传送石不够). */
+  private confirmTip = "";
 
   onClose: (() => void) | null = null;
   onSoftkeys: ((labels: { left: string; right: string }) => void) | null = null;
@@ -101,12 +112,36 @@ export class WorldMapPanel extends Container {
     this.worldCursor = wi >= 0 ? wi : 0;
     this.mode = "world";
     this.regionWorld = null;
+    this.clearConfirmTip();
     this.visible = true;
     this.redraw();
   }
 
   hide(): void {
+    this.confirmTip = "";
+    clearPanelTip(this.toast);
     this.visible = false;
+  }
+
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (!this.visible) return;
+      if (this.mode === "confirm" && this.confirmTip) {
+        setPanelTipSticky(this.toast, this.confirmTip);
+      }
+      this.redraw();
+    }, ms);
+  }
+
+  private setConfirmTip(alias: string): void {
+    this.confirmTip = `您需要花费1个传送石\n瞬移到${alias}`;
+    setPanelTipSticky(this.toast, this.confirmTip);
+  }
+
+  private clearConfirmTip(): void {
+    this.confirmTip = "";
+    clearPanelTip(this.toast);
   }
 
   move(cbeDir: number): void {
@@ -159,7 +194,12 @@ export class WorldMapPanel extends Container {
       return;
     }
     if (this.mode === "region") {
+      const w = this.regionWorld;
+      const list = w ? scenesForWorld(this.catalog, w.id) : [];
+      const scene = list[this.regionCursor];
+      const alias = scene?.alias || scene?.scene || "目标";
       this.mode = "confirm";
+      this.setConfirmTip(alias);
       this.redraw();
       return;
     }
@@ -183,6 +223,7 @@ export class WorldMapPanel extends Container {
 
   cancel(): void {
     if (this.mode === "confirm") {
+      this.clearConfirmTip();
       this.mode = "region";
       this.redraw();
       return;
@@ -225,50 +266,54 @@ export class WorldMapPanel extends Container {
     // Bottom L/R chrome removed — HTML softkeys carry 确定/返回/瞬移.
     const softY = y + h - 6;
 
-    if (this.mode === "confirm") {
-      this.drawConfirm(x, y, w, softY);
-      return;
-    }
+    try {
+      if (this.mode === "confirm") {
+        this.drawConfirm(x, y, w, softY);
+        return;
+      }
 
-    const focus =
-      this.mode === "world"
-        ? this.catalog.worlds[this.worldCursor]
-        : scenesForWorld(this.catalog, this.regionWorld!.id)[this.regionCursor];
-    const name = focus?.alias || "—";
-    const level = focus?.level || "无";
-    this.addKv(x + 10, pillY + pillH + 8, "名称:", name);
-    this.addKv(x + 10, pillY + pillH + 24, "等级:", level);
+      const focus =
+        this.mode === "world"
+          ? this.catalog.worlds[this.worldCursor]
+          : scenesForWorld(this.catalog, this.regionWorld!.id)[this.regionCursor];
+      const name = focus?.alias || "—";
+      const level = focus?.level || "无";
+      this.addKv(x + 10, pillY + pillH + 8, "名称:", name);
+      this.addKv(x + 10, pillY + pillH + 24, "等级:", level);
 
-    if (this.mode === "world") {
-      this.drawGraph(
-        this.catalog.worlds.map((n) => ({
-          id: n.id,
-          x: n.x,
-          y: n.y,
-          selected: n.id === this.catalog!.worlds[this.worldCursor]?.id,
-          here: n.id === this.hereWorldId,
-        })),
-        this.catalog.worldLines,
-      );
-      this.onSoftkeys?.({ left: "确定", right: "返回" });
-    } else {
-      const list = scenesForWorld(this.catalog, this.regionWorld!.id);
-      const lines = linesForWorld(this.catalog, this.regionWorld!.id);
-      this.drawGraph(
-        list.map((n) => ({
-          id: n.id,
-          x: n.x,
-          y: n.y,
-          selected: n.id === list[this.regionCursor]?.id,
-          here: n.id === this.hereSceneId,
-        })),
-        lines,
-      );
-      this.onSoftkeys?.({ left: "瞬移", right: "返回" });
+      if (this.mode === "world") {
+        this.drawGraph(
+          this.catalog.worlds.map((n) => ({
+            id: n.id,
+            x: n.x,
+            y: n.y,
+            selected: n.id === this.catalog!.worlds[this.worldCursor]?.id,
+            here: n.id === this.hereWorldId,
+          })),
+          this.catalog.worldLines,
+        );
+        this.onSoftkeys?.({ left: "确定", right: "返回" });
+      } else {
+        const list = scenesForWorld(this.catalog, this.regionWorld!.id);
+        const lines = linesForWorld(this.catalog, this.regionWorld!.id);
+        this.drawGraph(
+          list.map((n) => ({
+            id: n.id,
+            x: n.x,
+            y: n.y,
+            selected: n.id === list[this.regionCursor]?.id,
+            here: n.id === this.hereSceneId,
+          })),
+          lines,
+        );
+        this.onSoftkeys?.({ left: "瞬移", right: "返回" });
+      }
+    } finally {
+      drawPanelTipOverlay(this, this.toast);
     }
   }
 
-  private drawConfirm(x: number, y: number, w: number, _softY: number): void {
+  private drawConfirm(x: number, y: number, _w: number, _softY: number): void {
     if (!this.catalog || !this.regionWorld) return;
     const list = scenesForWorld(this.catalog, this.regionWorld.id);
     const scene = list[this.regionCursor];
@@ -287,33 +332,8 @@ export class WorldMapPanel extends Container {
       linesForWorld(this.catalog, this.regionWorld.id),
     );
 
-    // Modal over map (CBE tip toast style).
-    const tipLines = [`您需要花费1个传送石`, `瞬移到${alias}`];
-    const lineH = 18;
-    const padX = 14;
-    const padY = 12;
-    let textW = 120;
-    for (const l of tipLines) {
-      let tw = 0;
-      for (const ch of l) tw += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
-      textW = Math.max(textW, tw);
-    }
-    const bw = Math.min(w - 24, textW + padX * 2);
-    const bh = padY * 2 + tipLines.length * lineH;
-    const bx = Math.floor((LCD_WIDTH - bw) / 2);
-    const by = Math.floor(LCD_HEIGHT / 2 - bh / 2);
-    this.box
-      .roundRect(bx, by, bw, bh, 4)
-      .fill({ color: 0x0a1814, alpha: 0.94 })
-      .stroke({ width: 1, color: CBE.borderBright });
-    tipLines.forEach((line, i) => {
-      this.addLabelCentered(
-        line,
-        LCD_WIDTH / 2,
-        by + padY + lineH / 2 + i * lineH,
-        VALUE_GREEN,
-      );
-    });
+    // Confirm copy is drawn by unified panelTip (sticky) in redraw finally.
+    if (!this.confirmTip) this.setConfirmTip(alias);
     this.onSoftkeys?.({ left: "确定", right: "取消" });
   }
 

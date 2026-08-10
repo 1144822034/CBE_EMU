@@ -39,8 +39,8 @@ const FX_MAX_W = 96;
 const FX_MAX_H = 96;
 /** Player / combat-pose frame step (ms). */
 const UNIT_FRAME_MS = 90;
-/** Monster idle/death flap — slower than UNIT_FRAME_MS (felt too frenetic). */
-const MONSTER_IDLE_FRAME_MS = 180;
+/** Battle idle/death flap — same slow cadence for player + all monsters (鼠尾节奏). */
+const BATTLE_IDLE_FRAME_MS = 360;
 
 const MONSTER_RED = 0xff8080;
 const SETTLE_GOLD = 0xffd080;
@@ -147,10 +147,13 @@ export class BattleScreen extends Container {
   private floatHost = new Container();
   private topHost = new Container();
   private bottomHost = new Container();
-  /** Top-right 「自动战斗中」+ 关闭 when [自动] is armed. */
+  /** Top-right 「自动/挂机战斗中」+ 关闭. */
   private autoBannerHost = new Container();
   private autoBannerBuilt = false;
+  private autoBannerTip: BitmapLabel | null = null;
   private autoActive = false;
+  /** Hangup (2/10) — hide operate scroll; server synth owns the seat. */
+  private hangupActive = false;
   private partyHud = new BattlePartyHud();
   private log = new BitmapLabel();
   private topTitle = new BitmapLabel();
@@ -182,7 +185,7 @@ export class BattleScreen extends Container {
    */
   private awaitingRound = false;
   private tickAcc = 0;
-  private monsterIdleTickAcc = 0;
+  private idleTickAcc = 0;
   private timerSec = TURN_SECONDS;
   private timerAcc = 0;
   private battleMapFile = "";
@@ -225,6 +228,8 @@ export class BattleScreen extends Container {
   onAutoToggle: (() => boolean) | null = null;
   /** Fired when banner 关闭 or a manual battle op disarms [自动]. */
   onAutoCancel: (() => void) | null = null;
+  /** Fired when banner 关闭 while hangup owns the fight — request stop (2/10). */
+  onHangupCancel: (() => void) | null = null;
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
   /**
@@ -262,6 +267,43 @@ export class BattleScreen extends Container {
     return this.autoActive;
   }
 
+  isHangupActive(): boolean {
+    return this.hangupActive;
+  }
+
+  /** True when the action scroll may be shown (not [自动] / hangup). */
+  private operateMenuAllowed(): boolean {
+    return !this.autoActive && !this.hangupActive;
+  }
+
+  /**
+   * Sync with session.hangupActive. Hangup hides the operate menu for the
+   * whole fight (CBE 4/11 style); stopping hangup restores it when the seat
+   * can act.
+   */
+  setHangupActive(on: boolean): void {
+    this.ensureAutoBanner();
+    this.hangupActive = on;
+    this.refreshAutoBannerVisibility();
+    if (on) {
+      this.menuOpen = false;
+      this.redrawMenu();
+      return;
+    }
+    if (
+      this.awaitingExit ||
+      this.awaitingDeathPrompt ||
+      this.playbackBusy ||
+      this.awaitingRound ||
+      this.autoActive
+    ) {
+      return;
+    }
+    this.menuMode = "root";
+    this.menuOpen = true;
+    this.redrawMenu();
+  }
+
   /**
    * Sync banner + menu with session.autoBattleActive.
    * When on, hides the action scroll; when off and the seat can act, reopens it.
@@ -280,7 +322,8 @@ export class BattleScreen extends Container {
       this.awaitingExit ||
       this.awaitingDeathPrompt ||
       this.playbackBusy ||
-      this.awaitingRound
+      this.awaitingRound ||
+      this.hangupActive
     ) {
       return;
     }
@@ -295,6 +338,16 @@ export class BattleScreen extends Container {
     this.setAutoBattleActive(false);
     void this.log.setText("自动战斗关闭", CBE.inkTip);
     this.onAutoCancel?.();
+  }
+
+  /**
+   * Banner 关闭 while hangup — same 2/10 Type=2 as HUD 挂机 (stop-after /
+   * 已停止挂机). Does not locally clear hangupActive; server chat is authority.
+   */
+  closeHangup(): void {
+    if (!this.hangupActive) return;
+    void this.log.setText("请求停止挂机…", CBE.inkTip);
+    this.onHangupCancel?.();
   }
 
   setVisualContext(ctx: BattleVisualContext): void {
@@ -374,7 +427,11 @@ export class BattleScreen extends Container {
   clearAwaitingRound(): void {
     if (!this.awaitingRound) return;
     this.awaitingRound = false;
-    if (!this.autoActive && !this.playbackBusy && !this.awaitingExit) {
+    if (
+      this.operateMenuAllowed() &&
+      !this.playbackBusy &&
+      !this.awaitingExit
+    ) {
       this.menuMode = "root";
       this.menuOpen = true;
       this.redrawMenu();
@@ -396,6 +453,9 @@ export class BattleScreen extends Container {
     if (this.awaitingDeathPrompt) {
       return this.deathPromptHasStone ? "普通复活" : "复活";
     }
+    if (this.awaitingExit) return "";
+    // Hangup / [自动]: no flee / return softkey (menu is hidden).
+    if (this.hangupActive || this.autoActive) return "";
     if (this.isSkillMode()) return "返回";
     if (this.isSparBattle()) return "";
     return "逃跑";
@@ -406,6 +466,7 @@ export class BattleScreen extends Container {
       return this.deathPromptHasStone ? "复活石" : "复活";
     }
     if (this.awaitingExit) return "继续";
+    if (this.hangupActive || this.autoActive) return "";
     return "确定";
   }
 
@@ -448,7 +509,7 @@ export class BattleScreen extends Container {
     this.playbackGen += 1;
     this.menuMode = "root";
     this.menuCursor = 0;
-    this.menuOpen = !this.autoActive;
+    this.menuOpen = this.operateMenuAllowed();
     this.resetTargetPick();
     this.timerSec = TURN_SECONDS;
     this.timerAcc = 0;
@@ -469,8 +530,12 @@ export class BattleScreen extends Container {
       outline: false,
     });
     void this.log.setText(
-      this.autoActive ? "自动战斗中…" : `遭遇敌×${state.left.length}`,
-      this.autoActive ? CBE.inkTip : CBE.inkBody,
+      this.hangupActive
+        ? "挂机战斗中…"
+        : this.autoActive
+          ? "自动战斗中…"
+          : `遭遇敌×${state.left.length}`,
+      this.hangupActive || this.autoActive ? CBE.inkTip : CBE.inkBody,
       { maxWidth: LCD_WIDTH - 16 },
     );
   }
@@ -546,14 +611,14 @@ export class BattleScreen extends Container {
         return;
       }
       this.menuMode = "root";
-      // Keep scroll hidden while [自动] is armed; banner 关闭 restores it.
-      this.menuOpen = !this.autoActive;
+      // Keep scroll hidden while [自动] / hangup; banner or stop-hangup restores.
+      this.menuOpen = this.operateMenuAllowed();
       this.timerSec = TURN_SECONDS;
       this.timerAcc = 0;
       this.paintTimer();
       this.redrawMenu();
       this.refreshAutoBannerVisibility();
-      // Next seat is ready — main arms [自动]/挂机 client 4/2 if enabled.
+      // Next seat is ready — main arms [自动] client 4/2 if enabled.
       this.onAutoReady?.();
     });
   }
@@ -561,6 +626,7 @@ export class BattleScreen extends Container {
   hide(): void {
     this.visible = false;
     this.state = null;
+    this.hangupActive = false;
     this.awaitingExit = false;
     this.awaitingDeathPrompt = false;
     this.playbackBusy = false;
@@ -604,7 +670,52 @@ export class BattleScreen extends Container {
   targetIndex(): number {
     if (!this.state?.left.length && !this.state?.right.length) return 0;
     if (this.selectedTargetWire != null) return this.selectedTargetWire;
-    return battleTargetWire(this.state!);
+    return this.livingEnemyWires()[0] ?? battleTargetWire(this.state!);
+  }
+
+  /**
+   * Hangup / [自动] 出手：与手动攻击/仙术同一套选目标 + onAttack/onSkill。
+   * 不在这里改写 actioninfo 播报（播报照服务器 child wire，与手动一致）。
+   */
+  submitAutoOperate(operate: number, tip: string): boolean {
+    if (!this.state || !this.canSubmitOperate()) return false;
+    const op = operate | 0;
+    if (op === 0) {
+      const wires = this.livingEnemyWires();
+      this.selectedTargetWire =
+        wires[0] ?? battleTargetWire(this.state);
+      this.noteOperateSubmitted(tip);
+      this.onAttack?.();
+      return true;
+    }
+    const sk = this.skills.find((s) => s.id + 2 === op);
+    const kind = (sk?.targetKind ?? 3) as SkillTargetKind;
+    const name = sk?.name ?? "仙术";
+    // Same branches as fireSkill / confirm（自动不弹选目标 UI，取首个合法 wire）.
+    if (skillNeedsTargetPick(kind)) {
+      const wires =
+        kind === 1 ? this.livingAllyWires() : this.livingEnemyWires();
+      this.selectedTargetWire =
+        wires[0] ?? (kind === 1 ? this.selfWire() : null);
+      if (this.selectedTargetWire == null) return false;
+      this.noteOperateSubmitted(tip || `施展${name}…`);
+      this.onSkill?.(op);
+      return true;
+    }
+    if (kind === 0) {
+      this.selectedTargetWire = this.selfWire();
+    } else if (kind === 2) {
+      this.selectedTargetWire =
+        this.livingAllyWires()[0] ?? this.selfWire();
+    } else if (kind === 4) {
+      this.selectedTargetWire =
+        this.livingEnemyWires()[0] ?? battleTargetWire(this.state);
+    } else {
+      this.selectedTargetWire = this.livingEnemyWires()[0] ?? null;
+    }
+    this.noteOperateSubmitted(tip || `施展${name}…`);
+    this.onSkill?.(op);
+    return true;
   }
 
   allyVitals(): { hp: number; maxHp: number; mp: number; maxMp: number } | null {
@@ -671,6 +782,11 @@ export class BattleScreen extends Container {
     }
     if (this.playbackBusy || this.awaitingRound) return;
     if (!this.menuOpen) {
+      // Hangup owns the seat via server synth — do not reopen the scroll.
+      if (this.hangupActive) {
+        void this.log.setText("挂机中…", CBE.inkTip);
+        return;
+      }
       // Reopening the scroll is a manual takeover — disarm [自动].
       this.clearAutoForManualOp();
       this.menuOpen = true;
@@ -1118,7 +1234,7 @@ export class BattleScreen extends Container {
     }
 
     this.tickAcc += dtMs;
-    this.monsterIdleTickAcc += dtMs;
+    this.idleTickAcc += dtMs;
     const now = performance.now();
     if (this.tickAcc >= UNIT_FRAME_MS) {
       this.tickAcc = 0;
@@ -1128,11 +1244,8 @@ export class BattleScreen extends Container {
         if (u.pose !== "idle" && u.pose !== "death" && now >= u.poseUntil) {
           u.pose = "idle";
         }
-        // Monster idle/death flaps on MONSTER_IDLE_FRAME_MS; attack/cast stay at 90ms.
-        if (
-          this.isEnemyUnit(u) &&
-          (u.pose === "idle" || u.pose === "death")
-        ) {
+        // Idle/death use BATTLE_IDLE_FRAME_MS; attack/cast/hit stay at 90ms.
+        if (u.pose === "idle" || u.pose === "death") {
           if (prevPose !== u.pose) this.paintUnitSprite(u);
           continue;
         }
@@ -1140,11 +1253,10 @@ export class BattleScreen extends Container {
         this.paintUnitSprite(u);
       }
     }
-    if (this.monsterIdleTickAcc >= MONSTER_IDLE_FRAME_MS) {
-      this.monsterIdleTickAcc = 0;
+    if (this.idleTickAcc >= BATTLE_IDLE_FRAME_MS) {
+      this.idleTickAcc = 0;
       for (const u of this.units) {
         if (u.hidden || !u.loaded || !u.sprite) continue;
-        if (!this.isEnemyUnit(u)) continue;
         if (u.pose !== "idle" && u.pose !== "death") continue;
         u.phase += 1;
         this.paintUnitSprite(u);
@@ -1180,7 +1292,7 @@ export class BattleScreen extends Container {
     host.visible = false;
     host.eventMode = "static";
 
-    // UC3「自动战斗中」≈60px + outline; keep clear gap before 关闭.
+    // UC3「自动/挂机战斗中」≈60px; keep clear gap before 关闭.
     const panelW = 134;
     const panelH = 22;
     const bg = new Graphics()
@@ -1193,6 +1305,7 @@ export class BattleScreen extends Container {
     tip.eventMode = "none";
     tip.position.set(4, 5);
     tip.show("自动战斗中", CBE.inkTip, { outline: false });
+    this.autoBannerTip = tip;
     host.addChild(tip);
 
     const btn = new Container();
@@ -1210,6 +1323,11 @@ export class BattleScreen extends Container {
     btn.cursor = "pointer";
     btn.on("pointertap", (e) => {
       e.stopPropagation();
+      // Hangup owns the seat; closing it is the stop-hangup path (not [自动]).
+      if (this.hangupActive) {
+        this.closeHangup();
+        return;
+      }
       this.closeAutoBattle();
     });
     host.addChild(btn);
@@ -1217,12 +1335,22 @@ export class BattleScreen extends Container {
     host.position.set(LCD_WIDTH - panelW - 4, STAGE_TOP + 2);
   }
 
+  private paintAutoBannerTip(): void {
+    const tip = this.autoBannerTip;
+    if (!tip) return;
+    tip.show(this.hangupActive ? "挂机战斗中" : "自动战斗中", CBE.inkTip, {
+      outline: false,
+    });
+  }
+
   private refreshAutoBannerVisibility(): void {
-    this.autoBannerHost.visible =
+    const show =
       this.visible &&
-      this.autoActive &&
+      (this.hangupActive || this.autoActive) &&
       !this.awaitingExit &&
       !this.awaitingDeathPrompt;
+    this.autoBannerHost.visible = show;
+    if (show) this.paintAutoBannerTip();
   }
 
   /** Manual 攻击/仙术/物品/逃跑 disarms [自动] without reopening the scroll. */
@@ -1592,23 +1720,28 @@ export class BattleScreen extends Container {
     target: UnitView | null,
     pose: "attack" | "cast",
   ): Promise<void> {
-    // Face the target for the whole strike/cast (homeX of foe, not current dash x).
+    // Cast/heal: keep formation facing. Facing the heal target (often a left-side
+    // ally with smaller homeX) flipped monsters left — looked like 回血后转身.
+    // Melee still faces the foe for the dash/swing.
+    if (pose === "cast") {
+      actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
+      this.paintUnitSprite(actor);
+      return;
+    }
     if (target) {
       actor.facingRight = target.homeX > actor.homeX;
     } else {
       actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
     }
     this.paintUnitSprite(actor);
+
     // Match BattleScreen.tick cadence (UNIT_FRAME_MS/part); one strip only — no double loop.
     const frameMs = UNIT_FRAME_MS;
     const cycleMs = this.attackStripParts(actor) * frameMs;
     const hold = cycleMs + 120;
     this.setUnitPose(actor, pose, hold);
 
-    if (pose === "cast") {
-      // Spell: stay in place for one cast strip (parts×90ms) while eidolon FX overlaps.
-      await sleep(cycleMs);
-    } else if (target) {
+    if (target) {
       // Melee: flash beside target on the side that keeps facing them, swing, return.
       const beside = actor.facingRight ? target.homeX - 30 : target.homeX + 30;
       await this.tweenUnitTo(actor, beside, target.homeY, 260);
@@ -1970,7 +2103,7 @@ export class BattleScreen extends Container {
         : null;
       const isSkill = rec.type === 1 || rec.type === 2;
       // Group skills (目标指向=2/4) put one child per target — FX on every child.
-      // Monster cast_skill counters also land here as type1 + effectIndex.
+      // Same as manual: trust server actioninfo wires (no hangup remap).
       const fxWires = rec.children.length
         ? rec.children.map((c) => c.wire)
         : [rec.actorWire];
@@ -1985,12 +2118,11 @@ export class BattleScreen extends Container {
           firstTarget,
           isSkill ? "cast" : "attack",
         );
-        // Overlap eidolon FX with cast/attack body motion (~1.5–2s total).
         if (effectIndex > 0) {
           await Promise.all([
             motion,
             (async () => {
-              await sleep(280);
+              await sleep(120);
               await this.playSkillEffects(effectIndex, fxWires, actor);
             })(),
           ]);
@@ -2007,11 +2139,8 @@ export class BattleScreen extends Container {
           void this.playHitMotion(tgt);
         }
         this.spawnFloatAtWire(c.wire, c.delta, c.flag, rec.effectText);
-        // Land HP with the float — player bar moves on monster hit, not on 4/6.
         this.applyWireHpDelta(c.wire, c.delta);
       }
-      // Skill/item: commit caster post-cost MP as soon as the record resolves
-      // (CBE DrawBattleSceneBg after type-1; evidence 2026-06-25 battle flow).
       if (isSkill) {
         this.applyCasterMpFromTeaminfo(up.rightHp, rec.actorWire);
       }
@@ -2048,7 +2177,7 @@ export class BattleScreen extends Container {
     }
     await Promise.all(
       spots.map((p) =>
-        this.playNamedActorFx(actorName, p.x, p.y, undefined, 1200, 0.85),
+        this.playNamedActorFx(actorName, p.x, p.y, undefined, 750, 0.85),
       ),
     );
   }
@@ -2084,7 +2213,7 @@ export class BattleScreen extends Container {
         maxParts != null
           ? Math.min(maxParts, Math.max(1, partCount))
           : Math.max(1, partCount || 4);
-      const frameMs = Math.max(53, Math.floor(durationMs / frames));
+      const frameMs = Math.max(40, Math.floor(durationMs / frames));
       let painted = 0;
       for (let i = 0; i < frames; i++) {
         if (!host.parent) break;
@@ -2130,9 +2259,9 @@ export class BattleScreen extends Container {
   ): void {
     if (!this.state) return;
     const view = this.unitForWire(wire);
-    // Anchor on the target body (chest), not screen-fixed / head-far float.
-    const x = view?.feetX ?? UNIT_LEFT_X;
-    const yBody = (view?.feetY ?? UNIT_FEET_Y) - 36;
+    // Prefer head/chest of the resolved unit; left-side fallback is monster column.
+    const x = view?.root.x ?? view?.feetX ?? UNIT_LEFT_X;
+    const yBody = (view?.root.y ?? view?.feetY ?? UNIT_FEET_Y) - 48;
     // mmBattle 0x24f6: flag 2 → 「暴击」, 3 → 「闪躲」, else numeric float.
     // Pixi also stacks the damage digits under 「暴击」 so the amount stays visible.
     if (flag === 3) {

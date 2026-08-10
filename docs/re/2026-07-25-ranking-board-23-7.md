@@ -61,8 +61,14 @@ r2 dump @ state+0x80: +0x10 orderlist array = 0
 | type | 排序字段 | 显示分数 | myorder 语义 |
 | --- | --- | --- | --- |
 | 0 | `exp` DESC（总经验多者在前；并列 `role_id` ASC） | `level` | 名次（UI：当前排名:第） |
-| 1 | `money` | `money` | 名次 |
+| 1 | `money` | `money`（铜总量） | 名次 |
 | 2 | `account_roles.pk_points` | `pk_points` | PK 点数（UI：PK点数为:） |
+
+### Pixi UI（2026-08-09）
+
+- 顶部胶囊「排行榜」+ **分类标签条**（同背包/商城：选中全名、未选首字；←→ 切 type 重拉 `23/7`）。
+- 财富榜分数：`floor(money/10000)` + `jin.gif`，不显示银/铜。
+- 每页条数：`VM_NET_MOCK_RANKING_PAGE_SIZE=20`（`pageIndex=0` 即前 20 名）；列表 ↑↓ 翻屏。
 
 `pk_points` 默认 0；切磋胜负如何累加仍 `unresolved`，但不再回退到 money。
 

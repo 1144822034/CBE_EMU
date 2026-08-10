@@ -4853,23 +4853,50 @@ static bool vm_net_mock_parse_special_item_seq_request(
 {
     u32 offset = 4;
     vm_net_mock_request_object object;
+    vm_net_mock_request_object matched;
     u32 sequence = 0;
     u32 num = 0;
+    bool haveMatch = false;
 
     if (seqOut)
         *seqOut = 0;
+    memset(&matched, 0, sizeof(matched));
     if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T' ||
-        seqField == NULL || !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
-        offset != requestLen || object.major != 1 || object.kind != kind ||
-        object.subtype != subtype ||
-        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+        seqField == NULL)
+    {
+        return false;
+    }
+
+    /*
+     * CBE often flushes a pending 1/2/10 actor-other with special-item ops
+     * (battle-insight 25/6|25/7, exp-card 7/30).  Require exactly one matching
+     * special object; allow only 2/10 companions alongside it.
+     */
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &object))
+    {
+        if (object.major == 1 && object.kind == kind && object.subtype == subtype)
+        {
+            if (haveMatch)
+                return false;
+            matched = object;
+            haveMatch = true;
+            continue;
+        }
+        if (object.major == 1 && object.kind == 2 && object.subtype == 10)
+            continue;
+        return false;
+    }
+    if (offset != requestLen || !haveMatch)
+        return false;
+    if (!vm_net_mock_get_object_number_field(matched.payload, matched.payloadLen,
                                               seqField, &sequence) ||
         sequence == 0 || sequence > 0xffffu)
     {
         return false;
     }
     if (requireOneNum &&
-        (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen, "num", &num) ||
+        (!vm_net_mock_get_object_number_field(matched.payload, matched.payloadLen,
+                                              "num", &num) ||
          num != 1))
     {
         return false;
@@ -5473,6 +5500,9 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
     else if (requestKind == 25 && requestSubtype == 6)
     {
         u8 statusObjects = 0;
+        u8 objectCount = 1;
+        bool haveActorOther =
+            vm_net_mock_request_contains_object(request, requestLen, 1, 2, 10);
 
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 25, 6, &objectStart) ||
             !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 1 : 2) ||
@@ -5489,12 +5519,15 @@ static u32 vm_net_mock_build_timed_special_item_use_response(
             if (!vm_net_mock_append_status_icon_arm_objects(out, outCap, &pos,
                                                             &statusObjects))
                 return 0;
-            vm_net_mock_finish_wt_packet(out, pos, (u8)(1u + statusObjects));
+            objectCount = (u8)(1u + statusObjects);
         }
-        else
+        if (haveActorOther)
         {
-            vm_net_mock_finish_wt_packet(out, pos, 1);
+            if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+                return 0;
+            objectCount = (u8)(objectCount + 1u);
         }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
     }
     else
     {
@@ -5535,6 +5568,9 @@ static u32 vm_net_mock_build_battle_insight_followup_response(
     u32 pos = 5;
     u32 objectStart = 0;
     u8 statusObjects = 0;
+    u8 objectCount = 1;
+    bool haveActorOther =
+        vm_net_mock_request_contains_object(request, requestLen, 1, 2, 10);
 
     if (out == NULL || outCap < pos)
         return 0;
@@ -5556,10 +5592,20 @@ static u32 vm_net_mock_build_battle_insight_followup_response(
     if (!vm_net_mock_append_status_icon_arm_objects(out, outCap, &pos,
                                                     &statusObjects))
         return 0;
-    vm_net_mock_finish_wt_packet(out, pos, (u8)(1u + statusObjects));
+    objectCount = (u8)(1u + statusObjects);
+    /* Same-WT 2/10 companion: empty actor-other ACK (discard/chat pattern). */
+    if (haveActorOther)
+    {
+        if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+            return 0;
+        objectCount = (u8)(objectCount + 1u);
+    }
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
-    printf("[info][network] mock_battle_insight_followup request=25/7 seq=%u response=%u status_objs=%u evidence=JianghuOL.CBE:0x0102DC40+0x0102DD7A+0x01011AF8\n",
-           requestedSeq, pos, statusObjects);
+    printf("[info][network] mock_battle_insight_followup request=25/7 seq=%u "
+           "actor_other=%u response=%u status_objs=%u "
+           "evidence=JianghuOL.CBE:0x0102DC40+0x0102DD7A+0x01011AF8\n",
+           requestedSeq, haveActorOther ? 1u : 0u, pos, statusObjects);
     vm_autotest_note("mock_battle_insight_followup request=25/7 seq=%u response=%u evidence=JianghuOL.CBE:0x0102DC40+0x0102DD7A\n",
                      requestedSeq, pos);
     return pos;

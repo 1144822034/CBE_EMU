@@ -17,6 +17,13 @@ import type {
   GuildListRow,
   GuildMemberRow,
 } from "../net/protocolGuild";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 export type GuildAction =
   | "open_list"
@@ -61,6 +68,7 @@ export class GuildPanel extends Container {
   private selectedGuild: GuildListRow | null = null;
   private selectedApp: GuildApplicantRow | null = null;
   private returnMode: Mode = "hub";
+  private toast: PanelTipState = createPanelTipState();
 
   onAction: ((action: GuildAction, payload?: number) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -178,7 +186,15 @@ export class GuildPanel extends Container {
   }
 
   hide(): void {
+    clearPanelTip(this.toast);
     this.visible = false;
+  }
+
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
   }
 
   move(delta: number): void {
@@ -368,124 +384,128 @@ export class GuildPanel extends Container {
       CBE.ink,
     );
 
-    if (this.mode === "text") {
-      this.textLines.slice(0, 12).forEach((line, i) => {
-        this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
-      });
-      this.addLabel(
-        this.actionLabels.includes("申请入帮") ? "确定=操作" : "确定=返回",
-        x + 10,
-        y + h - 18,
-        CBE.inkLabel,
-      );
-      return;
-    }
-
-    if (this.mode === "actions") {
-      this.actionLabels.forEach((lab, i) => {
-        const hi = i === this.actionCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 36 + i * 18, w - 12, 16)
-            .fill({ color: CBE.select });
-        }
-        this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
-      });
-      return;
-    }
-
-    if (this.mode === "hub") {
-      this.hubLabels.forEach((lab, i) => {
-        const hi = i === this.listCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 36 + i * 18, w - 12, 16)
-            .fill({ color: CBE.select });
-        }
-        this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
-      });
-      return;
-    }
-
-    if (this.mode === "list") {
-      if (!this.listRows.length) {
-        this.addLabel("(无帮派)", x + 10, y + 40, CBE.inkMint);
-      }
-      this.listRows.slice(0, 10).forEach((row, i) => {
-        const hi = i === this.listCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 34 + i * 18, w - 12, 16)
-            .fill({ color: CBE.select });
-        }
+    try {
+      if (this.mode === "text") {
+        this.textLines.slice(0, 12).forEach((line, i) => {
+          this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
+        });
         this.addLabel(
-          `${row.guildName} Lv${row.guildLevel}`.slice(0, 14),
+          this.actionLabels.includes("申请入帮") ? "确定=操作" : "确定=返回",
           x + 10,
-          y + 36 + i * 18,
-          hi ? CBE.ink : CBE.inkMint,
-        );
-        this.addLabel(`${row.memberCount}人`, x + 140, y + 36 + i * 18, CBE.inkLabel);
-      });
-      this.drawPager(x, y, w, this.listRows.length, this.listPage, this.listPages);
-      return;
-    }
-
-    if (this.mode === "members") {
-      if (!this.memberRows.length) {
-        this.addLabel("(无成员)", x + 10, y + 40, CBE.inkMint);
-      }
-      this.memberRows.slice(0, 10).forEach((row, i) => {
-        const hi = i === this.listCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 34 + i * 18, w - 12, 16)
-            .fill({ color: CBE.select });
-        }
-        const on = row.online ? "" : "离";
-        this.addLabel(
-          `${row.roleName}${on}`.slice(0, 10),
-          x + 10,
-          y + 36 + i * 18,
-          hi ? CBE.ink : CBE.inkMint,
-        );
-        this.addLabel(
-          `${row.title} Lv${row.level}`.slice(0, 12),
-          x + 100,
-          y + 36 + i * 18,
+          y + h - 18,
           CBE.inkLabel,
         );
-      });
-      this.drawPager(
-        x,
-        y,
-        w,
-        this.memberRows.length,
-        this.memberPage,
-        this.memberPages,
-      );
-      return;
-    }
-
-    if (this.mode === "apps") {
-      if (!this.appRows.length) {
-        this.addLabel("(无申请)", x + 10, y + 40, CBE.inkMint);
+        return;
       }
-      this.appRows.slice(0, 10).forEach((row, i) => {
-        const hi = i === this.listCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 34 + i * 18, w - 12, 16)
-            .fill({ color: CBE.select });
+
+      if (this.mode === "actions") {
+        this.actionLabels.forEach((lab, i) => {
+          const hi = i === this.actionCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+        });
+        return;
+      }
+
+      if (this.mode === "hub") {
+        this.hubLabels.forEach((lab, i) => {
+          const hi = i === this.listCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+        });
+        return;
+      }
+
+      if (this.mode === "list") {
+        if (!this.listRows.length) {
+          this.addLabel("(无帮派)", x + 10, y + 40, CBE.inkMint);
         }
-        this.addLabel(
-          row.roleName.slice(0, 12),
-          x + 10,
-          y + 36 + i * 18,
-          hi ? CBE.ink : CBE.inkMint,
+        this.listRows.slice(0, 10).forEach((row, i) => {
+          const hi = i === this.listCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 34 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          this.addLabel(
+            `${row.guildName} Lv${row.guildLevel}`.slice(0, 14),
+            x + 10,
+            y + 36 + i * 18,
+            hi ? CBE.ink : CBE.inkMint,
+          );
+          this.addLabel(`${row.memberCount}人`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+        });
+        this.drawPager(x, y, w, this.listRows.length, this.listPage, this.listPages);
+        return;
+      }
+
+      if (this.mode === "members") {
+        if (!this.memberRows.length) {
+          this.addLabel("(无成员)", x + 10, y + 40, CBE.inkMint);
+        }
+        this.memberRows.slice(0, 10).forEach((row, i) => {
+          const hi = i === this.listCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 34 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          const on = row.online ? "" : "离";
+          this.addLabel(
+            `${row.roleName}${on}`.slice(0, 10),
+            x + 10,
+            y + 36 + i * 18,
+            hi ? CBE.ink : CBE.inkMint,
+          );
+          this.addLabel(
+            `${row.title} Lv${row.level}`.slice(0, 12),
+            x + 100,
+            y + 36 + i * 18,
+            CBE.inkLabel,
+          );
+        });
+        this.drawPager(
+          x,
+          y,
+          w,
+          this.memberRows.length,
+          this.memberPage,
+          this.memberPages,
         );
-        this.addLabel(`Lv${row.level}`, x + 140, y + 36 + i * 18, CBE.inkLabel);
-      });
-      this.drawPager(x, y, w, this.appRows.length, this.appPage, this.appPages);
+        return;
+      }
+
+      if (this.mode === "apps") {
+        if (!this.appRows.length) {
+          this.addLabel("(无申请)", x + 10, y + 40, CBE.inkMint);
+        }
+        this.appRows.slice(0, 10).forEach((row, i) => {
+          const hi = i === this.listCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 34 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          this.addLabel(
+            row.roleName.slice(0, 12),
+            x + 10,
+            y + 36 + i * 18,
+            hi ? CBE.ink : CBE.inkMint,
+          );
+          this.addLabel(`Lv${row.level}`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+        });
+        this.drawPager(x, y, w, this.appRows.length, this.appPage, this.appPages);
+      }
+    } finally {
+      drawPanelTipOverlay(this, this.toast);
     }
   }
 

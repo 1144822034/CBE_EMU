@@ -33,39 +33,59 @@ async function exchangeOnce(reqBuf) {
     socket.once("connect", resolve);
     socket.once("error", reject);
   });
-  socket.write(reqBuf);
 
+  // Continuous buffer — do not attach one-shot `data` listeners inside pull();
+  // localhost CBMR can arrive before the listener is registered and be lost.
   let pending = Buffer.alloc(0);
-  const pull = async (n) => {
-    while (pending.length < n) {
-      const chunk = await new Promise((resolve, reject) => {
-        const onData = (buf) => {
-          cleanup();
-          resolve(buf);
-        };
-        const onErr = (e) => {
-          cleanup();
-          reject(e);
-        };
-        const onEnd = () => {
-          cleanup();
-          reject(new Error("tcp ended early"));
-        };
-        const cleanup = () => {
-          socket.off("data", onData);
-          socket.off("error", onErr);
-          socket.off("end", onEnd);
-        };
-        socket.on("data", onData);
-        socket.on("error", onErr);
-        socket.on("end", onEnd);
-      });
-      pending = Buffer.concat([pending, chunk]);
+  let wait = null;
+  let ended = null;
+
+  const wake = () => {
+    if (!wait) return;
+    if (ended) {
+      const { reject } = wait;
+      wait = null;
+      reject(ended);
+      return;
     }
-    const out = pending.subarray(0, n);
-    pending = pending.subarray(n);
-    return out;
+    if (pending.length >= wait.n) {
+      const { n, resolve } = wait;
+      wait = null;
+      const out = pending.subarray(0, n);
+      pending = pending.subarray(n);
+      resolve(out);
+    }
   };
+
+  socket.on("data", (buf) => {
+    pending = Buffer.concat([pending, buf]);
+    wake();
+  });
+  socket.on("error", (e) => {
+    ended = e instanceof Error ? e : new Error(String(e));
+    wake();
+  });
+  socket.on("end", () => {
+    ended = ended || new Error("tcp ended early");
+    wake();
+  });
+
+  const pull = (n) =>
+    new Promise((resolve, reject) => {
+      if (pending.length >= n) {
+        const out = pending.subarray(0, n);
+        pending = pending.subarray(n);
+        resolve(out);
+        return;
+      }
+      if (ended) {
+        reject(ended);
+        return;
+      }
+      wait = { n, resolve, reject };
+    });
+
+  socket.write(reqBuf);
 
   const header = await pull(20);
   if (header.toString("ascii", 0, 4) !== "CBMR") {
@@ -81,7 +101,12 @@ async function exchangeOnce(reqBuf) {
   if (flags & 0x2) {
     try {
       socket.setTimeout(800);
-      const h2 = await pull(20);
+      const h2 = await Promise.race([
+        pull(20),
+        new Promise((_, reject) => {
+          socket.once("timeout", () => reject(new Error("followup timeout")));
+        }),
+      ]);
       const l2 = h2.readUInt32LE(12);
       const b2 = l2 ? await pull(l2) : Buffer.alloc(0);
       frames.push(Buffer.concat([h2, b2]));

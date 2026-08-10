@@ -42,3 +42,8 @@ scene_pending / mmgame-transfer-followup   ← 随后户外 ScreenInit
 3. 期望：出本后**无** `pending_match` 早投；先 `scene_ready` 临安，再 `loading_clear remaining↓` / `dream_exit_settle_complete`；进度条消失可走。
 4. 再点使者进本应能进（clear 尽后）；短暂「地图加载中」可接受。
 5. 回归：户外地图石、梦境内商城进出。
+
+## 2026-08-07 落地补记
+
+文档中的 unstick 此前**未进 C 代码**；Pixi 出本不发 `2/3` 使问题必现。
+实现见 `docs/re/2026-08-07-dream-reenter-map-loading-tip.md`。

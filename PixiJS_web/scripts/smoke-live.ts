@@ -12,11 +12,12 @@ import {
 import {
   buildLoginAlt12Request,
   ingestPacket,
+  loadClientCodeVersion,
   parseServerList,
 } from "../src/net/protocol";
 
 const url = process.env.PIX_GATEWAY || "ws://127.0.0.1:19092";
-const clientId = (Math.random() * 0xffffff) >>> 0;
+const clientId = ((Math.random() * 0xffffff) >>> 0) || 1;
 
 function exchange(ws: WebSocket, wt: Uint8Array, timeoutMs = 5000): Promise<Uint8Array[]> {
   return new Promise((resolve, reject) => {
@@ -61,15 +62,19 @@ await new Promise<void>((resolve, reject) => {
   });
 });
 
-const bodies = await exchange(ws, buildLoginAlt12Request());
+const codeVersion = await loadClientCodeVersion();
+const bodies = await exchange(ws, buildLoginAlt12Request("", "", codeVersion));
 ws.close();
 
 let servers = 0;
 let name = "";
+let detail = "";
 for (const body of bodies) {
   const pkt = ingestPacket(body);
   if (!pkt) continue;
   const list = parseServerList(pkt);
+  if (list.information) detail = `result=${list.result} ${list.information}`;
+  else if (list.result) detail = `result=${list.result}`;
   if (list.servers.length) {
     servers = list.servers.length;
     name = list.servers[0]!.name;
@@ -78,7 +83,20 @@ for (const body of bodies) {
 }
 
 if (!servers) {
-  console.error("live smoke FAIL: no servers in", bodies.length, "bodies");
+  console.error(
+    "live smoke FAIL: no servers in",
+    bodies.length,
+    "bodies",
+    detail || "",
+    "codeVersion",
+    codeVersion,
+  );
   process.exit(1);
 }
-console.log("live smoke OK", { url, bodies: bodies.length, servers, first: name });
+console.log("live smoke OK", {
+  url,
+  bodies: bodies.length,
+  servers,
+  first: name,
+  codeVersion,
+});

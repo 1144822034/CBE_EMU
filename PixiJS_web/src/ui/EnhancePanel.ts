@@ -31,6 +31,13 @@ import {
   EQUIP_DETAIL_YELLOW,
   type EquipPaintLine,
 } from "./equipDetail";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 export type EnhanceAction =
   | "submit"
@@ -66,7 +73,7 @@ export class EnhancePanel extends Container {
   private slots: number[] = [];
   private rate = 0;
   private money = 0;
-  private tip = "";
+  private toast: PanelTipState = createPanelTipState();
   private actionCursor = 0;
   private listCursor = 0;
   private listScroll = 0;
@@ -97,7 +104,7 @@ export class EnhancePanel extends Container {
     this.slots = [];
     this.rate = 0;
     this.money = 0;
-    this.tip = "";
+    clearPanelTip(this.toast);
     this.mode = "main";
     this.actionCursor = 1; // 放置
     this.listCursor = 0;
@@ -117,7 +124,7 @@ export class EnhancePanel extends Container {
     this.slots = [];
     this.rate = 0;
     this.money = 0;
-    this.tip = "";
+    clearPanelTip(this.toast);
     this.mode = "transferPick";
     this.actionCursor = 0;
     this.listCursor = 0;
@@ -174,9 +181,15 @@ export class EnhancePanel extends Container {
     if (this.visible) this.redraw();
   }
 
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
+  }
+
   setTip(text: string): void {
-    this.tip = text;
-    if (this.visible) this.redraw();
+    this.showTip(text);
   }
 
   setBusy(busy: boolean): void {
@@ -256,20 +269,17 @@ export class EnhancePanel extends Container {
       const row = rows[this.listCursor];
       if (!row) return;
       if (this.slots.length >= ENHANCE_MAX_SLOTS) {
-        this.tip = "最多可放入五颗玄晶";
-        this.redraw();
+        this.showTip("最多可放入五颗玄晶");
         return;
       }
       if (row.count <= 0) {
-        this.tip = "玄晶数量不足";
-        this.redraw();
+        this.showTip("玄晶数量不足");
         return;
       }
       // Available after already placing same id
       const placed = this.slots.filter((id) => id === row.itemId).length;
       if (placed >= row.count) {
-        this.tip = "玄晶数量不足";
-        this.redraw();
+        this.showTip("玄晶数量不足");
         return;
       }
       this.onAction?.("pick_crystal", row.itemId);
@@ -278,8 +288,7 @@ export class EnhancePanel extends Container {
     if (this.mode === "transferPick") {
       const dest = this.destCandidates[this.listCursor];
       if (!dest) {
-        this.tip = "没有可转移的同类装备";
-        this.redraw();
+        this.showTip("没有可转移的同类装备");
         return;
       }
       this.onAction?.("pick_dest", dest.seq);
@@ -297,14 +306,14 @@ export class EnhancePanel extends Container {
     if (this.mode === "pickCrystal") {
       this.mode = "main";
       this.actionCursor = 1;
-      this.tip = "";
+      clearPanelTip(this.toast);
       this.redraw();
       return;
     }
     if (this.mode === "transferConfirm") {
       this.mode = "transferPick";
       this.destPick = null;
-      this.tip = "";
+      clearPanelTip(this.toast);
       this.redraw();
       return;
     }
@@ -314,14 +323,13 @@ export class EnhancePanel extends Container {
   /** Called by main when place opens crystal list. */
   enterPickCrystal(): void {
     if (this.slots.length >= ENHANCE_MAX_SLOTS) {
-      this.tip = "最多可放入五颗玄晶";
-      this.redraw();
+      this.showTip("最多可放入五颗玄晶");
       return;
     }
     this.mode = "pickCrystal";
     this.listCursor = 0;
     this.listScroll = 0;
-    this.tip = "";
+    clearPanelTip(this.toast);
     this.redraw();
   }
 
@@ -344,10 +352,10 @@ export class EnhancePanel extends Container {
   }
 
   hide(): void {
+    clearPanelTip(this.toast);
     this.visible = false;
     this.equip = null;
     this.slots = [];
-    this.tip = "";
     this.busy = false;
   }
 
@@ -424,9 +432,7 @@ export class EnhancePanel extends Container {
       this.drawMain(x, y, w, h);
     }
 
-    if (this.tip) {
-      this.addLabelCentered(this.tip.slice(0, 22), LCD_WIDTH / 2, y + h - 36, INK_GREEN);
-    }
+    drawPanelTipOverlay(this, this.toast);
   }
 
   private drawTitle(name: string, x: number, y: number, w: number): number {

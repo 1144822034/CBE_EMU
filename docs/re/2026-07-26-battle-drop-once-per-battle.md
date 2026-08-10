@@ -8,6 +8,9 @@
 
 经验 / 铜钱仍按 `enemyCount` 缩放，不受本变更影响。
 
+> 2026-08-07 起普通掉落不再全表独立投掷，见
+> `docs/re/2026-08-07-battle-drop-lottery-non-guaranteed.md`。
+
 ## 修改点
 
 - `src/server/mock_server_equipment_npc.c`

@@ -6961,6 +6961,8 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 
     if (out == NULL || outCap < pos || observer == NULL)
         return 0;
+    vm_mock_arena_tick();
+    vm_mock_auction_tick();
     /* This one-shot is deliberately checked before sceneVisiblePending.  The
      * target is only marked pending while this builder emits 30/1, so the old
      * scene remains pollable during the item/confirmation phase.
@@ -7517,6 +7519,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
             return 0;
         if (socialAppend > 0)
             objectCount = (u8)(objectCount + socialAppend);
+        if (vm_net_mock_append_arena_hud_object(out, outCap, &pos))
+            objectCount = (u8)(objectCount + 1u);
+        if (vm_net_mock_append_wager_event_object(out, outCap, &pos))
+            objectCount = (u8)(objectCount + 1u);
+        if (vm_net_mock_append_auction_event_object(out, outCap, &pos))
+            objectCount = (u8)(objectCount + 1u);
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         printf("[info][mock-service] scene_sync_poll baseline observer=%08x scene=%s roles=%u moveinfo=%u remove=%d npc=%u task_prompt=%u chat=%d trade=%u social=%s resp=%u evidence=IDA:0x01037998/0x01012958/0x01012A76/0x010126C6\n",
                observer->clientId,
@@ -7598,6 +7606,12 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return 0;
     if (socialAppend > 0)
         objectCount = (u8)(objectCount + socialAppend);
+    if (vm_net_mock_append_arena_hud_object(out, outCap, &pos))
+        objectCount = (u8)(objectCount + 1u);
+    if (vm_net_mock_append_wager_event_object(out, outCap, &pos))
+        objectCount = (u8)(objectCount + 1u);
+    if (vm_net_mock_append_auction_event_object(out, outCap, &pos))
+        objectCount = (u8)(objectCount + 1u);
 
     if (objectCount == 0)
         return 0;

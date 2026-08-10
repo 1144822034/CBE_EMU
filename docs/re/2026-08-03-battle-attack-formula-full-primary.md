@@ -2,13 +2,13 @@
 
 ## 触发
 
-产品约定：普攻攻击力改为全额主属性 + 装备攻击 + 力量，上限 99999。
+产品约定：普攻攻击力改为全额主属性 + 装备攻击 + 力量，上限 65535。
 
 ## 旧公式 → 新公式
 
 ```text
 旧: attack = 6 + level*2 + jobPrimary/2 + equipment.attack/3  (cap 9999)
-新: attack = jobPrimary + equipment.attack + strength         (cap 99999)
+新: attack = jobPrimary + equipment.attack + strength         (cap 65535)
 ```
 
 `jobPrimary` 仍为：天机→力量、幻剑→敏捷、鬼道→智慧。天机因此力量计入两次。

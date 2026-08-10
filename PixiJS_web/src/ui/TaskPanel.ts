@@ -12,6 +12,13 @@ import {
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { TaskCandidateRow, TaskListRow } from "../net/protocolExtras";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 export type TaskTab = "accepted" | "candidates";
 export type TaskAction = "detail" | "abandon" | "accept" | "refresh";
@@ -38,9 +45,7 @@ export class TaskPanel extends Container {
   private candidates: TaskCandidateRow[] = [];
   private actionLabels: string[] = [];
   private detailLines: string[] = [];
-  private tipText = "";
-  private tipUntil = 0;
-  private tipTimer: ReturnType<typeof setTimeout> | null = null;
+  private toast: PanelTipState = createPanelTipState();
 
   onAction: ((action: TaskAction, taskId: number) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -68,7 +73,7 @@ export class TaskPanel extends Container {
     this.listCursor = 0;
     this.actionCursor = 0;
     this.detailPage = 0;
-    this.clearTip();
+    clearPanelTip(this.toast);
     this.visible = true;
     this.clampCursor();
     this.redraw();
@@ -91,16 +96,11 @@ export class TaskPanel extends Container {
     this.redraw();
   }
 
-  showTip(text: string, ms = 1800): void {
-    this.clearTip();
-    this.tipText = text;
-    this.tipUntil = Date.now() + ms;
-    this.tipTimer = setTimeout(() => {
-      this.tipText = "";
-      this.tipTimer = null;
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
       if (this.visible) this.redraw();
     }, ms);
-    this.redraw();
   }
 
   get selectedTaskId(): number {
@@ -186,14 +186,8 @@ export class TaskPanel extends Container {
   }
 
   hide(): void {
+    clearPanelTip(this.toast);
     this.visible = false;
-    this.clearTip();
-  }
-
-  private clearTip(): void {
-    if (this.tipTimer) clearTimeout(this.tipTimer);
-    this.tipTimer = null;
-    this.tipText = "";
   }
 
   private currentRows(): { taskId: number; name: string; subtitle: string }[] {
@@ -269,74 +263,75 @@ export class TaskPanel extends Container {
     );
     this.addLabel("←→", x + w - 36, tabY, CBE.inkLabel);
 
-    if (this.mode === "detail") {
-      const ps = DETAIL_PAGE_SIZE;
-      const pages = Math.max(1, Math.ceil(this.detailLines.length / ps));
-      const start = this.detailPage * ps;
-      let ly = tabY + 18;
-      for (const line of this.detailLines.slice(start, start + ps)) {
-        this.addLabel(line, x + 10, ly, CBE.inkMint);
-        ly += 14;
+    try {
+      if (this.mode === "detail") {
+        const ps = DETAIL_PAGE_SIZE;
+        const pages = Math.max(1, Math.ceil(this.detailLines.length / ps));
+        const start = this.detailPage * ps;
+        let ly = tabY + 18;
+        for (const line of this.detailLines.slice(start, start + ps)) {
+          this.addLabel(line, x + 10, ly, CBE.inkMint);
+          ly += 14;
+        }
+        this.addLabel(
+          `详情 ${this.detailPage + 1}/${pages}`,
+          x + 10,
+          y + h - 18,
+          CBE.inkLabel,
+        );
+        return;
       }
+
+      if (this.mode === "actions") {
+        let ly = tabY + 18;
+        const row = this.currentRows()[this.listCursor];
+        this.addLabel((row?.name || "").slice(0, 14), x + 10, ly, CBE.ink);
+        ly += 18;
+        this.actionLabels.forEach((lab, i) => {
+          const sel = i === this.actionCursor;
+          if (sel) {
+            this.box.rect(x + 6, ly - 1, w - 12, 16).fill({ color: CBE.select });
+          }
+          this.addLabel(lab, x + 14, ly, sel ? CBE.ink : CBE.inkMint);
+          ly += 16;
+        });
+        return;
+      }
+
+      const rows = this.currentRows();
+      const start = this.listPageStart();
+      const pageRows = rows.slice(start, start + LIST_PAGE_SIZE);
+      let ly = tabY + 18;
+      if (!pageRows.length) {
+        this.addLabel(
+          this.tab === "accepted" ? "(无已接任务)" : "(无可接任务)",
+          x + 10,
+          ly,
+          CBE.inkLabel,
+        );
+        this.addLabel("确定·刷新", x + 10, ly + 18, CBE.inkLabel);
+      } else {
+        pageRows.forEach((row, i) => {
+          const idx = start + i;
+          const sel = idx === this.listCursor;
+          if (sel) {
+            this.box.rect(x + 6, ly - 1, w - 12, 26).fill({ color: CBE.select });
+          }
+          this.addLabel(row.name.slice(0, 16), x + 10, ly, sel ? CBE.ink : CBE.inkMint);
+          this.addLabel(row.subtitle.slice(0, 18), x + 12, ly + 12, CBE.inkLabel);
+          ly += 28;
+        });
+      }
+      const pages = Math.max(1, Math.ceil(Math.max(1, rows.length) / LIST_PAGE_SIZE));
+      const page = Math.floor(this.listCursor / LIST_PAGE_SIZE) + 1;
       this.addLabel(
-        `详情 ${this.detailPage + 1}/${pages}`,
+        `${this.tab === "accepted" ? "已接" : "可接"} ${page}/${pages}`,
         x + 10,
         y + h - 18,
         CBE.inkLabel,
       );
-      return;
-    }
-
-    if (this.mode === "actions") {
-      let ly = tabY + 18;
-      const row = this.currentRows()[this.listCursor];
-      this.addLabel((row?.name || "").slice(0, 14), x + 10, ly, CBE.ink);
-      ly += 18;
-      this.actionLabels.forEach((lab, i) => {
-        const sel = i === this.actionCursor;
-        if (sel) {
-          this.box.rect(x + 6, ly - 1, w - 12, 16).fill({ color: CBE.select });
-        }
-        this.addLabel(lab, x + 14, ly, sel ? CBE.ink : CBE.inkMint);
-        ly += 16;
-      });
-      return;
-    }
-
-    const rows = this.currentRows();
-    const start = this.listPageStart();
-    const pageRows = rows.slice(start, start + LIST_PAGE_SIZE);
-    let ly = tabY + 18;
-    if (!pageRows.length) {
-      this.addLabel(
-        this.tab === "accepted" ? "(无已接任务)" : "(无可接任务)",
-        x + 10,
-        ly,
-        CBE.inkLabel,
-      );
-      this.addLabel("确定·刷新", x + 10, ly + 18, CBE.inkLabel);
-    } else {
-      pageRows.forEach((row, i) => {
-        const idx = start + i;
-        const sel = idx === this.listCursor;
-        if (sel) {
-          this.box.rect(x + 6, ly - 1, w - 12, 26).fill({ color: CBE.select });
-        }
-        this.addLabel(row.name.slice(0, 16), x + 10, ly, sel ? CBE.ink : CBE.inkMint);
-        this.addLabel(row.subtitle.slice(0, 18), x + 12, ly + 12, CBE.inkLabel);
-        ly += 28;
-      });
-    }
-    const pages = Math.max(1, Math.ceil(Math.max(1, rows.length) / LIST_PAGE_SIZE));
-    const page = Math.floor(this.listCursor / LIST_PAGE_SIZE) + 1;
-    this.addLabel(
-      `${this.tab === "accepted" ? "已接" : "可接"} ${page}/${pages}`,
-      x + 10,
-      y + h - 18,
-      CBE.inkLabel,
-    );
-    if (this.tipText && Date.now() < this.tipUntil) {
-      this.addLabel(this.tipText.slice(0, 16), x + 100, y + h - 18, CBE.inkTipGreen);
+    } finally {
+      drawPanelTipOverlay(this, this.toast);
     }
   }
 }

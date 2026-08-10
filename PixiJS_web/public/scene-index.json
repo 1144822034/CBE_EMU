@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-09T13:20:18.687Z",
+  "generatedAt": "2026-08-10T03:08:29.527Z",
   "assetRootHint": "web/fs/JHOnlineData",
   "defaultScene": "01桃花岛_01.sce",
   "scenes": [
@@ -167,6 +167,7 @@
     "b_黑龙潭.sce",
     "c00蓬莱仙岛_01.sce",
     "c00蓬莱仙岛_03.sce",
+    "c04比武擂台.sce",
     "c04临安府_01.sce",
     "c04临安府_02.sce",
     "c04临安府_03.sce",
@@ -181,6 +182,7 @@
     "c04临安府_12.sce",
     "c04临安府_13.sce",
     "c04临安府_14.sce",
+    "c04临安府_15.sce",
     "c08雁门关_01.sce",
     "c08雁门关_02.sce",
     "c08雁门关_03.sce",

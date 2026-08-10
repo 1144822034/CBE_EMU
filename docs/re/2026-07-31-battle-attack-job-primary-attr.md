@@ -56,7 +56,7 @@ attack = 6 + level * 2 + jobPrimary / 2 + equipment.attack / 3
 产品约定改为全额累加（详见 `2026-08-03-battle-attack-formula-full-primary.md`）：
 
 ```text
-attack = jobPrimary + equipment.attack + strength   (cap 99999)
+attack = jobPrimary + equipment.attack + strength   (cap 65535)
 ```
 
 > **2026-08-04 修订**：现行去掉额外 `+ strength`；战斗 buff 为 `Δattack = ΔjobPrimary`（另加 skill 直接攻击变化）。见 `2026-08-04-three-job-balance-pass1.md`。

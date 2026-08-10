@@ -13,6 +13,7 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_scene_task.c \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \
+	src/server/mock_server_arena.c \
 	src/server/mock_server_social.c \
 	src/server/mock_server_battle.c \
 	src/server/mock_server_interaction_login.c \
@@ -75,7 +76,7 @@ $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_chests.inc.c \
+	src/web_admin_chests.inc.c src/web_admin_arena.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(CLIENT_OBJDIR)/%.o: src/%.c | $(CLIENT_OBJDIR)
@@ -124,7 +125,7 @@ boundary-check: build
 
 $(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/web_admin_chests.inc.c \
+	src/web_admin_chests.inc.c src/web_admin_arena.inc.c \
 	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
 
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)

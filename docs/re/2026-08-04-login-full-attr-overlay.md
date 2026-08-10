@@ -20,14 +20,11 @@
 | 闪躲/暴击 | enhance jump wear-apply | 同上 |
 | 抗性 | bare word[5]=0 + fec6 | 同上 |
 
-## Fix（窄）
+## Fix（窄）— 已废止
 
-1. 服务端在 actorinfo / login wear sync / 穿脱成功时
-   `publish_panel_attr_overlay` → `bin/cbe_panel_attr_overlay.txt`
-   （物攻用 `equipment.attack`，非战斗 `jobPrimary+FA`）。
-2. Host `vm_host_realign_attr_panel_value_rows`：**有 overlay 时整表采用**
-   （debug-a1d304 卸装：overlay `str=219` 但 sticky `strA/B=2195`；仅补 0
-   无法下调）。不写 actor 半字。
+原方案用 `cbe_panel_attr_overlay*.txt` 旁路补登录无 FA 的面板缺口。
+2026-08-06 起整段移除（见 `2026-08-06-remove-panel-attr-overlay-file.md`）。
+面板只读 actor 半字。
 
 ## Unresolved
 

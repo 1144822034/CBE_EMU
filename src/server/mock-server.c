@@ -38,6 +38,11 @@ static bool vm_mock_service_session_append_login_equip_wear_sync(
 /* Map HUD vitals: catalog item-use / map-heal update role HP then arm 1/1/14. */
 static void vm_mock_service_session_note_map_vitals_changed(const char *reason);
 
+/* Defined in mock_server_social.c; battle-insight 25/6|25/7 may ACK a same-WT
+ * 1/2/10 companion from catalog handlers compiled earlier in this TU. */
+static bool vm_net_mock_append_actor_other_empty10_object(u8 *out, u32 outCap,
+                                                          u32 *pos);
+
 #include "mock_server_catalog.c"
 
 /* Sync MySQL writers in role.c (position / full role_db_save) must invalidate
@@ -73,8 +78,35 @@ static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene);
 #include "mock_server_equipment_npc.c"
 #include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
+
+/* Pixi arena (defined in mock_server_arena.c after guild). */
+static bool vm_mock_arena_npc_offers_entry(const char *npcName);
+static bool vm_mock_arena_wager_npc_offers(const char *npcName);
+static bool vm_mock_arena_peer_visible(
+    const vm_mock_service_client_session *observer,
+    const vm_mock_service_client_session *peer);
+static bool vm_mock_arena_spar_forbidden_on_scene(const char *scene);
+static bool vm_mock_arena_entry_window_open(void);
+static void vm_mock_arena_tick(void);
+static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel);
+static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);
+static bool vm_net_mock_append_wager_event_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap);
+static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap);
+static u32 vm_net_mock_build_arena_protocol_response(const u8 *request,
+                                                      u32 requestLen, u8 *out,
+                                                      u32 outCap);
+static void vm_mock_auction_tick(void);
+static bool vm_net_mock_append_auction_event_object(u8 *out, u32 outCap, u32 *pos);
+static u32 vm_net_mock_build_auction_protocol_response(const u8 *request,
+                                                       u32 requestLen, u8 *out,
+                                                       u32 outCap);
+
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"
+#include "mock_server_arena.c"
+#include "mock_server_auction.c"
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
 #include "mock_server_interaction_login.c"

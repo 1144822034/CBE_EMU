@@ -36,6 +36,7 @@ import {
   type RoleRow,
   type ServerRow,
 } from "../net/protocol";
+import { BUNDLED_CLIENT_CODE_VERSION } from "../net/bundledCodeVersion";
 import {
   buildBattleEscapeRequest,
   buildBattleItemUseRequest,
@@ -167,6 +168,57 @@ import {
   parseQuickRepairQuote,
   parseQuickRepairConfirm,
   NpcServiceOpcode,
+} from "../net/protocolExtras";
+import {
+  bracketForLevel,
+  buildArenaClaimRequest,
+  buildArenaLeaveRequest,
+  buildArenaRankRequest,
+  buildArenaStatusRequest,
+  buildWagerCancelRequest,
+  buildWagerChallengeRequest,
+  buildWagerConfirmRequest,
+  buildWagerCreateRequest,
+  buildWagerListRequest,
+  buildWagerMineRequest,
+  parseArenaClaim,
+  parseArenaFromBodies,
+  parseArenaHud,
+  parseArenaRank,
+  parseArenaStatus,
+  parseWagerEvent,
+  parseWagerList,
+  parseWagerMine,
+  parseWagerOpResult,
+  type ArenaHud,
+  type ArenaRankPage,
+  type ArenaStatus,
+  type WagerEvent,
+  type WagerListRow,
+  type WagerMine,
+  type WagerResult,
+} from "../net/protocolArena";
+import {
+  buildAuctionBidRequest,
+  buildAuctionCancelRequest,
+  buildAuctionClaimRequest,
+  buildAuctionCreateRequest,
+  buildAuctionListRequest,
+  buildAuctionMineRequest,
+  buildAuctionStatusRequest,
+  parseAuctionClaim,
+  parseAuctionEvent,
+  parseAuctionList,
+  parseAuctionOpResult,
+  parseAuctionStatus,
+  type AuctionClaimResult,
+  type AuctionEvent,
+  type AuctionListing,
+  type AuctionOpResult,
+  type AuctionStatus,
+} from "../net/protocolAuction";
+import { decodeWtPacket } from "../net/wt";
+import {
   type BagItem,
   type BattleActionUpdate,
   type CharacterStats,
@@ -287,6 +339,10 @@ export type SessionCallbacks = {
   onOtherEquip?: (equip: OtherEquipView) => void;
   /** Equipped designation changed (23/2) — refresh overhead badge. */
   onDesignationUpdate?: (info: { name: string; gif: string }) => void;
+  /** Pixi 比武擂台 HUD push (41/5). */
+  onArenaHud?: (hud: ArenaHud | null) => void;
+  onWagerEvent?: (ev: WagerEvent) => void;
+  onAuctionEvent?: (ev: AuctionEvent) => void;
   /** Peer designation update (23/2 for another actorId). */
   onPeerDesignation?: (info: {
     actorId: number;
@@ -335,6 +391,17 @@ export class GameSession {
    * challenge_enemy_id (catalog), so Pixi resolves .actor via scene + this guide.
    */
   pendingChallengeGuideActorId = 0;
+  /**
+   * Spawn touched / nearest when issuing 4/1. Battle left seats must paint this
+   * species (multi-clone fights share one template), not other map kinds.
+   */
+  pendingEncounterVisual: {
+    battleActorId: number;
+    x: number;
+    y: number;
+    actorResource: string;
+    name?: string;
+  } | null = null;
   /** Surrounding-player page cache (2/7). */
   nearbyList: PeerActor[] = [];
   /** Live team roster (5/3, 5/10, …). */
@@ -344,6 +411,9 @@ export class GameSession {
   friends: FriendRow[] = [];
   /** Title page cache (23/1). */
   designationPage: DesignationPage | null = null;
+  arenaHud: ArenaHud | null = null;
+  arenaStatus: ArenaStatus | null = null;
+  arenaRankPage: ArenaRankPage | null = null;
   /** Ranking board cache (23/7). */
   rankingPage: RankingPage | null = null;
   /** Cached accepted/candidate rows for NPC overhead marks. */
@@ -441,7 +511,7 @@ export class GameSession {
   private accountUser = "";
   private accountPass = "";
   /** Matches server server_code_version.txt via login WT codeVersion. */
-  private codeVersion = 2;
+  private codeVersion = BUNDLED_CLIENT_CODE_VERSION;
   private roleSelectInFlight = false;
   /**
    * While set (title role-select → first scene ready), only this scene leaf may
@@ -482,7 +552,7 @@ export class GameSession {
     this.clearWorldState();
     this.stopPoll();
     this.transport?.close();
-    this.codeVersion = await loadClientCodeVersion(2);
+    this.codeVersion = await loadClientCodeVersion();
     this.transport = await connectLiveTransport();
     this.setPhase("connected", `${this.transport.mode} · codeVersion=${this.codeVersion}`);
     await this.fetchServerList();
@@ -561,6 +631,7 @@ export class GameSession {
     this.sceneMonsters = [];
     this.lastNpcId = 0;
     this.pendingChallengeGuideActorId = 0;
+    this.pendingEncounterVisual = null;
     this.nearbyList = [];
     this.scenePeerById.clear();
     this.teamMembers = [];
@@ -676,11 +747,16 @@ export class GameSession {
     await tryOnce();
     if (this.servers.length === 0) await tryOnce();
     if (this.servers.length === 0) {
-      const detail = lastInfo
-        ? `result=${lastResult} ${lastInfo}`
-        : lastResult
-          ? `result=${lastResult}`
-          : "无 1/12 serverinfo";
+      // result=2 is a real 1/1/12 failure (codeVersion / auth), not a missing packet.
+      if (lastResult === 2 || lastInfo) {
+        const tip = lastInfo || `result=${lastResult}`;
+        throw new Error(
+          lastResult === 2
+            ? `登录失败：${tip}`
+            : `登录失败：${tip}（1/1/12）`,
+        );
+      }
+      const detail = lastResult ? `result=${lastResult}` : "无 1/12 serverinfo";
       throw new Error(
         `未收到服务器列表（1/1/12：${detail}）。网关 :19092 / 服 :19090 需可达，且 MySQL 账号库可用（默认 CBE_MYSQL_* → jh_online）`,
       );
@@ -1304,6 +1380,7 @@ export class GameSession {
     /* Remap uses spawn (x,y); sending the player tile misses admin binds. */
     let battleX = px | 0;
     let battleY = py | 0;
+    let encounter: NpcActor | null = null;
     if (!id) {
       // Prefer SCE combat spawns, then catalog e_* rows; never town NPCs.
       const catalogMonsters = this.npcs.filter(
@@ -1323,6 +1400,7 @@ export class GameSession {
             best = n;
           }
         }
+        encounter = best;
         id = best.battleActorId ?? best.actorId;
         index = id;
         battleX = best.x | 0;
@@ -1330,6 +1408,7 @@ export class GameSession {
       }
     } else if (id >= 0x70000000) {
       const local = this.sceneMonsters.find((n) => n.actorId === id);
+      encounter = local ?? null;
       id = local?.battleActorId ?? id;
       index = id;
       if (local) {
@@ -1341,6 +1420,7 @@ export class GameSession {
         (n) => n.battleActorId === id || n.actorId === id,
       );
       if (local) {
+        encounter = local;
         battleX = local.x | 0;
         battleY = local.y | 0;
         index = local.battleActorId ?? id;
@@ -1352,6 +1432,23 @@ export class GameSession {
       index = 0;
       console.warn("[session] battle wild id=9001 (no monster catalog)");
     }
+    const visualRes =
+      encounter?.battleActorResource || encounter?.actorResource || "";
+    this.pendingEncounterVisual = visualRes
+      ? {
+          battleActorId: (encounter?.battleActorId ?? id) >>> 0,
+          x: battleX,
+          y: battleY,
+          actorResource: visualRes,
+          name: encounter?.name,
+        }
+      : {
+          battleActorId: id >>> 0,
+          x: battleX,
+          y: battleY,
+          actorResource: "",
+          name: encounter?.name,
+        };
     this.setPhase("battle-start", `id=${id} index=${index} pos=${battleX},${battleY}`);
     this.inBattle = true;
     const bodies = await this.transport.exchange(
@@ -1369,6 +1466,7 @@ export class GameSession {
       })
     ) {
       this.inBattle = false;
+      this.pendingEncounterVisual = null;
     }
   }
 
@@ -1381,17 +1479,20 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
-  /** True when client should auto-submit 4/2 while already in battle. */
+  /**
+   * Client-side 4/2 auto. Hangup must NOT share this with server poll synth:
+   * hangup start arms 4/11 prefer (CBE-style synth), and a second Pixi 4/2
+   * double-fired the same seat. Hangup casts via server LastOperate instead.
+   */
   shouldInBattleAuto(): boolean {
-    return this.hangupActive || this.autoBattleActive;
+    return this.autoBattleActive && !this.hangupActive;
   }
 
   /**
-   * Operate for in-battle auto: hangup always uses hangupSkillOperate;
-   * battle [自动] prefers last manual operate, else hangup skill setting.
+   * Operate for in-battle [自动]: last manual operate, else hangup skill setting.
+   * Hangup itself uses server synth (Operate seeded on 2/10 start).
    */
   inBattleAutoOperate(): number {
-    if (this.hangupActive) return this.hangupSkillOperate | 0;
     if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
     return this.hangupSkillOperate | 0;
   }
@@ -1486,7 +1587,60 @@ export class GameSession {
     // Optimistic arm for same-packet battle start; cleared on 「已停止挂机」.
     this.hangupActive = true;
     this.setPhase("hangup", "2/10 Type=2");
-    const bodies = await this.transport.exchange(0, buildHangupStartRequest());
+    /*
+     * Seed the same outdoor live-node fields as manual 4/1 so hangup can use
+     * subtype-5 scene wires (player=1, monsters=[2,3,0]) instead of Pixi's
+     * usual non-scene subtype-10 (player=0). Also seed Operate for server synth.
+     */
+    const px = this.x | 0;
+    const py = this.y | 0;
+    let enemyId = 0;
+    let index = 0;
+    let posx = 0;
+    let posy = 0;
+    if (!isCitySceneKey(this.scene || this.loadedScene || "")) {
+      const catalogMonsters = this.npcs.filter(
+        (n) =>
+          /monster|怪|e_/i.test(n.scriptName) ||
+          /^e_/i.test(n.actorResource) ||
+          (/^e_/i.test(n.name) && n.actorId < 100000),
+      );
+      const pool = [...this.sceneMonsters, ...catalogMonsters];
+      if (pool.length) {
+        let best = pool[0]!;
+        let bestD = Infinity;
+        for (const n of pool) {
+          const d = (n.x - px) * (n.x - px) + (n.y - py) * (n.y - py);
+          if (d < bestD) {
+            bestD = d;
+            best = n;
+          }
+        }
+        enemyId = (best.battleActorId ?? best.actorId) >>> 0;
+        index = enemyId;
+        posx = best.x | 0;
+        posy = best.y | 0;
+        const visualRes =
+          best.battleActorResource || best.actorResource || "";
+        this.pendingEncounterVisual = {
+          battleActorId: enemyId,
+          x: posx,
+          y: posy,
+          actorResource: visualRes,
+          name: best.name,
+        };
+      }
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildHangupStartRequest({
+        enemyId: enemyId || undefined,
+        index,
+        posx,
+        posy,
+        operate: this.hangupSkillOperate | 0,
+      }),
+    );
     this.handleBodies(bodies);
   }
 
@@ -1575,6 +1729,277 @@ export class GameSession {
     return page;
   }
 
+  isArenaScene(scene = this.scene): boolean {
+    return /比武擂台/.test(scene) || scene.includes("\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8");
+  }
+
+  async fetchArenaStatus(): Promise<ArenaStatus | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildArenaStatusRequest());
+    const parsed = parseArenaFromBodies(bodies);
+    this.handleBodies(bodies);
+    if (parsed.status) this.arenaStatus = parsed.status;
+    return this.arenaStatus;
+  }
+
+  async fetchArenaRank(
+    job?: number,
+    bracket?: number,
+    pageIndex = 0,
+  ): Promise<ArenaRankPage | null> {
+    if (!this.transport) return null;
+    const j = job && job > 0 ? job : this.roles.find((r) => r.roleId === this.selectedRoleId)?.jobIndex != null
+      ? (this.roles.find((r) => r.roleId === this.selectedRoleId)!.jobIndex + 1)
+      : 1;
+    const b =
+      bracket && bracket > 0 ? bracket : bracketForLevel(this.level || 1);
+    const bodies = await this.transport.exchange(
+      0,
+      buildArenaRankRequest(j, b, pageIndex),
+    );
+    const parsed = parseArenaFromBodies(bodies);
+    this.handleBodies(bodies);
+    if (parsed.rank) this.arenaRankPage = parsed.rank;
+    return this.arenaRankPage;
+  }
+
+  async claimArenaReward(): Promise<{
+    result: number;
+    rank: number;
+    claimed: boolean;
+  } | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildArenaClaimRequest());
+    const parsed = parseArenaFromBodies(bodies);
+    this.handleBodies(bodies);
+    return parsed.claim ?? null;
+  }
+
+  async leaveArena(): Promise<void> {
+    if (!this.transport) return;
+    const bodies = await this.transport.exchange(0, buildArenaLeaveRequest());
+    this.handleBodies(bodies);
+  }
+
+  async fetchWagerBoard(): Promise<{ rows: WagerListRow[]; mine: WagerMine | null }> {
+    if (!this.transport) return { rows: [], mine: null };
+    const listBodies = await this.transport.exchange(0, buildWagerListRequest());
+    this.handleBodies(listBodies);
+    const mineBodies = await this.transport.exchange(0, buildWagerMineRequest());
+    this.handleBodies(mineBodies);
+    let rows: WagerListRow[] = [];
+    let mine: WagerMine | null = null;
+    for (const body of listBodies) {
+      try {
+        const list = parseWagerList(decodeWtPacket(body));
+        if (list) rows = list.rows;
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const body of mineBodies) {
+      try {
+        const m = parseWagerMine(decodeWtPacket(body));
+        if (m) mine = m;
+      } catch {
+        /* ignore */
+      }
+    }
+    return { rows, mine };
+  }
+
+  async wagerCreate(stake: number): Promise<WagerResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildWagerCreateRequest(stake));
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseWagerOpResult(decodeWtPacket(body), 11);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async wagerCancel(challengeId: number): Promise<WagerResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildWagerCancelRequest(challengeId));
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseWagerOpResult(decodeWtPacket(body), 12);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async wagerChallenge(challengeId: number): Promise<WagerResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildWagerChallengeRequest(challengeId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseWagerOpResult(decodeWtPacket(body), 13);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async wagerConfirm(
+    challengeId: number,
+    accept: boolean,
+  ): Promise<WagerResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildWagerConfirmRequest(challengeId, accept),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseWagerOpResult(decodeWtPacket(body), 14);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async fetchAuctionBoard(): Promise<{
+    rows: AuctionListing[];
+    mine: AuctionListing[];
+    status: AuctionStatus | null;
+  }> {
+    if (!this.transport) return { rows: [], mine: [], status: null };
+    const statusBodies = await this.transport.exchange(
+      0,
+      buildAuctionStatusRequest(),
+    );
+    this.handleBodies(statusBodies);
+    const listBodies = await this.transport.exchange(0, buildAuctionListRequest(0));
+    this.handleBodies(listBodies);
+    const mineBodies = await this.transport.exchange(0, buildAuctionMineRequest(0));
+    this.handleBodies(mineBodies);
+    let rows: AuctionListing[] = [];
+    let mine: AuctionListing[] = [];
+    let status: AuctionStatus | null = null;
+    for (const body of statusBodies) {
+      try {
+        const st = parseAuctionStatus(decodeWtPacket(body));
+        if (st) status = st;
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const body of listBodies) {
+      try {
+        const list = parseAuctionList(decodeWtPacket(body), 2);
+        if (list) rows = list.rows;
+      } catch {
+        /* ignore */
+      }
+    }
+    for (const body of mineBodies) {
+      try {
+        const list = parseAuctionList(decodeWtPacket(body), 3);
+        if (list) mine = list.rows;
+      } catch {
+        /* ignore */
+      }
+    }
+    return { rows, mine, status };
+  }
+
+  async auctionCreate(opts: {
+    bagSeq: number;
+    count: number;
+    startPrice: number;
+    currency: number;
+    durationTier: number;
+  }): Promise<AuctionOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildAuctionCreateRequest(opts),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionOpResult(decodeWtPacket(body), 4);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async auctionBid(
+    listingId: number,
+    amount: number,
+  ): Promise<AuctionOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildAuctionBidRequest(listingId, amount),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionOpResult(decodeWtPacket(body), 5);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async auctionCancel(listingId: number): Promise<AuctionOpResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildAuctionCancelRequest(listingId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionOpResult(decodeWtPacket(body), 6);
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  async auctionClaim(): Promise<AuctionClaimResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildAuctionClaimRequest());
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const r = parseAuctionClaim(decodeWtPacket(body));
+        if (r) return r;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
   /** Quote then confirm quick repair (7/29 → 7/13). */
   async requestQuickRepairQuote(): Promise<{
     type: number;
@@ -1636,16 +2061,39 @@ export class GameSession {
   /**
    * subtype-10 PvE left visual bytes are crash-safe player-portrait placeholders
    * (mock default 0/1 → Pixi used to paint 男幻剑). Resolve a real .actor from
-   * scene SCE / catalog NPC / challenge guide instead.
+   * the pending collide spawn / scene SCE / catalog NPC / challenge guide.
    */
   resolvePveEnemyActor(
     enemyId: number,
     enemyName?: string,
+    opts?: { x?: number; y?: number },
   ): { actorResource: string; name?: string } | null {
     const id = enemyId >>> 0;
-    const name = (enemyName || "").replace(/\0+$/g, "").trim();
+    const name = (enemyName || "")
+      .replace(/\0+$/g, "")
+      .replace(/#\d+$/, "")
+      .trim();
     const fromMon = (n: NpcActor) =>
       n.battleActorResource || n.actorResource || "";
+    const pending = this.pendingEncounterVisual;
+    // Collide/tap/F set this for the current 4/1; hangup leaves it null.
+    // Prefer it unconditionally so wire→catalog remap cannot pick another SCE kind.
+    if (pending?.actorResource) {
+      return {
+        actorResource: pending.actorResource,
+        name: pending.name || name,
+      };
+    }
+    const matchPos = (n: NpcActor) =>
+      opts?.x != null &&
+      opts?.y != null &&
+      (n.x | 0) === (opts.x | 0) &&
+      (n.y | 0) === (opts.y | 0);
+    const monByPos = this.sceneMonsters.find(matchPos);
+    if (monByPos) {
+      const res = fromMon(monByPos);
+      if (res) return { actorResource: res, name: monByPos.name || name };
+    }
     const monById = this.sceneMonsters.find(
       (n) =>
         (n.battleActorId != null && (n.battleActorId >>> 0) === id) ||
@@ -2827,6 +3275,10 @@ export class GameSession {
 
   async sparChallenge(actorId: number): Promise<void> {
     if (!this.transport || this.inBattle) return;
+    if (this.isArenaScene()) {
+      this.setPhase("inworld", "比武擂台内不可手动切磋");
+      return;
+    }
     const bodies = await this.transport.exchange(0, buildSparRequest(actorId));
     this.handleBodies(bodies);
     // Same as confirmChallenge: 4/10 may be deferred to scene-sync poll when
@@ -3760,6 +4212,25 @@ export class GameSession {
         const flag = hangupActiveFromChatLine(hang);
         if (flag != null) this.hangupActive = flag;
         this.cb.onHangup?.(hang);
+      }
+
+      const arenaHud = parseArenaHud(packet);
+      if (arenaHud) {
+        this.arenaHud = arenaHud;
+        this.cb.onArenaHud?.(arenaHud);
+      }
+      const wagerEv = parseWagerEvent(packet);
+      if (wagerEv) this.cb.onWagerEvent?.(wagerEv);
+      const auctionEv = parseAuctionEvent(packet);
+      if (auctionEv) this.cb.onAuctionEvent?.(auctionEv);
+      const arenaSt = parseArenaStatus(packet);
+      if (arenaSt) this.arenaStatus = arenaSt;
+      const arenaRk = parseArenaRank(packet);
+      if (arenaRk) this.arenaRankPage = arenaRk;
+      const arenaCl = parseArenaClaim(packet);
+      if (arenaCl) {
+        /* claim result consumed by claimArenaReward */
+        void arenaCl;
       }
 
       const designation = parseDesignationPage(packet);

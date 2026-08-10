@@ -3811,6 +3811,14 @@ typedef struct
     u32 releaseNotBeforeTick;
     u32 actionSerial;
     vm_mock_service_duel_event events[VM_MOCK_SERVICE_DUEL_EVENT_MAX];
+    /* Pixi 比武擂台: skip spar death/token rewards; score via arena settle. */
+    bool arenaMode;
+    bool arenaSettled;
+    u32 arenaStartTick;
+    /* Pixi 赏金擂台: stake settle via wager; same death exemption as arena. */
+    bool wagerMode;
+    bool wagerSettled;
+    u32 wagerChallengeId;
 } vm_mock_service_duel;
 
 static vm_mock_service_team g_vm_mock_service_teams[VM_MOCK_SERVICE_TEAM_MAX];
@@ -5232,7 +5240,7 @@ static void vm_mock_service_duel_arm_observer_exit(
     observer->sparResultNotBeforeTick = 0;
     (void)battleMp;
     (void)targetMp;
-    if (observer->sparExitWasDead)
+    if (observer->sparExitWasDead && !(duel->arenaMode) && !(duel->wagerMode))
     {
         vm_mock_service_session_apply_spar_death_penalty(
             observer, "spar-defeat");
@@ -5241,6 +5249,13 @@ static void vm_mock_service_duel_arm_observer_exit(
             observer->sparExitRecoverHp = observer->onlineHp - battleHp;
         else if (observer->sparExitRecoverHp == 0)
             observer->sparExitRecoverHp = observer->onlineHp ? observer->onlineHp : 1;
+    }
+    else if (observer->sparExitWasDead && (duel->arenaMode || duel->wagerMode))
+    {
+        /* Arena: no PvE death penalty; restore display HP for settle banner. */
+        observer->sparExitRecoverHp =
+            targetHp > battleHp ? (targetHp - battleHp) : (targetHp ? targetHp : 1);
+        observer->sparExitWasDead = false;
     }
     holdTicks = vm_net_mock_env_u32("CBE_DUEL_EXIT_REDELIVER_TICKS", 300);
     if (holdTicks < 90)

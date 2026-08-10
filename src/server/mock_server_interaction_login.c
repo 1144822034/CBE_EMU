@@ -5308,6 +5308,16 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
         return true;
     if (object->kind == 0x19 && object->subtype == 5)
         return true;
+    /*
+     * Battle insight 828: CBE flushes 1/25/6 or wait-clear 1/25/7 with a
+     * pending 1/2/10 companion (same pattern as discard 7/4+2/10).  Solo
+     * parsers require a single object; without these entries the compound
+     * falls through to unimplemented-handler tip「功能暂未实现(1/2/10)」.
+     * Do not add 25/3 — that is the hangup marker with Type=2.
+     */
+    if (object->kind == 0x19 &&
+        (object->subtype == 6 || object->subtype == 7))
+        return true;
     if (object->kind == 0x63 && object->subtype == 1)
         return true;
     return false;

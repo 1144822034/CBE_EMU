@@ -216,10 +216,30 @@ export function buildBattleDeathPromptRequest(result: 1 | 2): Uint8Array {
   return b.finish();
 }
 
-/** Hangup start: 1/2/10 Type=2 + empty 1/25/3. */
-export function buildHangupStartRequest(): Uint8Array {
+/**
+ * Hangup start: 1/2/10 Type=2 + empty 1/25/3.
+ * Optional id/index/posx/posy seed the same request-live-node subtype-5 path
+ * as manual 4/1 (Pixi has no emulator live table). Operate seeds LastOperate
+ * so server poll synth casts the hangup skill (CBE-style; no client 4/2).
+ */
+export function buildHangupStartRequest(opts?: {
+  enemyId?: number;
+  index?: number;
+  posx?: number;
+  posy?: number;
+  operate?: number;
+}): Uint8Array {
   const b = new WtBuilder();
-  b.object(1, 2, 10).u8("Type", 2);
+  const o = b.object(1, 2, 10).u8("Type", 2);
+  if (opts?.enemyId != null && opts.enemyId !== 0) {
+    o.u32("id", opts.enemyId >>> 0)
+      .u32("index", (opts.index ?? 0) >>> 0)
+      .u32("posx", (opts.posx ?? 0) >>> 0)
+      .u32("posy", (opts.posy ?? 0) >>> 0);
+  }
+  if (opts?.operate != null && opts.operate !== 0) {
+    o.u32("Operate", opts.operate >>> 0);
+  }
   b.object(1, 25, 3);
   return b.finish();
 }
@@ -2503,6 +2523,7 @@ export function parseHangupNotice(packet: WtPacket): string | null {
 export function hangupActiveFromChatLine(text: string): boolean | null {
   if (text.includes("已停止挂机")) return false;
   if (text.includes("不能挂机")) return false;
+  if (text.includes("挂机失败")) return false;
   if (text.includes("已开始挂机")) return true;
   return null;
 }

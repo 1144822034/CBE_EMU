@@ -19,6 +19,13 @@ import type {
   PlayerInfoView,
   TeamMember,
 } from "../net/protocolSocial";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 const RANK_TAB_BG = 0x375946;
 const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
@@ -83,6 +90,7 @@ export class SocialPanel extends Container {
   private rankMyorder = 0;
   private jinTex: Texture | null = null;
   private jinTexLoading = false;
+  private toast: PanelTipState = createPanelTipState();
 
   onAction: ((kind: SocialKind, action: SocialAction, row?: SocialRow) => void) | null =
     null;
@@ -331,7 +339,15 @@ export class SocialPanel extends Container {
   }
 
   hide(): void {
+    clearPanelTip(this.toast);
     this.visible = false;
+  }
+
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
   }
 
   private enterList(): void {
@@ -395,82 +411,86 @@ export class SocialPanel extends Container {
     drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, pillH);
     this.addLabel(this.title, LCD_WIDTH / 2 - pillW / 2 + 8, y + 9, CBE.ink);
 
-    if (this.mode === "text") {
-      const ps = this.textPageSize();
-      const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
-      const start = this.textPage * ps;
-      const shown = this.textLines.slice(start, start + ps);
-      shown.forEach((line, i) => {
-        this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
-      });
-      const hint =
-        pages > 1
-          ? `↑↓翻页 ${this.textPage + 1}/${pages}  确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
-          : "确定/取消=关闭";
-      this.addLabel(hint, x + 10, y + h - 18, CBE.inkLabel);
-      return;
-    }
+    try {
+      if (this.mode === "text") {
+        const ps = this.textPageSize();
+        const pages = Math.max(1, Math.ceil(this.textLines.length / ps));
+        const start = this.textPage * ps;
+        const shown = this.textLines.slice(start, start + ps);
+        shown.forEach((line, i) => {
+          this.addLabel(line.slice(0, 28), x + 10, y + 36 + i * 15, CBE.inkMint);
+        });
+        const hint =
+          pages > 1
+            ? `↑↓翻页 ${this.textPage + 1}/${pages}  确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
+            : "确定/取消=关闭";
+        this.addLabel(hint, x + 10, y + h - 18, CBE.inkLabel);
+        return;
+      }
 
-    if (this.mode === "actions") {
-      this.actionLabels.forEach((lab, i) => {
-        const hi = i === this.actionCursor;
+      if (this.mode === "actions") {
+        this.actionLabels.forEach((lab, i) => {
+          const hi = i === this.actionCursor;
+          if (hi) {
+            this.box
+              .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+              .fill({ color: CBE.select });
+          }
+          this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+        });
+        return;
+      }
+
+      if (this.kind === "rank") {
+        this.drawRankList(x, y, w, h);
+        return;
+      }
+
+      if (!this.rows.length) {
+        this.addLabel("(空)", x + 10, y + 40, CBE.inkMint);
+        return;
+      }
+
+      const total = this.rows.length;
+      const pages = Math.max(1, Math.ceil(total / LIST_PAGE_SIZE));
+      const pageStart = this.listPageStart();
+      const page = Math.floor(pageStart / LIST_PAGE_SIZE) + 1;
+      const localCursor = this.listCursor - pageStart;
+      const shown = this.rows.slice(pageStart, pageStart + LIST_PAGE_SIZE);
+
+      shown.forEach((row, i) => {
+        const hi = i === localCursor;
         if (hi) {
           this.box
-            .rect(x + 6, y + 36 + i * 18, w - 12, 16)
+            .rect(x + 6, y + 36 + i * 20, w - 12, 18)
             .fill({ color: CBE.select });
         }
-        this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
-      });
-      return;
-    }
-
-    if (this.kind === "rank") {
-      this.drawRankList(x, y, w, h);
-      return;
-    }
-
-    if (!this.rows.length) {
-      this.addLabel("(空)", x + 10, y + 40, CBE.inkMint);
-      return;
-    }
-
-    const total = this.rows.length;
-    const pages = Math.max(1, Math.ceil(total / LIST_PAGE_SIZE));
-    const pageStart = this.listPageStart();
-    const page = Math.floor(pageStart / LIST_PAGE_SIZE) + 1;
-    const localCursor = this.listCursor - pageStart;
-    const shown = this.rows.slice(pageStart, pageStart + LIST_PAGE_SIZE);
-
-    shown.forEach((row, i) => {
-      const hi = i === localCursor;
-      if (hi) {
-        this.box
-          .rect(x + 6, y + 36 + i * 20, w - 12, 18)
-          .fill({ color: CBE.select });
-      }
-      this.addLabel(
-        row.name.slice(0, 14),
-        x + 10,
-        y + 38 + i * 20,
-        hi ? CBE.ink : CBE.inkMint,
-      );
-      if (row.subtitle) {
         this.addLabel(
-          row.subtitle.slice(0, 16),
-          x + 100,
+          row.name.slice(0, 14),
+          x + 10,
           y + 38 + i * 20,
+          hi ? CBE.ink : CBE.inkMint,
+        );
+        if (row.subtitle) {
+          this.addLabel(
+            row.subtitle.slice(0, 16),
+            x + 100,
+            y + 38 + i * 20,
+            CBE.inkLabel,
+          );
+        }
+      });
+
+      if (pages > 1) {
+        this.addLabel(
+          `↑↓ ${page}/${pages} · ${this.listCursor + 1}/${total}`,
+          x + 10,
+          y + h - 18,
           CBE.inkLabel,
         );
       }
-    });
-
-    if (pages > 1) {
-      this.addLabel(
-        `↑↓ ${page}/${pages} · ${this.listCursor + 1}/${total}`,
-        x + 10,
-        y + h - 18,
-        CBE.inkLabel,
-      );
+    } finally {
+      drawPanelTipOverlay(this, this.toast);
     }
   }
 

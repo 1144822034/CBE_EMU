@@ -6,10 +6,16 @@ import {
   SOFTKEY_H,
   WORLD_BOTTOM_H,
   WORLD_TOP_H,
+  drawCbePanel,
   drawLocBanner,
   makePixelText,
 } from "./constants";
-import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
+import {
+  BitmapLabel,
+  UC3_CELL,
+  measureUiTextWidth,
+  wrapUiText,
+} from "./BitmapLabel";
 import { DigitStrip, tryLoadUiTexture, uiSprite } from "./UiAssets";
 import { colorForChatType } from "./ChatPanel";
 import {
@@ -600,7 +606,7 @@ export class WorldHud extends Container {
   setBagSlots(_used: number, _cap: number): void {}
 
   /** Green center toast (增益列表 / short feedback). */
-  showTip(text: string, ms = 4200): void {
+  showTip(text: string, ms = 1200): void {
     const msg = text.trim();
     if (!msg) return;
     this.tipText = msg;
@@ -634,39 +640,40 @@ export class WorldHud extends Container {
       this.tipHost.visible = false;
       return;
     }
-    const maxW = LCD_WIDTH - 28;
+    const padFrame = 6;
     const padX = 10;
     const padY = 8;
     const lineH = 16;
-    const lines = wrapUiText(this.tipText, maxW - padX * 2);
+    const maxInner = LCD_WIDTH - 28 - padFrame * 2;
+    const textMax = Math.max(40, maxInner - padX * 2);
+    const lines = wrapUiText(this.tipText, textMax);
     const boxH = padY * 2 + lines.length * lineH;
     const boxW = Math.min(
-      maxW,
-      Math.max(
-        120,
-        ...lines.map((l) => {
-          let w = 0;
-          for (const ch of l) w += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
-          return w + padX * 2;
-        }),
-      ),
+      maxInner,
+      Math.max(96, ...lines.map((l) => measureUiTextWidth(l))) + padX * 2,
     );
-    const bx = Math.floor((LCD_WIDTH - boxW) / 2);
-    const by = Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2);
-    this.tipBox
-      .roundRect(bx, by, boxW, boxH, 4)
-      .fill({ color: 0x0a1814, alpha: 0.92 })
-      .stroke({ width: 1, color: CBE.borderBright });
+    const bx = Math.floor((LCD_WIDTH - boxW) / 2) - padFrame;
+    const by =
+      Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2) - padFrame;
+    // Same opaque CBE panel as battle settlement.
+    drawCbePanel(
+      this.tipBox,
+      bx,
+      by,
+      boxW + padFrame * 2,
+      boxH + padFrame * 2,
+      CBE.bgPanelDark,
+    );
+    const cx = Math.floor(LCD_WIDTH / 2);
     for (let i = 0; i < lines.length; i++) {
       const label = new BitmapLabel();
+      label.anchor.set(0.5, 0);
       await label.setText(lines[i]!, CBE.inkTipGreen, { outline: false });
-      label.position.set(
-        Math.floor(LCD_WIDTH / 2 - label.width / 2),
-        by + padY + i * lineH,
-      );
+      label.position.set(cx, by + padFrame + padY + i * lineH);
       this.tipHost.addChild(label);
       this.tipLabels.push(label);
     }
+    this.addChild(this.tipHost);
     this.tipHost.visible = true;
   }
 

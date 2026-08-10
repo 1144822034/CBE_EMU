@@ -374,6 +374,13 @@ static bool vm_mock_service_authenticate_login_request(const vm_mock_service_log
     {
         return false;
     }
+    vm_mock_service_account_db_load();
+    if (!g_vm_mock_service_account_db_valid)
+    {
+        if (errorOut)
+            *errorOut = "account db unavailable";
+        return false;
+    }
     if (!vm_mock_service_account_verify_credentials(login->userName, login->password))
         return false;
     return true;

@@ -1,3 +1,4 @@
+import { BUNDLED_CLIENT_CODE_VERSION } from "./bundledCodeVersion";
 import {
   SeqReader,
   SeqWriter,
@@ -231,7 +232,12 @@ export function battleTargetWire(state: BattleState): number {
             ? [2, 3, 0]
             : [0]
       : state.left.map((_, i) => i + 1);
-  return leftWires[mi] ?? 0;
+  const wire = leftWires[mi];
+  // subtype-10: wire 0 is the player — never use it as a monster fallback.
+  if (wire == null) {
+    return state.subtype === 10 ? 1 : 0;
+  }
+  return wire;
 }
 
 /**
@@ -244,7 +250,7 @@ export function battleTargetWire(state: BattleState): number {
 export function buildLoginAlt12Request(
   user = "",
   password = "",
-  codeVersion = 2,
+  codeVersion = BUNDLED_CLIENT_CODE_VERSION,
 ): Uint8Array {
   const b = new WtBuilder();
   b.object(1, 1, 12)
@@ -258,19 +264,36 @@ export function buildLoginAlt12Request(
   return b.finish();
 }
 
-/** Load `/client_code_version.txt` (synced into public/ for APK). */
+function parseCodeVersionText(text: string): number | null {
+  const token = text.trim().split(/\s+/)[0] ?? "";
+  const n = Number.parseInt(token, 10);
+  return Number.isFinite(n) && n >= 0 ? n >>> 0 : null;
+}
+
+/**
+ * Load client codeVersion for WT 1/1/12.
+ * Prefer relative URLs (`base: './'` / Capacitor); never fall back to a
+ * stale hard-coded 2 when the live server gate expects a newer value.
+ */
 export async function loadClientCodeVersion(
-  fallback = 2,
+  fallback = BUNDLED_CLIENT_CODE_VERSION,
 ): Promise<number> {
-  try {
-    const res = await fetch("/client_code_version.txt", { cache: "no-store" });
-    if (!res.ok) return fallback;
-    const text = (await res.text()).trim().split(/\s+/)[0] ?? "";
-    const n = Number.parseInt(text, 10);
-    return Number.isFinite(n) && n >= 0 ? n >>> 0 : fallback;
-  } catch {
-    return fallback;
+  const urls = [
+    "./client_code_version.txt",
+    "client_code_version.txt",
+    "/client_code_version.txt",
+  ];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) continue;
+      const parsed = parseCodeVersionText(await res.text());
+      if (parsed != null) return parsed;
+    } catch {
+      /* try next candidate */
+    }
   }
+  return fallback;
 }
 
 export function buildServerSelectRequest(serverId: number, moneytype = 0): Uint8Array {
@@ -950,10 +973,13 @@ function parseBattleInfoScene(
     ctx?.monsterNameFor?.(index) ||
     `怪#${actorId}`;
 
+  // Multi-enemy scene fights clone ONE template (same catalog/wire id + vitals).
+  // Do not invent index+i species keys — that made left seats resolve to other
+  // map SCE kinds while HP/ATK stayed identical.
   const left: BattleSide[] = [];
   for (let i = 0; i < monsterCount; i++) {
     left.push({
-      id: index + i,
+      id: actorId,
       hp,
       maxHp: hpMax,
       mp,

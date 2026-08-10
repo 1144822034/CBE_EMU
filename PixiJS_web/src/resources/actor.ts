@@ -732,6 +732,9 @@ export function mapMonsterPartIndex(
       return base + (phase % 2);
     }
     if (partCount >= 8) {
+      // Padded banks vary: believer/soldier = two offset-twin breath poses;
+      // kirin = two rect-remapping stands. Battle idle uses standBreathPartIndex
+      // for the offset-twin case; map keeps a stable facing pad here.
       const base = cbeDir === 3 || cbeDir === 4 ? 4 : 0;
       return base + (phase % 4);
     }
@@ -895,15 +898,295 @@ export function composeMapActor(
  * Resource evidence (blade/body centroid + PNG probe; see tmp/facing-probe):
  *   hW_warrior stand left=anim4 / right=anim5
  *   attack/cast left=anim6 / right=anim7
- *   e_bee* dirFlap: within one anim p0==p1 and p2==p3; flap = anim0↔anim1
- *     (layer offsets differ). Both part groups face right in art.
- *   Left-side monsters face the player with part 2 + anim flap; do not flipX
- *   (flip makes heads face away from the player on the right).
+ *   CBE evidence (e_ratB 掘地鼠): 待机趴着身子不动，只晃尾巴 — stand anim0
+ *   keeps body+head layers fixed and alternates the last (tail) layer.
+ *   anim1 (5 parts) changes head+silhouette → attack strip, not idle.
+ *   e_bee*: same rect stack at facing part2; only layer offsets change between
+ *   anim0/anim1 (翅) — same “body fixed / detail moves” rule, not walk morph.
+ *   e_believer / e_solider (dirFlap x8): standAnim has two offset-twin poses
+ *   (p0..3 vs p4..7) — 待机上身/下身轻起伏; not anim1 slash morph.
+ *   e_skeletonH: anim1 + wuqi1 → attack-only; idle stays on anim0 bob.
  *
- * unresolved (need IDA DrawBattleCharacter / action playback): exact frame
- * timer, melee dash interpolation, and which unit fields store anim index.
+ * unresolved (need IDA DrawBattleCharacter): exact frame timer, melee dash
+ * interpolation, unit struct anim/part field offsets.
  */
 export type BattlePose = "idle" | "attack" | "cast" | "hit" | "death";
+
+function animImageNames(actor: LoadedActor, animIndex: number): Set<string> {
+  const names = new Set<string>();
+  for (const part of actor.animations[animIndex]?.parts ?? []) {
+    for (const f of part.frames) {
+      const rect = actor.rects[f.rectIndex];
+      if (!rect) continue;
+      names.add(actor.imageNames[rect.imageIndex] ?? "");
+    }
+  }
+  return names;
+}
+
+/** Armed slash sheets (wuqi1) — attack strip, never 待机. */
+function animHasSlashSheet(actor: LoadedActor, animIndex: number): boolean {
+  for (const n of animImageNames(actor, animIndex)) {
+    if (/wuqi1/i.test(n)) return true;
+  }
+  return false;
+}
+
+/**
+ * Attack-only anim: slash sheet, or introduces a body sheet absent from stand
+ * (e_devil1.gif). Shadow `ying.gif` alone does not count.
+ */
+function animIsAttackOnly(
+  actor: LoadedActor,
+  animIndex: number,
+  standAnim: number,
+): boolean {
+  if (animHasSlashSheet(actor, animIndex)) return true;
+  const stand = animImageNames(actor, standAnim);
+  for (const n of animImageNames(actor, animIndex)) {
+    if (!n || /ying/i.test(n)) continue;
+    if (!stand.has(n)) return true;
+  }
+  return false;
+}
+
+function layerKey(f: ActorFrame): string {
+  return `${f.rectIndex}:${f.offsetX}:${f.offsetY}`;
+}
+
+function sharedLayerPrefix(a: ActorPart, b: ActorPart): number {
+  const n = Math.min(a.frames.length, b.frames.length);
+  let k = 0;
+  for (; k < n; k++) {
+    if (layerKey(a.frames[k]!) !== layerKey(b.frames[k]!)) break;
+  }
+  return k;
+}
+
+/**
+ * 掘地鼠-style detail flap: body/head stack shared; only a trailing detail
+ * layer differs (尾巴 / 石怪贴片 / 多一层装饰). Rejects left↔right facing
+ * banks where most layers shift.
+ */
+function isStandDetailFlapPair(a: ActorPart, b: ActorPart): boolean {
+  const na = a.frames.length;
+  const nb = b.frames.length;
+  if (na < 1 || nb < 1) return false;
+  if (na === nb) {
+    if (na < 2) return false;
+    const prefix = sharedLayerPrefix(a, b);
+    // Same stack length: allow last 1–2 layers to differ only.
+    return prefix >= 2 && prefix >= na - 2 && prefix < na;
+  }
+  // Unequal: longer part adds trailing detail on top of the shorter stack.
+  const [shorter, longer] = na < nb ? [a, b] : [b, a];
+  const prefix = sharedLayerPrefix(shorter, longer);
+  return (
+    prefix === shorter.frames.length &&
+    longer.frames.length === shorter.frames.length + 1
+  );
+}
+
+/**
+ * Stand idle detail flap: facing base part + nearest detail partner.
+ * Returns part index in standAnim, or null if no wag pair.
+ */
+function standTailFlapPartIndex(
+  actor: LoadedActor,
+  plan: MapAnimPlan,
+  cbeDir: number,
+  phase: number,
+): number | null {
+  const anim = actor.animations[plan.standAnim];
+  if (!anim || anim.parts.length < 2) return null;
+  const base = mapDirToPartIndex(anim.parts.length, cbeDir, 0);
+  const basePart = anim.parts[base];
+  const baseStacked = composePartStacked(actor, plan.standAnim, base);
+  if (!basePart || !baseStacked) return null;
+  let partner = -1;
+  let best = 1e9;
+  for (let i = 0; i < anim.parts.length; i++) {
+    if (i === base) continue;
+    if (!isStandDetailFlapPair(basePart, anim.parts[i]!)) continue;
+    const stacked = composePartStacked(actor, plan.standAnim, i);
+    if (!stacked) continue;
+    // Skip padded dir duplicates that compose identically.
+    if (
+      stacked.width === baseStacked.width &&
+      stacked.height === baseStacked.height &&
+      stacked.rgba.length === baseStacked.rgba.length &&
+      stacked.rgba.every((v, idx) => v === baseStacked.rgba[idx])
+    ) {
+      continue;
+    }
+    const dist = Math.abs(i - base);
+    if (dist < best) {
+      best = dist;
+      partner = i;
+    }
+  }
+  if (partner < 0) return null;
+  return phase % 2 === 0 ? base : partner;
+}
+
+/**
+ * Attack/action strip: non-stand anim with a different part count (e_ratB
+ * anim1=5). Not used for idle — rat anim1 also remaps the head layer.
+ */
+function findMonsterActionStrip(
+  actor: LoadedActor,
+  plan: MapAnimPlan,
+): number | null {
+  const standN = actor.animations[plan.standAnim]?.parts.length ?? 0;
+  if (standN <= 0) return null;
+  for (let ai = 0; ai < actor.animations.length; ai++) {
+    if (ai === plan.standAnim) continue;
+    const n = actor.animations[ai]?.parts.length ?? 0;
+    if (n <= 1 || n === standN) continue;
+    if (animHasSlashSheet(actor, ai)) continue;
+    return ai;
+  }
+  return null;
+}
+
+/**
+ * Same rect stack, only offsets differ — bee wing flap at a fixed facing part.
+ * Rejects anim twins that remap rects (attack morph / 整身切姿).
+ */
+function isOffsetFlapTwin(a: ActorPart, b: ActorPart): boolean {
+  if (a.frames.length !== b.frames.length || a.frames.length < 1) return false;
+  let offsetDiff = false;
+  for (let i = 0; i < a.frames.length; i++) {
+    const x = a.frames[i]!;
+    const y = b.frames[i]!;
+    if (x.rectIndex !== y.rectIndex) return false;
+    if (x.offsetX !== y.offsetX || x.offsetY !== y.offsetY) offsetDiff = true;
+  }
+  return offsetDiff;
+}
+
+/** Drop shadow/ying layers — e_beeG anim1 drops ying but body still offset-flaps. */
+function partBodyFrames(actor: LoadedActor, part: ActorPart): ActorPart["frames"] {
+  return part.frames.filter((f) => {
+    const rect = actor.rects[f.rectIndex];
+    if (!rect) return true;
+    return !/ying/i.test(actor.imageNames[rect.imageIndex] ?? "");
+  });
+}
+
+function isOffsetFlapTwinBody(
+  actor: LoadedActor,
+  a: ActorPart,
+  b: ActorPart,
+): boolean {
+  const fa = partBodyFrames(actor, a);
+  const fb = partBodyFrames(actor, b);
+  if (fa.length < 1 || fa.length !== fb.length) return false;
+  let offsetDiff = false;
+  for (let i = 0; i < fa.length; i++) {
+    const x = fa[i]!;
+    const y = fb[i]!;
+    if (x.rectIndex !== y.rectIndex) return false;
+    if (x.offsetX !== y.offsetX || x.offsetY !== y.offsetY) offsetDiff = true;
+  }
+  return offsetDiff;
+}
+
+function battleFacingPartIndex(plan: MapAnimPlan, cbeDir: number): number {
+  // Bee/monkey art: part2 faces the player; map cbeDir parts face wrong way.
+  if (plan.partMode === "dirFlap" && plan.partCount === 4) return 2;
+  return mapDirToPartIndex(plan.partCount, cbeDir, 0);
+}
+
+/**
+ * Idle/attack detail flap across anim twins at one facing part (e_bee*).
+ * Limited to dirFlap×4 — wider layouts (猪粽妖等) can share rects with offset
+ * drift that is NOT 翅扇，勿误用。
+ */
+function offsetFlapAnimIndex(
+  actor: LoadedActor,
+  plan: MapAnimPlan,
+  cbeDir: number,
+  phase: number,
+): { anim: number; part: number } | null {
+  if (plan.partMode !== "dirFlap" || plan.partCount !== 4) return null;
+  const twin =
+    plan.walkAnims.find((ai) => ai !== plan.standAnim) ??
+    (actor.animations[1] && 1 !== plan.standAnim ? 1 : undefined);
+  if (twin == null || animIsAttackOnly(actor, twin, plan.standAnim)) {
+    return null;
+  }
+  const part = battleFacingPartIndex(plan, cbeDir);
+  const a = actor.animations[plan.standAnim]?.parts[part];
+  const b = actor.animations[twin]?.parts[part];
+  if (
+    !a ||
+    !b ||
+    (!isOffsetFlapTwin(a, b) && !isOffsetFlapTwinBody(actor, a, b))
+  ) {
+    return null;
+  }
+  return {
+    anim: phase % 2 === 0 ? plan.standAnim : twin,
+    part,
+  };
+}
+
+/**
+ * Two stand poses that share a body prefix (same rects) then nudge limbs —
+ * e_craw / e_monkey ×4. Rejects bee facing banks (body rect already differs).
+ */
+function isLooseStandBobPair(a: ActorPart, b: ActorPart): boolean {
+  if (isOffsetFlapTwin(a, b) || isStandDetailFlapPair(a, b)) return true;
+  const n = Math.min(a.frames.length, b.frames.length);
+  if (n < 2) return false;
+  let sameRectPrefix = 0;
+  for (let i = 0; i < n; i++) {
+    if (a.frames[i]!.rectIndex !== b.frames[i]!.rectIndex) break;
+    sameRectPrefix++;
+  }
+  return sameRectPrefix >= 2;
+}
+
+/**
+ * dirFlap stand bob between the two unique padded poses:
+ * - ×8: p0..3 vs p4..7 (教徒呼吸 / 虎·麒麟细节)
+ * - ×4: only loose body-prefix pairs (螃蟹/猴); bees use offsetFlapAnimIndex
+ */
+function standBreathPartIndex(
+  actor: LoadedActor,
+  plan: MapAnimPlan,
+  phase: number,
+): number | null {
+  if (plan.partMode !== "dirFlap") return null;
+  if (!(plan.partCount === 4 || plan.partCount >= 8)) return null;
+  const anim = actor.animations[plan.standAnim];
+  if (!anim || anim.parts.length < 2) return null;
+  const uniqIdx: number[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < anim.parts.length; i++) {
+    const fp = partFingerprint(anim.parts[i]!);
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    uniqIdx.push(i);
+    if (uniqIdx.length > 2) return null;
+  }
+  if (uniqIdx.length !== 2) return null;
+  if (
+    plan.partCount === 4 &&
+    !isLooseStandBobPair(anim.parts[uniqIdx[0]!]!, anim.parts[uniqIdx[1]!]!)
+  ) {
+    return null;
+  }
+  return uniqIdx[phase % 2]!;
+}
+
+function withBattleFacing(
+  frame: ComposedFrame,
+  facingRight: boolean,
+): ComposedFrame {
+  return facingRight ? frame : { ...frame, flipX: true };
+}
 
 export function composeBattlePose(
   actor: LoadedActor,
@@ -957,32 +1240,42 @@ export function composeBattlePose(
     return composeActorFrameIndex(actor, phase);
   }
 
-  // Monsters: always flap/walk strip in battle; death is caller fade/remove.
-  const moving = pose !== "death";
-  if (
-    facingRight &&
-    plan.partMode === "dirFlap" &&
-    plan.partCount === 4
-  ) {
-    // Bee-family facing the player (right): parts 2/3 face right and anim0↔1 flaps.
-    const anim =
-      plan.walkAnims[phase % Math.max(1, plan.walkAnims.length)] ??
-      plan.standAnim;
-    const stacked = composePartStacked(actor, anim, 2);
-    if (stacked) return stacked;
+  // Monsters — idle: stand trailing-detail (鼠) → stand breath bob (人形×8)
+  // → offset-twin flap (蜂). Never idle on remapping anim1 walk/attack morphs.
+  if (pose === "idle") {
+    const wag = standTailFlapPartIndex(actor, plan, cbeDir, phase);
+    if (wag != null) {
+      const stacked = composePartStacked(actor, plan.standAnim, wag);
+      if (stacked) return stacked;
+    }
+    const breath = standBreathPartIndex(actor, plan, phase);
+    if (breath != null) {
+      const stacked = composePartStacked(actor, plan.standAnim, breath);
+      if (stacked) return withBattleFacing(stacked, facingRight);
+    }
+    const wing = offsetFlapAnimIndex(actor, plan, cbeDir, phase);
+    if (wing) {
+      const stacked = composePartStacked(actor, wing.anim, wing.part);
+      if (stacked) return withBattleFacing(stacked, facingRight);
+    }
   }
-  if (
-    !facingRight &&
-    plan.partMode === "dirFlap" &&
-    plan.partCount === 4
-  ) {
-    // Face left toward a right-side foe: mirror the right-facing flap pair.
-    const anim =
-      plan.walkAnims[phase % Math.max(1, plan.walkAnims.length)] ??
-      plan.standAnim;
-    const stacked = composePartStacked(actor, anim, 2);
-    if (stacked) return { ...stacked, flipX: true };
+  if (pose === "attack" || pose === "cast") {
+    const actionStrip = findMonsterActionStrip(actor, plan);
+    if (actionStrip != null) {
+      const n = actor.animations[actionStrip]!.parts.length;
+      const part = Math.min(Math.max(0, phase | 0), n - 1);
+      const stacked = composePartStacked(actor, actionStrip, part);
+      if (stacked) return withBattleFacing(stacked, facingRight);
+    }
+    // Bees have no separate attack strip — same offset-twin flap as idle.
+    const wing = offsetFlapAnimIndex(actor, plan, cbeDir, phase);
+    if (wing) {
+      const stacked = composePartStacked(actor, wing.anim, wing.part);
+      if (stacked) return withBattleFacing(stacked, facingRight);
+    }
   }
+
+  const moving = pose === "attack" || pose === "cast";
   return composeMapActor(actor, cbeDir, moving, phase);
 }
 

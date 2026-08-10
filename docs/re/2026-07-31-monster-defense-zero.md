@@ -4,16 +4,21 @@
 
 曾与抗性同策略：玩家打怪时强制 `defense=0`。2026-08-03 起恢复目录/后台防御。
 
-## 当前契约（2026-08-03）
+## 2026-08-08 回归
+
+普攻路径曾再次写死 `defense=0`，而 MySQL/后台仍保存并展示 `defense_value`。  
+见 `docs/re/2026-08-08-monster-defense-ignored-after-load.md`；已再次对齐下方契约。
+
+## 当前契约（2026-08-03 / 2026-08-08）
 
 | 路径 | 默认减伤属性 | 覆盖 env |
 | --- | --- | --- |
-| 普攻 `vm_net_mock_battle_player_damage_to_enemy` | `stats.defense` | `CBE_BATTLE_ENEMY_DEFENSE` |
+| 普攻 `vm_net_mock_battle_player_damage_to_enemy` | `stats.defense`（含 MySQL 覆盖） | `CBE_BATTLE_ENEMY_DEFENSE` |
 | 进攻技能（物理+法术） | 次级抗性（默认 0） | `CBE_BATTLE_SKILL_ENEMY_RESIST` / `CBE_BATTLE_MONSTER_RESIST` |
 
 - 减甲 ailment 仍可叠在普攻防御基值上；技能走抗性 ailment。
 - 玩家受击 / 切磋普攻仍用 `defense`；切磋技能用对方 `resist`。
-- 普攻：`damage_after_defense` 软减伤 + pierce；技能：`damage_after_resist`（上限 70%）。
+- 普攻：`damage_after_defense` 软减伤；技能：`damage_after_resist`（上限 70%）。
 
 ## 验证
 

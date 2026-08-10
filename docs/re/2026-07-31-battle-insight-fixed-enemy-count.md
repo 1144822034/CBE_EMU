@@ -12,9 +12,9 @@
 
 ## 优先级
 
-1. 非场景开战 → 1
-2. `CBE_BATTLE_ENEMY_COUNT` 环境强制 → 该值（autotest）
-3. 战斗心得激活 → **3**
+1. `CBE_BATTLE_ENEMY_COUNT` 环境强制 → 该值（autotest）
+2. 战斗心得激活 → **3**（含挂机 subtype-10；见 `2026-08-09-hangup-insight-fixed-3-subtype10.md`）
+3. 非场景开战且无心得 → 1
 4. 否则 `CBE_BATTLE_ENEMY_COUNT_MIN/MAX` 随机
 
 ## 修改点

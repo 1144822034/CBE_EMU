@@ -872,7 +872,22 @@ static bool vm_net_mock_battle_release_settle_for_start(u8 *out,
         if (!vm_net_mock_append_battle_terminal_subtype8_object(out, outCap, pos) ||
             *objectCount == 0xff)
         {
-            return false;
+            /*
+             * Still clear settle ownership so hangup/challenge are not stuck
+             * forever returning builder-zero → soft-fail.
+             */
+            printf("[error][network] mock_battle_start_blocked_by_settle via=%s "
+                   "action=clear-after-prepend-fail awaiting=%u "
+                   "evidence=hangup-must-not-stick-on-4/8-append\n",
+                   via ? via : "-",
+                   g_mockBattleAwaitingSettlement ? 1 : 0);
+            g_mockBattleOperateSessionArmed = 0;
+            g_mockBattleOperateSessionFinished = 0;
+            g_mockBattlePendingEnemyTurn = 0;
+            g_mockBattleAwaitingSettlement = 0;
+            vm_net_mock_battle_settlement_exit_clear("reenter-prepend-fail");
+            vm_net_mock_battle_post_exit_settle_clear("reenter-prepend-fail");
+            return true;
         }
         ++(*objectCount);
         printf("[info][network] mock_battle_start_blocked_by_settle via=%s "
@@ -928,6 +943,8 @@ static bool vm_net_mock_battle_release_settle_for_start(u8 *out,
 }
 static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32 requestLen,
                                                           u8 *out, u32 outCap);
+static u32 vm_net_mock_build_hangup_owned_soft_fail_response(u8 *out, u32 outCap,
+                                                             const char *reason);
 static void vm_net_mock_battle_auto_note_client_operate(void);
 
 static bool vm_net_mock_battle_inline_settlement_enabled(void)
@@ -8298,6 +8315,10 @@ static bool vm_mock_service_duel_resolve_committed_round(
         duel->terminalPendingMask = duel->startedMask;
         duel->terminalNotBeforeTick = g_schedulerTick + delayTicks;
         vm_mock_service_duel_arm_both_exits(duel);
+        if (duel->arenaMode)
+            vm_mock_arena_on_duel_finished(duel);
+        if (duel->wagerMode)
+            vm_mock_arena_on_wager_duel_finished(duel);
     }
     printf("[info][mock-service] duel_round_resolve serial=%u first_action=%u "
            "events=%u first=%u terminal=%u hp=%u/%u,%u/%u mp=%u/%u,%u/%u "
@@ -8462,9 +8483,16 @@ static bool vm_net_mock_append_duel_spar_status7_object(
     role = vm_mock_service_trade_role_for_session(observer, NULL);
     if (role != NULL && !observer->sparExitExpGranted)
     {
+        vm_mock_service_duel *arenaDuel =
+            vm_mock_service_duel_find_for_client(observer->clientId, NULL);
+        /* Arena/wager settle separately — no spar token. */
+        if (arenaDuel != NULL && (arenaDuel->arenaMode || arenaDuel->wagerMode))
+        {
+            observer->sparExitExpGranted = true;
+        }
         /* Winner keeps a token +1exp/+1gold so 4/7 is non-zero; loser already
          * took PvE death penalty and must not gain here. */
-        if (!observer->sparExitWasDead)
+        else if (!observer->sparExitWasDead)
         {
             u32 expBefore = role->exp;
             u32 goldBefore = role->money;
@@ -8476,8 +8504,10 @@ static bool vm_net_mock_append_duel_spar_status7_object(
                    "role=%u exp=%u->%u gold=%u->%u gain=1/1\n",
                    observer->clientId, role->roleId, expBefore, role->exp,
                    goldBefore, role->money);
+            observer->sparExitExpGranted = true;
         }
-        observer->sparExitExpGranted = true;
+        else
+            observer->sparExitExpGranted = true;
     }
     if (role != NULL)
     {
@@ -11816,64 +11846,167 @@ static bool vm_net_mock_parse_hangup_battle_start_request(
     vm_net_mock_request_object extra;
     const u8 *moveInfo = NULL;
     u16 moveInfoLen = 0;
+    bool haveType2 = false;
+    bool haveHangupMarker = false;
 
     if (moveUploadOut)
         memset(moveUploadOut, 0, sizeof(*moveUploadOut));
     if (hasMoveUploadOut)
         *hasMoveUploadOut = false;
 
-    if (request == NULL || requestLen < 24 ||
+    if (request == NULL || requestLen < 9 ||
         !vm_net_mock_get_wt_header_kind_subtype(request, requestLen, &kind, &subtype) ||
         kind != 2 || subtype != 10)
     {
         return false;
     }
+
+    /*
+     * Contract: 1/2/10 Type=2 + empty 1/25/3, optional trailing 2/1 moveinfo.
+     * Pixi/CBE may vary Type field encoding (payload 8 vs 10) or flush an
+     * unexpected trailer; previously any mismatch fell through to
+     * unimplemented-handler tip「功能暂未实现(1/2/10)」.
+     */
     if (!vm_net_mock_next_request_object(request, requestLen, &offset, &actorOther))
         return false;
     if (actorOther.major != 1 ||
         actorOther.kind != 2 ||
         actorOther.subtype != 10 ||
-        actorOther.payloadLen != 10)
+        actorOther.payloadLen == 0)
     {
         return false;
     }
-    if (!vm_net_mock_get_object_u8_field(actorOther.payload, actorOther.payloadLen,
+    haveType2 =
+        (vm_net_mock_get_object_u8_field(actorOther.payload, actorOther.payloadLen,
                                          "Type", &requestType) ||
-        requestType != 2)
-    {
+         vm_net_mock_get_object_u8_field(actorOther.payload, actorOther.payloadLen,
+                                         "type", &requestType)) &&
+        requestType == 2;
+    if (!haveType2)
         return false;
-    }
+
     if (!vm_net_mock_next_request_object(request, requestLen, &offset, &hangup))
-        return false;
-    if (hangup.major != 1 ||
-        hangup.kind != 0x19 ||
-        hangup.subtype != 3 ||
-        hangup.payloadLen != 0)
     {
-        return false;
+        /* Lone Type=2 (no 25/3): still hangup for Pixi softkey. */
+        printf("[info][network] mock_hangup_parse action=accept-type2-only "
+               "len=%u evidence=pixi-hangup-without-25-3\n",
+               requestLen);
+        return offset == requestLen;
     }
-    if (vm_net_mock_next_request_object(request, requestLen, &offset, &extra))
+    if (hangup.major == 1 && hangup.kind == 0x19 && hangup.subtype == 3 &&
+        hangup.payloadLen == 0)
     {
-        /* Runtime packets can flush the pending ten-direction movement queue
-         * after the two-object hangup marker.  Accept only that exact upload;
-         * other trailing objects remain outside this handler. */
-        if (extra.major != 1 || extra.kind != 2 || extra.subtype != 1 ||
-            extra.payloadLen != 23 ||
-            !vm_net_mock_get_object_blob_field(extra.payload, extra.payloadLen,
-                                               "moveinfo", &moveInfo,
-                                               &moveInfoLen) ||
-            !vm_net_mock_is_actor_moveinfo_timeline(moveInfo, moveInfoLen))
-        {
-            return false;
-        }
-        if (vm_net_mock_next_request_object(request, requestLen, &offset, &actorOther))
-            return false;
+        haveHangupMarker = true;
+    }
+    else if (hangup.major == 1 && hangup.kind == 2 && hangup.subtype == 1 &&
+             hangup.payloadLen == 23 &&
+             vm_net_mock_get_object_blob_field(hangup.payload, hangup.payloadLen,
+                                                "moveinfo", &moveInfo,
+                                                &moveInfoLen) &&
+             vm_net_mock_is_actor_moveinfo_timeline(moveInfo, moveInfoLen))
+    {
+        /* Type=2 + moveinfo (25/3 omitted). */
         if (moveUploadOut)
-            *moveUploadOut = extra;
+            *moveUploadOut = hangup;
         if (hasMoveUploadOut)
             *hasMoveUploadOut = true;
+        if (vm_net_mock_next_request_object(request, requestLen, &offset, &extra))
+        {
+            printf("[warn][network] mock_hangup_parse action=reject "
+                   "reason=extra-after-type2-move len=%u "
+                   "trail=%u/%u/%u:%u\n",
+                   requestLen, extra.major, extra.kind, extra.subtype,
+                   extra.payloadLen);
+            return false;
+        }
+        return offset == requestLen;
+    }
+    else
+    {
+        printf("[warn][network] mock_hangup_parse action=reject "
+               "reason=bad-second-object len=%u obj=%u/%u/%u:%u\n",
+               requestLen, hangup.major, hangup.kind, hangup.subtype,
+               hangup.payloadLen);
+        return false;
+    }
+
+    if (!haveHangupMarker)
+        return false;
+
+    while (vm_net_mock_next_request_object(request, requestLen, &offset, &extra))
+    {
+        /* Runtime may flush pending ten-direction movement after 25/3. */
+        if (extra.major == 1 && extra.kind == 2 && extra.subtype == 1 &&
+            extra.payloadLen == 23 &&
+            vm_net_mock_get_object_blob_field(extra.payload, extra.payloadLen,
+                                               "moveinfo", &moveInfo,
+                                               &moveInfoLen) &&
+            vm_net_mock_is_actor_moveinfo_timeline(moveInfo, moveInfoLen))
+        {
+            if (hasMoveUploadOut && *hasMoveUploadOut)
+            {
+                printf("[warn][network] mock_hangup_parse action=reject "
+                       "reason=duplicate-moveinfo len=%u\n",
+                       requestLen);
+                return false;
+            }
+            if (moveUploadOut)
+                *moveUploadOut = extra;
+            if (hasMoveUploadOut)
+                *hasMoveUploadOut = true;
+            continue;
+        }
+        /*
+         * Empty 25/5 scene-default keepalive is often flushed with Type=2.
+         * Rejecting it previously fell through to unimplemented tip
+         * 「功能暂未实现(1/2/10)」.
+         */
+        if (extra.major == 1 && extra.kind == 0x19 && extra.subtype == 5 &&
+            extra.payloadLen == 0)
+        {
+            printf("[info][network] mock_hangup_parse action=ignore-25-5 "
+                   "len=%u evidence=type2-hangup-plus-keepalive\n",
+                   requestLen);
+            continue;
+        }
+        printf("[warn][network] mock_hangup_parse action=reject "
+               "reason=unexpected-trailer len=%u trail=%u/%u/%u:%u\n",
+               requestLen, extra.major, extra.kind, extra.subtype,
+               extra.payloadLen);
+        return false;
     }
     return offset == requestLen;
+}
+
+/*
+ * Owned hangup request must never fall through to unimplemented-handler tip
+ * 「功能暂未实现(1/2/10)」.  Emit the same reject-notice contract as city forbid.
+ */
+static u32 vm_net_mock_build_hangup_owned_soft_fail_response(u8 *out, u32 outCap,
+                                                             const char *reason)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+    /* GBK: 挂机失败，请稍后重试。 */
+    static const char hangupFailGbk[] =
+        "\xb9\xd2\xbb\xfa\xca\xa7\xb0\xdc\xa3\xac"
+        "\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa1\xa3";
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_map_encounter_reject_notice(
+            out, outCap, &pos, &objectCount, hangupFailGbk))
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    vm_net_mock_hangup_loop_clear(reason ? reason : "hangup-owned-soft-fail");
+    printf("[error][network] mock_hangup_battle_start action=owned-soft-fail "
+           "reason=%s response=2/10+25/12+1/3/3 "
+           "evidence=owned-hangup-must-not-unimplemented\n",
+           reason ? reason : "-");
+    return pos;
 }
 
 static bool vm_net_mock_is_hangup_battle_start_request(const u8 *request,
@@ -11915,7 +12048,7 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     u32 sceneMonsterIndex = 0;
     u32 sceneMonsterPosX = 0;
     u32 sceneMonsterPosY = 0;
-    u8 battleInfo[160];
+    u8 battleInfo[512];
     u32 battleInfoLen = 0;
     vm_net_mock_request_object moveUpload;
     bool hasMoveUpload = false;
@@ -11948,16 +12081,28 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     u8 battleStartSubtype = 10;
     const char *targetSource = "none";
     u32 hangupMoveinfoWireId = 0;
+    u32 hangupSeedOperate = 0;
 
     if (g_mockBattleAutoPrefer != 0)
         autoFlagType = 1;
 
-    if (outCap < pos ||
-        (request != NULL && requestLen != 0 &&
-         !vm_net_mock_parse_hangup_battle_start_request(request, requestLen,
-                                                        &moveUpload,
-                                                        &hasMoveUpload)))
+    if (outCap < pos)
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=out-cap-too-small out_cap=%u\n",
+               outCap);
         return 0;
+    }
+    if (request != NULL && requestLen != 0 &&
+        !vm_net_mock_parse_hangup_battle_start_request(request, requestLen,
+                                                        &moveUpload,
+                                                        &hasMoveUpload))
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=parse-fail-in-builder len=%u\n",
+               requestLen);
+        return 0;
+    }
     /* Synthetic poll re-entry (request=NULL) mirrors a button hangup without
      * a trailing movement flush. */
     if (request == NULL || requestLen == 0)
@@ -12301,6 +12446,8 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
                                                      "hangup-battle-start",
                                                      true))
     {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=release-settle-failed\n");
         return 0;
     }
 
@@ -12309,11 +12456,19 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         moveRequestLen = vm_net_mock_build_single_object_request(
             &moveUpload, moveRequest, sizeof(moveRequest));
         if (moveRequestLen == 0)
+        {
+            printf("[error][network] mock_hangup_battle_start action=reject "
+                   "reason=move-upload-rebuild-fail\n");
             return 0;
+        }
         moveResponseLen = vm_net_mock_build_actor_moveinfo_ack_response(
             moveRequest, moveRequestLen, moveResponse, sizeof(moveResponse));
         if (moveResponseLen == 0)
+        {
+            printf("[error][network] mock_hangup_battle_start action=reject "
+                   "reason=move-upload-ack-fail\n");
             return 0;
+        }
     }
 
     scene = vm_net_mock_current_scene_name();
@@ -12355,6 +12510,63 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
 
     requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(requestedEnemyId);
     /*
+     * Pixi hangup may carry the same id/index/posx/posy as manual 4/1 so we
+     * can open subtype-5 (scene wires) without an emulator live-table.  CBE
+     * button hangup omits these fields and keeps session/emulator/subtype-10.
+     */
+    if (request != NULL && requestLen != 0 && !useSceneMonsterStart)
+    {
+        u32 reqId = 0;
+        u32 reqIndex = 0;
+        u32 reqPosX = 0;
+        u32 reqPosY = 0;
+        u32 reqOperate = 0;
+        u8 reqOperate8 = 0;
+
+        (void)vm_net_mock_get_object_u32_field(request, requestLen, "id", &reqId);
+        (void)vm_net_mock_get_object_u32_field(request, requestLen, "index", &reqIndex);
+        (void)vm_net_mock_get_object_u32_field(request, requestLen, "posx", &reqPosX);
+        (void)vm_net_mock_get_object_u32_field(request, requestLen, "posy", &reqPosY);
+        if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &reqOperate) &&
+            vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &reqOperate8))
+            reqOperate = reqOperate8;
+        if (reqPosX != 0 && reqPosY != 0)
+        {
+            u32 wireId = reqId != 0 ? reqId : requestedEnemyId;
+            u32 remapped = vm_net_mock_sce_combat_spawn_remap_battle_enemy(
+                scene, wireId, reqPosX, reqPosY);
+            if (remapped != 0)
+                requestedEnemyId = remapped;
+            else if (wireId != 0)
+                requestedEnemyId = vm_net_mock_normalize_battle_enemy_id(wireId);
+            sceneMonsterIndex = reqIndex < 25 ? reqIndex : 0;
+            sceneMonsterPosX = reqPosX;
+            sceneMonsterPosY = reqPosY;
+            hangupMoveinfoWireId = wireId != 0 ? wireId : requestedEnemyId;
+            useSceneMonsterStart = true;
+            targetSource = "request-live-node";
+            if (activeSession != NULL &&
+                vm_net_mock_scene_name_is_safe(scene))
+            {
+                activeSession->lastSceneMonsterLiveValid = true;
+                snprintf(activeSession->lastSceneMonsterLiveScene,
+                         sizeof(activeSession->lastSceneMonsterLiveScene),
+                         "%s", scene);
+                activeSession->lastSceneMonsterLiveActorId = hangupMoveinfoWireId;
+                activeSession->lastSceneMonsterLiveIndex = sceneMonsterIndex;
+                activeSession->lastSceneMonsterLiveX = sceneMonsterPosX;
+                activeSession->lastSceneMonsterLiveY = sceneMonsterPosY;
+            }
+            printf("[info][network] mock_hangup_battle_request_live "
+                   "id=%u index=%u pos=(%u,%u) operate=%u enemy=%u "
+                   "evidence=pixi-hangup-align-manual-4-1\n",
+                   reqId, reqIndex, reqPosX, reqPosY, reqOperate,
+                   requestedEnemyId);
+        }
+        if (reqOperate != 0)
+            hangupSeedOperate = reqOperate;
+    }
+    /*
      * Subtype-5 requires the client's live 25-row scene-node tuple.  SCE
      * combat-spawn ordinals (source=SCE2-combat-spawn) are not that contract:
      * runtime on 01桃花岛_02 showed challenge live index=6 pos=(102,287) while
@@ -12365,7 +12577,8 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
      * (2) an in-process emulator live-table scan.  Otherwise fall back to
      * non-scene subtype 10, which embeds the enemy template directly.
      */
-    if (activeSession != NULL &&
+    if (!useSceneMonsterStart &&
+        activeSession != NULL &&
         activeSession->lastSceneMonsterLiveValid &&
         vm_net_mock_scene_name_is_safe(activeSession->lastSceneMonsterLiveScene) &&
         vm_net_mock_scene_names_equal_loose(activeSession->lastSceneMonsterLiveScene,
@@ -12549,10 +12762,26 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
             roleId, requestedEnemyId, playerOnRight, battleEnemyCount);
     }
     if (battleInfoLen == 0 || battleInfoLen > 0xffff)
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=battleinfo-build-fail scene=%s enemy=%u enemies=%u "
+               "scene_start=%u party=%u buf=%u "
+               "evidence=insight-triple-or-team-blob-overflowed-160\n",
+               scene ? scene : "-",
+               requestedEnemyId,
+               battleEnemyCount,
+               useSceneMonsterStart ? 1u : 0u,
+               teamBattlePartyCount,
+               (u32)sizeof(battleInfo));
         return 0;
+    }
 
     if (!vm_net_mock_append_actor_other_empty10_object(out, outCap, &pos))
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=append-empty-2-10-fail\n");
         return 0;
+    }
     ++objectCount;
     if (useSceneMonsterStart)
     {
@@ -12561,17 +12790,36 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         if (!vm_net_mock_append_scene_monster_moveinfo2_object_ex(
                 out, outCap, &pos, moveWire, sceneMonsterPosX, sceneMonsterPosY,
                 requestedEnemyId))
+        {
+            printf("[error][network] mock_hangup_battle_start action=reject "
+                   "reason=append-scene-moveinfo2-fail wire=%u pos=(%u,%u)\n",
+                   moveWire, sceneMonsterPosX, sceneMonsterPosY);
             return 0;
+        }
         ++objectCount;
     }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 4, battleStartSubtype,
                                      &objectStart))
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=begin-4-%u-fail\n",
+               battleStartSubtype);
         return 0;
+    }
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "side", battleSide))
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=put-side-fail\n");
         return 0;
+    }
     if (!vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo", battleInfo,
                                    (u16)battleInfoLen))
+    {
+        printf("[error][network] mock_hangup_battle_start action=reject "
+               "reason=put-battleinfo-fail len=%u\n",
+               battleInfoLen);
         return 0;
+    }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     ++objectCount;
     /*
@@ -12627,6 +12875,18 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     g_vm_net_mock_battle_formula_enemy_index = 0xff;
     ++g_mockBattleOperateSessionSerial;
     vm_net_mock_battle_reset_last_operate_target();
+    if (hangupSeedOperate != 0)
+    {
+        u8 defaultPlayerSlot = 0;
+        u8 defaultEnemySlot = 1;
+        vm_net_mock_battle_default_wire_slots(playerOnRight, battleSide,
+                                              &defaultPlayerSlot, &defaultEnemySlot);
+        vm_net_mock_battle_remember_last_operate(defaultEnemySlot, hangupSeedOperate,
+                                                 true);
+        printf("[info][network] mock_hangup_seed_last_operate operate=%u "
+               "index=%u evidence=pixi-hangup-skill-for-synth\n",
+               hangupSeedOperate, defaultEnemySlot);
+    }
     g_vm_net_mock_battle_rewarded_serial = 0;
     g_vm_net_mock_battle_rewarded_exp = 0;
     memset(g_vm_net_mock_battle_rewarded_drops, 0,
@@ -12767,7 +13027,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     const u8 *moveInfo = NULL;
     u16 moveInfoLen = 0;
     bool hasMoveinfo = false;
-    u8 battleInfo[160];
+    u8 battleInfo[512];
     u32 battleInfoLen = 0;
     u32 id = 0;
     u32 requestedEnemyId = 0;

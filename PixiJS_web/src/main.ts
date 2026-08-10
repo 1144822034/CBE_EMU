@@ -30,6 +30,18 @@ import { ApproachPrompt } from "./ui/ApproachPrompt";
 import { SystemPanel, type SystemKind } from "./ui/SystemPanel";
 import { EnhancePanel } from "./ui/EnhancePanel";
 import { SocialPanel } from "./ui/SocialPanel";
+import { ArenaHud } from "./ui/ArenaHud";
+import { ArenaPanel } from "./ui/ArenaPanel";
+import { WagerPanel } from "./ui/WagerPanel";
+import { AuctionPanel } from "./ui/AuctionPanel";
+import {
+  ARENA_NPC_ENTER,
+  ARENA_NPC_LEAVE,
+  ARENA_NPC_RANK,
+  ARENA_NPC_WAGER,
+  bracketForLevel,
+} from "./net/protocolArena";
+import type { AuctionListing, AuctionStatus } from "./net/protocolAuction";
 import { TaskPanel } from "./ui/TaskPanel";
 import { ChatPanel } from "./ui/ChatPanel";
 import { TradePanel } from "./ui/TradePanel";
@@ -74,9 +86,48 @@ type Phase =
 type MapUiMode = "off" | "mini" | "world";
 
 let touchStatus: TouchControls | null = null;
+/** Routes player-facing game tips into the active LCD panel / HUD. */
+let gameTipSink: ((text: string) => void) | null = null;
 
 function setChromeStatus(text: string, error = false): void {
   touchStatus?.setStatus(text, error);
+}
+
+/** Game-level op feedback — panel toast / HUD, not HTML softkey chrome. */
+function showGameTip(text: string): void {
+  const msg = text.trim();
+  if (!msg) return;
+  if (gameTipSink) gameTipSink(msg);
+  else touchStatus?.setStatus(msg, false);
+}
+
+/** Map server auction/wager short codes to Chinese panel tips. */
+function auctionMsgTip(code: string | undefined, okText: string): string {
+  const m = (code || "").trim();
+  if (!m || m === "ok") return okText;
+  const map: Record<string, string> = {
+    disabled: "拍卖未开放",
+    "no-role": "角色无效",
+    "bad-args": "参数错误",
+    currency: "货币类型无效",
+    "no-item": "背包无此物品",
+    limit: "上架数量已达上限",
+    fee: "手续费不足",
+    consume: "扣物品失败",
+    save: "保存失败",
+    encode: "编码失败",
+    insert: "写入失败",
+    "not-open": "该拍品已结束",
+    self: "不能竞拍自己的物品",
+    "already-high": "你已是最高出价",
+    low: "出价过低",
+    balance: "余额不足",
+    update: "更新失败",
+    "not-owner": "非卖家不能下架",
+    "has-bid": "已有出价，无法下架",
+    "bag-full": "背包已满，无法取回",
+  };
+  return map[m] ?? `失败:${m}`;
 }
 
 async function main(): Promise<void> {
@@ -207,6 +258,15 @@ async function main(): Promise<void> {
   const system = new SystemPanel();
   const enhanceUi = new EnhancePanel();
   const social = new SocialPanel();
+  const arenaHud = new ArenaHud();
+  const arenaPanel = new ArenaPanel();
+  const wagerPanel = new WagerPanel();
+  const auctionPanel = new AuctionPanel();
+  let auctionCache: {
+    rows: AuctionListing[];
+    mine: AuctionListing[];
+    status: AuctionStatus | null;
+  } = { rows: [], mine: [], status: null };
   const taskUi = new TaskPanel();
   const chatPanel = new ChatPanel();
   const tradeUi = new TradePanel();
@@ -223,6 +283,10 @@ async function main(): Promise<void> {
   system.visible = false;
   enhanceUi.visible = false;
   social.visible = false;
+  arenaHud.visible = false;
+  arenaPanel.visible = false;
+  wagerPanel.visible = false;
+  auctionPanel.visible = false;
   taskUi.visible = false;
   chatPanel.visible = false;
   tradeUi.visible = false;
@@ -246,6 +310,10 @@ async function main(): Promise<void> {
     system,
     enhanceUi,
     social,
+    arenaHud,
+    arenaPanel,
+    wagerPanel,
+    auctionPanel,
     taskUi,
     chatPanel,
     tradeUi,
@@ -258,11 +326,254 @@ async function main(): Promise<void> {
   await worldMap.mountArt();
   await loadSMapAliases();
 
+  gameTipSink = (msg) => {
+    type TipHost = { visible: boolean; showTip: (t: string, ms?: number) => void };
+    const hosts: TipHost[] = [
+      worldMap,
+      auctionPanel,
+      wagerPanel,
+      arenaPanel,
+      enhanceUi,
+      system,
+      social,
+      guildUi,
+      tradeUi,
+      chatPanel,
+      taskUi,
+    ];
+    for (const h of hosts) {
+      if (h.visible) {
+        h.showTip(msg);
+        return;
+      }
+    }
+    if (hud.visible) hud.showTip(msg);
+  };
+
   const index = await loadSceneIndex();
   let phase: Phase = "splash";
   let pendingRoles: RoleRow[] = [];
   let activeRole: RoleRow | null = null;
   let mapUiMode: MapUiMode = "off";
+
+
+
+  /** World overlays keep phase=world but must freeze map walk (bag uses phase=system). */
+  const syncWorldWalkInput = () => {
+    const overlayOpen =
+      auctionPanel.visible || arenaPanel.visible || wagerPanel.visible;
+    if (phase === "world" && !overlayOpen) {
+      view.inputEnabled = true;
+    } else {
+      view.inputEnabled = false;
+      view.clearHeldKeys();
+    }
+  };
+
+  const openWagerPanel = async () => {
+    const board = await session.fetchWagerBoard();
+    wagerPanel.open(board.rows, board.mine);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(wagerPanel.softkeys());
+    setChromeStatus("赏金擂台");
+  };
+
+  const openAuctionPanel = async (opts?: {
+    preferTab?: "browse" | "mine" | "list" | "claim";
+    preselect?: import("./net/protocolExtras").BagItem;
+  }) => {
+    if (!session.bagItems.length) {
+      try {
+        await session.openBag();
+      } catch {
+        /* ignore */
+      }
+    }
+    const board = await session.fetchAuctionBoard();
+    auctionCache = board;
+    view.setPaiBlink(!!board.status?.blink);
+    auctionPanel.open(
+      board.rows,
+      board.mine,
+      session.bagItems,
+      board.status,
+      opts?.preferTab,
+    );
+    if (opts?.preselect) auctionPanel.preselectBagItem(opts.preselect);
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(auctionPanel.softkeys());
+    setChromeStatus(
+      board.status?.pendingClaims
+        ? `拍卖 · 待领${board.status.pendingClaims}`
+        : "物品竞拍",
+    );
+  };
+
+  wagerPanel.onAction = (action, challengeId) => {
+    const refresh = async (tip?: string) => {
+      await openWagerPanel();
+      if (tip) wagerPanel.showTip(tip);
+    };
+    if (action === "close") {
+      wagerPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    if (action === "refresh") {
+      void refresh();
+      return;
+    }
+    if (action === "create") {
+      void session.wagerCreate(wagerPanel.stake).then((r) => {
+        const tip = r?.result
+          ? `摆擂成功#${r.challengeId}`
+          : `摆擂失败:${r?.message ?? "?"}`;
+        void refresh(tip);
+      });
+      return;
+    }
+    if (action === "challenge" && challengeId) {
+      void session.wagerChallenge(challengeId).then((r) => {
+        const tip = r?.result
+          ? "已应战，等待擂主确认"
+          : `应战失败:${r?.message ?? "?"}`;
+        void refresh(tip);
+      });
+      return;
+    }
+    if (action === "confirm" && challengeId) {
+      void session.wagerConfirm(challengeId, true).then((r) => {
+        const tip = r?.message || (r?.result ? "已确认应战" : "确认失败");
+        void refresh(tip);
+      });
+      return;
+    }
+    if (action === "reject" && challengeId) {
+      void session.wagerConfirm(challengeId, false).then((r) => {
+        const tip = r?.message || "已拒绝应战";
+        void refresh(tip);
+      });
+      return;
+    }
+    if (action === "cancel" && challengeId) {
+      void session.wagerCancel(challengeId).then((r) => {
+        const tip = r?.result ? "已撤擂" : `撤擂失败:${r?.message ?? "?"}`;
+        void refresh(tip);
+      });
+    }
+  };
+
+  auctionPanel.onAction = (action, listingId) => {
+    const refresh = async (tip?: string) => {
+      await openAuctionPanel();
+      if (tip) auctionPanel.showTip(tip);
+    };
+    if (action === "close") {
+      auctionPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    if (action === "refresh") {
+      void refresh();
+      return;
+    }
+    if (action === "claim") {
+      void session.auctionClaim().then((r) => {
+        view.setPaiBlink(!!r?.blink);
+        const tip = r?.claimed
+          ? `已领取${r.claimed}项${r.failed ? ` 失败${r.failed}` : ""}`
+          : `领取失败${r?.failed ? `:${r.failed}` : ""}`;
+        void session.openBag().then(() => refresh(tip));
+      });
+      return;
+    }
+    if (action === "confirm_list") {
+      const p = auctionPanel.listParams;
+      if (!p) {
+        showGameTip("请选择背包物品");
+        return;
+      }
+      void session.auctionCreate(p).then((r) => {
+        const tip =
+          r?.result === 1
+            ? `上架成功#${r.listingId}`
+            : auctionMsgTip(r?.message, "上架失败");
+        void session.openBag().then(() => refresh(tip));
+      });
+      return;
+    }
+    if (action === "bid" && listingId) {
+      const row =
+        auctionCache.rows.find((x) => x.listingId === listingId) ||
+        auctionCache.mine.find((x) => x.listingId === listingId);
+      if (!row) {
+        showGameTip("条目不存在");
+        return;
+      }
+      const step = auctionCache.status?.minBidStep || 1;
+      const amount =
+        row.highBidderRoleId > 0 ? row.currentPrice + step : row.currentPrice;
+      void session.auctionBid(listingId, amount).then((r) => {
+        const tip =
+          r?.result === 1
+            ? `出价${amount}成功`
+            : auctionMsgTip(r?.message, "出价失败");
+        void refresh(tip);
+      });
+      return;
+    }
+    if (action === "cancel" && listingId) {
+      void session.auctionCancel(listingId).then((r) => {
+        const tip =
+          r?.result === 1 ? "已下架" : auctionMsgTip(r?.message, "下架失败");
+        void session.openBag().then(() => refresh(tip));
+      });
+    }
+  };
+
+  const openArenaPanel = async (job?: number, bracket?: number) => {
+    const j = job && job > 0 ? job : (activeRole ? activeRole.jobIndex + 1 : 1);
+    const b =
+      bracket && bracket > 0
+        ? bracket
+        : bracketForLevel(session.level || activeRole?.level || 1);
+    const page = await session.fetchArenaRank(j, b, 0);
+    arenaPanel.open(page, j, b);
+    showPhase("dialog");
+    setChromeStatus("比武排行榜");
+  };
+  arenaPanel.onBucketChange = (job, bracket) => {
+    void openArenaPanel(job, bracket);
+  };
+  arenaPanel.onAction = (action) => {
+    if (action === "close") {
+      arenaPanel.close();
+      showPhase("world");
+      return;
+    }
+    if (action === "leave") {
+      void session.leaveArena().then(() => {
+        arenaPanel.close();
+        showPhase("world");
+        showGameTip("已离开比武擂台");
+      });
+      return;
+    }
+    if (action === "claim") {
+      void session.claimArenaReward().then(async (r) => {
+        const tip =
+          r?.result === 1
+            ? "比武奖励已领取"
+            : `领奖失败(${r?.result ?? "?"})`;
+        await openArenaPanel(arenaPanel.job, arenaPanel.bracket);
+        arenaPanel.showTip(tip);
+      });
+    }
+  };
 
   const showPhase = (p: Phase) => {
     phase = p;
@@ -328,7 +639,13 @@ async function main(): Promise<void> {
     miniMap.visible = mapUiMode === "mini" && (p === "world" || p === "map");
     view.inputEnabled = p === "world";
     // Softkeys are HTML (#touch-bar); canvas SoftkeyBar stays hidden.
-    if (p !== "world") approach.hide();
+    if (p !== "world") {
+      approach.hide();
+      if (auctionPanel.visible) auctionPanel.close();
+      if (wagerPanel.visible) wagerPanel.close();
+      // arenaPanel may stay for leave flow; walk still gated below
+    }
+    if (p === "world") syncWorldWalkInput();
 
     if (p === "splash") shell.setSoftkeys({ left: "确定", right: "" });
     else if (p === "login") shell.setSoftkeys({ left: "确定", right: "返回" });
@@ -348,7 +665,9 @@ async function main(): Promise<void> {
     }
     else if (p === "battle")
       shell.setSoftkeys(
-        battle.isAwaitingRound()
+        battle.isAwaitingRound() ||
+          battle.isHangupActive() ||
+          battle.isAutoBattleActive()
           ? { left: "", right: "" }
           : {
               left: battle.softkeyLeftLabel(),
@@ -595,6 +914,10 @@ async function main(): Promise<void> {
       setChromeStatus(
         `[${session.transport?.mode ?? "?"}] ${loadedScene} @${session.x},${session.y} · NPC×${session.npcs.length} 怪×${session.sceneMonsters.length} · WASD/F/Q`,
       );
+      void session.fetchAuctionBoard().then((board) => {
+        auctionCache = board;
+        view.setPaiBlink(!!board.status?.blink);
+      });
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -686,22 +1009,27 @@ async function main(): Promise<void> {
     onSocialNotice: (n) => {
       if (n.kind === "team_result") {
         const ok = n.result === 1;
+        const tip = ok ? "组队成功" : "组队被拒";
         hud.pushChat(
           ok ? `[队]${n.name} 同意组队` : `[队]${n.name} 拒绝组队`,
         );
-        setChromeStatus(ok ? "组队成功" : "组队被拒", !ok);
+        setChromeStatus(tip, !ok);
+        if (social.visible) social.showTip(tip);
       } else if (n.kind === "friend_result") {
         const ok = n.result === 1;
+        const tip = ok ? "已加好友" : "好友被拒";
         hud.pushChat(
           ok ? `[友]${n.name} 同意加好友` : `[友]${n.name} 拒绝加好友`,
         );
-        setChromeStatus(ok ? "已加好友" : "好友被拒", !ok);
+        setChromeStatus(tip, !ok);
+        if (social.visible) social.showTip(tip);
       } else if (n.kind === "team_leave") {
         hud.pushChat(`[队]成员离开 ${n.id >>> 0}`);
+        if (social.visible) social.showTip("队员已离开");
       } else if (n.kind === "trade_result") {
         if (n.result !== 1) {
           hud.pushChat(`[交]${n.name || "对方"} 拒绝/结束交易`);
-          setChromeStatus("交易未开始", true);
+          showGameTip("交易未开始");
           if (phase === "trade") {
             tradeUi.hide();
             showPhase("world");
@@ -710,12 +1038,16 @@ async function main(): Promise<void> {
       } else if (n.kind === "spar_result") {
         hud.pushChat(`[切]${n.tip}`);
         setChromeStatus(n.tip, n.result !== 1);
+        if (social.visible && n.tip) social.showTip(n.tip);
       } else if (n.kind === "guild_sent") {
         hud.pushChat("[帮]已发送入帮邀请");
         setChromeStatus("入帮邀请已发送");
+        if (guildUi.visible) guildUi.showTip("入帮邀请已发送");
+        if (social.visible) social.showTip("入帮邀请已发送");
       } else if (n.kind === "guild_create") {
         hud.pushChat(`[帮]${n.tip}`);
         setChromeStatus(n.tip, n.stage === "fail");
+        if (guildUi.visible && n.tip) guildUi.showTip(n.tip);
         if (n.stage === "need_name") {
           const name = window.prompt("帮派名称", "") ?? "";
           if (name.trim()) void session.guildCreateCheckName(name.trim());
@@ -734,6 +1066,7 @@ async function main(): Promise<void> {
           void session.openCharacterStats();
           if (phase === "guild") {
             guildUi.openHub(session.inGuild, session.guildName || session.characterStats?.guild || "");
+            if (n.tip) guildUi.showTip(n.tip);
           }
         }
       }
@@ -742,10 +1075,12 @@ async function main(): Promise<void> {
       if (u.membershipNotice) {
         hud.pushChat(`[帮]${u.membershipNotice.info}`);
         setChromeStatus(u.membershipNotice.info, u.membershipNotice.type !== 1);
+        if (guildUi.visible) guildUi.showTip(u.membershipNotice.info);
       }
       if (u.applyResult) {
         hud.pushChat(`[帮]${u.applyResult.tip}`);
         setChromeStatus(u.applyResult.tip, u.applyResult.result !== 1);
+        if (guildUi.visible) guildUi.showTip(u.applyResult.tip);
       }
       if (u.leaveResult) {
         hud.pushChat(`[帮]${u.leaveResult.tip}`);
@@ -754,10 +1089,12 @@ async function main(): Promise<void> {
           guildUi.openHub(false, "无帮派");
           showPhase("guild");
         }
+        if (guildUi.visible) guildUi.showTip(u.leaveResult.tip);
       }
       if (u.reviewResult) {
         hud.pushChat(`[帮]${u.reviewResult.tip}`);
         setChromeStatus(u.reviewResult.tip, u.reviewResult.result !== 1);
+        if (guildUi.visible) guildUi.showTip(u.reviewResult.tip);
         if (u.reviewResult.result === 1) void session.openGuildApplications(session.guildAppPage);
       }
       if (u.list) {
@@ -791,8 +1128,13 @@ async function main(): Promise<void> {
           u.applications.maxroles,
         );
         showPhase("guild");
-        if (u.applications.result === 3) setChromeStatus("招收权限不足", true);
-        else if (u.applications.result === 4) setChromeStatus("暂无入帮申请");
+        if (u.applications.result === 3) {
+          setChromeStatus("招收权限不足", true);
+          if (guildUi.visible) guildUi.showTip("招收权限不足");
+        } else if (u.applications.result === 4) {
+          setChromeStatus("暂无入帮申请");
+          if (guildUi.visible) guildUi.showTip("暂无入帮申请");
+        }
       }
     },
     onTradeSession: (u) => {
@@ -801,29 +1143,28 @@ async function main(): Promise<void> {
         showPhase("trade");
         void session.openBag().then(() => tradeUi.setBag(session.bagItems));
         hud.pushChat(`[交]与 ${u.peerName || "对方"} 交易`);
-        setChromeStatus(`交易 · ${u.peerName || "对方"}`);
         return;
       }
       if (u.kind === "peer_offer") {
         tradeUi.setPeerOffer(u.offer);
-        setChromeStatus("对方报价已更新");
+        showGameTip("对方报价已更新");
         return;
       }
       if (u.kind === "offer_ack") {
         tradeUi.setStatus(u.tip, false, u.result === 1);
-        setChromeStatus(u.tip, u.result !== 1);
+        if (u.tip) showGameTip(u.tip);
         return;
       }
       if (u.kind === "waiting") {
         tradeUi.setStatus("等待对方确认", true, true);
-        setChromeStatus("等待对方确认交易");
+        showGameTip("等待对方确认交易");
         return;
       }
       if (u.kind === "cancel" || u.kind === "done") {
         hud.pushChat(`[交]${u.tip}`);
-        setChromeStatus(u.tip, u.kind === "cancel" || (u.kind === "done" && u.result !== 1));
         tradeUi.hide();
         if (phase === "trade" || phase === "dialog") showPhase("world");
+        if (u.tip) showGameTip(u.tip);
         if (u.kind === "done" && u.result === 1) void session.openBag();
       }
     },
@@ -863,22 +1204,52 @@ async function main(): Promise<void> {
         u.visual0 != null &&
         u.visual0 >= 1 &&
         u.visual0 <= 2;
+      /* One encounter → one species for every PvE left clone (CBE clones the
+       * touched SCE row). Resolve once from collide spawn / sceneMonster pos. */
+      const encounterId =
+        state.sceneMonster?.index ??
+        session.pendingEncounterVisual?.battleActorId ??
+        state.left.find((u) => !leftIsSparPlayer(u))?.id ??
+        0;
+      const encounterName = state.left.find((u) => !leftIsSparPlayer(u))?.name;
+      const encounterResolved = session.resolvePveEnemyActor(
+        encounterId,
+        encounterName,
+        state.sceneMonster
+          ? { x: state.sceneMonster.x, y: state.sceneMonster.y }
+          : session.pendingEncounterVisual
+            ? {
+                x: session.pendingEncounterVisual.x,
+                y: session.pendingEncounterVisual.y,
+              }
+            : undefined,
+      );
+      const encounterActor =
+        encounterResolved?.actorResource ||
+        session.pendingEncounterVisual?.actorResource ||
+        (() => {
+          const mon =
+            session.sceneMonsters.find(
+              (n) =>
+                (state.sceneMonster &&
+                  (n.x | 0) === (state.sceneMonster.x | 0) &&
+                  (n.y | 0) === (state.sceneMonster.y | 0)) ||
+                n.battleActorId === encounterId ||
+                n.actorId === encounterId,
+            ) ||
+            (state.subtype === 5 ? session.sceneMonsters[0] : undefined);
+          return mon?.battleActorResource || mon?.actorResource || "";
+        })() ||
+        "e_mucusY.actor";
+      const encounterLabel =
+        encounterResolved?.name ||
+        session.pendingEncounterVisual?.name ||
+        undefined;
       const leftActors = state.left.map((u) => {
         if (leftIsSparPlayer(u) && u.jobIndex != null) {
           return actorResourceForJobSex(u.jobIndex, u.sex ?? 0);
         }
-        const resolved = session.resolvePveEnemyActor(u.id, u.name);
-        if (resolved?.actorResource) return resolved.actorResource;
-        const mon =
-          session.sceneMonsters.find(
-            (n) =>
-              n.battleActorId === u.id ||
-              n.actorId === u.id ||
-              (state.sceneMonster && n.battleActorId === state.sceneMonster.index),
-          ) ||
-          (state.subtype === 5 ? session.sceneMonsters[0] : undefined);
-        // Default enemy catalog id 105 = 毒泥怪 — not player job actors.
-        return mon?.battleActorResource || mon?.actorResource || "e_mucusY.actor";
+        return encounterActor;
       });
       for (let i = 0; i < state.left.length; i++) {
         const slot = state.left[i]!;
@@ -891,18 +1262,14 @@ async function main(): Promise<void> {
         // do not treat the seat as 男幻剑.
         slot.jobIndex = undefined;
         slot.sex = undefined;
-        const resolved = session.resolvePveEnemyActor(slot.id, slot.name);
-        if (resolved?.name && (!slot.name || slot.name.startsWith("怪#"))) {
-          slot.name = resolved.name;
-        } else if (!slot.name || slot.name.startsWith("怪#")) {
-          const mon = session.sceneMonsters.find(
-            (n) =>
-              n.battleActorId === slot.id ||
-              n.battleActorId === state.sceneMonster?.index,
-          );
-          if (mon?.name) slot.name = mon.name;
+        if (encounterLabel && (!slot.name || slot.name.startsWith("怪#"))) {
+          slot.name =
+            state.left.length > 1
+              ? `${encounterLabel}#${i + 1}`
+              : encounterLabel;
         }
       }
+      session.pendingEncounterVisual = null;
       if (state.subtype === 10) {
         session.pendingChallengeGuideActorId = 0;
       }
@@ -972,6 +1339,7 @@ async function main(): Promise<void> {
           }
         }
         battle.setBattleItems(session.bagItems);
+        battle.setHangupActive(session.hangupActive);
         battle.setAutoBattleActive(session.autoBattleActive);
         battle.show(state);
         touch.releaseAll();
@@ -984,6 +1352,9 @@ async function main(): Promise<void> {
           session.mpMax = Math.max(selfSlot.maxMp, selfSlot.mp, 1);
         }
         showPhase("battle");
+        if (session.hangupActive || session.autoBattleActive) {
+          shell.setSoftkeys({ left: "", right: "" });
+        }
         if (session.shouldInBattleAuto()) {
           armInBattleAuto(session.hangupActive ? "挂机出手…" : "自动出手…");
         }
@@ -1024,15 +1395,18 @@ async function main(): Promise<void> {
         );
         shell.setSoftkeys({ left: "继续", center: "", right: "继续" });
       } else if (phase === "battle" && !up.finished) {
+        const hideKeys =
+          battle.isAwaitingRound() ||
+          battle.isPlaybackBusy() ||
+          session.hangupActive ||
+          session.autoBattleActive;
         shell.setSoftkeys(
-          battle.isAwaitingRound()
+          hideKeys
             ? { left: "", right: "" }
-            : battle.isAwaitingDeathPrompt()
-              ? {
-                  left: battle.softkeyLeftLabel(),
-                  right: battle.softkeyRightLabel(),
-                }
-              : { left: "确定", right: battle.softkeyRightLabel() },
+            : {
+                left: battle.softkeyLeftLabel(),
+                right: battle.softkeyRightLabel(),
+              },
         );
       }
       if (up.finished || (up.escaped && up.escapeOk)) {
@@ -1040,6 +1414,44 @@ async function main(): Promise<void> {
       }
       // Follow-up 4/2 is armed from BattleScreen.onAutoReady after playback
       // (avoids firing mid-FX and covers re-enable after 关闭).
+    },
+    onWagerEvent: (ev) => {
+      const kind =
+        ev.eventKind === 1
+          ? "待确认"
+          : ev.eventKind === 2
+            ? "开战"
+            : ev.eventKind === 3
+              ? ev.result === 1
+                ? `结算胜+${ev.payout}`
+                : ev.result === 2
+                  ? "结算负"
+                  : `结算退${ev.payout}`
+              : ev.eventKind === 4
+                ? "被拒"
+                : "通知";
+      showGameTip(`赏金#${ev.challengeId} ${kind}`);
+      if (wagerPanel.visible) void openWagerPanel();
+    },
+    onAuctionEvent: (ev) => {
+      view.setPaiBlink(!!ev.blink);
+      const kind =
+        ev.eventKind === 1
+          ? "可领取"
+          : ev.eventKind === 2
+            ? `被超价退${ev.amount}`
+            : ev.eventKind === 3
+              ? `成交${ev.amount}`
+              : ev.eventKind === 4
+                ? "超时下架"
+                : "拍卖通知";
+      showGameTip(
+        ev.listingId ? `拍卖#${ev.listingId} ${kind}` : `拍卖 ${kind}`,
+      );
+      if (auctionPanel.visible) void openAuctionPanel();
+    },
+    onArenaHud: (hud) => {
+      arenaHud.apply(hud);
     },
     onNpcDialog: (d) => {
       dialog.show(d);
@@ -1080,6 +1492,8 @@ async function main(): Promise<void> {
           ? "已停止挂机"
           : line.text.includes("不能挂机")
             ? "当前场景不能挂机"
+            : line.text.includes("挂机失败")
+              ? "挂机失败"
             : line.text.includes("已开始挂机")
               ? "已开始挂机"
               : line.text.includes("下一场完成后挂机停止")
@@ -1087,7 +1501,20 @@ async function main(): Promise<void> {
                 : null;
         if (hangTip) {
           hud.pushChat(`[挂] ${hangTip}`, 5);
-          setChromeStatus(`挂机: ${hangTip}`);
+          showGameTip(hangTip);
+          battle.setHangupActive(session.hangupActive);
+          if (phase === "battle" && battle.visible) {
+            shell.setSoftkeys(
+              session.hangupActive || session.autoBattleActive
+                ? { left: "", right: "" }
+                : battle.isAwaitingRound() || battle.isPlaybackBusy()
+                  ? { left: "", right: "" }
+                  : {
+                      left: battle.softkeyLeftLabel(),
+                      right: battle.softkeyRightLabel(),
+                    },
+            );
+          }
           continue;
         }
         hud.pushChat(line.text, line.type);
@@ -1112,8 +1539,7 @@ async function main(): Promise<void> {
       showPhase("splash");
     },
     onItemUseFeedback: (fb) => {
-      system.showTip(fb.message);
-      setChromeStatus(fb.message, !fb.ok);
+      showGameTip(fb.message);
     },
     onVitals: (hp, hpMax, mp, mpMax) => {
       hud.setVitals(hp, Math.max(hpMax, hp, 1), mp, Math.max(mpMax, mp, 1));
@@ -1145,7 +1571,7 @@ async function main(): Promise<void> {
     },
     onHangup: (msg) => {
       hud.pushChat(`[挂] ${msg}`);
-      setChromeStatus(`挂机: ${msg}`);
+      showGameTip(msg);
     },
   });
 
@@ -1166,7 +1592,6 @@ async function main(): Promise<void> {
     if (phase !== "world" || session.inBattle) return;
     approach.show(actorId, name);
     shell.setSoftkeys({ left: "确定", right: "取消" });
-    setChromeStatus(`接近 ${name}`);
   };
 
   approach.onConfirm = (actorId) => {
@@ -1186,11 +1611,35 @@ async function main(): Promise<void> {
     });
   };
 
+  view.onPaiTap = () => {
+    if (phase !== "world" || session.inBattle) return;
+    if (auctionPanel.visible) {
+      auctionPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    void openAuctionPanel();
+  };
+
+  /** Hide map SCE spawn on engage; restore if 4/5 never arrives. */
+  const engageSceneMonster = (actorId: number) => {
+    if (actorId < 0x70000000) return;
+    view.actors.suppressSceneMonster(actorId);
+  };
+  const rollbackSceneMonsterIfNoBattle = (actorId: number) => {
+    if (actorId < 0x70000000) return;
+    if (!session.inBattle) view.actors.restoreSceneMonster(actorId);
+  };
+
   view.onNpcTap = (actorId) => {
     // SCE combat markers use high ids — tap starts battle, not 26/1 dialog.
     if (actorId >= 0x70000000) {
       session.sceneMonsters = view.actors.liveSceneMonsters();
-      void session.startBattleNearPlayer(view.playerX, view.playerY, actorId);
+      engageSceneMonster(actorId);
+      void session
+        .startBattleNearPlayer(view.playerX, view.playerY, actorId)
+        .then(() => rollbackSceneMonsterIfNoBattle(actorId));
       return;
     }
     // SCE teleport stones (0x60000000+) → 16/1 destination list.
@@ -1213,7 +1662,10 @@ async function main(): Promise<void> {
     closeApproach(false);
     session.sceneMonsters = view.actors.liveSceneMonsters();
     setChromeStatus("遭遇怪物！");
-    void session.startBattleNearPlayer(view.playerX, view.playerY, actorId);
+    engageSceneMonster(actorId);
+    void session
+      .startBattleNearPlayer(view.playerX, view.playerY, actorId)
+      .then(() => rollbackSceneMonsterIfNoBattle(actorId));
   };
   view.onPortalEnter = (portal) => {
     if (session.inBattle || phase !== "world") return;
@@ -1226,7 +1678,7 @@ async function main(): Promise<void> {
       portal.displayName ||
       portal.targetScene.replace(/\.sce$/i, "").slice(0, 12);
     hud.pushChat(`[系]传送: ${label}`);
-    setChromeStatus(`传送 → ${portal.targetScene}`);
+    showGameTip(`传送 → ${label}`);
     view.inputEnabled = false;
     void session
       .requestSceneChange(portal.targetScene, exitId, {
@@ -1246,17 +1698,47 @@ async function main(): Promise<void> {
     }
     if (!battle.canSubmitOperate()) return false;
     const operate = session.inBattleAutoOperate();
-    battle.noteOperateSubmitted(tip);
+    // Same path as manual 攻击/仙术 (selectedTargetWire + onAttack/onSkill).
+    if (!battle.submitAutoOperate(operate, tip)) return false;
     shell.setSoftkeys({ left: "", right: "" });
-    void session.battleOperate(battle.targetIndex(), operate).catch(() => {
-      // Exchange failed — unlock seat so arm/retry or manual can recover.
-      if (phase === "battle") battle.clearAwaitingRound();
-    });
     return true;
   };
 
   /** Fire now, or retry until the seat can act (or auto is cancelled). */
   let autoArmTimer: number | null = null;
+  /**
+   * HUD 挂机按钮打开技能菜单后：选技能即发 2/10 开战。
+   * 菜单「挂机战斗」仍只记录，不置此标志。
+   */
+  let hangupStartAfterSkillPick = false;
+
+  const openHangupSkillDialog = (startAfterPick: boolean): void => {
+    hangupStartAfterSkillPick = startAfterPick;
+    void (async () => {
+      const skills = await session.getBattleSkills();
+      const options = [
+        { label: "普通攻击", action: 260, value: 0 },
+        ...skills.map((s) => ({
+          label: s.name.slice(0, 10),
+          action: 260,
+          value: s.id + 2,
+        })),
+        { label: "取消", action: 101, value: 0 },
+      ];
+      dialog.show({
+        title: "挂机战斗",
+        body: startAfterPick
+          ? skills.length > 6
+            ? "选择技能后开始挂机（↑↓翻页）"
+            : "选择技能后开始挂机遇怪"
+          : skills.length > 6
+            ? "仅记录技能，点挂机开始（↑↓翻页）"
+            : "仅记录技能，点挂机按钮后开始遇怪",
+        options,
+      });
+      showPhase("dialog");
+    })();
+  };
   const armInBattleAuto = (tip = "自动出手…") => {
     if (autoArmTimer != null) {
       window.clearTimeout(autoArmTimer);
@@ -1282,6 +1764,8 @@ async function main(): Promise<void> {
     touch.releaseAll();
     view.clearHeldKeys();
     view.inputEnabled = true;
+    // Engaged SCE spawn stays hidden; refresh at birth point after 20s.
+    view.actors.armSuppressedRespawns(20_000);
     view.armCollideCooldown(2000);
     showPhase("world");
     setChromeStatus(`[${session.transport?.mode}] ${log}`);
@@ -1290,7 +1774,10 @@ async function main(): Promise<void> {
   const hasRevivalStone = () =>
     session.bagItems.some((it) => it.itemId === 801 && it.count > 0);
 
+  let loginInFlight = false;
   const doLogin = async (credentials?: { user: string; password: string }) => {
+    if (loginInFlight) return;
+    loginInFlight = true;
     try {
       setChromeStatus("登录中…");
       title.setStatus("正在和服务器通讯请稍候....");
@@ -1315,6 +1802,8 @@ async function main(): Promise<void> {
       setChromeStatus(msg, true);
       // Keep login form visible when account login failed.
       showPhase(credentials ? "login" : "splash");
+    } finally {
+      loginInFlight = false;
     }
   };
 
@@ -1483,10 +1972,10 @@ async function main(): Promise<void> {
     if (leaf === "title") {
       showPhase("social");
       social.openTitles([]);
-      setChromeStatus("称号…");
+      showGameTip("称号…");
       void session.openDesignations().then((page) => {
         if (!page) {
-          setChromeStatus("称号列表失败", true);
+          showGameTip("称号列表失败");
           return;
         }
         social.openTitles(
@@ -1521,10 +2010,10 @@ async function main(): Promise<void> {
     if (leaf === "rank") {
       showPhase("social");
       social.openRank({ type: 0, tabs: ["等级榜", "财富榜", "PK榜"], rows: [], myorder: 0 });
-      setChromeStatus("排行榜…");
+      showGameTip("排行榜…");
       void session.openRanking(0, 0).then((page) => {
         if (!page) {
-          setChromeStatus("排行榜失败", true);
+          showGameTip("排行榜失败");
           return;
         }
         social.openRank({
@@ -1537,7 +2026,7 @@ async function main(): Promise<void> {
           })),
           myorder: page.myorder,
         });
-        setChromeStatus(`排行榜 · ${page.tabs[page.type] ?? "等级榜"}`);
+        showGameTip(`排行榜 · ${page.tabs[page.type] ?? "等级榜"}`);
       });
       return;
     }
@@ -1555,15 +2044,13 @@ async function main(): Promise<void> {
     }
     if (leaf === "unstuck") {
       hud.pushChat("[系]脱离卡死…");
-      setChromeStatus("脱离卡死…");
+      showGameTip("脱离卡死…");
       showPhase("world");
       view.inputEnabled = false;
       void session.requestUnstuck().finally(() => {
         if (phase === "world") view.inputEnabled = true;
         hud.pushChat(`[系]落点 ${session.scene} @${session.x},${session.y}`);
-        setChromeStatus(
-          `[${session.transport?.mode ?? "?"}] unstuck @${session.x},${session.y}`,
-        );
+        showGameTip(`已脱离 · ${session.x},${session.y}`);
       });
       return;
     }
@@ -1571,22 +2058,22 @@ async function main(): Promise<void> {
       showPhase("world");
       void session.teamLeave().then(() => {
         hud.pushChat("[队]已离开队伍");
-        setChromeStatus("已离队");
+        showGameTip("已离队");
       });
       return;
     }
     if (leaf === "quick_repair") {
       showPhase("world");
-      setChromeStatus("快速修理报价…");
+      showGameTip("快速修理报价…");
       void session.requestQuickRepairQuote().then((quote) => {
         if (!quote) {
           hud.pushChat("[系]无修理报价");
-          setChromeStatus("无修理报价", true);
+          showGameTip("无修理报价");
           return;
         }
         if (quote.repairnum <= 0) {
           hud.pushChat("[系]没有需要修理的装备");
-          setChromeStatus("无需修理");
+          showGameTip("无需修理");
           return;
         }
         dialog.show({
@@ -1602,27 +2089,7 @@ async function main(): Promise<void> {
       return;
     }
     if (leaf === "hangup") {
-      void (async () => {
-        const skills = await session.getBattleSkills();
-        const options = [
-          { label: "普通攻击", action: 260, value: 0 },
-          ...skills.map((s) => ({
-            label: s.name.slice(0, 10),
-            action: 260,
-            value: s.id + 2,
-          })),
-          { label: "取消", action: 101, value: 0 },
-        ];
-        dialog.show({
-          title: "挂机战斗",
-          body:
-            skills.length > 6
-              ? "仅记录技能，点挂机开始（↑↓翻页）"
-              : "仅记录技能，点挂机按钮后开始遇怪",
-          options,
-        });
-        showPhase("dialog");
-      })();
+      openHangupSkillDialog(false);
       return;
     }
     setChromeStatus(`菜单: ${label}`);
@@ -1640,10 +2107,7 @@ async function main(): Promise<void> {
       Math.max(20, session.bagItems.length);
     const money = session.characterStats?.money ?? session.gold;
     system.setBagMeta(money, cap);
-    if (tip) {
-      system.showTip(tip);
-      setChromeStatus(tip);
-    }
+    if (tip) showGameTip(tip);
   };
 
   const refreshEnhancePreview = async () => {
@@ -1672,7 +2136,7 @@ async function main(): Promise<void> {
       system.showTip("装备无效");
       return;
     }
-    setChromeStatus(`强化 ${bag.name}…`);
+    showGameTip(`强化 ${bag.name}…`);
     const info = await session.openEnhance(bag.seq);
     if (!info || info.result !== 1) {
       const msg =
@@ -1681,24 +2145,21 @@ async function main(): Promise<void> {
           : info?.result === 3
             ? "已达强化上限"
             : "无法打开强化";
-      system.showTip(msg);
-      setChromeStatus(msg, true);
+      showGameTip(msg);
       return;
     }
     enhanceUi.openEnhance(bag, session.bagItems, info);
     showPhase("enhance");
-    setChromeStatus(`强化 ${bag.name}`);
   };
 
   const openRecastFlow = async (bag: import("./net/protocolExtras").BagItem) => {
     if ((bag.enhance | 0) <= 0) {
-      system.showTip("未强化装备无法重铸");
+      showGameTip("未强化装备无法重铸");
       return;
     }
     await session.openBag();
     enhanceUi.openTransfer(bag, session.bagItems);
     showPhase("enhance");
-    setChromeStatus(`重铸 ${bag.name}`);
   };
 
   enhanceUi.onClose = () => {
@@ -1727,7 +2188,7 @@ async function main(): Promise<void> {
           return;
         }
         enhanceUi.setBusy(true);
-        setChromeStatus("强化中…");
+        showGameTip("强化中…");
         const res = await session.confirmEnhance(seq, mats);
         enhanceUi.setBusy(false);
         await session.openBag();
@@ -1737,8 +2198,7 @@ async function main(): Promise<void> {
           const reopen = await session.openEnhance(seq);
           if (reopen && reopen.result === 1 && fresh) {
             enhanceUi.openEnhance(fresh, session.bagItems, reopen);
-            enhanceUi.setTip(res.message);
-            setChromeStatus(res.message);
+            showGameTip(res.message);
           } else {
             await closeEnhanceToBag(res.message);
           }
@@ -1751,11 +2211,9 @@ async function main(): Promise<void> {
             if (fresh) enhanceUi.openEnhance(fresh, session.bagItems, reopen);
             else enhanceUi.setOpenInfo(reopen);
           }
-          enhanceUi.setTip(res.message);
-          setChromeStatus(res.message, true);
+          showGameTip(res.message);
         } else {
-          enhanceUi.setTip(res.message);
-          setChromeStatus(res.message, true);
+          showGameTip(res.message);
         }
       })();
       return;
@@ -1768,8 +2226,7 @@ async function main(): Promise<void> {
         const prev = await session.enhanceTransferPreview(dest, src);
         enhanceUi.setBusy(false);
         if (!prev.ok) {
-          enhanceUi.setTip(prev.message);
-          setChromeStatus(prev.message, true);
+          showGameTip(prev.message);
           return;
         }
         const destItem =
@@ -1797,11 +2254,10 @@ async function main(): Promise<void> {
         const dest = enhanceUi.getDestSeq();
         if (!src || !dest) return;
         enhanceUi.setBusy(true);
-        setChromeStatus("转移中…");
+        showGameTip("转移中…");
         const res = await session.enhanceTransferConfirm(dest, src);
         enhanceUi.setBusy(false);
         await closeEnhanceToBag(res.message);
-        setChromeStatus(res.message, !res.ok);
       })();
       return;
     }
@@ -1818,19 +2274,18 @@ async function main(): Promise<void> {
       if (!bag) return;
       if (action === "use") {
         void (async () => {
-          setChromeStatus(`使用 ${bag.name}…`);
+          showGameTip(`使用 ${bag.name}…`);
           const fb = await session.useItem(bag.itemId, bag.seq);
           // Success: refresh bag from server. Failure: keep local stack
           // (CBE only deducts on result=1; do not openBag-resync a fail).
           if (fb.ok) await session.openBag();
-          system.showTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
-          setChromeStatus(fb.message || (fb.ok ? "使用成功" : "使用失败"), !fb.ok);
+          showGameTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
         })();
         return;
       }
       if (action === "batch_open") {
         void (async () => {
-          setChromeStatus(`批量开启 ${bag.name}×10…`);
+          showGameTip(`批量开启 ${bag.name}×10…`);
           const fb = await session.openChestBatch(bag.itemId, bag.seq, 10);
           if (fb.ok) await session.openBag();
           system.setBag(session.bagItems);
@@ -1841,17 +2296,13 @@ async function main(): Promise<void> {
             session.characterStats?.money ?? session.gold,
             cap,
           );
-          system.showTip(fb.message || (fb.ok ? "开启成功" : "开启失败"));
-          setChromeStatus(
-            fb.message || (fb.ok ? "开启成功" : "开启失败"),
-            !fb.ok,
-          );
+          showGameTip(fb.message || (fb.ok ? "开启成功" : "开启失败"));
         })();
         return;
       }
       if (action === "equip") {
         void session.equipItem(bag.itemId, bag.seq).then(() => void session.openBag());
-        setChromeStatus(`装备 ${bag.name}`);
+        showGameTip(`装备 ${bag.name}`);
         return;
       }
       if (action === "enhance") {
@@ -1864,7 +2315,15 @@ async function main(): Promise<void> {
       }
       if (action === "discard") {
         void session.discardItem(bag.itemId, bag.seq, bag.count).then(() => void session.openBag());
-        setChromeStatus(`丢弃 ${bag.name}`);
+        showGameTip(`丢弃 ${bag.name}`);
+        return;
+      }
+      if (action === "auction") {
+        system.visible = false;
+        showPhase("world");
+        void openAuctionPanel({ preferTab: "list", preselect: bag }).then(() => {
+          showGameTip(`已选 ${bag.name}，设置金额后确认上架`);
+        });
         return;
       }
     }
@@ -1878,24 +2337,23 @@ async function main(): Promise<void> {
         void session
           .unequipItem(bag.itemId, bodySeq)
           .then(() => refreshEquip());
-        setChromeStatus(`卸载 ${bag.name}`);
+        showGameTip(`卸载 ${bag.name}`);
         return;
       }
       if (action === "equip") {
         void session.equipItem(bag.itemId, bag.seq).then(() => refreshEquip());
-        setChromeStatus(`装备 ${bag.name}`);
+        showGameTip(`装备 ${bag.name}`);
         return;
       }
       if (action === "swap") {
         void session
           .swapEquip(system.getEquipFocusBodySeq(), bag.seq)
           .then(() => refreshEquip());
-        setChromeStatus(`替换 ${bag.name}`);
+        showGameTip(`替换 ${bag.name}`);
         return;
       }
       if (action === "enhance") {
-        system.showTip("请先卸下到背包再强化");
-        setChromeStatus("穿戴中装备请先卸下再强化", true);
+        showGameTip("穿戴中装备请先卸下再强化");
         return;
       }
     }
@@ -1903,8 +2361,7 @@ async function main(): Promise<void> {
       const g = item as import("./net/protocolExtras").ShopGoods;
       const n = system.getMallBuyQty();
       void session.buyMallItem(g.itemId, n).then(() => {
-        system.showTip(`购买 ${g.name} ×${n}`);
-        setChromeStatus(`购买 ${g.name} ×${n}`);
+        showGameTip(`购买 ${g.name} ×${n}`);
       });
       return;
     }
@@ -1920,12 +2377,11 @@ async function main(): Promise<void> {
       const account = (creds.user || "").trim();
       const password = (creds.password || "").trim();
       if (!account || !roleId || yuan < 1) {
-        system.showTip("无法充值：请重新登录");
-        setChromeStatus("充值参数无效", true);
+        showGameTip("无法充值：请重新登录");
         return;
       }
       const channel = payType === 1 ? "微信" : "支付宝";
-      setChromeStatus(`创建${channel}充值单…`);
+      showGameTip(`创建${channel}充值单…`);
       void (async () => {
         const result = await createRechargeOrder({
           account,
@@ -1935,28 +2391,22 @@ async function main(): Promise<void> {
           payType,
         });
         if (!result.ok) {
-          system.showTip(result.error);
-          setChromeStatus(result.error, true);
+          showGameTip(result.error);
           return;
         }
         const amountText = formatRechargeYuan(result.reallyPriceCents);
         const tip = `应付 ${amountText} · ${result.wcoinAmount}酷宝`;
-        system.showTip(tip);
-        setChromeStatus(`${tip} · 打开支付…`);
+        showGameTip(`${tip} · 打开支付…`);
         const pay = await openPayUrl(result.payUrl, {
           amountText,
           channel,
         });
         if (pay.showedQr) {
-          system.showTip(`${tip} · 请扫码（个人收款码）`);
-          setChromeStatus(
-            `${channel}个人码扫码 · 金额须一致 · 完成后重开商城`,
-          );
+          showGameTip(`${tip} · 请扫码（个人收款码）`);
         } else if (pay.opened) {
-          setChromeStatus(`${channel}支付已打开 · 完成后重开商城刷新`);
+          showGameTip(`${channel}支付已打开 · 完成后重开商城刷新`);
         } else {
-          system.showTip("订单已创建，但无法打开支付");
-          setChromeStatus("无法打开支付应用", true);
+          showGameTip("订单已创建，但无法打开支付");
         }
         void session.openMall();
       })();
@@ -1967,19 +2417,18 @@ async function main(): Promise<void> {
         ? (item as import("./resources/skill").BattleSkillRow)
         : session.learnedSkills[0];
       if (!sk) {
-        setChromeStatus("无已学仙术（等 1/12/1）");
+        showGameTip("无已学仙术");
         return;
       }
       if (!session.inBattle) {
         if (!isMapHealSkill(sk)) {
-          setChromeStatus("仙术需在战斗中施放");
+          showGameTip("仙术需在战斗中施放");
           return;
         }
         void (async () => {
-          setChromeStatus(`施展${sk.name}…`);
+          showGameTip(`施展${sk.name}…`);
           const fb = await session.useMapHealSkill(sk.id);
-          system.showTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
-          setChromeStatus(fb.message || (fb.ok ? "使用成功" : "使用失败"), !fb.ok);
+          showGameTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
         })();
         return;
       }
@@ -1998,7 +2447,7 @@ async function main(): Promise<void> {
     if (action === "refresh") {
       void session.fetchTaskLists().then((lists) => {
         taskUi.setLists(lists.accepted, lists.candidates);
-        setChromeStatus(
+        showGameTip(
           `已接${lists.accepted.length} · 可接${lists.candidates.length}`,
         );
       });
@@ -2007,14 +2456,12 @@ async function main(): Promise<void> {
     if (action === "detail" && taskId) {
       void session.fetchTaskDetailText(taskId).then((text) => {
         taskUi.showDetail(text || "(无详情)");
-        setChromeStatus(`任务详情 ${taskId}`);
       });
       return;
     }
     if (action === "abandon" && taskId) {
       void session.abandonTask(taskId).then(async (r) => {
-        taskUi.showTip(r.ok ? "已放弃" : "放弃失败");
-        setChromeStatus(r.ok ? `已放弃任务 ${taskId}` : "放弃失败", !r.ok);
+        showGameTip(r.ok ? "已放弃" : "放弃失败");
         const lists = await session.fetchTaskLists();
         taskUi.setLists(lists.accepted, lists.candidates);
       });
@@ -2022,8 +2469,7 @@ async function main(): Promise<void> {
     }
     if (action === "accept" && taskId) {
       void session.acceptTask(taskId).then(async () => {
-        taskUi.showTip("已接取");
-        setChromeStatus(`接取任务 ${taskId}`);
+        showGameTip("已接取");
         const lists = await session.fetchTaskLists();
         taskUi.setLists(lists.accepted, lists.candidates);
       });
@@ -2032,42 +2478,42 @@ async function main(): Promise<void> {
   chatPanel.onClose = () => showPhase("world");
   chatPanel.onSend = async (text, type) => {
     const r = await session.sendChat(text, type);
-    if (r.tip) chatPanel.showTip(r.tip);
+    if (r.tip) showGameTip(r.tip);
     if (!r.ok) {
-      setChromeStatus(r.tip || "发送失败");
+      if (!r.tip) showGameTip("发送失败");
       return false;
     }
     chatPanel.setEntries(hud.getChatEntries());
-    setChromeStatus(`已发送 · ${text.slice(0, 12)}`);
+    showGameTip(`已发送 · ${text.slice(0, 12)}`);
     return true;
   };
   social.onAction = (kind, action, row) => {
     if (action === "player_info" && row?.id) {
       void session.requestPlayerInfo(row.id);
-      setChromeStatus(`查看 ${row.name}`);
+      showGameTip(`查看 ${row.name}`);
       return;
     }
     if (action === "view_equip" && row?.id) {
       void session.requestOtherEquip(row.id);
-      setChromeStatus(`装备 ${row.name}`);
+      showGameTip(`装备 ${row.name}`);
       return;
     }
     if (action === "invite_team" && row?.id) {
       void session.teamInvite(row.id);
       hud.pushChat(`[队]已邀请 ${row.name}`);
-      setChromeStatus(`组队邀请 ${row.name}`);
+      showGameTip(`组队邀请 ${row.name}`);
       return;
     }
     if (action === "add_friend" && row?.id) {
       void session.friendAdd(row.id);
       hud.pushChat(`[友]已发送好友邀请 ${row.name}`);
-      setChromeStatus(`加好友 ${row.name}`);
+      showGameTip(`加好友 ${row.name}`);
       return;
     }
     if (action === "trade" && row?.id) {
       void session.tradeInvite(row.id);
       hud.pushChat(`[交]已邀请 ${row.name} 交易`);
-      setChromeStatus(`交易邀请 ${row.name}`);
+      showGameTip(`交易邀请 ${row.name}`);
       return;
     }
     if (action === "spar" && row?.id) {
@@ -2077,12 +2523,12 @@ async function main(): Promise<void> {
         (/^[1-9]/.test(leaf) && (leaf.charCodeAt(1) || 0) >= 0x80);
       if (city) {
         hud.pushChat("[系]城镇中无法切磋");
-        setChromeStatus("城镇中无法切磋", true);
+        showGameTip("城镇中无法切磋");
         return;
       }
       if ((session.level | 0) < 25) {
         hud.pushChat("[系]等级不足25级无法切磋");
-        setChromeStatus("等级不足25级无法切磋", true);
+        showGameTip("等级不足25级无法切磋");
         return;
       }
       social.hide();
@@ -2090,12 +2536,12 @@ async function main(): Promise<void> {
         if (session.inBattle) showPhase("battle");
         else showPhase("world");
       });
-      setChromeStatus(`切磋 ${row.name}`);
+      showGameTip(`切磋 ${row.name}`);
       return;
     }
     if (action === "guild_invite" && row?.id) {
       void session.guildInvite(row.id);
-      setChromeStatus(`入帮邀请 ${row.name}`);
+      showGameTip(`入帮邀请 ${row.name}`);
       return;
     }
     if (action === "leave_team") {
@@ -2113,7 +2559,7 @@ async function main(): Promise<void> {
     if (action === "invite_pick") {
       social.openNearby(session.nearbyList);
       void session.openNearbyPlayers(0);
-      setChromeStatus("选择邀请目标");
+      showGameTip("选择邀请目标");
       return;
     }
     if (action === "equip_title" && row && row.id >= 0) {
@@ -2121,7 +2567,7 @@ async function main(): Promise<void> {
         if (r.ok) {
           const titleName = r.name || row.name.replace(/^\★/, "");
           hud.pushChat(`[称]已装备 ${titleName}`);
-          setChromeStatus(`称号 ${titleName}`);
+          showGameTip(`称号 ${titleName}`);
           const page = session.designationPage;
           if (page) {
             social.openTitles(
@@ -2135,7 +2581,7 @@ async function main(): Promise<void> {
           }
           /* Nameplate refresh is driven by onDesignationUpdate from 23/2. */
         } else {
-          setChromeStatus("称号设置失败", true);
+          showGameTip("称号设置失败");
         }
       });
       return;
@@ -2147,10 +2593,10 @@ async function main(): Promise<void> {
     }
     if (action === "rank_tab") {
       const type = row?.id ?? 0;
-      setChromeStatus(`排行榜 · ${row?.name ?? ""}…`);
+      showGameTip(`排行榜 · ${row?.name ?? ""}…`);
       void session.openRanking(type, 0).then((page) => {
         if (!page) {
-          setChromeStatus("排行榜失败", true);
+          showGameTip("排行榜失败");
           return;
         }
         social.openRank({
@@ -2163,7 +2609,7 @@ async function main(): Promise<void> {
           })),
           myorder: page.myorder,
         });
-        setChromeStatus(
+        showGameTip(
           `排行榜 · ${page.tabs[page.type] ?? row?.name ?? "等级榜"}`,
         );
       });
@@ -2178,7 +2624,7 @@ async function main(): Promise<void> {
     }
     if (action === "open_create") {
       showPhase("world");
-      setChromeStatus("创建帮派…");
+      showGameTip("创建帮派…");
       void session.guildCreateStart();
       return;
     }
@@ -2186,7 +2632,7 @@ async function main(): Promise<void> {
       void (async () => {
         if (!session.guildId) await session.ensureGuildId();
         if (session.guildId) await session.openGuildSelfDetail();
-        else setChromeStatus("未加入帮派", true);
+        else showGameTip("未加入帮派");
       })();
       return;
     }
@@ -2259,8 +2705,7 @@ async function main(): Promise<void> {
     if (action === "submit") {
       const offer = tradeUi.localOffer;
       if (!offer.money && !offer.items.length) {
-        tradeUi.setStatus("请先放入物品或金币");
-        setChromeStatus("报价不能为空", true);
+        showGameTip("请先放入物品或金币");
         return;
       }
       void session.tradeOffer(offer.money, offer.items);
@@ -2279,6 +2724,7 @@ async function main(): Promise<void> {
   };
 
   dialog.onClose = () => {
+    hangupStartAfterSkillPick = false;
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
   };
@@ -2293,6 +2739,7 @@ async function main(): Promise<void> {
       return;
     }
     if (action === 101) {
+      hangupStartAfterSkillPick = false;
       dialog.hide();
       void session.confirmTaskPrompt(false);
       showPhase("world");
@@ -2336,7 +2783,7 @@ async function main(): Promise<void> {
     if (action === 244) {
       dialog.hide();
       void session.tradeCancel().then(() => showPhase("world"));
-      setChromeStatus("已取消交易");
+      showGameTip("已取消交易");
       return;
     }
     if (action === 250) {
@@ -2347,7 +2794,7 @@ async function main(): Promise<void> {
     if (action === 251) {
       dialog.hide();
       session.pendingGuildCreateName = "";
-      setChromeStatus("已取消创建帮派");
+      showGameTip("已取消创建帮派");
       showPhase("world");
       return;
     }
@@ -2373,8 +2820,17 @@ async function main(): Promise<void> {
           ? "普通攻击"
           : session.learnedSkills.find((s) => s.id + 2 === value)?.name ||
             `技能#${value}`;
+      const startNow = hangupStartAfterSkillPick;
+      hangupStartAfterSkillPick = false;
+      if (startNow) {
+        hud.pushChat(`[挂]技能 ${tip}，请求挂机…`);
+        showGameTip(`挂机技能: ${tip}`);
+        showPhase("world");
+        void session.startHangup();
+        return;
+      }
       hud.pushChat(`[挂]已记录技能 ${tip}，点挂机开始`);
-      setChromeStatus(`挂机技能已记录: ${tip}`);
+      showGameTip(`挂机技能已记录: ${tip}`);
       showPhase("world");
       return;
     }
@@ -2382,7 +2838,7 @@ async function main(): Promise<void> {
       dialog.hide();
       void session.confirmQuickRepair().then((r) => {
         hud.pushChat(`[系]${r.message}`);
-        setChromeStatus(r.message, !r.ok);
+        showGameTip(r.message);
         showPhase("world");
       });
       return;
@@ -2402,7 +2858,26 @@ async function main(): Promise<void> {
       showPhase("world");
       return;
     }
-    dialog.hide();
+        if ((value >>> 0) === ARENA_NPC_WAGER) {
+      dialog.hide();
+      void openWagerPanel();
+      return;
+    }
+    if ((value >>> 0) === ARENA_NPC_RANK) {
+      dialog.hide();
+      void openArenaPanel();
+      return;
+    }
+    if ((value >>> 0) === ARENA_NPC_ENTER || (value >>> 0) === ARENA_NPC_LEAVE) {
+      dialog.hide();
+      void session.pickNpcOption(action, value, label).then(() => {
+        if ((value >>> 0) === ARENA_NPC_LEAVE) arenaPanel.close();
+        if (!dialog.visible) showPhase("world");
+        if (session.isArenaScene()) showGameTip("已进入比武擂台");
+      });
+      return;
+    }
+dialog.hide();
     void session.pickNpcOption(action, value, label).then(() => {
       if (session.inBattle) {
         showPhase("battle");
@@ -2423,7 +2898,7 @@ async function main(): Promise<void> {
     if (phase === "map") shell.setSoftkeys(labels);
   };
   worldMap.onTeleport = (args) => {
-    setChromeStatus(`传送石 → ${args.alias}…`);
+    worldMap.showTip(`传送中…${args.alias}`);
     view.inputEnabled = false;
     void session
       .requestMapTeleport(
@@ -2439,10 +2914,10 @@ async function main(): Promise<void> {
           worldMap.hide();
           showPhase("world");
           hud.pushChat(`[系]消耗${r.cost}个传送石 → ${args.alias}`);
-          setChromeStatus(`已传送 ${args.alias}`);
+          showGameTip(`消耗${r.cost}个传送石 → ${args.alias}`);
         } else {
           hud.pushChat(`[系]传送失败: ${r.detail}`);
-          setChromeStatus(r.detail, true);
+          worldMap.showTip(r.detail);
           if (phase === "map") view.inputEnabled = false;
           else view.inputEnabled = true;
         }
@@ -2458,7 +2933,9 @@ async function main(): Promise<void> {
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
     }
-    void session.battleOperate(id, 0);
+    void session.battleOperate(id, 0).catch(() => {
+      if (phase === "battle") battle.clearAwaitingRound();
+    });
   };
   battle.onSkill = (operate) => {
     session.noteManualBattleOperate(operate);
@@ -2466,7 +2943,9 @@ async function main(): Promise<void> {
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
     }
-    void session.battleOperate(id, operate);
+    void session.battleOperate(id, operate).catch(() => {
+      if (phase === "battle") battle.clearAwaitingRound();
+    });
   };
   battle.onFlee = () => void session.battleEscape();
   battle.onItemUse = (seq) => {
@@ -2492,7 +2971,7 @@ async function main(): Promise<void> {
     });
   };
   battle.onDeathPromptChoice = (result) => {
-    setChromeStatus(result === 1 ? "使用复活石…" : "普通复活…");
+    showGameTip(result === 1 ? "使用复活石…" : "普通复活…");
     shell.setSoftkeys({ left: "", right: "" });
     void session.battleDeathPrompt(result).then(() => {
       // result=1 → 4/7+4/8…; result=2 → 20/1+30/1 scene enter.
@@ -2505,7 +2984,7 @@ async function main(): Promise<void> {
     session.autoBattleActive = !session.autoBattleActive;
     const on = session.autoBattleActive;
     hud.pushChat(on ? "[战]自动开启" : "[战]自动关闭");
-    setChromeStatus(on ? "自动战斗开启" : "自动战斗关闭");
+    showGameTip(on ? "自动战斗开启" : "自动战斗关闭");
     if (on) {
       // Retry until seat is free — covers re-enable after 关闭/手动技能.
       armInBattleAuto("自动出手…");
@@ -2532,7 +3011,7 @@ async function main(): Promise<void> {
     if (!session.autoBattleActive) return;
     session.autoBattleActive = false;
     hud.pushChat("[战]自动关闭");
-    setChromeStatus("自动战斗关闭");
+    showGameTip("自动战斗关闭");
     if (phase === "battle") {
       shell.setSoftkeys(
         battle.isAwaitingRound()
@@ -2540,6 +3019,11 @@ async function main(): Promise<void> {
           : { left: "确定", right: battle.softkeyRightLabel() },
       );
     }
+  };
+  /** Same 2/10 Type=2 as HUD 挂机 — mid-fight stop-after / 已停止挂机. */
+  battle.onHangupCancel = () => {
+    hud.pushChat("[挂] 请求停止挂机…");
+    void session.startHangup();
   };
   battle.onVitalsChanged = () => {
     const vitals = battle.allyVitals();
@@ -2560,8 +3044,14 @@ async function main(): Promise<void> {
   hud.onMenu = () => showPhase("menu");
   hud.onHome = () => cycleMapUi();
   hud.onHangup = () => {
-    hud.pushChat("[挂] 请求挂机…");
-    void session.startHangup();
+    // Already hanging: second tap = stop-after / 已停止挂机 (same 2/10).
+    if (session.hangupActive) {
+      hud.pushChat("[挂] 请求停止挂机…");
+      void session.startHangup();
+      return;
+    }
+    // Idle: pick skill first, then startHangup on confirm (action 260).
+    openHangupSkillDialog(true);
   };
   hud.onIcon = (action) => {
     if (action === "status") {
@@ -2617,6 +3107,42 @@ async function main(): Promise<void> {
       return;
     }
     if (phase === "world") {
+      // Overlays on world (auction/arena/wager) must win over 菜单 softkeys.
+      if (auctionPanel.visible) {
+        if (which === "left" || which === "center") {
+          auctionPanel.confirm();
+          shell.setSoftkeys(auctionPanel.softkeys());
+        } else if (which === "right") {
+          if (auctionPanel.cancelOrBack()) {
+            shell.setSoftkeys(auctionPanel.softkeys());
+            return;
+          }
+          auctionPanel.close();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
+      if (arenaPanel.visible) {
+        if (which === "left") arenaPanel.switchJob(1);
+        if (which === "center") arenaPanel.confirm();
+        if (which === "right") {
+          arenaPanel.close();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
+      if (wagerPanel.visible) {
+        if (which === "left") wagerPanel.adjustStake(1000);
+        if (which === "center") wagerPanel.confirm();
+        if (which === "right") {
+          wagerPanel.close();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
       if (approach.open) {
         if (which === "left") approach.confirm();
         if (which === "right") approach.cancel();
@@ -2698,6 +3224,19 @@ async function main(): Promise<void> {
       worldMap.confirm();
       return;
     }
+    if (phase === "world" && auctionPanel.visible) {
+      auctionPanel.confirm();
+      shell.setSoftkeys(auctionPanel.softkeys());
+      return;
+    }
+    if (phase === "world" && arenaPanel.visible) {
+      arenaPanel.confirm();
+      return;
+    }
+    if (phase === "world" && wagerPanel.visible) {
+      wagerPanel.confirm();
+      return;
+    }
     if (phase === "world" && approach.open) {
       approach.confirm();
       return;
@@ -2710,7 +3249,7 @@ async function main(): Promise<void> {
       if (npc) {
         openApproach(npc.actorId, npc.name);
       } else {
-        setChromeStatus("附近没有可对话对象");
+        showGameTip("附近没有可对话对象");
       }
       return;
     }
@@ -2796,6 +3335,27 @@ async function main(): Promise<void> {
     if (!down) {
       view.setHeldKey(dirKey[dir], false);
       view.setHeldKey(dirWasd[dir], false);
+    }
+    if (phase === "world" && auctionPanel.visible) {
+      if (!down) return;
+      if (dir === "left" || dir === "right") {
+        auctionPanel.horizontal(dir === "left" ? -1 : 1);
+        shell.setSoftkeys(auctionPanel.softkeys());
+      } else {
+        auctionPanel.move(dir === "up" ? -1 : 1);
+      }
+      return;
+    }
+    if (phase === "world" && (arenaPanel.visible || wagerPanel.visible)) {
+      if (!down) return;
+      if (arenaPanel.visible) {
+        if (dir === "left" || dir === "right") arenaPanel.switchJob(dir === "left" ? -1 : 1);
+        else arenaPanel.move(dir === "up" ? -1 : 1);
+      } else if (wagerPanel.visible) {
+        if (dir === "left" || dir === "right") wagerPanel.adjustStake(dir === "left" ? -1000 : 1000);
+        else wagerPanel.move(dir === "up" ? -1 : 1);
+      }
+      return;
     }
     if (phase === "world") {
       if (down) {
@@ -2920,6 +3480,33 @@ async function main(): Promise<void> {
       if (k === "arrowup" || k === "w") dialog.move(-1);
       if (k === "arrowdown" || k === "s") dialog.move(1);
     }
+    if (auctionPanel.visible) {
+      if (auctionPanel.isPriceMode()) {
+        if (auctionPanel.typePriceKey(k === "backspace" ? "backspace" : e.key)) {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (k === "arrowup" || k === "w") {
+        auctionPanel.move(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        auctionPanel.move(1);
+        e.preventDefault();
+      }
+      if (k === "arrowleft" || k === "a") {
+        auctionPanel.horizontal(-1);
+        shell.setSoftkeys(auctionPanel.softkeys());
+        e.preventDefault();
+      }
+      if (k === "arrowright" || k === "d") {
+        auctionPanel.horizontal(1);
+        shell.setSoftkeys(auctionPanel.softkeys());
+        e.preventDefault();
+      }
+      return;
+    }
     if (phase === "system") {
       if (k === "arrowup" || k === "w") system.move(-1);
       if (k === "arrowdown" || k === "s") system.move(1);
@@ -3023,7 +3610,9 @@ async function main(): Promise<void> {
     }
     if (k === "q") {
       // Q = left softkey everywhere (确定/瞬移/继续); map used to call cancel and quit early.
-      if (phase === "world" && approach.open) approach.confirm();
+      if (phase === "world" && (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible)) {
+        handleSoftkey("left");
+      } else if (phase === "world" && approach.open) approach.confirm();
       else if (phase === "world") showPhase("menu");
       else if (phase === "splash" || phase === "login") title.confirm();
       else shell.softkeys.onSoftkey?.("left");
@@ -3035,7 +3624,9 @@ async function main(): Promise<void> {
       handleOk();
       e.preventDefault();
     } else if (k === "e" || k === "escape") {
-      if (phase === "world" && approach.open) {
+      if (phase === "world" && (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible)) {
+        handleSoftkey("right");
+      } else if (phase === "world" && approach.open) {
         approach.cancel();
       } else if (phase === "world") {
         showPhase("menu");

@@ -12,6 +12,13 @@ import {
 } from "./constants";
 import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 /** Wire 1/3/3 type → display. */
 export type ChatEntry = {
@@ -86,9 +93,7 @@ export class ChatPanel extends Container {
   private draft = "";
   private ime = new ChatIme();
   private inputHit = new Graphics();
-  private tipText = "";
-  private tipUntil = 0;
-  private tipTimer: ReturnType<typeof setTimeout> | null = null;
+  private toast: PanelTipState = createPanelTipState();
   /** Bumped on open/hide so deferred focus cannot remount IME after close. */
   private openGen = 0;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
@@ -147,6 +152,7 @@ export class ChatPanel extends Container {
   hide(): void {
     this.openGen += 1;
     this.clearFocusTimer();
+    clearPanelTip(this.toast);
     this.visible = false;
     this.ime.hide();
   }
@@ -159,10 +165,7 @@ export class ChatPanel extends Container {
   destroy(options?: boolean | { children?: boolean; texture?: boolean }): void {
     this.openGen += 1;
     this.clearFocusTimer();
-    if (this.tipTimer) {
-      clearTimeout(this.tipTimer);
-      this.tipTimer = null;
-    }
+    clearPanelTip(this.toast);
     this.ime.destroy();
     super.destroy(options);
   }
@@ -196,20 +199,11 @@ export class ChatPanel extends Container {
   }
 
   /** Green center toast — same style as SystemPanel mall/bag tips. */
-  showTip(text: string, ms = 2800): void {
-    const msg = text.trim();
-    if (!msg) return;
-    this.tipText = msg;
-    this.tipUntil = Date.now() + ms;
-    if (this.tipTimer) clearTimeout(this.tipTimer);
-    this.tipTimer = setTimeout(() => {
-      this.tipTimer = null;
-      if (Date.now() >= this.tipUntil) {
-        this.tipText = "";
-        if (this.visible) this.redraw();
-      }
-    }, ms + 20);
-    if (this.visible) this.redraw();
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
   }
 
   confirm(): void {
@@ -358,45 +352,7 @@ export class ChatPanel extends Container {
         : "←→频道  ↑↓翻阅  确定发送";
     this.addLabel(hint, x + 10, y + h - 48, CBE.inkLabel);
 
-    this.drawTipOverlay();
-  }
-
-  private drawTipOverlay(): void {
-    if (!this.tipText || Date.now() >= this.tipUntil) {
-      if (this.tipText && Date.now() >= this.tipUntil) this.tipText = "";
-      return;
-    }
-    const maxW = LCD_WIDTH - 28;
-    const padX = 10;
-    const padY = 8;
-    const lineH = 16;
-    const lines = wrapTipLines(this.tipText, maxW - padX * 2);
-    const boxH = padY * 2 + lines.length * lineH;
-    const boxW = Math.min(
-      maxW,
-      Math.max(
-        120,
-        ...lines.map((l) => {
-          let w = 0;
-          for (const ch of l) w += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
-          return w + padX * 2;
-        }),
-      ),
-    );
-    const bx = Math.floor((LCD_WIDTH - boxW) / 2);
-    const by = Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2);
-    this.box
-      .roundRect(bx, by, boxW, boxH, 4)
-      .fill({ color: 0x0a1814, alpha: 0.92 })
-      .stroke({ width: 1, color: CBE.borderBright });
-    lines.forEach((line, i) => {
-      const lab = new BitmapLabel();
-      lab.anchor.set(0.5, 0.5);
-      lab.position.set(LCD_WIDTH / 2, by + padY + lineH / 2 + i * lineH);
-      void lab.setText(line, CBE.inkTipGreen, { outline: false });
-      this.addChild(lab);
-      this.labels.push(lab);
-    });
+    drawPanelTipOverlay(this, this.toast);
   }
 
   /** One painted row per wrapped line (preserves \n and width wrap). */
@@ -435,23 +391,4 @@ export class ChatPanel extends Container {
     this.addChild(lab);
     this.labels.push(lab);
   }
-}
-
-function wrapTipLines(text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  let cur = "";
-  let w = 0;
-  for (const ch of text) {
-    const cw = (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
-    if (w + cw > maxWidth && cur) {
-      lines.push(cur);
-      cur = ch;
-      w = cw;
-    } else {
-      cur += ch;
-      w += cw;
-    }
-  }
-  if (cur) lines.push(cur);
-  return lines.length ? lines : [""];
 }

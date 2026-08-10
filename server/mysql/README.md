@@ -197,7 +197,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_vitality_
 - `account_role_backpack`：按角色和背包槽保存物品、数量及装备强化等级；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、奖励和三阶段 NPC 对话。
-- `server_dynamic_npc_tasks`：动态 NPC 到一个可接取任务的绑定关系，以及该 NPC 是否允许角色在完成后重复接取。
+- `server_dynamic_npc_tasks`：动态 NPC 到可接取任务的绑定（主键含 `task_id`，同一 NPC 可绑多个任务），以及该绑定是否允许完成后重复接取与每日次数。
 - `role_id_sequence`：分配全服唯一且不复用的角色 ID。
 - `guilds`：帮派名称、帮主、等级、人数上限、资源、建设和公告。
 - `guild_members`：角色与帮派的一对一成员关系及职位。

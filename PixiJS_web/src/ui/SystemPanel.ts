@@ -28,6 +28,13 @@ import {
   EQUIP_DETAIL_YELLOW,
   type EquipPaintLine,
 } from "./equipDetail";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 export type SystemKind =
   | "bag"
@@ -50,6 +57,7 @@ export type SystemAction =
   | "enhance"
   | "recast"
   | "discard"
+  | "auction"
   | "buy"
   | "recharge_alipay"
   | "recharge_wechat"
@@ -249,9 +257,7 @@ export class SystemPanel extends Container {
   private equipActorTex: Texture | null = null;
   private equipActorKey = "";
   /** Transient server feedback (item use / chest reward). */
-  private tipText = "";
-  private tipUntil = 0;
-  private tipTimer: ReturnType<typeof setTimeout> | null = null;
+  private toast: PanelTipState = createPanelTipState();
   /** Pulsing red glow over durability-0 worn slots (equip panel only). */
   private brokenGlowGfx = new Graphics();
   private brokenSlotRects: { x: number; y: number; w: number; h: number }[] = [];
@@ -353,29 +359,15 @@ export class SystemPanel extends Container {
   }
 
   /** Show a short in-panel tip (item use / 获得奖励). */
-  showTip(text: string, ms = 2800): void {
-    const msg = text.trim();
-    if (!msg) return;
-    this.tipText = msg;
-    this.tipUntil = Date.now() + ms;
-    if (this.tipTimer) clearTimeout(this.tipTimer);
-    this.tipTimer = setTimeout(() => {
-      this.tipTimer = null;
-      if (Date.now() >= this.tipUntil) {
-        this.tipText = "";
-        if (this.visible) this.redraw();
-      }
-    }, ms + 20);
-    if (this.visible) this.redraw();
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (this.visible) this.redraw();
+    }, ms);
   }
 
   private clearTip(): void {
-    this.tipText = "";
-    this.tipUntil = 0;
-    if (this.tipTimer) {
-      clearTimeout(this.tipTimer);
-      this.tipTimer = null;
-    }
+    clearPanelTip(this.toast);
   }
 
   setInBattle(v: boolean): void {
@@ -446,6 +438,7 @@ export class SystemPanel extends Container {
   }
 
   hide(): void {
+    this.clearTip();
     this.visible = false;
     this.stopBrokenGlowAnim();
     this.brokenGlowGfx.clear();
@@ -845,6 +838,7 @@ export class SystemPanel extends Container {
         acts.push("使用");
         if (isChestBoxItem(it.itemId)) acts.push("批量开启");
       }
+      acts.push("拍卖");
       acts.push("丢弃");
       acts.push("返回");
       return acts;
@@ -998,7 +992,7 @@ export class SystemPanel extends Container {
         this.drawList(x, y, w);
       }
     }
-    this.drawTipOverlay();
+    drawPanelTipOverlay(this, this.toast);
   }
 
   /**
@@ -1205,44 +1199,6 @@ export class SystemPanel extends Container {
   }
 
   /** Center toast over panel for use/chest feedback. */
-  private drawTipOverlay(): void {
-    if (!this.tipText || Date.now() >= this.tipUntil) {
-      if (this.tipText && Date.now() >= this.tipUntil) this.tipText = "";
-      return;
-    }
-    const maxW = LCD_WIDTH - 28;
-    const padX = 10;
-    const padY = 8;
-    const lineH = 16;
-    const lines = wrapUc3Lines(this.tipText, maxW - padX * 2);
-    const boxH = padY * 2 + lines.length * lineH;
-    const boxW = Math.min(
-      maxW,
-      Math.max(
-        120,
-        ...lines.map((l) => {
-          let w = 0;
-          for (const ch of l) w += (ch.codePointAt(0) ?? 0) > 0xff ? 14 : 8;
-          return w + padX * 2;
-        }),
-      ),
-    );
-    const bx = Math.floor((LCD_WIDTH - boxW) / 2);
-    const by = Math.floor((LCD_HEIGHT - SOFTKEY_H) / 2 - boxH / 2);
-    this.box
-      .roundRect(bx, by, boxW, boxH, 4)
-      .fill({ color: 0x0a1814, alpha: 0.92 })
-      .stroke({ width: 1, color: CBE.borderBright });
-    lines.forEach((line, i) => {
-      this.addLabelCentered(
-        line,
-        LCD_WIDTH / 2,
-        by + padY + lineH / 2 + i * lineH,
-        CBE.inkTipGreen,
-      );
-    });
-  }
-
   /**
    * CBE 背包页（江湖OL.CBE 0x010250F2 标签簇 + 截图）：
    * 胶囊「背包」、六分类 Tab、黄字 `%d/%d个`、品质色列表、金/银/铜栏；操作走 HTML 软键。
@@ -2181,6 +2137,8 @@ function actionKey(label: string): SystemAction | string {
       return "recast";
     case "丢弃":
       return "discard";
+    case "拍卖":
+      return "auction";
     case "购买":
       return "buy";
     case "支付宝":

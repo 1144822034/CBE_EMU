@@ -12,6 +12,12 @@ import {
   loadActor,
   type LoadedActor,
 } from "../resources/actor";
+import {
+  findNearestWalkable,
+  mapBlocksAt,
+  mapMoveBlocked,
+  type MapPreview,
+} from "../resources/map";
 import { formatMonsterMapName } from "../resources/monsterLevels";
 import { Plus16Sparkles } from "../render/Plus16Sparkles";
 import { rgbaToTexture } from "../render/rgbaTexture";
@@ -69,6 +75,10 @@ const PATROL_SPEED = 0.028;
 /** Min/max walk burst and idle pause (ms). */
 const PATROL_WALK_MS = [900, 2200] as const;
 const PATROL_IDLE_MS = [600, 1800] as const;
+/** Map walk strip step — keep snappier than idle breath. */
+const MAP_WALK_FRAME_MS = 140;
+/** Map idle flap — match battle 鼠尾/呼吸节奏. */
+const MAP_IDLE_FRAME_MS = 360;
 
 type Marker = {
   id: number;
@@ -152,14 +162,30 @@ export class ActorLayer {
   onNpcTap: ((actorId: number) => void) | null = null;
   private markers = new Map<number, Marker>();
   private animAcc = 0;
+  private idleAnimAcc = 0;
   private catalogNpcs: NpcActor[] = [];
   private sceMonsters: NpcActor[] = [];
   private teleportStones: NpcActor[] = [];
   /** NPC display name → prompt type (from 6/1 + 6/14). */
   private taskPrompts = new Map<string, NpcTaskPromptType>();
+  /** Current scene MAP cells — SCE patrol uses same collision as the player. */
+  private mapPreview: MapPreview | null = null;
+  /**
+   * SCE combat markers hidden while in / after battle.
+   * `respawnAt` null = waiting for battle end; number = performance.now() deadline.
+   */
+  private suppressedScene = new Map<
+    number,
+    { seed: NpcActor; respawnAt: number | null }
+  >();
 
   constructor(parent: Container) {
     this.root = parent;
+  }
+
+  /** Wire MAP collision for wild-monster patrol (clear with null on scene drop). */
+  setMapCollision(map: MapPreview | null): void {
+    this.mapPreview = map;
   }
 
   clear(): void {
@@ -172,6 +198,58 @@ export class ActorLayer {
     this.sceMonsters = [];
     this.teleportStones = [];
     this.taskPrompts = new Map();
+    this.mapPreview = null;
+    this.suppressedScene.clear();
+  }
+
+  /**
+   * Remove a wild SCE monster from the map (enter battle). Returns false if
+   * the id is not a live SCE combat marker.
+   */
+  suppressSceneMonster(actorId: number): boolean {
+    if (actorId < 0x70000000) return false;
+    const seed = this.sceMonsters.find((s) => s.actorId === actorId);
+    const m = this.markers.get(actorId);
+    if (!seed && !m) return false;
+    const snap: NpcActor = seed
+      ? { ...seed }
+      : {
+          actorId,
+          x: m!.x | 0,
+          y: m!.y | 0,
+          name: m!.nameLabel,
+          actorResource: m!.actorName,
+          scriptName: "sce_combat",
+        };
+    // Keep spawn home (SCE seed), not patrol feet — 刷新回出生点.
+    if (seed) {
+      snap.x = seed.x | 0;
+      snap.y = seed.y | 0;
+    }
+    this.suppressedScene.set(actorId, { seed: snap, respawnAt: null });
+    if (m) {
+      m.root.destroy({ children: true });
+      this.markers.delete(actorId);
+    }
+    return true;
+  }
+
+  /** Battle start failed — put the marker back immediately. */
+  restoreSceneMonster(actorId: number): void {
+    const held = this.suppressedScene.get(actorId);
+    if (!held) return;
+    this.suppressedScene.delete(actorId);
+    this.respawnSceneMonster(held.seed);
+  }
+
+  /**
+   * After battle ends: arm 10s (default) refresh for every engaged SCE spawn.
+   */
+  armSuppressedRespawns(delayMs = 20_000): void {
+    const at = performance.now() + Math.max(0, delayMs);
+    for (const info of this.suppressedScene.values()) {
+      if (info.respawnAt == null) info.respawnAt = at;
+    }
   }
 
   /** Drop nearby-player markers only (role switch / same-map re-enter). */
@@ -199,6 +277,12 @@ export class ActorLayer {
 
   setSceneMonsters(monsters: NpcActor[]): void {
     this.sceMonsters = monsters;
+    // Drop engage/respawn only for spawns gone from the new list (map hop).
+    for (const id of [...this.suppressedScene.keys()]) {
+      if (!monsters.some((m) => m.actorId === id)) {
+        this.suppressedScene.delete(id);
+      }
+    }
     this.syncMarkers();
   }
 
@@ -209,11 +293,13 @@ export class ActorLayer {
 
   /** Live SCE monster coords after patrol (for F-key nearest). */
   liveSceneMonsters(): NpcActor[] {
-    return this.sceMonsters.map((seed) => {
-      const m = this.markers.get(seed.actorId);
-      if (!m) return seed;
-      return { ...seed, x: m.x | 0, y: m.y | 0 };
-    });
+    return this.sceMonsters
+      .filter((seed) => !this.suppressedScene.has(seed.actorId))
+      .map((seed) => {
+        const m = this.markers.get(seed.actorId);
+        if (!m) return seed;
+        return { ...seed, x: m.x | 0, y: m.y | 0 };
+      });
   }
 
   /**
@@ -337,6 +423,7 @@ export class ActorLayer {
 
   tick(dtMs: number): void {
     const dt = Math.min(dtMs, 50);
+    this.tickSuppressedRespawns();
     for (const m of this.markers.values()) {
       if (m.kind === "monster" && m.source === "sce") {
         this.tickPatrol(m, dt);
@@ -347,11 +434,17 @@ export class ActorLayer {
     }
 
     this.animAcc += dt;
-    if (this.animAcc < 140) return;
-    this.animAcc = 0;
+    this.idleAnimAcc += dt;
+    const stepWalk = this.animAcc >= MAP_WALK_FRAME_MS;
+    const stepIdle = this.idleAnimAcc >= MAP_IDLE_FRAME_MS;
+    if (!stepWalk && !stepIdle) return;
+    if (stepWalk) this.animAcc = 0;
+    if (stepIdle) this.idleAnimAcc = 0;
     for (const m of this.markers.values()) {
       if (!m.loaded || !m.animate) continue;
       if (m.kind === "peer" && !m.moving && !m.peerMoveQueue.length) continue;
+      const moving = m.moving || m.peerMoveQueue.length > 0;
+      if (moving ? !stepWalk : !stepIdle) continue;
       m.phase = (m.phase + 1) % 256;
       this.applyFrame(m);
     }
@@ -396,7 +489,7 @@ export class ActorLayer {
         // Start walk in a random (or home-seeking) direction.
         m.patrolWalking = true;
         m.moving = true;
-        m.dir = 1 + ((Math.random() * 4) | 0);
+        m.dir = this.pickPatrolDir(m);
         m.patrolLeft = randRange(PATROL_WALK_MS[0], PATROL_WALK_MS[1]);
       }
     }
@@ -406,20 +499,114 @@ export class ActorLayer {
     const { dx, dy } = dirDelta(m.dir);
     let nx = m.x + dx * PATROL_SPEED * dt;
     let ny = m.y + dy * PATROL_SPEED * dt;
-    const ox = nx - m.homeX;
-    const oy = ny - m.homeY;
-    if (ox * ox + oy * oy > PATROL_RADIUS * PATROL_RADIUS) {
+    const awayX = nx - m.homeX;
+    const awayY = ny - m.homeY;
+    if (awayX * awayX + awayY * awayY > PATROL_RADIUS * PATROL_RADIUS) {
       // Turn back toward home.
-      if (Math.abs(ox) >= Math.abs(oy)) m.dir = ox > 0 ? 4 : 2;
-      else m.dir = oy > 0 ? 1 : 3;
+      if (Math.abs(awayX) >= Math.abs(awayY)) m.dir = awayX > 0 ? 4 : 2;
+      else m.dir = awayY > 0 ? 1 : 3;
       const d2 = dirDelta(m.dir);
       nx = m.x + d2.dx * PATROL_SPEED * dt;
       ny = m.y + d2.dy * PATROL_SPEED * dt;
     }
-    m.x = nx;
-    m.y = ny;
+
+    const fromX = m.x;
+    const fromY = m.y;
+    let tx = nx;
+    let ty = ny;
+    const map = this.mapPreview;
+    if (map) {
+      // Same axis-separated slide as SceneView player walk (MAP 0xF + edge bits).
+      const stuck = mapBlocksAt(map, fromX, fromY, 0);
+      if (!stuck) {
+        if (mapMoveBlocked(map, fromX, fromY, tx, fromY, 1)) tx = fromX;
+        if (mapMoveBlocked(map, tx, fromY, tx, ty, 1)) ty = fromY;
+        if (mapMoveBlocked(map, fromX, fromY, tx, ty, 1)) {
+          tx = fromX;
+          ty = fromY;
+        }
+      }
+      tx = Math.max(0, Math.min(map.width - 1, tx));
+      ty = Math.max(0, Math.min(map.height - 1, ty));
+    }
+
+    if (tx === fromX && ty === fromY && (nx !== fromX || ny !== fromY)) {
+      // Hit wall / edge — stop this burst and face another open dir next walk.
+      m.patrolWalking = false;
+      m.moving = false;
+      m.dir = this.pickPatrolDir(m, m.dir);
+      m.patrolLeft = randRange(PATROL_IDLE_MS[0], PATROL_IDLE_MS[1]);
+      if (m.loaded) this.applyFrame(m);
+      return;
+    }
+
+    m.x = tx;
+    m.y = ty;
     m.root.position.set(m.x, m.y);
     m.root.zIndex = m.y | 0;
+  }
+
+  /** Prefer a dir that is not immediately wall-blocked from current feet. */
+  private pickPatrolDir(m: Marker, avoidDir = 0): number {
+    const map = this.mapPreview;
+    const dirs = [1, 2, 3, 4].filter((d) => d !== avoidDir);
+    for (let i = dirs.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = dirs[i]!;
+      dirs[i] = dirs[j]!;
+      dirs[j] = t;
+    }
+    if (!map) return dirs[0] ?? 1 + ((Math.random() * 4) | 0);
+    const probe = 6;
+    for (const d of dirs) {
+      const { dx, dy } = dirDelta(d);
+      const tx = m.x + dx * probe;
+      const ty = m.y + dy * probe;
+      if (!mapMoveBlocked(map, m.x, m.y, tx, ty, 1)) return d;
+    }
+    return dirs[0] ?? 1;
+  }
+
+  /** Snap SCE spawn out of solid so patrol does not start inside a wall. */
+  private snapMonsterToWalkable(m: Marker): void {
+    const map = this.mapPreview;
+    if (!map || !mapBlocksAt(map, m.x, m.y, 0)) return;
+    const safe = findNearestWalkable(map, m.x, m.y);
+    if (!safe) return;
+    m.x = safe.x;
+    m.y = safe.y;
+    m.homeX = safe.x;
+    m.homeY = safe.y;
+    m.root.position.set(m.x, m.y);
+    m.root.zIndex = m.y | 0;
+  }
+
+  private tickSuppressedRespawns(): void {
+    if (!this.suppressedScene.size) return;
+    const now = performance.now();
+    for (const [id, info] of [...this.suppressedScene]) {
+      if (info.respawnAt == null || now < info.respawnAt) continue;
+      this.suppressedScene.delete(id);
+      this.respawnSceneMonster(info.seed);
+    }
+  }
+
+  private respawnSceneMonster(seed: NpcActor): void {
+    if (!this.sceMonsters.some((s) => s.actorId === seed.actorId)) {
+      // Scene list dropped this spawn (map hop) — do not recreate.
+      return;
+    }
+    void this.upsert(
+      seed.actorId,
+      seed.x,
+      seed.y,
+      seed.name || "怪",
+      "monster",
+      seed.actorResource || "",
+      MONSTER_GREEN,
+      true,
+      "sce",
+    );
   }
 
   private syncMarkers(): void {
@@ -443,6 +630,7 @@ export class ActorLayer {
       );
     }
     for (const mon of this.sceMonsters) {
+      if (this.suppressedScene.has(mon.actorId)) continue;
       keep.add(mon.actorId);
       void this.upsert(
         mon.actorId,
@@ -577,6 +765,9 @@ export class ActorLayer {
     } else if (Math.hypot(m.homeX - x, m.homeY - y) > 4) {
       m.homeX = x;
       m.homeY = y;
+    }
+    if (source === "sce" && kind === "monster") {
+      this.snapMonsterToWalkable(m);
     }
 
     // Map scene only: player / monster / NPC hard thin outline.

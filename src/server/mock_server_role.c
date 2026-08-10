@@ -2099,22 +2099,40 @@ static vm_mock_service_account_record *vm_mock_service_account_find_record(const
     {
         return NULL;
     }
-    memset(&g_vm_mock_service_account_lookup_scratch, 0,
-           sizeof(g_vm_mock_service_account_lookup_scratch));
-    memset(&context, 0, sizeof(context));
-    context.record = &g_vm_mock_service_account_lookup_scratch;
     snprintf(query, sizeof(query),
              "SELECT account_id,HEX(password_value) FROM accounts "
              "WHERE account_id=CAST(X'%s' AS CHAR) LIMIT 1",
              username_hex);
-    if (!vm_mysql_query(query, vm_mock_mysql_account_lookup_row, &context) ||
-        context.invalid || !context.found)
+    /*
+     * Cold MySQL connect / brief SO_RCVTIMEO can fail the first COM_QUERY.
+     * Retry once on transport failure only — a clean "not found" must not retry
+     * or a missing account would look like a transient glitch.
+     */
+    for (int attempt = 0; attempt < 2; ++attempt)
     {
         memset(&g_vm_mock_service_account_lookup_scratch, 0,
                sizeof(g_vm_mock_service_account_lookup_scratch));
-        return NULL;
+        memset(&context, 0, sizeof(context));
+        context.record = &g_vm_mock_service_account_lookup_scratch;
+        if (!vm_mysql_query(query, vm_mock_mysql_account_lookup_row, &context))
+        {
+            printf("[warn][network] account_lookup_query_failed user=%s attempt=%d error=%s\n",
+                   username,
+                   attempt + 1,
+                   vm_mysql_last_error());
+            continue;
+        }
+        if (context.invalid || !context.found)
+        {
+            memset(&g_vm_mock_service_account_lookup_scratch, 0,
+                   sizeof(g_vm_mock_service_account_lookup_scratch));
+            return NULL;
+        }
+        return &g_vm_mock_service_account_lookup_scratch;
     }
-    return &g_vm_mock_service_account_lookup_scratch;
+    memset(&g_vm_mock_service_account_lookup_scratch, 0,
+           sizeof(g_vm_mock_service_account_lookup_scratch));
+    return NULL;
 }
 
 static bool vm_mock_service_account_verify_credentials(const char *username, const char *password)

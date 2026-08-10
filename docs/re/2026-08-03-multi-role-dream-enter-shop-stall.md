@@ -100,3 +100,19 @@ TTL 默认 3600000ms，按角色绑定；三人各自进本应各自武装。仅
 3. 进梦 → 等 remain 小于 60 → 进出商城：应 `L_POKE ... new=<剩余> role=<id>`，**不是** 60；无垃圾名 `dream_hud_visit_clear`。
 4. 同进程换另一角色进梦：独立 visit，互不继承。
 
+### 2026-08-05：恢复确认
+
+先前 worktree 误剥 / HEAD 回退导致客户端按角色分槽一度丢失（
+ote_active_role 变 stub，paint 固定 poke=60）。已重新合入：
+
+| 项 | 状态 |
+|----|------|
+| 服务端 dreamHudTtlRoleId 按 session/角色隔离 TTL | **仍在**（mock_server_scene_sync.c） |
+| 客户端 isit_ms/last_remain/watch 按 roleId 分槽（最多 8） | **已恢复** |
+| 非法 SCE 名忽略（防出店 visit clear→刷回 60） | **已恢复** |
+| 标题 1/1/6 → 
+ote_active_role | **已恢复**（
+etwork-client.c 上/下行） |
+| paint L_POKE 用 visit 剩余而非固定 60 | **已恢复** |
+
+make -j2 通过。冒烟：选角见 dream_hud_active_role；进梦等 remain&lt;60 后进出商城应 L_POKE new=&lt;剩余&gt; 不是 60。

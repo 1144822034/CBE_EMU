@@ -30,6 +30,8 @@ normal attack: damage_after_defense(raw, defense)
   if def/2 < raw: soft += (raw - def/2) * 2
 offensive skill (physical + spell): damage_after_resist(raw, resist)
   damage = raw * (100 - min(resist, 70)) / 100
+monster → player skill (2026-08-08): same resist % only — do NOT apply 护甲
+  (NA counter still uses defense soft curve; skill remits with ROLE_RESIST then ×mult)
 ```
 
 法术判定：`skill.dsh` 中 `智慧系数` 非零且 ≥ `力量系数`、`敏捷系数`（如绯炎幻法）——仅用于**忽略闪躲**；

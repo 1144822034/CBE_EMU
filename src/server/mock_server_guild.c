@@ -212,6 +212,15 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
             session->clientId != g_vm_mock_service_active_client_id &&
             vm_mock_service_session_scene_is_visible(session, scene))
         {
+            vm_mock_service_client_session *observer =
+                vm_mock_service_find_client_session(
+                    g_vm_mock_service_active_client_id);
+            if (observer != NULL &&
+                !vm_mock_arena_peer_visible(observer, session))
+            {
+                session = session->next;
+                continue;
+            }
             seeds[count].actorId = vm_net_mock_scene_role_actor_id_for_session(session,
                                                                                seeds,
                                                                                count,
@@ -1795,7 +1804,15 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
      * Gates: town/city maps forbid spar (same city key as hangup forbid);
      * either seat below level 25 cannot spar or be sparred.
      */
-    if (vm_net_mock_scene_is_city_hangup_forbidden(scene))
+    if (vm_mock_arena_spar_forbidden_on_scene(scene))
+    {
+        result = 7; /* arena: manual spar disabled */
+        printf("[info][network] mock_spar_request_reject actor=%u source=%08x "
+               "scene=%s reason=arena-map result=7\n",
+               actorId, sourceSession ? sourceSession->clientId : 0,
+               scene ? scene : "-");
+    }
+    else if (vm_net_mock_scene_is_city_hangup_forbidden(scene))
     {
         result = 7; /* town / city */
         printf("[info][network] mock_spar_request_reject actor=%u source=%08x "

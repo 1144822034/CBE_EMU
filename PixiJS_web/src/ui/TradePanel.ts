@@ -16,6 +16,14 @@ import { ChatIme } from "./ChatIme";
 import type { BagItem } from "../net/protocolExtras";
 import type { TradeOfferItem, TradeOfferView } from "../net/protocolSocial";
 import { isTradeableItem, qualityColor } from "../resources/itemCatalog";
+import {
+  clearPanelTip,
+  createPanelTipState,
+  drawPanelTipOverlay,
+  setPanelTipSticky,
+  showPanelTip,
+  type PanelTipState,
+} from "./panelTip";
 
 export type TradeAction =
   | "pick_item"
@@ -59,6 +67,7 @@ export class TradePanel extends Container {
   private inputHit = new Graphics();
   private openGen = 0;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private toast: PanelTipState = createPanelTipState();
 
   private readonly actions = [
     "选择物品",
@@ -111,6 +120,10 @@ export class TradePanel extends Container {
     this.bagScroll = 0;
     this.moneyDraft = "";
     this.visible = true;
+    setPanelTipSticky(
+      this.toast,
+      "交易步骤\n①选物/设金 → ②提交报价\n③双方确认交易",
+    );
     this.redraw();
   }
 
@@ -230,7 +243,23 @@ export class TradePanel extends Container {
 
   hide(): void {
     this.releaseMoneyIme();
+    clearPanelTip(this.toast);
     this.visible = false;
+  }
+
+  showTip(text: string, ms = 1200): void {
+    if (!this.visible) return;
+    showPanelTip(this.toast, text, () => {
+      if (!this.visible) return;
+      this.redraw();
+    }, ms);
+  }
+
+  /** Dismiss sticky step tip after first player action. */
+  private clearStepTip(): void {
+    if (this.toast.tipUntil === Number.POSITIVE_INFINITY) {
+      clearPanelTip(this.toast);
+    }
   }
 
   /** Drop HTML overlay when leaving trade phase (TitleScreen-style). */
@@ -250,7 +279,12 @@ export class TradePanel extends Container {
     if (this.mode === "money") return;
     if (this.mode === "actions") {
       const n = this.actions.length;
-      this.actionCursor = (this.actionCursor + delta + n) % n;
+      let next = this.actionCursor;
+      for (let i = 0; i < n; i++) {
+        next = (next + delta + n) % n;
+        if (this.actionEnabled(this.actions[next]!)) break;
+      }
+      this.actionCursor = next;
     } else if (this.mode === "bag") {
       const n = Math.max(1, this.bag.length);
       this.bagCursor = (this.bagCursor + delta + n) % n;
@@ -264,6 +298,7 @@ export class TradePanel extends Container {
 
   confirm(): void {
     if (!this.visible) return;
+    this.clearStepTip();
     if (this.mode === "bag") {
       const it = this.bag[this.bagCursor];
       if (it) this.onAction?.("add_bag_item", it);
@@ -279,6 +314,15 @@ export class TradePanel extends Container {
       return;
     }
     const label = this.actions[this.actionCursor];
+    if (!label || !this.actionEnabled(label)) {
+      if (label === "提交报价") this.showTip("请先放入物品或金币");
+      else if (label === "确认交易") {
+        this.showTip(
+          this.step1Done() ? "请先提交报价" : "请先放入物品或金币",
+        );
+      }
+      return;
+    }
     if (label === "选择物品") {
       this.mode = "bag";
       this.bagCursor = 0;
@@ -501,22 +545,73 @@ export class TradePanel extends Container {
     } else if (this.mode === "money") {
       this.drawMoneyInput(leftX, midY, x, y, w, h);
     } else {
+      this.ensureActionCursor();
       this.actions.forEach((lab, i) => {
+        const en = this.actionEnabled(lab);
         const hi = i === this.actionCursor;
         if (hi) {
           this.box
             .rect(x + 6, midY + 6 + i * 16, w - 12, 15)
             .fill({ color: CBE.select });
         }
-        this.addLabel(lab, leftX, midY + 8 + i * 16, hi ? CBE.ink : CBE.inkMint);
+        const text = en ? lab : `${lab}(锁)`;
+        this.addLabel(
+          text,
+          leftX,
+          midY + 8 + i * 16,
+          hi ? CBE.ink : en ? CBE.inkMint : CBE.inkLabel,
+        );
       });
     }
 
+    if (this.mode !== "money") {
+      this.addLabel(this.guideLine(), leftX, y + h - 32, CBE.inkMint);
+    }
     const tip = this.waitingPeer ? `等待对方… ${this.status}` : this.status;
-    this.addLabel(tip.slice(0, 28), leftX, y + h - 18, CBE.inkLabel);
+    this.addLabel(tip.slice(0, 26), leftX, y + h - 18, CBE.inkLabel);
 
     if (this.mode === "money") {
       this.ime.show(this.moneyInputRect());
+    }
+    drawPanelTipOverlay(this, this.toast);
+  }
+
+  /** Persistent step line under the action list. */
+  private guideLine(): string {
+    if (this.mode === "bag") return "步骤：选物后确定放入 · 取消返回";
+    if (this.mode === "mine") return "步骤：确定移出 · 取消返回";
+    if (this.mode === "money") return "步骤：输入金币后确定";
+    if (this.waitingPeer) return "步骤：③等待对方 · 可点确认交易";
+    if (this.offerSubmitted) return "步骤：③双方确认交易即可完成";
+    if (this.step1Done()) return "步骤：②提交报价 → ③双方确认";
+    return "步骤：①选物/设金 → ②提交 → ③确认";
+  }
+
+  /** ① done when bag item or gold is offered. */
+  private step1Done(): boolean {
+    return this.myItems.length > 0 || this.myMoney > 0;
+  }
+
+  /** ② done after local offer submitted. */
+  private step2Done(): boolean {
+    return this.offerSubmitted;
+  }
+
+  private actionEnabled(label: string): boolean {
+    if (label === "提交报价") return this.step1Done();
+    if (label === "确认交易") return this.step1Done() && this.step2Done();
+    return true;
+  }
+
+  private ensureActionCursor(): void {
+    const cur = this.actions[this.actionCursor];
+    if (cur && this.actionEnabled(cur)) return;
+    const n = this.actions.length;
+    for (let i = 0; i < n; i++) {
+      if (this.actionEnabled(this.actions[i]!)) {
+        this.actionCursor = i;
+        return;
+      }
     }
   }
 

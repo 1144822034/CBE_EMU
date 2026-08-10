@@ -30,9 +30,22 @@
 ## 验证
 
 - `make -j2`
-- 绑定 `daily_accept_limit=1`、任务可重复或仅靠日限再接：当日第 1 次接取成功并见 `npc_task_daily_inc`；第 2 次对话无接取，伪造 `6/11` 见 `mock_task_accept_daily_gate`
+- 绑定 `daily_accept_limit=1`、任务可重复或仅靠日限再接：当日第 1 次接取成功并见 `npc_task_daily_inc`；第 2 次对话无接取且对白为「今日次数已达上限，请明日再来。」；伪造 `6/11` 见 `mock_task_accept_daily_gate`
 - `daily_accept_limit=0`：行为与改前一致
 - 跨本地自然日：计数重置，可再次接取
+
+## 2026-08-05 加固
+
+- 对话达日限时给显式提示（与前置门闩同级，不显示「接受」）。
+- `6/11`：无 offer context 时按当前场景 NPC 绑定回查 `daily_accept_limit`，拒绝超限伪造接取，成功仍 `accept_count+1`。
+
+## 2026-08-05 对话卡死（N+1）
+
+- **症状**：点 NPC 后客户端挂起 / 进度条不消。
+- **根因**：`available()` 曾对快照未命中的**本任务**做权威 `task_state_load`；NPC
+  优先级 / `6/14` 对每个绑定种子调用一次 → 对话后 prompt 刷新触发大量串行
+  SELECT，服务端长时间不回包。
+- **修复**：本任务权威校验只留在 `6/11`；`available()` 仅保留前置任务的权威兜底。
 
 ## 运维
 

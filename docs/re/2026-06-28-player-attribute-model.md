@@ -183,18 +183,31 @@ login reseeds from the server.
 
 ## Derived Combat Stats (server battle model)
 
-Panel 物攻/护甲 follow the client table above. Mock **battle** still derives:
+Panel 物攻/护甲 follow the client table above. Mock battle/PvP/panel overlay
+share `vm_net_mock_role_build_player_stats`:
 
 ```text
-maxHp   = 90 + level * 8 + endurance * 2 + equipment.hp
-maxMp   = 70 + level * 9 + wisdom * 3 + equipment.mp
-attack  = jobPrimary + equipment.attack   (cap 99999)
-defense = 4 + level + endurance / 2 + equipment.armor / 5
+maxHp   = bareHp + equipment.hp
+maxMp   = bareMp + equipment.mp
+  bareHp = 90 + level * 8 + endurance * 2
+  bareMp = 70 + level * 9 + baseWisdom * 3
+  equipment.hp/mp 含定值里程碑 + 气血%/法力%×对应裸池
+attack  = jobPrimary + equipment.attack   (cap 65535)
+defense = 4 + level + endurance / 2 + equipment.armor   (裸+全额装甲)
 hit     = 101 + equipment.hit
 dodge   = equipment.dodge
 crit    = equipment.crit
 resist  = equipment.resist
 ```
+
+See `2026-08-05-hp-mp-percent-character-bare-base.md` for % base.
+
+Live actorinfo still wires bare armor halfword (`defense - equipment.armor`)
+so wear-apply F8 can add equip without double-count; overlay / login-full /
+battle use the full `defense`. See `2026-08-05-battle-panel-attack-include-base.md`.
+
+All primary and combat-derived panel/battle stats soft-cap at **65535**
+(u16 / actor halfword). See `2026-08-05-stat-cap-unify-65535.md`.
 
 `jobPrimary` (2026-07-31):
 

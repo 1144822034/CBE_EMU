@@ -4461,6 +4461,57 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 break;
             }
         }
+        /* Pixi 比武擂台：NPC 名含配置关键字时提供进场/离场/排行 */
+        if (vm_mock_arena_npc_offers_entry(matchedSeed->displayName[0]
+                                               ? matchedSeed->displayName
+                                               : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xbd\xf8\xc8\xeb\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8"; /* 进入比武擂台 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xb1\xc8\xce\xe4\xbb\xee\xb6\xaf"; /* 比武活动 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ARENA_ENTER;
+                serviceOptionCount += 1;
+            }
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xc0\xeb\xbf\xaa\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8"; /* 离开比武擂台 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xb7\xb5\xbb\xd8\xd4\xad\xb3\xa1\xbe\xb0"; /* 返回原场景 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ARENA_LEAVE;
+                serviceOptionCount += 1;
+            }
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xb1\xc8\xce\xe4\xc5\xc5\xd0\xd0\xb0\xf1"; /* 比武排行榜 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xb2\xe9\xbf\xb4\xbb\xf1\xc1\xec\xbd\xac\xc0\xf8"; /* 查看或领取奖励 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ARENA_RANK;
+                serviceOptionCount += 1;
+            }
+        }
+        if (vm_mock_arena_wager_npc_offers(matchedSeed->displayName[0]
+                                               ? matchedSeed->displayName
+                                               : matchedSeed->scriptName))
+        {
+            if (serviceOptionCount + usedSlots < dialogCap)
+            {
+                serviceOptionNames[serviceOptionCount] =
+                    "\xc9\xcd\xbd\xf0\xc0\xde\xcc\xa8"; /* 赏金擂台 */
+                serviceOptionDescriptions[serviceOptionCount] =
+                    "\xd1\xba\xbd\xf0\xb6\xd4\xbe\xf6"; /* 押金对决 */
+                serviceOptionValues[serviceOptionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER;
+                serviceOptionCount += 1;
+            }
+        }
     }
 
     /*
@@ -4946,7 +4997,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_EQUIP_SELL_VIEW_BASE &
+            (VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
@@ -7525,7 +7576,56 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     operation = serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK;
     value = serviceValue & VM_NET_MOCK_NPC_SERVICE_VALUE_MASK;
 
-    if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
+    if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_ENTER)
+    {
+        u32 transferLen = vm_net_mock_build_arena_enter_response(out, outCap);
+        if (transferLen != 0)
+            return transferLen;
+        action = "arena-enter-refuse";
+        dialogText =
+            "\xb1\xbe\xb4\xce\xb1\xc8\xce\xe4\xce\xb4\xbf\xaa\xb7\xc5\xbb\xf2"
+            "\xd2\xd1\xb9\xd8\xb1\xd5\xbd\xf8\xb3\xa1\xa1\xa3"; /* 本次比武未开放或已关闭进场。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8"; /* 确定 */
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_LEAVE)
+    {
+        u32 transferLen = vm_net_mock_build_arena_leave_response(out, outCap);
+        if (transferLen != 0)
+            return transferLen;
+        action = "arena-leave-refuse";
+        dialogText =
+            "\xc0\xeb\xb3\xa1\xca\xa7\xb0\xdc\xa1\xa3"; /* 离场失败。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_RANK)
+    {
+        action = "arena-rank";
+        dialogText =
+            "\xc7\xeb\xb4\xf2\xbf\xaa\xb1\xc8\xce\xe4\xc5\xc5\xd0\xd0\xb0\xf1"
+            "\xb2\xe9\xbf\xb4\xbb\xf1\xc1\xec\xbd\xac\xc0\xf8\xa1\xa3"; /* 请打开比武排行榜查看或领取奖励。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER)
+    {
+        action = "arena-wager";
+        dialogText =
+            "\xc7\xeb\xb4\xf2\xbf\xaa\xc9\xcd\xbd\xf0\xc0\xde\xcc\xa8"
+            "\xc3\xe6\xb0\xe5\xa1\xa3"; /* 请打开赏金擂台面板。 */
+        optionNames[optionCount] = "\xc8\xb7\xb6\xa8";
+        optionDescriptions[optionCount] = "";
+        optionValues[optionCount] = 0;
+        ++optionCount;
+    }
+    else if (operation == VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE ||
         operation == VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE)
     {

@@ -1,5 +1,15 @@
 # CBE_EMU 项目协作规范
 
+## 改码安全约束（强制）
+
+1. **大改之前先提交再改**  
+   开始大范围、多文件或高风险修改前，必须先把当前可工作状态提交入库，再动手改。未提交不得进入大改。若本次会话惯例需用户确认提交说明，先说明意图并完成提交，再继续修改。
+
+2. **禁止用 PowerShell 修改代码**  
+   不得使用 PowerShell（含 `Set-Content` / `Get-Content` / `-replace` 写回、重定向覆盖等）批量或单文件改写源码与文档。PowerShell 默认编码易破坏 UTF-8 中文与符号。  
+   改代码应使用编辑器补丁工具（如 `ApplyPatch` / `StrReplace` / `Write`）；若必须脚本化，仅允许显式 `encoding='utf-8'` 的 Python（或同等可靠 UTF-8 工具），且改前仍须满足上条提交要求。  
+   PowerShell 仍可用于只读检查、`git`、构建与进程管理，但**不得写源文件**。
+
 ## 故障处理必须根因优先
 
 本规范适用于客户端闪退、断言、解包错误、界面卡住、状态错乱，以及由模拟服务端响应、事件投递、资源更新或持久化逻辑引起的其他异常。
@@ -38,3 +48,5 @@
 - 将触发条件、证据、根因、修改点、验证结果和仍未知的风险记录到 `docs/re/`，便于后续继续取证，而不是只在代码里留下特判。
 
 江湖 OL 协议和客户端行为的详细取证流程继续遵循 `docs/re/jianghu-ol-server-agent.md`。
+
+PixiJS_web Android APK 出包流程见 `.codex/skills/pixijs-android-apk/SKILL.md` 与 `docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md`。

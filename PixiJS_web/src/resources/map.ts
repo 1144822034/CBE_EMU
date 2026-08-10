@@ -247,6 +247,31 @@ export function mapMoveBlocked(
   return false;
 }
 
+/**
+ * Feet in 0xF solid, or every short cardinal step is edge/solid-blocked.
+ * Login/persist can land on fringe cells that are not 0xF but cannot leave —
+ * looks like “进场景卡在墙里”.
+ */
+export function mapStandTrapped(
+  map: MapPreview,
+  x: number,
+  y: number,
+  probe = 4,
+  radius = 1,
+): boolean {
+  if (mapBlocksAt(map, x, y, 0)) return true;
+  const dirs: Array<[number, number]> = [
+    [0, -probe],
+    [probe, 0],
+    [0, probe],
+    [-probe, 0],
+  ];
+  for (const [dx, dy] of dirs) {
+    if (!mapMoveBlocked(map, x, y, x + dx, y + dy, radius)) return false;
+  }
+  return true;
+}
+
 /** Spiral search for a walkable pixel near (ox,oy). Used when feet land in solid. */
 export function findNearestWalkable(
   map: MapPreview,
@@ -270,6 +295,34 @@ export function findNearestWalkable(
     }
   }
   return null;
+}
+
+/**
+ * Nearest stand that is not solid and has at least one open cardinal step.
+ * Prefer this for login / scene enter snap (fringe pockets).
+ */
+export function findNearestEscapableStand(
+  map: MapPreview,
+  ox: number,
+  oy: number,
+  maxRadius = 128,
+): { x: number; y: number } | null {
+  const x0 = ox | 0;
+  const y0 = oy | 0;
+  if (!mapStandTrapped(map, x0, y0)) return { x: x0, y: y0 };
+  for (let r = 1; r <= maxRadius; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = x0 + dx;
+        const y = y0 + dy;
+        if (x < 0 || y < 0 || x >= map.width || y >= map.height) continue;
+        if (!mapStandTrapped(map, x, y)) return { x, y };
+      }
+    }
+  }
+  // Last resort: any non-0xF feet cell (may still be fringe-trapped).
+  return findNearestWalkable(map, ox, oy, maxRadius, 0);
 }
 
 /**

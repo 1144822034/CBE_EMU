@@ -48,7 +48,14 @@ export class LiveTransport implements GameTransport {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private exchangeChain: Promise<void> = Promise.resolve();
-  clientId = (Math.random() * 0xffffff) >>> 0;
+  /** Frames that arrived while no exchange was waiting (must not be dropped). */
+  private inbox: CbmrFrame[] = [];
+  private waiters: Array<{
+    resolve: (f: CbmrFrame) => void;
+    reject: (e: Error) => void;
+    timer: number;
+  }> = [];
+  clientId = ((Math.random() * 0xffffff) >>> 0) || 1;
   constructor(private readonly url = defaultLiveGatewayUrl()) {}
 
   async connect(): Promise<void> {
@@ -65,6 +72,7 @@ export class LiveTransport implements GameTransport {
       ws.onopen = () => {
         window.clearTimeout(timer);
         this.ws = ws;
+        this.bindSocket(ws);
         this.connectPromise = null;
         resolve();
       };
@@ -75,15 +83,50 @@ export class LiveTransport implements GameTransport {
       };
       ws.onclose = () => {
         if (this.ws === ws) this.ws = null;
+        this.rejectWaiters(new Error("socket closed"));
       };
     });
     return this.connectPromise;
+  }
+
+  private bindSocket(ws: WebSocket): void {
+    ws.addEventListener("message", (ev) => {
+      try {
+        const frame = decodeCbmr(new Uint8Array(ev.data as ArrayBuffer));
+        const waiter = this.waiters.shift();
+        if (waiter) {
+          window.clearTimeout(waiter.timer);
+          waiter.resolve(frame);
+        } else {
+          this.inbox.push(frame);
+        }
+      } catch (e) {
+        const waiter = this.waiters.shift();
+        if (waiter) {
+          window.clearTimeout(waiter.timer);
+          waiter.reject(e instanceof Error ? e : new Error(String(e)));
+        }
+      }
+    });
+    ws.addEventListener("error", () => {
+      this.rejectWaiters(new Error("socket error"));
+    });
+  }
+
+  private rejectWaiters(err: Error): void {
+    const pending = this.waiters.splice(0, this.waiters.length);
+    for (const w of pending) {
+      window.clearTimeout(w.timer);
+      w.reject(err);
+    }
   }
 
   /** Re-open gateway WS if it dropped (keeps the same clientId). */
   async ensureConnected(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) return;
     this.ws = null;
+    this.inbox = [];
+    this.rejectWaiters(new Error("socket closed"));
     await this.connect();
   }
 
@@ -96,6 +139,8 @@ export class LiveTransport implements GameTransport {
     } catch {
       /* ignore */
     }
+    this.rejectWaiters(new Error("socket closed"));
+    this.inbox = [];
     this.ws?.close();
     this.ws = null;
   }
@@ -139,41 +184,19 @@ export class LiveTransport implements GameTransport {
   }
 
   private readOne(timeoutMs: number): Promise<CbmrFrame> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws) {
-        reject(new Error("no socket"));
-        return;
-      }
-      const ws = this.ws;
+    if (this.inbox.length) {
+      return Promise.resolve(this.inbox.shift()!);
+    }
+    if (!this.ws) {
+      return Promise.reject(new Error("no socket"));
+    }
+    return new Promise<CbmrFrame>((resolve, reject) => {
       const timer = window.setTimeout(() => {
-        cleanup();
+        const idx = this.waiters.findIndex((w) => w.timer === timer);
+        if (idx >= 0) this.waiters.splice(idx, 1);
         reject(new Error("read timeout"));
       }, timeoutMs);
-      const onMsg = (ev: MessageEvent) => {
-        cleanup();
-        try {
-          resolve(decodeCbmr(new Uint8Array(ev.data as ArrayBuffer)));
-        } catch (e) {
-          reject(e);
-        }
-      };
-      const onErr = () => {
-        cleanup();
-        reject(new Error("socket error"));
-      };
-      const onClose = () => {
-        cleanup();
-        reject(new Error("socket closed"));
-      };
-      const cleanup = () => {
-        window.clearTimeout(timer);
-        ws.removeEventListener("message", onMsg);
-        ws.removeEventListener("error", onErr);
-        ws.removeEventListener("close", onClose);
-      };
-      ws.addEventListener("message", onMsg);
-      ws.addEventListener("error", onErr);
-      ws.addEventListener("close", onClose);
+      this.waiters.push({ resolve, reject, timer });
     });
   }
 

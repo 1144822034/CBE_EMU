@@ -14,9 +14,9 @@ import {
   type LoadedActor,
 } from "../resources/actor";
 import {
-  mapBlocksAt,
   mapMoveBlocked,
-  findNearestWalkable,
+  mapStandTrapped,
+  findNearestEscapableStand,
   type MapPreview,
 } from "../resources/map";
 import { portalContains, type SceDecoration, type ScePortal } from "../resources/sce";
@@ -76,8 +76,10 @@ export class SceneView {
   onMonsterCollide: ((actorId: number) => void) | null = null;
   /** Walked into an SCE portal trigger rect. */
   onPortalEnter: ((portal: ScePortal) => void) | null = null;
-  /** Top-right「修」status badge (SendSceneAction31 / 1/7/31). */
+  /** Top-left「修」status badge (SendSceneAction31 / 1/7/31). */
   onXiuTap: (() => void) | null = null;
+  /** Top-left「拍」auction badge (right of 修). */
+  onPaiTap: (() => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -99,6 +101,9 @@ export class SceneView {
   /** One rainbow gem per worn +16 piece (local player). */
   private plus16Sparkles = new Plus16Sparkles();
   private xiuBadge = new Container();
+  private paiBadge = new Container();
+  private paiBlink = false;
+  private paiBlinkPhase = 0;
   private mapPreview: MapPreview | null = null;
   private portals: ScePortal[] = [];
   private decorations: SceDecoration[] = [];
@@ -160,7 +165,23 @@ export class SceneView {
     this.root.addChild(this.xiuBadge);
     void this.mountXiuArt();
 
+    this.paiBadge.position.set(24, 4);
+    this.paiBadge.zIndex = 20;
+    this.paiBadge.eventMode = "static";
+    this.paiBadge.cursor = "pointer";
+    this.paiBadge.hitArea = {
+      contains: (px: number, py: number) =>
+        px >= 0 && py >= 0 && px <= 18 && py <= 18,
+    };
+    this.paiBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onPaiTap?.();
+    });
+    this.root.addChild(this.paiBadge);
+    void this.mountPaiArt();
+
     window.addEventListener("keydown", (e) => {
+      if (!this.inputEnabled) return;
       this.keys.add(e.key.toLowerCase());
     });
     window.addEventListener("keyup", (e) => {
@@ -221,6 +242,7 @@ export class SceneView {
     }
     this.mapIdentity = "";
     this.actors.clear();
+    this.actors.setMapCollision(null);
     this.mapPreview = null;
     this.portals = [];
     this.decorations = [];
@@ -263,6 +285,7 @@ export class SceneView {
     this.mapWidth = scene.width;
     this.mapHeight = scene.height;
     this.mapPreview = scene.map;
+    this.actors.setMapCollision(scene.map);
     this.portals = scene.portals ?? [];
     this.decorations = scene.decorations ?? [];
     this.playerX = spawnX ?? scene.width * 0.5;
@@ -270,6 +293,8 @@ export class SceneView {
     this.portalCooldownMs = 1200;
     this.nearNpcId = 0;
     this.clampPlayer();
+    // Soft-shell / map-center / server persist can land in wall or fringe pocket.
+    this.ensurePlayerWalkable("showScene");
     this.player.position.set(this.playerX, this.playerY);
     this.player.zIndex = this.playerY | 0;
     this.applyCamera();
@@ -446,17 +471,8 @@ export class SceneView {
     this.playerX = x;
     this.playerY = y;
     this.clampPlayer();
-    // Server/login can persist feet inside solid (临安南墙). Snap to nearest walkable.
-    if (this.mapPreview && mapBlocksAt(this.mapPreview, this.playerX, this.playerY, 0)) {
-      const safe = findNearestWalkable(this.mapPreview, this.playerX, this.playerY);
-      if (safe) {
-        console.warn(
-          `[scene] feet in solid @${x | 0},${y | 0} → walkable ${safe.x},${safe.y}`,
-        );
-        this.playerX = safe.x;
-        this.playerY = safe.y;
-      }
-    }
+    // Server/login can persist feet in solid or edge-fringe pockets.
+    this.ensurePlayerWalkable("setPlayerPos", x, y);
     this.player.position.set(this.playerX, this.playerY);
     this.player.zIndex = this.playerY | 0;
     this.applyCamera();
@@ -571,6 +587,40 @@ export class SceneView {
     this.xiuBadge.addChild(label);
   }
 
+  private async mountPaiArt(): Promise<void> {
+    const tex = await tryLoadUiTexture("UIRed.gif");
+    this.paiBadge.removeChildren().forEach((c) => c.destroy());
+    if (tex) {
+      const spr = new Sprite(tex);
+      spr.width = 16;
+      spr.height = 16;
+      this.paiBadge.addChild(spr);
+    } else {
+      this.paiBadge.addChild(
+        new Graphics()
+          .rect(0, 0, 16, 16)
+          .fill({ color: 0x2858c0 })
+          .stroke({ width: 1, color: 0xe8c080 }),
+      );
+    }
+    const label = new BitmapLabel();
+    await label.setText("拍", 0xffe080, { outline: false });
+    label.position.set(
+      Math.floor((16 - label.width) / 2),
+      Math.floor((16 - label.height) / 2),
+    );
+    this.paiBadge.addChild(label);
+  }
+
+  /** Flash「拍」when auction claims / refunds are pending. */
+  setPaiBlink(on: boolean): void {
+    this.paiBlink = on;
+    if (!on) {
+      this.paiBadge.alpha = 1;
+      this.paiBlinkPhase = 0;
+    }
+  }
+
   resetCamera(): void {
     this.scale = 1;
     this.applyCamera();
@@ -581,12 +631,38 @@ export class SceneView {
     this.playerY = Math.max(8, Math.min(Math.max(8, this.mapHeight - 8), this.playerY));
   }
 
+  /**
+   * Snap out of 0xF solid or fringe cells where every short step is blocked.
+   * Called on showScene / setPlayerPos so login does not leave the player stuck.
+   */
+  private ensurePlayerWalkable(
+    reason: string,
+    fromX = this.playerX,
+    fromY = this.playerY,
+  ): void {
+    const map = this.mapPreview;
+    if (!map?.cells.length) return;
+    if (!mapStandTrapped(map, this.playerX, this.playerY)) return;
+    const safe = findNearestEscapableStand(map, this.playerX, this.playerY);
+    if (!safe) return;
+    if (safe.x === (this.playerX | 0) && safe.y === (this.playerY | 0)) return;
+    console.warn(
+      `[scene] ${reason} trapped @${fromX | 0},${fromY | 0} → ${safe.x},${safe.y}`,
+    );
+    this.playerX = safe.x;
+    this.playerY = safe.y;
+  }
+
   private tick(): void {
     const now = performance.now();
     const dt = this.lastTick ? now - this.lastTick : 16;
     this.lastTick = now;
     this.actors.tick(dt);
     this.plus16Sparkles.tick(dt);
+    if (this.paiBlink) {
+      this.paiBlinkPhase += dt * 0.01;
+      this.paiBadge.alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.paiBlinkPhase));
+    }
     if (this.collideCooldownMs > 0) this.collideCooldownMs -= dt;
     if (this.portalCooldownMs > 0) this.portalCooldownMs -= dt;
 
@@ -617,10 +693,11 @@ export class SceneView {
       // Axis-separated slide so one blocked axis does not freeze both.
       let tx = nx;
       let ty = ny;
-      // Already inside solid (bad persist / portal): allow escape; only block free→solid.
-      // Edge fringe (MAP high-nibble N/W/S/E) uses CBE exit|entry — mapMoveBlocked.
+      // Inside solid or fringe pocket (no open step): allow escape.
+      // Edge fringe uses CBE exit|entry — mapMoveBlocked.
       const stuck =
-        !!this.mapPreview && mapBlocksAt(this.mapPreview, this.playerX, this.playerY, 0);
+        !!this.mapPreview &&
+        mapStandTrapped(this.mapPreview, this.playerX, this.playerY);
       if (!stuck && this.mapPreview) {
         const ox = this.playerX;
         const oy = this.playerY;

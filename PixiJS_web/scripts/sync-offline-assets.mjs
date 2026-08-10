@@ -118,14 +118,31 @@ if (fontGbSrc) {
 
 const verSrc = resolveClientCodeVersion();
 const verDest = path.join(publicDir, "client_code_version.txt");
+let verNum = 0;
 if (verSrc) {
   fs.copyFileSync(verSrc, verDest);
   console.log(`[sync-offline-assets] client_code_version.txt ← ${verSrc}`);
+  verNum = Number.parseInt(fs.readFileSync(verDest, "utf8").trim(), 10) || 0;
 } else {
-  fs.writeFileSync(verDest, "2\n", "utf8");
+  fs.writeFileSync(verDest, "5\n", "utf8");
+  verNum = 5;
   console.warn(
-    "[sync-offline-assets] no client_code_version.txt found; wrote default 2",
+    "[sync-offline-assets] no client_code_version.txt found; wrote default 5",
   );
 }
+const bundledPath = path.join(pixiRoot, "src", "net", "bundledCodeVersion.ts");
+fs.writeFileSync(
+  bundledPath,
+  `/**\n` +
+    ` * Bundled login codeVersion — kept in sync with \`client_code_version.txt\`\n` +
+    ` * by \`scripts/sync-offline-assets.mjs\`. Used when runtime fetch misses\n` +
+    ` * (Capacitor \`base: './'\`, offline, or absolute \`/…\` 404).\n` +
+    ` */\n` +
+    `export const BUNDLED_CLIENT_CODE_VERSION = ${verNum >>> 0};\n`,
+  "utf8",
+);
+console.log(
+  `[sync-offline-assets] bundledCodeVersion.ts ← ${verNum >>> 0}`,
+);
 
 console.log("[sync-offline-assets] done →", publicDir);

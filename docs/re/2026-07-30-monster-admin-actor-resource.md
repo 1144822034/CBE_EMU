@@ -50,3 +50,12 @@ subtype-10 左侧 visual 只选玩家六槽肖像；`0/0` 得到空指针会崩�
 - 临安进战改为「同拍 + 一次 poll 二次 HAS_FOLLOWUP」，与立绘解耦。
 - 下一步取证：真机 subtype-10 包对照，或挑战能绑到 subtype-5 live combat 节点后
   再用目录 Actor；在此之前目录字段只作配置/日志，不写回开战 name/visual。
+
+## Pixi（2026-08-09）
+
+CBE 仍受 GetMapTileData 六槽限制；Pixi 可直接加载 `.actor`。
+
+- 根因：开战 `visual=0/1` 被 `parseBattleInfoPve` 收成 `jobIndex=1,sex=0` → 男幻剑。
+- 切磋：`visual0`∈1..2（sexGroup）仍走玩家六槽。
+- 挑战/挂机 PvE：`resolvePveEnemyActor` 按 leftId / 名 / EC 向导 NPC 取场景
+  `battleActorResource` / NPC `actorResource`，不再用占位 visual 当职业性别。

@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
   `target_y` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `challenge_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `minimum_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `teleport_require_task_id` INT UNSIGNED NOT NULL DEFAULT 0
+    COMMENT '0=always show teleport; else show after this task completed(state3)',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`scene`, `actor_id`),

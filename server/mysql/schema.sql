@@ -353,6 +353,7 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npcs` (
   `pos_x` SMALLINT UNSIGNED NOT NULL,
   `pos_y` SMALLINT UNSIGNED NOT NULL,
   `npc_kind` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `npc_service_mask` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'bits 1..6 = enabled root services; 0=derive from npc_kind',
   `orientation` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `actor_resource` VARBINARY(64) NOT NULL,
   `display_name` VARBINARY(32) NOT NULL,
@@ -368,13 +369,32 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_tasks` (
   `actor_id` INT UNSIGNED NOT NULL,
   `task_id` INT UNSIGNED NOT NULL,
   `repeatable` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=不可重复,1=完成后可重新接取',
+  `daily_accept_limit` SMALLINT UNSIGNED NOT NULL DEFAULT 0
+    COMMENT '0=不限制每日次数;N=每个自然日最多接取N次',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`scene`, `actor_id`),
+  PRIMARY KEY (`scene`, `actor_id`, `task_id`),
   KEY `idx_server_dynamic_npc_tasks_task` (`task_id`),
   CONSTRAINT `fk_server_dynamic_npc_tasks_npc`
     FOREIGN KEY (`scene`, `actor_id`)
     REFERENCES `server_dynamic_npcs` (`scene`, `actor_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `account_role_npc_task_daily` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `scene` VARBINARY(64) NOT NULL,
+  `actor_id` INT UNSIGNED NOT NULL,
+  `task_id` INT UNSIGNED NOT NULL,
+  `day_ymd` INT UNSIGNED NOT NULL,
+  `accept_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`, `scene`, `actor_id`, `task_id`, `day_ymd`),
+  CONSTRAINT `fk_account_role_npc_task_daily_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
@@ -386,6 +406,8 @@ CREATE TABLE IF NOT EXISTS `server_dynamic_npc_instances` (
   `target_y` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `challenge_enemy_id` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   `minimum_level` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `teleport_require_task_id` INT UNSIGNED NOT NULL DEFAULT 0
+    COMMENT '0=always show teleport; else show after this task completed(state3)',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`scene`, `actor_id`),
@@ -541,4 +563,190 @@ CREATE TABLE IF NOT EXISTS `account_role_state_payload_backup` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`)
+) ENGINE=InnoDB;
+
+-- 比武擂台 (Pixi) — also ensured at runtime by mock_server_arena.c
+CREATE TABLE IF NOT EXISTS `server_arena_config` (
+  `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `scene` VARBINARY(64) NOT NULL,
+  `spawn_x` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
+  `spawn_y` SMALLINT UNSIGNED NOT NULL DEFAULT 120,
+  `weekday_mask` INT UNSIGNED NOT NULL DEFAULT 72 COMMENT 'bit0=Sun..bit6=Sat; default Wed+Sat',
+  `entry_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1220,
+  `entry_end_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1229,
+  `match_start_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1230,
+  `match_end_minute` SMALLINT UNSIGNED NOT NULL DEFAULT 1260,
+  `round_seconds` INT UNSIGNED NOT NULL DEFAULT 300,
+  `battle_timeout_seconds` INT UNSIGNED NOT NULL DEFAULT 240,
+  `score_win` INT UNSIGNED NOT NULL DEFAULT 20,
+  `score_bye` INT UNSIGNED NOT NULL DEFAULT 20,
+  `score_draw` INT UNSIGNED NOT NULL DEFAULT 10,
+  `npc_name_keyword` VARBINARY(32) NOT NULL DEFAULT '',
+  `wager_enabled` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `wager_fee_percent` TINYINT UNSIGNED NOT NULL DEFAULT 10,
+  `wager_currency` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=铜币',
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_rewards` (
+  `job` TINYINT UNSIGNED NOT NULL,
+  `bracket` SMALLINT UNSIGNED NOT NULL,
+  `rank_pos` TINYINT UNSIGNED NOT NULL,
+  `reward_exp` INT UNSIGNED NOT NULL DEFAULT 0,
+  `reward_money` INT UNSIGNED NOT NULL DEFAULT 0,
+  `reward_wcoin` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `equip_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`job`, `bracket`, `rank_pos`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_sessions` (
+  `session_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `day_ymd` INT UNSIGNED NOT NULL,
+  `slot` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=entry 1=live 2=settled',
+  `entry_start_ts` INT UNSIGNED NOT NULL DEFAULT 0,
+  `match_start_ts` INT UNSIGNED NOT NULL DEFAULT 0,
+  `match_end_ts` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`session_id`),
+  UNIQUE KEY `uk_arena_sessions_day_slot` (`day_ymd`, `slot`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_scores` (
+  `session_id` INT UNSIGNED NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_name` VARBINARY(32) NOT NULL,
+  `job` TINYINT UNSIGNED NOT NULL,
+  `bracket` SMALLINT UNSIGNED NOT NULL,
+  `level` INT UNSIGNED NOT NULL,
+  `score` INT UNSIGNED NOT NULL DEFAULT 0,
+  `wins` INT UNSIGNED NOT NULL DEFAULT 0,
+  `losses` INT UNSIGNED NOT NULL DEFAULT 0,
+  `draws` INT UNSIGNED NOT NULL DEFAULT 0,
+  `byes` INT UNSIGNED NOT NULL DEFAULT 0,
+  `rank_pos` INT UNSIGNED NOT NULL DEFAULT 0,
+  `claimed` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`session_id`, `role_id`),
+  KEY `idx_arena_scores_bucket` (`session_id`, `job`, `bracket`, `score`),
+  CONSTRAINT `fk_arena_scores_session`
+    FOREIGN KEY (`session_id`) REFERENCES `server_arena_sessions` (`session_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_titles` (
+  `job` TINYINT UNSIGNED NOT NULL,
+  `bracket` SMALLINT UNSIGNED NOT NULL,
+  `place` TINYINT UNSIGNED NOT NULL COMMENT '1冠军 2亚军 3季军',
+  `role_id` INT UNSIGNED NOT NULL,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_name` VARBINARY(32) NOT NULL,
+  `session_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`job`, `bracket`, `place`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_wager_challenges` (
+  `challenge_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `host_role_id` INT UNSIGNED NOT NULL,
+  `host_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `challenger_role_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `challenger_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `scene` VARBINARY(64) NOT NULL,
+  `stake_money` INT UNSIGNED NOT NULL DEFAULT 0,
+  `fee_percent` TINYINT UNSIGNED NOT NULL DEFAULT 10,
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=open 1=matched 2=done 3=cancel',
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`challenge_id`),
+  KEY `idx_arena_wager_host` (`host_role_id`, `status`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_arena_wager_members` (
+  `challenge_id` INT UNSIGNED NOT NULL,
+  `side` TINYINT UNSIGNED NOT NULL COMMENT '0=host 1=challenger',
+  `role_id` INT UNSIGNED NOT NULL,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_name` VARBINARY(32) NOT NULL DEFAULT '',
+  `paid` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `accepted` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `payout` INT UNSIGNED NOT NULL DEFAULT 0,
+  PRIMARY KEY (`challenge_id`, `role_id`),
+  KEY `idx_wager_member_role` (`role_id`)
+) ENGINE=InnoDB;
+
+
+CREATE TABLE IF NOT EXISTS `server_auction_config` (
+  `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `fee_percent_base` TINYINT UNSIGNED NOT NULL DEFAULT 2,
+  `fee_percent_per_tier` TINYINT UNSIGNED NOT NULL DEFAULT 2,
+  `min_bid_step` INT UNSIGNED NOT NULL DEFAULT 1,
+  `currency_mask` TINYINT UNSIGNED NOT NULL DEFAULT 3,
+  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 20,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_auction_listings` (
+  `listing_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `seller_role_id` INT UNSIGNED NOT NULL,
+  `seller_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `seller_name` VARBINARY(32) NOT NULL DEFAULT '',
+  `item_id` INT UNSIGNED NOT NULL,
+  `item_count` INT UNSIGNED NOT NULL DEFAULT 1,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `start_price` INT UNSIGNED NOT NULL DEFAULT 0,
+  `current_price` INT UNSIGNED NOT NULL DEFAULT 0,
+  `currency` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `fee_paid` INT UNSIGNED NOT NULL DEFAULT 0,
+  `fee_percent` TINYINT UNSIGNED NOT NULL DEFAULT 2,
+  `duration_tier` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `high_bidder_role_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `high_bidder_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT '',
+  `expire_unix` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`listing_id`),
+  KEY `idx_auction_listings_status_expire` (`status`, `expire_unix`),
+  KEY `idx_auction_listings_seller` (`seller_role_id`, `status`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_auction_bids` (
+  `bid_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `listing_id` INT UNSIGNED NOT NULL,
+  `bidder_role_id` INT UNSIGNED NOT NULL,
+  `bidder_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `amount` INT UNSIGNED NOT NULL DEFAULT 0,
+  `currency` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`bid_id`),
+  KEY `idx_auction_bids_listing` (`listing_id`, `status`),
+  KEY `idx_auction_bids_bidder` (`bidder_role_id`)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `server_auction_claims` (
+  `claim_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `role_id` INT UNSIGNED NOT NULL,
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `kind` TINYINT UNSIGNED NOT NULL,
+  `listing_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `money_amount` INT UNSIGNED NOT NULL DEFAULT 0,
+  `wcoin_amount` INT UNSIGNED NOT NULL DEFAULT 0,
+  `claimed` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`claim_id`),
+  KEY `idx_auction_claims_role` (`role_id`, `claimed`)
 ) ENGINE=InnoDB;

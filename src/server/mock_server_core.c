@@ -679,10 +679,13 @@ static bool vm_net_mock_battle_use_scene_monster_wire_maps(bool playerOnRight, u
         return g_mockBattleStartUsesSceneWireMaps != 0;
     if (g_mockBattleSceneMonsterStartActive != 0)
         return true;
-    /* Count>1 must keep the subtype-5 wire table even if the scene-start flag
-     * was lost across account restore — otherwise all damage collapses onto
-     * slot0 and the first kill looks like a full clear on the client. */
-    return vm_net_mock_battle_enemy_count_current() > 1;
+    /*
+     * Persist the battle-start wire table only.  Do NOT treat enemies>1 as
+     * "must be subtype-5": hangup + 战斗心得 forces enemies=3 on subtype-10
+     * (player wire 0, monsters 1..N).  The old count>1 heuristic re-enabled
+     * scene maps [2,3,0] and painted group-skill child wire 0 onto the player.
+     */
+    return g_mockBattleStartUsesSceneWireMaps != 0;
 }
 
 static bool vm_net_mock_battle_enemy_wire_to_index(u8 wireSlot,
@@ -4797,6 +4800,11 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_COOLMALL_BUY_BASE         0xf5000000u /* | itemId */
 #define VM_NET_MOCK_NPC_SERVICE_COOLMALL_VIEW_BASE        0xf5100000u /* | itemId */
 #define VM_NET_MOCK_COOLMALL_PAGE_ITEMS                   5u
+/* Pixi 比武擂台 NPC services (extend dialog opcode upper bound). */
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_ENTER               0xf6000001u
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_LEAVE               0xf6000002u
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_RANK                0xf6000003u
+#define VM_NET_MOCK_NPC_SERVICE_ARENA_WAGER               0xf6000004u
 /* ParseNPCDialogData main-text paint uses #0xc8 including NUL. */
 #define VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES            199u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu

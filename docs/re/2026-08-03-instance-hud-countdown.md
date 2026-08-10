@@ -261,3 +261,13 @@
 2. `obj+0x10` = 剩余 **秒**；本地 tick 每次 `-1`。
 3. 本局 tick **阈值约 60s**（不是 1s）→ 秒个位约每墙钟分钟减一。
 4. 非 WT 进本包驱动；初值 `29285` 来源仍 **unresolved**。
+
+### 2026-08-05：worktree 误剥后恢复
+
+工作区曾用脚本剥掉 `agent_dbg0b451a*` HUD 取证；恢复时误删 `vm_game_launcher_update` 与 `vm_lcd_draw` 之间大段代码（含 `destroyEntry`）。处置：
+
+1. `src/main.c` 以 `HEAD` 为基线恢复（含 paint PC `0x0104c38a` **poke `remain=60`** → 屏 `01:00`）。
+2. 再并入商店退出 host 辅助：`open14_uplink`、买确定框软键门闩、`mmshop_exit_pop_skip`（peel 仍禁用，权威退出靠 open14 actor-state）。
+3. `make -j2` 已通过（`bin/main.exe` + `bin/jh-online-server.exe`）。
+
+待客户端冒烟：进 `29*` → 日志 `dream_hud_watch_arm` / `timer_remain_poke_1m00`，HUD `01:00`；商城返回仍走 post-test23 包路径。

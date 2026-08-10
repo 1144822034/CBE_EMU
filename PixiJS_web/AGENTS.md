@@ -1,5 +1,7 @@
 # PixiJS_web 协作约定
 
+改码安全（大改先提交、禁止 PowerShell 改源码）遵循仓库根目录 [`AGENTS.md`](../AGENTS.md)。
+
 ## 字体（强制）
 
 **LCD 内文字默认 `gb16.uc2.uc3` 硬点阵（`smooth: false`，Unicode 索引）。**  
