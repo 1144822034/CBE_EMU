@@ -2652,7 +2652,11 @@ typedef enum
 } vm_net_mock_monster_family;
 
 #define VM_NET_MOCK_MONSTER_ADMIN_STAT_MAX 0x7fffffffu
-#define VM_NET_MOCK_MONSTER_DROP_MAX 8u
+/* `server_monster_drops.drop_slot` and the client additive-item sequence both
+ * use a u8 count. Keep a practical server-side ceiling rather than the old
+ * eight-row editor limit, and share it across persistence, runtime rolls and
+ * the admin form. */
+#define VM_NET_MOCK_MONSTER_DROP_MAX 64u
 
 typedef struct
 {

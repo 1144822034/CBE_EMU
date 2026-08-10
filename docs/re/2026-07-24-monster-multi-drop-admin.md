@@ -40,7 +40,7 @@ iteminfo:
 ## 修正设计
 
 - 新增 `server_monster_drops(monster_id, drop_slot, item_id,
-  drop_rate_percent)`，每行是一个独立投掷概率；上限为 8 行。
+  drop_rate_percent)`，每行是一个独立投掷概率；当前服务端上限为 64 行。
 - 老 `server_monsters.drop_*` 是一次性兼容导入来源。运行时以
   `INSERT IGNORE` 导入旧第 1 条；新的后台保存会在同一 MySQL 事务中写父行、
   删除旧子行、插入完整的新列表，并把父行旧列清零。这样管理员删除掉落后不会
@@ -82,7 +82,8 @@ iteminfo:
 
 - 未把普通物品塞回 `4/7.iteminfo`；已有运行时证据表明该路径会进入不完整的
   装备/详情解析并可能闪退。
-- 多掉落条数严格限制为 8，并在 SQL 读取、后台表单、内存缓存和客户端 `iteminfo`
-  构建处重复边界检查。
+- 多掉落条数使用统一的 64 条服务端边界，并在 SQL 读取、后台表单、内存缓存和客户端
+  `iteminfo` 构建处重复边界检查；这高于原先人为的 8 条编辑器限制，同时仍受客户端
+  `u8` 行计数与单个 WT 对象长度约束。
 - `server_monster_drops` 不引用 `item.dsh` 的 SQL 外键，因为物品目录是客户端
   DSH 资源而非 MySQL 表；服务端保存和加载时使用目录校验。

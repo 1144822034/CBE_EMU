@@ -4615,11 +4615,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 1;
-    bool appendBackpackAdd = false;
     bool appendSkills = false;
-    u32 backpackAddItemId = 0;
-    u32 backpackAddCount = 0;
+    bool appendPurchaseBackpackAdd = false;
     u16 backpackAddSeq = 0;
+    u32 purchasedItemId = 0;
+    u32 purchasedItemCount = 0;
     const char *action = "invalid";
     u32 result = 0;
     u32 skillEligibleCount = 0;
@@ -4876,10 +4876,16 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         vm_net_mock_role_find_backpack_item(
                             role, buyItem->itemId, backpackAddSeq);
 
-                    /* Normal rows are an additive one-item delta.  The two
-                     * reservoir flasks are not stackable: their item row must
-                     * carry the newly allocated HP/MP pool, while the common
-                     * extra still exposes one visible flask. */
+                    /* The mutation has already committed.  The purchased row
+                     * must be delivered as the one-shot 7/7 type=1 item
+                     * manager increment, not as a 17/1 full list: the latter
+                     * belongs to a backpack-owned query callback.  The remote
+                     * client transport separates that increment from this
+                     * 26/1 dialogue packet into the immediately following
+                     * normal event, so ParseNPCDialogData clears its action=1
+                     * wait before mmGame consumes the new row.  Keep the
+                     * postcondition check so malformed allocation is rolled
+                     * back rather than reported as a successful purchase. */
                     if (purchasedItem == NULL || backpackAddSeq == 0)
                     {
                         *role = purchaseBefore;
@@ -4890,26 +4896,26 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     }
                     else
                     {
-                        backpackAddItemId = buyItem->itemId;
-                        backpackAddCount =
+                        purchasedItemId = buyItem->itemId;
+                        purchasedItemCount =
                             vm_net_mock_backpack_item_id_uses_reservoir_count(
                                 buyItem->itemId)
                                 ? purchasedItem->count
                                 : 1;
-                        appendBackpackAdd = backpackAddCount != 0;
-                        if (appendBackpackAdd)
-                        {
-                            dialogText =
-                                "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
-                            result = 1;
-                        }
-                        else
+                        if (purchasedItemCount == 0)
                         {
                             *role = purchaseBefore;
                             if (!vm_net_mock_role_db_save("npc-purchase-rollback"))
                                 return 0;
                             dialogText =
                                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                        }
+                        else
+                        {
+                            dialogText =
+                                "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
+                            result = 1;
+                            appendPurchaseBackpackAdd = true;
                         }
                     }
                 }
@@ -4991,7 +4997,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                 selector;
             ++optionCount;
         }
-        if (optionCount == 0 && !appendBackpackAdd)
+        if (optionCount == 0 && result == 0)
             dialogText =
                 "\xd4\xdd\xce\xde\xbf\xc9\xb9\xba\xc2\xf2\xb5\xc4\xc9\xcc\xc6\xb7\xa1\xa3"; /* 暂无可购买的商品。 */
     }
@@ -5325,18 +5331,21 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    if (appendBackpackAdd)
-    {
-        if (!vm_net_mock_append_backpack_item_add7_object(
-                out, outCap, &pos, backpackAddSeq, backpackAddItemId,
-                backpackAddCount))
-            return 0;
-        ++objectCount;
-    }
     if (appendSkills)
     {
         if (!vm_net_mock_append_role_skills_object(out, outCap, &pos))
             return 0;
+        ++objectCount;
+    }
+    if (appendPurchaseBackpackAdd)
+    {
+        if (purchasedItemId == 0 || purchasedItemCount == 0 ||
+            !vm_net_mock_append_backpack_item_add7_object(
+                out, outCap, &pos, backpackAddSeq, purchasedItemId,
+                purchasedItemCount))
+        {
+            return 0;
+        }
         ++objectCount;
     }
     if (instanceChallengeOptionIndex != 0xff && instanceSeed != NULL &&
@@ -5368,8 +5377,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
            skillNextLocked ? skillNextLocked->levelRequired : 0,
            skillNextLocked ? skillNextLocked->learnPrice : 0,
            objectCount, pos,
-           strcmp(action, "equipment-sell") == 0 && result == 1
-               ? "deferred-native-backpack-query"
+           (appendPurchaseBackpackAdd ||
+            (strcmp(action, "equipment-sell") == 0 && result == 1))
+               ? "separate-item-manager-followup"
                : "not-applicable");
     return pos;
 }
