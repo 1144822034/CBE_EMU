@@ -85,6 +85,13 @@ async function exchangeOnce(reqBuf) {
       wait = { n, resolve, reject };
     });
 
+  const cancelPull = (err) => {
+    if (!wait) return;
+    const { reject } = wait;
+    wait = null;
+    reject(err instanceof Error ? err : new Error(String(err)));
+  };
+
   socket.write(reqBuf);
 
   const header = await pull(20);
@@ -98,20 +105,21 @@ async function exchangeOnce(reqBuf) {
   const frames = [Buffer.concat([header, body])];
 
   // HAS_FOLLOWUP = 0x2 — read one more CBMR if present (best-effort short timeout).
+  // Cancel the same pull waiter on timeout (no orphaned Promise.race loser).
   if (flags & 0x2) {
+    const onTimeout = () => cancelPull(new Error("followup timeout"));
     try {
       socket.setTimeout(800);
-      const h2 = await Promise.race([
-        pull(20),
-        new Promise((_, reject) => {
-          socket.once("timeout", () => reject(new Error("followup timeout")));
-        }),
-      ]);
+      socket.once("timeout", onTimeout);
+      const h2 = await pull(20);
       const l2 = h2.readUInt32LE(12);
       const b2 = l2 ? await pull(l2) : Buffer.alloc(0);
       frames.push(Buffer.concat([h2, b2]));
     } catch {
       /* ignore */
+    } finally {
+      socket.setTimeout(0);
+      socket.off("timeout", onTimeout);
     }
   }
   socket.destroy();
@@ -191,6 +199,26 @@ function proxyAdminApi(req, res, adminPath, { methods }) {
         return;
       }
     }
+    // timeout → destroy() emits "error"; both handlers must not writeHead twice
+    // or Node throws and the whole gateway process exits.
+    let responded = false;
+    const replyJson = (status, payload) => {
+      if (responded || res.headersSent || res.writableEnded) return;
+      responded = true;
+      sendJson(res, status, payload);
+    };
+    const replyRaw = (statusCode, contentType, out) => {
+      if (responded || res.headersSent || res.writableEnded) return;
+      responded = true;
+      res.writeHead(statusCode || 502, {
+        "Content-Type": contentType || "application/json; charset=utf-8",
+        "Content-Length": out.length,
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      });
+      res.end(out);
+    };
+
     const headers = {
       "Content-Type":
         req.headers["content-type"] || "application/x-www-form-urlencoded",
@@ -209,31 +237,29 @@ function proxyAdminApi(req, res, adminPath, { methods }) {
         const chunks = [];
         up.on("data", (c) => chunks.push(c));
         up.on("end", () => {
-          const out = Buffer.concat(chunks);
-          res.writeHead(up.statusCode || 502, {
-            "Content-Type":
-              up.headers["content-type"] || "application/json; charset=utf-8",
-            "Content-Length": out.length,
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-store",
-          });
-          res.end(out);
+          replyRaw(
+            up.statusCode || 502,
+            up.headers["content-type"] || "application/json; charset=utf-8",
+            Buffer.concat(chunks),
+          );
         });
       },
     );
     upstream.on("timeout", () => {
       upstream.destroy();
-      sendJson(res, 504, { ok: false, error: "admin-timeout" });
+      replyJson(504, { ok: false, error: "admin-timeout" });
     });
     upstream.on("error", (err) => {
       console.error(`[ws-gateway] ${adminPath} proxy`, err.message || err);
-      sendJson(res, 502, { ok: false, error: "admin-unreachable" });
+      replyJson(502, { ok: false, error: "admin-unreachable" });
     });
     if (body.length) upstream.write(body);
     upstream.end();
   };
 
-  void forward();
+  void forward().catch((err) => {
+    console.error(`[ws-gateway] ${adminPath} forward`, err.message || err);
+  });
 }
 
 const server = http.createServer((req, res) => {
@@ -254,6 +280,12 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+server.on("error", (err) => {
+  console.error("[ws-gateway] http server", err.message || err);
+});
+wss.on("error", (err) => {
+  console.error("[ws-gateway] wss", err.message || err);
+});
 server.listen(listenPort, listenHost, () => {
   const tips = lanIpv4s().map((ip) => `ws://${ip}:${listenPort}`);
   console.log(
@@ -272,23 +304,39 @@ server.listen(listenPort, listenHost, () => {
   }
 });
 
+// Keep the bridge up: one bad proxy/WS edge must not tear down the process.
+process.on("uncaughtException", (err) => {
+  console.error("[ws-gateway] uncaughtException", err?.stack || err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[ws-gateway] unhandledRejection", err?.stack || err);
+});
+
 wss.on("connection", (ws) => {
   // Serialize per-socket exchanges so overlapping browser sends cannot interleave.
   let chain = Promise.resolve();
 
+  ws.on("error", (err) => {
+    console.error("[ws-gateway] ws", err.message || err);
+  });
+
   ws.on("message", (data) => {
-    chain = chain.then(async () => {
-      if (ws.readyState !== ws.OPEN) return;
-      try {
-        const req = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        const frames = await exchangeOnce(req);
-        for (const frame of frames) {
-          if (ws.readyState === ws.OPEN) ws.send(frame);
+    chain = chain
+      .then(async () => {
+        if (ws.readyState !== ws.OPEN) return;
+        try {
+          const req = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          const frames = await exchangeOnce(req);
+          for (const frame of frames) {
+            if (ws.readyState === ws.OPEN) ws.send(frame);
+          }
+        } catch (err) {
+          console.error("[ws-gateway]", err.message || err);
+          // Keep WS alive — client will time out / retry on the same session.
         }
-      } catch (err) {
-        console.error("[ws-gateway]", err.message || err);
-        // Keep WS alive — client will time out / retry on the same session.
-      }
-    });
+      })
+      .catch((err) => {
+        console.error("[ws-gateway] chain", err.message || err);
+      });
   });
 });
