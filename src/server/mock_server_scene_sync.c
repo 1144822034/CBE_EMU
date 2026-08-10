@@ -299,12 +299,12 @@ static bool vm_net_mock_build_scene_npcinfo_blob(
             const char *publishError = NULL;
             /* A service-side catalog may contain both Web/MySQL rows and
              * built-in companions (for example the Penglai blacksmith and
-             * monkey). Publish every selected row as one safe dependency set
-             * so a clean client can load the whole catalog. */
-            if (!vm_net_mock_ensure_actor_resource_published(
+             * monkey). Validate every selected row as one dependency set so
+             * a clean client can load the whole catalog through WT 18/7. */
+            if (!vm_net_mock_ensure_actor_resource_available(
                     selectedSeeds[i].actorResource, &publishError))
             {
-                printf("[error][network] mock_scene_npc_resource_publish_failed scene=%s actor=%u resource=%s reason=%s action=skip-row\n",
+                printf("[error][network] mock_scene_npc_resource_invalid scene=%s actor=%u resource=%s reason=%s action=skip-row\n",
                        scene ? scene : "-", selectedSeeds[i].actorId,
                        selectedSeeds[i].actorResource,
                        publishError ? publishError : "unknown");
@@ -344,6 +344,21 @@ static bool vm_net_mock_build_scene_npcinfo_blob(
         *npcNumOut = (u8)selectedCount;
     if (npcInfoLenOut)
         *npcInfoLenOut = npcInfoLen;
+    {
+        vm_mock_service_client_session *session =
+            vm_mock_service_get_active_client_session();
+
+        /* This is the authoritative, post-filtering count: every selected
+         * row above has both been encoded and accepted for initial delivery.
+         * A kind-3 SCE battle record must use this same count when resolving
+         * its live index for a later 4/5 start. */
+        if (session != NULL && vm_net_mock_scene_name_is_safe(scene))
+        {
+            session->sceneNpcNodeCount = (u8)selectedCount;
+            snprintf(session->sceneNpcNodeScene,
+                     sizeof(session->sceneNpcNodeScene), "%s", scene);
+        }
+    }
     if (dynamicCount != 0)
         catalogSource = totalCount > dynamicCount ? "sce+service-dynamic" : "service-dynamic";
     printf("[info][network] mock_scene_npc_catalog scene=%s source=%s delivery=initial actors=%u selected=%u rows=%u dynamic=%u truncated=%u npcinfo_len=%u resource=client-file-miss-WT18/7 evidence=JianghuOL.CBE:0x01037998+0x01044E48\n",
@@ -3523,6 +3538,10 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     u32 configuredServiceCount = 0;
     u32 emittedServiceCount = 0;
     u32 emittedServiceMask = 0;
+    bool directChallengeServiceEmitted = false;
+    bool directChallengeServiceConfigured = false;
+    bool directChallengeNodeReady = false;
+    bool directChallengeUnavailable = false;
     bool servicesConfigured = false;
     u32 taskEntryCount = 0;
     u8 dialog[3072];
@@ -3541,6 +3560,22 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
      * authorization before building this response so a malformed/oversized
      * new menu can never retain a stale actor's service mask. */
     vm_net_mock_npc_service_context_record(session, NULL, NULL, NULL, 0);
+    /* A new NPC dialog also invalidates a previous action-13 authorization.
+     * The subsequent battle request contains only a monster id, so letting a
+     * prior dialog survive would make its NPC origin ambiguous. */
+    if (session != NULL)
+    {
+        session->instanceChallengePending = false;
+        session->instanceChallengeBattlePending = false;
+        session->instanceChallengeDirectPending = false;
+        session->instanceChallengeDirectSceneMonster = false;
+        session->instanceChallengeActorId = 0;
+        session->instanceChallengeEnemyId = 0;
+        session->instanceChallengeX = 0;
+        session->instanceChallengeY = 0;
+        session->instanceChallengeTick = 0;
+        session->instanceChallengeScene[0] = 0;
+    }
 
     memset(seeds, 0, sizeof(seeds));
     seedCount = vm_net_mock_collect_scene_npcinfo_seeds(scene, seeds,
@@ -3859,6 +3894,41 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                vm_mysql_last_error());
     }
 
+    /* action 13 is only valid when the client can resolve the configured
+     * enemy to a live type-2 scene node.  Its request builder sends that node
+     * index in 4/1; advertising action 13 before the SCE kind-3 record has
+     * been installed makes the client send index=0 and leaves its loading
+     * state waiting for a 4/5 battle that cannot legally be built. */
+    if (matchedSeed != NULL && matchedSeed->challengeEnemyId != 0 &&
+        matchedSeed->instanceScene[0] == 0)
+    {
+        for (u32 serviceIndex = 0;
+             serviceIndex < configuredServiceCount; ++serviceIndex)
+        {
+            if (configuredServices[serviceIndex].kind ==
+                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE)
+            {
+                directChallengeServiceConfigured = true;
+                break;
+            }
+        }
+        if (directChallengeServiceConfigured)
+        {
+            directChallengeNodeReady = vm_net_mock_select_sce_combat_spawn(
+                scene, matchedSeed->challengeEnemyId, NULL, NULL, NULL);
+            if (!directChallengeNodeReady)
+            {
+                printf("[warn][network] mock_npc_direct_challenge_withheld "
+                       "scene=%s actor=%u enemy=%u "
+                       "action=omit-action13 reason=live-kind3-node-unready "
+                       "evidence=SendNPCInteractReq:0x01037ED4-index-required+"
+                       "mmBattle:0x66CC\n",
+                       scene ? scene : "-", matchedSeed->actorId,
+                       matchedSeed->challengeEnemyId);
+            }
+        }
+    }
+
     taskEntryCount =
         (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u) +
         optionCount;
@@ -3890,9 +3960,22 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         {
             continue;
         }
+        if (configuredServices[serviceIndex].kind ==
+                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+            directChallengeServiceConfigured && !directChallengeNodeReady)
+        {
+            directChallengeUnavailable = true;
+            continue;
+        }
         ++emittedServiceCount;
         emittedServiceMask |= vm_net_mock_npc_service_kind_mask(
             configuredServices[serviceIndex].kind);
+    }
+    if (directChallengeUnavailable && taskEntryCount == 0)
+    {
+        dialogText =
+            "\xcc\xf4\xd5\xbd\xc4\xbf\xb1\xea\xc9\xd0\xce\xb4\xb2\xbf\xca\xf0\xa3\xac"
+            "\xc7\xeb\xcd\xea\xd5\xfb\xcd\xcb\xb3\xf6\xba\xf3\xd6\xd8\xd0\xc2\xbd\xf8\xc8\xeb\xb3\xa1\xbe\xb0\xa1\xa3"; /* 挑战目标尚未部署，请完整退出后重新进入场景。 */
     }
     /* ParseNPCDialogData(0x010380E8) consumes the raw sequence as:
      * dialog-kind:u8, main-text:string, option-count:u8, then each option as
@@ -3935,6 +4018,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         const char *serviceName = NULL;
         const char *serviceDescription = NULL;
         u32 serviceValue = 0;
+        u8 serviceAction = 1;
+        bool directChallengeService = false;
 
         if (!vm_net_mock_npc_service_option_default(
                 matchedSeed, configuredServices[serviceIndex].kind,
@@ -3950,10 +4035,33 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             configuredServices[serviceIndex].optionDescription[0] != 0
                 ? configuredServices[serviceIndex].optionDescription
                 : defaultDescription;
+        /* A guide with a challenge target but no destination scene has no
+         * meaningful intermediate choice.  Encode its client-native
+         * action-13 option in this first dialog, so the next step is the
+         * real 4/1 battle request instead of “请选择副本操作”.  If a target
+         * scene also exists, keep the menu: entering and challenging remain
+         * separate user operations. */
+        directChallengeService =
+            configuredServices[serviceIndex].kind ==
+                VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE &&
+            matchedSeed != NULL && matchedSeed->challengeEnemyId != 0 &&
+            matchedSeed->instanceScene[0] == 0;
+        if (directChallengeService && !directChallengeNodeReady)
+            continue;
+        if (directChallengeService)
+        {
+            if (configuredServices[serviceIndex].optionName[0] == 0)
+                serviceName = "\xcc\xf4\xd5\xbd\xca\xd8\xb9\xd8\xb9\xd6"; /* 挑战守关怪 */
+            if (configuredServices[serviceIndex].optionDescription[0] == 0)
+                serviceDescription = "\xd6\xb1\xbd\xd3\xbf\xaa\xca\xbc\xd5\xbd\xb6\xb7"; /* 直接开始战斗 */
+            serviceAction = 13;
+            serviceValue = matchedSeed->challengeEnemyId;
+        }
         if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
                                         serviceName) ||
-            !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+            !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen,
+                                    serviceAction) ||
             !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
                                      serviceValue) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
@@ -3961,6 +4069,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         {
             return 0;
         }
+        if (directChallengeService)
+            directChallengeServiceEmitted = true;
         ++emitted;
     }
     for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
@@ -4015,6 +4125,26 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     vm_net_mock_npc_service_context_record(
         session, activeRole, scene,
         emittedServiceMask != 0 ? matchedSeed : NULL, emittedServiceMask);
+    if (directChallengeServiceEmitted && matchedSeed != NULL &&
+        session != NULL && vm_net_mock_scene_name_is_safe(scene))
+    {
+        /* action=13 sends only the enemy id.  Bind it to the dialog actor and
+         * visible scene until the client emits 4/1; the battle handler then
+         * validates this binding before it starts the exact SCE live node. */
+        session->instanceChallengeDirectPending = true;
+        session->instanceChallengeDirectSceneMonster = true;
+        session->instanceChallengeActorId = matchedSeed->actorId;
+        session->instanceChallengeEnemyId = matchedSeed->challengeEnemyId;
+        session->instanceChallengeX = matchedSeed->instanceX != 0
+                                          ? matchedSeed->instanceX
+                                          : matchedSeed->x;
+        session->instanceChallengeY = matchedSeed->instanceY != 0
+                                          ? matchedSeed->instanceY
+                                          : matchedSeed->y;
+        session->instanceChallengeTick = g_schedulerTick;
+        snprintf(session->instanceChallengeScene,
+                 sizeof(session->instanceChallengeScene), "%s", scene);
+    }
     /* The later action=4 task request contains only task id. Record exactly
      * the options in the delivered dialog after every packet object has been
      * built, preserving whether that id was authorized for acceptance or
@@ -4034,7 +4164,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             scene);
     }
 
-    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u legacy_service_kind=%u scene_entity_kind=%u native=%u service_configured=%u service_count=%u service_mask=%08x task_options=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4)+0x0104726C(case6)\n",
+    printf("[info][network] mock_npc_dialog actor=%u index=%u name=%s script=%s scene=%s catalog_match=%u legacy_service_kind=%u scene_entity_kind=%u native=%u service_configured=%u service_count=%u service_mask=%08x direct_challenge=%u task_options=%u task_accepted=%u task_state=%u task_completed_now=%u task_option_action=%u xse_dialogs=%u dialog_len=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01037ED4+0x010380E8+0x010492B0(action1/action4/action13)+0x0104726C(case6)\n",
            actorId,
            index,
            matchedSeed && matchedSeed->displayName[0] ? matchedSeed->displayName : "-",
@@ -4047,6 +4177,7 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
            servicesConfigured ? 1u : 0u,
            emittedServiceCount,
            emittedServiceMask,
+           directChallengeServiceEmitted ? 1u : 0u,
            (actorId == VM_NET_MOCK_TEST_TASK_NPC_ACTOR_ID && showTaskOption ? 1u : 0u) + optionCount,
            taskAlreadyAccepted ? 1u : 0u,
            taskState.state,
@@ -4391,7 +4522,7 @@ static bool vm_net_mock_append_npc_service_dialog_option(
 
 static u32 vm_net_mock_build_challenge_interaction_response_ex(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap,
-    bool forceNonSceneStart);
+    bool forceNonSceneStart, bool forceSceneMonsterStart);
 
 static const vm_net_mock_scene_npcinfo_seed *
 vm_net_mock_instance_guide_seed(u32 actorId)
@@ -4505,10 +4636,10 @@ static u32 vm_net_mock_build_instance_challenge_battle_response(
     synthetic[objectStart + 3] = (u8)((requestPos - objectStart) >> 8);
     synthetic[objectStart + 4] = (u8)(requestPos - objectStart);
     responseLen = vm_net_mock_build_challenge_interaction_response_ex(
-        synthetic, requestPos, out, outCap, true);
+        synthetic, requestPos, out, outCap, true, false);
     if (responseLen != 0)
     {
-        printf("[info][network] mock_npc_instance_challenge_start actor=%u enemy=%u pos=(%u,%u) response=4/10 resp=%u evidence=JianghuOL.CBE:0x01039566(30/10)+mmBattle:0x67AC(non-scene-start)\n",
+        printf("[info][network] mock_npc_instance_challenge_start actor=%u enemy=%u pos=(%u,%u) response=4/10-direct resp=%u evidence=JianghuOL.CBE:0x01039566(30/10)+mmBattle:0x67AC(non-scene-start)\n",
                actorId, enemyId, challengeX, challengeY,
                responseLen);
     }
@@ -5521,6 +5652,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     {
         const char *scene = vm_net_mock_current_scene_name();
         session->instanceChallengeDirectPending = true;
+        /* A guide with a destination scene keeps its isolated-instance
+         * contract.  Only the no-destination option targets a monster that
+         * must already be live in this visible scene. */
+        session->instanceChallengeDirectSceneMonster =
+            instanceSeed->instanceScene[0] == 0;
         session->instanceChallengePending = false;
         session->instanceChallengeBattlePending = false;
         session->instanceChallengeActorId = instanceSeed->actorId;

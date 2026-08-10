@@ -261,6 +261,21 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
+    if (vm_net_mock_is_content_update_chunk_request(request, requestLen))
+    {
+        hookedLen = vm_net_mock_build_content_update_chunk_response(
+            request, requestLen, out, outCap);
+        if (hookedLen)
+        {
+            vm_net_log_handled_packet("builtin-content-update-chunk",
+                                      request, requestLen, hookedLen);
+            return hookedLen;
+        }
+        vm_net_log_handled_packet("builtin-content-update-chunk-missing",
+                                  request, requestLen, 0);
+        return 0;
+    }
+
     if (vm_net_mock_is_update_manifest_chunk_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_update_manifest_chunk_response(request, requestLen, out, outCap);

@@ -29,6 +29,18 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 static bool vm_net_mock_role_equipment_slot_is_usable(
     const vm_net_mock_role_state *role, u32 slot);
 
+/* The canonical monster identity set is built from the shipped SCE2 combat
+ * nodes after their parser is available.  Role persistence owns the default
+ * stats/overrides, while the scene fragment owns the resource scan. */
+static void vm_net_mock_monster_catalog_ensure_loaded(void);
+
+/* Content deployment validates the Actor/GIF dependency set before its SCE2
+ * kind-3 record can reach a clean client cache.  The web
+ * administration implementation owns the existing resource inspector; this
+ * declaration keeps scene-content assembly in the scene module. */
+static bool vm_net_mock_ensure_actor_resource_available(
+    const char *actorResource, const char **errorOut);
+
 /* Chest configuration belongs to the catalog, while durable world-chat
  * storage and live delivery belong to the social service.  A successful
  * chest opening calls this narrow bridge only after the role mutation has

@@ -66,6 +66,28 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_dynam
 
 服务启动也会检查并补充该列；开关默认关闭，因此已有任务的完成后不可再次接取行为不会改变。
 
+已有数据库升级到“场景战斗怪”配置层时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_scene_battle_monsters.sql
+```
+
+脚本仅增加战斗怪草稿、场景基础资源快照和部署状态表。保存草稿不会修改任何
+`.sce`；只有后台显式部署时，服务端才会从快照重建相应的 SCE2 战斗记录。服务启动
+时也会自动创建同名表。
+
+已有数据库升级到启动期“游戏数据内容更新”时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_content_updates.sql
+```
+
+脚本新增 `server_content_update_releases` 和
+`server_content_update_files`，用来保存 WT 18/9 → 18/8 的版本清单。清单可以包含
+任意非 CBM 游戏数据资源；服务不会在每次启动时递增版本，只有在后台增删资源或重新发布
+当前清单时，客户端才会因 `id/code` 不同而删除并重取其中资源。服务启动也会自动创建表，
+并一次性迁移旧 `server_content_update.tsv`（若存在）。
+
 已有数据库升级到用户账号中心和数据库后台密码时执行：
 
 ```powershell

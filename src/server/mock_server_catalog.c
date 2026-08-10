@@ -173,6 +173,13 @@ typedef struct
     u32 itemId;
     u8 slot;
     u8 levelRequired;
+    /* `装备品质`: quality 0 is the common-equipment reference used by the
+     * default monster curve.  Keep this catalog field rather than deriving
+     * quality from an item-id range: the DSH data is authoritative. */
+    u8 quality;
+    /* `装备类型`: distinguishes sword/dagger/staff for the shared weapon
+     * slot and is therefore required to construct a job-appropriate outfit. */
+    u8 category;
     /* equip.dsh column 19 (`耐久`) is the client-visible maximum.  The
      * wire payload only carries the current value, so the server must use this
      * same source whenever it creates or repairs durable equipment. */
@@ -2346,13 +2353,14 @@ static u8 vm_net_mock_equipment_slot_for_category(u32 category)
 }
 
 static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired,
-                                                   u32 category, u32 durabilityMax,
+                                                   u32 quality, u32 category, u32 durabilityMax,
                                                    const vm_net_mock_equipment_bonus *bonus)
 {
     vm_net_mock_equipment_catalog_item *item = NULL;
     u8 slot = vm_net_mock_equipment_slot_for_category(category);
 
-    if (itemId == 0 || durabilityMax == 0 || durabilityMax > 0xffffu ||
+    if (itemId == 0 || quality > 0xffu || category > 0xffu ||
+        durabilityMax == 0 || durabilityMax > 0xffffu ||
         bonus == NULL || slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
         g_vm_net_mock_equipment_catalog_count >= VM_NET_MOCK_EQUIP_CATALOG_MAX_ITEMS)
     {
@@ -2364,6 +2372,8 @@ static bool vm_net_mock_add_equipment_catalog_item(u32 itemId, u32 levelRequired
     item->itemId = itemId;
     item->slot = slot;
     item->levelRequired = (u8)(levelRequired > 255 ? 255 : levelRequired);
+    item->quality = (u8)quality;
+    item->category = (u8)category;
     item->durabilityMax = (u16)durabilityMax;
     item->bonus = *bonus;
     return true;
@@ -2403,6 +2413,7 @@ static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
         u32 rowEnd = rowPos + rowLen;
         u32 itemId = 0;
         u32 levelRequired = 1;
+        u32 quality = 0xffu;
         u32 category = 0xffffffffu;
         u32 durabilityMax = 0;
         vm_net_mock_equipment_bonus bonus;
@@ -2427,6 +2438,9 @@ static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
                 break;
             case 3:
                 levelRequired = parsed ? parsed : 1;
+                break;
+            case 6:
+                quality = parsed;
                 break;
             case 7:
                 category = parsed;
@@ -2473,7 +2487,8 @@ static u32 vm_net_mock_load_equipment_catalog_dsh(const char *path)
             rowPos += valueLen;
         }
 
-        if (vm_net_mock_add_equipment_catalog_item(itemId, levelRequired, category,
+        if (vm_net_mock_add_equipment_catalog_item(itemId, levelRequired, quality,
+                                                   category,
                                                    durabilityMax, &bonus))
             ++added;
         pos = rowEnd;

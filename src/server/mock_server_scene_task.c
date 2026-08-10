@@ -19,16 +19,26 @@ static u32 vm_net_mock_load_xse_resource(const char *scriptName,
     if (rawLen > 4)
     {
         u32 declaredLen = vm_net_mock_read_le32_at(raw, 0);
-        if (declaredLen != 0 && declaredLen <= rawLen - 4 &&
-            (raw[4] == 1 || raw[4] == 2))
+        if (declaredLen != 0 && declaredLen <= rawLen - 4 && raw[4] == 2)
         {
             decodedLen = vm_net_mock_decode_lzss_resource_stream(raw + 4,
-                                                                 declaredLen,
-                                                                 out,
-                                                                 outCap);
+                                                                  declaredLen,
+                                                                  out,
+                                                                  outCap);
             if (decodedLen >= 16 && memcmp(out, "XSE0", 4) == 0)
                 return decodedLen;
             return 0;
+        }
+        if (declaredLen > 1 && declaredLen <= rawLen - 4 && raw[4] == 1)
+        {
+            decodedLen = declaredLen - 1u;
+            if (decodedLen > outCap || decodedLen < 16 ||
+                memcmp(raw + 5, "XSE0", 4) != 0)
+            {
+                return 0;
+            }
+            memcpy(out, raw + 5, decodedLen);
+            return decodedLen;
         }
     }
     if (rawLen >= 16 && memcmp(raw, "XSE0", 4) == 0)
@@ -51,6 +61,27 @@ static bool vm_net_mock_read_sce_string_field(const u8 *data, u32 len, u32 *pos,
         return false;
     if (vm_net_mock_read_le16_at(data, *pos) != 3 ||
         vm_net_mock_read_le16_at(data, *pos + 2) != expectedField)
+    {
+        return false;
+    }
+    *pos += 4;
+    return vm_net_mock_read_sce_len_string(data, len, pos, out, outCap);
+}
+
+/* The effect-actor tail of SCE2 kind-3 records is not a normal numbered
+ * string field.  The shipped bytes are exactly `u16 3, u16 3, u8 length,
+ * bytes`; in particular, the first byte after the two little-endian words is
+ * the string length.  Keep this separate from
+ * vm_net_mock_read_sce_string_field(): treating that length as a u16 field
+ * ID was the deployment-format defect which left the client without a live
+ * scene monster node. */
+static bool vm_net_mock_read_sce_effect_actor_tail(
+    const u8 *data, u32 len, u32 *pos, char *out, size_t outCap)
+{
+    if (data == NULL || pos == NULL || out == NULL || outCap == 0 ||
+        *pos + 5 > len ||
+        vm_net_mock_read_le16_at(data, *pos) != 3 ||
+        vm_net_mock_read_le16_at(data, *pos + 2) != 3)
     {
         return false;
     }
@@ -220,6 +251,7 @@ typedef struct
     u16 y;
     char displayName[32];
     char actorResource[64];
+    char effectResource[64];
 } vm_net_mock_sce_combat_spawn;
 
 /*
@@ -334,7 +366,18 @@ static bool vm_net_mock_parse_sce_combat_spawn_at(
      *   meta token 5/6 { field 14 = actor id },
      *   string field 15 = display name,
      *   scalar field 16 = visual/class hint,
-     *   string field 17 = actor resource.
+     *   string field 17 = actor resource,
+     *   nested-string field 18 = effect actor resource.
+     *
+     * Field 18 is not optional in the native kind-3 record, and it is not
+     * encoded like fields 15 and 17.  Shipped resources contain the exact
+     * envelope `u16 3, u16 3, u8 len, bytes`: the first `3` is the outer
+     * entity marker and the second is the effect-tail marker.  The next byte
+     * is already the string length, not a u16 field ID.  Earlier generators
+     * omitted the second marker or wrote an invented u16 field ID; both byte
+     * streams passed our scanner but LoadSceneDataFromStream did not turn
+     * them into a live type-2 node.  Do not relax this parser: deployment
+     * validation must use the same grammar the client consumes.
      */
     metaKind = vm_net_mock_read_le16_at(data, pos);
     if ((metaKind != 5 && metaKind != 6) ||
@@ -354,7 +397,11 @@ static bool vm_net_mock_parse_sce_combat_spawn_at(
         !vm_net_mock_read_sce_string_field(data, len, &pos, 0x11,
                                            spawn.actorResource,
                                            sizeof(spawn.actorResource)) ||
-        !vm_net_mock_str_ends_with(spawn.actorResource, ".actor"))
+        !vm_net_mock_str_ends_with(spawn.actorResource, ".actor") ||
+        !vm_net_mock_read_sce_effect_actor_tail(
+            data, len, &pos, spawn.effectResource,
+            sizeof(spawn.effectResource)) ||
+        !vm_net_mock_str_ends_with(spawn.effectResource, ".actor"))
     {
         return false;
     }
@@ -370,16 +417,45 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
                                                  u32 *posxOut,
                                                  u32 *posyOut)
 {
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
     u8 data[8192];
     u32 len = 0;
     u32 start = 0;
     u32 scanStart = 0;
     u32 propNodeCount = 0;
+    u32 npcNodeCount = 0;
     u32 sceneNodeIndex = 0;
     u32 combatOrdinal = 0;
 
     if (scene == NULL || scene[0] == 0 || actorId == 0)
         return false;
+
+    /* SCE type-2 records do not occupy the whole live table by themselves.
+     * After the local row and the static SCE placements, the scene parser
+     * appends exactly the rows emitted in the initial 27/11 npcinfo blob.
+     * The old `prop + combatOrdinal` approximation therefore addressed the
+     * first dynamic NPC (the blacksmith in Penglai_02) instead of the later
+     * kind-3 monkey record.  This count is captured when that blob is
+     * actually built, after resource-publish filtering, and is scoped to the
+     * exact visible scene.  Do not fall back to a freshly selected catalog:
+     * task priority can change it after the client has built its node table. */
+    if (session == NULL || !session->sceneVisibleReady ||
+        session->sceneVisiblePending ||
+        !vm_net_mock_scene_names_equal_exact(session->sceneVisibleScene,
+                                             scene) ||
+        !vm_net_mock_scene_names_equal_exact(session->sceneNpcNodeScene,
+                                             scene))
+    {
+        printf("[error][network] mock_scene_monster_target scene=%s actor=%u "
+               "action=reject-unobserved-npc-node-order visible_scene=%s "
+               "npc_scene=%s evidence=27/11-before-4/5+mmBattle:0x66CC\n",
+               scene, actorId,
+               session != NULL ? session->sceneVisibleScene : "-",
+               session != NULL ? session->sceneNpcNodeScene : "-");
+        return false;
+    }
+    npcNodeCount = session->sceneNpcNodeCount;
 
     len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
     start = vm_net_mock_scene_payload_start(data, len);
@@ -387,10 +463,10 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
         vm_net_mock_parse_sce_prop_scatter_at(data, len, start,
                                                &propNodeCount, &scanStart))
     {
-        /* Node 0 is the local-player row.  The first static placement is
-         * runtime row 1, so the battle scene index is exactly the number of
-         * preceding static placements plus the combat-record ordinal. */
-        sceneNodeIndex = propNodeCount;
+        /* Node 0 is local-player.  The first static placement begins at
+         * runtime row 1; 27/11 NPC rows follow all SCE static placements;
+         * kind-3 combat records follow those NPC rows. */
+        sceneNodeIndex = propNodeCount + npcNodeCount;
         for (u32 off = scanStart; off + 14 <= len; ++off)
         {
             vm_net_mock_sce_combat_spawn spawn;
@@ -423,13 +499,13 @@ static bool vm_net_mock_select_sce_combat_spawn(const char *scene, u32 actorId,
                 if (posyOut)
                     *posyOut = spawn.y;
                 printf("[info][network] mock_scene_monster_target scene=%s resource_scene=%s actor=%u "
-                       "runtime_index=%u prop_nodes=%u combat_ordinal=%u pos=(%u,%u) "
-                       "name=%s actor_resource=%s source=SCE2-static-node-order "
+                       "runtime_index=%u prop_nodes=%u npc_nodes=%u combat_ordinal=%u pos=(%u,%u) "
+                       "name=%s actor_resource=%s source=SCE2+observed-27/11-node-order "
                        "evidence=runtime:01桃花岛_01 first-combat=6 third-combat=8 "
-                       "+ mmBattle:0x66CC\n",
+                       "+ runtime:00蓬莱仙岛_02 blacksmith=5 monkey-combat=8 + mmBattle:0x66CC\n",
                        scene, scene, actorId, sceneNodeIndex, propNodeCount,
-                       combatOrdinal, spawn.x, spawn.y, spawn.displayName,
-                       spawn.actorResource);
+                       npcNodeCount, combatOrdinal, spawn.x, spawn.y,
+                       spawn.displayName, spawn.actorResource);
                 return true;
             }
             if (end > off)
@@ -445,11 +521,12 @@ typedef struct
     char firstScene[64];
 } vm_net_mock_monster_resource_label;
 
+#ifndef _WIN32
+#include <dirent.h>
+#endif
+
 static vm_net_mock_monster_resource_label
-    g_vm_net_mock_monster_resource_labels[
-        sizeof(g_vm_net_mock_monster_entries) /
-        sizeof(g_vm_net_mock_monster_entries[0])];
-static bool g_vm_net_mock_monster_resource_labels_loaded = false;
+    g_vm_net_mock_monster_resource_labels[VM_NET_MOCK_MONSTER_CATALOG_MAX];
 
 /* These targets are present as structured task.dsh kill requirements but do
  * not occur in automonster.dsh.  If the normal SCE2 scan cannot identify
@@ -473,89 +550,255 @@ static const vm_net_mock_monster_task_only_label
         {300, "\xC1\xB6\xD3\xFC\xC4\xA7\xCD\xB7", "task.dsh#5010" }  /* 炼狱魔头 */
     };
 
-static void vm_net_mock_monster_resource_labels_load(void)
-{
-    u32 catalogCount = 0;
+enum { VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX = 512 };
 
-    if (g_vm_net_mock_monster_resource_labels_loaded)
+typedef struct
+{
+    char name[64];
+} vm_net_mock_monster_catalog_scene_file;
+
+static int vm_net_mock_monster_catalog_scene_file_compare(const void *left,
+                                                          const void *right)
+{
+    const vm_net_mock_monster_catalog_scene_file *a = left;
+    const vm_net_mock_monster_catalog_scene_file *b = right;
+    return strcmp(a->name, b->name);
+}
+
+/* This enumerates the same server resource root later used by
+ * vm_net_mock_load_scene_resource().  The directory is only an index: every
+ * selected name is subsequently opened through the normal safe game-resource
+ * path, so host paths never become a scene identity or a client payload. */
+static u32 vm_net_mock_monster_catalog_collect_scene_files(
+    vm_net_mock_monster_catalog_scene_file *files, u32 fileCap)
+{
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+#ifdef _WIN32
+    {
+        char pattern[1200];
+        const char *directories[] = {
+            vm_net_mock_resource_dir()[0] ? vm_net_mock_resource_dir() : NULL,
+            "../web/fs/JHOnlineData", "web/fs/JHOnlineData"
+        };
+
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            WIN32_FIND_DATAA found;
+            HANDLE search = INVALID_HANDLE_VALUE;
+            size_t dirLen = 0;
+
+            if (directories[directoryIndex] == NULL)
+                continue;
+            dirLen = strlen(directories[directoryIndex]);
+            if (snprintf(pattern, sizeof(pattern), "%s%s*.sce",
+                         directories[directoryIndex],
+                         (dirLen != 0 &&
+                          (directories[directoryIndex][dirLen - 1] == '/' ||
+                           directories[directoryIndex][dirLen - 1] == '\\'))
+                             ? "" : "/") >= (int)sizeof(pattern))
+            {
+                continue;
+            }
+            search = FindFirstFileA(pattern, &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                size_t nameLen = strlen(found.cFileName);
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(files[0].name) ||
+                    !vm_net_mock_str_ends_with(found.cFileName, ".sce"))
+                {
+                    continue;
+                }
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         found.cFileName);
+                ++count;
+            } while (count < fileCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
+    }
+#else
+    {
+        const char *directories[] = {
+            vm_net_mock_resource_dir()[0] ? vm_net_mock_resource_dir() : NULL,
+            "../web/fs/JHOnlineData", "web/fs/JHOnlineData"
+        };
+
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = NULL;
+            struct dirent *entry = NULL;
+
+            if (directories[directoryIndex] == NULL)
+                continue;
+            directory = opendir(directories[directoryIndex]);
+            if (directory == NULL)
+                continue;
+            while (count < fileCap && (entry = readdir(directory)) != NULL)
+            {
+                char gameName[sizeof(files[0].name)];
+                size_t nameLen = strlen(entry->d_name);
+
+                if (nameLen == 0 || !vm_net_mock_str_ends_with(entry->d_name,
+                                                                ".sce"))
+                {
+                    continue;
+                }
+                memset(gameName, 0, sizeof(gameName));
+#ifdef CBE_HOST_UTF8_PATHS
+                utf8_to_gbk((u8 *)entry->d_name, (u8 *)gameName,
+                            sizeof(gameName));
+#else
+                if (nameLen >= sizeof(gameName))
+                    continue;
+                snprintf(gameName, sizeof(gameName), "%s", entry->d_name);
+#endif
+                if (gameName[0] == 0 ||
+                    strlen(gameName) >= sizeof(files[0].name))
+                {
+                    continue;
+                }
+                snprintf(files[count].name, sizeof(files[count].name), "%s",
+                         gameName);
+                ++count;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (count > 1)
+    {
+        qsort(files, count, sizeof(files[0]),
+              vm_net_mock_monster_catalog_scene_file_compare);
+    }
+    return count;
+}
+
+static void vm_net_mock_monster_catalog_sort(void)
+{
+    /* The base table is already ID ordered.  SCE-only records are appended
+     * while scanning, then inserted here with their parallel label so page
+     * order is stable and MySQL overrides keep one canonical index. */
+    for (u32 i = 1; i < g_vm_net_mock_monster_catalog_count; ++i)
+    {
+        vm_net_mock_monster_entry entry =
+            g_vm_net_mock_monster_catalog_entries[i];
+        vm_net_mock_monster_resource_label label =
+            g_vm_net_mock_monster_resource_labels[i];
+        u32 j = i;
+
+        while (j > 0 &&
+               g_vm_net_mock_monster_catalog_entries[j - 1].enemyId >
+                   entry.enemyId)
+        {
+            g_vm_net_mock_monster_catalog_entries[j] =
+                g_vm_net_mock_monster_catalog_entries[j - 1];
+            g_vm_net_mock_monster_resource_labels[j] =
+                g_vm_net_mock_monster_resource_labels[j - 1];
+            --j;
+        }
+        g_vm_net_mock_monster_catalog_entries[j] = entry;
+        g_vm_net_mock_monster_resource_labels[j] = label;
+    }
+}
+
+static void vm_net_mock_monster_catalog_ensure_loaded(void)
+{
+    vm_net_mock_monster_catalog_scene_file
+        scenes[VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX];
+    u32 sceneCount = 0;
+    u32 baseCount = 0;
+    u32 sceneAdded = 0;
+    u32 parsedSpawnCount = 0;
+    u32 rejectedSceneEntries = 0;
+
+    if (g_vm_net_mock_monster_catalog_loaded ||
+        g_vm_net_mock_monster_catalog_loading)
+    {
         return;
-    g_vm_net_mock_monster_resource_labels_loaded = true;
+    }
+    g_vm_net_mock_monster_catalog_loading = true;
+    vm_net_mock_monster_catalog_seed_base_entries();
+    baseCount = g_vm_net_mock_monster_catalog_count;
     memset(g_vm_net_mock_monster_resource_labels, 0,
            sizeof(g_vm_net_mock_monster_resource_labels));
+    sceneCount = vm_net_mock_monster_catalog_collect_scene_files(
+        scenes, VM_NET_MOCK_MONSTER_CATALOG_SCENE_FILE_MAX);
 
-    catalogCount = vm_net_mock_load_auto_monster_catalog();
-
-    for (u32 catalogIndex = 0; catalogIndex < catalogCount; ++catalogIndex)
+    for (u32 sceneIndex = 0; sceneIndex < sceneCount; ++sceneIndex)
     {
-        const vm_net_mock_auto_monster_catalog_item *catalog =
-            &g_vm_net_mock_auto_monster_catalog[catalogIndex];
         u8 data[8192];
+        u32 len = vm_net_mock_load_scene_resource(scenes[sceneIndex].name,
+                                                   data, sizeof(data));
+        u32 start = vm_net_mock_scene_payload_start(data, len);
 
-        for (u32 idIndex = 0; idIndex < 3; ++idIndex)
+        if (len == 0 || start == 0)
+            continue;
+        for (u32 off = start; off + 14 <= len; ++off)
         {
-            int monsterIndex = vm_net_mock_monster_catalog_index(
-                catalog->monsterIds[idIndex]);
-            if (monsterIndex >= 0 &&
-                g_vm_net_mock_monster_resource_labels[monsterIndex]
-                    .firstScene[0] == 0)
+            vm_net_mock_sce_combat_spawn spawn;
+            u32 end = 0;
+            int monsterIndex = -1;
+            u32 beforeCount = g_vm_net_mock_monster_catalog_count;
+
+            if (!vm_net_mock_parse_sce_combat_spawn_at(data, len, off,
+                                                       &spawn, &end))
             {
-                snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
-                             .firstScene,
-                         sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
-                                    .firstScene),
-                         "%s", catalog->scene);
+                continue;
             }
-        }
-
-        {
-            u32 len = vm_net_mock_load_scene_resource(catalog->scene, data,
-                                                       sizeof(data));
-            u32 start = vm_net_mock_scene_payload_start(data, len);
-
-            if (len != 0 && start != 0)
+            ++parsedSpawnCount;
+            monsterIndex = vm_net_mock_monster_catalog_add_scene_entry(
+                spawn.actorId);
+            if (monsterIndex >= 0)
             {
-                for (u32 off = start; off + 14 <= len; ++off)
+                if (g_vm_net_mock_monster_catalog_count > beforeCount)
+                    ++sceneAdded;
+                if (g_vm_net_mock_monster_resource_labels[monsterIndex]
+                        .displayName[0] == 0)
                 {
-                    vm_net_mock_sce_combat_spawn spawn;
-                    u32 end = 0;
-                    int monsterIndex = -1;
-                    bool declaredByAutoMonsterRow = false;
-
-                    if (!vm_net_mock_parse_sce_combat_spawn_at(
-                            data, len, off, &spawn, &end))
-                    {
-                        continue;
-                    }
-                    for (u32 idIndex = 0; idIndex < 3; ++idIndex)
-                    {
-                        if (catalog->monsterIds[idIndex] == spawn.actorId)
-                        {
-                            declaredByAutoMonsterRow = true;
-                            break;
-                        }
-                    }
-                    monsterIndex = vm_net_mock_monster_catalog_index(spawn.actorId);
-                    if (declaredByAutoMonsterRow && monsterIndex >= 0 &&
-                        g_vm_net_mock_monster_resource_labels[monsterIndex]
-                            .displayName[0] == 0)
-                    {
-                        snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
-                                     .displayName,
-                                 sizeof(g_vm_net_mock_monster_resource_labels[monsterIndex]
-                                            .displayName),
-                                 "%s", spawn.displayName);
-                    }
-                    if (end > off)
-                        off = end - 1;
+                    snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                 .displayName,
+                             sizeof(g_vm_net_mock_monster_resource_labels[
+                                        monsterIndex].displayName),
+                             "%s", spawn.displayName);
+                }
+                if (g_vm_net_mock_monster_resource_labels[monsterIndex]
+                        .firstScene[0] == 0)
+                {
+                    snprintf(g_vm_net_mock_monster_resource_labels[monsterIndex]
+                                 .firstScene,
+                             sizeof(g_vm_net_mock_monster_resource_labels[
+                                        monsterIndex].firstScene),
+                             "%s", scenes[sceneIndex].name);
                 }
             }
+            else
+            {
+                /* Do not turn a capacity/configuration defect into an
+                 * anonymous missing boss in the admin UI.  The catalog is
+                 * intentionally finite only because all service persistence
+                 * arrays share this index; report any rejected native ID. */
+                ++rejectedSceneEntries;
+            }
+            if (end > off)
+                off = end - 1;
         }
     }
 
-    /* A name read from SCE is valid only when the same automonster.dsh row
-     * declares that actor ID.  Task-only targets otherwise keep their exact
-     * task.dsh label and provenance, rather than inheriting an unrelated
-     * combat actor found while scanning the same scene. */
+    /* Task-only targets retain their exact task name when no native combat
+     * placement supplied one.  This is a fallback label only; it never
+     * creates an arbitrary battle ID. */
     for (u32 i = 0;
          i < sizeof(g_vm_net_mock_monster_task_only_labels) /
                  sizeof(g_vm_net_mock_monster_task_only_labels[0]);
@@ -563,7 +806,8 @@ static void vm_net_mock_monster_resource_labels_load(void)
     {
         const vm_net_mock_monster_task_only_label *label =
             &g_vm_net_mock_monster_task_only_labels[i];
-        int monsterIndex = vm_net_mock_monster_catalog_index(label->enemyId);
+        int monsterIndex = vm_net_mock_monster_catalog_index_loaded(
+            label->enemyId);
 
         if (monsterIndex < 0)
             continue;
@@ -582,25 +826,39 @@ static void vm_net_mock_monster_resource_labels_load(void)
                      "%s", label->source);
         }
     }
+
+    vm_net_mock_monster_catalog_sort();
+    g_vm_net_mock_monster_catalog_loaded = true;
+    g_vm_net_mock_monster_catalog_loading = false;
+    printf("[info][network] mock_monster_catalog base=%u scenes=%u spawns=%u "
+           "scene_added=%u rejected=%u total=%u source=SCE2-kind3+task-kill-labels\n",
+           baseCount, sceneCount, parsedSpawnCount, sceneAdded,
+           rejectedSceneEntries, g_vm_net_mock_monster_catalog_count);
+}
+
+static void vm_net_mock_monster_resource_labels_load(void)
+{
+    vm_net_mock_monster_catalog_ensure_loaded();
 }
 
 static u32 vm_net_mock_monster_admin_list(
     vm_net_mock_monster_admin_row *rows, u32 rowCap)
 {
-    u32 total = (u32)(sizeof(g_vm_net_mock_monster_entries) /
-                      sizeof(g_vm_net_mock_monster_entries[0]));
-    u32 copied = vm_net_mock_min_u32(total, rowCap);
+    u32 total = 0;
+    u32 copied = 0;
 
+    vm_net_mock_monster_resource_labels_load();
+    total = g_vm_net_mock_monster_catalog_count;
+    copied = vm_net_mock_min_u32(total, rowCap);
     if (rows == NULL || rowCap == 0)
         return total;
     (void)vm_net_mock_monster_db_load();
-    vm_net_mock_monster_resource_labels_load();
     memset(rows, 0, sizeof(*rows) * copied);
 
     for (u32 i = 0; i < copied; ++i)
     {
         const vm_net_mock_monster_entry *entry =
-            &g_vm_net_mock_monster_entries[i];
+            &g_vm_net_mock_monster_catalog_entries[i];
         vm_net_mock_monster_stats stats =
             vm_net_mock_monster_stats_for_enemy(entry->enemyId);
         const vm_net_mock_monster_override *override =
@@ -1102,6 +1360,1422 @@ static bool vm_net_mock_npc_service_options_has_kind(
             return true;
     }
     return false;
+}
+
+/*
+ * Scene battle monsters are deliberately not dynamic-NPC rows.  The CBE
+ * scene loader creates battle-capable type-2 nodes only from SCE2 kind-3
+ * records, and mmBattle:HandleBattleStartMsg(0x66CC) copies a live type-2
+ * node for 4/5 scene battles.  This configuration layer therefore keeps a
+ * draft in MySQL and has an explicit deployment step which rebuilds the
+ * server-owned SCE source from a captured base resource.  Saving a draft can
+ * never cause an NPC packet to masquerade as a monster.
+ */
+enum
+{
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX = 96,
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX = 8192,
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX = 8192,
+    VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX = 24
+};
+
+typedef struct
+{
+    u32 entryId;
+    u16 monsterId;
+    u16 x;
+    u16 y;
+    u16 visualHint;
+    bool enabled;
+    char displayName[32];
+    char actorResource[64];
+    char effectResource[64];
+} vm_net_mock_scene_battle_monster_admin_row;
+
+typedef struct
+{
+    vm_net_mock_scene_battle_monster_admin_row *rows;
+    u32 cap;
+    u32 count;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_list_context;
+
+typedef struct
+{
+    u8 *raw;
+    u32 rawCap;
+    u32 rawLen;
+    bool found;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_source_context;
+
+typedef struct
+{
+    u32 fingerprint;
+    bool found;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_deployment_context;
+
+typedef struct
+{
+    u32 count;
+    bool found;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_count_context;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+} vm_net_mock_scene_battle_monster_column_context;
+
+static bool g_vm_net_mock_scene_battle_monster_effect_column_ready = false;
+
+static bool vm_net_mock_scene_battle_monster_column_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths);
+static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount);
+
+/* All shipped SCE kind-3 records carry a field-18 effect Actor.  This is a
+ * native scene-record dependency, not an optional visual override.  The
+ * migration intentionally assigns the same early-scene effect Actor that is
+ * present beside e_mucusP.actor in the shipped 01桃花岛_01.sce samples, so
+ * existing drafts become explicit, editable complete records rather than
+ * remaining ambiguous/truncated rows. */
+static bool vm_net_mock_scene_battle_monster_ensure_effect_column(void)
+{
+    vm_net_mock_scene_battle_monster_column_context context;
+
+    if (g_vm_net_mock_scene_battle_monster_effect_column_ready)
+        return true;
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME='server_scene_battle_monsters' "
+            "AND COLUMN_NAME='effect_resource'",
+            vm_net_mock_scene_battle_monster_column_row, &context) ||
+        context.invalid)
+    {
+        return false;
+    }
+    if (context.found)
+    {
+        g_vm_net_mock_scene_battle_monster_effect_column_ready = true;
+        return true;
+    }
+    if (!vm_mysql_exec(
+            "ALTER TABLE server_scene_battle_monsters "
+            "ADD COLUMN effect_resource VARBINARY(64) NOT NULL "
+            "DEFAULT 'e_ghostfireR.actor' AFTER actor_resource"))
+    {
+        return false;
+    }
+    printf("[info][mock-admin] scene_battle_monster_schema "
+           "migration=effect-resource-field18 action=applied "
+           "default=e_ghostfireR.actor\n");
+    g_vm_net_mock_scene_battle_monster_effect_column_ready = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_column_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_column_context *context =
+        (vm_net_mock_scene_battle_monster_column_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || values == NULL ||
+        lengths == NULL || values[0] == NULL || lengths[0] == 0 ||
+        context->found)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_count_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_count_context *context =
+        (vm_net_mock_scene_battle_monster_count_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->count))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_count_scene(
+    const char *scene, u32 *countOut)
+{
+    vm_net_mock_scene_battle_monster_count_context context;
+    char sceneHex[129];
+    char query[320];
+
+    if (countOut)
+        *countOut = 0;
+    if (scene == NULL || !vm_net_mock_scene_name_is_safe(scene) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM server_scene_battle_monsters WHERE scene=X'%s'",
+             sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_count_row,
+                        &context) || context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (countOut)
+        *countOut = context.count;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_schema_ensure(void)
+{
+    return vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_scene_battle_monsters ("
+               "entry_id INT UNSIGNED NOT NULL AUTO_INCREMENT,"
+               "scene VARBINARY(64) NOT NULL,"
+               "monster_id SMALLINT UNSIGNED NOT NULL,"
+               "pos_x SMALLINT UNSIGNED NOT NULL,pos_y SMALLINT UNSIGNED NOT NULL,"
+               "display_name VARBINARY(30) NOT NULL,"
+               "actor_resource VARBINARY(64) NOT NULL,"
+               "effect_resource VARBINARY(64) NOT NULL DEFAULT 'e_ghostfireR.actor',"
+               "visual_hint TINYINT UNSIGNED NOT NULL DEFAULT 5,"
+               "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+               "PRIMARY KEY(entry_id),KEY idx_scene_battle_monster_scene(scene),"
+               "UNIQUE KEY uq_scene_battle_monster_pos(scene,monster_id,pos_x,pos_y)"
+               ") ENGINE=InnoDB") &&
+           vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_scene_battle_monster_sources ("
+               "scene VARBINARY(64) NOT NULL,base_resource MEDIUMBLOB NOT NULL,"
+               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+               "PRIMARY KEY(scene)) ENGINE=InnoDB") &&
+           vm_mysql_exec(
+               "CREATE TABLE IF NOT EXISTS server_scene_battle_monster_deployments ("
+               "scene VARBINARY(64) NOT NULL,config_fingerprint INT UNSIGNED NOT NULL,"
+               "configured_count SMALLINT UNSIGNED NOT NULL,"
+               "deployed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+               "PRIMARY KEY(scene)) ENGINE=InnoDB") &&
+           vm_net_mock_scene_battle_monster_ensure_effect_column();
+}
+
+static bool vm_net_mock_scene_battle_monster_decode_hex_text(
+    const char *hex, size_t hexLen, char *out, size_t outCap)
+{
+    size_t decodedLen = 0;
+
+    if (hex == NULL || out == NULL || outCap == 0 ||
+        hexLen == 0 || (hexLen & 1u) != 0 ||
+        !vm_mysql_hex_decode(hex, hexLen, out, outCap - 1u, &decodedLen) ||
+        decodedLen == 0 || decodedLen >= outCap)
+    {
+        return false;
+    }
+    out[decodedLen] = 0;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_list_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_list_context *context =
+        (vm_net_mock_scene_battle_monster_list_context *)contextValue;
+    vm_net_mock_scene_battle_monster_admin_row *row = NULL;
+    u32 value = 0;
+
+    if (context == NULL || columnCount != 9 || values == NULL ||
+        lengths == NULL || context->count >= context->cap)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    row = &context->rows[context->count];
+    memset(row, 0, sizeof(*row));
+    if (!vm_mock_mysql_parse_u32(values[0], lengths[0], &row->entryId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &value) ||
+        value == 0 || value > 0xffffu)
+    {
+        context->invalid = true;
+        return true;
+    }
+    row->monsterId = (u16)value;
+    if (!vm_mock_mysql_parse_u32(values[2], lengths[2], &value) ||
+        value == 0 || value > 0xffffu)
+    {
+        context->invalid = true;
+        return true;
+    }
+    row->x = (u16)value;
+    if (!vm_mock_mysql_parse_u32(values[3], lengths[3], &value) ||
+        value == 0 || value > 0xffffu)
+    {
+        context->invalid = true;
+        return true;
+    }
+    row->y = (u16)value;
+    if (!vm_net_mock_scene_battle_monster_decode_hex_text(
+            values[4], lengths[4], row->displayName,
+            sizeof(row->displayName)) ||
+        !vm_net_mock_scene_battle_monster_decode_hex_text(
+            values[5], lengths[5], row->actorResource,
+            sizeof(row->actorResource)) ||
+        !vm_net_mock_scene_battle_monster_decode_hex_text(
+            values[6], lengths[6], row->effectResource,
+            sizeof(row->effectResource)) ||
+        !vm_mock_mysql_parse_u32(values[7], lengths[7], &value) ||
+        (value != 5 && value != 6))
+    {
+        context->invalid = true;
+        return true;
+    }
+    row->visualHint = (u16)value;
+    if (!vm_mock_mysql_parse_u32(values[8], lengths[8], &value) || value > 1)
+    {
+        context->invalid = true;
+        return true;
+    }
+    row->enabled = value != 0;
+    ++context->count;
+    return true;
+}
+
+static u32 vm_net_mock_scene_battle_monster_admin_list(
+    const char *scene, vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCap)
+{
+    vm_net_mock_scene_battle_monster_list_context context;
+    char sceneHex[129];
+    char query[640];
+
+    if (rows == NULL || rowCap == 0 || scene == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_battle_monster_schema_ensure() ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return 0;
+    }
+    memset(rows, 0, sizeof(*rows) * rowCap);
+    memset(&context, 0, sizeof(context));
+    context.rows = rows;
+    context.cap = rowCap;
+    snprintf(query, sizeof(query),
+             "SELECT entry_id,monster_id,pos_x,pos_y,HEX(display_name),"
+             "HEX(actor_resource),HEX(effect_resource),visual_hint,enabled "
+             "FROM server_scene_battle_monsters WHERE scene=X'%s' "
+             "ORDER BY entry_id",
+             sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_list_row,
+                        &context) || context.invalid)
+    {
+        return 0;
+    }
+    return context.count;
+}
+
+/* A direct NPC challenge targets a native SCE kind-3 node in the NPC's
+ * current scene.  That identity is deliberately distinct from the general
+ * monster catalog: a freshly configured scene battle monster is a valid
+ * configuration target before the administrator publishes its SCE update,
+ * while it cannot yet be used as an arbitrary 4/10 monster-template fight.
+ *
+ * Keeping this lookup at the scene-battle configuration layer breaks the old
+ * circular dependency where dynamic-NPC loading first asked the catalog to
+ * discover a node that only becomes visible after the dynamic NPC itself was
+ * accepted.  It does not claim that the client has installed the node; the
+ * direct 4/1 handler still verifies the observed live SCE node before it
+ * emits the 4/5 scene-battle contract. */
+static bool vm_net_mock_scene_battle_monster_configured_target_exists(
+    const char *scene, u32 monsterId)
+{
+    vm_net_mock_scene_battle_monster_admin_row
+        rows[VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX];
+    u32 rowCount = 0;
+
+    if (scene == NULL || monsterId == 0 || monsterId > 0xffffu ||
+        !vm_net_mock_scene_name_is_safe(scene))
+    {
+        return false;
+    }
+    memset(rows, 0, sizeof(rows));
+    rowCount = vm_net_mock_scene_battle_monster_admin_list(
+        scene, rows, VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX);
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled && rows[i].monsterId == monsterId)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_npc_instance_challenge_target_is_configured(
+    const char *ownerScene, const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    if (seed == NULL || seed->challengeEnemyId == 0)
+        return true;
+    if (seed->instanceScene[0] == 0)
+    {
+        return vm_net_mock_scene_battle_monster_configured_target_exists(
+            ownerScene, seed->challengeEnemyId);
+    }
+    return vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId);
+}
+
+static bool vm_net_mock_scene_battle_monster_row_validate(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *row)
+{
+    if (scene == NULL || row == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_resource_exists(scene) || row->monsterId == 0 ||
+        row->x == 0 || row->y == 0 || row->displayName[0] == 0 ||
+        strlen(row->displayName) >= 30 || row->actorResource[0] == 0 ||
+        strlen(row->actorResource) >= 64 || row->effectResource[0] == 0 ||
+        strlen(row->effectResource) >= 64 ||
+        !vm_net_mock_str_ends_with(row->actorResource, ".actor") ||
+        !vm_net_mock_str_ends_with(row->effectResource, ".actor") ||
+        (row->visualHint != 5 && row->visualHint != 6) ||
+        !vm_net_mock_open_server_data_resource(row->actorResource, ".actor",
+                                                NULL, NULL, 0) ||
+        !vm_net_mock_open_server_data_resource(row->effectResource, ".actor",
+                                                NULL, NULL, 0))
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_entry_exists(
+    const char *scene, u32 entryId, bool *foundOut)
+{
+    vm_net_mock_scene_battle_monster_count_context context;
+    char sceneHex[129];
+    char query[384];
+
+    if (foundOut)
+        *foundOut = false;
+    if (scene == NULL || entryId == 0 ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM server_scene_battle_monsters "
+             "WHERE scene=X'%s' AND entry_id=%u", sceneHex, entryId);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_count_row,
+                        &context) || context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (foundOut)
+        *foundOut = context.count == 1;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_save(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *row,
+    const char **errorOut)
+{
+    char sceneHex[129];
+    char nameHex[sizeof(row->displayName) * 2 + 1];
+    char actorHex[sizeof(row->actorResource) * 2 + 1];
+    char effectHex[sizeof(row->effectResource) * 2 + 1];
+    char query[1280];
+    bool existing = false;
+    u32 sceneCount = 0;
+
+    if (errorOut)
+        *errorOut = "场景战斗怪配置无效";
+    if (!vm_net_mock_scene_battle_monster_schema_ensure() ||
+        !vm_net_mock_scene_battle_monster_row_validate(scene, row) ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0 ||
+        vm_mysql_hex_encode(row->displayName, strlen(row->displayName),
+                            nameHex, sizeof(nameHex)) == 0 ||
+        vm_mysql_hex_encode(row->actorResource, strlen(row->actorResource),
+                            actorHex, sizeof(actorHex)) == 0 ||
+        vm_mysql_hex_encode(row->effectResource, strlen(row->effectResource),
+                            effectHex, sizeof(effectHex)) == 0)
+    {
+        return false;
+    }
+    if (row->entryId != 0 &&
+        (!vm_net_mock_scene_battle_monster_admin_entry_exists(
+             scene, row->entryId, &existing) || !existing))
+    {
+        if (errorOut)
+            *errorOut = "该场景战斗怪已不存在或页面已过期";
+        return false;
+    }
+    if (row->entryId == 0 &&
+        (!vm_net_mock_scene_battle_monster_admin_count_scene(scene,
+                                                              &sceneCount) ||
+         sceneCount >= VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX))
+    {
+        if (errorOut)
+            *errorOut = "该场景的战斗怪草稿数量已达上限";
+        return false;
+    }
+    if (row->entryId == 0)
+    {
+        snprintf(query, sizeof(query),
+                 "INSERT INTO server_scene_battle_monsters("
+                 "scene,monster_id,pos_x,pos_y,display_name,actor_resource,effect_resource,visual_hint,enabled) "
+                 "VALUES(X'%s',%u,%u,%u,X'%s',X'%s',X'%s',%u,%u)",
+                 sceneHex, row->monsterId, row->x, row->y, nameHex, actorHex,
+                 effectHex,
+                 row->visualHint, row->enabled ? 1u : 0u);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE server_scene_battle_monsters SET monster_id=%u,pos_x=%u,pos_y=%u,"
+                 "display_name=X'%s',actor_resource=X'%s',effect_resource=X'%s',"
+                 "visual_hint=%u,enabled=%u "
+                 "WHERE scene=X'%s' AND entry_id=%u",
+                 row->monsterId, row->x, row->y, nameHex, actorHex, effectHex,
+                 row->visualHint, row->enabled ? 1u : 0u, sceneHex,
+                 row->entryId);
+    }
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_delete(
+    const char *scene, u32 entryId, const char **errorOut)
+{
+    char sceneHex[129];
+    char query[384];
+    bool existing = false;
+
+    if (errorOut)
+        *errorOut = "场景战斗怪不存在";
+    if (!vm_net_mock_scene_battle_monster_schema_ensure() || scene == NULL ||
+        entryId == 0 || !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_battle_monster_admin_entry_exists(
+            scene, entryId, &existing) || !existing ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_scene_battle_monsters WHERE scene=X'%s' AND entry_id=%u",
+             sceneHex, entryId);
+    if (!vm_mysql_exec(query))
+    {
+        if (errorOut)
+            *errorOut = vm_mysql_last_error();
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+static u32 vm_net_mock_scene_battle_monster_fingerprint(
+    const vm_net_mock_scene_battle_monster_admin_row *rows, u32 rowCount)
+{
+    u32 hash = 2166136261u;
+
+    for (u32 i = 0; rows != NULL && i < rowCount; ++i)
+    {
+        const vm_net_mock_scene_battle_monster_admin_row *row = &rows[i];
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->entryId,
+                                             sizeof(row->entryId));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->monsterId,
+                                             sizeof(row->monsterId));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->x,
+                                             sizeof(row->x));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->y,
+                                             sizeof(row->y));
+        hash = vm_net_mock_update_hash_bytes(hash,
+                                             (const u8 *)row->displayName,
+                                             (u32)strlen(row->displayName));
+        hash = vm_net_mock_update_hash_bytes(hash,
+                                             (const u8 *)row->actorResource,
+                                             (u32)strlen(row->actorResource));
+        hash = vm_net_mock_update_hash_bytes(hash,
+                                             (const u8 *)row->effectResource,
+                                             (u32)strlen(row->effectResource));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->visualHint,
+                                             sizeof(row->visualHint));
+        hash = vm_net_mock_update_hash_bytes(hash, (const u8 *)&row->enabled,
+                                             sizeof(row->enabled));
+    }
+    return hash == 0 ? 1u : hash;
+}
+
+static bool vm_net_mock_scene_battle_monster_deployment_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_deployment_context *context =
+        (vm_net_mock_scene_battle_monster_deployment_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0],
+                                 &context->fingerprint))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_admin_is_deployed(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount, bool *deployedOut)
+{
+    vm_net_mock_scene_battle_monster_deployment_context context;
+    char sceneHex[129];
+    char query[384];
+    u32 fingerprint = vm_net_mock_scene_battle_monster_fingerprint(rows,
+                                                                     rowCount);
+
+    if (deployedOut)
+        *deployedOut = false;
+    if (!vm_net_mock_scene_battle_monster_schema_ensure() || scene == NULL ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT config_fingerprint FROM server_scene_battle_monster_deployments "
+             "WHERE scene=X'%s'", sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_deployment_row,
+                        &context) || context.invalid)
+    {
+        return false;
+    }
+    if (deployedOut)
+    {
+        bool fingerprintMatches = context.found &&
+                                  context.fingerprint == fingerprint;
+        bool sourceMatches = fingerprintMatches &&
+                             vm_net_mock_scene_battle_monster_deployed_source_matches(
+                                 scene, rows, rowCount);
+
+        *deployedOut = sourceMatches;
+        if (fingerprintMatches && !sourceMatches)
+        {
+            printf("[warn][mock-admin] scene_battle_monster_deployment_stale "
+                   "scene=%s reason=published-sce-does-not-match-current-"
+                   "kind3-record-contract action=require-explicit-redeploy\n",
+                   scene);
+        }
+    }
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_source_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_net_mock_scene_battle_monster_source_context *context =
+        (vm_net_mock_scene_battle_monster_source_context *)contextValue;
+    size_t decodedLen = 0;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        values == NULL || lengths == NULL || lengths[0] == 0 ||
+        (lengths[0] & 1u) != 0 ||
+        !vm_mysql_hex_decode(values[0], lengths[0], context->raw,
+                             context->rawCap, &decodedLen) ||
+        decodedLen == 0 || decodedLen > context->rawCap)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->rawLen = (u32)decodedLen;
+    context->found = true;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_read_source_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut,
+    char *pathOut, size_t pathOutCap)
+{
+    char path[1200];
+    u32 rawLen = 0;
+
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (pathOut && pathOutCap != 0)
+        pathOut[0] = 0;
+    if (scene == NULL || raw == NULL || rawCap == 0 ||
+        !vm_net_mock_open_server_scene_resource(scene, NULL, path,
+                                                 sizeof(path)))
+    {
+        return false;
+    }
+    rawLen = vm_net_mock_load_response_file(path, raw, rawCap);
+    if (rawLen == 0)
+        return false;
+    if (pathOut && pathOutCap != 0)
+        snprintf(pathOut, pathOutCap, "%s", path);
+    if (rawLenOut)
+        *rawLenOut = rawLen;
+    return true;
+}
+
+/* `vm_net_mock_load_scene_resource()` accepts direct SCE2 and the normal
+ * four-byte wrapper.  Type 1 is a literal payload; type 2 is the only LZSS
+ * stream.  Deployment needs exactly that client resource contract, but starts
+ * from the captured raw base rather than the mutable published file. */
+static bool vm_net_mock_scene_battle_monster_decode_raw_sce(
+    const u8 *raw, u32 rawLen, u8 *decoded, u32 decodedCap,
+    u32 *decodedLenOut)
+{
+    u32 decodedLen = 0;
+    u32 declaredLen = 0;
+
+    if (decodedLenOut)
+        *decodedLenOut = 0;
+    if (raw == NULL || rawLen == 0 || decoded == NULL || decodedCap == 0)
+        return false;
+    /* A normal resource wrapper contains a compressed literal run.  That run
+     * can itself contain the bytes "SCE2" (and the 00 蓬莱仙岛_02 snapshot
+     * does), so testing `scene_payload_start(raw)` first misclassifies the
+     * wrapper as a direct scene.  Recognize a structurally valid wrapper
+     * before considering an unwrapped SCE2 payload. */
+    if (rawLen > 4)
+    {
+        declaredLen = vm_net_mock_read_le16_at(raw, 0) |
+                      ((u32)vm_net_mock_read_le16_at(raw, 2) << 16);
+        if (declaredLen != 0 && declaredLen <= rawLen - 4 && raw[4] == 2)
+        {
+            decodedLen = vm_net_mock_decode_lzss_resource_stream(
+                raw + 4, declaredLen, decoded, decodedCap);
+        }
+        else if (declaredLen > 1 && declaredLen <= rawLen - 4 && raw[4] == 1)
+        {
+            decodedLen = declaredLen - 1u;
+            if (decodedLen > decodedCap)
+                return false;
+            memcpy(decoded, raw + 5, decodedLen);
+        }
+        else if (vm_net_mock_scene_payload_start(raw, rawLen) != 0)
+        {
+            if (rawLen > decodedCap)
+                return false;
+            memcpy(decoded, raw, rawLen);
+            decodedLen = rawLen;
+        }
+        else
+        {
+            decodedLen = vm_net_mock_decode_lzss_resource_stream(raw, rawLen,
+                                                                    decoded,
+                                                                    decodedCap);
+        }
+    }
+    if (decodedLen == 0 || vm_net_mock_scene_payload_start(decoded,
+                                                            decodedLen) == 0)
+    {
+        return false;
+    }
+    if (decodedLenOut)
+        *decodedLenOut = decodedLen;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_load_base_raw(
+    const char *scene, u8 *raw, u32 rawCap, u32 *rawLenOut,
+    const char **sourceOut)
+{
+    vm_net_mock_scene_battle_monster_source_context context;
+    char sceneHex[129];
+    char query[512];
+    char *rawHex = NULL;
+    u32 currentLen = 0;
+
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (sourceOut)
+        *sourceOut = "unresolved";
+    if (scene == NULL || raw == NULL || rawCap == 0 ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    memset(&context, 0, sizeof(context));
+    context.raw = raw;
+    context.rawCap = rawCap;
+    snprintf(query, sizeof(query),
+             "SELECT HEX(base_resource) FROM server_scene_battle_monster_sources "
+             "WHERE scene=X'%s'", sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_source_row,
+                        &context) || context.invalid)
+    {
+        return false;
+    }
+    if (context.found)
+    {
+        if (rawLenOut)
+            *rawLenOut = context.rawLen;
+        if (sourceOut)
+            *sourceOut = "mysql-captured-base";
+        return true;
+    }
+    if (!vm_net_mock_scene_battle_monster_read_source_raw(scene, raw, rawCap,
+                                                           &currentLen, NULL, 0) ||
+        currentLen == 0 || currentLen > rawCap)
+    {
+        return false;
+    }
+    rawHex = calloc((size_t)currentLen * 2u + 1u, 1u);
+    if (rawHex == NULL ||
+        vm_mysql_hex_encode(raw, currentLen, rawHex,
+                            (size_t)currentLen * 2u + 1u) == 0)
+    {
+        free(rawHex);
+        return false;
+    }
+    {
+        size_t queryCap = strlen(rawHex) + strlen(sceneHex) + 160u;
+        char *insertQuery = calloc(queryCap, 1u);
+        bool inserted = false;
+        if (insertQuery != NULL)
+        {
+            snprintf(insertQuery, queryCap,
+                     "INSERT IGNORE INTO server_scene_battle_monster_sources(scene,base_resource) "
+                     "VALUES(X'%s',X'%s')", sceneHex, rawHex);
+            inserted = vm_mysql_exec(insertQuery);
+        }
+        free(insertQuery);
+        free(rawHex);
+        rawHex = NULL;
+        if (!inserted)
+            return false;
+    }
+    /* Re-read after INSERT IGNORE so a concurrent deploy always uses one
+     * durable base byte stream, not whichever source it happened to see. */
+    memset(&context, 0, sizeof(context));
+    context.raw = raw;
+    context.rawCap = rawCap;
+    snprintf(query, sizeof(query),
+             "SELECT HEX(base_resource) FROM server_scene_battle_monster_sources "
+             "WHERE scene=X'%s'", sceneHex);
+    if (!vm_mysql_query(query, vm_net_mock_scene_battle_monster_source_row,
+                        &context) || context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (rawLenOut)
+        *rawLenOut = context.rawLen;
+    if (sourceOut)
+        *sourceOut = "mysql-captured-base";
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_append_record(
+    u8 *payload, u32 payloadCap, u32 *pos,
+    const vm_net_mock_scene_battle_monster_admin_row *row)
+{
+    size_t nameLen = 0;
+    size_t actorLen = 0;
+    size_t effectLen = 0;
+
+    if (payload == NULL || pos == NULL || row == NULL ||
+        row->monsterId == 0 || row->x == 0 || row->y == 0 ||
+        (row->visualHint != 5 && row->visualHint != 6))
+    {
+        return false;
+    }
+    nameLen = strlen(row->displayName);
+    actorLen = strlen(row->actorResource);
+    effectLen = strlen(row->effectResource);
+    if (nameLen == 0 || nameLen >= 30 || actorLen == 0 || actorLen >= 64 ||
+        effectLen == 0 || effectLen >= 64 || nameLen > 0xffu ||
+        actorLen > 0xffu || effectLen > 0xffu ||
+        *pos > payloadCap || payloadCap - *pos <
+            35u + (u32)nameLen + (u32)actorLen + (u32)effectLen)
+    {
+        return false;
+    }
+    /* Exact record grammar recovered from shipped SCE2 kind-3 records:
+     * kind,x,y, meta(5,1,field14,id), string15(name), scalar16(hint),
+     * string17(actor), effect-actor tail.  The latter is deliberately
+     * `3,3,len,effect`, copied byte-for-byte from shipped SCE2 kind-3
+     * records; it is not interchangeable with ordinary numbered string
+     * fields.  No private marker is injected. */
+    if (!vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, row->x) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, row->y) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 5) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 1) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 0x0e) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, row->monsterId) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 0x0f) ||
+        *pos >= payloadCap)
+    {
+        return false;
+    }
+    payload[(*pos)++] = (u8)nameLen;
+    memcpy(payload + *pos, row->displayName, nameLen);
+    *pos += (u32)nameLen;
+    if (!vm_net_mock_put_le16(payload, payloadCap, pos, 1) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 0x10) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, row->visualHint) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 0x11) ||
+        *pos >= payloadCap)
+    {
+        return false;
+    }
+    payload[(*pos)++] = (u8)actorLen;
+    memcpy(payload + *pos, row->actorResource, actorLen);
+    *pos += (u32)actorLen;
+    if (!vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
+        !vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
+        *pos >= payloadCap)
+    {
+        return false;
+    }
+    payload[(*pos)++] = (u8)effectLen;
+    memcpy(payload + *pos, row->effectResource, effectLen);
+    *pos += (u32)effectLen;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_lzss_literal_encode(
+    const u8 *payload, u32 payloadLen, u8 *encoded, u32 encodedCap,
+    u32 *encodedLenOut)
+{
+    u32 srcPos = 0;
+    u32 dstPos = 9;
+
+    if (encodedLenOut)
+        *encodedLenOut = 0;
+    if (payload == NULL || payloadLen == 0 || encoded == NULL ||
+        encodedCap < 10)
+    {
+        return false;
+    }
+    /* The shipped decoder accepts literal runs up to 127 bytes.  Literal-only
+     * LZSS is intentional here: it is deterministic, requires no speculative
+     * compressor heuristics and is validated by the same decoder that serves
+     * every existing SCE resource. */
+    while (srcPos < payloadLen)
+    {
+        u32 count = vm_net_mock_min_u32(127u, payloadLen - srcPos);
+        if (count == 0 || dstPos > encodedCap ||
+            encodedCap - dstPos < count + 1u)
+        {
+            return false;
+        }
+        encoded[dstPos++] = (u8)(0x80u | count);
+        memcpy(encoded + dstPos, payload + srcPos, count);
+        dstPos += count;
+        srcPos += count;
+    }
+    if (dstPos <= 9 || dstPos - 9 > 0xffffffffu ||
+        payloadLen > 0x7fffffffu)
+    {
+        return false;
+    }
+    /* Type 2 is the client LZSS container.  Type 1 would make the client use
+     * the following compression header as literal SCE bytes, so the SCE2
+     * parser never sees the appended scene node. */
+    encoded[0] = 2;
+    encoded[1] = (u8)((dstPos - 9) >> 24);
+    encoded[2] = (u8)((dstPos - 9) >> 16);
+    encoded[3] = (u8)((dstPos - 9) >> 8);
+    encoded[4] = (u8)(dstPos - 9);
+    encoded[5] = (u8)(payloadLen >> 24);
+    encoded[6] = (u8)(payloadLen >> 16);
+    encoded[7] = (u8)(payloadLen >> 8);
+    encoded[8] = (u8)payloadLen;
+    if (encodedLenOut)
+        *encodedLenOut = dstPos;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_write_resource(
+    const char *path, const u8 *raw, u32 rawLen, const char **errorOut)
+{
+    char tempPath[1240];
+    FILE *fp = NULL;
+    bool writeOk = false;
+
+    if (errorOut)
+        *errorOut = "场景资源写入失败";
+    if (path == NULL || path[0] == 0 || raw == NULL || rawLen == 0 ||
+        snprintf(tempPath, sizeof(tempPath), "%s.scene-battle.tmp", path) >=
+            (int)sizeof(tempPath))
+    {
+        return false;
+    }
+    fp = fopen(tempPath, "wb");
+    if (fp == NULL)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "场景资源临时文件写入失败";
+        return false;
+    }
+    writeOk = fwrite(raw, 1, rawLen, fp) == rawLen;
+    if (fflush(fp) != 0)
+        writeOk = false;
+    if (fclose(fp) != 0)
+        writeOk = false;
+    if (!writeOk)
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "场景资源临时文件写入失败";
+        return false;
+    }
+#ifdef _WIN32
+    /* Windows rename() cannot replace an existing file.  MoveFileEx keeps
+     * the previous source in place if replacement itself fails; deleting the
+     * original first would make a failed deployment destroy the live scene. */
+    if (!MoveFileExA(tempPath, path,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+#else
+    if (rename(tempPath, path) != 0)
+#endif
+    {
+        remove(tempPath);
+        if (errorOut)
+            *errorOut = "场景资源原子替换失败";
+        return false;
+    }
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_payload_collect_node_count(
+    const u8 *payload, u32 payloadLen, u32 *nodeCountOut)
+{
+    u32 start = 0;
+    u32 scanStart = 0;
+    u32 propCount = 0;
+    u32 combatCount = 0;
+
+    if (nodeCountOut)
+        *nodeCountOut = 0;
+    start = vm_net_mock_scene_payload_start(payload, payloadLen);
+    if (start == 0 ||
+        !vm_net_mock_parse_sce_prop_scatter_at(payload, payloadLen, start,
+                                                &propCount, &scanStart))
+    {
+        return false;
+    }
+    for (u32 off = scanStart; off + 14 <= payloadLen; ++off)
+    {
+        vm_net_mock_sce_combat_spawn spawn;
+        u32 end = 0;
+        if (!vm_net_mock_parse_sce_combat_spawn_at(payload, payloadLen, off,
+                                                   &spawn, &end))
+        {
+            continue;
+        }
+        ++combatCount;
+        if (end > off)
+            off = end - 1;
+    }
+    if (propCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX ||
+        combatCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX ||
+        propCount + combatCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX)
+    {
+        return false;
+    }
+    if (nodeCountOut)
+        *nodeCountOut = propCount + combatCount;
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_payload_has_row(
+    const u8 *payload, u32 payloadLen,
+    const vm_net_mock_scene_battle_monster_admin_row *wanted)
+{
+    u32 start = vm_net_mock_scene_payload_start(payload, payloadLen);
+    u32 scanStart = 0;
+
+    if (wanted == NULL || start == 0 ||
+        !vm_net_mock_parse_sce_prop_scatter_at(payload, payloadLen, start,
+                                                NULL, &scanStart))
+    {
+        return false;
+    }
+    for (u32 off = scanStart; off + 14 <= payloadLen; ++off)
+    {
+        vm_net_mock_sce_combat_spawn spawn;
+        u32 end = 0;
+        if (!vm_net_mock_parse_sce_combat_spawn_at(payload, payloadLen, off,
+                                                   &spawn, &end))
+        {
+            continue;
+        }
+        if (spawn.actorId == wanted->monsterId && spawn.x == wanted->x &&
+            spawn.y == wanted->y &&
+            strcmp(spawn.displayName, wanted->displayName) == 0 &&
+            strcmp(spawn.actorResource, wanted->actorResource) == 0 &&
+            strcmp(spawn.effectResource, wanted->effectResource) == 0)
+        {
+            return true;
+        }
+        if (end > off)
+            off = end - 1;
+    }
+    return false;
+}
+
+/* The deployment table's fingerprint proves that a deploy transaction once
+ * completed; it cannot by itself prove that the currently served resource
+ * still obeys the current SCE kind-3 grammar.  In particular, the earlier
+ * generated form of a battle-monster record ended after field 17 and was
+ * accepted by the deployment ledger, but the CBE loader requires field 18
+ * (the effect Actor) before it creates a live type-2 scene node.
+ *
+ * Re-parse the exact server-owned resource with the same grammar used by the
+ * battle entry path.  This is intentionally a status check only: a stale
+ * publication is repaired through the existing explicit admin deployment,
+ * which rebuilds from the captured base and publishes through WT18. */
+static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
+    const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
+    u32 rowCount)
+{
+    u8 raw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u32 rawLen = 0;
+    u32 payloadLen = 0;
+
+    if (scene == NULL || rows == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_battle_monster_read_source_raw(
+            scene, raw, sizeof(raw), &rawLen, NULL, 0) ||
+        !vm_net_mock_scene_battle_monster_decode_raw_sce(
+            raw, rawLen, payload, sizeof(payload), &payloadLen))
+    {
+        return false;
+    }
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled &&
+            !vm_net_mock_scene_battle_monster_payload_has_row(
+                payload, payloadLen, &rows[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool vm_net_mock_scene_battle_monster_deployment_save(
+    const char *scene, u32 fingerprint, u32 enabledCount)
+{
+    char sceneHex[129];
+    char query[512];
+
+    if (scene == NULL || enabledCount > 0xffffu ||
+        vm_mysql_hex_encode(scene, strlen(scene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_scene_battle_monster_deployments("
+             "scene,config_fingerprint,configured_count) VALUES(X'%s',%u,%u) "
+             "ON DUPLICATE KEY UPDATE config_fingerprint=VALUES(config_fingerprint),"
+             "configured_count=VALUES(configured_count)",
+             sceneHex, fingerprint, enabledCount);
+    return vm_mysql_exec(query);
+}
+
+/* 27/11 can append at most four selected NPC rows after the SCE static
+ * records.  Deployment must reserve these client-owned rows as well as the
+ * static kind-2/kind-3 records it can parse from the base scene; otherwise a
+ * syntactically valid SCE can still produce an invalid live node index. */
+static u32 vm_net_mock_collect_scene_npcinfo_seeds(
+    const char *scene, vm_net_mock_scene_npcinfo_seed *seeds, u32 seedCap,
+    u32 *totalOut, u32 *dynamicOut);
+
+static u32 vm_net_mock_scene_battle_monster_npc_node_reserve(
+    const char *scene)
+{
+    vm_net_mock_scene_npcinfo_seed seeds[VM_NET_MOCK_SCENE_NPCINFO_MAX];
+
+    if (scene == NULL || scene[0] == 0)
+        return 0;
+    memset(seeds, 0, sizeof(seeds));
+    return vm_net_mock_collect_scene_npcinfo_seeds(
+        scene, seeds, VM_NET_MOCK_SCENE_NPCINFO_MAX, NULL, NULL);
+}
+
+/* Rebuild one exact source SCE from its durable base plus the currently
+ * enabled rows.  The runtime does not read the table to synthesize nodes; it
+ * reads the resulting SCE through the normal scene-resource path. */
+static bool vm_net_mock_scene_battle_monster_admin_deploy(
+    const char *scene, const char **errorOut)
+{
+    vm_net_mock_scene_battle_monster_admin_row
+        rows[VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX];
+    u8 baseRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 previousRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 payload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 encoded[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 outputRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
+    u8 roundTripPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    const char *baseSource = "unresolved";
+    const char *publishError = NULL;
+    char resourcePath[1200];
+    u32 rowCount = 0;
+    u32 storedRowCount = 0;
+    u32 enabledCount = 0;
+    u32 baseRawLen = 0;
+    u32 previousRawLen = 0;
+    u32 payloadLen = 0;
+    u32 encodedLen = 0;
+    u32 outputRawLen = 0;
+    u32 roundTripPayloadLen = 0;
+    u32 originalNodeCount = 0;
+    u32 finalNodeCount = 0;
+    u32 npcNodeReserve = 0;
+    u32 fingerprint = 0;
+    const char *names[1];
+
+    if (errorOut)
+        *errorOut = "场景战斗怪部署失败";
+    if (scene == NULL || !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_resource_exists(scene) ||
+        !vm_net_mock_scene_battle_monster_schema_ensure())
+    {
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_admin_count_scene(scene,
+                                                             &storedRowCount) ||
+        storedRowCount > VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX)
+    {
+        if (errorOut)
+            *errorOut = "场景战斗怪草稿数量异常；请先清理超过上限的配置";
+        return false;
+    }
+    memset(rows, 0, sizeof(rows));
+    rowCount = vm_net_mock_scene_battle_monster_admin_list(
+        scene, rows, VM_NET_MOCK_SCENE_BATTLE_MONSTER_ADMIN_MAX);
+    if (rowCount != storedRowCount)
+    {
+        if (errorOut)
+            *errorOut = "场景战斗怪草稿读取不完整；拒绝部署以避免遗漏配置";
+        return false;
+    }
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (!vm_net_mock_scene_battle_monster_row_validate(scene, &rows[i]))
+        {
+            if (errorOut)
+                *errorOut = "存在无效的场景战斗怪 Actor、名称或坐标";
+            return false;
+        }
+        if (rows[i].enabled)
+        {
+            if (!vm_net_mock_ensure_actor_resource_available(
+                    rows[i].actorResource, &publishError))
+            {
+                if (errorOut)
+                    *errorOut = publishError ? publishError : "战斗怪 Actor 资源校验失败";
+                return false;
+            }
+            if (!vm_net_mock_ensure_actor_resource_available(
+                    rows[i].effectResource, &publishError))
+            {
+                if (errorOut)
+                    *errorOut = publishError ? publishError :
+                                             "战斗怪特效 Actor 资源校验失败";
+                return false;
+            }
+            ++enabledCount;
+        }
+    }
+    if (!vm_net_mock_scene_battle_monster_load_base_raw(
+            scene, baseRaw, sizeof(baseRaw), &baseRawLen, &baseSource))
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=load-base "
+               "scene=%s mysql=%s\n", scene, vm_mysql_last_error());
+        if (errorOut)
+            *errorOut = "无法读取或捕获场景基础资源；请查看服务端 scene_battle_monster_deploy 日志";
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_decode_raw_sce(
+            baseRaw, baseRawLen, payload, sizeof(payload), &payloadLen))
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=decode-base "
+               "scene=%s base=%s raw=%u\n", scene, baseSource, baseRawLen);
+        if (errorOut)
+            *errorOut = "捕获的基础场景资源不是可解析的 SCE2；请先核对资源来源";
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            payload, payloadLen, &originalNodeCount))
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=count-base "
+               "scene=%s base=%s raw=%u payload=%u\n", scene, baseSource,
+               baseRawLen, payloadLen);
+        if (errorOut)
+            *errorOut = "基础 SCE2 的静态节点段不符合已确认的场景记录格式";
+        return false;
+    }
+    npcNodeReserve = vm_net_mock_scene_battle_monster_npc_node_reserve(scene);
+    if (originalNodeCount + npcNodeReserve + enabledCount >
+        VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX)
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=node-limit "
+               "scene=%s base=%s static=%u npc_reserve=%u enabled=%u limit=%u\n", scene,
+               baseSource, originalNodeCount, npcNodeReserve, enabledCount,
+               VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX);
+        if (errorOut)
+            *errorOut = "场景静态节点、最多 4 个已下发 NPC 与启用战斗怪超过客户端 24 个非本地节点上限";
+        return false;
+    }
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled &&
+            !vm_net_mock_scene_battle_monster_append_record(
+                payload, sizeof(payload), &payloadLen, &rows[i]))
+        {
+            if (errorOut)
+                *errorOut = "场景资源容量不足，无法写入全部战斗怪";
+            return false;
+        }
+    }
+    if (!vm_net_mock_scene_battle_monster_payload_collect_node_count(
+            payload, payloadLen, &finalNodeCount) ||
+        finalNodeCount != originalNodeCount + enabledCount)
+    {
+        if (errorOut)
+            *errorOut = "生成后的场景战斗怪记录未通过 SCE2 解析验证";
+        return false;
+    }
+    for (u32 i = 0; i < rowCount; ++i)
+    {
+        if (rows[i].enabled &&
+            !vm_net_mock_scene_battle_monster_payload_has_row(
+                payload, payloadLen, &rows[i]))
+        {
+            if (errorOut)
+                *errorOut = "生成后的战斗怪记录与配置不一致";
+            return false;
+        }
+    }
+    if (!vm_net_mock_scene_battle_monster_lzss_literal_encode(
+            payload, payloadLen, encoded, sizeof(encoded), &encodedLen) ||
+        encodedLen > sizeof(outputRaw) - 4u)
+    {
+        if (errorOut)
+            *errorOut = "场景资源压缩失败或超过服务端资源上限";
+        return false;
+    }
+    outputRaw[0] = (u8)encodedLen;
+    outputRaw[1] = (u8)(encodedLen >> 8);
+    outputRaw[2] = (u8)(encodedLen >> 16);
+    outputRaw[3] = (u8)(encodedLen >> 24);
+    memcpy(outputRaw + 4, encoded, encodedLen);
+    outputRawLen = encodedLen + 4u;
+    /* Verify the bytes in the exact direction used by the client: wrapper
+     * dispatch first, then LZSS decode, then the SCE2 signature.  The old
+     * type-1 container passed this server's overly-permissive decoder but
+     * delivered a compression header to LoadSceneDataFromStream. */
+    if (!vm_net_mock_scene_battle_monster_decode_raw_sce(
+            outputRaw, outputRawLen, roundTripPayload,
+            sizeof(roundTripPayload), &roundTripPayloadLen) ||
+        roundTripPayloadLen != payloadLen ||
+        memcmp(roundTripPayload, payload, payloadLen) != 0)
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=roundtrip "
+               "scene=%s raw=%u payload=%u decoded=%u resource_type=%u\n",
+               scene, outputRawLen, payloadLen, roundTripPayloadLen,
+               outputRawLen > 4 ? outputRaw[4] : 0);
+        if (errorOut)
+            *errorOut = "生成的场景资源未能按客户端 SCE2 格式解码";
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_read_source_raw(
+            scene, previousRaw, sizeof(previousRaw), &previousRawLen,
+            resourcePath, sizeof(resourcePath)))
+    {
+        if (errorOut)
+            *errorOut = "当前服务端场景资源不可读";
+        return false;
+    }
+    if (!vm_net_mock_scene_battle_monster_write_resource(resourcePath,
+                                                          outputRaw,
+                                                          outputRawLen,
+                                                          errorOut))
+    {
+        return false;
+    }
+    names[0] = scene;
+    if (!vm_net_mock_content_update_publish_files(names, 1,
+                                                        &publishError))
+    {
+        const char *restoreError = NULL;
+        (void)vm_net_mock_scene_battle_monster_write_resource(
+            resourcePath, previousRaw, previousRawLen, &restoreError);
+        if (errorOut)
+            *errorOut = publishError ? publishError : "内容更新发布失败";
+        return false;
+    }
+    fingerprint = vm_net_mock_scene_battle_monster_fingerprint(rows, rowCount);
+    if (!vm_net_mock_scene_battle_monster_deployment_save(scene, fingerprint,
+                                                           enabledCount))
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy_status_failed scene=%s "
+               "base=%s nodes=%u->%u error=%s action=content-update-already-published\n",
+               scene, baseSource, originalNodeCount, finalNodeCount,
+               vm_mysql_last_error());
+        if (errorOut)
+            *errorOut = "场景资源已部署并加入内容更新，但部署状态写入失败；请重试部署以补齐状态";
+        vm_net_mock_monster_catalog_invalidate();
+        return false;
+    }
+    vm_net_mock_monster_catalog_invalidate();
+    printf("[info][mock-admin] scene_battle_monster_deploy scene=%s base=%s "
+            "drafts=%u enabled=%u nodes=%u->%u raw=%u payload=%u "
+            "resource_type=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-kind3+"
+            "mmBattle:0x66CC\n",
+            scene, baseSource, rowCount, enabledCount, originalNodeCount,
+            finalNodeCount, outputRawLen, payloadLen, outputRaw[4]);
+    if (errorOut)
+        *errorOut = "ok";
+    return true;
 }
 
 static bool vm_net_mock_npc_service_options_validate(
@@ -2271,12 +3945,12 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     vm_net_mock_dynamic_npc_load_context *context =
         (vm_net_mock_dynamic_npc_load_context *)contextValue;
     vm_net_mock_dynamic_npc_override row;
-    u32 number[12];
+    u32 number[13];
     bool hasInstanceConfiguration = false;
 
     memset(&row, 0, sizeof(row));
     memset(number, 0, sizeof(number));
-    if (context == NULL || columnCount != 19 ||
+    if (context == NULL || columnCount != 20 ||
         g_vm_net_mock_dynamic_npc_override_count >= VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX ||
         !vm_net_mock_dynamic_npc_decode_hex(values[0], lengths[0],
                                             row.scene, sizeof(row.scene)) ||
@@ -2307,7 +3981,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
         !vm_mock_mysql_parse_u32(values[15], lengths[15], &number[8]) || number[8] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[16], lengths[16], &number[9]) || number[9] > 0xffffu ||
         !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[10]) || number[10] > 0xffffu ||
-        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffu)
+        !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[11]) || number[11] > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[12]) || number[12] > 1u)
     {
         if (context != NULL)
             ++context->skipped;
@@ -2390,6 +4065,29 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                    row.scene, row.seed.actorId, row.seed.actorResource);
         }
     }
+    /* This callback runs while vm_mysql_query is iterating its result set.
+     * Never issue a second MySQL query here: the client library correctly
+     * rejects it as reentrant and the old fallback then silently exposed the
+     * built-in monkey with service rows but without its challenge target.
+     * The final SELECT supplies this exact-scene existence bit for direct
+     * kind-3 challenges.  Destination-scene guides retain the already local
+     * generic catalog predicate. */
+    if (hasInstanceConfiguration && row.seed.challengeEnemyId != 0 &&
+        ((row.seed.instanceScene[0] == 0 && number[12] == 0) ||
+         (row.seed.instanceScene[0] != 0 &&
+          !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId))))
+    {
+        ++context->skipped;
+        printf("[error][mock-admin] dynamic_npc_instance_target_unresolved "
+               "scene=%s actor=%u target_scene=%s enemy=%u "
+               "action=skip-row reason=direct-challenge-requires-enabled-"
+               "scene-battle-monster-or-instance-catalog-target "
+               "direct_scene_target_exists=%u source=parent-load-query\n",
+               row.scene, row.seed.actorId,
+               row.seed.instanceScene[0] ? row.seed.instanceScene : "-",
+               row.seed.challengeEnemyId, number[12]);
+        return true;
+    }
     if (row.seed.actorId == 0 || row.seed.x == 0 || row.seed.y == 0 ||
         !vm_net_mock_scene_name_is_safe(row.scene) ||
         row.seed.displayName[0] == 0 ||
@@ -2408,8 +4106,6 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
             !vm_net_mock_scene_name_is_safe(row.seed.instanceScene) ||
             row.seed.instanceX == 0 || row.seed.instanceY == 0 ||
             !vm_net_mock_scene_resource_exists(row.seed.instanceScene))) ||
-          (row.seed.challengeEnemyId != 0 &&
-           !vm_net_mock_monster_enemy_id_known(row.seed.challengeEnemyId)) ||
           row.seed.instanceMinLevel == 0)) ||
         !vm_net_mock_scene_npc_validate_actor_resource(&row.seed,
                                                         "dynamic-npc-db") ||
@@ -2443,7 +4139,11 @@ static bool vm_net_mock_dynamic_npc_db_query_rows(
         "COALESCE(server_dynamic_npc_instances.target_x,0),"
         "COALESCE(server_dynamic_npc_instances.target_y,0),"
         "COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0),"
-        "COALESCE(server_dynamic_npc_instances.minimum_level,1) "
+        "COALESCE(server_dynamic_npc_instances.minimum_level,1),"
+        "EXISTS(SELECT 1 FROM server_scene_battle_monsters AS sbm "
+        "WHERE sbm.scene=server_dynamic_npcs.scene "
+        "AND sbm.monster_id=COALESCE(server_dynamic_npc_instances.challenge_enemy_id,0) "
+        "AND sbm.enabled=1) "
         "FROM server_dynamic_npcs LEFT JOIN server_dynamic_npc_tasks "
         "USING(scene,actor_id) LEFT JOIN server_dynamic_npc_instances "
         "USING(scene,actor_id) ORDER BY scene,actor_id",
@@ -2465,6 +4165,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
 
     if (!vm_net_mock_native_npc_db_load() ||
         !vm_net_mock_npc_service_options_table_ensure() ||
+        !vm_net_mock_scene_battle_monster_schema_ensure() ||
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npcs ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
@@ -2546,14 +4247,14 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         const char *publishError = NULL;
         if (!row->enabled)
             continue;
-        if (!vm_net_mock_ensure_actor_resource_published(
+        if (!vm_net_mock_ensure_actor_resource_available(
                 row->seed.actorResource, &publishError))
         {
             row->enabled = false;
             ++context.quarantined;
             printf("[error][mock-admin] dynamic_npc_quarantine scene=%s actor=%u resource=%s reason=%s action=runtime-disable\n",
                    row->scene, row->seed.actorId, row->seed.actorResource,
-                   publishError ? publishError : "publish-failed");
+                   publishError ? publishError : "resource-invalid");
         }
     }
     g_vm_net_mock_dynamic_npc_db_valid = true;
@@ -2712,8 +4413,8 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             !vm_net_mock_scene_name_is_safe(seed->instanceScene) ||
             seed->instanceX == 0 || seed->instanceY == 0 ||
             !vm_net_mock_scene_resource_exists(seed->instanceScene))) ||
-          (seed->challengeEnemyId != 0 &&
-           !vm_net_mock_monster_enemy_id_known(seed->challengeEnemyId)) ||
+          !vm_net_mock_npc_instance_challenge_target_is_configured(
+              scene, seed) ||
           seed->instanceMinLevel == 0 || seed->instanceMinLevel > 0xffu ||
           seed->challengeEnemyId > 0xffffu ||
           seed->actorId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK)) ||
@@ -2727,11 +4428,11 @@ static bool vm_net_mock_dynamic_npc_admin_save(
             *errorOut = "NPC fields are invalid or the server Actor/XSE resource is unavailable";
         return false;
     }
-    if (!vm_net_mock_ensure_actor_resource_published(seed->actorResource,
+    if (!vm_net_mock_ensure_actor_resource_available(seed->actorResource,
                                                       &publishError))
     {
         if (errorOut)
-            *errorOut = publishError ? publishError : "Actor resource could not be published";
+            *errorOut = publishError ? publishError : "Actor resource is invalid";
         return false;
     }
     existing = vm_net_mock_dynamic_npc_find_override(scene, seed->actorId);
