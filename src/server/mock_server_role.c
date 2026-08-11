@@ -3617,25 +3617,39 @@ mysql_failed:
     return false;
 }
 
-/* Recalculate only mutable combat values.  The server's default formula is
- * parametrised by level and family, therefore an override must retain those
- * two current settings while HP/MP/attack/defense are regenerated.  Saving
- * the complete row through the existing transactional writer preserves
- * reward and drop ownership exactly as the administrator configured it. */
-static bool vm_net_mock_monster_admin_reset_combat_stats(
-    u32 enemyId, const char **errorOut)
+/* Recalculate only mutable combat values.  A batch is one MySQL transaction:
+ * validate every selected identity and calculate all four values before the
+ * first UPDATE, then publish the matching in-memory overrides only after
+ * COMMIT.  This avoids a browser-side bulk action leaving a half-reset set
+ * when one row is invalid or MySQL rejects the write. */
+static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
+    const u32 *enemyIds, u32 enemyCount, u32 *updatedOut, u32 *alreadyDefaultOut,
+    const char **errorOut)
 {
-    vm_net_mock_monster_admin_row row;
-    vm_net_mock_monster_entry entry;
-    vm_net_mock_monster_stats defaults;
-    vm_net_mock_monster_override *override = NULL;
-    int index = -1;
+    typedef struct
+    {
+        int index;
+        vm_net_mock_monster_stats defaults;
+    } vm_net_mock_monster_combat_reset_pending;
+    vm_net_mock_monster_combat_reset_pending
+        pending[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    char query[512];
+    char mysqlError[512];
+    u32 pendingCount = 0;
+    u32 alreadyDefault = 0;
+    bool transactionStarted = false;
 
+    if (updatedOut)
+        *updatedOut = 0;
+    if (alreadyDefaultOut)
+        *alreadyDefaultOut = 0;
     if (errorOut)
         *errorOut = "怪物目录中不存在该 ID";
-    index = vm_net_mock_monster_catalog_index(enemyId);
-    if (index < 0)
+    if (enemyIds == NULL || enemyCount == 0 ||
+        enemyCount > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+    {
         return false;
+    }
     if (!g_vm_net_mock_monster_db_valid)
     {
         g_vm_net_mock_monster_db_loaded = false;
@@ -3647,46 +3661,107 @@ static bool vm_net_mock_monster_admin_reset_combat_stats(
         }
     }
 
-    override = &g_vm_net_mock_monster_overrides[index];
-    if (!override->used)
+    for (u32 i = 0; i < enemyCount; ++i)
     {
-        /* No database row means all four values already come from precisely
-         * this baseline.  Avoid materialising a redundant override. */
-        if (errorOut)
-            *errorOut = "ok";
-        printf("[info][mock-admin] monster_combat_stats_reset id=%u source=server-default action=noop\n",
-               enemyId);
-        return true;
+        vm_net_mock_monster_entry entry;
+        vm_net_mock_monster_override *override = NULL;
+        int index = vm_net_mock_monster_catalog_index(enemyIds[i]);
+
+        if (enemyIds[i] == 0 || index < 0)
+            return false;
+        for (u32 previous = 0; previous < i; ++previous)
+        {
+            if (enemyIds[previous] == enemyIds[i])
+            {
+                if (errorOut)
+                    *errorOut = "批量重置中存在重复怪物 ID";
+                return false;
+            }
+        }
+        override = &g_vm_net_mock_monster_overrides[index];
+        if (!override->used)
+        {
+            ++alreadyDefault;
+            continue;
+        }
+        entry = vm_net_mock_monster_entry_for_enemy(enemyIds[i]);
+        entry.level = override->stats.level;
+        entry.family = override->family;
+        pending[pendingCount].index = index;
+        pending[pendingCount].defaults =
+            vm_net_mock_monster_base_stats_for_entry(&entry);
+        ++pendingCount;
     }
 
-    entry = vm_net_mock_monster_entry_for_enemy(enemyId);
-    entry.level = override->stats.level;
-    entry.family = override->family;
-    defaults = vm_net_mock_monster_base_stats_for_entry(&entry);
-
-    memset(&row, 0, sizeof(row));
-    row.enemyId = enemyId;
-    row.level = override->stats.level;
-    row.family = override->family;
-    row.hp = defaults.hp;
-    row.mp = defaults.mp;
-    row.attack = defaults.attack;
-    row.defense = defaults.defense;
-    row.exp = override->stats.exp;
-    row.gold = override->stats.gold;
-    row.dropCount = override->dropCount;
-    if (row.dropCount != 0)
+    if (pendingCount != 0)
     {
-        memcpy(row.drops, override->drops,
-               sizeof(row.drops[0]) * row.dropCount);
-    }
-    if (!vm_net_mock_monster_admin_save(&row, errorOut))
-        return false;
+        if (!vm_mysql_exec("START TRANSACTION"))
+            goto mysql_failed;
+        transactionStarted = true;
+        for (u32 i = 0; i < pendingCount; ++i)
+        {
+            vm_net_mock_monster_override *override =
+                &g_vm_net_mock_monster_overrides[pending[i].index];
+            const vm_net_mock_monster_stats *defaults = &pending[i].defaults;
 
-    printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=reward-and-drops\n",
-           row.enemyId, row.level, row.family, row.hp, row.mp, row.attack,
-           row.defense);
+            snprintf(query, sizeof(query),
+                     "UPDATE server_monsters SET hp=%u,mp=%u,attack_value=%u,"
+                     "defense_value=%u WHERE monster_id=%u",
+                     defaults->hp, defaults->mp, defaults->attack,
+                     defaults->defense, override->stats.enemyId);
+            if (!vm_mysql_exec(query))
+                goto mysql_failed;
+        }
+        if (!vm_mysql_exec("COMMIT"))
+            goto mysql_failed;
+        transactionStarted = false;
+    }
+
+    for (u32 i = 0; i < pendingCount; ++i)
+    {
+        vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[pending[i].index];
+        const vm_net_mock_monster_stats *defaults = &pending[i].defaults;
+
+        override->stats.hp = defaults->hp;
+        override->stats.mp = defaults->mp;
+        override->stats.attack = defaults->attack;
+        override->stats.defense = defaults->defense;
+        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=reward-and-drops\n",
+               override->stats.enemyId, override->stats.level,
+               override->family, defaults->hp, defaults->mp,
+               defaults->attack, defaults->defense);
+    }
+    if (updatedOut)
+        *updatedOut = pendingCount;
+    if (alreadyDefaultOut)
+        *alreadyDefaultOut = alreadyDefault;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] monster_combat_stats_batch_reset selected=%u updated=%u already_default=%u transaction=%s\n",
+           enemyCount, pendingCount, alreadyDefault,
+           pendingCount == 0 ? "not-needed" : "committed");
     return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_combat_stats_batch_reset_failed selected=%u staged=%u error=%s\n",
+           enemyCount, pendingCount, mysqlError);
+    if (errorOut)
+        *errorOut = "怪物战斗属性批量重置失败，请检查服务端 MySQL 日志";
+    return false;
+}
+
+static bool vm_net_mock_monster_admin_reset_combat_stats(
+    u32 enemyId, const char **errorOut)
+{
+    u32 updated = 0;
+    u32 alreadyDefault = 0;
+
+    return vm_net_mock_monster_admin_reset_combat_stats_batch(
+        &enemyId, 1, &updated, &alreadyDefault, errorOut);
 }
 
 static bool vm_net_mock_monster_admin_reset(u32 enemyId,

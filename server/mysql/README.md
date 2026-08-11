@@ -84,9 +84,10 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_conte
 
 脚本新增 `server_content_update_releases` 和
 `server_content_update_files`，用来保存 WT 18/9 → 18/8 的版本清单。清单可以包含
-任意非 CBM 游戏数据资源；服务不会在每次启动时递增版本，只有在后台增删资源或重新发布
-当前清单时，客户端才会因 `id/code` 不同而删除并重取其中资源。服务启动也会自动创建表，
-并一次性迁移旧 `server_content_update.tsv`（若存在）。
+任意非 CBM 游戏数据资源。每个文件还保存服务端的发布时字节校验，用于避免相同文件的
+重复发布。服务不会在每次启动时递增版本，只有后台新增/移除资源或检测到已发布资源的
+字节变化时，客户端才会因 `id/code` 不同而删除并重取其中资源。服务启动也会自动补齐
+旧表的 `resource_checksum` 列，并一次性迁移旧 `server_content_update.tsv`（若存在）。
 
 已有数据库升级到用户账号中心和数据库后台密码时执行：
 

@@ -14,7 +14,8 @@
 #include "../src/main.c"
 #undef main
 
-static u32 make_request(u8 *out, u32 outCap, u8 subtype)
+static u32 make_request(u8 *out, u32 outCap, u8 subtype,
+                        u32 contentVersion, u32 contentCode)
 {
     u32 pos = 4;
     u32 objectStart = 0;
@@ -25,7 +26,10 @@ static u32 make_request(u8 *out, u32 outCap, u8 subtype)
     }
     if (subtype == 9)
     {
-        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "version", 0) ||
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "version",
+                                        contentVersion) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "codeVersion",
+                                        contentCode) ||
             !vm_net_mock_put_object_string(out, outCap, &pos, "cbm", "") ||
             !vm_net_mock_put_object_string(out, outCap, &pos, "client",
                                            "content-update-regression"))
@@ -112,7 +116,7 @@ int main(void)
     }
     g_vm_net_mock_content_update.code = expectedCode;
 
-    requestLen = make_request(request, sizeof(request), 9);
+    requestLen = make_request(request, sizeof(request), 9, 0, 0);
     responseLen = vm_net_mock_build_version_response(request, requestLen,
                                                       response, sizeof(response));
     if (responseLen == 0 ||
@@ -129,7 +133,40 @@ int main(void)
         return 1;
     }
 
-    requestLen = make_request(request, sizeof(request), 8);
+    /* A finished client reports the id/code pair it persisted after WT 18/8.
+     * type=1 is an update command, not a harmless hint, so the server must
+     * acknowledge an exact match with type=0 and no target metadata. */
+    requestLen = make_request(request, sizeof(request), 9,
+                              g_vm_net_mock_content_update.id, expectedCode);
+    responseLen = vm_net_mock_build_version_response(request, requestLen,
+                                                      response, sizeof(response));
+    if (responseLen == 0 ||
+        !vm_net_mock_get_object_u8_field(response, responseLen, "type", &type) ||
+        !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
+        !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
+        type != 0 || id != 0 || code != 0)
+    {
+        fputs("WT 18/9 current-content acknowledgement failed\n", stderr);
+        return 1;
+    }
+
+    requestLen = make_request(request, sizeof(request), 9,
+                              g_vm_net_mock_content_update.id,
+                              expectedCode + 1u);
+    responseLen = vm_net_mock_build_version_response(request, requestLen,
+                                                      response, sizeof(response));
+    if (responseLen == 0 ||
+        !vm_net_mock_get_object_u8_field(response, responseLen, "type", &type) ||
+        !vm_net_mock_get_object_u32_field(response, responseLen, "id", &id) ||
+        !vm_net_mock_get_object_u32_field(response, responseLen, "code", &code) ||
+        type != 1 || id != g_vm_net_mock_content_update.id ||
+        code != expectedCode)
+    {
+        fputs("WT 18/9 changed-content target contract failed\n", stderr);
+        return 1;
+    }
+
+    requestLen = make_request(request, sizeof(request), 8, 0, 0);
     responseLen = vm_net_mock_build_content_update_chunk_response(
         request, requestLen, response, sizeof(response));
     if (responseLen == 0 ||

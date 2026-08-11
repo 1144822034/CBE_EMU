@@ -28,7 +28,7 @@ u16 field=5, u16 value=1, u16 field=14, u16 monster_id,
 string field=15 display_name,
 u16 field=16, u16 visual_hint(5 或 6),
 string field=17 actor_resource,
-effect-actor tail after field17 (`u16 3, u16 3, u8 len, bytes`)
+unnumbered child effect Actor (`u16 kind=3, u16 kind=3, u8 len, bytes`)
 ```
 
 这正是部署器输出并重新解析验证的格式。
@@ -45,12 +45,13 @@ MySQL 表：
 
 后台“保存草稿”不会向任何客户端投递 NPC 或怪物包。显式“部署”会：
 
-1. 校验场景、GBK 名称、坐标、视觉提示、主 Actor 与 field18 效果 Actor；并按已有
-   资源发布流程确保这两项 Actor/GIF 依赖可发布。field18 是客户端创建 type-2
-   场景节点的原生记录部分，不是可以省略的装饰字段。
+1. 校验场景、GBK 名称、坐标、视觉提示、主 Actor 与退场效果 Actor；并按已有
+   资源发布流程确保这两项 Actor/GIF 依赖可发布。退场 Actor 是客户端创建 type-2
+   场景节点的原生子记录，不是可以省略的装饰字段。
 2. 解码捕获的基础 SCE，统计原有静态节点，并为当前场景最多四条初始
    `27/11` NPC 记录预留节点位。
-3. 追加每个启用项的原生 kind-3 记录，重新由同一 SCE 解析器核验所有新增项。
+3. 在原生最终 kind-8 场景控制记录之前（无此记录的场景则在 EOF）插入每个启用项的
+   kind-3 记录，再以同一边界重新核验所有新增项。
 4. 拒绝会超过客户端 25 个场景节点表上限的输出：本地角色以外的静态节点、
    已下发 NPC 与启用战斗怪合计最多为 24。
 5. 使用普通资源格式（外层长度 + 标准 LZSS literal 流）写入**服务端**资源根，
@@ -90,9 +91,11 @@ NPC 的 action13 挑战请求不是一律 `4/10`。`江湖OL.CBE:SendNPCInteract
 `mmBattle:0x66CC` 用该 index 和服务器解析出的静态 spawn 坐标复制 type-2 节点的
 Actor。`4/10` 不使用该 index，只能生成角色职业/性别模板，不能表示怪物 Actor。
 
-这不允许服务端以离线 SCE 结果猜测客户端节点。服务端必须先确认 action13 上行的
-nonzero index 与当前可验证的 SCE2 战斗怪相符；若客户端缓存仍是旧版本、未找到目标
-节点或 index 不匹配，应拒绝挑战，而不是返回 `4/10` 或伪造 `4/5`。
+这不允许服务端以离线 SCE 结果猜测客户端节点。`SendNPCInteractReq` 已在客户端以
+目标 actor ID 扫描 active scene-node table；因此 action13 上行的 **nonzero index 本身**
+就是该 live node 已存在的证据。服务端只校验配置敌人 ID、当前场景和时序，并使用请求
+index 与 SCE 提供的静态 x/y 返回 `4/5`；不得以服务器按 prop/NPC 数量推导的 ordinal
+覆盖或拒绝客户端 index。若客户端未找到目标而发出 0，才拒绝挑战，不能返回 `4/10`。
 
 2026-08-10 的实际复现中，服务端将 `00蓬莱仙岛_02` 的小猴子配置解析为 index 8，
 但本次客户端没有发送该 SCE 的 `18/7 clientmiss` 下载请求；随后 action13 上行也未

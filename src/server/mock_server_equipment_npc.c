@@ -934,6 +934,12 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
     if (rewardGrantedOut)
         *rewardGrantedOut = true;
 
+    /* Count a defeated monster once per newly settled victory, independently
+     * of whether any configured item happened to drop.  Loot progress is
+     * recorded separately inside the loop below. */
+    vm_net_mock_task_progress_after_battle(
+        g_vm_net_mock_battle_enemy_id_current, enemyCount, 0, 0);
+
     baseRewardExp = vm_net_mock_mul_capped_u32(
         vm_net_mock_env_u32_if_set("CBE_BATTLE_REWARD_EXP",
                                    vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
@@ -1054,7 +1060,7 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
         results[resultCount].count = grantedCount;
         ++resultCount;
         vm_net_mock_task_progress_after_battle(
-            g_vm_net_mock_battle_enemy_id_current, enemyCount,
+            0, 0,
             configured->itemId, grantedCount);
     }
 

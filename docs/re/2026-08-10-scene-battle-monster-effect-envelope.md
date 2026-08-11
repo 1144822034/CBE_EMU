@@ -1,8 +1,8 @@
-# 场景战斗怪 field-18 嵌套信封
+# 场景战斗怪退场 Actor 子记录
 
 Date: 2026-08-10
 
-Status: implemented; requires one explicit re-deploy and client re-entry
+Status: corrected 2026-08-11; requires one explicit re-deploy and client re-entry
 
 ## 触发
 
@@ -14,18 +14,18 @@ Status: implemented; requires one explicit re-deploy and client re-entry
 ## 首个偏离
 
 对比已解压的原生 `01桃花岛_01.sce` 和本次已部署的
-`00蓬莱仙岛_02.sce`，field 14–17 相同；field 18 不同：
+`00蓬莱仙岛_02.sce`，field 14–17 相同；field17 后的无编号退场 Actor 子记录不同：
 
 ```text
 原生： ... [03 00][03 00][len][effect.actor]
-旧部署：... [03 00][12 00][len][effect.actor]
+错误短尾：... [03 00][len][effect.actor]
 ```
 
-第二个 `03 00` 不是可省略的重复值；它之后的首字节就是 effect Actor 字符串长度，
-不是 `u16 field=18`。`JianghuOL.CBE:LoadSceneDataFromStream` 读取 SCE2 后交由
-场景实体解析回调创建节点；实际运行表明把这段写成普通编号字段时，记录不会成为
-action13 能按 monster ID 找到的 active scene node。服务器原来的宽松扫描器也漏掉了
-这条结构约束，因而错误地把资源标记为已部署。
+两段 `03 00` 都是原生记录的一部分；第二段后面的一个字节才是 effect Actor
+字符串长度。该尾部不是普通的 `field=18` 字符串字段。短尾资源会使
+`LoadSceneDataFromStream` 在安装 SCE 时越过正确记录边界，随后在场景数据读取阶段
+访问空对象。服务器 parser 曾被错误地改成与短尾生成器一致，因而把这份无效资源
+标记为可部署。
 
 ## 修复
 
@@ -37,8 +37,8 @@ action13 能按 monster ID 找到的 active scene node。服务器原来的宽�
 `scripts/scene-battle-monster-field18-regression.c` 同时覆盖：
 
 1. 生成记录可以被生产 parser 读回；
-2. 输出包含原生 `3,3,len` 字节信封；
-3. 删除完整 field 18 或删除中间 `3` 的旧部署格式均被拒绝。
+2. 输出包含原生 `3,3,len` 退场 Actor 子记录；
+3. 删除完整退场 Actor 或删除第二个 `u16 3` 的短尾部署格式均被拒绝。
 
 ## 验证边界
 

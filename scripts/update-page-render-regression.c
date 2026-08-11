@@ -61,6 +61,10 @@ int main(void)
         strstr(response, "server_content_update_releases") == NULL ||
         strstr(response, "server_content_update_files") == NULL ||
         strstr(response, "add-content-update-files") == NULL ||
+        strstr(response, "data-admin-list") == NULL ||
+        strstr(response, "data-admin-detail") == NULL ||
+        strstr(response, "section=modules") == NULL ||
+        strstr(response, "section=configuration") == NULL ||
         strstr(response, "multiple") == NULL ||
         strstr(response, "b_bamboo.actor") == NULL ||
         strstr(response, "publish-named-update") != NULL ||
@@ -69,6 +73,33 @@ int main(void)
     {
         fprintf(stderr, "update page render contract failed: bytes=%zu\n",
                 responseLen);
+        free(response);
+        return 1;
+    }
+
+    /* Each option is a same-tab partial-navigation target.  The server still
+     * renders a complete authenticated document, while admin.js replaces only
+     * data-admin-detail on option changes. */
+    vm_mock_admin_render_page(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                              "tab=updates&section=modules");
+    if (strstr(response, "save-update-slot") == NULL ||
+        strstr(response, "add-content-update-files") != NULL ||
+        strstr(response, "data-admin-list") == NULL ||
+        strstr(response, "data-admin-detail") == NULL)
+    {
+        fputs("update modules partial render contract failed\n", stderr);
+        free(response);
+        return 1;
+    }
+    vm_mock_admin_render_page(response, VM_MOCK_ADMIN_RESPONSE_MAX,
+                              "tab=updates&section=configuration");
+    if (strstr(response, "server_update_catalog.tsv") == NULL ||
+        strstr(response, "server_update_delivery.tsv") == NULL ||
+        strstr(response, "add-content-update-files") != NULL ||
+        strstr(response, "data-admin-list") == NULL ||
+        strstr(response, "data-admin-detail") == NULL)
+    {
+        fputs("update configuration partial render contract failed\n", stderr);
         free(response);
         return 1;
     }

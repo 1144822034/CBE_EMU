@@ -1536,6 +1536,10 @@ typedef struct
     u32 code;
     char names[VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX]
               [VM_NET_MOCK_CONTENT_UPDATE_NAME_CAP];
+    /* This is server-side publish metadata, not a client protocol field.
+     * It lets the control plane distinguish an explicit re-submit from bytes
+     * that really changed under the same resource leaf. */
+    u32 resourceChecksums[VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX];
     u32 nameCount;
 } vm_net_mock_content_update_config;
 
@@ -1565,6 +1569,8 @@ static bool g_vm_net_mock_content_update_loaded = false;
 
 static u32 vm_net_mock_signed_byte_sum(const u8 *data, u32 len);
 static long vm_net_mock_update_file_size(const char *name);
+static bool vm_net_mock_content_update_resource_checksum(const char *name,
+                                                         u32 *checksumOut);
 
 static bool vm_net_mock_update_name_is_safe(const char *name)
 {
@@ -1829,6 +1835,19 @@ static bool vm_net_mock_content_update_add_name(
     return true;
 }
 
+static u32 vm_net_mock_content_update_find_name(
+    const vm_net_mock_content_update_config *release, const char *name)
+{
+    if (release == NULL || name == NULL)
+        return VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX;
+    for (u32 i = 0; i < release->nameCount; ++i)
+    {
+        if (strcmp(release->names[i], name) == 0)
+            return i;
+    }
+    return VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX;
+}
+
 static u32 vm_net_mock_content_update_build_payload(
     const vm_net_mock_content_update_config *release, u8 *out, u32 outCap,
     u32 *checksumOut)
@@ -1933,15 +1952,18 @@ static bool vm_net_mock_content_update_file_row(
     vm_net_mock_content_update_file_row_context *context =
         (vm_net_mock_content_update_file_row_context *)contextValue;
     u32 order = 0;
+    u32 resourceChecksum = 0;
     size_t decodedLen = 0;
     char name[128];
 
-    if (context == NULL || context->release == NULL || columnCount != 2 ||
+    if (context == NULL || context->release == NULL || columnCount != 3 ||
         values == NULL || lengths == NULL ||
         !vm_net_mock_content_update_parse_mysql_u32(values[0], lengths[0],
                                                      &order) ||
         order != context->release->nameCount + 1u || values[1] == NULL ||
         lengths[1] == 0 || (lengths[1] & 1u) != 0 ||
+        !vm_net_mock_content_update_parse_mysql_u32(values[2], lengths[2],
+                                                     &resourceChecksum) ||
         !vm_mysql_hex_decode(values[1], lengths[1], name, sizeof(name) - 1u,
                              &decodedLen) ||
         decodedLen == 0 || decodedLen >= sizeof(name))
@@ -1955,6 +1977,8 @@ static bool vm_net_mock_content_update_file_row(
         context->invalid = true;
         return true;
     }
+    context->release->resourceChecksums[context->release->nameCount - 1u] =
+        resourceChecksum;
     return true;
 }
 
@@ -1979,32 +2003,61 @@ static bool vm_net_mock_content_update_count_row(
 
 static bool vm_net_mock_content_update_schema_ensure(void)
 {
+    vm_net_mock_content_update_count_context columnContext;
+
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_content_update_releases ("
+            "config_id TINYINT UNSIGNED NOT NULL,"
+            "enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "release_id INT UNSIGNED NOT NULL DEFAULT 0,"
+            "manifest_code INT UNSIGNED NOT NULL DEFAULT 0,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+            "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(config_id)"
+            ") ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_content_update_files ("
+            "config_id TINYINT UNSIGNED NOT NULL,"
+            "sort_order SMALLINT UNSIGNED NOT NULL,"
+            "resource_name VARBINARY(127) NOT NULL,"
+            "resource_checksum INT UNSIGNED NOT NULL DEFAULT 0,"
+            "PRIMARY KEY(config_id,sort_order),"
+            "UNIQUE KEY uq_content_update_resource(config_id,resource_name)"
+            ") ENGINE=InnoDB") ||
+        !vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS server_data_migrations ("
+            "migration_name VARCHAR(127) CHARACTER SET ascii "
+            "COLLATE ascii_bin NOT NULL,"
+            "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(migration_name)) ENGINE=InnoDB"))
+    {
+        return false;
+    }
+
+    /* Existing installations created before byte-aware publication need a
+     * real schema migration.  Do not use unsupported ADD COLUMN IF NOT
+     * EXISTS syntax: the target MySQL versions include 5.x. */
+    memset(&columnContext, 0, sizeof(columnContext));
+    if (!vm_mysql_query(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() "
+            "AND TABLE_NAME='server_content_update_files' "
+            "AND COLUMN_NAME='resource_checksum'",
+            vm_net_mock_content_update_count_row, &columnContext) ||
+        columnContext.invalid || !columnContext.found)
+    {
+        return false;
+    }
+    if (columnContext.count == 0 &&
+        !vm_mysql_exec(
+            "ALTER TABLE server_content_update_files ADD COLUMN "
+            "resource_checksum INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER resource_name"))
+    {
+        return false;
+    }
     return vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_content_update_releases ("
-               "config_id TINYINT UNSIGNED NOT NULL,"
-               "enabled TINYINT UNSIGNED NOT NULL DEFAULT 0,"
-               "release_id INT UNSIGNED NOT NULL DEFAULT 0,"
-               "manifest_code INT UNSIGNED NOT NULL DEFAULT 0,"
-               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
-               "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(config_id)"
-               ") ENGINE=InnoDB") &&
-           vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_content_update_files ("
-               "config_id TINYINT UNSIGNED NOT NULL,"
-               "sort_order SMALLINT UNSIGNED NOT NULL,"
-               "resource_name VARBINARY(127) NOT NULL,"
-               "PRIMARY KEY(config_id,sort_order),"
-               "UNIQUE KEY uq_content_update_resource(config_id,resource_name)"
-               ") ENGINE=InnoDB") &&
-           vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_data_migrations ("
-               "migration_name VARCHAR(127) CHARACTER SET ascii "
-               "COLLATE ascii_bin NOT NULL,"
-               "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-               "PRIMARY KEY(migration_name)) ENGINE=InnoDB") &&
-           vm_mysql_exec(
-               "INSERT IGNORE INTO server_content_update_releases "
-               "(config_id,enabled,release_id,manifest_code) VALUES (1,0,0,0)");
+        "INSERT IGNORE INTO server_content_update_releases "
+        "(config_id,enabled,release_id,manifest_code) VALUES (1,0,0,0)");
 }
 
 static bool vm_net_mock_content_update_migration_is_marked(bool *markedOut)
@@ -2090,8 +2143,9 @@ static bool vm_net_mock_content_update_persist(
         }
         snprintf(query, sizeof(query),
                  "INSERT INTO server_content_update_files "
-                 "(config_id,sort_order,resource_name) VALUES (1,%u,X'%s')",
-                 i + 1u, nameHex);
+                 "(config_id,sort_order,resource_name,resource_checksum) "
+                 "VALUES (1,%u,X'%s',%u)",
+                 i + 1u, nameHex, release->resourceChecksums[i]);
         if (!vm_mysql_exec(query))
             goto fail;
     }
@@ -2255,7 +2309,7 @@ static void vm_net_mock_content_update_load(void)
     memset(&fileContext, 0, sizeof(fileContext));
     fileContext.release = &releaseContext.release;
     if (!vm_mysql_query(
-            "SELECT sort_order,HEX(resource_name) "
+            "SELECT sort_order,HEX(resource_name),resource_checksum "
             "FROM server_content_update_files WHERE config_id=1 "
             "ORDER BY sort_order",
             vm_net_mock_content_update_file_row, &fileContext) ||
@@ -2297,19 +2351,22 @@ static bool vm_net_mock_content_update_save(const char **errorOut)
 
 /* New game-data bytes must reach existing clients through the native startup path.
  * The manifest is cumulative: a client can skip releases, while its local
- * target records only one id/code pair.  Re-sending a managed resource name is
- * harmless; the client will fetch it once via WT 18/7 after invalidation. */
+ * target records only one id/code pair.  Publication is byte-aware: submitting
+ * an unchanged leaf must not manufacture a new target and force a re-download. */
 static bool vm_net_mock_content_update_publish_files(
-    const char *const *names, u32 nameCount, const char **errorOut)
+    const char *const *names, u32 nameCount, const char **errorOut,
+    bool *changedOut)
 {
     vm_net_mock_content_update_config previous;
     u8 payload[VM_NET_MOCK_CONTENT_UPDATE_PAYLOAD_MAX];
     u32 checksum = 0;
     u32 payloadLen = 0;
-    bool haveResource = false;
+    bool changed = false;
 
     if (errorOut)
         *errorOut = NULL;
+    if (changedOut)
+        *changedOut = false;
     if (names == NULL || nameCount == 0 ||
         nameCount > VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX)
     {
@@ -2327,6 +2384,9 @@ static bool vm_net_mock_content_update_publish_files(
     previous = g_vm_net_mock_content_update;
     for (u32 i = 0; i < nameCount; ++i)
     {
+        u32 resourceChecksum = 0;
+        u32 existingIndex = 0;
+
         if (!vm_net_mock_content_update_name_is_managed_resource(names[i]))
         {
             g_vm_net_mock_content_update = previous;
@@ -2334,18 +2394,41 @@ static bool vm_net_mock_content_update_publish_files(
                 *errorOut = "资源不属于可管理的非 CBM 游戏数据";
             return false;
         }
-        haveResource = true;
         if (vm_net_mock_update_file_size(names[i]) <= 0 ||
-            !vm_net_mock_content_update_add_name(
-                &g_vm_net_mock_content_update, names[i]))
+            !vm_net_mock_content_update_resource_checksum(names[i],
+                                                           &resourceChecksum))
         {
             g_vm_net_mock_content_update = previous;
             if (errorOut)
                 *errorOut = "资源无法加入内容更新清单";
             return false;
         }
+        existingIndex = vm_net_mock_content_update_find_name(
+            &g_vm_net_mock_content_update, names[i]);
+        if (existingIndex == VM_NET_MOCK_CONTENT_UPDATE_FILE_MAX)
+        {
+            if (!vm_net_mock_content_update_add_name(
+                    &g_vm_net_mock_content_update, names[i]))
+            {
+                g_vm_net_mock_content_update = previous;
+                if (errorOut)
+                    *errorOut = "资源无法加入内容更新清单";
+                return false;
+            }
+            existingIndex = g_vm_net_mock_content_update.nameCount - 1u;
+            g_vm_net_mock_content_update.resourceChecksums[existingIndex] =
+                resourceChecksum;
+            changed = true;
+        }
+        else if (g_vm_net_mock_content_update.resourceChecksums[existingIndex] !=
+                 resourceChecksum)
+        {
+            g_vm_net_mock_content_update.resourceChecksums[existingIndex] =
+                resourceChecksum;
+            changed = true;
+        }
     }
-    if (!haveResource)
+    if (!changed)
         return true;
 
     g_vm_net_mock_content_update.enabled = true;
@@ -2368,8 +2451,10 @@ static bool vm_net_mock_content_update_publish_files(
         g_vm_net_mock_content_update = previous;
         return false;
     }
+    if (changedOut)
+        *changedOut = true;
     printf("[info][mock-admin] content_update_publish id=%u code=%u files=%u "
-           "payload=%u delivery=WT18/9+18/8->18/7\n",
+           "payload=%u changed=1 delivery=WT18/9+18/8->18/7\n",
            g_vm_net_mock_content_update.id,
            g_vm_net_mock_content_update.code,
            g_vm_net_mock_content_update.nameCount, payloadLen);
@@ -2424,11 +2509,17 @@ static bool vm_net_mock_content_update_admin_remove_file(
                 &g_vm_net_mock_content_update.names[removeIndex + 1],
                 sizeof(g_vm_net_mock_content_update.names[0]) *
                     (g_vm_net_mock_content_update.nameCount - removeIndex - 1));
+        memmove(&g_vm_net_mock_content_update.resourceChecksums[removeIndex],
+                &g_vm_net_mock_content_update.resourceChecksums[removeIndex + 1],
+                sizeof(g_vm_net_mock_content_update.resourceChecksums[0]) *
+                    (g_vm_net_mock_content_update.nameCount - removeIndex - 1));
     }
     --g_vm_net_mock_content_update.nameCount;
     memset(g_vm_net_mock_content_update.names[
                g_vm_net_mock_content_update.nameCount], 0,
            sizeof(g_vm_net_mock_content_update.names[0]));
+    g_vm_net_mock_content_update.resourceChecksums[
+        g_vm_net_mock_content_update.nameCount] = 0;
     g_vm_net_mock_content_update.id =
         previous.id == 0xffffffffu ? 1u : previous.id + 1u;
     if (g_vm_net_mock_content_update.id == 0)
@@ -2495,19 +2586,22 @@ static bool vm_net_mock_content_update_admin_clear(const char **errorOut)
     return true;
 }
 
-/* Re-publishing is intentionally distinct from editing the list: a resource
- * may have been replaced in the authoritative server directory while keeping
- * its filename.  Bumping only the release id is enough for the client to see
- * a different target pair and re-fetch the unchanged manifest entries. */
-static bool vm_net_mock_content_update_admin_republish(const char **errorOut)
+/* Re-publishing checks the authoritative bytes behind every currently managed
+ * leaf.  A new id is emitted only when at least one byte stream differs from
+ * the version stored with the current release. */
+static bool vm_net_mock_content_update_admin_republish(const char **errorOut,
+                                                       bool *changedOut)
 {
     vm_net_mock_content_update_config previous;
     u8 payload[VM_NET_MOCK_CONTENT_UPDATE_PAYLOAD_MAX];
     u32 checksum = 0;
     u32 payloadLen = 0;
+    bool changed = false;
 
     if (errorOut)
         *errorOut = NULL;
+    if (changedOut)
+        *changedOut = false;
     vm_net_mock_content_update_load();
     if (!g_vm_net_mock_content_update_loaded)
     {
@@ -2523,6 +2617,28 @@ static bool vm_net_mock_content_update_admin_republish(const char **errorOut)
         return false;
     }
     previous = g_vm_net_mock_content_update;
+    for (u32 i = 0; i < g_vm_net_mock_content_update.nameCount; ++i)
+    {
+        u32 resourceChecksum = 0;
+
+        if (!vm_net_mock_content_update_resource_checksum(
+                g_vm_net_mock_content_update.names[i], &resourceChecksum))
+        {
+            g_vm_net_mock_content_update = previous;
+            if (errorOut)
+                *errorOut = "当前内容更新资源不可读";
+            return false;
+        }
+        if (g_vm_net_mock_content_update.resourceChecksums[i] !=
+            resourceChecksum)
+        {
+            g_vm_net_mock_content_update.resourceChecksums[i] =
+                resourceChecksum;
+            changed = true;
+        }
+    }
+    if (!changed)
+        return true;
     g_vm_net_mock_content_update.id =
         previous.id == 0xffffffffu ? 1u : previous.id + 1u;
     if (g_vm_net_mock_content_update.id == 0)
@@ -2542,8 +2658,10 @@ static bool vm_net_mock_content_update_admin_republish(const char **errorOut)
         g_vm_net_mock_content_update = previous;
         return false;
     }
+    if (changedOut)
+        *changedOut = true;
     printf("[info][mock-admin] content_update_republish id=%u code=%u "
-           "files=%u payload=%u storage=mysql\n",
+           "files=%u payload=%u changed=1 storage=mysql\n",
            g_vm_net_mock_content_update.id,
            g_vm_net_mock_content_update.code,
            g_vm_net_mock_content_update.nameCount, payloadLen);
@@ -2929,6 +3047,47 @@ static long vm_net_mock_update_file_size(const char *name)
         size = ftell(fp);
     fclose(fp);
     return size;
+}
+
+/* FNV-1a is stored only as a compact change detector for the publication
+ * control plane.  The client-side WT 18/8 checksum remains the original
+ * signed-byte manifest checksum and must not be replaced by this value. */
+static bool vm_net_mock_content_update_resource_checksum(const char *name,
+                                                         u32 *checksumOut)
+{
+    char path[1200];
+    FILE *fp = NULL;
+    u8 buffer[4096];
+    size_t readCount = 0;
+    u32 checksum = 2166136261u;
+
+    if (checksumOut)
+        *checksumOut = 0;
+    if (!vm_net_mock_content_update_name_is_managed_resource(name) ||
+        !vm_net_mock_update_resource_path(name, path, sizeof(path)))
+    {
+        return false;
+    }
+    fp = vm_net_mock_fopen_game_path(path, "rb");
+    if (fp == NULL)
+        return false;
+    while ((readCount = fread(buffer, 1, sizeof(buffer), fp)) != 0)
+    {
+        for (size_t i = 0; i < readCount; ++i)
+        {
+            checksum ^= buffer[i];
+            checksum *= 16777619u;
+        }
+    }
+    if (ferror(fp))
+    {
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    if (checksumOut)
+        *checksumOut = checksum;
+    return true;
 }
 
 static u32 vm_net_mock_file_checksum(const char *path)
@@ -4628,8 +4787,11 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
     u8 requestKind = 0;
     u8 requestSubtype = 0;
     u32 identityHash = 0;
+    u32 clientContentVersion = 0;
+    u32 clientContentCode = 0;
     bool usedClientVersions = false;
     bool haveContentUpdate = false;
+    bool clientContentCurrent = false;
     u8 result = vm_net_mock_update_result_mask(request, requestLen,
                                                &identityHash,
                                                &usedClientVersions);
@@ -4642,6 +4804,20 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
     haveContentUpdate = g_vm_net_mock_content_update.enabled &&
                         g_vm_net_mock_content_update.id != 0 &&
                         g_vm_net_mock_content_update.nameCount != 0;
+    /* WT 18/9 carries the pair persisted after the client has successfully
+     * processed a content manifest.  type=1 unconditionally enters the
+     * update/resume state machine, so the server (not the client) must return
+     * type=0 when that installed pair is exactly the active release. */
+    if (haveContentUpdate && requestKind == 0x12 && requestSubtype == 9 &&
+        vm_net_mock_get_object_u32_field(request, requestLen, "version",
+                                         &clientContentVersion) &&
+        vm_net_mock_get_object_u32_field(request, requestLen, "codeVersion",
+                                         &clientContentCode))
+    {
+        clientContentCurrent =
+            clientContentVersion == g_vm_net_mock_content_update.id &&
+            clientContentCode == g_vm_net_mock_content_update.code;
+    }
 
     u32 objectStart = 0;
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x12, 5, &objectStart))
@@ -4661,25 +4837,29 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
             return 0;
         /* type=1 enters startup_screen_select_phase_and_continue(), which
          * requests WT 18/8.  id must match the following 18/8.version and
-         * code must match its final signed-byte checksum; the CBE persists
-         * that pair and therefore skips an unchanged release on later boots. */
+         * code must match its final signed-byte checksum.  The client reports
+         * the last completed pair above, but does not turn type=1 into a
+         * no-op itself. */
         if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type",
-                                       haveContentUpdate ? 1 : 0))
+                                       haveContentUpdate && !clientContentCurrent ?
+                                           1 : 0))
             return 0;
         if (!vm_net_mock_put_object_u32(
                 out, outCap, &pos, "id",
-                haveContentUpdate ? g_vm_net_mock_content_update.id : 0))
+                haveContentUpdate && !clientContentCurrent ?
+                    g_vm_net_mock_content_update.id : 0))
             return 0;
         if (!vm_net_mock_put_object_u32(
                 out, outCap, &pos, "code",
-                haveContentUpdate ? g_vm_net_mock_content_update.code : 0))
+                haveContentUpdate && !clientContentCurrent ?
+                    g_vm_net_mock_content_update.code : 0))
             return 0;
         vm_net_mock_finish_wt_object(out, objectStart, pos);
         objectCount = 2;
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u content=%u/%u/%u\n",
+    printf("[info][network] mock_update_version request=%u/%u result=0x%02x identity=%08x source=%s configured=%u/%u/%u/%u content=%u/%u/%u client_content=%u/%u action=%s\n",
            requestKind, requestSubtype, result, identityHash,
            usedClientVersions ? "client-cbm-versions" : "delivery-ledger",
            g_vm_net_mock_update_slots[0].enabled ?
@@ -4692,7 +4872,9 @@ static u32 vm_net_mock_build_version_response(const u8 *request,
                g_vm_net_mock_update_slots[3].version : 0,
            haveContentUpdate ? g_vm_net_mock_content_update.id : 0,
            haveContentUpdate ? g_vm_net_mock_content_update.code : 0,
-           haveContentUpdate ? g_vm_net_mock_content_update.nameCount : 0);
+           haveContentUpdate ? g_vm_net_mock_content_update.nameCount : 0,
+           clientContentVersion, clientContentCode,
+           haveContentUpdate && !clientContentCurrent ? "update" : "current");
     return pos;
 }
 
