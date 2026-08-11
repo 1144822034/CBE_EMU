@@ -2485,7 +2485,7 @@ static bool vm_net_mock_shop_commit_purchase(const char *reason,
     debit.expectedBalance = wcoin_before;
     debit.debit = cost;
     if (!vm_net_mock_role_db_save_relational(
-            reason, NULL, NULL, 0, false, NULL, &debit))
+            reason, NULL, NULL, 0, false, NULL, &debit, NULL))
     {
         return false;
     }
@@ -4098,6 +4098,20 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
 
     if (selected && role != NULL)
     {
+        u32 offlineExp = 0;
+        u32 offlineMinutes = 0;
+        u32 offlineItems = 0;
+
+        /* The three seasonal tokens have no client-side “use” request.  Settle
+         * only after this exact role becomes active, so the full login actor
+         * payload below is already built from the persisted post-offline EXP. */
+        if (vm_net_mock_offline_exp_settle(role, &offlineExp, &offlineMinutes,
+                                            &offlineItems) &&
+            (offlineExp != 0 || offlineItems != 0))
+        {
+            printf("[info][network] mock_login_offline_exp role=%u exp=%u minutes=%u tokens=%u source=role-select\n",
+                   role->roleId, offlineExp, offlineMinutes, offlineItems);
+        }
         /*
          * Role select creates a new first-scene lifecycle on the client. Do
          * not inherit the previous connection's completed/pending scene

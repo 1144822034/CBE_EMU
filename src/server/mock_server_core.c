@@ -5867,6 +5867,7 @@ typedef struct
 
 static vm_net_mock_role_state *vm_net_mock_active_role(void);
 static u32 vm_net_mock_role_level_from_exp(u32 exp);
+static u32 vm_net_mock_role_level_start_exp(u32 level);
 static u32 vm_net_mock_role_next_level_start_exp(u32 exp);
 static u32 vm_net_mock_role_exp_percent(u32 exp);
 static u32 vm_net_mock_role_last_level_exp(u32 exp);
@@ -5882,6 +5883,18 @@ static bool vm_net_mock_practise_use_pill(vm_net_mock_role_state *role,
                                           u16 itemSeq, u32 *remainingOut);
 static void vm_net_mock_practise_mark_offline(const char *accountId,
                                               u32 roleId);
+/* 聚元丹的“活力”不属于角色 HP/MP，也不应伪装成二者之一。它和离线
+ * 奖励一样是按账号/角色持久化的伴随状态；专用物品 builder 只能在这些
+ * 权威操作成功提交后返回客户端的 result=1。 */
+static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *currentOut,
+                                          u32 *maxOut);
+static void vm_net_mock_offline_exp_mark_offline(const char *accountId,
+                                                  u32 roleId);
+static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,
+                                           u32 *expGrantedOut,
+                                           u32 *minutesOut,
+                                           u32 *itemsConsumedOut);
 static void vm_net_mock_role_record_rapid_battle_entry(
     const vm_net_mock_role_state *role, const char *source,
     const char *scene, u32 enemyId);
@@ -5941,6 +5954,10 @@ static u32 vm_net_mock_build_exp_card_status_response(const u8 *request,
                                                       u32 requestLen,
                                                       u8 *out, u32 outCap);
 static u32 vm_net_mock_build_timed_special_item_use_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_vitality_pill33_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap);
+static u32 vm_net_mock_build_training_book_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);
 static u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap);

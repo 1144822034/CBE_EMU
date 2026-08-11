@@ -943,8 +943,19 @@ static const char g_vm_net_mock_training_book_default_title[] =
 static const char g_vm_net_mock_training_book_default_description[] =
     "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\n"
     "\xB4\xCB\xCA\xE9\xBC\xC7\xC2\xBC\xC1\xCB\xC7\xB0\xB1\xB2\xB5\xC4\xD0\xDE\xD0\xD0\xD0\xC4\xB5\xC3\xA1\xA3\n"
-    "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xA3\xBA" "1\n"
-    "\xCB\xF9\xBA\xAC\xBE\xAD\xD1\xE9\xA3\xBA" "0";
+    "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xA3\xBA" "10\n"
+    "\xCB\xF9\xBA\xAC\xBE\xAD\xD1\xE9\xA3\xBA" "1689";
+
+/* item.dsh gives no numeric book payload.  The default instance is therefore
+ * an explicit server balance seed: level 10 and the current level-10 entry
+ * threshold (1689 EXP on the shipped curve).  Per-instance DB values remain
+ * authoritative and may be higher; this seed only prevents a newly granted
+ * 921 from being an unuseable level-1/zero-EXP placeholder. */
+enum
+{
+    VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL = 10,
+    VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE = 1689
+};
 
 static bool vm_net_mock_training_book_schema_prepare(void)
 {
@@ -1037,6 +1048,36 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
     if (!vm_mysql_exec(query))
         return false;
 
+    /* Version one of this companion table was created before a transfer rule
+     * existed and seeded every 921 as level 1 / zero EXP.  An early build of
+     * this transfer implementation also paired level 10 with the level-9
+     * threshold 1303.  Neither payload can satisfy its claimed level, and
+     * both are server-generated placeholders rather than player-authored
+     * book progress, so migrate only those exact tuples to the baseline. */
+    if (fullSnapshot)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_training_books SET book_level=%u,book_experience=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND "
+                 "((book_level=1 AND book_experience=0) OR "
+                 "(book_level=10 AND book_experience=1303))",
+                 VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL,
+                 VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE, accountHex);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_training_books SET book_level=%u,book_experience=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND "
+                 "((book_level=1 AND book_experience=0) OR "
+                 "(book_level=10 AND book_experience=1303))",
+                 VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL,
+                 VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE,
+                 accountHex, scopedRoleId);
+    }
+    if (!vm_mysql_exec(query))
+        return false;
+
     for (u32 roleIndex = 0; roleIndex < database->roleCount; ++roleIndex)
     {
         const vm_net_mock_role_state *role = &database->roles[roleIndex];
@@ -1053,9 +1094,11 @@ static bool vm_net_mock_training_book_sync_role_records(const vm_net_mock_role_d
             snprintf(query, sizeof(query),
                      "INSERT IGNORE INTO account_role_training_books("
                      "account_id,role_id,item_seq,title,book_description,book_info,book_level,book_experience) "
-                     "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',X'%s',X'%s',1,0)",
+                     "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',X'%s',X'%s',%u,%u)",
                      accountHex, role->roleId, item->seq, titleHex,
-                     descriptionHex, descriptionHex);
+                     descriptionHex, descriptionHex,
+                     VM_NET_MOCK_TRAINING_BOOK_DEFAULT_LEVEL,
+                     VM_NET_MOCK_TRAINING_BOOK_DEFAULT_EXPERIENCE);
             if (!vm_mysql_exec(query))
                 return false;
         }
@@ -1532,6 +1575,33 @@ static void vm_net_mock_role_service_apply_battle_wear(
     }
     printf("[info][network] mock_equipment_durability_wear role=%u battle=%u amount=1\n",
            role->roleId, g_mockBattleOperateSessionSerial);
+
+    /* 战斗心得 is a live one-hour effect.  Its resource wording promises
+     * automatic repair, not a free repair: retain the existing NPC repair
+     * pricing/eligibility and only repair after this battle's normal one-point
+     * wear has committed.  A shortfall leaves durability unchanged and does
+     * not turn an unaffordable repair into a fake success. */
+    if (vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0)
+    {
+        u16 repairCount = 0;
+        u32 repairCost = 0;
+
+        if (vm_net_mock_role_service_repair_all(role, &repairCount, &repairCost))
+        {
+            if (repairCount != 0)
+            {
+                printf("[info][network] mock_battle_insight_auto_repair role=%u battle=%u repaired=%u cost=%u action=committed\n",
+                       role->roleId, g_mockBattleOperateSessionSerial,
+                       repairCount, repairCost);
+            }
+        }
+        else if (repairCount != 0)
+        {
+            printf("[info][network] mock_battle_insight_auto_repair role=%u battle=%u repaired=0 cost=%u money=%u action=insufficient-funds\n",
+                   role->roleId, g_mockBattleOperateSessionSerial,
+                   repairCost, role->money);
+        }
+    }
 }
 
 static u32 vm_net_mock_build_role_learned_skill_blob(const vm_net_mock_role_state *role,
@@ -1774,6 +1844,84 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
             return &g_vm_net_mock_shop_catalog[i];
     }
     return NULL;
+}
+
+/* Battle心得 may free a single physical bag row only when a rolled reward
+ * cannot be inserted.  Sell the least valuable ordinary equipment instance
+ * first, use the same 50% base-price rule as the explicit recovery NPC, and
+ * never touch consumables, quest items, equipped instances or enhanced-price
+ * guesses.  The caller retries its normal grant only after this commit. */
+static bool vm_net_mock_battle_insight_auto_sell_one_equipment(
+    vm_net_mock_role_state *role, u32 *soldItemIdOut, u16 *soldSeqOut,
+    u32 *salePriceOut)
+{
+    vm_net_mock_role_state before;
+    const vm_net_mock_shop_catalog_item *bestCatalog = NULL;
+    vm_net_mock_backpack_item_state *bestItem = NULL;
+    u32 bestPrice = 0;
+    u32 bestItemId = 0;
+    u16 bestItemSeq = 0;
+    u32 remaining = 0;
+
+    if (soldItemIdOut)
+        *soldItemIdOut = 0;
+    if (soldSeqOut)
+        *soldSeqOut = 0;
+    if (salePriceOut)
+        *salePriceOut = 0;
+    if (role == NULL ||
+        vm_net_mock_role_backpack_count(role) < role->backpackCapacity)
+    {
+        return false;
+    }
+    for (u32 index = 0; index < vm_net_mock_role_backpack_count(role); ++index)
+    {
+        vm_net_mock_backpack_item_state *item = &role->backpackItems[index];
+        const vm_net_mock_shop_catalog_item *catalog =
+            vm_net_mock_find_shop_catalog_item(item->itemId);
+        u32 resale = 0;
+
+        if (item->itemId == 0 || item->seq == 0 || item->count != 1 ||
+            catalog == NULL || !catalog->isEquip || catalog->price == 0)
+        {
+            continue;
+        }
+        resale = (catalog->price / 2u) + (catalog->price & 1u);
+        if (bestItem == NULL || resale < bestPrice ||
+            (resale == bestPrice && item->seq < bestItem->seq))
+        {
+            bestItem = item;
+            bestCatalog = catalog;
+            bestPrice = resale;
+            bestItemId = item->itemId;
+            bestItemSeq = item->seq;
+        }
+    }
+    if (bestItem == NULL || bestCatalog == NULL || bestPrice == 0)
+        return false;
+
+    before = *role;
+    if (!vm_net_mock_role_consume_backpack_item(role, bestItemId,
+                                                 bestItemSeq, 1, &remaining) ||
+        remaining != 0)
+    {
+        *role = before;
+        return false;
+    }
+    role->money = 0xffffffffu - role->money < bestPrice ?
+                      0xffffffffu : role->money + bestPrice;
+    if (!vm_net_mock_role_db_save("battle-insight-auto-sell"))
+    {
+        *role = before;
+        return false;
+    }
+    if (soldItemIdOut)
+        *soldItemIdOut = bestCatalog->itemId;
+    if (soldSeqOut)
+        *soldSeqOut = bestItemSeq;
+    if (salePriceOut)
+        *salePriceOut = bestPrice;
+    return true;
 }
 
 static int vm_net_mock_chest_kind_index(u32 chestItemId)
@@ -5060,12 +5208,147 @@ static u32 vm_net_mock_build_practise_pill16_response(
     return pos;
 }
 
-/* These requests have parser-proven response contracts, but their durable
- * gameplay state is not yet represented by an authoritative server record:
- * 827 needs offline-training hours, 833 needs vitality, and 920/921 need the
- * book instance's level and experience payload. Return a parser-valid
- * non-success response instead of silently dropping the request or consuming
- * an item with no corresponding gameplay effect. */
+/* 833 聚元丹 uses the same CBE result shell as 827, but its `maxnum` is the
+ * current vitality, not a disguised HP/MP amount.  result=1 is emitted only
+ * after the exact selected stack and account_role_vitality row committed in
+ * one transaction. */
+static u32 vm_net_mock_build_vitality_pill33_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = NULL;
+    u16 itemSeq = 0;
+    u32 current = 0;
+    u32 maximum = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    bool success = false;
+    const char *itemInfo =
+        "\xBB\xEE\xC1\xA6\xD2\xD1\xC2\xFA\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 活力已满，未使用。 */
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 33,
+                                                    "itemseq", false, &itemSeq))
+    {
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    success = vm_net_mock_vitality_use_pill(role, itemSeq, &current, &maximum);
+    if (success)
+    {
+        itemInfo = "\xBB\xEE\xC1\xA6\xBB\xD6\xB8\xB4\xB3\xC9\xB9\xA6\xA1\xA3"; /* 活力恢复成功。 */
+    }
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 33, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 1 : 2) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", current) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", itemInfo))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_vitality_pill33 role=%u seq=%u success=%u vitality=%u/%u response=%u evidence=JianghuOL.CBE:0x0102355E+0x01025AE6,item.dsh:833\n",
+           role ? role->roleId : 0, itemSeq, success ? 1u : 0u,
+           current, maximum, pos);
+    return pos;
+}
+
+/* 921 is the actual sequence-owned transfer item.  CBE case 40 consumes the
+ * currently selected row only for result=0 and then calls HandleLevelUpResponse,
+ * so all status fields must be from the same committed role snapshot. */
+static u32 vm_net_mock_build_training_book_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state before;
+    vm_net_mock_training_book_record book;
+    u16 itemSeq = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 currentLevel = 0;
+    u32 beforeExp = 0;
+    u32 remaining = 0;
+    bool success = false;
+    const char *bookInfo =
+        "\xB1\xB3\xB0\xFC\xD6\xD0\xB5\xC4\xCC\xEC\xCA\xE9\xB2\xBB\xB4\xE6\xD4\xDA\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 背包中的天书不存在，未使用。 */
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 40,
+                                                    "seq", false, &itemSeq))
+    {
+        return 0;
+    }
+    role = vm_net_mock_active_role();
+    memset(&book, 0, sizeof(book));
+    if (role != NULL &&
+        vm_net_mock_training_book_load_active_instance(role, itemSeq, &book))
+    {
+        currentLevel = vm_net_mock_role_level_from_exp(role->exp);
+        if (book.level == 0 || book.level > VM_NET_MOCK_ROLE_LEVEL_CAP ||
+            book.experience == 0 ||
+            book.experience < vm_net_mock_role_level_start_exp(book.level))
+        {
+            bookInfo = "\xCC\xEC\xCA\xE9\xBE\xAD\xD1\xE9\xCE\xDE\xD0\xA7\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 天书经验无效，未使用。 */
+        }
+        else if (currentLevel >= VM_NET_MOCK_ROLE_LEVEL_CAP ||
+                 book.level <= currentLevel)
+        {
+            bookInfo = "\xCC\xEC\xCA\xE9\xB5\xC8\xBC\xB6\xB1\xD8\xD0\xEB\xB8\xDF\xD3\xDA\xB5\xB1\xC7\xB0\xB5\xC8\xBC\xB6\xA1\xA3"; /* 天书等级必须高于当前等级。 */
+        }
+        else
+        {
+            before = *role;
+            beforeExp = role->exp;
+            if (vm_net_mock_role_consume_backpack_item(role, 921, itemSeq, 1,
+                                                        &remaining))
+            {
+                (void)vm_net_mock_role_add_exp(role, book.experience);
+                if (role->exp > beforeExp &&
+                    vm_net_mock_role_db_save("training-book-use"))
+                {
+                    success = true;
+                    bookInfo = "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xCA\xB9\xD3\xC3\xB3\xC9\xB9\xA6\xA1\xA3"; /* 修炼天书使用成功。 */
+                }
+                else
+                {
+                    *role = before;
+                    bookInfo = "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xCA\xB9\xD3\xC3\xCA\xA7\xB0\xDC\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 修炼天书使用失败，未使用。 */
+                }
+            }
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 40, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", success ? 0 : 1) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "bookinfo", bookInfo))
+    {
+        return 0;
+    }
+    if (success)
+    {
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "exp", role->exp) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "level", role->level) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp",
+                                        vm_net_mock_role_last_level_exp(role->exp)) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "curexp",
+                                        vm_net_mock_role_next_level_start_exp(role->exp)) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "persentexp",
+                                        vm_net_mock_role_exp_percent(role->exp)))
+        {
+            return 0;
+        }
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    printf("[info][network] mock_training_book_use role=%u seq=%u book_level=%u book_exp=%u recipient_level=%u success=%u item_remaining=%u response=%u evidence=JianghuOL.CBE:0x010238B6+0x01025AE6(case40)+0x01046EDA\n",
+           role ? role->roleId : 0, itemSeq, book.level, book.experience,
+           currentLevel, success ? 1u : 0u, remaining, pos);
+    return pos;
+}
+
+/* Description-only book reads stay separate from the consuming 7/40 transfer
+ * transaction.  7/35 is the static template text; 7/38 reads a concrete 921
+ * instance.  The use packets 7/16, 7/33 and 7/40 are handled by their own
+ * durable builders above and must never fall back here. */
 static u32 vm_net_mock_build_unresolved_special_item_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -5073,8 +5356,6 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
     u8 subtype = 0;
     u32 pos = 5;
     u32 objectStart = 0;
-    const char *itemInfo =
-        "\xB8\xC3\xB5\xC0\xBE\xDF\xB5\xC4\xC8\xA8\xCD\xFE\xD7\xB4\xCC\xAC\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
     const char *bookInfo =
         "\xD0\xDE\xC1\xB6\xCC\xEC\xCA\xE9\xD7\xCA\xC1\xCF\xC9\xD0\xCE\xB4\xC5\xE4\xD6\xC3\xA3\xAC\xCE\xB4\xCF\xFB\xBA\xC4\xA1\xA3";
     vm_net_mock_role_state *role = NULL;
@@ -5083,17 +5364,7 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
 
     if (out == NULL || outCap < pos)
         return 0;
-    if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 16,
-                                                   "itemseq", false, &requestedSeq))
-    {
-        subtype = 16;
-    }
-    else if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 33,
-                                                        "itemseq", false, &requestedSeq))
-    {
-        subtype = 33;
-    }
-    else if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 35,
+    if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 35,
                                                         "seq", false, &requestedSeq))
     {
         subtype = 35;
@@ -5102,11 +5373,6 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
                                                         "seq", false, &requestedSeq))
     {
         subtype = 38;
-    }
-    else if (vm_net_mock_parse_special_item_seq_request(request, requestLen, 7, 40,
-                                                        "seq", false, &requestedSeq))
-    {
-        subtype = 40;
     }
     else
     {
@@ -5137,16 +5403,7 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, subtype, &objectStart))
         return 0;
-    if (subtype == 16 || subtype == 33)
-    {
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 2) ||
-            !vm_net_mock_put_object_u32(out, outCap, &pos, "maxnum", 0) ||
-            !vm_net_mock_put_object_string(out, outCap, &pos, "iteminfo", itemInfo))
-        {
-            return 0;
-        }
-    }
-    else if (subtype == 35)
+    if (subtype == 35)
     {
         if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
             !vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookInfo))
@@ -5158,15 +5415,6 @@ static u32 vm_net_mock_build_unresolved_special_item_response(
     {
         if (!vm_net_mock_put_object_string(out, outCap, &pos, "bookdes", bookInfo))
             return 0;
-    }
-    else
-    {
-        /* result=1 displays bookinfo without removing the selected 921 row. */
-        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
-            !vm_net_mock_put_object_string(out, outCap, &pos, "bookinfo", bookInfo))
-        {
-            return 0;
-        }
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);

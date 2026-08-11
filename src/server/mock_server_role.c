@@ -6349,6 +6349,43 @@ typedef struct
     u32 committedBalance;
 } vm_net_mock_account_wallet_debit;
 
+/* Seasonal offline EXP has no item-use request.  The only durable authority
+ * is the interval between a session becoming offline and the next role
+ * selection, plus the unspent minutes bought by already-consumed tokens. */
+typedef struct
+{
+    bool apply;
+    u32 expectedOfflineStartedUnix;
+    u32 remainingMinutes;
+} vm_net_mock_offline_exp_settlement_update;
+
+static bool g_vm_net_mock_offline_exp_schema_checked = false;
+static bool g_vm_net_mock_offline_exp_schema_valid = false;
+
+static bool vm_net_mock_offline_exp_schema_prepare(void)
+{
+    if (g_vm_net_mock_offline_exp_schema_checked)
+        return g_vm_net_mock_offline_exp_schema_valid;
+    g_vm_net_mock_offline_exp_schema_checked = true;
+    g_vm_net_mock_offline_exp_schema_valid = vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS account_role_offline_exp ("
+        "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "role_id INT UNSIGNED NOT NULL,"
+        "offline_started_unix INT UNSIGNED NOT NULL DEFAULT 0,"
+        "available_minutes INT UNSIGNED NOT NULL DEFAULT 0,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(account_id,role_id),"
+        "CONSTRAINT fk_account_role_offline_exp_role FOREIGN KEY(account_id,role_id) "
+        "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+        ") ENGINE=InnoDB");
+    if (!g_vm_net_mock_offline_exp_schema_valid)
+    {
+        printf("[error][network] mock_offline_exp_schema error=%s\n",
+               vm_mysql_last_error());
+    }
+    return g_vm_net_mock_offline_exp_schema_valid;
+}
+
 static void vm_mock_service_account_wallet_sync_cached_balance(
     const char *account_id, u32 balance);
 
@@ -6358,7 +6395,8 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
                                                  u32 mapping_count,
                                                  bool full_snapshot,
                                                  const vm_net_mock_role_item_effect *timed_effect,
-                                                 vm_net_mock_account_wallet_debit *wallet_debit)
+                                                 vm_net_mock_account_wallet_debit *wallet_debit,
+                                                 const vm_net_mock_offline_exp_settlement_update *offline_exp_update)
 {
     const char *account_id = g_vm_mock_service_active_account_id;
     char account_hex[129];
@@ -6376,6 +6414,12 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     if (timed_effect != NULL &&
         (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
          !vm_net_mock_role_prepare_item_effect_schema()))
+    {
+        return false;
+    }
+    if (offline_exp_update != NULL &&
+        (!offline_exp_update->apply ||
+         !vm_net_mock_offline_exp_schema_prepare()))
     {
         return false;
     }
@@ -6721,6 +6765,34 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             goto failed;
         }
     }
+    if (offline_exp_update != NULL)
+    {
+        if (full_snapshot || scoped_role_id == 0 ||
+            offline_exp_update->expectedOfflineStartedUnix == 0)
+        {
+            snprintf(mysql_error, sizeof(mysql_error),
+                     "offline experience settlement requires active role scope");
+            goto failed;
+        }
+        /* The expected timestamp keeps a stale role-select from consuming an
+         * interval a newer session already replaced.  Same-account sessions
+         * are retired before their replacement is admitted, so this is an
+         * optimistic guard rather than a silent retry policy. */
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_offline_exp(account_id,role_id,offline_started_unix,available_minutes) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,0,%u) "
+                 "ON DUPLICATE KEY UPDATE "
+                 "available_minutes=IF(offline_started_unix=%u,VALUES(available_minutes),available_minutes),"
+                 "offline_started_unix=IF(offline_started_unix=%u,0,offline_started_unix)",
+                 account_hex, scoped_role_id, offline_exp_update->remainingMinutes,
+                 offline_exp_update->expectedOfflineStartedUnix,
+                 offline_exp_update->expectedOfflineStartedUnix);
+        if (!vm_mysql_exec(query))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+            goto failed;
+        }
+    }
     if (!vm_mysql_exec("COMMIT"))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -6749,7 +6821,8 @@ failed:
 
 static bool vm_net_mock_role_db_save(const char *reason)
 {
-    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false, NULL, NULL);
+    return vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false,
+                                                NULL, NULL, NULL);
 }
 
 /*
@@ -7339,6 +7412,478 @@ failed:
     return false;
 }
 
+/* item.dsh gives 行酒令、月饼、爱国之心 the same behavioural contract:
+ * they are consumed by the server while their owner is offline and award more
+ * EXP at higher levels.  The resource deliberately has no numeric reward
+ * columns, so this server policy uses the already-documented normal-practise
+ * rate (8 * level EXP per settled minute) and converts each token into one
+ * hour of stored offline time.  Seasonal items remain separate item ids but
+ * therefore have equal mechanics rather than undocumented hidden multipliers.
+ */
+enum
+{
+    VM_NET_MOCK_OFFLINE_EXP_TOKEN_MINUTES = 60,
+    VM_NET_MOCK_OFFLINE_EXP_PER_MINUTE_PER_LEVEL =
+        VM_NET_MOCK_PRACTISE_EXP_PER_MINUTE_PER_LEVEL
+};
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 offlineStartedUnix;
+    u32 availableMinutes;
+} vm_net_mock_offline_exp_state;
+
+typedef struct
+{
+    vm_net_mock_offline_exp_state *state;
+} vm_net_mock_offline_exp_load_context;
+
+static bool vm_net_mock_offline_exp_load_row(void *contextValue,
+                                              unsigned int columnCount,
+                                              const char *const *values,
+                                              const size_t *lengths)
+{
+    vm_net_mock_offline_exp_load_context *context =
+        (vm_net_mock_offline_exp_load_context *)contextValue;
+    vm_net_mock_offline_exp_state *state = context ? context->state : NULL;
+
+    if (state == NULL || state->found || columnCount != 2 ||
+        values[0] == NULL || values[1] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0],
+                                 &state->offlineStartedUnix) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1],
+                                 &state->availableMinutes))
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return true;
+    }
+    state->found = true;
+    return true;
+}
+
+static bool vm_net_mock_offline_exp_load(const char *accountHex, u32 roleId,
+                                         vm_net_mock_offline_exp_state *stateOut)
+{
+    char query[640];
+    vm_net_mock_offline_exp_load_context context;
+
+    if (stateOut == NULL || accountHex == NULL || accountHex[0] == 0 ||
+        roleId == 0 || !vm_net_mock_offline_exp_schema_prepare())
+    {
+        return false;
+    }
+    memset(stateOut, 0, sizeof(*stateOut));
+    context.state = stateOut;
+    snprintf(query, sizeof(query),
+             "SELECT offline_started_unix,available_minutes "
+             "FROM account_role_offline_exp WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             accountHex, roleId);
+    if (!vm_mysql_query(query, vm_net_mock_offline_exp_load_row, &context) ||
+        stateOut->invalid)
+    {
+        return false;
+    }
+    return true;
+}
+
+static void vm_net_mock_offline_exp_mark_offline(const char *accountId,
+                                                  u32 roleId)
+{
+    char accountHex[129];
+    char query[768];
+
+    if (roleId == 0 || !vm_net_mock_practise_account_hex(accountId, accountHex) ||
+        !vm_net_mock_offline_exp_schema_prepare())
+    {
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_role_offline_exp(account_id,role_id,offline_started_unix,available_minutes) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,UNIX_TIMESTAMP(CURRENT_TIMESTAMP()),0) "
+             "ON DUPLICATE KEY UPDATE offline_started_unix="
+             "IF(offline_started_unix=0,VALUES(offline_started_unix),offline_started_unix)",
+             accountHex, roleId);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] offline_exp_mark_failed account=%s role=%u error=%s\n",
+               accountId ? accountId : "-", roleId, vm_mysql_last_error());
+    }
+}
+
+static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,
+                                           u32 *expGrantedOut,
+                                           u32 *minutesOut,
+                                           u32 *itemsConsumedOut)
+{
+    static const u32 tokenItemIds[] = {804u, 812u, 938u};
+    char accountHex[129];
+    vm_net_mock_offline_exp_state state;
+    vm_net_mock_offline_exp_settlement_update update;
+    vm_net_mock_role_state before;
+    vm_mock_mysql_practise_clock_context clock;
+    u32 nowUnix = 0;
+    u32 elapsedMinutes = 0;
+    u32 tokenMinutes = 0;
+    u32 totalAvailableMinutes = 0;
+    u32 usableMinutes = 0;
+    u32 requiredTokens = 0;
+    u32 consumedTokens = 0;
+    u32 grantedExp = 0;
+    u32 remainingMinutes = 0;
+
+    if (expGrantedOut)
+        *expGrantedOut = 0;
+    if (minutesOut)
+        *minutesOut = 0;
+    if (itemsConsumedOut)
+        *itemsConsumedOut = 0;
+    if (role == NULL || role->roleId == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_offline_exp_load(accountHex, role->roleId, &state) ||
+        !state.found || state.offlineStartedUnix == 0)
+    {
+        return false;
+    }
+    /* The start marker is written by MySQL's UNIX_TIMESTAMP().  Read the
+     * same clock here instead of time(NULL), otherwise a skewed game host
+     * could grant an interval that the durable authority never observed. */
+    memset(&clock, 0, sizeof(clock));
+    if (!vm_net_mock_practise_read_clock_locked(&clock) ||
+        clock.nowUnix > 0xffffffffu)
+    {
+        return false;
+    }
+    nowUnix = (u32)clock.nowUnix;
+    if (nowUnix <= state.offlineStartedUnix)
+        return true;
+    elapsedMinutes = (nowUnix - state.offlineStartedUnix) / 60u;
+    /* Preserve a sub-minute interval.  The next offline transition leaves the
+     * original timestamp intact, so this time is not silently discarded. */
+    if (elapsedMinutes == 0)
+        return true;
+
+    for (u32 i = 0; i < vm_net_mock_role_backpack_count(role); ++i)
+    {
+        const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+        bool isToken = false;
+        for (u32 kind = 0; kind < sizeof(tokenItemIds) / sizeof(tokenItemIds[0]); ++kind)
+        {
+            if (item->itemId == tokenItemIds[kind])
+            {
+                isToken = true;
+                break;
+            }
+        }
+        if (isToken && item->count != 0)
+        {
+            uint64_t add = (uint64_t)item->count *
+                           VM_NET_MOCK_OFFLINE_EXP_TOKEN_MINUTES;
+            tokenMinutes = add > 0xffffffffu - tokenMinutes ?
+                           0xffffffffu : tokenMinutes + (u32)add;
+        }
+    }
+    totalAvailableMinutes =
+        tokenMinutes > 0xffffffffu - state.availableMinutes ?
+            0xffffffffu : state.availableMinutes + tokenMinutes;
+    usableMinutes = elapsedMinutes < totalAvailableMinutes ?
+                        elapsedMinutes : totalAvailableMinutes;
+    if (usableMinutes > state.availableMinutes)
+    {
+        u32 newMinutesNeeded = usableMinutes - state.availableMinutes;
+        requiredTokens = (newMinutesNeeded +
+                          VM_NET_MOCK_OFFLINE_EXP_TOKEN_MINUTES - 1u) /
+                         VM_NET_MOCK_OFFLINE_EXP_TOKEN_MINUTES;
+    }
+
+    before = *role;
+    for (u32 kind = 0; requiredTokens != 0 &&
+                        kind < sizeof(tokenItemIds) / sizeof(tokenItemIds[0]); ++kind)
+    {
+        u32 itemIndex = 0;
+        while (requiredTokens != 0 &&
+               itemIndex < vm_net_mock_role_backpack_count(role))
+        {
+            vm_net_mock_backpack_item_state *item = &role->backpackItems[itemIndex];
+            u32 take = 0;
+            u32 remaining = 0;
+
+            if (item->itemId != tokenItemIds[kind] || item->seq == 0 ||
+                item->count == 0)
+            {
+                ++itemIndex;
+                continue;
+            }
+            take = item->count < requiredTokens ? item->count : requiredTokens;
+            if (!vm_net_mock_role_consume_backpack_item(role, item->itemId,
+                                                         item->seq, take,
+                                                         &remaining))
+            {
+                *role = before;
+                return false;
+            }
+            requiredTokens -= take;
+            consumedTokens += take;
+            if (remaining != 0)
+                ++itemIndex;
+        }
+    }
+    if (requiredTokens != 0)
+    {
+        *role = before;
+        return false;
+    }
+    {
+        uint64_t funded = (uint64_t)state.availableMinutes +
+                          (uint64_t)consumedTokens *
+                              VM_NET_MOCK_OFFLINE_EXP_TOKEN_MINUTES;
+        remainingMinutes = funded > usableMinutes ?
+                           (funded - usableMinutes > 0xffffffffu ?
+                                0xffffffffu : (u32)(funded - usableMinutes)) : 0;
+    }
+    if (usableMinutes != 0)
+    {
+        uint64_t reward = (uint64_t)usableMinutes *
+                          (role->level ? role->level : 1u) *
+                          VM_NET_MOCK_OFFLINE_EXP_PER_MINUTE_PER_LEVEL;
+        grantedExp = reward > 0xffffffffu ? 0xffffffffu : (u32)reward;
+        if (grantedExp != 0)
+            (void)vm_net_mock_role_add_exp(role, grantedExp);
+    }
+
+    memset(&update, 0, sizeof(update));
+    update.apply = true;
+    update.expectedOfflineStartedUnix = state.offlineStartedUnix;
+    update.remainingMinutes = remainingMinutes;
+    if (!vm_net_mock_role_db_save_relational("offline-exp-settle", NULL, NULL,
+                                             0, false, NULL, NULL, &update))
+    {
+        *role = before;
+        return false;
+    }
+    if (expGrantedOut)
+        *expGrantedOut = grantedExp;
+    if (minutesOut)
+        *minutesOut = usableMinutes;
+    if (itemsConsumedOut)
+        *itemsConsumedOut = consumedTokens;
+    printf("[info][network] mock_offline_exp_settle role=%u elapsed_minutes=%u "
+           "settled_minutes=%u tokens=%u remaining_minutes=%u exp=%u "
+           "source=item.dsh:804/812/938\n",
+           role->roleId, elapsedMinutes, usableMinutes, consumedTokens,
+           remainingMinutes, grantedExp);
+    return true;
+}
+
+/* 活力 is not the scene HP/MP pair.  The CBE's 7/33 response only consumes
+ * the selected inventory row after result=1, therefore the value and the row
+ * have to commit together or the client would be told a pill worked without a
+ * durable recovery. */
+enum
+{
+    VM_NET_MOCK_VITALITY_MAX = 100,
+    VM_NET_MOCK_VITALITY_PILL_RESTORE = 100
+};
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 current;
+    u32 maximum;
+} vm_net_mock_vitality_state;
+
+typedef struct
+{
+    vm_net_mock_vitality_state *state;
+} vm_net_mock_vitality_load_context;
+
+static bool g_vm_net_mock_vitality_schema_checked = false;
+static bool g_vm_net_mock_vitality_schema_valid = false;
+
+static bool vm_net_mock_vitality_schema_prepare(void)
+{
+    if (g_vm_net_mock_vitality_schema_checked)
+        return g_vm_net_mock_vitality_schema_valid;
+    g_vm_net_mock_vitality_schema_checked = true;
+    g_vm_net_mock_vitality_schema_valid = vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS account_role_vitality ("
+        "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+        "role_id INT UNSIGNED NOT NULL,"
+        "vitality INT UNSIGNED NOT NULL DEFAULT 0,"
+        "vitality_max INT UNSIGNED NOT NULL DEFAULT 100,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(account_id,role_id),"
+        "CONSTRAINT fk_account_role_vitality_role FOREIGN KEY(account_id,role_id) "
+        "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+        ") ENGINE=InnoDB");
+    if (!g_vm_net_mock_vitality_schema_valid)
+    {
+        printf("[error][network] mock_vitality_schema error=%s\n",
+               vm_mysql_last_error());
+    }
+    return g_vm_net_mock_vitality_schema_valid;
+}
+
+static bool vm_net_mock_vitality_load_row(void *contextValue,
+                                           unsigned int columnCount,
+                                           const char *const *values,
+                                           const size_t *lengths)
+{
+    vm_net_mock_vitality_load_context *context =
+        (vm_net_mock_vitality_load_context *)contextValue;
+    vm_net_mock_vitality_state *state = context ? context->state : NULL;
+
+    if (state == NULL || state->found || columnCount != 2 ||
+        values[0] == NULL || values[1] == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &state->current) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &state->maximum) ||
+        state->maximum == 0 || state->current > state->maximum)
+    {
+        if (state != NULL)
+            state->invalid = true;
+        return true;
+    }
+    state->found = true;
+    return true;
+}
+
+static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
+                                          u16 itemSeq, u32 *currentOut,
+                                          u32 *maxOut)
+{
+    char accountHex[129];
+    char query[1024];
+    char mysqlError[512];
+    vm_net_mock_role_state projected;
+    vm_net_mock_backpack_item_state *sourceItem = NULL;
+    vm_net_mock_vitality_state state;
+    vm_net_mock_vitality_load_context loadContext;
+    bool transactionStarted = false;
+    u32 expectedItemCount = 0;
+    u32 remaining = 0;
+    u32 restored = 0;
+
+    if (currentOut)
+        *currentOut = 0;
+    if (maxOut)
+        *maxOut = 0;
+    if (role == NULL || role->roleId == 0 || itemSeq == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_vitality_schema_prepare())
+    {
+        return false;
+    }
+    sourceItem = vm_net_mock_role_find_backpack_item(role, 833, itemSeq);
+    if (sourceItem == NULL || sourceItem->count == 0)
+        return false;
+    expectedItemCount = sourceItem->count;
+    projected = *role;
+    if (!vm_net_mock_role_consume_backpack_item(&projected, 833, itemSeq, 1,
+                                                 &remaining))
+    {
+        return false;
+    }
+
+    mysqlError[0] = 0;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_vitality(account_id,role_id,vitality,vitality_max) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,0,%u)",
+             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    memset(&state, 0, sizeof(state));
+    loadContext.state = &state;
+    snprintf(query, sizeof(query),
+             "SELECT vitality,vitality_max FROM account_role_vitality WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
+             accountHex, role->roleId);
+    if (!vm_mysql_query(query, vm_net_mock_vitality_load_row, &loadContext) ||
+        !state.found || state.invalid || state.current >= state.maximum)
+    {
+        goto failed;
+    }
+    restored = state.maximum - state.current;
+    if (restored > VM_NET_MOCK_VITALITY_PILL_RESTORE)
+        restored = VM_NET_MOCK_VITALITY_PILL_RESTORE;
+    state.current += restored;
+
+    memset(&loadContext, 0, sizeof(loadContext));
+    /* Lock the exact selected stack, not merely any item 833 row. */
+    {
+        vm_mock_mysql_practise_u32_context databaseItemCount;
+        memset(&databaseItemCount, 0, sizeof(databaseItemCount));
+        snprintf(query, sizeof(query),
+                 "SELECT item_count FROM account_role_backpack WHERE "
+                 "account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND item_id=833 "
+                 "AND item_seq=%u FOR UPDATE",
+                 accountHex, role->roleId, itemSeq);
+        if (!vm_mysql_query(query, vm_mock_mysql_practise_u32_row,
+                            &databaseItemCount) || !databaseItemCount.found ||
+            databaseItemCount.invalid ||
+            databaseItemCount.value != expectedItemCount)
+        {
+            goto failed;
+        }
+    }
+    if (expectedItemCount == 1)
+    {
+        snprintf(query, sizeof(query),
+                 "DELETE FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) "
+                 "AND role_id=%u AND item_id=833 AND item_seq=%u",
+                 accountHex, role->roleId, itemSeq);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_backpack SET item_count=item_count-1 "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u "
+                 "AND item_id=833 AND item_seq=%u AND item_count=%u",
+                 accountHex, role->roleId, itemSeq, expectedItemCount);
+    }
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_vitality SET vitality=%u WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             state.current, accountHex, role->roleId);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    snprintf(query, sizeof(query),
+             "UPDATE account_roles SET backpack_item_count=%u WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             projected.backpackItemCount, accountHex, role->roleId);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    *role = projected;
+    if (currentOut)
+        *currentOut = state.current;
+    if (maxOut)
+        *maxOut = state.maximum;
+    printf("[info][network] mock_vitality_pill role=%u seq=%u restore=%u vitality=%u/%u item_remaining=%u action=committed\n",
+           role->roleId, itemSeq, restored, state.current, state.maximum,
+           remaining);
+    return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] vitality_pill_failed account=%s role=%u seq=%u error=%s\n",
+           g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, itemSeq,
+           mysqlError[0] ? mysqlError : "state-rejected");
+    return false;
+}
+
 static u32 vm_net_mock_role_active_exp_card_multiplier(
     const vm_net_mock_role_state *role)
 {
@@ -7524,7 +8069,7 @@ static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
         return false;
     if (!vm_net_mock_role_db_save_relational(
             reason ? reason : "special-item-use", NULL, NULL, 0, false,
-            &effective, NULL))
+            &effective, NULL, NULL))
     {
         *role = before;
         printf("[error][mock-service] special_item_persist_failed account=%s role=%u item=%u seq=%u kind=%u error=%s\n",
@@ -7960,7 +8505,7 @@ static void vm_net_mock_role_db_load(void)
         if (!vm_net_mock_role_db_save_relational(saveReason,
                                                  migratedOldIds,
                                                  migratedNewIds,
-                                                 migratedIdCount, true, NULL, NULL))
+                                                 migratedIdCount, true, NULL, NULL, NULL))
         {
             g_vm_net_mock_role_db_valid = false;
             return;
@@ -8284,7 +8829,8 @@ static bool vm_net_mock_role_db_create_from_title(const vm_net_mock_title_role_c
 
     g_vm_net_mock_role_db.roleCount += 1;
     g_vm_net_mock_role_db.activeRoleId = actorId;
-    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true, NULL, NULL))
+    if (!vm_net_mock_role_db_save_relational("role-create", NULL, NULL, 0, true,
+                                             NULL, NULL, NULL))
     {
         --g_vm_net_mock_role_db.roleCount;
         memset(role, 0, sizeof(*role));
@@ -8354,7 +8900,8 @@ static bool vm_net_mock_role_db_delete_by_id(u32 actorId, u8 *resultOut, u32 *ro
         g_vm_net_mock_role_db.activeRoleId = g_vm_net_mock_role_db.roles[0].roleId;
     }
 
-    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true, NULL, NULL))
+    if (!vm_net_mock_role_db_save_relational("role-delete", NULL, NULL, 0, true,
+                                             NULL, NULL, NULL))
     {
         g_vm_net_mock_role_db = before;
         if (roleCountOut)

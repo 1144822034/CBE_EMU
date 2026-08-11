@@ -945,21 +945,24 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                                    vm_net_mock_battle_reward_exp_for_enemy(g_vm_net_mock_battle_enemy_id_current)),
         enemyCount);
     rewardExp = baseRewardExp;
-    if (rewardExp != 0 && role != NULL)
+    if (role != NULL)
     {
-        expCardMultiplier = vm_net_mock_role_active_exp_card_multiplier(role);
-        if (expCardMultiplier > 1)
-            rewardExp = vm_net_mock_mul_capped_u32(rewardExp, expCardMultiplier);
         /* 战斗心得's resource wording is "experience +20%", not another
          * multiplier. Apply its bonus to the unmodified monster reward so it
          * remains a separately auditable base-reward increment when an
          * experience card is also active. */
         battleInsightBonusPercent = vm_net_mock_role_active_battle_exp_bonus_percent(role);
-        if (battleInsightBonusPercent != 0)
+        if (rewardExp != 0)
         {
-            uint64_t bonus = ((uint64_t)baseRewardExp * battleInsightBonusPercent) / 100u;
-            rewardExp = vm_net_mock_add_capped_u32(
-                rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
+            expCardMultiplier = vm_net_mock_role_active_exp_card_multiplier(role);
+            if (expCardMultiplier > 1)
+                rewardExp = vm_net_mock_mul_capped_u32(rewardExp, expCardMultiplier);
+            if (battleInsightBonusPercent != 0)
+            {
+                uint64_t bonus = ((uint64_t)baseRewardExp * battleInsightBonusPercent) / 100u;
+                rewardExp = vm_net_mock_add_capped_u32(
+                    rewardExp, bonus > 0xffffffffull ? 0xffffffffu : (u32)bonus);
+            }
         }
     }
     if (rewardExp != baseRewardExp)
@@ -1049,11 +1052,33 @@ static u32 vm_net_mock_battle_grant_reward_once(u32 *dropItemIdOut,
                dropIsTaskMaterial ? 1u : 0u, taskMaterialRemaining,
                dropPolicyOk ? "ok" : "unavailable", dropEligible ? 1u : 0u,
                rolledDropCount, grantedCount);
-        if (grantedCount == 0 ||
-            !vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
-                                                &grantedSeq))
+        if (grantedCount == 0)
         {
             continue;
+        }
+        if (!vm_net_mock_role_add_backpack_item(configured->itemId, grantedCount,
+                                                &grantedSeq))
+        {
+            u32 soldItemId = 0;
+            u16 soldItemSeq = 0;
+            u32 salePrice = 0;
+
+            /* An Insight auto-sale is deliberately a retry of the normal
+             * backpack grant, not a synthetic reward response.  It runs only
+             * after the first insertion proved the current physical bag has
+             * no compatible row/slot, and only sells an eligible equipment
+             * instance. */
+            if (battleInsightBonusPercent == 0 ||
+                !vm_net_mock_battle_insight_auto_sell_one_equipment(
+                    role, &soldItemId, &soldItemSeq, &salePrice) ||
+                !vm_net_mock_role_add_backpack_item(configured->itemId,
+                                                    grantedCount, &grantedSeq))
+            {
+                continue;
+            }
+            printf("[info][network] mock_battle_insight_auto_sell role=%u sold_item=%u sold_seq=%u sale=%u reward_item=%u reward_count=%u action=retry-grant\n",
+                   role ? role->roleId : 0, soldItemId, soldItemSeq, salePrice,
+                   configured->itemId, grantedCount);
         }
         results[resultCount].itemId = configured->itemId;
         results[resultCount].seq = grantedSeq;
@@ -2165,6 +2190,7 @@ typedef struct vm_mock_service_client_session
     bool sceneHangupRestartPending;
     u32 sceneHangupBattleSessionSerial;
     u32 sceneHangupRestartNotBeforeTick;
+    u16 sceneHangupCompletedBattles;
     char sceneHangupScene[64];
     /* The native action=4 task path carries only task_id after the NPC dialog.
      * Retain the server-observed offer/submit source so a later 6/11 accept or
@@ -4181,6 +4207,7 @@ static void vm_mock_service_session_clear_scene_hangup(
     session->sceneHangupRestartPending = false;
     session->sceneHangupBattleSessionSerial = 0;
     session->sceneHangupRestartNotBeforeTick = 0;
+    session->sceneHangupCompletedBattles = 0;
     session->sceneHangupScene[0] = 0;
 }
 
@@ -4199,7 +4226,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
      * lifecycle boundary before clearing the session's role identity; the
      * next online practise-info request will settle only this interval. */
     if (accountId[0] != 0 && offlineRoleId != 0)
+    {
         vm_net_mock_practise_mark_offline(accountId, offlineRoleId);
+        vm_net_mock_offline_exp_mark_offline(accountId, offlineRoleId);
+    }
     vm_mock_service_session_clear_scene_hangup(session,
                                                reason ? reason : "offline");
     wasOnline = session->roleOnline || session->onlinePresenceValid || session->sceneVisibleReady;
@@ -5125,7 +5155,8 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
      * account snapshot in the existing transactional role writer, rather than
      * using the active-role-only position fast path. */
     if (!vm_net_mock_role_db_save_relational(
-            "admin-reset-selected-scene", NULL, NULL, 0, true, NULL, NULL))
+            "admin-reset-selected-scene", NULL, NULL, 0, true, NULL, NULL,
+            NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -5345,7 +5376,7 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
     }
     targetExp = role->exp;
     if (!vm_net_mock_role_db_save_relational("admin-set-role-level", NULL,
-                                             NULL, 0, true, NULL, NULL))
+                                             NULL, 0, true, NULL, NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
@@ -5499,7 +5530,7 @@ static bool vm_mock_service_account_remove_role_backpack_item(
      * persists activeRoleId, so use the relational full snapshot transaction
      * and keep the account's active role unchanged. */
     if (!vm_net_mock_role_db_save_relational("user-web-backpack-delete", NULL,
-                                             NULL, 0, true, NULL, NULL))
+                                             NULL, 0, true, NULL, NULL, NULL))
     {
         *role = before;
         vm_mock_service_account_capture(state);
