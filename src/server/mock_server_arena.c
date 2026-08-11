@@ -108,6 +108,7 @@ static u32 g_vm_mock_arena_last_tick_sec = 0;
 
 /* Defined in mock_server_arena_wager.inc.c (included below). */
 static bool vm_mock_wager_ensure_member_table(void);
+static void vm_mock_wager_tick_expire(void);
 static u32 vm_net_mock_build_wager_protocol_response(const u8 *request,
                                                      u32 requestLen, u8 *out,
                                                      u32 outCap, u8 subtype);
@@ -1137,6 +1138,8 @@ static void vm_mock_arena_tick(void)
     u32 timeoutSeconds;
 
     (void)vm_mock_arena_load_config(false);
+    /* Wager idle-timeout must run even when tournament arena is disabled. */
+    vm_mock_wager_tick_expire();
     if (!g_vm_mock_arena_config.enabled)
         return;
     vm_mock_arena_wall_clock(&dayYmd, &minute, &weekdayBit, &unixTs);

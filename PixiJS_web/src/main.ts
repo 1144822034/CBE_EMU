@@ -25,7 +25,7 @@ import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
 import { RoleScreen } from "./ui/RoleScreen";
 import { CreateRoleScreen } from "./ui/CreateRoleScreen";
-import { WorldHud } from "./ui/WorldHud";
+import { WorldHud, sceneDisplayName } from "./ui/WorldHud";
 import { MenuScreen, type MenuLeaf } from "./ui/MenuScreen";
 import { BattleScreen } from "./ui/BattleScreen";
 import { DialogPanel } from "./ui/DialogPanel";
@@ -183,7 +183,7 @@ function wagerMsgTip(code: string | undefined, okText: string): string {
     "bad-id": "擂台编号无效",
     denied: "无权操作",
     "not-open": "该擂台不可挑战",
-    scene: "须在同一场景",
+    scene: "须先赶到对方所在场景再应战",
     self: "不能挑战自己的擂台",
     size: "双方人数须相等",
     "not-await": "不在待确认状态",
@@ -462,6 +462,7 @@ async function main(): Promise<void> {
 
   const openWagerPanel = async () => {
     const board = await session.fetchWagerBoard();
+    view.setLeiBlink(false);
     wagerPanel.open(board.rows, board.mine, session.selectedRoleId);
     showPhase("world");
     syncWorldWalkInput();
@@ -469,20 +470,8 @@ async function main(): Promise<void> {
     setChromeStatus("赏金擂台");
     if (board.listResult === 0 && board.listMessage) {
       wagerPanel.showTip(wagerMsgTip(board.listMessage, "列表失败"));
-    } else if (
-      board.rows.length === 0 &&
-      !(board.mine?.challengeId && (board.mine.status === 0 || board.mine.status === 1))
-    ) {
-      wagerPanel.showTip("本场景暂无开放擂台");
-    } else if (
-      board.rows.length > 0 &&
-      !board.rows.some(
-        (r) =>
-          r.status === 0 &&
-          r.hostLeaderRoleId !== (session.selectedRoleId >>> 0),
-      )
-    ) {
-      wagerPanel.showTip("列表仅有己方擂台，换号同场景可挑战");
+    } else if (board.rows.length === 0) {
+      wagerPanel.showTip("暂无擂台");
     }
   };
 
@@ -551,9 +540,17 @@ async function main(): Promise<void> {
       await openWagerPanel();
       if (tip) wagerPanel.showTip(tip);
     };
+    if (action === "prev_page" || action === "next_page") {
+      shell.setSoftkeys(wagerPanel.softkeys());
+      return;
+    }
     if (action === "close" || action === "noop") {
       if (action === "noop") {
-        wagerPanel.showTip("请选择应战或撤擂");
+        wagerPanel.showTip(
+          wagerPanel.currentTab === "live"
+            ? "进行中仅查看；待确认请选开战/拒绝"
+            : "请选择可应战的擂台",
+        );
         shell.setSoftkeys(wagerPanel.softkeys());
         return;
       }
@@ -1134,6 +1131,9 @@ async function main(): Promise<void> {
         auctionCache = board;
         view.setPaiBlink(!!board.status?.blink);
       });
+      void session.fetchWagerBoard().then((board) => {
+        if (board.mine?.needConfirm) view.setLeiBlink(true);
+      });
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -1643,7 +1643,7 @@ async function main(): Promise<void> {
     onWagerEvent: (ev) => {
       const kind =
         ev.eventKind === 1
-          ? "待确认"
+          ? "有人应战，请确认"
           : ev.eventKind === 2
             ? "开战"
             : ev.eventKind === 3
@@ -1653,10 +1653,13 @@ async function main(): Promise<void> {
                   ? "结算负"
                   : `结算退${ev.payout}`
               : ev.eventKind === 4
-                ? "被拒"
-                : "通知";
+                ? "擂主拒绝"
+                : ev.eventKind === 5
+                  ? "超时，已自动撤擂"
+                  : "通知";
       showGameTip(`赏金#${ev.challengeId} ${kind}`);
       if (wagerPanel.visible) void openWagerPanel();
+      else view.setLeiBlink(true);
     },
     onAuctionEvent: (ev) => {
       view.setPaiBlink(!!ev.blink);
@@ -1859,6 +1862,17 @@ async function main(): Promise<void> {
     void openAuctionPanel();
   };
 
+  view.onLeiTap = () => {
+    if (phase !== "world" || session.inBattle) return;
+    if (wagerPanel.visible) {
+      wagerPanel.close();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    void openWagerPanel();
+  };
+
   /** Hide map SCE spawn on engage; restore if 4/5 never arrives. */
   const engageSceneMonster = (actorId: number) => {
     if (actorId < 0x70000000) return;
@@ -1923,9 +1937,7 @@ async function main(): Promise<void> {
     // paired reverse door: dest edge portal with the same entryId → its spawn.
     // Do NOT send targetEntryId (0x13); that often points at a different door.
     const exitId = portal.entryId;
-    const label =
-      portal.displayName ||
-      portal.targetScene.replace(/\.sce$/i, "").slice(0, 12);
+    const label = sceneDisplayName(portal.targetScene);
     hud.pushChat(`[系]传送: ${label}`);
     showGameTip(`传送 → ${label}`);
     view.inputEnabled = false;
@@ -2351,7 +2363,9 @@ async function main(): Promise<void> {
       view.inputEnabled = false;
       void session.requestUnstuck().finally(() => {
         if (phase === "world") view.inputEnabled = true;
-        hud.pushChat(`[系]落点 ${session.scene} @${session.x},${session.y}`);
+        hud.pushChat(
+          `[系]落点 ${sceneDisplayName(session.scene)} @${session.x},${session.y}`,
+        );
         showGameTip(`已脱离 · ${session.x},${session.y}`);
       });
       return;
@@ -2687,8 +2701,18 @@ async function main(): Promise<void> {
     if (kind === "mall" && action === "buy" && item && "price" in item) {
       const g = item as import("./net/protocolExtras").ShopGoods;
       const n = system.getMallBuyQty();
-      void session.buyMallItem(g.itemId, n).then(() => {
-        showGameTip(`购买 ${g.name} ×${n}`);
+      const total = (g.price >>> 0) * (n >>> 0);
+      const bal = session.mallState?.coolmoney ?? 0;
+      if (total > 0 && bal < total) {
+        showGameTip("酷宝不够请右下角赞助");
+        return;
+      }
+      void session.buyMallItem(g.itemId, n).then((r) => {
+        if (r.ok) {
+          showGameTip(`购买 ${g.name} ×${n}`);
+          return;
+        }
+        showGameTip(r.message || "购买失败");
       });
       return;
     }
@@ -3508,9 +3532,14 @@ dialog.hide();
         return;
       }
       if (wagerPanel.visible) {
-        if (which === "left" || which === "center") {
+        if (which === "left") {
+          wagerPanel.onAction?.("refresh");
+          return;
+        }
+        if (which === "center") {
           wagerPanel.confirm();
           shell.setSoftkeys(wagerPanel.softkeys());
+          return;
         }
         if (which === "right") {
           wagerPanel.close();
@@ -3731,8 +3760,11 @@ dialog.hide();
         } else arenaPanel.move(dir === "up" ? -1 : 1);
       } else if (wagerPanel.visible) {
         if (dir === "left" || dir === "right") {
-          // 1金 = 10000铜；最低 100金
-          wagerPanel.adjustStake(dir === "left" ? -10000 : 10000);
+          const d = dir === "left" ? -1 : 1;
+          // ←→切栏；摆擂未开擂时调押金（步进 100金=1000000铜）
+          if (!wagerPanel.horizontal(d)) {
+            wagerPanel.adjustStake(d * 100 * 10000);
+          }
         } else {
           wagerPanel.move(dir === "up" ? -1 : 1);
         }

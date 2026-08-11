@@ -35,7 +35,7 @@ const PORTAL_ACTOR = "n_teleporter.actor";
 const WALK_PX_PER_MS = 1 / (1000 / 60);
 /** Cap one tick so a long hitch cannot teleport past collision samples. */
 const WALK_DT_CLAMP_MS = 50;
-/** Map-corner status strip (修/拍/斗/练). */
+/** Map-corner status strip (修/拍/擂/斗/练). */
 const STATUS_BADGE_SIZE = 17;
 const STATUS_BADGE_PITCH = 20;
 const STATUS_BADGE_X0 = 4;
@@ -85,6 +85,8 @@ export class SceneView {
   onXiuTap: (() => void) | null = null;
   /** Top-left「拍」auction badge (right of 修). */
   onPaiTap: (() => void) | null = null;
+  /** Top-left「擂」wager badge (right of 拍). */
+  onLeiTap: (() => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -107,12 +109,15 @@ export class SceneView {
   private plus16Sparkles = new Plus16Sparkles();
   private xiuBadge = new Container();
   private paiBadge = new Container();
-  /** Hangup / auto-fight 「斗」— vip_effect.gif, after 修/拍. */
+  private leiBadge = new Container();
+  /** Hangup / auto-fight 「斗」— vip_effect.gif, after 修/拍/擂. */
   private douBadge = new Container();
   /** Training buff 「练」— training.gif, after 斗. */
   private lianBadge = new Container();
   private paiBlink = false;
   private paiBlinkPhase = 0;
+  private leiBlink = false;
+  private leiBlinkPhase = 0;
   private mapPreview: MapPreview | null = null;
   private portals: ScePortal[] = [];
   private decorations: SceDecoration[] = [];
@@ -159,7 +164,7 @@ export class SceneView {
     this.world.addChild(this.player);
     this.root.addChild(this.clip);
 
-    // Status strip on map top-left: 修 → 拍 → 斗 → 练 (17px cells, pitch 20).
+    // Status strip on map top-left: 修 → 拍 → 擂 → 斗 → 练 (17px cells, pitch 20).
     this.mountStatusBadgeSlot(this.xiuBadge, 0);
     this.xiuBadge.on("pointertap", (e) => {
       e.stopPropagation();
@@ -176,13 +181,21 @@ export class SceneView {
     this.root.addChild(this.paiBadge);
     void this.mountPaiArt();
 
-    this.mountStatusBadgeSlot(this.douBadge, 2);
+    this.mountStatusBadgeSlot(this.leiBadge, 2);
+    this.leiBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onLeiTap?.();
+    });
+    this.root.addChild(this.leiBadge);
+    void this.mountLeiArt();
+
+    this.mountStatusBadgeSlot(this.douBadge, 3);
     this.douBadge.visible = false;
     this.douBadge.eventMode = "none";
     this.root.addChild(this.douBadge);
     void this.mountGifBadge(this.douBadge, "vip_effect.gif");
 
-    this.mountStatusBadgeSlot(this.lianBadge, 3);
+    this.mountStatusBadgeSlot(this.lianBadge, 4);
     this.lianBadge.visible = false;
     this.lianBadge.eventMode = "none";
     this.root.addChild(this.lianBadge);
@@ -583,6 +596,10 @@ export class SceneView {
     await this.mountTextStatusBadge(this.paiBadge, "拍", 0x081828, 0xa8d8e8);
   }
 
+  private async mountLeiArt(): Promise<void> {
+    await this.mountTextStatusBadge(this.leiBadge, "擂", 0x281808, 0xe8c8a0);
+  }
+
   /** Flash「拍」when auction claims / refunds are pending. */
   setPaiBlink(on: boolean): void {
     this.paiBlink = on;
@@ -592,7 +609,16 @@ export class SceneView {
     }
   }
 
-  /** Hangup/auto 「斗」tile after 修/拍. */
+  /** Flash「擂」when wager notices need attention (应战/拒绝/结算等). */
+  setLeiBlink(on: boolean): void {
+    this.leiBlink = on;
+    if (!on) {
+      this.leiBadge.alpha = 1;
+      this.leiBlinkPhase = 0;
+    }
+  }
+
+  /** Hangup/auto 「斗」tile after 修/拍/擂. */
   setDouVisible(on: boolean): void {
     this.douBadge.visible = !!on;
   }
@@ -685,6 +711,10 @@ export class SceneView {
     if (this.paiBlink) {
       this.paiBlinkPhase += dt * 0.01;
       this.paiBadge.alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.paiBlinkPhase));
+    }
+    if (this.leiBlink) {
+      this.leiBlinkPhase += dt * 0.01;
+      this.leiBadge.alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.leiBlinkPhase));
     }
     if (this.collideCooldownMs > 0) this.collideCooldownMs -= dt;
     if (this.portalCooldownMs > 0) this.portalCooldownMs -= dt;

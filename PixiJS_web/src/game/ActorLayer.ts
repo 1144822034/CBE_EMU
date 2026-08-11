@@ -313,11 +313,12 @@ export class ActorLayer {
       if (npc.actorId >= 0x60000000) continue;
       if (isMonsterLike(npc.scriptName || "", npc.actorResource || "")) continue;
       const m = this.markers.get(npc.actorId);
+      const rawName = (npc.name || "NPC").replace(/\0+$/g, "").trim();
       out.push({
         actorId: npc.actorId,
         x: (m?.x ?? npc.x) | 0,
         y: (m?.y ?? npc.y) | 0,
-        name: (npc.name || "NPC").slice(0, 12),
+        name: (/\.actor$/i.test(rawName) ? "NPC" : rawName).slice(0, 12),
       });
     }
     return out;
@@ -329,9 +330,13 @@ export class ActorLayer {
   ): { actorId: number; name: string; x: number; y: number; title: string } | null {
     const m = this.markers.get(actorId);
     if (!m || m.kind !== "peer") return null;
+    /* nameLabel = 玩家名；actorName = h_*.actor 资源，切勿当提示名. */
+    const raw = (m.nameLabel || "").replace(/\0+$/g, "").trim();
+    const name =
+      raw && !/\.actor$/i.test(raw) ? raw.slice(0, 12) : "玩家";
     return {
       actorId,
-      name: (m.actorName || m.nameLabel || "玩家").slice(0, 12),
+      name,
       x: m.x | 0,
       y: m.y | 0,
       title: "",

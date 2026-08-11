@@ -33,6 +33,13 @@ const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
 /** 1金元宝 = 10000 铜（与背包金/银/铜栏同源）. */
 const COPPER_PER_GOLD = 10000;
 
+/** Map tips must show role name, never h_*.actor resource. */
+function displayPeerName(name: string | undefined): string {
+  const s = (name || "").replace(/\0+$/g, "").trim();
+  if (!s || /\.actor$/i.test(s)) return "玩家";
+  return s;
+}
+
 export type SocialKind =
   | "nearby"
   | "friends"
@@ -114,7 +121,7 @@ export class SocialPanel extends Container {
     this.title = "周围玩家";
     this.rows = peers.map((p) => ({
       id: p.actorId,
-      name: p.name || "玩家",
+      name: displayPeerName(p.name),
       subtitle: p.title
         ? `${p.title} @${p.x},${p.y}`
         : `@${p.x},${p.y}`,
@@ -139,7 +146,7 @@ export class SocialPanel extends Container {
       list = [
         {
           actorId,
-          name: fallback.name || "玩家",
+          name: displayPeerName(fallback.name),
           x: fallback.x | 0,
           y: fallback.y | 0,
           visualVariant: 0,
@@ -151,7 +158,7 @@ export class SocialPanel extends Container {
     }
     this.rows = list.map((p) => ({
       id: p.actorId,
-      name: p.name || "玩家",
+      name: displayPeerName(p.name),
       subtitle: p.title
         ? `${p.title} @${p.x},${p.y}`
         : `@${p.x},${p.y}`,

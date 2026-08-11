@@ -225,6 +225,13 @@ export function parseArenaFromBodies(bodies: Uint8Array[]): {
 
 
 /** 赏金擂台 subtypes 10-16 */
+export type WagerMemberBrief = {
+  name: string;
+  /** 1..3 天机/幻剑/鬼道 */
+  job: number;
+  level: number;
+};
+
 export type WagerListRow = {
   challengeId: number;
   stake: number;
@@ -234,7 +241,10 @@ export type WagerListRow = {
   feePercent: number;
   hostName: string;
   hostLeaderRoleId: number;
+  scene: string;
   hostNames: string[];
+  hosts: WagerMemberBrief[];
+  challs: WagerMemberBrief[];
 };
 
 export type WagerMine = {
@@ -341,7 +351,15 @@ export function parseWagerList(packet: WtPacket): {
     }
   }
   if (raw) {
-    const r = new SeqReader(raw);
+    /* Tolerate put_object_blob (BE16 len + seq) or put_object_entry (naked seq). */
+    let seq = raw;
+    if (raw.length >= 2) {
+      const declared = (raw[0]! << 8) | raw[1]!;
+      if (declared + 2 === raw.length && raw.length >= 8 && raw[2] === 0x00) {
+        seq = raw.subarray(2);
+      }
+    }
+    const r = new SeqReader(seq);
     for (let i = 0; i < count && r.remaining() > 8; i++) {
       try {
         const challengeId = r.u32();
@@ -352,9 +370,20 @@ export function parseWagerList(packet: WtPacket): {
         const feePercent = r.u32();
         const hostName = r.string().replace(/\0+$/g, "");
         const hostLeaderRoleId = r.u32();
-        const hostNames: string[] = [];
+        const scene = r.string().replace(/\0+$/g, "");
+        const hosts: WagerMemberBrief[] = [];
+        const challs: WagerMemberBrief[] = [];
         for (let m = 0; m < hostCount; m++) {
-          hostNames.push(r.string().replace(/\0+$/g, ""));
+          const name = r.string().replace(/\0+$/g, "");
+          const job = r.u32();
+          const level = r.u32();
+          hosts.push({ name, job, level });
+        }
+        for (let m = 0; m < challCount; m++) {
+          const name = r.string().replace(/\0+$/g, "");
+          const job = r.u32();
+          const level = r.u32();
+          challs.push({ name, job, level });
         }
         rows.push({
           challengeId,
@@ -365,7 +394,10 @@ export function parseWagerList(packet: WtPacket): {
           feePercent,
           hostName,
           hostLeaderRoleId,
-          hostNames,
+          scene,
+          hostNames: hosts.map((h) => h.name),
+          hosts,
+          challs,
         });
       } catch {
         break;

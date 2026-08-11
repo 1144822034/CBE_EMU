@@ -86,6 +86,8 @@ import {
   buildPanelStatsRequest,
   buildWornEquipRequest,
   buildShopBuy14Request,
+  parseShopBuy14Response,
+  shopBuy14ResultTip,
   buildMoveRequest,
   buildNpcDialogRequest,
   buildSettingsUnstuckRequest,
@@ -3258,14 +3260,39 @@ export class GameSession {
     }
   }
 
-  async buyMallItem(itemId: number, num = 1): Promise<void> {
-    if (!this.transport) return;
+  async buyMallItem(
+    itemId: number,
+    num = 1,
+  ): Promise<{ ok: boolean; result: number; message: string }> {
+    if (!this.transport) {
+      return { ok: false, result: 0, message: "未连接" };
+    }
     const bodies = await this.transport.exchange(
       0,
       buildShopBuy14Request(itemId, num),
     );
+    let result = -1;
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseShopBuy14Response(packet);
+        if (parsed) result = parsed.result;
+      } catch {
+        /* skip */
+      }
+    }
     this.handleBodies(bodies);
     await this.openMall();
+    if (result < 0) {
+      return { ok: false, result: 0, message: "购买无响应" };
+    }
+    const tip = shopBuy14ResultTip(result);
+    return {
+      ok: result === 1,
+      result,
+      message: tip || (result === 1 ? "购买成功" : `购买失败(${result})`),
+    };
   }
 
   async enhanceTransferPreview(

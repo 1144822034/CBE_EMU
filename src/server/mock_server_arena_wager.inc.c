@@ -30,6 +30,8 @@ enum
     VM_MOCK_WAGER_EVT_CANCEL = 5,
     /* 1金=10000铜；最低押金 100金 */
     VM_MOCK_WAGER_MIN_STAKE_COPPER = 1000000u,
+    /* OPEN 无人应战 / AWAIT 无人确认或拒绝：10 分钟空闲自动撤擂 */
+    VM_MOCK_WAGER_IDLE_TIMEOUT_SEC = 600u,
     VM_MOCK_WAGER_STREAK_ANNOUNCE = 3,
     VM_MOCK_WAGER_STREAK_TRACK_MAX = 128
 };
@@ -40,6 +42,8 @@ typedef struct
     u32 clientId;
     char accountId[64];
     char name[32];
+    u8 job;   /* 1..3 */
+    u16 level;
     u8 paid;
     u8 accepted;
 } vm_mock_wager_member;
@@ -61,6 +65,8 @@ typedef struct
     u8 hostPairWins;
     u8 challPairWins;
     u8 active;
+    /* Wall-clock unix sec of last create / challenge / reject / confirm. */
+    u32 idleSinceUnix;
 } vm_mock_wager_challenge;
 
 typedef struct
@@ -215,6 +221,12 @@ static bool vm_mock_wager_ensure_member_table(void)
             "KEY idx_wager_member_role(role_id)) ENGINE=InnoDB"))
         return false;
     (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_wager_members "
+        "ADD COLUMN job TINYINT UNSIGNED NOT NULL DEFAULT 0");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_arena_wager_members "
+        "ADD COLUMN level SMALLINT UNSIGNED NOT NULL DEFAULT 0");
+    (void)vm_mysql_exec(
         "ALTER TABLE server_arena_wager_challenges "
         "ADD COLUMN host_count TINYINT UNSIGNED NOT NULL DEFAULT 1");
     (void)vm_mysql_exec(
@@ -316,6 +328,251 @@ static const char *vm_mock_wager_viewer_scene(
     return "";
 }
 
+static u32 vm_mock_wager_client_id_for_role(u32 roleId)
+{
+    vm_mock_service_client_session *s = g_vm_mock_service_client_sessions;
+    if (roleId == 0)
+        return 0;
+    for (; s != NULL; s = s->next)
+    {
+        if (s->roleOnline && s->onlineRoleId == roleId)
+            return s->clientId;
+    }
+    return 0;
+}
+
+static void vm_mock_wager_rebind_member_clients(vm_mock_wager_challenge *ch)
+{
+    u8 i;
+    if (ch == NULL)
+        return;
+    for (i = 0; i < ch->hostCount; ++i)
+        ch->host[i].clientId = vm_mock_wager_client_id_for_role(ch->host[i].roleId);
+    for (i = 0; i < ch->challCount; ++i)
+        ch->chall[i].clientId =
+            vm_mock_wager_client_id_for_role(ch->chall[i].roleId);
+}
+
+static void vm_mock_wager_fill_member_stats(vm_mock_wager_member *m,
+                                           const vm_net_mock_role_state *role)
+{
+    if (m == NULL || role == NULL)
+        return;
+    m->job = role->job >= 1 && role->job <= 3 ? role->job : 1;
+    m->level = (u16)(role->level ? role->level : 1);
+}
+
+static void vm_mock_wager_refresh_member_stats(vm_mock_wager_member *m)
+{
+    vm_mock_service_client_session *s;
+    vm_net_mock_role_state *role;
+    if (m == NULL || m->roleId == 0)
+        return;
+    s = g_vm_mock_service_client_sessions;
+    for (; s != NULL; s = s->next)
+    {
+        if (!s->roleOnline || s->onlineRoleId != m->roleId)
+            continue;
+        role = vm_mock_service_trade_role_for_session(s, NULL);
+        if (role != NULL)
+            vm_mock_wager_fill_member_stats(m, role);
+        return;
+    }
+}
+
+static bool vm_mock_wager_hydrate_challenge_row(void *contextValue,
+                                               unsigned int columnCount,
+                                               const char *const *values,
+                                               const size_t *lengths)
+{
+    vm_mock_wager_challenge *ch;
+    u32 tmp = 0;
+    u32 challengeId = 0;
+
+    (void)contextValue;
+    (void)columnCount;
+    if (values == NULL || lengths == NULL ||
+        g_vm_mock_wager_count >= VM_MOCK_WAGER_CHALLENGE_MAX)
+        return false;
+    if (!values[0] || !vm_mock_mysql_parse_u32(values[0], lengths[0], &challengeId) ||
+        challengeId == 0)
+        return false;
+    if (vm_mock_wager_find(challengeId) != NULL)
+        return true;
+    ch = &g_vm_mock_wagers[g_vm_mock_wager_count++];
+    memset(ch, 0, sizeof(*ch));
+    ch->active = 1;
+    ch->challengeId = challengeId;
+    if (values[1] && vm_mock_mysql_parse_u32(values[1], lengths[1], &tmp))
+        ch->hostLeaderRoleId = tmp;
+    if (values[2] && lengths[2] > 0 && lengths[2] < sizeof(ch->scene))
+    {
+        memcpy(ch->scene, values[2], lengths[2]);
+        ch->scene[lengths[2]] = 0;
+    }
+    if (values[3] && vm_mock_mysql_parse_u32(values[3], lengths[3], &tmp))
+        ch->stake = tmp;
+    if (values[4] && vm_mock_mysql_parse_u32(values[4], lengths[4], &tmp))
+        ch->feePercent = (u8)tmp;
+    if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
+        ch->status = (u8)tmp;
+    if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
+        ch->hostCount = (u8)tmp;
+    if (values[7] && vm_mock_mysql_parse_u32(values[7], lengths[7], &tmp))
+        ch->challCount = (u8)tmp;
+    if (values[8] && vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp))
+        ch->challLeaderRoleId = tmp;
+    if (values[9] && vm_mock_mysql_parse_u32(values[9], lengths[9], &tmp) &&
+        tmp != 0)
+        ch->idleSinceUnix = tmp;
+    else
+        ch->idleSinceUnix = (u32)time(NULL);
+    /* Counts filled from members; keep DB values as upper bound only. */
+    ch->hostCount = 0;
+    ch->challCount = 0;
+    return true;
+}
+
+static bool vm_mock_wager_hydrate_member_row(void *contextValue,
+                                            unsigned int columnCount,
+                                            const char *const *values,
+                                            const size_t *lengths)
+{
+    vm_mock_wager_challenge *ch;
+    vm_mock_wager_member *slot;
+    u32 challengeId = 0;
+    u32 side = 0;
+    u32 roleId = 0;
+    u32 tmp = 0;
+
+    (void)contextValue;
+    (void)columnCount;
+    if (values == NULL || lengths == NULL)
+        return false;
+    if (!values[0] || !vm_mock_mysql_parse_u32(values[0], lengths[0], &challengeId))
+        return false;
+    ch = vm_mock_wager_find(challengeId);
+    if (ch == NULL)
+        return true;
+    if (!values[1] || !vm_mock_mysql_parse_u32(values[1], lengths[1], &side))
+        return false;
+    if (!values[2] || !vm_mock_mysql_parse_u32(values[2], lengths[2], &roleId) ||
+        roleId == 0)
+        return false;
+    if (side == 0)
+    {
+        if (ch->hostCount >= VM_MOCK_WAGER_MEMBER_MAX)
+            return false;
+        slot = &ch->host[ch->hostCount++];
+    }
+    else
+    {
+        if (ch->challCount >= VM_MOCK_WAGER_MEMBER_MAX)
+            return false;
+        slot = &ch->chall[ch->challCount++];
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->roleId = roleId;
+    if (values[3] && lengths[3] > 0 && lengths[3] < sizeof(slot->accountId))
+    {
+        memcpy(slot->accountId, values[3], lengths[3]);
+        slot->accountId[lengths[3]] = 0;
+    }
+    if (values[4] && lengths[4] > 0 && lengths[4] < sizeof(slot->name))
+    {
+        memcpy(slot->name, values[4], lengths[4]);
+        slot->name[lengths[4]] = 0;
+    }
+    if (values[5] && vm_mock_mysql_parse_u32(values[5], lengths[5], &tmp))
+        slot->paid = (u8)tmp;
+    if (values[6] && vm_mock_mysql_parse_u32(values[6], lengths[6], &tmp))
+        slot->accepted = (u8)tmp;
+    if (values[7] && vm_mock_mysql_parse_u32(values[7], lengths[7], &tmp))
+        slot->job = (u8)(tmp >= 1 && tmp <= 3 ? tmp : 0);
+    if (values[8] && vm_mock_mysql_parse_u32(values[8], lengths[8], &tmp))
+        slot->level = (u16)tmp;
+    slot->clientId = vm_mock_wager_client_id_for_role(roleId);
+    vm_mock_wager_refresh_member_stats(slot);
+    if (side == 0 && ch->hostLeaderRoleId == 0)
+        ch->hostLeaderRoleId = roleId;
+    if (side != 0 && ch->challLeaderRoleId == 0)
+        ch->challLeaderRoleId = roleId;
+    return true;
+}
+
+static void vm_mock_wager_persist_clear_challengers(u32 challengeId);
+static void vm_mock_wager_persist_status(const vm_mock_wager_challenge *ch);
+static void vm_mock_wager_persist_host_accepted_all(u32 challengeId, u8 accepted);
+
+/* Open/await rows live in process memory; restart must rehydrate from DB or
+ * peers only see empty boards despite server_arena_wager_challenges rows. */
+static void vm_mock_wager_hydrate_from_db(void)
+{
+    static bool attempted = false;
+    u32 i;
+
+    if (attempted)
+        return;
+    attempted = true;
+    if (g_vm_mock_wager_count > 0)
+        return;
+    if (!vm_mock_wager_ensure_member_table())
+        return;
+    (void)vm_mysql_query(
+        "SELECT challenge_id,host_role_id,scene,stake_money,fee_percent,status,"
+        "host_count,challenger_count,challenger_role_id,"
+        "UNIX_TIMESTAMP(updated_at) "
+        "FROM server_arena_wager_challenges WHERE status IN (0,1) "
+        "ORDER BY challenge_id",
+        vm_mock_wager_hydrate_challenge_row, NULL);
+    if (g_vm_mock_wager_count == 0)
+        return;
+    (void)vm_mysql_query(
+        "SELECT m.challenge_id,m.side,m.role_id,m.account_id,m.role_name,"
+        "m.paid,m.accepted,m.job,m.level FROM server_arena_wager_members m "
+        "INNER JOIN server_arena_wager_challenges c "
+        "ON c.challenge_id=m.challenge_id WHERE c.status IN (0,1) "
+        /* OPEN: host rows only — stale side=1 after reject must not load. */
+        "AND (c.status<>0 OR m.side=0) "
+        "ORDER BY m.challenge_id,m.side,m.role_id",
+        vm_mock_wager_hydrate_member_row, NULL);
+    for (i = 0; i < g_vm_mock_wager_count; ++i)
+    {
+        vm_mock_wager_challenge *ch = &g_vm_mock_wagers[i];
+        if (ch->status == VM_MOCK_WAGER_ST_OPEN &&
+            (ch->challCount > 0 || ch->challLeaderRoleId != 0))
+        {
+            ch->challCount = 0;
+            ch->challLeaderRoleId = 0;
+            memset(ch->chall, 0, sizeof(ch->chall));
+            vm_mock_wager_persist_clear_challengers(ch->challengeId);
+            vm_mock_wager_persist_status(ch);
+        }
+        if (ch->status == VM_MOCK_WAGER_ST_AWAIT && ch->hostCount > 0)
+        {
+            /* Entering AWAIT must clear host accepted; old rows kept accepted=1
+             * so reconnect needConfirm stayed 0 and reject/confirm vanished. */
+            u8 pending = 0;
+            u8 hi;
+            for (hi = 0; hi < ch->hostCount; ++hi)
+            {
+                if (!ch->host[hi].accepted)
+                    pending = 1;
+            }
+            if (!pending)
+            {
+                for (hi = 0; hi < ch->hostCount; ++hi)
+                    ch->host[hi].accepted = 0;
+                vm_mock_wager_persist_host_accepted_all(ch->challengeId, 0);
+            }
+        }
+        vm_mock_wager_rebind_member_clients(ch);
+    }
+    printf("[info][mock-service] wager_hydrate count=%u "
+           "evidence=reload-open-await-from-db\n",
+           g_vm_mock_wager_count);
+}
+
 static bool vm_mock_wager_role_busy(vm_mock_service_client_session *session)
 {
     vm_mock_service_team *team;
@@ -382,6 +639,7 @@ static u8 vm_mock_wager_collect_party(vm_mock_service_client_session *leader,
         snprintf(out[0].accountId, sizeof(out[0].accountId), "%s",
                  leader->accountId);
         snprintf(out[0].name, sizeof(out[0].name), "%s", role->name);
+        vm_mock_wager_fill_member_stats(&out[0], role);
         return 1;
     }
     if (!vm_mock_service_team_is_leader(team, leader->clientId))
@@ -427,6 +685,7 @@ static u8 vm_mock_wager_collect_party(vm_mock_service_client_session *leader,
         snprintf(out[count].accountId, sizeof(out[count].accountId), "%s",
                  ms->accountId);
         snprintf(out[count].name, sizeof(out[count].name), "%s", role->name);
+        vm_mock_wager_fill_member_stats(&out[count], role);
         count += 1;
     }
     return count;
@@ -523,12 +782,28 @@ static bool vm_mock_wager_persist_new(vm_mock_wager_challenge *ch)
             nameHex[0] = 0;
         snprintf(query, sizeof(query),
                  "INSERT INTO server_arena_wager_members "
-                 "(challenge_id,side,role_id,account_id,role_name,paid,accepted) "
-                 "VALUES (%u,0,%u,UNHEX('%s'),UNHEX('%s'),1,1)",
-                 newId, ch->host[i].roleId, accHex, nameHex);
+                 "(challenge_id,side,role_id,account_id,role_name,paid,accepted,"
+                 "job,level) "
+                 "VALUES (%u,0,%u,UNHEX('%s'),UNHEX('%s'),1,1,%u,%u)",
+                 newId, ch->host[i].roleId, accHex, nameHex,
+                 (u32)ch->host[i].job, (u32)ch->host[i].level);
         (void)vm_mysql_exec(query);
     }
     return true;
+}
+
+static void vm_mock_wager_persist_clear_challengers(u32 challengeId)
+{
+    char query[192];
+    if (challengeId == 0)
+        return;
+    /* Reject/cancel-back-to-OPEN must drop side=1 rows or hydrate
+     * reloads them as challCount>0 and OPEN boards show under 进行中. */
+    snprintf(query, sizeof(query),
+             "DELETE FROM server_arena_wager_members WHERE challenge_id=%u AND "
+             "side=1",
+             challengeId);
+    (void)vm_mysql_exec(query);
 }
 
 static void vm_mock_wager_persist_status(const vm_mock_wager_challenge *ch)
@@ -554,6 +829,11 @@ static void vm_mock_wager_persist_status(const vm_mock_wager_challenge *ch)
              challAccHex[0] ? "')" : "",
              (u32)ch->challCount, ch->challengeId);
     (void)vm_mysql_exec(query);
+    if (ch->status == VM_MOCK_WAGER_ST_OPEN || ch->challCount == 0)
+    {
+        vm_mock_wager_persist_clear_challengers(ch->challengeId);
+        return;
+    }
     if (ch->status == VM_MOCK_WAGER_ST_AWAIT ||
         ch->status == VM_MOCK_WAGER_ST_FIGHT)
     {
@@ -570,10 +850,12 @@ static void vm_mock_wager_persist_status(const vm_mock_wager_challenge *ch)
                 nameHex[0] = 0;
             snprintf(query, sizeof(query),
                      "INSERT INTO server_arena_wager_members "
-                     "(challenge_id,side,role_id,account_id,role_name,paid,accepted) "
-                     "VALUES (%u,1,%u,UNHEX('%s'),UNHEX('%s'),1,0) "
-                     "ON DUPLICATE KEY UPDATE paid=1",
-                     ch->challengeId, ch->chall[i].roleId, accHex, nameHex);
+                     "(challenge_id,side,role_id,account_id,role_name,paid,accepted,"
+                     "job,level) "
+                     "VALUES (%u,1,%u,UNHEX('%s'),UNHEX('%s'),1,0,%u,%u) "
+                     "ON DUPLICATE KEY UPDATE paid=1,job=VALUES(job),level=VALUES(level)",
+                     ch->challengeId, ch->chall[i].roleId, accHex, nameHex,
+                     (u32)ch->chall[i].job, (u32)ch->chall[i].level);
             (void)vm_mysql_exec(query);
         }
     }
@@ -587,6 +869,110 @@ static void vm_mock_wager_persist_accept(u32 challengeId, u32 roleId, u8 accepte
              "WHERE challenge_id=%u AND role_id=%u AND side=0",
              (u32)accepted, challengeId, roleId);
     (void)vm_mysql_exec(query);
+}
+
+static void vm_mock_wager_persist_host_accepted_all(u32 challengeId, u8 accepted)
+{
+    char query[256];
+    if (challengeId == 0)
+        return;
+    snprintf(query, sizeof(query),
+             "UPDATE server_arena_wager_members SET accepted=%u "
+             "WHERE challenge_id=%u AND side=0",
+             (u32)accepted, challengeId);
+    (void)vm_mysql_exec(query);
+}
+
+static void vm_mock_wager_touch_idle(vm_mock_wager_challenge *ch)
+{
+    if (ch == NULL)
+        return;
+    ch->idleSinceUnix = (u32)time(NULL);
+}
+
+/* OPEN 无人应战 / AWAIT 无人确认拒绝：退押、CANCEL、提示擂主超时. */
+static void vm_mock_wager_expire_idle(vm_mock_wager_challenge *ch)
+{
+    u8 i;
+    /* 擂主超时，已自动撤擂 */
+    static const char hostTipGbk[] =
+        "\xC0\xDE\xD6\xF7\xB3\xAC\xCA\xB1\xA3\xAC\xD2\xD1\xD7\xD4\xB6\xAF"
+        "\xB3\xB7\xC0\xDE";
+    /* 对方擂台超时已撤销 */
+    static const char challTipGbk[] =
+        "\xB6\xD4\xB7\xBD\xC0\xDE\xCC\xA8\xB3\xAC\xCA\xB1\xD2\xD1\xB3\xB7"
+        "\xCF\xFA";
+
+    if (ch == NULL || !ch->active)
+        return;
+    if (ch->status != VM_MOCK_WAGER_ST_OPEN &&
+        ch->status != VM_MOCK_WAGER_ST_AWAIT)
+        return;
+
+    vm_mock_wager_rebind_member_clients(ch);
+    if (ch->status == VM_MOCK_WAGER_ST_AWAIT && ch->challCount > 0)
+    {
+        vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_CHALL,
+                                 VM_MOCK_WAGER_EVT_CANCEL, ch->stake, 0);
+        for (i = 0; i < ch->challCount; ++i)
+        {
+            vm_mock_service_client_session *s =
+                vm_mock_service_find_client_session(ch->chall[i].clientId);
+            if (s != NULL)
+                (void)vm_mock_service_session_enqueue_system_message(
+                    s, challTipGbk);
+        }
+        vm_mock_wager_refund_members(ch->chall, ch->challCount, ch->stake);
+        ch->challCount = 0;
+        ch->challLeaderRoleId = 0;
+        memset(ch->chall, 0, sizeof(ch->chall));
+    }
+
+    vm_mock_wager_refund_members(ch->host, ch->hostCount, ch->stake);
+    ch->status = VM_MOCK_WAGER_ST_CANCEL;
+    vm_mock_wager_persist_status(ch);
+    vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_HOST,
+                             VM_MOCK_WAGER_EVT_CANCEL, ch->stake, 0);
+    for (i = 0; i < ch->hostCount; ++i)
+    {
+        vm_mock_service_client_session *s =
+            vm_mock_service_find_client_session(ch->host[i].clientId);
+        if (s != NULL)
+            (void)vm_mock_service_session_enqueue_system_message(s, hostTipGbk);
+    }
+    printf("[info][mock-service] wager_idle_timeout id=%u host=%u stake=%u "
+           "idle_since=%u evidence=open-or-await-10min\n",
+           ch->challengeId, ch->hostLeaderRoleId, ch->stake, ch->idleSinceUnix);
+    ch->active = 0;
+}
+
+static void vm_mock_wager_tick_expire(void)
+{
+    static u32 lastExpireSec = 0;
+    u32 now = (u32)time(NULL);
+    u32 i;
+
+    if (now == 0 || now == lastExpireSec)
+        return;
+    lastExpireSec = now;
+    (void)vm_mock_arena_load_config(false);
+    if (!g_vm_mock_arena_config.wagerEnabled)
+        return;
+    vm_mock_wager_hydrate_from_db();
+    for (i = 0; i < g_vm_mock_wager_count; ++i)
+    {
+        vm_mock_wager_challenge *ch = &g_vm_mock_wagers[i];
+        if (!ch->active)
+            continue;
+        if (ch->status != VM_MOCK_WAGER_ST_OPEN &&
+            ch->status != VM_MOCK_WAGER_ST_AWAIT)
+            continue;
+        if (ch->idleSinceUnix == 0)
+            ch->idleSinceUnix = now;
+        if (now < ch->idleSinceUnix + VM_MOCK_WAGER_IDLE_TIMEOUT_SEC)
+            continue;
+        vm_mock_wager_expire_idle(ch);
+    }
 }
 
 static bool vm_mock_wager_start_pair(vm_mock_wager_challenge *ch)
@@ -806,22 +1192,30 @@ static u32 vm_net_mock_build_wager_list_response(const u8 *request, u32 requestL
     (void)request;
     (void)requestLen;
     (void)vm_mock_arena_load_config(false);
+    vm_mock_wager_tick_expire();
+    vm_mock_wager_hydrate_from_db();
     if (session == NULL || out == NULL ||
         !g_vm_mock_arena_config.wagerEnabled)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_LIST, 0, 0,
                                              "disabled");
     viewerScene = vm_mock_wager_viewer_scene(session, role);
+    /* List is global (any 比武 NPC); challenge still enforces same-scene. */
     for (i = 0; i < g_vm_mock_wager_count && count < 32; ++i)
     {
         vm_mock_wager_challenge *ch = &g_vm_mock_wagers[i];
         if (!ch->active)
             continue;
+        /* OPEN=摆擂；AWAIT/FIGHT=进行中（客户端分栏展示） */
         if (ch->status != VM_MOCK_WAGER_ST_OPEN &&
-            ch->status != VM_MOCK_WAGER_ST_AWAIT)
+            ch->status != VM_MOCK_WAGER_ST_AWAIT &&
+            ch->status != VM_MOCK_WAGER_ST_FIGHT)
             continue;
-        if (!vm_net_mock_scene_names_equal_loose(ch->scene, viewerScene))
-            continue;
+        vm_mock_wager_rebind_member_clients(ch);
+        for (m = 0; m < ch->hostCount; ++m)
+            vm_mock_wager_refresh_member_stats(&ch->host[m]);
+        for (m = 0; m < ch->challCount; ++m)
+            vm_mock_wager_refresh_member_stats(&ch->chall[m]);
         if (!vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
                                      ch->challengeId) ||
             !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos, ch->stake) ||
@@ -835,23 +1229,47 @@ static u32 vm_net_mock_build_wager_list_response(const u8 *request, u32 requestL
             !vm_net_mock_seq_put_string(rows, sizeof(rows), &rowsPos,
                                         ch->host[0].name) ||
             !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
-                                     ch->hostLeaderRoleId))
+                                     ch->hostLeaderRoleId) ||
+            !vm_net_mock_seq_put_string(rows, sizeof(rows), &rowsPos, ch->scene))
             break;
+        /* After scene: host then chall — each name + job u32 + level u32. */
         for (m = 0; m < ch->hostCount; ++m)
         {
             if (!vm_net_mock_seq_put_string(rows, sizeof(rows), &rowsPos,
-                                            ch->host[m].name))
+                                            ch->host[m].name) ||
+                !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
+                                         ch->host[m].job) ||
+                !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
+                                         ch->host[m].level))
                 break;
         }
         if (m < ch->hostCount)
             break;
+        for (m = 0; m < ch->challCount; ++m)
+        {
+            if (!vm_net_mock_seq_put_string(rows, sizeof(rows), &rowsPos,
+                                            ch->chall[m].name) ||
+                !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
+                                         ch->chall[m].job) ||
+                !vm_net_mock_seq_put_u32(rows, sizeof(rows), &rowsPos,
+                                         ch->chall[m].level))
+                break;
+        }
+        if (m < ch->challCount)
+            break;
         count += 1;
     }
+    printf("[info][mock-service] wager_list viewer=%s mem=%u out=%u "
+           "same_scene_hint=%s\n",
+           viewerScene[0] ? viewerScene : "-", g_vm_mock_wager_count, count,
+           viewerScene);
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_ARENA_WT_KIND,
                                      VM_MOCK_ARENA_WT_WAGER_LIST, &objectStart) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "result", 1) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "count", count) ||
-        !vm_net_mock_put_object_blob(out, outCap, &pos, "rows", rows, rowsPos))
+        /* entry not blob: Pixi SeqReader expects naked seq (same as auction/rank). */
+        !vm_net_mock_put_object_entry(out, outCap, &pos, "rows", rows,
+                                      (u16)rowsPos))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     out[0] = 'W';
@@ -879,6 +1297,7 @@ static u32 vm_net_mock_build_wager_create_response(const u8 *request,
     u8 i;
 
     (void)vm_mock_arena_load_config(false);
+    vm_mock_wager_hydrate_from_db();
     if (!g_vm_mock_arena_config.wagerEnabled)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
@@ -945,6 +1364,7 @@ static u32 vm_net_mock_build_wager_create_response(const u8 *request,
                                              VM_MOCK_ARENA_WT_WAGER_CREATE, 0, 0,
                                              "db");
     }
+    vm_mock_wager_touch_idle(ch);
     printf("[info][mock-service] wager_create id=%u host=%u n=%u stake=%u scene=%s\n",
            ch->challengeId, ch->hostLeaderRoleId, (u32)ch->hostCount, stake,
            ch->scene);
@@ -963,6 +1383,7 @@ static u32 vm_net_mock_build_wager_cancel_response(const u8 *request,
     u32 offset = 4;
     vm_net_mock_request_object object;
 
+    vm_mock_wager_hydrate_from_db();
     if (role == NULL)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CANCEL, 0, 0,
@@ -1007,6 +1428,7 @@ static u32 vm_net_mock_build_wager_challenge_response(const u8 *request,
     u8 i;
 
     (void)vm_mock_arena_load_config(false);
+    vm_mock_wager_hydrate_from_db();
     if (!g_vm_mock_arena_config.wagerEnabled || session == NULL || role == NULL)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CHALLENGE, 0,
@@ -1061,8 +1483,25 @@ static u32 vm_net_mock_build_wager_challenge_response(const u8 *request,
         ch->host[i].accepted = 0; /* require host reconfirm */
     ch->status = VM_MOCK_WAGER_ST_AWAIT;
     vm_mock_wager_persist_status(ch);
-    vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_HOST, VM_MOCK_WAGER_EVT_AWAIT,
-                             0, 0);
+    vm_mock_wager_persist_host_accepted_all(ch->challengeId, 0);
+    vm_mock_wager_touch_idle(ch);
+    /* 有人应战你的赏金擂台，请打开确认 */
+    {
+        static const char awaitTipGbk[] =
+            "\xD3\xD0\xC8\xCB\xD3\xA6\xD5\xBD\xC4\xE3\xB5\xC4\xC9\xCD\xBD\xF0"
+            "\xC0\xDE\xCC\xA8\xA3\xAC\xC7\xEB\xB4\xF2\xBF\xAA\xC8\xB7\xC8\xCF";
+        vm_mock_wager_rebind_member_clients(ch);
+        vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_HOST,
+                                 VM_MOCK_WAGER_EVT_AWAIT, 0, 0);
+        for (i = 0; i < ch->hostCount; ++i)
+        {
+            vm_mock_service_client_session *hostSession =
+                vm_mock_service_find_client_session(ch->host[i].clientId);
+            if (hostSession != NULL)
+                (void)vm_mock_service_session_enqueue_system_message(
+                    hostSession, awaitTipGbk);
+        }
+    }
     printf("[info][mock-service] wager_challenge id=%u chall=%u n=%u\n",
            ch->challengeId, ch->challLeaderRoleId, (u32)count);
     return vm_net_mock_build_wager_result(out, outCap,
@@ -1086,6 +1525,7 @@ static u32 vm_net_mock_build_wager_confirm_response(const u8 *request,
     u8 hostIndex = 0xff;
     u8 allAccepted;
 
+    vm_mock_wager_hydrate_from_db();
     if (role == NULL || session == NULL)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CONFIRM, 0, 0,
@@ -1099,6 +1539,8 @@ static u32 vm_net_mock_build_wager_confirm_response(const u8 *request,
                                              VM_MOCK_ARENA_WT_WAGER_CONFIRM, 0, 0,
                                              "bad-req");
     ch = vm_mock_wager_find(challengeId);
+    if (ch != NULL)
+        vm_mock_wager_rebind_member_clients(ch);
     if (ch == NULL || ch->status != VM_MOCK_WAGER_ST_AWAIT)
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CONFIRM, 0,
@@ -1117,6 +1559,22 @@ static u32 vm_net_mock_build_wager_confirm_response(const u8 *request,
                                              challengeId, "not-host");
     if (accept == 0)
     {
+        /* 擂主已拒绝你的赏金挑战 */
+        static const char rejectTipGbk[] =
+            "\xC0\xDE\xD6\xF7\xD2\xD1\xBE\xDC\xBE\xF8\xC4\xE3\xB5\xC4"
+            "\xC9\xCD\xBD\xF0\xCC\xF4\xD5\xBD";
+        /* Notify challengers while chall[] still valid (clientId rebound). */
+        vm_mock_wager_rebind_member_clients(ch);
+        vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_CHALL,
+                                 VM_MOCK_WAGER_EVT_REJECT, ch->stake, 0);
+        for (i = 0; i < ch->challCount; ++i)
+        {
+            vm_mock_service_client_session *challSession =
+                vm_mock_service_find_client_session(ch->chall[i].clientId);
+            if (challSession != NULL)
+                (void)vm_mock_service_session_enqueue_system_message(
+                    challSession, rejectTipGbk);
+        }
         vm_mock_wager_refund_members(ch->chall, ch->challCount, ch->stake);
         ch->challCount = 0;
         ch->challLeaderRoleId = 0;
@@ -1125,14 +1583,14 @@ static u32 vm_net_mock_build_wager_confirm_response(const u8 *request,
             ch->host[i].accepted = 1;
         ch->status = VM_MOCK_WAGER_ST_OPEN;
         vm_mock_wager_persist_status(ch);
-        vm_mock_wager_notify_side(ch, VM_MOCK_WAGER_SIDE_CHALL,
-                                 VM_MOCK_WAGER_EVT_REJECT, ch->stake, 0);
+        vm_mock_wager_touch_idle(ch);
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CONFIRM, 1,
                                              challengeId, "rejected");
     }
     ch->host[hostIndex].accepted = 1;
     vm_mock_wager_persist_accept(challengeId, role->roleId, 1);
+    vm_mock_wager_touch_idle(ch);
     allAccepted = 1;
     for (i = 0; i < ch->hostCount; ++i)
     {
@@ -1156,6 +1614,7 @@ static u32 vm_net_mock_build_wager_confirm_response(const u8 *request,
             ch->host[i].accepted = 1;
         ch->status = VM_MOCK_WAGER_ST_OPEN;
         vm_mock_wager_persist_status(ch);
+        vm_mock_wager_touch_idle(ch);
         return vm_net_mock_build_wager_result(out, outCap,
                                              VM_MOCK_ARENA_WT_WAGER_CONFIRM, 0,
                                              challengeId, "start-fail");
@@ -1182,6 +1641,7 @@ static u32 vm_net_mock_build_wager_mine_response(const u8 *request, u32 requestL
 
     (void)request;
     (void)requestLen;
+    vm_mock_wager_hydrate_from_db();
     if (role == NULL)
         return 0;
     for (i = 0; i < g_vm_mock_wager_count; ++i)

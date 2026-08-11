@@ -1122,6 +1122,39 @@ export function buildShopBuy14Request(
 }
 
 /**
+ * Mall buy ack: 1/14/3 { seq, result }.
+ * result: 1=ok, 2=酷宝不足(type=2), 3=背包已满/无法入库, 4=礼包空位不足.
+ * Evidence: mmShop:0x9DE / docs/re/2026-07-26-shop-buy14-bag-full-as-wcoin.md
+ */
+export function parseShopBuy14Response(
+  packet: WtPacket,
+): { seq: number; result: number } | null {
+  const obj = packet.objects.find((o) => o.kind === 14 && o.subtype === 3);
+  if (!obj) return null;
+  if (!findField(obj, "result") && !findField(obj, "seq")) return null;
+  return {
+    seq: fieldU32(obj, "seq"),
+    result: fieldU32(obj, "result"),
+  };
+}
+
+/** Map shop 14/3 result to panel tip; empty string = unknown / keep generic. */
+export function shopBuy14ResultTip(result: number): string {
+  switch (result >>> 0) {
+    case 1:
+      return "";
+    case 2:
+      return "酷宝不够请右下角赞助";
+    case 3:
+      return "背包已满";
+    case 4:
+      return "背包已满";
+    default:
+      return result ? `购买失败(${result})` : "购买失败";
+  }
+}
+
+/**
  * WT `1/12/1` (major=1 kind=0x0c subtype=1): learned skill IDs for the active role.
  * Names/MP/effects come from local skill.dsh filtered by actorinfo job.
  * Evidence: JianghuOL.CBE:0x01010594 / docs/re/2026-06-28-role-skills.md
