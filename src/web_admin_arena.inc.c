@@ -167,6 +167,7 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
         "<a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a>"
         "<a class=\"tab\" href=\"/?tab=shop\">商品管理</a>"
         "<a class=\"tab\" href=\"/?tab=chests\">宝箱奖励</a>"
+        "<a class=\"tab\" href=\"/?tab=enhance\">强化配置</a>"
         "<a class=\"tab on\" href=\"/?tab=arena\">比武</a>"
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"

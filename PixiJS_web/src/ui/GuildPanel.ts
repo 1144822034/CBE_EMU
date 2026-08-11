@@ -22,6 +22,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -336,6 +337,7 @@ export class GuildPanel extends Container {
 
   cancel(): void {
     if (!this.visible) return;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.mode === "actions" || this.mode === "text") {
       this.mode = this.returnMode;
       if (this.mode === "hub") this.rebuildHub();

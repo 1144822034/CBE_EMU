@@ -2798,34 +2798,31 @@ static u16 vm_net_mock_equip_enhance_milestone_value(
                                                          type, flag);
 }
 
-/* Add unlocked +4/+8/+12/+16 milestone flats (quality table) into dst. */
+#include "mock_server_enhance_config.inc.c"
+
+/* Add unlocked +4/+8/+12/+16 milestone flats (config + wash) into dst. */
 static void vm_net_mock_equipment_bonus_add_unlocked_milestones(
     vm_net_mock_equipment_bonus *dst,
     const vm_net_mock_equipment_catalog_item *item,
-    u16 enhanceLevel)
+    u16 enhanceLevel,
+    const vm_net_mock_enhance_wash_state *wash)
 {
-    const vm_net_mock_equip_enhance_attr_def *defs = NULL;
-    u8 knownCount = 0;
     u8 i = 0;
 
     if (dst == NULL || item == NULL || enhanceLevel < 4)
         return;
-    defs = vm_net_mock_equip_enhance_attrs_for_slot(item->slot, &knownCount);
-    if (defs == NULL || knownCount == 0)
-        return;
-    if (knownCount > VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS)
-        knownCount = VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS;
-    for (i = 0; i < knownCount; ++i)
+    for (i = 0; i < VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS; ++i)
     {
-        u8 unlock = (u8)((i + 1u) * 4u);
-        u8 type;
-        u16 value;
+        u8 unlock = vm_net_mock_enhance_unlock_for_index(i);
+        u8 type = 0;
+        u8 flag = 0;
+        u16 value = 0;
 
         if (unlock > enhanceLevel)
             continue;
-        type = vm_net_mock_equip_enhance_milestone_type(item, i, defs[i].type);
-        value = vm_net_mock_equip_enhance_milestone_value(item, unlock, type,
-                                                         defs[i].flag);
+        if (!vm_net_mock_equip_enhance_resolve_milestone(item, i, wash, &type,
+                                                         &flag, &value))
+            continue;
         switch (type)
         {
         case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
@@ -2853,15 +2850,13 @@ static void vm_net_mock_equipment_bonus_add_unlocked_milestones(
             dst->crit += value;
             break;
         case VM_NET_MOCK_EQUIP_ATTR_HP:
-            if (defs[i].flag != 0)
-                /* Sum percent points; ×character bare HP in build_player_stats. */
+            if (flag != 0)
                 dst->hpPercent += value;
             else
                 dst->hp += value;
             break;
         case VM_NET_MOCK_EQUIP_ATTR_MP:
-            if (defs[i].flag != 0)
-                /* Same as 气血%: ×character bare MP, not item->bonus.mp. */
+            if (flag != 0)
                 dst->mpPercent += value;
             else
                 dst->mp += value;
@@ -2917,11 +2912,9 @@ vm_net_mock_equip_enhance_attrs_for_slot(u8 slot, u8 *countOut)
     }
 }
 
-static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
-                                                   u32 *pos,
-                                                   u8 stackRuntimeByte,
-                                                   u8 enhanceLevel,
-                                                   u32 itemId)
+static bool vm_net_mock_seq_put_item_common_extra(
+    u8 *out, u32 outCap, u32 *pos, u8 stackRuntimeByte, u8 enhanceLevel,
+    u32 itemId, const vm_net_mock_enhance_wash_state *wash)
 {
     /*
      * JianghuOL.CBE:ParseEquipAttributes reads tagged i16, i16, u8 attr_count,
@@ -2940,15 +2933,13 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
      *   second i16 = 0
      *
      * Slot layout when L>=1:
-     *   1) L>=4: four milestone lines unlock 4/8/12/16 (slot template)
-     *   2) then M(L)-base for 护甲/物攻/气血/法力 with base>0 (unlock=1),
+     *   1) L>=4: four milestone lines unlock 4/8/12/16 (config + wash)
+     *   2) then M(L)-base for 护甲/物攻 with base>0 (unlock=1),
      *      until CLIENT_CAP
      */
     const vm_net_mock_equipment_catalog_item *equip = NULL;
-    const vm_net_mock_equip_enhance_attr_def *defs = NULL;
     u8 level = enhanceLevel;
     u8 attrCount = 0;
-    u8 knownCount = 0;
     u16 firstWire = stackRuntimeByte;
     u16 secondWire = 0;
     u8 unlocks[VM_NET_MOCK_EQUIP_ATTR_CLIENT_CAP];
@@ -2967,41 +2958,27 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
         secondWire = (u16)VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (level >= 4)
         {
-            defs = vm_net_mock_equip_enhance_attrs_for_slot(equip->slot,
-                                                            &knownCount);
-            if (defs != NULL && knownCount > 0)
+            for (i = 0; i < VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS; ++i)
             {
-                /*
-                 * JianghuOL.CBE:0x01032118 paints every attr slot and chooses
-                 * color by unlock vs current enhance (unlock > L → gray #5,
-                 * else active #4).  Wire all 4 milestone lines whenever L>=4
-                 * so +4 shows attr1 live and attrs 2..4 gray — not only the
-                 * unlocked prefix (old attr_count=L/4 hid the rest).
-                 */
-                if (knownCount > VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS)
-                    knownCount = VM_NET_MOCK_EQUIP_ATTR_MILESTONE_SLOTS;
-                for (i = 0; i < knownCount; ++i)
-                {
-                    u8 realUnlock = (u8)((i + 1u) * 4u);
-                    u8 type = vm_net_mock_equip_enhance_milestone_type(
-                        equip, i, defs[i].type);
-                    u16 wireValue;
-                    unlocks[attrCount] = vm_net_mock_equip_enhance_wire_unlock(
-                        type, realUnlock);
-                    types[attrCount] =
-                        vm_net_mock_equip_enhance_wire_type(type);
-                    flags[attrCount] = defs[i].flag;
-                    /*
-                     * Keep percent on the wire for flag=1 (详情 +25%).
-                     * Wear-apply 0x0100FED8 seeds HP/MP from actor pools, then
-                     * for mode=1 does pool * percent / 100 (0x0101010A).
-                     * Emitting the precomputed flat (e.g. 232) with flag=1 made
-                     * detail show +232% and applied pool*232/100.
-                     */
-                    values[attrCount] = vm_net_mock_equip_enhance_milestone_value(
-                        equip, realUnlock, type, defs[i].flag);
-                    attrCount++;
-                }
+                u8 realUnlock = vm_net_mock_enhance_unlock_for_index(i);
+                u8 type = 0;
+                u8 flag = 0;
+                u16 wireValue = 0;
+                u8 washed = 0;
+
+                if (!vm_net_mock_equip_enhance_resolve_milestone(
+                        equip, i, wash, &type, &flag, &wireValue))
+                    continue;
+                if (wash != NULL && wash->slots[i].washed != 0 &&
+                    wash->slots[i].type >= 1 && wash->slots[i].type <= 10)
+                    washed = 1;
+                unlocks[attrCount] =
+                    vm_net_mock_equip_enhance_wire_unlock(type, realUnlock);
+                types[attrCount] = vm_net_mock_equip_enhance_wire_type(type);
+                /* PixiJS: bit0=%  bit7=washed; CBE typically treats flag as 0/1. */
+                flags[attrCount] = (u8)((flag & 1u) | (washed ? 0x80u : 0u));
+                values[attrCount] = wireValue;
+                attrCount++;
             }
         }
         /*
@@ -3123,7 +3100,7 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
                 out, outCap, &pos, vm_net_mock_backpack_stack_byte(item),
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                item->itemId))
+                item->itemId, &item->enhanceWash))
         {
             return false;
         }
@@ -3225,7 +3202,7 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
                 return false;
             if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
                                                        item->stack, 0,
-                                                       item->itemId))
+                                                       item->itemId, NULL))
                 return false;
             ++emitted;
         }
@@ -3265,7 +3242,7 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
                 out, outCap, &pos, 0,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                item->itemId))
+                item->itemId, &item->enhanceWash))
             return false;
     }
     *blobLenOut = pos;
@@ -3756,6 +3733,16 @@ typedef struct
     u16 sourceSeq;
     u16 destSeq;
 } vm_net_mock_equipment_enhance_transfer_request;
+
+/* PixiJS-only 强化洗练: 1/29/{7|8|9}. */
+typedef struct
+{
+    u8 subtype; /* 7 open, 8 preview, 9 confirm */
+    u16 equipSeq;
+    u8 unlockLevel; /* 4/8/12/16 for 8/9 */
+    u32 crystalItemId;
+    u8 crystalCount;
+} vm_net_mock_equipment_enhance_wash_request;
 
 typedef struct
 {
@@ -4260,6 +4247,8 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     u8 stackRuntime = 0;
     u8 enhance =
         (u8)SDL_min(enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    const vm_net_mock_enhance_wash_state *wash = NULL;
+    vm_net_mock_role_state *role = NULL;
 
     if (blobLenOut)
         *blobLenOut = 0;
@@ -4270,7 +4259,18 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
      * must stay 1 here — MoveBattleActorStep / bag insert loop on count, and
      * 7/11 may rewrite item+0xf2.  Worn-slot durability is only the login
      * equipment blob (mmGame:0xD04 → item+0x110).
+     *
+     * Prefer live backpack wash overrides so enhance/wash 7/7 sync does not
+     * briefly rewrite milestone lines back to unwashed defaults.
      */
+    role = vm_net_mock_active_role();
+    if (role != NULL && seq != 0)
+    {
+        vm_net_mock_backpack_item_state *bp =
+            vm_net_mock_role_find_backpack_item(role, 0, seq);
+        if (bp != NULL && bp->itemId == itemId)
+            wash = &bp->enhanceWash;
+    }
     stackRuntime = vm_net_mock_item_common_extra_stack_byte(itemId, count);
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
         return false;
@@ -4281,7 +4281,7 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, stackRuntime,
-                                                enhance, itemId))
+                                                enhance, itemId, wash))
         return false;
 
     *blobLenOut = pos;
@@ -4321,7 +4321,7 @@ static bool vm_net_mock_build_chest_open_info_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_item_common_extra(
             out, outCap, &pos,
             vm_net_mock_item_common_extra_stack_byte(itemId, count), 0,
-            itemId))
+            itemId, NULL))
         return false;
 
     *blobLenOut = pos;
@@ -4372,7 +4372,7 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
             !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos,
                                                     stackRuntime, enhance,
-                                                    rows[i].itemId))
+                                                    rows[i].itemId, NULL))
         {
             return false;
         }
@@ -4618,7 +4618,7 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
                 out, outCap, &pos, 0,
                 (u8)SDL_min(role->equippedEnhanceLevels[slot],
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                itemId))
+                itemId, &role->equippedEnhanceWash[slot]))
         {
             return false;
         }
@@ -8933,6 +8933,75 @@ static bool vm_net_mock_parse_equipment_enhance_transfer_request(
     parsed.subtype = object.subtype;
     parsed.destSeq = (u16)seqd;
     parsed.sourceSeq = (u16)seqs;
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_parse_equipment_enhance_wash_request(
+    const u8 *request,
+    u32 requestLen,
+    vm_net_mock_equipment_enhance_wash_request *parsedOut)
+{
+    u32 offset = 4;
+    u32 seqValue = 0;
+    u32 unlockValue = 0;
+    u32 crystalId = 0;
+    u32 crystalCount = 1;
+    vm_net_mock_request_object object;
+    vm_net_mock_equipment_enhance_wash_request parsed;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+    if (request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype < 7 || object.subtype > 9 || object.payloadLen == 0)
+    {
+        return false;
+    }
+
+    parsed.subtype = object.subtype;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seq", &seqValue) &&
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "equipseq", &seqValue))
+    {
+        return false;
+    }
+    if (seqValue == 0 || seqValue > 0xffffu)
+        return false;
+    parsed.equipSeq = (u16)seqValue;
+
+    if (parsed.subtype != 7)
+    {
+        if (!vm_net_mock_get_object_number_field(
+                object.payload, object.payloadLen, "unlock", &unlockValue) ||
+            (unlockValue != 4 && unlockValue != 8 && unlockValue != 12 &&
+             unlockValue != 16))
+        {
+            return false;
+        }
+        parsed.unlockLevel = (u8)unlockValue;
+        if (!vm_net_mock_get_object_number_field(
+                object.payload, object.payloadLen, "crystal", &crystalId) ||
+            crystalId < VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
+            crystalId > VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+        {
+            return false;
+        }
+        parsed.crystalItemId = crystalId;
+        if (vm_net_mock_get_object_number_field(
+                object.payload, object.payloadLen, "count", &crystalCount) &&
+            crystalCount != 1)
+        {
+            return false;
+        }
+        parsed.crystalCount = 1;
+    }
+
     if (parsedOut)
         *parsedOut = parsed;
     return true;

@@ -4,7 +4,7 @@
  * screenshots 玄魔古杖 / 梦境魔杖.
  */
 
-import type { BagItem } from "../net/protocolExtras";
+import type { BagEnhanceAttr, BagItem } from "../net/protocolExtras";
 import {
   lookupItemSync,
   qualityColor,
@@ -16,6 +16,8 @@ import {
 export const EQUIP_DETAIL_YELLOW = 0xffff00;
 /** Gray for locked enhance rows (CBE color-5). */
 export const EQUIP_DETAIL_GRAY = 0x808080;
+/** Red for washed (洗练) milestone rows. */
+export const EQUIP_DETAIL_WASHED = 0xff2020;
 
 export type EquipPaintLine =
   | { kind: "text"; text: string; color: number }
@@ -189,39 +191,45 @@ function milestoneValue(
   }
 }
 
-/** Main combat attrs from equip.dsh (only non-zero columns), CBE order. */
+/** Main combat attrs from equip.dsh (only non-zero columns), CBE order.
+ * 物攻/护甲 append M(L) enhance delta: `[物攻]:+576(+1725)`.
+ */
 function mainStatLines(
   cat: ItemCatalogRow,
   qColor: number,
+  enhance = 0,
 ): EquipPaintLine[] {
-  const rows: { key: string; n: number }[] = [
-    { key: "力量", n: cat.strength ?? 0 },
-    { key: "敏捷", n: cat.agility ?? 0 },
-    { key: "智慧", n: cat.wisdom ?? 0 },
-    { key: "物攻", n: cat.attack ?? 0 },
-    { key: "护甲", n: cat.armor ?? 0 },
-    { key: "躲闪", n: cat.dodge ?? 0 },
-    { key: "命中", n: cat.hit ?? 0 },
-    { key: "暴击", n: cat.crit ?? 0 },
-    { key: "抗性", n: cat.resist ?? 0 },
-    { key: "气血", n: cat.hpChange ?? 0 },
-    { key: "法力", n: cat.mpChange ?? 0 },
+  const attackBase = cat.attack ?? 0;
+  const armorBase = cat.armor ?? 0;
+  const attackDelta =
+    enhance >= 1 && attackBase > 0 ? attackEnhanceDelta(attackBase, enhance) : 0;
+  const armorDelta =
+    enhance >= 1 && armorBase > 0 ? armorEnhanceDelta(armorBase, enhance) : 0;
+  const rows: { key: string; n: number; delta: number }[] = [
+    { key: "力量", n: cat.strength ?? 0, delta: 0 },
+    { key: "敏捷", n: cat.agility ?? 0, delta: 0 },
+    { key: "智慧", n: cat.wisdom ?? 0, delta: 0 },
+    { key: "物攻", n: attackBase, delta: attackDelta },
+    { key: "护甲", n: armorBase, delta: armorDelta },
+    { key: "躲闪", n: cat.dodge ?? 0, delta: 0 },
+    { key: "命中", n: cat.hit ?? 0, delta: 0 },
+    { key: "暴击", n: cat.crit ?? 0, delta: 0 },
+    { key: "抗性", n: cat.resist ?? 0, delta: 0 },
+    { key: "气血", n: cat.hpChange ?? 0, delta: 0 },
+    { key: "法力", n: cat.mpChange ?? 0, delta: 0 },
   ];
   return rows
     .filter((r) => r.n !== 0)
     .map((r) => ({
       kind: "kv" as const,
       key: `[${r.key}]:`,
-      value: `+${r.n}`,
+      value: r.delta > 0 ? `+${r.n}(+${r.delta})` : `+${r.n}`,
       keyColor: qColor,
       valueColor: EQUIP_DETAIL_YELLOW,
     }));
 }
 
-function enhanceLines(cat: ItemCatalogRow, enhance: number): EquipPaintLine[] {
-  const slot = cat.equipSlot ?? -1;
-  if (slot < 0 || slot >= MILESTONES.length) return [];
-  const defs = MILESTONES[slot]!;
+function enhanceLines(cat: ItemCatalogRow, enhance: number, attrs?: BagEnhanceAttr[]): EquipPaintLine[] {
   const out: EquipPaintLine[] = [
     {
       kind: "text",
@@ -229,6 +237,32 @@ function enhanceLines(cat: ItemCatalogRow, enhance: number): EquipPaintLine[] {
       color: EQUIP_DETAIL_YELLOW,
     },
   ];
+
+  const milestones =
+    attrs?.filter((a) => a.unlock === 4 || a.unlock === 8 || a.unlock === 12 || a.unlock === 16) ??
+    [];
+  if (milestones.length > 0) {
+    for (const a of milestones) {
+      const name = ATTR_NAMES[a.type] ?? "?";
+      const pct = (a.flag & 1) !== 0 ? "%" : "";
+      const locked = a.unlock > enhance;
+      const washed = isWashedMilestone(cat, a);
+      out.push({
+        kind: "text",
+        text: `(+${a.unlock}) ${name}+${a.value}${pct}`,
+        color: locked
+          ? EQUIP_DETAIL_GRAY
+          : washed
+            ? EQUIP_DETAIL_WASHED
+            : EQUIP_DETAIL_YELLOW,
+      });
+    }
+    return out;
+  }
+
+  const slot = cat.equipSlot ?? -1;
+  if (slot < 0 || slot >= MILESTONES.length) return out;
+  const defs = MILESTONES[slot]!;
   for (let i = 0; i < defs.length; i++) {
     const unlock = (i + 1) * 4;
     const def = defs[i]!;
@@ -244,6 +278,21 @@ function enhanceLines(cat: ItemCatalogRow, enhance: number): EquipPaintLine[] {
     });
   }
   return out;
+}
+
+/** Wire bit7 or diverge from catalog default milestone → washed (red). */
+function isWashedMilestone(cat: ItemCatalogRow, a: BagEnhanceAttr): boolean {
+  if (a.washed) return true;
+  const slot = cat.equipSlot ?? -1;
+  if (slot < 0 || slot >= MILESTONES.length) return false;
+  const slotIndex = a.unlock / 4 - 1;
+  if (slotIndex < 0 || slotIndex > 3 || !Number.isInteger(slotIndex)) return false;
+  const def = MILESTONES[slot]![slotIndex];
+  if (!def) return false;
+  const defType = milestoneType(cat, slotIndex, def.type);
+  const defFlag = def.flag & 1;
+  const defValue = milestoneValue(cat, a.unlock, defType, defFlag);
+  return a.type !== defType || (a.flag & 1) !== defFlag || a.value !== defValue;
 }
 
 /** M(L) = base * (1 + (10L + 35*⌊L/4⌋)/100) */
@@ -316,37 +365,6 @@ export function buildEnhanceCompareLines(
   return out;
 }
 
-/**
- * Wire after milestones: M(L)-base for 护甲/物攻 (unlock=1).
- * Client cap 6 → after 4 milestones at most 2 extras.
- * Display: `(+1) 物攻+Δ` (CBE 0x01032118).
- */
-function scaleExtraLines(cat: ItemCatalogRow, enhance: number): EquipPaintLine[] {
-  if (enhance < 1) return [];
-  const extras: { name: string; base: number; delta: number }[] = [
-    {
-      name: "护甲",
-      base: cat.armor ?? 0,
-      delta: armorEnhanceDelta(cat.armor ?? 0, enhance),
-    },
-    {
-      name: "物攻",
-      base: cat.attack ?? 0,
-      delta: attackEnhanceDelta(cat.attack ?? 0, enhance),
-    },
-  ];
-  const out: EquipPaintLine[] = [];
-  for (const e of extras) {
-    if (e.base <= 0 || e.delta <= 0) continue;
-    out.push({
-      kind: "text",
-      text: `(+1) ${e.name}+${e.delta}`,
-      color: EQUIP_DETAIL_YELLOW,
-    });
-  }
-  return out;
-}
-
 export type EquipDetailOpts = {
   /** Worn panel screenshot omits 类型/职业. */
   omitTypeJob?: boolean;
@@ -410,24 +428,12 @@ export function buildEquipDetailLines(
       keyColor: qColor,
       valueColor: qColor,
     },
-    ...mainStatLines(cat, qColor),
+    ...mainStatLines(cat, qColor, enhance),
   );
 
-  // L>=4: 四档里程碑；其后追加 M(L)-base 护甲/物攻（原分页第 2 页那几行）
-  // 1<=L<4: 仅强化基础缩放行
+  // L>=4: 四档里程碑。物攻/护甲 M(L) 缩放已并入主属性行。
   if (enhance >= 4) {
-    lines.push(...enhanceLines(cat, enhance));
-    lines.push(...scaleExtraLines(cat, enhance));
-  } else if (enhance >= 1) {
-    const extras = scaleExtraLines(cat, enhance);
-    if (extras.length) {
-      lines.push({
-        kind: "text",
-        text: `强化附加: (${enhance}/16)`,
-        color: EQUIP_DETAIL_YELLOW,
-      });
-      lines.push(...extras);
-    }
+    lines.push(...enhanceLines(cat, enhance, it.enhanceAttrs));
   }
 
   return lines;

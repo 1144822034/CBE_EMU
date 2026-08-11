@@ -12,7 +12,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 手续费：`fee = max(1, startPrice * feePercent / 100)`；`feePercent = base(2) + tier * perTier(2)`（1/6/12/24 时 → **2/4/6/8%**）。
 - 竞拍：同货币出价；被超价后拍金进入 **待领退款**（不自动入账）。
 - 禁止同 `roleId` 与同 `accountId` 自拍。
-- 全服同时在售（`status=OPEN`）最多 **50** 件；另有每人 `max_active_listings`（默认 20）。
+- 全服同时在售（`status=OPEN`）最多 **50** 件；另有每人 `max_active_listings`（默认 **2**）。
 - 超时无出价：下架，卖家待领 **超时退物**。
 - 超时有出价：下架成交；卖家待领 **拍金**，赢家待领 **物品**。
 - 「拍」有待领时闪烁；领取走 claim 幂等（先占位 `claimed=1` 再发货）。
@@ -92,6 +92,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - [ ] 有出价不可撤；无出价可撤回背包
 - [ ] 同账号出价被拒 `self-account`
 - [ ] 全服 OPEN≥50 时上架返回 `global-limit`
+- [ ] 单角色 OPEN≥2 时上架返回 `limit`（每人最多同时 2 件）
 - [ ] 背包满撤拍不丢物（仍 OPEN）
 - [ ] claim 重复请求不双发
 - [ ] `make -j2`；Pixi `tsc --noEmit`

@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS `account_role_equipment` (
   `slot_index` TINYINT UNSIGNED NOT NULL,
   `item_id` INT UNSIGNED NOT NULL,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   CONSTRAINT `fk_account_role_equipment_role`
     FOREIGN KEY (`account_id`, `role_id`)
@@ -220,6 +221,7 @@ CREATE TABLE IF NOT EXISTS `account_role_backpack` (
   `item_seq` SMALLINT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL COMMENT '普通物品为堆叠数；802/803 为剩余 HP/MP 储量',
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_backpack_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_backpack_role`
@@ -237,6 +239,7 @@ CREATE TABLE IF NOT EXISTS `account_role_warehouse` (
   `item_seq` SMALLINT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
@@ -683,6 +686,27 @@ CREATE TABLE IF NOT EXISTS `server_arena_wager_members` (
 ) ENGINE=InnoDB;
 
 
+CREATE TABLE IF NOT EXISTS `server_enhance_milestones` (
+  `equip_slot` TINYINT UNSIGNED NOT NULL COMMENT '0武器..7饰品',
+  `unlock_level` TINYINT UNSIGNED NOT NULL COMMENT '4/8/12/16',
+  `attr_type` TINYINT UNSIGNED NOT NULL COMMENT '1力..10法力',
+  `flag` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0值 1%',
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`equip_slot`, `unlock_level`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `server_enhance_attr_pool` (
+  `attr_type` TINYINT UNSIGNED NOT NULL,
+  `flag` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `value_min` INT UNSIGNED NOT NULL DEFAULT 1,
+  `value_max` INT UNSIGNED NOT NULL DEFAULT 1,
+  `weight` INT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`attr_type`, `flag`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `server_auction_config` (
   `id` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
@@ -690,7 +714,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_config` (
   `fee_percent_per_tier` TINYINT UNSIGNED NOT NULL DEFAULT 2,
   `min_bid_step` INT UNSIGNED NOT NULL DEFAULT 1,
   `currency_mask` TINYINT UNSIGNED NOT NULL DEFAULT 3,
-  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 20,
+  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 2,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB;
@@ -703,6 +727,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_listings` (
   `item_id` INT UNSIGNED NOT NULL,
   `item_count` INT UNSIGNED NOT NULL DEFAULT 1,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   `start_price` INT UNSIGNED NOT NULL DEFAULT 0,
   `current_price` INT UNSIGNED NOT NULL DEFAULT 0,
   `buyout_price` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -744,6 +769,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_claims` (
   `item_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `item_count` INT UNSIGNED NOT NULL DEFAULT 0,
   `enhance_level` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  `enhance_wash` VARCHAR(96) NOT NULL DEFAULT '0,0,0,0,0;0,0,0,0,0;0,0,0,0,0;0,0,0,0,0',
   `money_amount` INT UNSIGNED NOT NULL DEFAULT 0,
   `wcoin_amount` INT UNSIGNED NOT NULL DEFAULT 0,
   `claimed` TINYINT UNSIGNED NOT NULL DEFAULT 0,

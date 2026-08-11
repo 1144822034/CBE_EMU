@@ -32,6 +32,7 @@ import { DialogPanel } from "./ui/DialogPanel";
 import { ApproachPrompt } from "./ui/ApproachPrompt";
 import { SystemPanel, type SystemKind } from "./ui/SystemPanel";
 import { EnhancePanel } from "./ui/EnhancePanel";
+import { WashPanel } from "./ui/WashPanel";
 import { SocialPanel } from "./ui/SocialPanel";
 import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
@@ -93,6 +94,7 @@ type Phase =
   | "dialog"
   | "system"
   | "enhance"
+  | "wash"
   | "social"
   | "quest"
   | "chat"
@@ -129,7 +131,7 @@ function auctionMsgTip(code: string | undefined, okText: string): string {
     "bad-args": "参数错误",
     currency: "货币类型无效",
     "no-item": "背包无此物品",
-    limit: "上架数量已达上限",
+    limit: "每人最多同时上架2件",
     "global-limit": "拍卖行已满（全服最多50件）",
     fee: "手续费不足",
     consume: "扣物品失败",
@@ -324,6 +326,7 @@ async function main(): Promise<void> {
   const approach = new ApproachPrompt();
   const system = new SystemPanel();
   const enhanceUi = new EnhancePanel();
+  const washUi = new WashPanel();
   const social = new SocialPanel();
   const arenaHud = new ArenaHud();
   const arenaPanel = new ArenaPanel();
@@ -367,6 +370,7 @@ async function main(): Promise<void> {
   approach.visible = false;
   system.visible = false;
   enhanceUi.visible = false;
+  washUi.visible = false;
   social.visible = false;
   arenaHud.visible = false;
   arenaPanel.visible = false;
@@ -399,6 +403,7 @@ async function main(): Promise<void> {
     approach,
     system,
     enhanceUi,
+    washUi,
     social,
     arenaHud,
     arenaPanel,
@@ -424,6 +429,7 @@ async function main(): Promise<void> {
       wagerPanel,
       arenaPanel,
       enhanceUi,
+    washUi,
       system,
       social,
       guildUi,
@@ -815,6 +821,7 @@ async function main(): Promise<void> {
       p === "dialog" ||
       p === "system" ||
       p === "enhance" ||
+      p === "wash" ||
       p === "social" ||
       p === "quest" ||
       p === "chat" ||
@@ -827,6 +834,7 @@ async function main(): Promise<void> {
       p === "dialog" ||
       p === "system" ||
       p === "enhance" ||
+      p === "wash" ||
       p === "social" ||
       p === "quest" ||
       p === "chat" ||
@@ -838,6 +846,7 @@ async function main(): Promise<void> {
     dialog.visible = p === "dialog";
     system.visible = p === "system";
     enhanceUi.visible = p === "enhance";
+    washUi.visible = p === "wash";
     social.visible = p === "social";
     taskUi.visible = p === "quest";
     if (p !== "quest") taskUi.hide();
@@ -890,6 +899,7 @@ async function main(): Promise<void> {
     else if (p === "dialog") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "system") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "enhance") shell.setSoftkeys({ left: "确定", right: "返回" });
+    else if (p === "wash") shell.setSoftkeys(washUi.softkeys());
     else if (p === "social") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "quest") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "chat") shell.setSoftkeys({ left: "发送", right: "返回" });
@@ -2493,6 +2503,55 @@ async function main(): Promise<void> {
     showPhase("enhance");
   };
 
+
+  const openWashFlow = async (bag: import("./net/protocolExtras").BagItem) => {
+    if (!bag.seq) {
+      system.showTip("装备无效");
+      return;
+    }
+    if ((bag.enhance | 0) < 4) {
+      showGameTip("需强化到+4才可洗练");
+      return;
+    }
+    showGameTip(`洗练 ${bag.name}…`);
+    const info = await session.openEnhanceWash(bag.seq);
+    if (!info || info.result !== 1) {
+      showGameTip(info?.result === 3 ? "装备不存在" : "无法打开洗练");
+      return;
+    }
+    washUi.openWash(bag, session.bagItems, info);
+    showPhase("wash");
+  };
+
+  const closeWashToBag = async (tip?: string) => {
+    washUi.close();
+    await session.openBag();
+    system.open("bag");
+    showPhase("system");
+    if (tip) showGameTip(tip);
+  };
+
+  const refreshWashPreview = async () => {
+    const seq = washUi.getEquipSeq();
+    const unlock = washUi.getSelectedUnlock();
+    const crystal = washUi.getSelectedCrystalId();
+    if (!seq || !crystal) return;
+    const prev = await session.previewEnhanceWash(seq, unlock, crystal);
+    if (prev && prev.result === 1) {
+      washUi.setPreview(prev.rate, prev.money);
+    } else if (prev) {
+      washUi.setTip(
+        prev.result === 4
+          ? "玄晶不足"
+          : prev.result === 5
+            ? "档次未解锁"
+            : prev.result === 6
+              ? "金钱不足"
+              : "预览失败",
+      );
+    }
+  };
+
   const openRecastFlow = async (bag: import("./net/protocolExtras").BagItem) => {
     if ((bag.enhance | 0) <= 0) {
       showGameTip("未强化装备无法重铸");
@@ -2505,6 +2564,69 @@ async function main(): Promise<void> {
 
   enhanceUi.onClose = () => {
     void closeEnhanceToBag();
+  };
+  washUi.onClose = () => {
+    void closeWashToBag();
+  };
+  washUi.onAction = (action) => {
+    if (action === "cancel") {
+      void closeWashToBag();
+      return;
+    }
+    if (action === "pick_crystal" || action === "back") {
+      shell.setSoftkeys(washUi.softkeys());
+      if (action === "back" && washUi.getSelectedCrystalId()) {
+        void refreshWashPreview();
+      }
+      return;
+    }
+    if (action === "submit") {
+      void (async () => {
+        const seq = washUi.getEquipSeq();
+        const unlock = washUi.getSelectedUnlock();
+        const crystal = washUi.getSelectedCrystalId();
+        showGameTip("洗练中…");
+        const res = await session.confirmEnhanceWash(seq, unlock, crystal);
+        await session.openBag();
+        washUi.setBag(session.bagItems);
+        const fresh = session.bagItems.find((b) => b.seq === seq);
+        const reopen = await session.openEnhanceWash(seq);
+        if (reopen && reopen.result === 1 && fresh) {
+          washUi.openWash(fresh, session.bagItems, reopen, {
+            keepUnlock: unlock,
+            keepCrystalId: crystal,
+          });
+        }
+        if (res.ok) {
+          const attrNames: Record<number, string> = {
+            1: "力量",
+            2: "敏捷",
+            3: "智慧",
+            4: "物攻",
+            5: "护甲",
+            6: "躲闪",
+            7: "命中",
+            8: "暴击",
+            9: "气血",
+            10: "法力",
+          };
+          const name = attrNames[res.attrType ?? 0] ?? `属性${res.attrType ?? 0}`;
+          const pct = res.attrFlag ? "%" : "";
+          const tip =
+            res.attrType && res.attrValue != null
+              ? `洗练成功 ${name}+${res.attrValue}${pct}`
+              : res.message;
+          showGameTip(tip);
+          washUi.setTip(tip);
+          if (crystal) void refreshWashPreview();
+          else washUi.setPreview(0, 0);
+        } else {
+          washUi.setTip(res.message);
+          showGameTip(res.message);
+          if (crystal) void refreshWashPreview();
+        }
+      })();
+    }
   };
   enhanceUi.onAction = (action, payload) => {
     if (action === "cancel") {
@@ -2648,6 +2770,10 @@ async function main(): Promise<void> {
       }
       if (action === "enhance") {
         void openEnhanceFlow(bag);
+        return;
+      }
+      if (action === "wash") {
+        void openWashFlow(bag);
         return;
       }
       if (action === "recast") {
@@ -3525,6 +3651,7 @@ dialog.hide();
         }
         if (which === "center") arenaPanel.confirm();
         if (which === "right") {
+          if (arenaPanel.dismissTipOnSoftRight()) return;
           arenaPanel.close();
           syncWorldWalkInput();
           shell.setSoftkeys({ left: "菜单", right: "菜单" });
@@ -3542,6 +3669,7 @@ dialog.hide();
           return;
         }
         if (which === "right") {
+          if (wagerPanel.dismissTipOnSoftRight()) return;
           wagerPanel.close();
           syncWorldWalkInput();
           shell.setSoftkeys({ left: "菜单", right: "菜单" });
@@ -3553,6 +3681,7 @@ dialog.hide();
         if (which === "right") approach.cancel();
         return;
       }
+      if (which === "right" && hud.dismissTipOnSoftRight()) return;
       if (which === "left" || which === "right") showPhase("menu");
       return;
     }
@@ -3593,6 +3722,13 @@ dialog.hide();
     if (phase === "enhance") {
       if (which === "left") enhanceUi.confirm();
       if (which === "right") enhanceUi.cancel();
+      return;
+    }
+    if (phase === "wash") {
+      if (which === "left") washUi.softLeft();
+      if (which === "center") washUi.softMid();
+      if (which === "right") washUi.softRight();
+      shell.setSoftkeys(washUi.softkeys());
       return;
     }
     if (phase === "social") {
@@ -3698,6 +3834,13 @@ dialog.hide();
     }
     if (phase === "enhance") {
       enhanceUi.confirm();
+      return;
+    }
+    if (phase === "wash") {
+      // D-pad 中键/OK：主界面选玄晶；选晶界面确定（不用方向键上方中软按钮）
+      if (washUi.softkeys().left === "确定") washUi.softLeft();
+      else washUi.softMid();
+      shell.setSoftkeys(washUi.softkeys());
       return;
     }
     if (phase === "social") {
@@ -3830,6 +3973,7 @@ dialog.hide();
     else if (phase === "dialog") dialog.move(delta);
     else if (phase === "system") system.move(delta);
     else if (phase === "enhance") enhanceUi.move(delta);
+    else if (phase === "wash") washUi.move(delta);
     else if (phase === "social") social.move(delta);
     else if (phase === "quest") taskUi.move(delta);
     else if (phase === "chat") chatPanel.move(delta);
@@ -3931,6 +4075,16 @@ dialog.hide();
     if (phase === "enhance") {
       if (k === "arrowup" || k === "w") enhanceUi.move(-1);
       if (k === "arrowdown" || k === "s") enhanceUi.move(1);
+    }
+    if (phase === "wash") {
+      if (k === "arrowup" || k === "w") {
+        washUi.move(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        washUi.move(1);
+        e.preventDefault();
+      }
     }
     if (phase === "social") {
       if (k === "arrowup" || k === "w") social.move(-1);

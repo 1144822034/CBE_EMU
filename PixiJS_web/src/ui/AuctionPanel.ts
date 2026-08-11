@@ -35,6 +35,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -419,6 +420,7 @@ export class AuctionPanel extends Container {
 
   cancelOrBack(): boolean {
     if (!this.visible) return false;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return true;
     if (this.detailListing) {
       this.detailListing = null;
       this.detailActionCursor = 0;

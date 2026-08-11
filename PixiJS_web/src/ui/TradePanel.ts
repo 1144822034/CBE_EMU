@@ -22,6 +22,7 @@ import {
   drawPanelTipOverlay,
   setPanelTipSticky,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -361,6 +362,7 @@ export class TradePanel extends Container {
 
   cancel(): void {
     if (!this.visible) return;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.mode === "money") {
       this.cancelMoney();
       return;

@@ -971,7 +971,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
                 out, outCap, &pos, 0,
                 (u8)SDL_min(session->onlineEquippedEnhanceLevels[slot],
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                itemId))
+                itemId, NULL))
         {
             return false;
         }
@@ -987,7 +987,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
             !vm_net_mock_seq_put_item_common_extra(out, outCap, &pos, 0, 0,
-                                                   itemId))
+                                                   itemId, NULL))
         {
             return false;
         }
@@ -2664,6 +2664,8 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
             return false;
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = item->enhanceLevel;
+        vm_net_mock_enhance_wash_copy(&offer->items[i].enhanceWash,
+                                      &item->enhanceWash);
     }
     return true;
 }
@@ -2703,7 +2705,7 @@ static bool vm_net_mock_append_trade_offer_object(
                     : (u8)SDL_min(item->count, 0xffu),
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                item->itemId))
+                item->itemId, &item->enhanceWash))
         {
             return false;
         }
@@ -2775,7 +2777,7 @@ static bool vm_net_mock_append_trade_terminal_object(
                     itemInfo, sizeof(itemInfo), &itemInfoLen, stackRuntime,
                     (u8)SDL_min(item->enhanceLevel,
                                 VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                    item->itemId))
+                    item->itemId, &item->enhanceWash))
             {
                 return false;
             }
@@ -2937,9 +2939,11 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
                     row->sourceSeq = incomingItem->sourceSeq;
                     row->count = 1;
                     row->enhanceLevel = incomingItem->enhanceLevel;
+                    vm_net_mock_enhance_wash_copy(&row->enhanceWash,
+                                                  &incomingItem->enhanceWash);
                     if (!vm_mock_service_trade_role_add_item(
                             &roles[side], row->itemId, 1, row->enhanceLevel,
-                            &row->destinationSeq))
+                            &row->enhanceWash, &row->destinationSeq))
                     {
                         return VM_MOCK_TRADE_COMMIT_BAG_FULL;
                     }
@@ -2953,7 +2957,7 @@ static u8 vm_mock_service_trade_commit(vm_mock_service_trade *trade)
             receipt->items[receipt->itemCount] = *incomingItem;
             if (!vm_mock_service_trade_role_add_item(
                     &roles[side], incomingItem->itemId, incomingItem->count,
-                    incomingItem->enhanceLevel,
+                    incomingItem->enhanceLevel, &incomingItem->enhanceWash,
                     &receipt->items[receipt->itemCount].destinationSeq))
             {
                 return VM_MOCK_TRADE_COMMIT_BAG_FULL;

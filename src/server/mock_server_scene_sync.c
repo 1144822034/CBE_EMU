@@ -3273,7 +3273,7 @@ static bool vm_net_mock_build_task_awardinfo(
                                                     incrementalCount),
             (u8)SDL_min(rewardItem->enhanceLevel,
                         VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-            task->rewardItemId))
+            task->rewardItemId, &rewardItem->enhanceWash))
     {
         printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u item=%u reward_seq=%u incremental=%u pos=%u cap=%u reason=serialize\n",
                task->taskId, role->roleId, task->rewardItemId, rewardSeq,

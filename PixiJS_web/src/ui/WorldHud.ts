@@ -23,6 +23,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 
@@ -624,6 +625,11 @@ export class WorldHud extends Container {
     showPanelTip(this.toast, text, () => {
       if (this.visible) drawPanelTipOverlay(this, this.toast);
     }, ms);
+  }
+
+  /** Right softkey closes stuck/transient toast without opening 菜单. */
+  dismissTipOnSoftRight(): boolean {
+    return tryDismissPanelTipOnSoftRight(this.toast);
   }
 
   pushChat(line: string, type?: number): void {

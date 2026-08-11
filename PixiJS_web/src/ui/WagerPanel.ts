@@ -15,6 +15,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -175,6 +176,11 @@ export class WagerPanel extends Container {
   close(): void {
     clearPanelTip(this.toast);
     this.visible = false;
+  }
+
+  /** Soft-right: dismiss toast first; true = stay on panel. */
+  dismissTipOnSoftRight(): boolean {
+    return tryDismissPanelTipOnSoftRight(this.toast);
   }
 
   showTip(text: string, ms = 1200): void {

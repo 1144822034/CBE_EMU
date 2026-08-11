@@ -17,6 +17,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -236,6 +237,7 @@ export class ChatPanel extends Container {
 
   cancel(): void {
     if (!this.visible) return;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     this.hide();
     this.onClose?.();
   }

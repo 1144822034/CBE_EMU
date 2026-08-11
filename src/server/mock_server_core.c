@@ -4834,12 +4834,149 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
 #define VM_NET_MOCK_NPC_SERVICE_LEVEL_BAND_COUNT  4u
 
+/*
+ * Per-equip wash overrides for +4/+8/+12/+16 milestone lines.
+ * Text form (MySQL): "w,t,f,v,c;w,t,f,v,c;w,t,f,v,c;w,t,f,v,c"
+ */
+enum
+{
+    VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT = 4,
+    VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX = 96
+};
+
+typedef struct
+{
+    u8 washed;     /* 0=use config default, 1=override */
+    u8 type;       /* 1..10 */
+    u8 flag;       /* 0 flat, 1 percent */
+    u16 value;
+    u16 washCount; /* times this tier has been washed (for gold cost) */
+} vm_net_mock_enhance_wash_slot;
+
+typedef struct
+{
+    vm_net_mock_enhance_wash_slot slots[VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT];
+} vm_net_mock_enhance_wash_state;
+
+static void vm_net_mock_enhance_wash_clear(vm_net_mock_enhance_wash_state *wash)
+{
+    if (wash == NULL)
+        return;
+    memset(wash, 0, sizeof(*wash));
+}
+
+static void vm_net_mock_enhance_wash_copy(vm_net_mock_enhance_wash_state *dst,
+                                          const vm_net_mock_enhance_wash_state *src)
+{
+    if (dst == NULL)
+        return;
+    if (src == NULL)
+    {
+        vm_net_mock_enhance_wash_clear(dst);
+        return;
+    }
+    *dst = *src;
+}
+
+static bool vm_net_mock_enhance_wash_encode(
+    const vm_net_mock_enhance_wash_state *wash, char *out, size_t outCap)
+{
+    size_t pos = 0;
+    u8 i;
+
+    if (out == NULL || outCap < 8)
+        return false;
+    out[0] = 0;
+    for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+    {
+        const vm_net_mock_enhance_wash_slot *s =
+            wash != NULL ? &wash->slots[i] : NULL;
+        u8 w = s != NULL ? (s->washed ? 1u : 0u) : 0u;
+        u8 t = s != NULL ? s->type : 0u;
+        u8 f = s != NULL ? s->flag : 0u;
+        u16 v = s != NULL ? s->value : 0u;
+        u16 c = s != NULL ? s->washCount : 0u;
+        int written = snprintf(out + pos, outCap - pos, "%s%u,%u,%u,%u,%u",
+                               i == 0 ? "" : ";", w, t, f, (u32)v, (u32)c);
+        if (written < 0 || (size_t)written >= outCap - pos)
+            return false;
+        pos += (size_t)written;
+    }
+    return true;
+}
+
+static bool vm_net_mock_enhance_wash_decode(const char *text, size_t textLen,
+                                            vm_net_mock_enhance_wash_state *out)
+{
+    char buf[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+    char *groups[VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT];
+    u8 groupCount = 0;
+    u8 i;
+    size_t copyLen;
+
+    vm_net_mock_enhance_wash_clear(out);
+    if (out == NULL)
+        return false;
+    if (text == NULL || textLen == 0)
+        return true;
+    copyLen = textLen;
+    if (copyLen >= sizeof(buf))
+        copyLen = sizeof(buf) - 1u;
+    memcpy(buf, text, copyLen);
+    buf[copyLen] = 0;
+    groups[0] = buf;
+    groupCount = 1;
+    for (i = 0; buf[i] != 0; ++i)
+    {
+        if (buf[i] == ';')
+        {
+            buf[i] = 0;
+            if (groupCount >= VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT)
+                break;
+            groups[groupCount++] = &buf[i + 1u];
+        }
+    }
+    for (i = 0; i < groupCount && i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+    {
+        unsigned w = 0, t = 0, f = 0, v = 0, c = 0;
+        if (sscanf(groups[i], "%u,%u,%u,%u,%u", &w, &t, &f, &v, &c) != 5)
+            continue;
+        if (w > 1 || t > 10 || f > 1 || v > 65535u || c > 65535u)
+            continue;
+        out->slots[i].washed = (u8)w;
+        out->slots[i].type = (u8)t;
+        out->slots[i].flag = (u8)f;
+        out->slots[i].value = (u16)v;
+        out->slots[i].washCount = (u16)c;
+    }
+    return true;
+}
+
+static u8 vm_net_mock_enhance_unlock_for_index(u8 index)
+{
+    return (u8)((index + 1u) * 4u);
+}
+
+static int vm_net_mock_enhance_index_for_unlock(u8 unlock)
+{
+    if (unlock == 4)
+        return 0;
+    if (unlock == 8)
+        return 1;
+    if (unlock == 12)
+        return 2;
+    if (unlock == 16)
+        return 3;
+    return -1;
+}
+
 typedef struct
 {
     u32 itemId;
     u16 seq;
     u16 enhanceLevel;
     u32 count;
+    vm_net_mock_enhance_wash_state enhanceWash;
 } vm_net_mock_backpack_item_state;
 
 typedef struct
@@ -4877,6 +5014,7 @@ typedef struct
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
     u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_enhance_wash_state equippedEnhanceWash[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state;
 

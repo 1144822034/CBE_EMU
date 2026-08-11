@@ -25,6 +25,7 @@ import {
   drawPanelTipOverlay,
   setPanelTipSticky,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -232,6 +233,7 @@ export class WorldMapPanel extends Container {
   }
 
   cancel(): void {
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.mode === "confirm") {
       this.clearConfirmTip();
       this.mode = "region";

@@ -47,6 +47,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -396,6 +397,14 @@ export class SystemPanel extends Container {
 
   setBag(items: BagItem[]): void {
     this.bagItems = items;
+    // Keep detail/actions on the live bag row (enhanceAttrs / wash markers).
+    if (this.selected && isBag(this.selected)) {
+      const sel = this.selected;
+      if (sel.seq > 0) {
+        const fresh = items.find((it) => it.seq === sel.seq);
+        if (fresh) this.selected = fresh;
+      }
+    }
     if (this.visible && (this.kind === "bag" || this.kind === "enhance")) {
       if (this.mode === "list") this.clampCursor();
       this.redraw();
@@ -695,6 +704,7 @@ export class SystemPanel extends Container {
   }
 
   cancel(): void {
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.kind === "status") {
       this.hide();
       this.onClose?.();
@@ -852,6 +862,7 @@ export class SystemPanel extends Container {
       if (it.kind === "equip") {
         acts.push("装备");
         acts.push("强化");
+        if (it.enhance >= 4) acts.push("洗练");
         if (it.enhance > 0) acts.push("重铸");
       } else {
         // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
@@ -868,6 +879,7 @@ export class SystemPanel extends Container {
     }
     if (this.kind === "enhance" && this.selected && isBag(this.selected)) {
       const acts = ["强化"];
+      if (this.selected.enhance >= 4) acts.push("洗练");
       if (this.selected.enhance > 0) acts.push("重铸");
       acts.push("返回");
       return acts;
@@ -2286,6 +2298,8 @@ function actionKey(label: string): SystemAction | string {
       return "swap";
     case "强化":
       return "enhance";
+    case "洗练":
+      return "wash";
     case "重铸":
       return "recast";
     case "丢弃":

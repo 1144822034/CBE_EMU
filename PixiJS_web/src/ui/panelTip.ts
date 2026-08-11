@@ -52,14 +52,26 @@ export function showPanelTip(
   state.tipText = msg;
   state.tipUntil = Date.now() + ms;
   if (state.tipTimer) clearTimeout(state.tipTimer);
+  // dismissPanelTip clears the host layer even if onRedraw skips drawPanelTipOverlay
+  // (common cause of "toast stuck after auto-close").
   state.tipTimer = setTimeout(() => {
     state.tipTimer = null;
-    if (Date.now() >= state.tipUntil) {
-      state.tipText = "";
-      onRedraw();
-    }
+    if (Date.now() >= state.tipUntil) dismissPanelTip(state);
   }, ms + 20);
   onRedraw();
+}
+
+/**
+ * Right softkey: close transient / stuck toasts without leaving the panel.
+ * Sticky confirm tips (`tipUntil === Infinity`) stay for cancel handlers.
+ */
+export function tryDismissPanelTipOnSoftRight(state: PanelTipState): boolean {
+  const sticky =
+    !!state.tipText && state.tipUntil === Number.POSITIVE_INFINITY;
+  if (sticky) return false;
+  if (!state.tipText && !state.host.visible) return false;
+  dismissPanelTip(state);
+  return true;
 }
 
 /** Persistent tip (confirm dialogs) — no auto-dismiss until clear/hide/close. */
@@ -128,9 +140,15 @@ export function drawPanelTipOverlay(
   state.gfx.clear();
 
   if (!state.tipText || Date.now() >= state.tipUntil) {
-    if (state.tipText && Date.now() >= state.tipUntil) state.tipText = "";
-    state.host.visible = false;
-    state.host.eventMode = "none";
+    if (state.tipText && Date.now() >= state.tipUntil) {
+      state.tipText = "";
+      state.tipUntil = 0;
+      if (state.tipTimer) {
+        clearTimeout(state.tipTimer);
+        state.tipTimer = null;
+      }
+    }
+    clearTipLayer(state);
     return;
   }
 

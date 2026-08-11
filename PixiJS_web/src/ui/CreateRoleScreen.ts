@@ -20,6 +20,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 
@@ -168,6 +169,7 @@ export class CreateRoleScreen extends Container {
   }
 
   cancel(): void {
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     this.close();
     this.onCancel?.();
   }

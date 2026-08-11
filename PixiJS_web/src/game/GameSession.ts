@@ -51,16 +51,24 @@ import {
   buildEnhanceMaterialRequest,
   buildEnhanceTransferRequest,
   buildEnhanceTransferConfirmRequest,
+  buildEnhanceWashOpenRequest,
+  buildEnhanceWashMaterialRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
   parseEnhanceTransferPreview,
   parseEnhanceTransferConfirm,
+  parseEnhanceWashOpenResult,
+  parseEnhanceWashPreviewResult,
+  parseEnhanceWashConfirmResult,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
   type EnhanceConfirmResult,
   type EnhanceTransferPreviewResult,
   type EnhanceTransferConfirmResult,
+  type EnhanceWashOpenResult,
+  type EnhanceWashPreviewResult,
+  type EnhanceWashConfirmResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
   buildChestOpenRequest,
@@ -3577,6 +3585,100 @@ export class GameSession {
   /** @deprecated prefer openEnhance */
   async enhance(seq: number): Promise<void> {
     await this.openEnhance(seq);
+  }
+
+  async openEnhanceWash(seq: number): Promise<EnhanceWashOpenResult | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildEnhanceWashOpenRequest(seq),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseEnhanceWashOpenResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return null;
+  }
+
+  async previewEnhanceWash(
+    seq: number,
+    unlock: number,
+    crystalItemId: number,
+  ): Promise<EnhanceWashPreviewResult | null> {
+    if (!this.transport || !crystalItemId) return null;
+    const bodies = await this.transport.exchange(
+      0,
+      buildEnhanceWashMaterialRequest(8, seq, unlock, crystalItemId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseEnhanceWashPreviewResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return null;
+  }
+
+  async confirmEnhanceWash(
+    seq: number,
+    unlock: number,
+    crystalItemId: number,
+  ): Promise<EnhanceWashConfirmResult> {
+    if (!this.transport) {
+      return {
+        result: 0,
+        ok: false,
+        message: "未连接",
+        unlock,
+        rate: 0,
+        money: 0,
+      };
+    }
+    if (!crystalItemId) {
+      return {
+        result: 0,
+        ok: false,
+        message: "请放入玄晶",
+        unlock,
+        rate: 0,
+        money: 0,
+      };
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildEnhanceWashMaterialRequest(9, seq, unlock, crystalItemId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseEnhanceWashConfirmResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return {
+      result: 0,
+      ok: false,
+      message: "洗练无响应",
+      unlock,
+      rate: 0,
+      money: 0,
+    };
   }
 
   async teamInvite(actorId: number): Promise<void> {

@@ -24,6 +24,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -378,6 +379,7 @@ export class SocialPanel extends Container {
 
   cancel(): void {
     if (!this.visible) return;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.mode === "actions") {
       this.mode = "list";
       this.redraw();

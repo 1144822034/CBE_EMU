@@ -36,6 +36,7 @@ import {
   createPanelTipState,
   drawPanelTipOverlay,
   showPanelTip,
+  tryDismissPanelTipOnSoftRight,
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
@@ -304,6 +305,7 @@ export class EnhancePanel extends Container {
 
   cancel(): void {
     if (!this.visible) return;
+    if (tryDismissPanelTipOnSoftRight(this.toast)) return;
     if (this.busy) return;
     if (this.mode === "pickCrystal") {
       this.mode = "main";

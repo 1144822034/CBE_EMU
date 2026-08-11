@@ -93,7 +93,11 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     {
         u16 newEnhance = backpackItem->enhanceLevel;
         u16 oldEnhance = role->equippedEnhanceLevels[slot];
+        vm_net_mock_enhance_wash_state newWash;
+        vm_net_mock_enhance_wash_state oldWash;
 
+        vm_net_mock_enhance_wash_copy(&newWash, &backpackItem->enhanceWash);
+        vm_net_mock_enhance_wash_copy(&oldWash, &role->equippedEnhanceWash[slot]);
         if (newEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             newEnhance = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
         if (oldEnhance > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
@@ -101,8 +105,10 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
         backpackItem->itemId = oldItemId;
         backpackItem->count = 1;
         backpackItem->enhanceLevel = oldEnhance;
+        vm_net_mock_enhance_wash_copy(&backpackItem->enhanceWash, &oldWash);
         role->equippedItemIds[slot] = newItemId;
         role->equippedEnhanceLevels[slot] = newEnhance;
+        vm_net_mock_enhance_wash_copy(&role->equippedEnhanceWash[slot], &newWash);
     }
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-equip-swap");
@@ -224,16 +230,28 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         return false;
     }
 
-    if (!vm_net_mock_role_add_backpack_item_enhanced(
-            itemId, 1, role->equippedEnhanceLevels[slot], &seq))
     {
-        if (reasonOut)
-            *reasonOut = "bag-full";
-        return false;
+        vm_net_mock_enhance_wash_state unequipWash;
+        vm_net_mock_enhance_wash_copy(&unequipWash, &role->equippedEnhanceWash[slot]);
+        if (!vm_net_mock_role_add_backpack_item_enhanced(
+                itemId, 1, role->equippedEnhanceLevels[slot], &seq))
+        {
+            if (reasonOut)
+                *reasonOut = "bag-full";
+            return false;
+        }
+        if (seq != 0)
+        {
+            vm_net_mock_backpack_item_state *added =
+                vm_net_mock_role_find_backpack_item(role, itemId, seq);
+            if (added != NULL)
+                vm_net_mock_enhance_wash_copy(&added->enhanceWash, &unequipWash);
+        }
     }
 
     role->equippedItemIds[slot] = 0;
     role->equippedEnhanceLevels[slot] = 0;
+    vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot]);
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-unequip");
 
@@ -1419,6 +1437,8 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
             sourceLevelAfter = 0;
             source->enhanceLevel = sourceLevelAfter;
             dest->enhanceLevel = destLevelAfter;
+            vm_net_mock_enhance_wash_copy(&dest->enhanceWash, &source->enhanceWash);
+            vm_net_mock_enhance_wash_clear(&source->enhanceWash);
             role->money -= moneyCost;
             transferred = true;
             vm_net_mock_role_mark_inventory_dirty("equipment-enhance-transfer");
@@ -1537,6 +1557,355 @@ static u32 vm_net_mock_build_equipment_enhance_transfer_response(
                      parsed.subtype, parsed.sourceSeq, parsed.destSeq,
                      sourceLevel, sourceLevelAfter, destLevelAfter, moneyCost,
                      result, reason, parsed.subtype);
+    return pos;
+}
+
+/*
+ * PixiJS-only 强化洗练 (WT 29/7 open, 29/8 preview, 29/9 confirm).
+ * Crystal rate: unit_rate(unlock, tier) — tier > unlock → 100%.
+ * Gold: 5*(washCount+1) 金 per attempt on that equip+tier.
+ */
+static u32 vm_net_mock_build_equipment_enhance_wash_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    vm_net_mock_equipment_enhance_wash_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *equipment = NULL;
+    const vm_net_mock_equipment_catalog_item *catalog = NULL;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u8 currentLevel = 0;
+    u32 successRate = 0;
+    u32 moneyCost = 0;
+    u8 tierIndex = 0;
+    int unlockIndex = -1;
+    bool washSucceeded = false;
+    bool inventorySynced = false;
+    u8 rolledType = 0;
+    u8 rolledFlag = 0;
+    u16 rolledValue = 0;
+    const char *reason = "ok";
+    u8 tiersBlob[4 * 12];
+    u32 tiersLen = 0;
+    u8 poolBlob[VM_NET_MOCK_ENHANCE_ATTR_POOL_MAX * 6];
+    u32 poolLen = 0;
+
+    memset(&parsed, 0, sizeof(parsed));
+    memset(tiersBlob, 0, sizeof(tiersBlob));
+    memset(poolBlob, 0, sizeof(poolBlob));
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_parse_equipment_enhance_wash_request(request, requestLen,
+                                                          &parsed))
+    {
+        return 0;
+    }
+
+    (void)vm_net_mock_enhance_config_db_load();
+    role = vm_net_mock_active_role();
+    if (role != NULL)
+        equipment = vm_net_mock_role_find_backpack_item(role, 0, parsed.equipSeq);
+    if (equipment != NULL)
+        catalog = vm_net_mock_find_equipment_catalog_item(equipment->itemId);
+    if (equipment == NULL || catalog == NULL)
+    {
+        result = 3;
+        reason = "equipment-not-found";
+    }
+    else
+    {
+        currentLevel = (u8)SDL_min(equipment->enhanceLevel,
+                                   VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    }
+
+    if (parsed.subtype != 7 && result == 1)
+    {
+        unlockIndex = vm_net_mock_enhance_index_for_unlock(parsed.unlockLevel);
+        if (unlockIndex < 0)
+        {
+            result = 5;
+            reason = "bad-unlock";
+        }
+        else if (currentLevel < parsed.unlockLevel)
+        {
+            result = 5;
+            reason = "tier-locked";
+        }
+        else
+        {
+            u32 crystalTier =
+                parsed.crystalItemId - VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST +
+                1u;
+            u16 washCount =
+                equipment->enhanceWash.slots[unlockIndex].washCount;
+            moneyCost = vm_net_mock_enhance_wash_next_copper(washCount);
+            successRate = vm_net_mock_equipment_enhance_crystal_unit_rate(
+                parsed.unlockLevel, crystalTier);
+            if (successRate == 0)
+            {
+                result = 4;
+                reason = "crystal-rate-zero";
+            }
+        }
+    }
+
+    if (parsed.subtype == 9 && result == 1)
+    {
+        vm_net_mock_backpack_item_state *crystal = NULL;
+        u32 remaining = 0;
+
+        if (role->money < moneyCost)
+        {
+            result = 6;
+            reason = "money-insufficient";
+        }
+        else
+        {
+            crystal = vm_net_mock_role_find_backpack_item(
+                role, parsed.crystalItemId, 0);
+            if (crystal == NULL ||
+                !vm_net_mock_role_consume_backpack_item(
+                    role, parsed.crystalItemId, crystal->seq, 1, &remaining))
+            {
+                result = 4;
+                reason = "crystal-insufficient";
+            }
+            else
+            {
+                u32 roll = 0;
+                u16 priorWashCount = 0;
+
+                unlockIndex =
+                    vm_net_mock_enhance_index_for_unlock(parsed.unlockLevel);
+                if (unlockIndex >= 0)
+                    priorWashCount =
+                        equipment->enhanceWash.slots[unlockIndex].washCount;
+                /* Mix per-attempt entropy so 2nd+ washes are not tick-stuck. */
+                vm_net_mock_enhance_wash_rand_mix(
+                    g_schedulerTick ^ ((u32)parsed.equipSeq << 16) ^
+                    ((u32)parsed.unlockLevel << 8) ^
+                    ((u32)priorWashCount * 0x85ebca6bu) ^
+                    ((u32)parsed.crystalItemId * 0xc2b2ae35u));
+                roll = vm_net_mock_enhance_wash_rand_below(100u);
+                role->money -= moneyCost;
+                washSucceeded = roll < successRate;
+                result = washSucceeded ? 1 : 2;
+                equipment = vm_net_mock_role_find_backpack_item(
+                    role, 0, parsed.equipSeq);
+                if (equipment == NULL)
+                {
+                    result = 3;
+                    reason = "equipment-missing-after-consume";
+                }
+                else
+                {
+                    unlockIndex =
+                        vm_net_mock_enhance_index_for_unlock(parsed.unlockLevel);
+                    if (washSucceeded && unlockIndex >= 0)
+                    {
+                        if (!vm_net_mock_enhance_wash_roll_attr(
+                                &rolledType, &rolledFlag, &rolledValue))
+                        {
+                            result = 5;
+                            reason = "pool-empty";
+                            washSucceeded = false;
+                        }
+                        else
+                        {
+                            vm_net_mock_enhance_wash_slot *slot =
+                                &equipment->enhanceWash.slots[unlockIndex];
+                            slot->washed = 1;
+                            slot->type = rolledType;
+                            slot->flag = rolledFlag;
+                            slot->value = rolledValue;
+                            if (slot->washCount < 0xffffu)
+                                slot->washCount += 1;
+                            reason = "wash-ok";
+                        }
+                    }
+                    else if (!washSucceeded)
+                    {
+                        /* Fail still increments wash_count for gold ladder. */
+                        if (unlockIndex >= 0)
+                        {
+                            vm_net_mock_enhance_wash_slot *slot =
+                                &equipment->enhanceWash.slots[unlockIndex];
+                            if (slot->washCount < 0xffffu)
+                                slot->washCount += 1;
+                        }
+                        reason = "wash-failed";
+                    }
+                    vm_net_mock_role_mark_inventory_dirty("equipment-enhance-wash");
+                }
+            }
+        }
+    }
+
+    /* Build tier snapshot for open / confirm. */
+    if (equipment != NULL && catalog != NULL)
+    {
+        u8 i;
+        for (i = 0; i < VM_NET_MOCK_ENHANCE_WASH_SLOT_COUNT; ++i)
+        {
+            u8 unlock = vm_net_mock_enhance_unlock_for_index(i);
+            u8 type = 0;
+            u8 flag = 0;
+            u16 value = 0;
+            u16 washCount = equipment->enhanceWash.slots[i].washCount;
+            u8 washed = equipment->enhanceWash.slots[i].washed ? 1u : 0u;
+            u32 nextGold = vm_net_mock_enhance_wash_next_gold(washCount);
+
+            (void)vm_net_mock_equip_enhance_resolve_milestone(
+                catalog, i, &equipment->enhanceWash, &type, &flag, &value);
+            if (tiersLen + 12u > sizeof(tiersBlob))
+                break;
+            tiersBlob[tiersLen++] = unlock;
+            tiersBlob[tiersLen++] = washed;
+            tiersBlob[tiersLen++] = type;
+            tiersBlob[tiersLen++] = flag;
+            tiersBlob[tiersLen++] = (u8)((value >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(value & 0xff);
+            tiersBlob[tiersLen++] = (u8)((washCount >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(washCount & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 24) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 16) & 0xff);
+            tiersBlob[tiersLen++] = (u8)((nextGold >> 8) & 0xff);
+            tiersBlob[tiersLen++] = (u8)(nextGold & 0xff);
+        }
+        {
+            u32 i;
+            u32 poolCount = vm_net_mock_enhance_attr_pool_admin_count();
+            for (i = 0; i < poolCount; ++i)
+            {
+                const vm_net_mock_enhance_attr_pool_cfg *row =
+                    vm_net_mock_enhance_attr_pool_admin_row_at(i);
+                if (row == NULL || !row->enabled)
+                    continue;
+                if (poolLen + 6u > sizeof(poolBlob))
+                    break;
+                poolBlob[poolLen++] = row->attrType;
+                poolBlob[poolLen++] = row->flag;
+                poolBlob[poolLen++] = (u8)((row->valueMin >> 8) & 0xff);
+                poolBlob[poolLen++] = (u8)(row->valueMin & 0xff);
+                poolBlob[poolLen++] = (u8)((row->valueMax >> 8) & 0xff);
+                poolBlob[poolLen++] = (u8)(row->valueMax & 0xff);
+            }
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29,
+                                     parsed.subtype, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+
+    if (parsed.subtype == 7)
+    {
+        if (result == 1 &&
+            (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq",
+                                         parsed.equipSeq) ||
+             !vm_net_mock_put_object_u8(out, outCap, &pos, "curlevel",
+                                        currentLevel) ||
+             !vm_net_mock_put_object_raw(out, outCap, &pos, "tiers", tiersBlob,
+                                         (u16)tiersLen) ||
+             !vm_net_mock_put_object_raw(out, outCap, &pos, "pool", poolBlob,
+                                         (u16)poolLen)))
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        if (!vm_net_mock_put_object_u16(out, outCap, &pos, "equipseq",
+                                         parsed.equipSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "unlock",
+                                       parsed.unlockLevel) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "rate",
+                                        successRate) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "money", moneyCost))
+        {
+            return 0;
+        }
+        if (parsed.subtype == 9 && result == 1 && washSucceeded)
+        {
+            if (!vm_net_mock_put_object_u8(out, outCap, &pos, "attrtype",
+                                           rolledType) ||
+                !vm_net_mock_put_object_u8(out, outCap, &pos, "attrflag",
+                                           rolledFlag) ||
+                !vm_net_mock_put_object_u16(out, outCap, &pos, "attrvalue",
+                                           rolledValue) ||
+                !vm_net_mock_put_object_raw(out, outCap, &pos, "tiers",
+                                            tiersBlob, (u16)tiersLen))
+            {
+                return 0;
+            }
+        }
+        else if (parsed.subtype == 9 && (result == 1 || result == 2) &&
+                 tiersLen > 0)
+        {
+            (void)vm_net_mock_put_object_raw(out, outCap, &pos, "tiers",
+                                              tiersBlob, (u16)tiersLen);
+        }
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+
+    if (parsed.subtype == 9 && role != NULL && equipment != NULL &&
+        (result == 1 || result == 2))
+    {
+        bool listResynced = false;
+        u16 crystalSeqs[5];
+        u32 crystalIds[5];
+        u32 crystalRemainings[5];
+        u8 crystalRows = 0;
+        vm_net_mock_backpack_item_state *crystalLeft =
+            vm_net_mock_role_find_backpack_item(role, parsed.crystalItemId, 0);
+
+        memset(crystalSeqs, 0, sizeof(crystalSeqs));
+        memset(crystalIds, 0, sizeof(crystalIds));
+        memset(crystalRemainings, 0, sizeof(crystalRemainings));
+        if (crystalLeft != NULL)
+        {
+            crystalSeqs[0] = crystalLeft->seq;
+            crystalIds[0] = crystalLeft->itemId;
+            crystalRemainings[0] = crystalLeft->count;
+            crystalRows = 1;
+        }
+        else
+        {
+            crystalIds[0] = parsed.crystalItemId;
+            crystalRows = 1;
+        }
+        inventorySynced = vm_net_mock_append_equipment_enhance_inventory_sync(
+            out, outCap, &pos, &objectCount, crystalIds, crystalSeqs,
+            crystalRemainings, crystalRows, parsed.equipSeq, equipment->itemId,
+            (u8)SDL_min(equipment->enhanceLevel,
+                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            true, true, false, role->money, &listResynced);
+        if (inventorySynced)
+        {
+            vm_net_mock_arm_enhance_backpack_list_resync(
+                parsed.equipSeq, equipment->itemId,
+                (u8)SDL_min(equipment->enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                listResynced);
+        }
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_equipment_enhance_wash phase=%u seq=%u "
+           "item=%u level=%u unlock=%u crystal=%u rate=%u money=%u "
+           "result=%u success=%u type=%u flag=%u value=%u inv_sync=%u "
+           "reason=%s resp=29/%u\n",
+           parsed.subtype, parsed.equipSeq,
+           equipment ? equipment->itemId : 0, currentLevel, parsed.unlockLevel,
+           parsed.crystalItemId, successRate, moneyCost, result,
+           washSucceeded ? 1 : 0, rolledType, rolledFlag, rolledValue,
+           inventorySynced ? 1 : 0, reason, parsed.subtype);
     return pos;
 }
 
@@ -3138,6 +3507,7 @@ typedef struct
     u16 destinationSeq;
     u32 count;
     u16 enhanceLevel;
+    vm_net_mock_enhance_wash_state enhanceWash;
 } vm_mock_service_trade_item;
 
 typedef struct
@@ -5886,11 +6256,13 @@ static vm_net_mock_role_state *vm_mock_service_trade_role_for_session(
     return NULL;
 }
 
-static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
-                                                u32 itemId,
-                                                u32 count,
-                                                u16 enhanceLevel,
-                                                u16 *destinationSeqOut)
+static bool vm_mock_service_trade_role_add_item(
+    vm_net_mock_role_state *role,
+    u32 itemId,
+    u32 count,
+    u16 enhanceLevel,
+    const vm_net_mock_enhance_wash_state *wash,
+    u16 *destinationSeqOut)
 {
     u8 itemCount = 0;
     bool isEquipment = false;
@@ -5935,6 +6307,7 @@ static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
             item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
             item->count = 1;
             item->enhanceLevel = enhanceLevel;
+            vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
             if (firstSeq == 0)
                 firstSeq = item->seq;
             role->nextBackpackSeq = (u16)(item->seq + 1);
@@ -5958,6 +6331,7 @@ static bool vm_mock_service_trade_role_add_item(vm_net_mock_role_state *role,
         item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
         item->count = count;
         item->enhanceLevel = enhanceLevel;
+        vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
         role->backpackItemCount = (u8)(itemCount + 1);
         role->nextBackpackSeq = (u16)(item->seq + 1);
         if (role->nextBackpackSeq == 0)

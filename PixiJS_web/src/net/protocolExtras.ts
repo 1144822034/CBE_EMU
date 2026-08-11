@@ -1083,6 +1083,193 @@ export function parseEnhanceTransferConfirm(
 }
 
 /** Transfer fee display (product): 48金65银. */
+
+/** PixiJS-only enhance wash (29/7..9). */
+export type EnhanceWashTier = {
+  unlock: number;
+  washed: number;
+  type: number;
+  flag: number;
+  value: number;
+  washCount: number;
+  nextGold: number;
+};
+
+export type EnhanceWashOpenResult = {
+  result: number;
+  seq: number;
+  curLevel: number;
+  tiers: EnhanceWashTier[];
+  pool: { type: number; flag: number; min: number; max: number }[];
+};
+
+export type EnhanceWashPreviewResult = {
+  result: number;
+  unlock: number;
+  rate: number;
+  money: number;
+};
+
+export type EnhanceWashConfirmResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  unlock: number;
+  rate: number;
+  money: number;
+  attrType?: number;
+  attrFlag?: number;
+  attrValue?: number;
+  tiers?: EnhanceWashTier[];
+};
+
+export function buildEnhanceWashOpenRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 7).u32("seq", seq);
+  return b.finish();
+}
+
+export function buildEnhanceWashMaterialRequest(
+  subtype: 8 | 9,
+  equipSeq: number,
+  unlock: number,
+  crystalItemId: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, subtype)
+    .u16("equipseq", equipSeq & 0xffff)
+    .u8("unlock", unlock & 0xff)
+    .u32("crystal", crystalItemId >>> 0)
+    .u8("count", 1);
+  return b.finish();
+}
+
+function parseEnhanceWashTiers(raw: Uint8Array | null | undefined): EnhanceWashTier[] {
+  if (!raw || raw.length < 12) return [];
+  const out: EnhanceWashTier[] = [];
+  for (let i = 0; i + 12 <= raw.length && out.length < 4; i += 12) {
+    out.push({
+      unlock: raw[i]!,
+      washed: raw[i + 1]!,
+      type: raw[i + 2]!,
+      flag: raw[i + 3]!,
+      value: (raw[i + 4]! << 8) | raw[i + 5]!,
+      washCount: (raw[i + 6]! << 8) | raw[i + 7]!,
+      nextGold:
+        (raw[i + 8]! << 24) |
+        (raw[i + 9]! << 16) |
+        (raw[i + 10]! << 8) |
+        raw[i + 11]!,
+    });
+  }
+  return out;
+}
+
+function parseEnhanceWashPool(
+  raw: Uint8Array | null | undefined,
+): { type: number; flag: number; min: number; max: number }[] {
+  if (!raw || raw.length < 6) return [];
+  const out: { type: number; flag: number; min: number; max: number }[] = [];
+  for (let i = 0; i + 6 <= raw.length; i += 6) {
+    out.push({
+      type: raw[i]!,
+      flag: raw[i + 1]!,
+      min: (raw[i + 2]! << 8) | raw[i + 3]!,
+      max: (raw[i + 4]! << 8) | raw[i + 5]!,
+    });
+  }
+  return out;
+}
+
+export function parseEnhanceWashOpenResult(
+  packet: WtPacket,
+): EnhanceWashOpenResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 7);
+  if (!obj) return null;
+  return {
+    result: fieldU32(obj, "result"),
+    seq: fieldU32(obj, "seq"),
+    curLevel: fieldU32(obj, "curlevel"),
+    tiers: parseEnhanceWashTiers(findField(obj, "tiers")),
+    pool: parseEnhanceWashPool(findField(obj, "pool")),
+  };
+}
+
+export function parseEnhanceWashPreviewResult(
+  packet: WtPacket,
+): EnhanceWashPreviewResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 8);
+  if (!obj) return null;
+  return {
+    result: fieldU32(obj, "result"),
+    unlock: fieldU32(obj, "unlock"),
+    rate: fieldU32(obj, "rate"),
+    money: fieldU32(obj, "money"),
+  };
+}
+
+function enhanceWashFailMessage(result: number): string {
+  switch (result) {
+    case 3:
+      return "装备不存在";
+    case 4:
+      return "玄晶不足";
+    case 5:
+      return "档次未解锁";
+    case 6:
+      return "金钱不足";
+    default:
+      return "洗练失败";
+  }
+}
+
+export function parseEnhanceWashConfirmResult(
+  packet: WtPacket,
+): EnhanceWashConfirmResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 9);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const unlock = fieldU32(obj, "unlock");
+  const rate = fieldU32(obj, "rate");
+  const money = fieldU32(obj, "money");
+  const tiers = parseEnhanceWashTiers(findField(obj, "tiers"));
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: "洗练成功",
+      unlock,
+      rate,
+      money,
+      attrType: fieldU32(obj, "attrtype"),
+      attrFlag: fieldU32(obj, "attrflag"),
+      attrValue: fieldU32(obj, "attrvalue"),
+      tiers,
+    };
+  }
+  if (result === 2) {
+    return {
+      result,
+      ok: false,
+      message: "洗练失败",
+      unlock,
+      rate,
+      money,
+      tiers,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: enhanceWashFailMessage(result),
+    unlock,
+    rate,
+    money,
+    tiers,
+  };
+}
+
+
 export const ENHANCE_TRANSFER_FEE_TEXT = "48金65银";
 
 /** Mall balance: 1/14/4 → coolmoney(=role.wcoin) + ticket. */
@@ -2075,6 +2262,15 @@ function chatPrefix(type: number): string {
   }
 }
 
+export type BagEnhanceAttr = {
+  unlock: number;
+  type: number;
+  flag: number;
+  value: number;
+  /** PixiJS: washed override from enhance_wash (wire flag bit7). */
+  washed?: boolean;
+};
+
 export type BagItem = {
   itemId: number;
   seq: number;
@@ -2097,6 +2293,8 @@ export type BagItem = {
    *   unequip move (30/21 does not rewrite +0x110 on CBE).
    */
   durability?: number;
+  /** Common-extra milestone / enhance attrs (server-authoritative, may include wash). */
+  enhanceAttrs?: BagEnhanceAttr[];
 };
 
 /**
@@ -2185,10 +2383,15 @@ export type CharacterStats = {
   backpackCapacity: number;
 };
 
-/** Skip ParseEquipAttributes common-extra; returns first i16 (enhance or stack). */
-function readItemCommonExtra(r: SeqReader): { enhance: number; stackHint: number } {
+/** ParseEquipAttributes common-extra; returns enhance + attr slots. */
+function readItemCommonExtra(r: SeqReader): {
+  enhance: number;
+  stackHint: number;
+  attrs: BagEnhanceAttr[];
+} {
   let enhance = 0;
   let stackHint = 1;
+  const attrs: BagEnhanceAttr[] = [];
   try {
     const first = r.i16();
     const second = r.i16();
@@ -2197,15 +2400,18 @@ function readItemCommonExtra(r: SeqReader): { enhance: number; stackHint: number
     stackHint = first & 0xff;
     void second;
     for (let a = 0; a < attrCount && a < 8; a++) {
-      r.u8(); // unlock
-      r.u8(); // type
-      r.u8(); // flag
-      r.i16(); // value
+      const unlock = r.u8();
+      const type = r.u8();
+      const rawFlag = r.u8();
+      const value = r.i16();
+      const washed = (rawFlag & 0x80) !== 0;
+      const flag = rawFlag & 0x01;
+      attrs.push({ unlock, type, flag, value, ...(washed ? { washed: true } : {}) });
     }
   } catch {
     /* truncated extra ok */
   }
-  return { enhance, stackHint };
+  return { enhance, stackHint, attrs };
 }
 
 function enrichBagRow(
@@ -2213,6 +2419,7 @@ function enrichBagRow(
   seq: number,
   count: number,
   enhance: number,
+  enhanceAttrs?: BagEnhanceAttr[],
 ): BagItem {
   const cat = lookupItemSync(itemId);
   const kind = cat?.kind ?? (itemId >= 1000 ? "equip" : "item");
@@ -2246,6 +2453,9 @@ function enrichBagRow(
     usable,
     equipSlot: cat?.equipSlot ?? -1,
     ...(durability != null ? { durability } : {}),
+    ...(kind === "equip" && enhanceAttrs && enhanceAttrs.length
+      ? { enhanceAttrs }
+      : {}),
   };
 }
 
@@ -2287,13 +2497,29 @@ function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[
     const arr = pools.get(it.itemId);
     const hit = arr?.shift();
     if (!hit) return it;
+    const attrs = preferEnhanceAttrs(it.enhanceAttrs, hit.enhanceAttrs);
     return {
       ...it,
       seq: hit.seq > 0 ? hit.seq : it.seq,
       count: hit.count > 0 ? hit.count : it.count,
       enhance: hit.enhance || it.enhance,
+      ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
     };
   });
+}
+
+/** Prefer the attr list that carries wash markers / more milestone rows. */
+function preferEnhanceAttrs(
+  a?: BagEnhanceAttr[],
+  b?: BagEnhanceAttr[],
+): BagEnhanceAttr[] | undefined {
+  const aWash = a?.some((x) => x.washed) ? 1 : 0;
+  const bWash = b?.some((x) => x.washed) ? 1 : 0;
+  if (aWash !== bWash) return aWash > bWash ? a : b;
+  const aLen = a?.length ?? 0;
+  const bLen = b?.length ?? 0;
+  if (aLen !== bLen) return aLen > bLen ? a : b;
+  return a ?? b;
 }
 
 /** Incremental 7/7 type=1 updates — merge by seq into existing bag. */
@@ -2331,7 +2557,7 @@ export function parseWornEquipmentSnapshot(packet: WtPacket): BagItem[] | null {
         const extra = readItemCommonExtra(r);
         // type=2 wire count = current durability (mmGame:sub_D04 / item+0x110).
         worn.push({
-          ...enrichBagRow(itemId, seq, count, extra.enhance),
+          ...enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs),
           durability: count >>> 0,
         });
       }
@@ -2367,7 +2593,7 @@ function parseBagItems17(packet: WtPacket): BagItem[] {
         : Math.max(1, extra.stackHint || 1);
       // 17/1 has no wire seq — leave 0 until 30/21 overlay (do not invent i+1).
       items.push(
-        enrichBagRow(itemId, 0, qty, isEquip ? extra.enhance : 0),
+        enrichBagRow(itemId, 0, qty, isEquip ? extra.enhance : 0, isEquip ? extra.attrs : undefined),
       );
     } catch {
       // Resync attempt: skip one tagged field and continue next row.
@@ -2397,7 +2623,7 @@ function parseBagGrid30(packet: WtPacket): BagItem[] {
       const seq = r.i16();
       const count = r.u32();
       const extra = readItemCommonExtra(r);
-      items.push(enrichBagRow(itemId, seq, count, extra.enhance));
+      items.push(enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs));
     } catch {
       r.pos = mark + 1;
       if (r.pos >= raw.length) break;
@@ -2423,7 +2649,7 @@ function parseItemManager77(packet: WtPacket): { bag: BagItem[]; worn: BagItem[]
         const itemId = r.u32();
         const count = r.u32();
         const extra = readItemCommonExtra(r);
-        const row = enrichBagRow(itemId, seq, count, extra.enhance);
+        const row = enrichBagRow(itemId, seq, count, extra.enhance, extra.attrs);
         if (type === 2) {
           worn.push({ ...row, durability: count >>> 0 });
         } else {

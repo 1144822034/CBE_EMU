@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS `server_auction_config` (
   `fee_percent_per_tier` TINYINT UNSIGNED NOT NULL DEFAULT 2 COMMENT '每档时长额外%',
   `min_bid_step` INT UNSIGNED NOT NULL DEFAULT 1,
   `currency_mask` TINYINT UNSIGNED NOT NULL DEFAULT 3 COMMENT 'bit0铜币 bit1酷宝',
-  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 20,
+  `max_active_listings` INT UNSIGNED NOT NULL DEFAULT 2,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB;
