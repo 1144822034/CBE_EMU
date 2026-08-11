@@ -19,7 +19,9 @@ import {
   warmEquipArt,
 } from "./ItemArt";
 import {
+  canCombineEnhanceCrystal,
   isChestBoxItem,
+  isEnhanceCrystal,
   type BagItem,
   type CharacterStats,
   type MallState,
@@ -66,6 +68,7 @@ type ViewMode = "list" | "detail" | "actions" | "recharge_pay";
 
 export type SystemAction =
   | "use"
+  | "combine"
   | "batch_open"
   | "equip"
   | "unequip"
@@ -620,7 +623,13 @@ export class SystemPanel extends Container {
     }
     const action = actionKey(label);
     this.onAction?.(this.kind, action, this.selected ?? undefined);
-    if (action === "discard" || action === "use" || action === "equip" || action === "buy") {
+    if (
+      action === "discard" ||
+      action === "use" ||
+      action === "combine" ||
+      action === "equip" ||
+      action === "buy"
+    ) {
       this.mode = "list";
       this.selected = null;
       this.buyQty = 1;
@@ -864,6 +873,9 @@ export class SystemPanel extends Container {
         acts.push("强化");
         if (it.enhance >= 4) acts.push("洗练");
         if (it.enhance > 0) acts.push("重铸");
+      } else if (isEnhanceCrystal(it.itemId)) {
+        // 玄晶：≥3 且非十六级 →「合成」代替「使用」
+        if (canCombineEnhanceCrystal(it.itemId, it.count)) acts.push("合成");
       } else {
         // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
         acts.push("使用");
@@ -2287,6 +2299,8 @@ function actionKey(label: string): SystemAction | string {
   switch (label) {
     case "使用":
       return "use";
+    case "合成":
+      return "combine";
     case "批量开启":
       return "batch_open";
     case "装备":

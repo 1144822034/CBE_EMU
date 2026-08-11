@@ -1269,6 +1269,82 @@ export function parseEnhanceWashConfirmResult(
   };
 }
 
+/** PixiJS-only 玄晶合成: 3×N级 → 1×(N+1)级；16级不可合成. */
+export type CrystalCombineResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  srcItemId: number;
+  destItemId: number;
+  remaining: number;
+  destCount: number;
+};
+
+export function enhanceCrystalTier(itemId: number): number {
+  if (!isEnhanceCrystal(itemId)) return 0;
+  return itemId - ENHANCE_CRYSTAL_FIRST + 1;
+}
+
+/** True when bag detail should show 合成 instead of 使用. */
+export function canCombineEnhanceCrystal(itemId: number, count: number): boolean {
+  const tier = enhanceCrystalTier(itemId);
+  return tier >= 1 && tier < 16 && (count | 0) >= 3;
+}
+
+export function buildCrystalCombineRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 10).u32("seq", seq);
+  return b.finish();
+}
+
+function crystalCombineFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "不是玄晶";
+    case 3:
+      return "背包空间不足";
+    case 4:
+      return "玄晶不足3颗";
+    case 5:
+      return "十六级玄晶无法合成";
+    default:
+      return "合成失败";
+  }
+}
+
+export function parseCrystalCombineResult(
+  packet: WtPacket,
+): CrystalCombineResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 10);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const srcItemId = fieldU32(obj, "itemid");
+  const destItemId = fieldU32(obj, "destid");
+  const remaining = fieldU32(obj, "remaining");
+  const destCount = fieldU32(obj, "destcount");
+  if (result === 1) {
+    const name = enhanceCrystalName(destItemId || srcItemId + 1);
+    return {
+      result,
+      ok: true,
+      message: `合成成功：获得${name}`,
+      srcItemId,
+      destItemId,
+      remaining,
+      destCount,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: crystalCombineFailMessage(result),
+    srcItemId,
+    destItemId,
+    remaining,
+    destCount,
+  };
+}
+
 
 export const ENHANCE_TRANSFER_FEE_TEXT = "48金65银";
 

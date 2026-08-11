@@ -53,6 +53,7 @@ import {
   buildEnhanceTransferConfirmRequest,
   buildEnhanceWashOpenRequest,
   buildEnhanceWashMaterialRequest,
+  buildCrystalCombineRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
@@ -61,6 +62,9 @@ import {
   parseEnhanceWashOpenResult,
   parseEnhanceWashPreviewResult,
   parseEnhanceWashConfirmResult,
+  parseCrystalCombineResult,
+  canCombineEnhanceCrystal,
+  isEnhanceCrystal,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
   type EnhanceConfirmResult,
@@ -69,6 +73,7 @@ import {
   type EnhanceWashOpenResult,
   type EnhanceWashPreviewResult,
   type EnhanceWashConfirmResult,
+  type CrystalCombineResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
   buildChestOpenRequest,
@@ -3679,6 +3684,64 @@ export class GameSession {
       rate: 0,
       money: 0,
     };
+  }
+
+  /**
+   * PixiJS-only: 3×N级玄晶 → 1×(N+1)级.
+   * Pre-checks count/space; server 29/10 is authoritative.
+   */
+  async combineCrystal(itemId: number, seq: number): Promise<CrystalCombineResult> {
+    const fail = (message: string, result = 0): CrystalCombineResult => ({
+      result,
+      ok: false,
+      message,
+      srcItemId: itemId,
+      destItemId: isEnhanceCrystal(itemId) ? itemId + 1 : 0,
+      remaining: 0,
+      destCount: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(seq > 0) || !isEnhanceCrystal(itemId)) {
+      return fail("不是玄晶", 2);
+    }
+    if (itemId >= 916) {
+      return fail("十六级玄晶无法合成", 5);
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    const count = row?.count ?? 0;
+    if (!canCombineEnhanceCrystal(itemId, count)) {
+      return fail(count < 3 ? "玄晶不足3颗" : "十六级玄晶无法合成", count < 3 ? 4 : 5);
+    }
+    const destId = itemId + 1;
+    const destExists = this.bagItems.some(
+      (it) => it.itemId === destId && it.count > 0,
+    );
+    if (!destExists) {
+      const cap =
+        this.characterStats?.backpackCapacity ||
+        Math.max(20, this.bagItems.length);
+      const empty = Math.max(0, (cap | 0) - this.bagItems.length);
+      const freesSlot = count === 3;
+      if (empty < 1 && !freesSlot) {
+        return fail("背包空间不足", 3);
+      }
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildCrystalCombineRequest(seq),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseCrystalCombineResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("合成无响应");
   }
 
   async teamInvite(actorId: number): Promise<void> {

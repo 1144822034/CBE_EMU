@@ -1909,6 +1909,155 @@ static u32 vm_net_mock_build_equipment_enhance_wash_response(
     return pos;
 }
 
+/*
+ * PixiJS-only 玄晶合成: 1/29/10 { seq }.
+ * Consume 3 of crystal tier N (901..915) → grant 1 of N+1.
+ * If dest tier already in bag, stack +1; else need a free slot (consuming a
+ * full stack of exactly 3 frees one slot before grant).
+ * result: 1=ok, 2=bad item, 3=bag full, 4=count<3, 5=max tier(16).
+ */
+static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
+                                                      u32 requestLen, u8 *out,
+                                                      u32 outCap)
+{
+    u32 offset = 4;
+    u32 seqValue = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u32 srcItemId = 0;
+    u32 destItemId = 0;
+    u16 srcSeq = 0;
+    u16 destSeq = 0;
+    u32 srcRemaining = 0;
+    u32 destCount = 0;
+    const char *reason = "ok";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *src = NULL;
+    vm_net_mock_backpack_item_state *dest = NULL;
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 10 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seq", &seqValue) ||
+        seqValue == 0 || seqValue > 0xffffu)
+    {
+        return 0;
+    }
+    srcSeq = (u16)seqValue;
+
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+    {
+        result = 2;
+        reason = "no-role";
+    }
+    else
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        src = vm_net_mock_role_find_backpack_item(role, 0, srcSeq);
+        if (src == NULL || src->count == 0)
+        {
+            result = 2;
+            reason = "crystal-not-found";
+        }
+        else
+        {
+            srcItemId = src->itemId;
+            if (srcItemId < VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST ||
+                srcItemId > VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+            {
+                result = 2;
+                reason = "not-crystal";
+            }
+            else if (srcItemId >= VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST)
+            {
+                result = 5;
+                reason = "max-tier";
+            }
+            else if (src->count < 3)
+            {
+                result = 4;
+                reason = "count-lt-3";
+            }
+            else
+            {
+                u8 itemCount = vm_net_mock_role_backpack_count(role);
+                u32 freeSlots = role->backpackCapacity > itemCount
+                                    ? (u32)role->backpackCapacity - itemCount
+                                    : 0;
+                bool freesSlot = (src->count == 3);
+                destItemId = srcItemId + 1;
+                dest = vm_net_mock_role_find_backpack_item(role, destItemId, 0);
+                if (dest == NULL && freeSlots == 0 && !freesSlot)
+                {
+                    result = 3;
+                    reason = "bag-full";
+                }
+            }
+        }
+    }
+
+    if (result == 1 && role != NULL && src != NULL)
+    {
+        if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq, 3,
+                                                     &srcRemaining))
+        {
+            result = 4;
+            reason = "consume-failed";
+        }
+        else if (!vm_net_mock_role_add_backpack_item_to_role(
+                     role, destItemId, 1, 0, &destSeq, "crystal-combine"))
+        {
+            /* Should be rare after pre-check; restore 3 source crystals. */
+            (void)vm_net_mock_role_add_backpack_item_to_role(
+                role, srcItemId, 3, 0, NULL, "crystal-combine-rollback");
+            result = 3;
+            reason = "grant-failed";
+            srcRemaining = srcRemaining + 3;
+        }
+        else
+        {
+            dest = vm_net_mock_role_find_backpack_item(role, destItemId, destSeq);
+            destCount = dest ? dest->count : 1;
+            reason = "combine-ok";
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 10,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "seq", srcSeq) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "itemid", srcItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destid", destItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
+                                    srcRemaining) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_crystal_combine seq=%u src=%u dest=%u "
+           "src_remain=%u dest_count=%u result=%u reason=%s resp=29/10\n",
+           srcSeq, srcItemId, destItemId, srcRemaining, destCount, result,
+           reason);
+    vm_autotest_note(
+        "mock_crystal_combine seq=%u src=%u dest=%u result=%u reason=%s "
+        "evidence=pixijs-only-29/10\n",
+        srcSeq, srcItemId, destItemId, result, reason);
+    return pos;
+}
+
 static u32 vm_net_mock_battle_reward_rand(void)
 {
     if (g_vm_net_mock_battle_reward_rng == 0)

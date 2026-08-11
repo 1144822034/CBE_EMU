@@ -2746,6 +2746,25 @@ async function main(): Promise<void> {
         })();
         return;
       }
+      if (action === "combine") {
+        void (async () => {
+          showGameTip(`合成 ${bag.name}…`);
+          const fb = await session.combineCrystal(bag.itemId, bag.seq);
+          if (fb.ok) {
+            await session.openBag();
+            system.setBag(session.bagItems);
+            const cap =
+              session.characterStats?.backpackCapacity ||
+              Math.max(20, session.bagItems.length);
+            system.setBagMeta(
+              session.characterStats?.money ?? session.gold,
+              cap,
+            );
+          }
+          showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));
+        })();
+        return;
+      }
       if (action === "batch_open") {
         void (async () => {
           showGameTip(`批量开启 ${bag.name}×10…`);
