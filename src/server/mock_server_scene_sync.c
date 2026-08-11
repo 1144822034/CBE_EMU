@@ -3079,7 +3079,13 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
     vm_net_mock_task_state_list_row states[VM_NET_MOCK_TASK_CATALOG_MAX];
     u32 stateCount = 0;
 
-    if (role == NULL || enemyId == 0 || enemyCount == 0 ||
+    /* A battle victory and each granted loot stack are distinct events.  The
+     * old code only ran from the loot loop, silently leaving kill-only tasks
+     * at state 1 whenever the monster had no drop (and counting a kill once
+     * per drop when it did). */
+    if (role == NULL ||
+        ((enemyId == 0 || enemyCount == 0) &&
+         (dropItemId == 0 || dropCount == 0)) ||
         !vm_net_mock_load_task_catalog() ||
         !vm_net_mock_task_state_list_load(role->roleId, true, states,
                                           VM_NET_MOCK_TASK_CATALOG_MAX,
@@ -3098,27 +3104,31 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
 
         if (task == NULL || states[i].state != 1)
             continue;
-        if (task->requirementType1 == 2 && task->requirementId1 == enemyId)
+        if (enemyId != 0 && enemyCount != 0 &&
+            task->requirementType1 == 2 && task->requirementId1 == enemyId)
         {
             progress1 = vm_net_mock_min_u32(progress1 + enemyCount,
                                             task->requirementCount1);
             changed = true;
         }
-        else if (task->requirementType1 == 1 && task->requirementId1 == dropItemId &&
-                 dropCount != 0)
+        else if (dropItemId != 0 && dropCount != 0 &&
+                 task->requirementType1 == 1 &&
+                 task->requirementId1 == dropItemId)
         {
             progress1 = vm_net_mock_min_u32(progress1 + dropCount,
                                             task->requirementCount1);
             changed = true;
         }
-        if (task->requirementType2 == 2 && task->requirementId2 == enemyId)
+        if (enemyId != 0 && enemyCount != 0 &&
+            task->requirementType2 == 2 && task->requirementId2 == enemyId)
         {
             progress2 = vm_net_mock_min_u32(progress2 + enemyCount,
                                             task->requirementCount2);
             changed = true;
         }
-        else if (task->requirementType2 == 1 && task->requirementId2 == dropItemId &&
-                 dropCount != 0)
+        else if (dropItemId != 0 && dropCount != 0 &&
+                 task->requirementType2 == 1 &&
+                 task->requirementId2 == dropItemId)
         {
             progress2 = vm_net_mock_min_u32(progress2 + dropCount,
                                             task->requirementCount2);
@@ -3135,6 +3145,11 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                                             (u8)progress1, (u8)progress2,
                                             nextState))
         {
+            if (nextState == 2)
+            {
+                vm_mock_service_session_arm_task_prompt_refresh(
+                    vm_net_mock_current_scene_name());
+            }
             printf("[info][network] mock_task_battle_progress task=%u role=%u enemy=%u enemies=%u drop=%u drop_count=%u progress=%u/%u,%u/%u state=%u\n",
                    task->taskId, role->roleId, enemyId, enemyCount,
                    dropItemId, dropCount,
@@ -4886,6 +4901,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u8 objectCount = 1;
     bool appendSkills = false;
     bool appendPurchaseBackpackAdd = false;
+    bool appendPurchaseWalletSync = false;
     u16 backpackAddSeq = 0;
     u32 purchasedItemId = 0;
     u32 purchasedItemCount = 0;
@@ -5188,6 +5204,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
                             result = 1;
                             appendPurchaseBackpackAdd = true;
+                            appendPurchaseWalletSync = true;
                         }
                     }
                 }
@@ -5638,6 +5655,18 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     }
     if (appendPurchaseBackpackAdd)
     {
+        /* The purchase mutates both inventory and copper.  The native
+         * 1/10/26 handler (net_handle_role_login_gift_glamour at
+         * 0x010114FC) installs its `money` field into every role state used
+         * by the backpack and scene HUD.  The preceding 26/1 dialog only
+         * parses dialog data, while 7/7 only adds the item row, so neither
+         * can refresh the displayed balance. */
+        if (!appendPurchaseWalletSync ||
+            !vm_net_mock_append_type1_object(out, outCap, &pos, 0))
+        {
+            return 0;
+        }
+        ++objectCount;
         if (purchasedItemId == 0 || purchasedItemCount == 0 ||
             !vm_net_mock_append_backpack_item_add7_object(
                 out, outCap, &pos, backpackAddSeq, purchasedItemId,
@@ -5683,7 +5712,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
            objectCount, pos,
            (appendPurchaseBackpackAdd ||
             (strcmp(action, "equipment-sell") == 0 && result == 1))
-               ? "separate-item-manager-followup"
+               ? (appendPurchaseWalletSync
+                      ? "role-wallet-10/26+item-manager-7/7"
+                      : "separate-item-manager-followup")
                : "not-applicable");
     return pos;
 }
@@ -5693,6 +5724,12 @@ static bool vm_net_mock_append_info_banner_result5_object(u8 *out, u32 outCap,
 static bool vm_net_mock_append_info_banner_text11_object(u8 *out, u32 outCap,
                                                          u32 *pos,
                                                          const char *info);
+/* Defined by the scene-sync poll module after this handler.  A successful
+ * 6/11 accept only confirms the dialog operation; case 11 does not rebuild
+ * the client's active-task table or refresh scene-node prompt types. */
+static bool vm_net_mock_append_taskinfo_empty1_object(u8 *out, u32 outCap,
+                                                       u32 *pos,
+                                                       const char *sceneOverride);
 static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap,
                                                     u32 *pos,
                                                     const char *sceneOverride);
@@ -5735,6 +5772,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     bool taskAcceptBlockedByBackpack = false;
     bool taskAcceptOfferStillAvailable = false;
     bool taskAcceptNeedsCandidateRefresh = false;
+    bool taskAcceptNeedsScenePromptRefresh = false;
     bool taskAcceptOfferContext = false;
     const vm_net_mock_task_definition *taskDefinition = NULL;
     char detailText[256];
@@ -6344,6 +6382,12 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             }
             taskAcceptNeedsCandidateRefresh =
                 result != 0 && taskAcceptOfferStillAvailable;
+            /* 6/11 is the accept-result parser only.  The original client
+             * derives the grey active-task question mark from the complete
+             * 6/1 task row, then clears/rebuilds offer prompts from 6/14.
+             * Leaving either table stale makes a successfully accepted task
+             * look as if it disappeared from its giver NPC. */
+            taskAcceptNeedsScenePromptRefresh = result == 0;
             if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 6, 11,
                                              &objectStart) ||
                 !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
@@ -6385,6 +6429,19 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
             return 0;
         responseObjectCount += 1;
+    }
+    if (taskAcceptNeedsScenePromptRefresh)
+    {
+        if (!vm_net_mock_append_taskinfo_empty1_object(
+                out, outCap, &pos, vm_net_mock_current_scene_name()) ||
+            !vm_net_mock_append_taskaction14_object(out, outCap, &pos, NULL))
+        {
+            return 0;
+        }
+        responseObjectCount = (u8)(responseObjectCount + 2u);
+        printf("[info][network] mock_task_accept_prompt_refresh task=%u role=%u "
+               "objects=6/1+6/14 evidence=0x0104726C(case1,14)->0x01017C6C\n",
+               taskId, activeRole ? activeRole->roleId : 0);
     }
     if (object.subtype == 11 && result != 0 &&
         taskAcceptFailureInfo[0] != 0)
@@ -6706,6 +6763,7 @@ static u32 vm_net_mock_build_task_transport_response(
     u32 transId = 0;
     u32 pos = 5;
     u32 objectStart = 0;
+    bool confirm = false;
     bool hasTaskId = false;
     bool hasTransId = false;
     bool activeTask = false;
@@ -6715,18 +6773,47 @@ static u32 vm_net_mock_build_task_transport_response(
         request[0] != 'W' || request[1] != 'T' || request[4] != 1 ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
         offset != requestLen || object.major != 1 || object.kind != 16 ||
-        object.subtype != 5)
+        (object.subtype != 5 && object.subtype != 6))
     {
         return 0;
     }
-    hasTaskId = vm_net_mock_get_object_u32_field(object.payload,
-                                                 object.payloadLen,
-                                                 "taskid", &taskId);
-    hasTransId = vm_net_mock_get_object_u32_field(object.payload,
-                                                  object.payloadLen,
-                                                  "transid", &transId);
-    if (hasTaskId == hasTransId)
-        return 0;
+
+    /*
+     * task_handle_destinfo_response(0x01047F0A) turns the 16/6 destination
+     * confirmation into a second, one-object 16/6 request after the player
+     * chooses \"yes\".  The packet captured on the failing path is exactly
+     * 24 bytes: the 15-byte payload is the wrapped u32 `taskid` field below.
+     *
+     * Do not claim other 16/6 requests here.  Several unrelated mmGame
+     * confirmations share the same kind/subtype, and accepting a loose
+     * `taskid` scan would steal those request lifecycles.
+     */
+    confirm = object.subtype == 6;
+    if (confirm)
+    {
+        if (object.payloadLen != 15 || object.payload[0] != 6 ||
+            memcmp(object.payload + 1, "taskid", 6) != 0 ||
+            object.payload[7] != 0 || object.payload[8] != 0x06 ||
+            object.payload[9] != 0 || object.payload[10] != 4 ||
+            !vm_net_mock_get_object_u32_field(object.payload,
+                                              object.payloadLen,
+                                              "taskid", &taskId))
+        {
+            return 0;
+        }
+        hasTaskId = true;
+    }
+    else
+    {
+        hasTaskId = vm_net_mock_get_object_u32_field(object.payload,
+                                                     object.payloadLen,
+                                                     "taskid", &taskId);
+        hasTransId = vm_net_mock_get_object_u32_field(object.payload,
+                                                      object.payloadLen,
+                                                      "transid", &transId);
+        if (hasTaskId == hasTransId)
+            return 0;
+    }
 
     role = vm_net_mock_active_role();
     memset(&taskState, 0, sizeof(taskState));
@@ -6738,6 +6825,48 @@ static u32 vm_net_mock_build_task_transport_response(
     {
         activeTask = true;
         resolved = vm_net_mock_task_transport_resolve(taskId, &target);
+    }
+
+    if (confirm)
+    {
+        vm_net_mock_scene_change_target sceneTarget;
+
+        /* A confirmed teleport is a fresh direct mmGame scene entry, rather
+         * than an empty acknowledgement.  This is the same 16/3 contract used
+         * by client-initiated direct scene entries: mmGame parses its scene and
+         * posinfo fields, then emits the ordinary runtime follow-up requests.
+         * Sending a 30/1 in this callback would re-enter the scene manager
+         * while HandleItemUseConfirm is still unwinding and violates that
+         * lifecycle. */
+        if (!activeTask || !resolved)
+            return 0;
+
+        memset(&sceneTarget, 0, sizeof(sceneTarget));
+        snprintf(sceneTarget.scene, sizeof(sceneTarget.scene), "%s", target.scene);
+        sceneTarget.x = target.x;
+        sceneTarget.y = target.y;
+        sceneTarget.exitId = 0;
+        sceneTarget.mapType = 2;
+        sceneTarget.hasSceEntry = true;
+        sceneTarget.needsSceneDownload = false;
+        pos = vm_net_mock_build_mmgame_scene_transfer_start_response(
+            &sceneTarget, out, outCap);
+        if (pos == 0)
+            return 0;
+
+        vm_net_mock_mark_direct_scene_enter_completed(
+            &sceneTarget, "task-transport-confirm");
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        g_vm_net_mock_last_scene_change_fb4_type = 1;
+        vm_net_mock_save_player_pos_state(sceneTarget.scene, sceneTarget.x,
+                                          sceneTarget.y,
+                                          "task-transport-confirm");
+        printf("[info][network] mock_task_transport phase=confirm task=%u role=%u active=1 resolved=1 scene=%s scene_name=%s pos=(%u,%u) response=16/3 resp=%u evidence=JianghuOL.CBE:0x01047F0A->0x010190A8->mmGame:0x11CE,0x0BCC\n",
+               taskId, role ? role->roleId : 0, target.scene,
+               target.sceneName, target.x, target.y, pos);
+        vm_autotest_note("mock_task_transport phase=confirm task=%u scene=%s pos=(%u,%u) response=16/3 evidence=JianghuOL.CBE:0x01047F0A+0x010190A8 mmGame:0x11CE,0x0BCC\n",
+                         taskId, target.scene, target.x, target.y);
+        return pos;
     }
 
     if (hasTaskId)

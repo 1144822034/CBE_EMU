@@ -10594,10 +10594,11 @@ static void vm_note_sce_load_entry_pc(u32 pc)
  * SCE2 header and prop layer itself, then invokes a scene-specific callback
  * at 0x010064B2 for the trailing scene entity data.  A generated scene can
  * be byte-valid yet fail to produce a live node, so the callback target is
- * the first contract boundary to inspect.  The loader entry is traced too:
- * this distinguishes a null callback from a scene path that never invokes
- * this loader.  This probe deliberately does not alter guest registers,
- * memory, PC, or callback timing; it only records normal call arguments.
+ * the first contract boundary to inspect.  The layer-controller entry and
+ * loader entry are traced too: this distinguishes an upstream null callback
+ * from a scene path that never invokes this loader.  This probe deliberately
+ * does not alter guest registers, memory, PC, or callback timing; it only
+ * records normal call arguments.
  *
  * It is opt-in because every scene load would otherwise add diagnostic noise.
  * Launch the client with CBE_TRACE_SCE_ENTITY_CALLBACK=1 and inspect
@@ -10611,13 +10612,16 @@ static void vm_trace_sce_entity_callback_pc(u32 pc)
     u32 offsetPtr = 0;
     u32 callback = 0;
     u32 lr = 0;
+    u32 sp = 0;
+    u32 stackArgs[4];
     u32 streamOffset = 0;
     u8 header[96];
     char mapName[80];
     size_t mapNameLen = 0;
     FILE *trace = NULL;
 
-    if ((pc != 0x01006204 && pc != 0x010064B2) || MTK == NULL)
+    if ((pc != 0x01006204 && pc != 0x010064B2 && pc != 0x010067F0) ||
+        MTK == NULL)
         return;
     enabled = getenv("CBE_TRACE_SCE_ENTITY_CALLBACK");
     if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
@@ -10629,6 +10633,28 @@ static void vm_trace_sce_entity_callback_pc(u32 pc)
     (void)uc_reg_read(MTK, UC_ARM_REG_R1, &offsetPtr);
     (void)uc_reg_read(MTK, UC_ARM_REG_R2, &callback);
     (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    if (pc == 0x010067F0)
+    {
+        memset(stackArgs, 0, sizeof(stackArgs));
+        (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        if (sp != 0)
+            (void)uc_mem_read(MTK, sp, stackArgs, sizeof(stackArgs));
+        trace = fopen("logs/sce-entity-callback.log", "ab");
+        if (trace != NULL)
+        {
+            fprintf(trace,
+                    "sce_layer_init entry pc=%08x controller=%08x arg1=%08x "
+                    "arg2=%08x arg3=%08x stream_resource=%08x callback=%08x "
+                    "lr=%08x\\n",
+                    pc, stream, offsetPtr, callback, lr,
+                    stackArgs[0], stackArgs[3], lr);
+            fclose(trace);
+        }
+        printf("[info][scene] sce_layer_init entry pc=%08x controller=%08x "
+               "stream_resource=%08x callback=%08x lr=%08x\\n",
+               pc, stream, stackArgs[0], stackArgs[3], lr);
+        return;
+    }
     if (pc == 0x01006204)
     {
         trace = fopen("logs/sce-entity-callback.log", "ab");
@@ -10683,6 +10709,82 @@ static void vm_trace_sce_entity_callback_pc(u32 pc)
            pc, callback, stream, streamOffset, lr, mapName);
 }
 
+/*
+ * Read-only proof for the action13 contract.  SendNPCInteractReq scans this
+ * exact table (R9+0x5CB0, 25 rows of 340 bytes) for an active node whose
+ * +100 actor ID equals R0, then writes that row as the 1/4/1 index.  Logging
+ * the table at its entry lets us distinguish a missing resource reload from a
+ * malformed SCE entity without manufacturing an index or changing node state.
+ */
+static void vm_trace_scene_challenge_node_table_pc(u32 pc)
+{
+    const char *enabled = NULL;
+    u32 requestedId = 0;
+    u32 nodeBase = 0;
+    char rows[1536];
+    size_t used = 0;
+    FILE *trace = NULL;
+
+    if (pc != 0x01037ED4 || MTK == NULL || Global_R9 == 0)
+        return;
+    enabled = getenv("CBE_TRACE_SCE_ENTITY_CALLBACK");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+    {
+        return;
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &requestedId);
+    if (uc_mem_read(MTK, Global_R9 + 0x5CB0u, &nodeBase, sizeof(nodeBase)) != UC_ERR_OK ||
+        nodeBase == 0)
+    {
+        return;
+    }
+    rows[0] = 0;
+    for (u32 index = 0; index < 25; ++index)
+    {
+        u32 node = nodeBase + index * 340u;
+        u32 actorId = 0;
+        u16 x = 0;
+        u16 y = 0;
+        u8 active = 0;
+        u8 kind = 0;
+        int written = 0;
+
+        if (uc_mem_read(MTK, node + 319u, &active, sizeof(active)) != UC_ERR_OK ||
+            active == 0)
+        {
+            continue;
+        }
+        (void)uc_mem_read(MTK, node + 315u, &kind, sizeof(kind));
+        (void)uc_mem_read(MTK, node + 100u, &actorId, sizeof(actorId));
+        (void)uc_mem_read(MTK, node + 24u, &x, sizeof(x));
+        (void)uc_mem_read(MTK, node + 26u, &y, sizeof(y));
+        if (used >= sizeof(rows))
+            break;
+        written = snprintf(rows + used, sizeof(rows) - used,
+                           "%s%u:k%u:id%u@%u,%u%s",
+                           used == 0 ? "" : ";", index, kind, actorId, x, y,
+                           actorId == requestedId ? "*" : "");
+        if (written < 0 || (size_t)written >= sizeof(rows) - used)
+        {
+            used = sizeof(rows) - 1u;
+            rows[used] = 0;
+            break;
+        }
+        used += (size_t)written;
+    }
+    trace = fopen("logs/sce-entity-callback.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "scene_challenge_nodes pc=%08x requested=%u r9=%08x base=%08x active=[%s]\\n",
+                pc, requestedId, Global_R9, nodeBase, rows[0] ? rows : "-");
+        fclose(trace);
+    }
+    printf("[info][scene] scene_challenge_nodes requested=%u active=[%s]\\n",
+           requestedId, rows[0] ? rows : "-");
+}
+
 static void vm_trace_read_guest_string(u32 ptr, char *out, size_t outSize)
 {
     u8 first = 0;
@@ -10696,6 +10798,85 @@ static void vm_trace_read_guest_string(u32 ptr, char *out, size_t outSize)
     vm_read_path_string(ptr, out, outSize);
     if (out[0] == 0)
         snprintf(out, outSize, "-");
+}
+
+/*
+ * Read-only follow-up for a generated scene battle entity.  The scene
+ * interaction trace proves whether the live node table contains the target,
+ * but cannot distinguish a parser that rejects the raw record from one that
+ * reaches the common node factory and subsequently removes the node.  Every
+ * normal scene-node creation goes through scene_node_find_or_create at this
+ * ROM entry.  The probe is limited to one explicitly selected actor ID
+ * (CBE_TRACE_SCE_NODE_ACTOR_ID, default 1000) so it does not turn ordinary
+ * movement into a high-volume trace.
+ *
+ * This only reads ABI arguments, stack arguments and LR at function entry.
+ * It never changes guest memory, registers, PC/LR, callback order, or the
+ * returned node.  It is therefore suitable for proving the first missing
+ * state transition in the static SCE -> live kind-2 node path.
+ */
+static void vm_trace_scene_node_create_pc(u32 pc)
+{
+    const char *enabled = NULL;
+    const char *targetText = NULL;
+    u32 targetActorId = 1000u;
+    u32 actorId = 0;
+    u32 x = 0;
+    u32 y = 0;
+    u32 visualGroup = 0;
+    u32 lr = 0;
+    u32 sp = 0;
+    u32 stackArgs[11];
+    char label[96];
+    char shortLabel[96];
+    char longLabel[96];
+    FILE *trace = NULL;
+
+    if (pc != 0x0100EFC4 || MTK == NULL)
+        return;
+    enabled = getenv("CBE_TRACE_SCE_ENTITY_CALLBACK");
+    if (enabled == NULL || enabled[0] == 0 || strcmp(enabled, "0") == 0 ||
+        strcmp(enabled, "off") == 0 || strcmp(enabled, "false") == 0)
+    {
+        return;
+    }
+    targetText = getenv("CBE_TRACE_SCE_NODE_ACTOR_ID");
+    if (targetText != NULL && targetText[0] != 0)
+    {
+        char *end = NULL;
+        unsigned long parsed = strtoul(targetText, &end, 0);
+        if (end != targetText && end != NULL && *end == 0 && parsed <= UINT32_MAX)
+            targetActorId = (u32)parsed;
+    }
+    (void)uc_reg_read(MTK, UC_ARM_REG_R0, &actorId);
+    if (actorId != targetActorId)
+        return;
+    (void)uc_reg_read(MTK, UC_ARM_REG_R1, &x);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R2, &y);
+    (void)uc_reg_read(MTK, UC_ARM_REG_R3, &visualGroup);
+    (void)uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
+    (void)uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    memset(stackArgs, 0, sizeof(stackArgs));
+    if (sp != 0)
+        (void)uc_mem_read(MTK, sp, stackArgs, sizeof(stackArgs));
+    vm_trace_read_guest_string(stackArgs[1], label, sizeof(label));
+    vm_trace_read_guest_string(stackArgs[3], shortLabel, sizeof(shortLabel));
+    vm_trace_read_guest_string(stackArgs[9], longLabel, sizeof(longLabel));
+    trace = fopen("logs/sce-entity-callback.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "scene_node_create entry pc=%08x actor=%u pos=%u,%u group=%u "
+                "variant=%u label=%s/%u short=%s/%u target=%u,%u flags=%u,%u "
+                "long=%s/%u lr=%08x sp=%08x\\n",
+                pc, actorId, x, y, visualGroup, stackArgs[0], label, stackArgs[2],
+                shortLabel, stackArgs[4], stackArgs[5], stackArgs[6], stackArgs[7],
+                stackArgs[8], longLabel, stackArgs[10], lr, sp);
+        fclose(trace);
+    }
+    printf("[info][scene] scene_node_create actor=%u pos=%u,%u group=%u variant=%u "
+           "lr=%08x\\n",
+           actorId, x, y, visualGroup, stackArgs[0], lr);
 }
 
 static void vm_note_castlevania_wpay_pc(u32 pc)
@@ -18582,6 +18763,8 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_hangup_vital_forensics_note_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);
     vm_trace_sce_entity_callback_pc((u32)address & ~1u);
+    vm_trace_scene_challenge_node_table_pc((u32)address & ~1u);
+    vm_trace_scene_node_create_pc((u32)address & ~1u);
     vm_note_castlevania_wpay_pc((u32)address & ~1u);
 
     if (vm_is_manager_func_stub_address((u32)address))

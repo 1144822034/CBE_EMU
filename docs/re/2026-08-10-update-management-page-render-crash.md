@@ -36,6 +36,19 @@
 修复位于 `src/web_admin_server.c`，即格式串的唯一所有者；没有修改请求路由、吞掉错误或
 改变客户端更新协议。
 
+## 当前页面导航契约
+
+更新管理页采用左侧选项列表：
+
+1. 游戏数据内容更新；
+2. 启动模块更新；
+3. 启动模块配置。
+
+三项均使用同一 `tab=updates` 路由和 `section=content|modules|configuration` 参数。
+页面为每项输出 `data-admin-list` 与 `data-admin-detail`；`admin.js` 只请求并替换右侧
+`data-admin-detail`，同时更新 History 状态，避免切换选项时整个后台页面重载。服务端仍
+生成完整、已鉴权的 HTML 文档，以保持直接访问、刷新及浏览器后退的正常行为。
+
 ## 回归验证
 
 执行：
@@ -45,5 +58,6 @@ gcc -DNETWORK_SUPPORT -DCBE_SERVER_ONLY -g -O2 -std=gnu11 -ffunction-sections -f
 .\obj\server\update-page-render-regression.exe
 ```
 
-该测试直接渲染真实更新管理页面，并确认页面标题、场景内容卡片、启动模块卡片及未截断
-响应都存在。它覆盖了此前发生访问冲突的同一格式化调用，而不依赖浏览器或用户服务进程。
+该测试直接渲染默认游戏数据、启动模块和启动模块配置三个真实页面状态，并确认每个状态
+都有 `data-admin-list`、`data-admin-detail` 与对应功能区，且响应未截断。它覆盖了此前发生
+访问冲突的同一格式化调用，而不依赖浏览器或用户服务进程。

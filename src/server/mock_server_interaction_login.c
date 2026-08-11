@@ -18,9 +18,11 @@ static u32 vm_net_mock_build_direct_scene_challenge_unready_response(
 }
 
 /* SendNPCInteractReq(action13) has the matching node index but deliberately
- * writes posx/posy as zero.  mmBattle subtype 5 needs the real SCE spawn x/y,
- * so reconstruct the same 4/1 grammar only after the caller has verified the
- * client index against that exact visible scene spawn. */
+ * writes posx/posy as zero.  mmBattle subtype 5 needs the real SCE spawn x/y.
+ * The index itself is client authority: CBE 0x01037ED4 obtains it by scanning
+ * the active scene table for the requested actor ID.  Do not replace it with
+ * a server-derived ordinal, because 27/11 NPC timing changes the table order
+ * without changing the static SCE position. */
 static u32 vm_net_mock_build_direct_scene_challenge_battle_response(
     const u8 *request, u32 requestLen, u32 enemyId, u32 sceneIndex,
     u32 sceneX, u32 sceneY, u8 *out, u32 outCap)
@@ -74,7 +76,7 @@ static u32 vm_net_mock_build_challenge_interaction_response(
     {
         u32 ageTicks = g_schedulerTick - session->instanceChallengeTick;
         u32 requestedSceneIndex = 0;
-        u32 expectedSceneIndex = 0;
+        u32 configuredSceneIndex = 0;
         u32 expectedSceneX = 0;
         u32 expectedSceneY = 0;
         bool directSceneMonster =
@@ -94,9 +96,8 @@ static u32 vm_net_mock_build_challenge_interaction_response(
             valid = valid && requestCarriesSceneIndex &&
                     requestedSceneIndex != 0 &&
                     vm_net_mock_select_sce_combat_spawn(
-                        scene, requestedEnemyId, &expectedSceneIndex,
-                        &expectedSceneX, &expectedSceneY) &&
-                    requestedSceneIndex == expectedSceneIndex;
+                        scene, requestedEnemyId, &configuredSceneIndex,
+                        &expectedSceneX, &expectedSceneY);
         }
 
         session->instanceChallengeDirectPending = false;
@@ -106,14 +107,15 @@ static u32 vm_net_mock_build_challenge_interaction_response(
             u32 responseLen = directSceneMonster
                                   ? vm_net_mock_build_direct_scene_challenge_battle_response(
                                         request, requestLen, requestedEnemyId,
-                                        expectedSceneIndex, expectedSceneX,
+                                        requestedSceneIndex, expectedSceneX,
                                         expectedSceneY, out, outCap)
                                   : vm_net_mock_build_challenge_interaction_response_ex(
                                         request, requestLen, out, outCap,
                                         true, false);
-            printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) req_index=%u response=%s resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC/0x67AC\n",
+            printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) req_index=%u config_index=%u response=%s resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC/0x67AC\n",
                    session->clientId, session->instanceChallengeActorId,
                    requestedEnemyId, ageTicks, scene, requestedSceneIndex,
+                   configuredSceneIndex,
                    directSceneMonster ? "2/2+4/5-scene" : "4/10-direct",
                    responseLen);
             session->instanceChallengeActorId = 0;
@@ -128,10 +130,10 @@ static u32 vm_net_mock_build_challenge_interaction_response(
         {
             u32 responseLen = vm_net_mock_build_direct_scene_challenge_unready_response(
                 out, outCap);
-            printf("[warn][network] mock_direct_scene_challenge_reject client=%08x actor=%u expected_enemy=%u requested_enemy=%u req_index=%u expected_index=%u age_ticks=%u scene=%s reason=live-node-unready response=2/10+25/11 resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC\n",
+            printf("[warn][network] mock_direct_scene_challenge_reject client=%08x actor=%u expected_enemy=%u requested_enemy=%u req_index=%u config_index=%u age_ticks=%u scene=%s reason=live-node-unready response=2/10+25/11 resp=%u evidence=JianghuOL.CBE:0x01037ED4+mmBattle:0x66CC\n",
                    session->clientId, session->instanceChallengeActorId,
                    session->instanceChallengeEnemyId, requestedEnemyId,
-                   requestedSceneIndex, expectedSceneIndex, ageTicks,
+                   requestedSceneIndex, configuredSceneIndex, ageTicks,
                    scene ? scene : "-", responseLen);
             session->instanceChallengeActorId = 0;
             session->instanceChallengeEnemyId = 0;
@@ -637,6 +639,31 @@ static void vm_mock_service_complete_shop_scene_return(const char *scene,
     session->shopSceneNpcReseedScene[0] = 0;
 }
 
+/* A shop return is a scene re-entry, not a teleport.  The client consumes the
+ * coordinate-bearing 30/2 result through
+ * scene_handle_change_result_scene_pos(0x01039770), which unconditionally
+ * installs those coordinates into the new scene shell.  Therefore this path
+ * may use only the active role's persisted position in the same exact .sce
+ * scene; a scene default/spawn point would silently reset the player. */
+static bool vm_net_mock_get_shop_return_persisted_position(const char *scene,
+                                                           u16 *xOut, u16 *yOut)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+
+    if (xOut == NULL || yOut == NULL || role == NULL ||
+        !vm_net_mock_scene_name_is_persistable(scene) ||
+        !vm_net_mock_scene_name_is_persistable(role->scene) ||
+        !vm_net_mock_scene_names_equal_exact(role->scene, scene) ||
+        role->x == 0 || role->y == 0)
+    {
+        return false;
+    }
+
+    *xOut = role->x;
+    *yOut = role->y;
+    return true;
+}
+
 static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
                                                         u32 outCap,
                                                         u32 *pos,
@@ -705,6 +732,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     bool currentSceneReload = false;
     bool sceneShellAlreadyEntered = false;
     bool shopReturnReload = false;
+    u16 shopReturnX = 0;
+    u16 shopReturnY = 0;
     bool deferredTeleportNpcSeedAfterCurrentCompletion = false;
     bool completeTeleportResourceEnter = false;
     bool completePositionedPortalEnter = false;
@@ -892,6 +921,15 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
         vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+    if (shopReturnReload &&
+        !vm_net_mock_get_shop_return_persisted_position(
+            currentScene, &shopReturnX, &shopReturnY))
+    {
+        printf("[error][network] mock_shop_return_reenter_rejected scene=%s "
+               "reason=missing-exact-persisted-role-position contract=30/2-posinfo\n",
+               currentScene ? currentScene : "-");
+        return 0;
+    }
     /* See the paired direct-map-stone completion response. That WT2/3 sends
      * the required empty 27/11 gate object and leaves this one-shot catalog
      * pending. WT6/1 is the first client-requested scene-runtime phase after
@@ -973,12 +1011,14 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
              */
             if (!vm_net_mock_append_scene_pos_result_object_for_scene(
                     out, outCap, &pos, currentScene,
-                    vm_net_mock_scene_spawn_x(),
-                    vm_net_mock_scene_spawn_y()))
+                    shopReturnX, shopReturnY))
             {
                 return 0;
             }
             objectCount += 1;
+            printf("[info][network] mock_shop_return_reenter_pos scene=%s "
+                   "pos=(%u,%u) source=persisted-role completion=30/2-posinfo\n",
+                   currentScene, (u32)shopReturnX, (u32)shopReturnY);
         }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         if (shopReturnReload)
@@ -1300,6 +1340,8 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     bool primaryTaskSubsetNeedsFb11Ack = false;
     bool sceneNpcLifecycleAppended = false;
     bool shopReturnReload = false;
+    u16 shopReturnX = 0;
+    u16 shopReturnY = 0;
     const char *responseScene = NULL;
     u32 subsetNpcActorInfoLen = 0;
     u32 subsetNpcActorId = 0;
@@ -1377,6 +1419,15 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
         !completeDeferredScene &&
         currentScene != NULL &&
         vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+    if (shopReturnReload &&
+        !vm_net_mock_get_shop_return_persisted_position(
+            responseScene, &shopReturnX, &shopReturnY))
+    {
+        printf("[error][network] mock_shop_return_reenter_rejected scene=%s "
+               "reason=missing-exact-persisted-role-position contract=30/2-posinfo\n",
+               responseScene ? responseScene : "-");
+        return 0;
+    }
     /* scene_runtime_init_and_sync(0x01012FB4) issues this subset only after
      * rebuilding the 25-node scene table. Put 27/11 before 6/1 and 6/14 so
      * their prompt refresh sees the freshly created NPC nodes. */
@@ -1430,12 +1481,14 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
          * provide the player's authoritative persisted position. */
         if (!vm_net_mock_append_scene_pos_result_object_for_scene(
                 out, outCap, &pos, responseScene,
-                vm_net_mock_scene_spawn_x(),
-                vm_net_mock_scene_spawn_y()))
+                shopReturnX, shopReturnY))
         {
             return 0;
         }
         objectCount += 1;
+        printf("[info][network] mock_shop_return_reenter_pos scene=%s "
+               "pos=(%u,%u) source=persisted-role completion=30/2-posinfo\n",
+               responseScene, (u32)shopReturnX, (u32)shopReturnY);
     }
 
     if (completeDeferredScene)

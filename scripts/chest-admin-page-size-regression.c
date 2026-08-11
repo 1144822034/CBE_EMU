@@ -40,8 +40,14 @@ int main(void)
     g_vm_net_mock_shop_catalog[0].itemId = 1001;
     snprintf(g_vm_net_mock_shop_catalog[0].name,
              sizeof(g_vm_net_mock_shop_catalog[0].name), "Test item");
+    g_vm_net_mock_shop_catalog[0].isEquip = true;
+    g_vm_net_mock_shop_catalog[0].quality = 3;
     g_vm_net_mock_shop_catalog_count = 1;
     g_vm_net_mock_shop_catalog_loaded = true;
+    g_vm_net_mock_equipment_catalog[0].itemId = 1001;
+    g_vm_net_mock_equipment_catalog[0].levelRequired = 12;
+    g_vm_net_mock_equipment_catalog_count = 1;
+    g_vm_net_mock_equipment_catalog_loaded = true;
     for (u32 chest = 0; chest < VM_NET_MOCK_CHEST_KIND_COUNT; ++chest)
     {
         g_vm_net_mock_chest_rows[chest].rewardCount =
@@ -70,6 +76,11 @@ int main(void)
         strstr(page, "id=\"chest-524\"") == NULL ||
         strstr(page, "id=\"chest-522\"") != NULL ||
         strstr(page, "id=\"chest-523\"") != NULL ||
+        strstr(page, "item-picker-tools-equipment") == NULL ||
+        strstr(page, "id=\"item-quality\"") == NULL ||
+        strstr(page, "id=\"item-level\"") == NULL ||
+        strstr(page, "data-quality=\"3\"") == NULL ||
+        strstr(page, "data-level=\"12\"") == NULL ||
         count_occurrences(page, "data-chest-reward-row") !=
             VM_NET_MOCK_CHEST_REWARD_MAX ||
         strlen(page) >= VM_MOCK_ADMIN_RESPONSE_MAX)

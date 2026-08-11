@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS `server_content_update_files` (
   `config_id` TINYINT UNSIGNED NOT NULL,
   `sort_order` SMALLINT UNSIGNED NOT NULL,
   `resource_name` VARBINARY(127) NOT NULL,
+  `resource_checksum` INT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`config_id`, `sort_order`),
   UNIQUE KEY `uq_content_update_resource` (`config_id`, `resource_name`)
 ) ENGINE=InnoDB;

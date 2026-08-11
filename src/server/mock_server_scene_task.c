@@ -68,13 +68,11 @@ static bool vm_net_mock_read_sce_string_field(const u8 *data, u32 len, u32 *pos,
     return vm_net_mock_read_sce_len_string(data, len, pos, out, outCap);
 }
 
-/* The effect-actor tail of SCE2 kind-3 records is not a normal numbered
- * string field.  The shipped bytes are exactly `u16 3, u16 3, u8 length,
- * bytes`; in particular, the first byte after the two little-endian words is
- * the string length.  Keep this separate from
- * vm_net_mock_read_sce_string_field(): treating that length as a u16 field
- * ID was the deployment-format defect which left the client without a live
- * scene monster node. */
+/* The effect Actor tail is not a normal numbered string field.  Direct raw
+ * SCE2 samples (01桃花岛_01, 01桃花岛_02 and 06野猪林_01) all contain exactly
+ * `u16 3, u16 3, u8 length, bytes` after field17.  Keep this separate from
+ * vm_net_mock_read_sce_string_field(): treating the second 3 as a normal
+ * field ID, or omitting it, makes the client reject the static scene record. */
 static bool vm_net_mock_read_sce_effect_actor_tail(
     const u8 *data, u32 len, u32 *pos, char *out, size_t outCap)
 {
@@ -1430,6 +1428,7 @@ typedef struct
 } vm_net_mock_scene_battle_monster_column_context;
 
 static bool g_vm_net_mock_scene_battle_monster_effect_column_ready = false;
+static bool g_vm_net_mock_scene_battle_monster_effect_contract_ready = false;
 
 static bool vm_net_mock_scene_battle_monster_column_row(
     void *contextValue, unsigned int columnCount, const char *const *values,
@@ -1437,6 +1436,21 @@ static bool vm_net_mock_scene_battle_monster_column_row(
 static bool vm_net_mock_scene_battle_monster_deployed_source_matches(
     const char *scene, const vm_net_mock_scene_battle_monster_admin_row *rows,
     u32 rowCount);
+
+/* field18 is not an arbitrary visual effect slot.  Across the shipped SCE2
+ * combat records its value is the monster defeat-effect resource.  In
+ * particular, f_blood1.actor is a battle hit effect and was never used in a
+ * shipped kind-3 record; accepting it made a syntactically valid deployment
+ * that the client did not turn into a live kind-2 scene node. */
+static bool vm_net_mock_scene_battle_monster_effect_resource_is_supported(
+    const char *resource)
+{
+    return resource != NULL &&
+           (strcmp(resource, "e_ghostfireR.actor") == 0 ||
+            strcmp(resource, "e_ghostfireG.actor") == 0 ||
+            strcmp(resource, "e_ghostfireB.actor") == 0 ||
+            strcmp(resource, "e_ghostfiresG.actor") == 0);
+}
 
 /* All shipped SCE kind-3 records carry a field-18 effect Actor.  This is a
  * native scene-record dependency, not an optional visual override.  The
@@ -1461,21 +1475,37 @@ static bool vm_net_mock_scene_battle_monster_ensure_effect_column(void)
     {
         return false;
     }
-    if (context.found)
+    if (!context.found)
     {
-        g_vm_net_mock_scene_battle_monster_effect_column_ready = true;
-        return true;
+        if (!vm_mysql_exec(
+                "ALTER TABLE server_scene_battle_monsters "
+                "ADD COLUMN effect_resource VARBINARY(64) NOT NULL "
+                "DEFAULT 'e_ghostfireR.actor' AFTER actor_resource"))
+        {
+            return false;
+        }
+        printf("[info][mock-admin] scene_battle_monster_schema "
+               "migration=effect-resource-field18 action=applied "
+               "default=e_ghostfireR.actor\n");
     }
-    if (!vm_mysql_exec(
-            "ALTER TABLE server_scene_battle_monsters "
-            "ADD COLUMN effect_resource VARBINARY(64) NOT NULL "
-            "DEFAULT 'e_ghostfireR.actor' AFTER actor_resource"))
+    /* The former all-Actor picker allowed this known incompatible resource.
+     * This narrow one-time data migration repairs only that documented legacy
+     * value; other unknown values stay visible and are rejected on deploy so
+     * their intended semantics are not silently guessed. */
+    if (!g_vm_net_mock_scene_battle_monster_effect_contract_ready)
     {
-        return false;
+        if (!vm_mysql_exec(
+                "UPDATE server_scene_battle_monsters "
+                "SET effect_resource='e_ghostfireR.actor' "
+                "WHERE effect_resource='f_blood1.actor'"))
+        {
+            return false;
+        }
+        printf("[info][mock-admin] scene_battle_monster_schema "
+               "migration=field18-hit-effect-to-native-defeat-effect "
+               "from=f_blood1.actor to=e_ghostfireR.actor\n");
+        g_vm_net_mock_scene_battle_monster_effect_contract_ready = true;
     }
-    printf("[info][mock-admin] scene_battle_monster_schema "
-           "migration=effect-resource-field18 action=applied "
-           "default=e_ghostfireR.actor\n");
     g_vm_net_mock_scene_battle_monster_effect_column_ready = true;
     return true;
 }
@@ -1754,6 +1784,8 @@ static bool vm_net_mock_scene_battle_monster_row_validate(
         strlen(row->effectResource) >= 64 ||
         !vm_net_mock_str_ends_with(row->actorResource, ".actor") ||
         !vm_net_mock_str_ends_with(row->effectResource, ".actor") ||
+        !vm_net_mock_scene_battle_monster_effect_resource_is_supported(
+            row->effectResource) ||
         (row->visualHint != 5 && row->visualHint != 6) ||
         !vm_net_mock_open_server_data_resource(row->actorResource, ".actor",
                                                 NULL, NULL, 0) ||
@@ -2227,12 +2259,12 @@ static bool vm_net_mock_scene_battle_monster_append_record(
     {
         return false;
     }
-    /* Exact record grammar recovered from shipped SCE2 kind-3 records:
-     * kind,x,y, meta(5,1,field14,id), string15(name), scalar16(hint),
-     * string17(actor), effect-actor tail.  The latter is deliberately
-     * `3,3,len,effect`, copied byte-for-byte from shipped SCE2 kind-3
-     * records; it is not interchangeable with ordinary numbered string
-     * fields.  No private marker is injected. */
+    /* Exact record grammar recovered directly from shipped SCE2 kind-3
+     * records: kind,x,y, meta(5,1,field14,id), string15(name),
+     * scalar16(hint), string17(actor), then the unnumbered child effect
+     * Actor `u16 kind=3,u16 kind=3,u8 len`.  Both little-endian kind words
+     * are part of the native stream; omitting the second one was the first
+     * malformed byte in the release that crashed during SCE installation. */
     if (!vm_net_mock_put_le16(payload, payloadCap, pos, 3) ||
         !vm_net_mock_put_le16(payload, payloadCap, pos, row->x) ||
         !vm_net_mock_put_le16(payload, payloadCap, pos, row->y) ||
@@ -2381,11 +2413,52 @@ static bool vm_net_mock_scene_battle_monster_write_resource(
     return true;
 }
 
+/*
+ * A number of native SCE2 scenes end with the short kind-8 scene-control
+ * record `8, x, y, 1, 1, value, 0`.  The CBE static-scene reader treats it
+ * as the end of the entity stream.  Appending a monster after this record
+ * merely produces bytes the server can scan; the client never creates its
+ * kind-2 node.  Native scenes without this final control record use EOF as
+ * their entity boundary, so only this exact trailing form moves insertion.
+ */
+static bool vm_net_mock_scene_battle_monster_find_insert_offset(
+    const u8 *payload, u32 payloadLen, u32 *insertOffsetOut,
+    u32 *terminalLenOut)
+{
+    u32 terminalOffset = 0;
+
+    if (insertOffsetOut != NULL)
+        *insertOffsetOut = 0;
+    if (terminalLenOut != NULL)
+        *terminalLenOut = 0;
+    if (payload == NULL || payloadLen == 0 || insertOffsetOut == NULL)
+        return false;
+
+    if (payloadLen >= 14u)
+    {
+        terminalOffset = payloadLen - 14u;
+        if (vm_net_mock_read_le16_at(payload, terminalOffset) == 8u &&
+            vm_net_mock_read_le16_at(payload, terminalOffset + 6u) == 1u &&
+            vm_net_mock_read_le16_at(payload, terminalOffset + 8u) == 1u &&
+            vm_net_mock_read_le16_at(payload, terminalOffset + 12u) == 0u)
+        {
+            *insertOffsetOut = terminalOffset;
+            if (terminalLenOut != NULL)
+                *terminalLenOut = 14u;
+            return true;
+        }
+    }
+
+    *insertOffsetOut = payloadLen;
+    return true;
+}
+
 static bool vm_net_mock_scene_battle_monster_payload_collect_node_count(
     const u8 *payload, u32 payloadLen, u32 *nodeCountOut)
 {
     u32 start = 0;
     u32 scanStart = 0;
+    u32 staticEnd = 0;
     u32 propCount = 0;
     u32 combatCount = 0;
 
@@ -2398,7 +2471,12 @@ static bool vm_net_mock_scene_battle_monster_payload_collect_node_count(
     {
         return false;
     }
-    for (u32 off = scanStart; off + 14 <= payloadLen; ++off)
+    if (!vm_net_mock_scene_battle_monster_find_insert_offset(
+            payload, payloadLen, &staticEnd, NULL) || scanStart > staticEnd)
+    {
+        return false;
+    }
+    for (u32 off = scanStart; off + 14 <= staticEnd; ++off)
     {
         vm_net_mock_sce_combat_spawn spawn;
         u32 end = 0;
@@ -2428,14 +2506,17 @@ static bool vm_net_mock_scene_battle_monster_payload_has_row(
 {
     u32 start = vm_net_mock_scene_payload_start(payload, payloadLen);
     u32 scanStart = 0;
+    u32 staticEnd = 0;
 
     if (wanted == NULL || start == 0 ||
         !vm_net_mock_parse_sce_prop_scatter_at(payload, payloadLen, start,
-                                                NULL, &scanStart))
+                                                NULL, &scanStart) ||
+        !vm_net_mock_scene_battle_monster_find_insert_offset(
+            payload, payloadLen, &staticEnd, NULL) || scanStart > staticEnd)
     {
         return false;
     }
-    for (u32 off = scanStart; off + 14 <= payloadLen; ++off)
+    for (u32 off = scanStart; off + 14 <= staticEnd; ++off)
     {
         vm_net_mock_sce_combat_spawn spawn;
         u32 end = 0;
@@ -2554,6 +2635,7 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u8 encoded[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
     u8 outputRaw[VM_NET_MOCK_SCENE_BATTLE_MONSTER_RAW_MAX];
     u8 roundTripPayload[VM_NET_MOCK_SCENE_BATTLE_MONSTER_PAYLOAD_MAX];
+    u8 terminalRecord[14];
     const char *baseSource = "unresolved";
     const char *publishError = NULL;
     char resourcePath[1200];
@@ -2569,8 +2651,11 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     u32 originalNodeCount = 0;
     u32 finalNodeCount = 0;
     u32 npcNodeReserve = 0;
+    u32 insertOffset = 0;
+    u32 terminalLen = 0;
     u32 fingerprint = 0;
     const char *names[1];
+    bool contentChanged = false;
 
     if (errorOut)
         *errorOut = "场景战斗怪部署失败";
@@ -2653,6 +2738,18 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
             *errorOut = "基础 SCE2 的静态节点段不符合已确认的场景记录格式";
         return false;
     }
+    if (!vm_net_mock_scene_battle_monster_find_insert_offset(
+            payload, payloadLen, &insertOffset, &terminalLen) ||
+        terminalLen > sizeof(terminalRecord) || insertOffset > payloadLen ||
+        payloadLen - insertOffset != terminalLen)
+    {
+        printf("[error][mock-admin] scene_battle_monster_deploy stage=insert-boundary "
+               "scene=%s base=%s payload=%u insert=%u terminal=%u\n",
+               scene, baseSource, payloadLen, insertOffset, terminalLen);
+        if (errorOut)
+            *errorOut = "基础 SCE2 的场景实体结束记录不符合已确认格式";
+        return false;
+    }
     npcNodeReserve = vm_net_mock_scene_battle_monster_npc_node_reserve(scene);
     if (originalNodeCount + npcNodeReserve + enabledCount >
         VM_NET_MOCK_SCENE_BATTLE_MONSTER_LIVE_NODE_MAX)
@@ -2665,16 +2762,32 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
             *errorOut = "场景静态节点、最多 4 个已下发 NPC 与启用战斗怪超过客户端 24 个非本地节点上限";
         return false;
     }
+    if (terminalLen != 0)
+    {
+        memcpy(terminalRecord, payload + insertOffset, terminalLen);
+        payloadLen = insertOffset;
+    }
     for (u32 i = 0; i < rowCount; ++i)
     {
         if (rows[i].enabled &&
             !vm_net_mock_scene_battle_monster_append_record(
-                payload, sizeof(payload), &payloadLen, &rows[i]))
+                payload, sizeof(payload) - terminalLen, &payloadLen, &rows[i]))
         {
             if (errorOut)
                 *errorOut = "场景资源容量不足，无法写入全部战斗怪";
             return false;
         }
+    }
+    if (terminalLen != 0)
+    {
+        if (payloadLen > sizeof(payload) - terminalLen)
+        {
+            if (errorOut)
+                *errorOut = "场景资源容量不足，无法保留场景结束记录";
+            return false;
+        }
+        memcpy(payload + payloadLen, terminalRecord, terminalLen);
+        payloadLen += terminalLen;
     }
     if (!vm_net_mock_scene_battle_monster_payload_collect_node_count(
             payload, payloadLen, &finalNodeCount) ||
@@ -2743,8 +2856,8 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
         return false;
     }
     names[0] = scene;
-    if (!vm_net_mock_content_update_publish_files(names, 1,
-                                                        &publishError))
+    if (!vm_net_mock_content_update_publish_files(names, 1, &publishError,
+                                                  &contentChanged))
     {
         const char *restoreError = NULL;
         (void)vm_net_mock_scene_battle_monster_write_resource(
@@ -2769,10 +2882,11 @@ static bool vm_net_mock_scene_battle_monster_admin_deploy(
     vm_net_mock_monster_catalog_invalidate();
     printf("[info][mock-admin] scene_battle_monster_deploy scene=%s base=%s "
             "drafts=%u enabled=%u nodes=%u->%u raw=%u payload=%u "
-            "resource_type=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-kind3+"
+            "resource_type=%u content_changed=%u publish=WT18/9+18/8->18/7 catalog=invalidated evidence=SCE2-kind3+"
             "mmBattle:0x66CC\n",
             scene, baseSource, rowCount, enabledCount, originalNodeCount,
-            finalNodeCount, outputRawLen, payloadLen, outputRaw[4]);
+            finalNodeCount, outputRawLen, payloadLen, outputRaw[4],
+            contentChanged ? 1u : 0u);
     if (errorOut)
         *errorOut = "ok";
     return true;

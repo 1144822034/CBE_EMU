@@ -67,7 +67,9 @@ chest_item_id, reward_order, item_id, item_count, weight
 ## 管理与迁移
 
 - 后台：`/admin-418yz6/?tab=chests` 的“宝箱管理”。物品选择复用带分类和
-  搜索的统一物品选择器。
+  搜索的统一物品选择器；当分类为装备（或“全部分类”）时，可联合按
+  `equip.dsh` 的装备品质和需求等级筛选。任一装备筛选条件生效时，普通道具不
+  会混入结果；切换到普通物品分类会自动收起并清空这两个条件。
 - 新安装：`server/mysql/schema.sql` 已包含该表。
 - 已部署库：执行 `server/mysql/migrate_add_chest_rewards.sql`；服务启动时
   也会以 `CREATE TABLE IF NOT EXISTS` 保证表存在。
