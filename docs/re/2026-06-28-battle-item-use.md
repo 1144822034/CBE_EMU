@@ -134,10 +134,11 @@ Local item data then identifies which items should use that effect:
   `生命变化`.
 
 Therefore the mock now writes `effect_index = eidolon.dsh["f_renew1.actor"]`
-for consumed battle items whose `item.dsh` effect has positive HP recovery.
-In the current resources this is `13`. MP-only items still default to `0` until
-their visual contract is reversed. `CBE_BATTLE_ITEM_EFFECT_INDEX` remains an
-explicit debug override, including setting it to `0`.
+for consumed battle items whose `item.dsh` effect restores either HP or MP.
+In the current resources this is `13`; it covers HP medicines `301..305`, MP
+medicines `321..325`, mixed medicines `341..343`, and the two reservoir flasks
+`802/803`. `CBE_BATTLE_ITEM_EFFECT_INDEX` remains an explicit debug override,
+including setting it to `0`.
 
 ## Runtime Source
 

@@ -1202,14 +1202,18 @@ static u8 vm_net_mock_battle_apply_player_attack_targets(
     return targetCount;
 }
 
-static u32 vm_net_mock_battle_item_effect_index(u32 hpEffect)
+static u32 vm_net_mock_battle_item_effect_index(u32 hpEffect, u32 mpEffect)
 {
     const char *override = getenv("CBE_BATTLE_ITEM_EFFECT_INDEX");
     u32 effectIndex = 0;
 
     if (override != NULL && override[0] != 0)
         return vm_net_mock_env_u32("CBE_BATTLE_ITEM_EFFECT_INDEX", 0);
-    if (hpEffect != 0 && vm_net_mock_eidolon_heal_effect_index(&effectIndex))
+    /* `f_renew1.actor` is the native recovery actor (`回复.gif`).  Both
+     * 神仙壶 and 逍遥壶 restore a vital stat; letting MP-only recovery fall
+     * through to effect 0 instead selected `f_blood1.actor`. */
+    if ((hpEffect != 0 || mpEffect != 0) &&
+        vm_net_mock_eidolon_heal_effect_index(&effectIndex))
         return effectIndex;
     return 0;
 }
@@ -1273,12 +1277,14 @@ static bool vm_net_mock_battle_prepare_skill_mp(u32 operate,
     if (g_mockBattleRoleMpMax == 0)
         vm_net_mock_battle_sync_role_mp_from_role(role);
     mpBefore = g_mockBattleRoleMpCurrent;
-    mpAfter = (mpBefore > mpCost) ? (mpBefore - mpCost) : 0;
+    mpAfter = mpBefore;
+    if (mpBefore >= mpCost)
+        mpAfter = mpBefore - mpCost;
     if (mpBeforeOut)
         *mpBeforeOut = mpBefore;
     if (mpAfterOut)
         *mpAfterOut = mpAfter;
-    return true;
+    return mpBefore >= mpCost;
 }
 
 static void vm_net_mock_battle_commit_skill_mp(u32 mpAfter)
@@ -1545,6 +1551,57 @@ static bool vm_net_mock_append_battle_action6_object_ex(u8 *out, u32 outCap, u32
      * internal 4/2 has been built, so its next delivery cannot overwrite an
      * in-flight multi-record client action queue. */
     g_vm_net_mock_battle_action6_emitted_count = actionCount;
+    return true;
+}
+
+/* `WT 4/12` contains no new choice: auto battle replays the remembered
+ * `Operate` through the ordinary 4/2 builder.  MP eligibility belongs here,
+ * before target/effect/actioninfo selection.  Otherwise an unaffordable
+ * spell is still encoded as a spell and only its MP value is clamped to zero.
+ * Falling back to Operate=0 preserves the native physical-attack action
+ * contract without inventing a client error or altering the remembered skill.
+ */
+static bool vm_net_mock_battle_fallback_unaffordable_skill(u32 *operate,
+                                                            const char *source)
+{
+    const vm_net_mock_skill_catalog_item *skill = NULL;
+    vm_net_mock_role_state *role = NULL;
+    u32 requested = 0;
+    u32 mpBefore = 0;
+    u32 mpAfter = 0;
+    u32 mpCost = 0;
+    const char *reason = "skill-unresolved";
+
+    if (operate == NULL || !vm_net_mock_battle_operate_is_skill(*operate))
+        return false;
+    requested = *operate;
+    skill = vm_net_mock_battle_operate_skill(requested);
+    role = vm_net_mock_active_role();
+    /* Only the verified "known skill, current MP below cost" contract may
+     * turn into a physical attack.  Keep malformed/unknown requests on their
+     * ordinary path so this guard cannot mask a different protocol problem. */
+    if (skill == NULL || role == NULL)
+        return false;
+    if (vm_net_mock_battle_prepare_skill_mp(requested, &mpBefore, &mpAfter,
+                                            &mpCost))
+    {
+        return false;
+    }
+    if (mpBefore >= mpCost)
+        return false;
+    reason = "mp-insufficient";
+
+    *operate = 0;
+    printf("[info][network] mock_battle_skill_fallback role=%u operate=%u "
+           "fallback=0 mp=%u cost=%u reason=%s source=%s "
+           "evidence=skill.dsh:耗费法力+WT4/2\n",
+           role ? role->roleId : 0, requested, mpBefore, mpCost, reason,
+           source ? source : "-");
+    vm_autotest_note("mock_battle_skill_fallback role=%u operate=%u "
+                     "fallback=0 mp=%u cost=%u reason=%s source=%s "
+                     "evidence=skill.dsh:耗费法力+WT4/2\n",
+                     role ? role->roleId : 0, requested, mpBefore, mpCost,
+                     reason, source ? source : "-");
     return true;
 }
 
@@ -1930,7 +1987,7 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
         itemActionType = (hpEffect != 0 || hpApplied != 0)
                              ? (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_HEAL_ACTION_TYPE", 1)
                              : (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_ACTION_TYPE", 2);
-        itemEffectIndex = vm_net_mock_battle_item_effect_index(hpEffect);
+        itemEffectIndex = vm_net_mock_battle_item_effect_index(hpEffect, mpEffect);
         if (!vm_net_mock_append_battle_actioninfo_record(actionInfo, sizeof(actionInfo),
                                                          &actionInfoLen, itemActionType,
                                                          itemActorWireSlot,
@@ -2332,6 +2389,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate) &&
         vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
         operate = operate8;
+    (void)vm_net_mock_battle_fallback_unaffordable_skill(&operate,
+                                                          "battle-operate");
     operateIsSkill = vm_net_mock_battle_operate_is_skill(operate);
     operateConsumesTurn = operate == 0 || operateIsSkill;
     skillTargetsEnemyGroup = operateIsSkill &&
@@ -3131,6 +3190,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     if (!vm_net_mock_get_object_u32_field(request, requestLen, "Operate", &operate) &&
         vm_net_mock_get_object_u8_field(request, requestLen, "Operate", &operate8))
         operate = operate8;
+    (void)vm_net_mock_battle_fallback_unaffordable_skill(&operate,
+                                                          "battle-operate-fallback");
     operateIsSkill = vm_net_mock_battle_operate_is_skill(operate);
     operateConsumesTurn = operate == 0 || operateIsSkill;
     skillTargetsEnemyGroup = operateIsSkill &&
@@ -5222,7 +5283,12 @@ enum
      * hangup cadence is five seconds between completed rounds. */
     VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_MS = 5000,
     VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_TICKS =
-        VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_MS / VM_SCHED_FRAME_MS
+        VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_MS / VM_SCHED_FRAME_MS,
+    /* item.dsh explicitly gives 战斗心得 a 200-battle continuous-hangup
+     * ceiling.  It does not contain the ordinary-mode ceiling, so do not
+     * invent one here: the established ordinary hangup lifecycle remains
+     * unchanged while the timed effect is active. */
+    VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES = 200
 };
 
 static void vm_net_mock_battle_auto_reset(void)
@@ -7091,6 +7157,8 @@ static void vm_net_mock_scene_hangup_record_battle_start(
     {
         return;
     }
+    if (!session->sceneHangupEnabled)
+        session->sceneHangupCompletedBattles = 0;
     session->sceneHangupEnabled = true;
     session->sceneHangupRestartPending = false;
     session->sceneHangupBattleSessionSerial = g_mockBattleOperateSessionSerial;
@@ -7098,11 +7166,12 @@ static void vm_net_mock_scene_hangup_record_battle_start(
     snprintf(session->sceneHangupScene, sizeof(session->sceneHangupScene),
              "%s", scene);
     printf("[info][mock-service] scene_hangup_start client=%08x role=%u "
-           "scene=%s battle=%u source=%s\n",
+           "scene=%s battle=%u completed=%u source=%s\n",
            session->clientId,
            session->onlineRoleId,
            session->sceneHangupScene,
            session->sceneHangupBattleSessionSerial,
+           session->sceneHangupCompletedBattles,
             source ? source : "-");
 }
 
@@ -7524,16 +7593,43 @@ static void vm_net_mock_scene_hangup_on_scene_default_event(void)
         return;
     }
 
+    {
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+        bool battleInsightActive = false;
+
+        if (role != NULL && role->roleId == session->onlineRoleId &&
+            vm_net_mock_role_active_battle_exp_bonus_percent(role) != 0)
+        {
+            battleInsightActive = true;
+        }
+        if (session->sceneHangupCompletedBattles < 0xffffu)
+            ++session->sceneHangupCompletedBattles;
+        if (battleInsightActive &&
+            session->sceneHangupCompletedBattles >=
+                VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES)
+        {
+            printf("[info][mock-service] scene_hangup_limit_reached client=%08x role=%u "
+                   "scene=%s completed=%u max=%u insight=%u action=stop-after-native-result-close\n",
+                   session->clientId, session->onlineRoleId,
+                   session->sceneHangupScene,
+                   session->sceneHangupCompletedBattles,
+                   VM_NET_MOCK_SCENE_HANGUP_INSIGHT_MAX_BATTLES, 1u);
+            vm_mock_service_session_clear_scene_hangup(session, "battle-limit");
+            return;
+        }
+    }
+
     session->sceneHangupRestartPending = true;
     session->sceneHangupRestartNotBeforeTick =
         g_schedulerTick + VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_TICKS;
     printf("[info][mock-service] scene_hangup_round_complete client=%08x "
-           "role=%u scene=%s battle=%u next_tick=%u delay_ms=%u "
+           "role=%u scene=%s battle=%u completed=%u next_tick=%u delay_ms=%u "
            "evidence=4/7-panel->25/5->poll\n",
            session->clientId,
            session->onlineRoleId,
            session->sceneHangupScene,
            session->sceneHangupBattleSessionSerial,
+           session->sceneHangupCompletedBattles,
            session->sceneHangupRestartNotBeforeTick,
            VM_NET_MOCK_SCENE_HANGUP_RESTART_DELAY_MS);
 }

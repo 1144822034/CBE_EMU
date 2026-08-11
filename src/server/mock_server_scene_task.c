@@ -259,11 +259,23 @@ typedef struct
  * addresses that same live-node table, so a battleinfo scene index must
  * include these placements.  It must not use the ordinal among combat spawns.
  *
- * Known SCE2 form:
- *   u16 kind=1, u16 version=1, u16 placement_count,
- *   u16 scatter_group=1, u16 reserved=0, u16 template_count,
+ * Native SCE2 uses two verified envelopes:
+ *
+ *   short: u16 kind=1, u16 version=1, u16 placement_count,
+ *          u16 template_count,
+ *
+ *   extended: u16 kind=1, u16 version=1, u16 placement_count,
+ *             u16 scatter_group=1, u16 reserved=0, u16 template_count,
+ *
  *   template_count { u8 length, bytes actor_resource },
  *   placement_count { u16 template_index, u16 x, u16 y, u16 flags }.
+ *
+ * The short form is present in the shipped `05上古皇陵_02.sce`: its
+ * zero-placement/zero-template header ends at byte 40 and is followed by a
+ * kind-7 portal.  Treating the portal as fields in the extended header makes
+ * the combat-node scan fail before it begins.  The extended discriminator is
+ * structural: a short form with one template has a non-zero first string
+ * length at +8, whereas the extended form has reserved=0 there.
  */
 static bool vm_net_mock_parse_sce_prop_scatter_at(const u8 *data, u32 len,
                                                   u32 off,
@@ -278,26 +290,36 @@ static bool vm_net_mock_parse_sce_prop_scatter_at(const u8 *data, u32 len,
         *placementCountOut = 0;
     if (endOut != NULL)
         *endOut = 0;
-    if (data == NULL || off + 12 > len ||
+    if (data == NULL || off + 8 > len ||
         vm_net_mock_read_le16_at(data, pos) != 1 ||
-        vm_net_mock_read_le16_at(data, pos + 2) != 1 ||
-        vm_net_mock_read_le16_at(data, pos + 6) != 1 ||
-        vm_net_mock_read_le16_at(data, pos + 8) != 0)
+        vm_net_mock_read_le16_at(data, pos + 2) != 1)
     {
         return false;
     }
 
     placementCount = vm_net_mock_read_le16_at(data, pos + 4);
-    templateCount = vm_net_mock_read_le16_at(data, pos + 10);
+    if (off + 12 <= len &&
+        vm_net_mock_read_le16_at(data, pos + 6) == 1 &&
+        vm_net_mock_read_le16_at(data, pos + 8) == 0)
+    {
+        /* Extended form: group 1 plus an explicit zero reserved field. */
+        templateCount = vm_net_mock_read_le16_at(data, pos + 10);
+        pos += 12;
+    }
+    else
+    {
+        /* Short form: template count directly follows placement count. */
+        templateCount = vm_net_mock_read_le16_at(data, pos + 6);
+        pos += 8;
+    }
     if (templateCount == 0)
     {
         if (placementCount != 0)
             return false;
         if (endOut != NULL)
-            *endOut = pos + 12;
+            *endOut = pos;
         return true;
     }
-    pos += 12;
 
     for (u16 templateIndex = 0; templateIndex < templateCount; ++templateIndex)
     {
