@@ -26,6 +26,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 const RANK_TAB_BG = 0x375946;
 const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
@@ -78,6 +79,7 @@ export class SocialPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private uiSprites: Sprite[] = [];
+  private rowHits: Container[] = [];
   private listCursor = 0;
   private actionCursor = 0;
   private rows: SocialRow[] = [];
@@ -118,6 +120,46 @@ export class SocialPanel extends Container {
         : `@${p.x},${p.y}`,
     }));
     this.enterList();
+  }
+
+  /**
+   * Map face-to-face peer tap → same action menu as 周围玩家 list confirm.
+   * Prefers the live nearby list so refresh/cursor stay consistent; synthesizes
+   * a single row when the peer is visible on the map but not yet in the page.
+   */
+  openNearbyPeerActions(
+    actorId: number,
+    peers: PeerActor[],
+    fallback?: { name: string; x: number; y: number; title?: string },
+  ): void {
+    this.kind = "nearby";
+    this.title = "周围玩家";
+    let list = peers.slice();
+    if (!list.some((p) => p.actorId === actorId) && fallback) {
+      list = [
+        {
+          actorId,
+          name: fallback.name || "玩家",
+          x: fallback.x | 0,
+          y: fallback.y | 0,
+          visualVariant: 0,
+          visualGroup: 0,
+          title: fallback.title,
+        },
+        ...list,
+      ];
+    }
+    this.rows = list.map((p) => ({
+      id: p.actorId,
+      name: p.name || "玩家",
+      subtitle: p.title
+        ? `${p.title} @${p.x},${p.y}`
+        : `@${p.x},${p.y}`,
+    }));
+    const ix = this.rows.findIndex((r) => r.id === actorId);
+    this.listCursor = ix >= 0 ? ix : 0;
+    this.visible = true;
+    this.openActions();
   }
 
   openFriends(friends: FriendRow[]): void {
@@ -400,6 +442,7 @@ export class SocialPanel extends Container {
     this.labels = [];
     for (const s of this.uiSprites) s.destroy();
     this.uiSprites = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     const x = 8;
     const y = 28;
@@ -425,6 +468,9 @@ export class SocialPanel extends Container {
             ? `↑↓翻页 ${this.textPage + 1}/${pages}  确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
             : "确定/取消=关闭";
         this.addLabel(hint, x + 10, y + h - 18, CBE.inkLabel);
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 60, () => this.confirm()),
+        );
         return;
       }
 
@@ -437,6 +483,14 @@ export class SocialPanel extends Container {
               .fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+              this.actionCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         return;
       }
@@ -479,6 +533,14 @@ export class SocialPanel extends Container {
             CBE.inkLabel,
           );
         }
+        const abs = pageStart + i;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, y + 36 + i * 20, w - 12, 18, () => {
+            this.listCursor = abs;
+            this.redraw();
+            this.confirm();
+          }),
+        );
       });
 
       if (pages > 1) {
@@ -534,6 +596,13 @@ export class SocialPanel extends Container {
             CBE.inkLabel,
           );
         }
+        const abs = pageStart + i;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, ry, w - 12, 18, () => {
+            this.listCursor = abs;
+            this.redraw();
+          }),
+        );
       });
 
       if (pages > 1) {
@@ -572,6 +641,14 @@ export class SocialPanel extends Container {
         tx + tw / 2,
         y + h / 2,
         active ? CBE.ink : CBE.inkMint,
+      );
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, tx, y, tw, h, () => {
+          if (idx === this.rankType) return;
+          const delta = idx - this.rankType;
+          this.moveCategory(delta);
+        }),
       );
     }
   }

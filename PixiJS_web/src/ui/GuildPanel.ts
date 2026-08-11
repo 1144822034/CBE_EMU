@@ -24,6 +24,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type GuildAction =
   | "open_list"
@@ -45,6 +46,7 @@ type Mode = "hub" | "list" | "members" | "apps" | "actions" | "text";
 export class GuildPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private mode: Mode = "hub";
   private listCursor = 0;
   private actionCursor = 0;
@@ -369,6 +371,7 @@ export class GuildPanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     const x = 8;
     const y = 28;
@@ -395,6 +398,9 @@ export class GuildPanel extends Container {
           y + h - 18,
           CBE.inkLabel,
         );
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 60, () => this.confirm()),
+        );
         return;
       }
 
@@ -407,6 +413,14 @@ export class GuildPanel extends Container {
               .fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+              this.actionCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         return;
       }
@@ -420,6 +434,14 @@ export class GuildPanel extends Container {
               .fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 12, y + 38 + i * 18, hi ? CBE.ink : CBE.inkMint);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 36 + i * 18, w - 12, 16, () => {
+              this.listCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         return;
       }
@@ -442,6 +464,14 @@ export class GuildPanel extends Container {
             hi ? CBE.ink : CBE.inkMint,
           );
           this.addLabel(`${row.memberCount}人`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 34 + i * 18, w - 12, 16, () => {
+              this.listCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         this.drawPager(x, y, w, this.listRows.length, this.listPage, this.listPages);
         return;
@@ -470,6 +500,14 @@ export class GuildPanel extends Container {
             x + 100,
             y + 36 + i * 18,
             CBE.inkLabel,
+          );
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 34 + i * 18, w - 12, 16, () => {
+              this.listCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
           );
         });
         this.drawPager(
@@ -501,6 +539,14 @@ export class GuildPanel extends Container {
             hi ? CBE.ink : CBE.inkMint,
           );
           this.addLabel(`Lv${row.level}`, x + 140, y + 36 + i * 18, CBE.inkLabel);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, y + 34 + i * 18, w - 12, 16, () => {
+              this.listCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         this.drawPager(x, y, w, this.appRows.length, this.appPage, this.appPages);
       }
@@ -526,6 +572,13 @@ export class GuildPanel extends Container {
         this.box.rect(x + 6, base + i * 18, w - 12, 16).fill({ color: CBE.select });
       }
       this.addLabel(lab, x + 12, base + 2 + i * 18, hi ? CBE.ink : CBE.inkMint);
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 6, base + i * 18, w - 12, 16, () => {
+          this.listCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 

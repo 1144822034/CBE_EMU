@@ -19,6 +19,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 /** Wire 1/3/3 type → display. */
 export type ChatEntry = {
@@ -87,6 +88,7 @@ export function colorForChatType(type: number): number {
 export class ChatPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private entries: ChatEntry[] = [];
   private channelIdx = 0;
   private scroll = 0;
@@ -269,6 +271,7 @@ export class ChatPanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
 
     const x = 8;
@@ -282,6 +285,9 @@ export class ChatPanel extends Container {
     const tabH = 18;
     let tabX = x + 8;
     this.addLabel("<", tabX, tabY + 2, 0x7aef9a);
+    this.rowHits.push(
+      attachRowPointerHit(this, tabX - 2, tabY, 16, tabH, () => this.cycleChannel(-1)),
+    );
     tabX += 14;
     CHANNELS.forEach((ch, i) => {
       const lab = ch.tab;
@@ -294,9 +300,23 @@ export class ChatPanel extends Container {
           .stroke({ width: 1, color: CBE.borderDim });
       }
       this.addLabel(lab, tabX + 2, tabY + 2, hi ? CBE.ink : CBE.inkLabel);
+      const idx = i;
+      const hitX = tabX - 2;
+      this.rowHits.push(
+        attachRowPointerHit(this, hitX, tabY, tw + 4, tabH, () => {
+          if (idx === this.channelIdx) return;
+          this.channelIdx = idx;
+          this.scroll = 0;
+          this.redraw();
+          if (this.visible) this.ime.show(this.inputRect());
+        }),
+      );
       tabX += tw + 4;
     });
     this.addLabel(">", tabX + 2, tabY + 2, 0x7aef9a);
+    this.rowHits.push(
+      attachRowPointerHit(this, tabX, tabY, 16, tabH, () => this.cycleChannel(1)),
+    );
 
     this.box
       .moveTo(x + 6, tabY + tabH + 4)

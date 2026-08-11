@@ -49,6 +49,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type SystemKind =
   | "bag"
@@ -266,6 +267,8 @@ export class SystemPanel extends Container {
   private rechargeYuan = 0;
   /** Transient hit targets (mall footer 充值); destroyed each redraw. */
   private hitSprites: Container[] = [];
+  /** Selectable row pointer hits (list / actions); cleared each redraw. */
+  private rowHits: Container[] = [];
   /** Body slot under equip cursor (0..7). */
   private equipFocusSlot = 1;
   /** Bag candidates when replacing a worn slot. */
@@ -947,6 +950,7 @@ export class SystemPanel extends Container {
     this.uiSprites = [];
     for (const h of this.hitSprites) h.destroy();
     this.hitSprites = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     if (this.kind !== "equip") {
       this.brokenGlowGfx.clear();
@@ -1000,6 +1004,14 @@ export class SystemPanel extends Container {
           const rowY = y + 86 + i * 20;
           if (hi) this.box.rect(x + 4, rowY, w - 8, 19).fill({ color: CBE.select });
           this.addLabel(label, x + 12, rowY + 2, hi ? CBE.ink : CBE.inkMint);
+          const idx = i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 4, rowY, w - 8, 19, () => {
+              this.actionCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
       } else if (this.mode === "actions") {
         this.drawActionList(x, y, w);
@@ -1078,6 +1090,7 @@ export class SystemPanel extends Container {
       const iconTex = equipIconTextureSync(cat);
       const host = new Container();
       host.position.set(sx, sy);
+      host.eventMode = "none";
       mountEquipSlot(host, frameTex, iconTex, {
         category: cat,
         empty: !worn,
@@ -1095,6 +1108,18 @@ export class SystemPanel extends Container {
       }
       if (broken) {
         this.brokenSlotRects.push({ x: sx, y: sy, w: slotSize, h: slotSize });
+      }
+      if (this.mode === "list") {
+        const idx = i;
+        this.rowHits.push(
+          attachRowPointerHit(this, sx, sy, slotSize, slotSize, () => {
+            this.cursorIndex = idx;
+            this.equipFocusSlot = EQUIP_SLOT_UI[idx]!.slot;
+            this.selected = this.wornBySlot(this.equipFocusSlot);
+            this.redraw();
+            this.confirm();
+          }),
+        );
       }
     }
     this.paintBrokenGlowOverlay();
@@ -1155,6 +1180,14 @@ export class SystemPanel extends Container {
       const ry = py + padY + i * rowH;
       if (hi) this.box.rect(px + 4, ry, pw - 8, rowH - 2).fill({ color: CBE.select });
       this.addLabelCentered(lab, LCD_WIDTH / 2, ry + rowH / 2 - 1, hi ? CBE.ink : CBE.inkMint);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, px + 4, ry, pw - 8, rowH - 2, () => {
+          this.actionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 
@@ -1200,12 +1233,24 @@ export class SystemPanel extends Container {
         x + 14,
         ry + Math.floor((17 - EQUIP_ICON_SIZE) / 2),
       );
-      if (iconSpr) this.uiSprites.push(iconSpr);
+      if (iconSpr) {
+        iconSpr.eventMode = "none";
+        this.uiSprites.push(iconSpr);
+      }
       this.addLabel(
         `${formatBagName(it)} X${it.count}`,
         x + 14 + EQUIP_ICON_SIZE + 4,
         ry + 1,
         hi ? CBE.ink : qualityColor(it.quality),
+      );
+      const hitIdx = idx;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 10, ry, w - 20, 17, () => {
+          this.cursorIndex = hitIdx;
+          this.selected = this.replaceCandidates[hitIdx] ?? null;
+          this.redraw();
+          this.confirm();
+        }),
       );
     }
     this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 2, false, page < pageCount - 1);
@@ -1321,6 +1366,14 @@ export class SystemPanel extends Container {
       const name = formatBagName(it);
       this.addAttrText(name, listX + 4, ty, hi ? CBE.ink : col);
       this.addAttrTextRight(String(it.count), listX + listW - 4, ty, hi ? CBE.ink : col);
+      const absIdx = pageStart + i;
+      this.rowHits.push(
+        attachRowPointerHit(this, listX, ry, listW, rowH - 1, () => {
+          this.cursorIndex = absIdx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     }
 
     this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 6, false, page < pageCount - 1);
@@ -1541,6 +1594,14 @@ export class SystemPanel extends Container {
         by + btnH / 2,
         hi ? CBE.inkMint : CBE.ink,
       );
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, bx, by, btnW, btnH, () => {
+          this.actionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 
@@ -1623,6 +1684,13 @@ export class SystemPanel extends Container {
         .fill({ color: CBE.inkMint });
     }
     this.addLabelCentered("购买", LCD_WIDTH / 2, by + btnH / 2, hi ? CBE.inkMint : CBE.ink);
+    this.rowHits.push(
+      attachRowPointerHit(this, bx, by, btnW, btnH, () => {
+        this.actionCursor = 0;
+        this.redraw();
+        this.confirm();
+      }),
+    );
   }
 
   /**
@@ -1715,6 +1783,14 @@ export class SystemPanel extends Container {
         by + btnH / 2,
         hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
       );
+      const absIdx = actStart + i;
+      this.rowHits.push(
+        attachRowPointerHit(this, bx, by, btnW, btnH, () => {
+          this.actionCursor = absIdx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     }
 
     // Footer ▲▼ (scroll actions when more than 2)
@@ -1765,6 +1841,14 @@ export class SystemPanel extends Container {
       const hi = i === this.actionCursor;
       if (hi) this.box.rect(x + 10, top + i * 20, w - 20, 18).fill({ color: BAG_SELECT });
       this.addAttrText(label, x + 18, top + i * 20 + 2, hi ? CBE.ink : CBE.inkMint);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 10, top + i * 20, w - 20, 18, () => {
+          this.actionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 
@@ -1936,6 +2020,14 @@ export class SystemPanel extends Container {
       } else {
         this.addLabel(row.text.slice(0, 26), x + 8, ty, ink);
       }
+      const absIdx = pageStart + i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 4, y + 44 + i * 16, w - 8, 15, () => {
+          this.cursorIndex = absIdx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     }
 
     const footY = y + LCD_HEIGHT - SOFTKEY_H - 64 - 18;
@@ -2065,11 +2157,20 @@ export class SystemPanel extends Container {
       const hi = i === this.actionCursor;
       if (hi) this.box.rect(x + 4, y + 46 + i * 18, w - 8, 17).fill({ color: CBE.select });
       this.addLabel(label, x + 12, y + 48 + i * 18, hi ? CBE.ink : CBE.inkMint);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 4, y + 46 + i * 18, w - 8, 17, () => {
+          this.actionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 
   private addLabel(text: string, x: number, y: number, color: number): void {
     const t = new BitmapLabel();
+    t.eventMode = "none";
     t.position.set(x, y);
     void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - 36 });
     this.addChild(t);
@@ -2079,6 +2180,7 @@ export class SystemPanel extends Container {
   /** Attr-panel / list rows — plain fill, no stroke (clearest on LCD stretch). */
   private addAttrText(text: string, x: number, y: number, color: number): void {
     const t = new BitmapLabel();
+    t.eventMode = "none";
     t.position.set(x, y);
     void t.setText(text, color, { outline: false, maxWidth: LCD_WIDTH - x - 16 });
     this.addChild(t);
@@ -2093,6 +2195,7 @@ export class SystemPanel extends Container {
     maxWidth = 96,
   ): void {
     const t = new BitmapLabel();
+    t.eventMode = "none";
     t.anchor.set(1, 0);
     t.position.set(rightX, y);
     void t.setText(text, color, { outline: false, maxWidth });
@@ -2102,6 +2205,7 @@ export class SystemPanel extends Container {
 
   private addLabelCentered(text: string, cx: number, cy: number, color: number): void {
     const t = new BitmapLabel();
+    t.eventMode = "none";
     t.anchor.set(0.5, 0.5);
     t.position.set(Math.round(cx), Math.round(cy));
     // font_gb.uc3 hard pixels — sharp on CSS-pixelated LCD (HTML softkeys stay DOM).

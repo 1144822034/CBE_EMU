@@ -4816,6 +4816,11 @@ enum
 #define VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID       839u
 #define VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY    50u
 #define VM_NET_MOCK_EQUIP_SELL_PAGE_ITEMS         5u
+/* Mall 替身人偶 (item.dsh:846): durability 1; auto-consume to cancel one spar. */
+#define VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID  846u
+#define VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_DURABILITY 1u
+/* Initiator cooldown after a successful nearby spar start. */
+#define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 /* OPEN_CATEGORY value layout (low 24 bits):
  *   [7:0]  selector (equip category 1..10 or medicine 0xfe)
  *   [11:8] level band (0=band menu, 1=1-20, 2=21-40, 3=41-60, 4=61-70)

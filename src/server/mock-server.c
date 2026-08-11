@@ -75,6 +75,15 @@ static void vm_net_mock_dream_sce_hot_reenter_restore_admin(void);
 /* Heal web/fs↔bin 29* SCE twin drift before WT18/7 publish (equipment_npc). */
 static void vm_net_mock_dream_sce_heal_authoritative_kind3(const char *scene);
 
+/* Pixi arena helpers (defined in mock_server_arena.c); team/create + login
+ * rebind call sites live earlier in equipment_npc.c. */
+struct vm_mock_service_client_session;
+static bool vm_mock_arena_team_forbidden_for_session(
+    const struct vm_mock_service_client_session *session);
+static void vm_mock_arena_rebind_session_if_needed(
+    struct vm_mock_service_client_session *session,
+    vm_net_mock_role_state *role);
+
 #include "mock_server_equipment_npc.c"
 #include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
@@ -87,6 +96,7 @@ static bool vm_mock_arena_peer_visible(
     const vm_mock_service_client_session *peer);
 static bool vm_mock_arena_spar_forbidden_on_scene(const char *scene);
 static bool vm_mock_arena_entry_window_open(void);
+/* team_forbidden / rebind already declared before equipment_npc. */
 static void vm_mock_arena_tick(void);
 static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel);
 static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);

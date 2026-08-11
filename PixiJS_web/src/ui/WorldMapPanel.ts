@@ -27,6 +27,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 type Mode = "world" | "region" | "confirm";
 
@@ -54,6 +55,7 @@ export class WorldMapPanel extends Container {
   private box = new Graphics();
   private graph = new Container();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private catalog: WorldMapCatalog | null = null;
   private mode: Mode = "world";
   private worldCursor = 0;
@@ -127,7 +129,13 @@ export class WorldMapPanel extends Container {
     if (!this.visible) return;
     showPanelTip(this.toast, text, () => {
       if (!this.visible) return;
-      if (this.mode === "confirm" && this.confirmTip) {
+      // Restore sticky confirm only after transient tip expires/dismisses.
+      // Must not run on the immediate show redraw — that wiped「传送石不够」.
+      if (
+        !this.toast.tipText &&
+        this.mode === "confirm" &&
+        this.confirmTip
+      ) {
         setPanelTipSticky(this.toast, this.confirmTip);
       }
       this.redraw();
@@ -243,6 +251,7 @@ export class WorldMapPanel extends Container {
   private clearDynamic(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     for (const c of this.graph.removeChildren()) c.destroy();
     this.box.clear();
   }
@@ -401,6 +410,31 @@ export class WorldMapPanel extends Container {
           });
         }
       }
+      const nodeId = n.id;
+      this.rowHits.push(
+        attachRowPointerHit(this, n.x - 4, n.y - 4, NODE + 8, NODE + 8, () => {
+          if (this.mode === "confirm") {
+            this.confirm();
+            return;
+          }
+          if (this.mode === "world" && this.catalog) {
+            const ix = this.catalog.worlds.findIndex((w) => w.id === nodeId);
+            if (ix < 0) return;
+            this.worldCursor = ix;
+            this.redraw();
+            this.confirm();
+            return;
+          }
+          if (this.mode === "region" && this.regionWorld && this.catalog) {
+            const list = scenesForWorld(this.catalog, this.regionWorld.id);
+            const ix = list.findIndex((s) => s.id === nodeId);
+            if (ix < 0) return;
+            this.regionCursor = ix;
+            this.redraw();
+            this.confirm();
+          }
+        }),
+      );
     }
   }
 

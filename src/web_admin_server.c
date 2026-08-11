@@ -9475,19 +9475,21 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                                     "{\"ok\":true,\"service\":\"jianghu-admin\"}\n");
         return 1;
     }
-    /* Public id→level map for Pixi nameplates (via gateway proxy).  Only rows
-     * with a loaded server_monsters override; builtin fallback stays client-side. */
+    /* Public id→level (+ optional actor) map for Pixi nameplates / battle
+     * visuals (via gateway proxy).  Only rows with a loaded server_monsters
+     * override; builtin level fallback stays client-side. */
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, "/api/monster-levels") == 0)
     {
         char *json = NULL;
         size_t jsonCap = 0;
         size_t jsonLen = 0;
-        u32 written = 0;
+        u32 levelWritten = 0;
+        u32 actorWritten = 0;
         int ok = 0;
 
         (void)vm_net_mock_monster_db_load();
-        jsonCap = 64u + (size_t)g_vm_net_mock_monster_catalog_count * 24u;
+        jsonCap = 96u + (size_t)g_vm_net_mock_monster_catalog_count * 48u;
         if (jsonCap < 256u)
             jsonCap = 256u;
         json = (char *)malloc(jsonCap);
@@ -9519,7 +9521,7 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
                 override->stats.level == 0)
                 continue;
             pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":%u",
-                                written ? "," : "",
+                                levelWritten ? "," : "",
                                 override->stats.enemyId,
                                 override->stats.level);
             if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
@@ -9530,7 +9532,55 @@ static int vm_mock_admin_dispatch_client(vm_mock_service_socket client,
             }
             memcpy(json + jsonLen, piece, (size_t)pieceLen);
             jsonLen += (size_t)pieceLen;
-            ++written;
+            ++levelWritten;
+        }
+        if (ok && jsonLen + 16u < jsonCap)
+        {
+            memcpy(json + jsonLen, "},\"actors\":{", 12);
+            jsonLen += 12;
+        }
+        else
+            ok = 0;
+        for (u32 i = 0; ok && i < g_vm_net_mock_monster_catalog_count; ++i)
+        {
+            const vm_net_mock_monster_override *override =
+                &g_vm_net_mock_monster_overrides[i];
+            const char *actor = NULL;
+            char piece[96];
+            int pieceLen;
+
+            if (!override->used || override->stats.enemyId == 0)
+                continue;
+            if (override->actorResource[0] == 0)
+                continue;
+            actor = override->actorResource;
+            /* Catalog actors are ASCII *.actor paths — reject odd bytes. */
+            {
+                size_t alen = strlen(actor);
+                int safe = alen > 0 && alen < 64;
+                for (size_t a = 0; safe && a < alen; ++a)
+                {
+                    unsigned char c = (unsigned char)actor[a];
+                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+                          c == '-' || c == '/'))
+                        safe = 0;
+                }
+                if (!safe)
+                    continue;
+            }
+            pieceLen = snprintf(piece, sizeof(piece), "%s\"%u\":\"%s\"",
+                                actorWritten ? "," : "",
+                                override->stats.enemyId, actor);
+            if (pieceLen <= 0 || (size_t)pieceLen >= sizeof(piece) ||
+                jsonLen + (size_t)pieceLen + 4u >= jsonCap)
+            {
+                ok = 0;
+                break;
+            }
+            memcpy(json + jsonLen, piece, (size_t)pieceLen);
+            jsonLen += (size_t)pieceLen;
+            ++actorWritten;
         }
         if (ok && jsonLen + 4u < jsonCap)
         {

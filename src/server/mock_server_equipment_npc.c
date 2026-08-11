@@ -3413,6 +3413,8 @@ typedef struct vm_mock_service_client_session
     bool sparInviteReplyActive;
     u32 sparInviteSourceClientId;
     u32 sparInviteSourceWireId;
+    /* Earliest scheduler_get_tick_ms() when this client may initiate spar again. */
+    u32 sparInitiateReadyMs;
     bool sparBattleReadyPending;
     u32 sparBattlePeerClientId;
     u32 sparBattlePeerWireId;
@@ -3441,6 +3443,9 @@ typedef struct vm_mock_service_client_session
      * map 25/5 or scene-sync as 25/12 clear + 1/3/3 (no unsolicited 25/11). */
     bool sparResultMessageArmed;
     u32 sparResultNotBeforeTick;
+    /* Pixi 比武擂台: 4/7 fdata + map tip「胜/败/平 积分+N 当前积分」。 */
+    bool arenaResultPending;
+    char arenaResultFdata[96];
     u32 pendingTeamBattleSerial;
     /* HandleChallengeResponse(0x010395AA) first consumes 30/9 and its
      * confirmation callback sends 30/10 {agree}.  Keep the target on the
@@ -3803,6 +3808,10 @@ typedef struct
     u8 firstTurnIndex;
     u8 roundCommitMask;
     u32 roundCommitOperate[2];
+    /* Item/flask commit (4/3): heal amounts applied on round resolve. */
+    u8 roundCommitIsItem[2];
+    u32 roundCommitItemHealHp[2];
+    u32 roundCommitItemHealMp[2];
     u32 roundCommitDeadlineTick;
     u8 terminalPendingMask;
     u32 terminalNotBeforeTick;
@@ -5063,6 +5072,86 @@ static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
                duel->serial, duel->clientIds[0], duel->clientIds[1]);
         memset(duel, 0, sizeof(*duel));
     }
+}
+
+static bool vm_mock_service_session_try_consume_spar_substitute_doll(
+    vm_mock_service_client_session *session)
+{
+    vm_mock_service_account_state *account = NULL;
+    vm_net_mock_role_state *role = NULL;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    bool consumed = false;
+
+    if (session == NULL || session->accountId[0] == 0 || session->onlineRoleId == 0)
+        return false;
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+    account = vm_mock_service_account_find_or_create(session->accountId);
+    if (account == NULL)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return false;
+    }
+    vm_mock_service_account_restore(account);
+    g_vm_mock_service_active_client_id = session->clientId;
+    if (!vm_mock_service_account_ensure_role_db_loaded(account) ||
+        !g_vm_net_mock_role_db_valid)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return false;
+    }
+
+    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == session->onlineRoleId)
+        {
+            role = &g_vm_net_mock_role_db.roles[i];
+            break;
+        }
+    }
+    if (role != NULL &&
+        vm_net_mock_role_find_backpack_item(
+            role, VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID, 0) != NULL &&
+        vm_net_mock_role_consume_backpack_item_amount(
+            role, VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID, 1, NULL, 0, NULL))
+    {
+        vm_net_mock_role_mark_inventory_dirty("spar-substitute-doll");
+        if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
+            vm_net_mock_role_db_save("spar-substitute-doll");
+        session->backpackListResyncPending = true;
+        session->backpackListResyncPhase = 1;
+        session->backpackListResyncListOnly = true;
+        session->backpackListResyncTick = g_schedulerTick;
+        g_netMockBackpackGridSeededRoleId = 0;
+        consumed = true;
+        printf("[info][mock-service] spar_substitute_doll_consume client=%08x "
+               "role=%u item=%u durability=%u evidence=item.dsh:846\n",
+               session->clientId, role->roleId,
+               VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID,
+               VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_DURABILITY);
+    }
+
+    vm_mock_service_account_capture(account);
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+    return consumed;
 }
 
 static void vm_mock_service_session_apply_spar_death_penalty(
@@ -6967,6 +7056,7 @@ static const char *vm_mock_service_session_take_spar_result_text(
     static const char sparWinGbk[] =
         "\xcc\xf8\xd5\xbd\xb3\xc9\xb9\xa6";
     static char sparLoseBuf[96];
+    static char arenaBuf[96];
     const char *text = NULL;
 
     if (session == NULL || !session->sparResultMessageArmed)
@@ -6981,7 +7071,13 @@ static const char *vm_mock_service_session_take_spar_result_text(
     if (session->sparExitMessageQueued)
         return NULL;
     session->sparExitMessageQueued = true;
-    if (session->sparExitWasDead)
+    if (session->arenaResultPending && session->arenaResultFdata[0] != 0)
+    {
+        snprintf(arenaBuf, sizeof(arenaBuf), "%s", session->arenaResultFdata);
+        session->arenaResultPending = false;
+        text = arenaBuf;
+    }
+    else if (session->sparExitWasDead)
     {
         snprintf(sparLoseBuf, sizeof(sparLoseBuf),
                  "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
@@ -7274,6 +7370,8 @@ static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_
     vm_mock_service_team *team = NULL;
     static const char dreamTeamBanGbk[] =
         "\xc3\xce\xbe\xb5\xb8\xb1\xb1\xbe\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 梦境副本禁止组队 */
+    static const char arenaTeamBanGbk[] =
+        "\xb1\xc8\xce\xe4\xc6\xda\xbc\xe4\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 比武期间禁止组队 */
 
     if (leader == NULL || leader->clientId == 0 || leader->onlineRoleId == 0)
         return NULL;
@@ -7283,6 +7381,15 @@ static vm_mock_service_team *vm_mock_service_team_create(vm_mock_service_client_
                                                              dreamTeamBanGbk);
         printf("[info][mock-service] team_create_blocked_dream leader=%08x/%u "
                "evidence=dream-ops-no-team\n",
+               leader->clientId, leader->onlineRoleId);
+        return NULL;
+    }
+    if (vm_mock_arena_team_forbidden_for_session(leader))
+    {
+        (void)vm_mock_service_session_enqueue_system_message(leader,
+                                                             arenaTeamBanGbk);
+        printf("[info][mock-service] team_create_blocked_arena leader=%08x/%u "
+               "evidence=arena-no-team\n",
                leader->clientId, leader->onlineRoleId);
         return NULL;
     }
@@ -7340,6 +7447,21 @@ static bool vm_mock_service_team_add_member(vm_mock_service_team *team,
                     leader, dreamTeamBanGbk);
             printf("[info][mock-service] team_add_blocked_dream leader=%08x "
                    "member=%08x/%u evidence=dream-ops-no-team\n",
+                   team->leaderClientId, member->clientId, member->onlineRoleId);
+            return false;
+        }
+        if (vm_mock_arena_team_forbidden_for_session(member) ||
+            vm_mock_arena_team_forbidden_for_session(leader))
+        {
+            static const char arenaTeamBanGbk[] =
+                "\xb1\xc8\xce\xe4\xc6\xda\xbc\xe4\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 比武期间禁止组队 */
+            (void)vm_mock_service_session_enqueue_system_message(member,
+                                                                 arenaTeamBanGbk);
+            if (leader != NULL && leader->clientId != member->clientId)
+                (void)vm_mock_service_session_enqueue_system_message(
+                    leader, arenaTeamBanGbk);
+            printf("[info][mock-service] team_add_blocked_arena leader=%08x "
+                   "member=%08x/%u evidence=arena-no-team\n",
                    team->leaderClientId, member->clientId, member->onlineRoleId);
             return false;
         }
@@ -8124,6 +8246,25 @@ static void vm_mock_service_session_mark_scene_ready(vm_mock_service_client_sess
      */
     if (sceneNameChanged)
         vm_mock_service_team_auto_leave_off_leader_scene(session, "scene-mismatch");
+    {
+        vm_net_mock_role_state *role = vm_mock_service_trade_role_for_session(session, NULL);
+        if (role == NULL)
+            role = (session->clientId == g_vm_mock_service_active_client_id)
+                       ? vm_net_mock_active_role()
+                       : NULL;
+        vm_mock_arena_rebind_session_if_needed(session, role);
+        if (vm_mock_arena_team_forbidden_for_session(session))
+        {
+            static const char arenaTeamBanGbk[] =
+                "\xb1\xc8\xce\xe4\xc6\xda\xbc\xe4\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3";
+            if (vm_mock_service_team_find_for_client(session->clientId) != NULL)
+            {
+                (void)vm_mock_service_session_enqueue_system_message(session,
+                                                                     arenaTeamBanGbk);
+                (void)vm_mock_service_team_remove_member(session, "arena-scene-ready");
+            }
+        }
+    }
 }
 
 static u32 vm_net_mock_build_map_actor_fresh_shell_sync_response(u8 *out,
@@ -8556,6 +8697,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparInviteReplyActive = false;
     session->sparInviteSourceClientId = 0;
     session->sparInviteSourceWireId = 0;
+    session->sparInitiateReadyMs = 0;
     session->sparBattleReadyPending = false;
     session->sparBattlePeerClientId = 0;
     session->sparBattlePeerWireId = 0;
@@ -8575,6 +8717,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparSettleDelivered = false;
     session->sparResultMessageArmed = false;
     session->sparResultNotBeforeTick = 0;
+    session->arenaResultPending = false;
+    session->arenaResultFdata[0] = 0;
     session->pendingTeamBattleSerial = 0;
     session->instanceChallengePending = false;
     session->instanceChallengeBattlePending = false;

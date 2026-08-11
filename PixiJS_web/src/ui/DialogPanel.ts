@@ -2,6 +2,7 @@ import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, drawCbePanel, makePixelText } from "./constants";
 import { BitmapLabel, wrapUiText } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
 const OPTION_PAGE_SIZE = 7;
@@ -9,6 +10,7 @@ const OPTION_PAGE_SIZE = 7;
 export class DialogPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private cursorIndex = 0;
   private dialog: NpcDialog | null = null;
   onPick: ((action: number, value: number, label: string) => void) | null = null;
@@ -59,6 +61,7 @@ export class DialogPanel extends Container {
   private async redraw(): Promise<void> {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     if (!this.dialog) return;
 
@@ -101,8 +104,16 @@ export class DialogPanel extends Container {
       }
       const t = makePixelText(opt.label || `选项${abs + 1}`, 12, hi ? CBE.ink : CBE.inkMint);
       t.position.set(x + 12, optTop + 1 + i * 18);
+      t.eventMode = "none";
       this.addChild(t);
       this.labels.push(t);
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 6, optTop + i * 18, w - 12, 16, () => {
+          this.cursorIndex = abs;
+          void this.redraw();
+          this.confirm();
+        }),
+      );
     });
 
     if (pages > 1) {

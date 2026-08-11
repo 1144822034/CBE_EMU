@@ -1991,6 +1991,18 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
         if (posx != 0 && posy != 0 && bind->x == posx && bind->y == posy &&
             bind->realActorId != 0)
         {
+            /*
+             * Foot collide sends SCE wire (+spawn pos) → real.  Challenge /
+             * hangup may send catalog challenge_enemy_id with borrowed map
+             * coords — do not replace a different known catalog id with the
+             * floor bind at that tile (wrong HP/drops/actor).
+             */
+            if (wireActorId != 0 &&
+                wireActorId != bind->wireActorId &&
+                wireActorId != bind->realActorId)
+            {
+                continue;
+            }
             if (bind->realActorId != wireActorId)
             {
                 printf("[info][network] mock_scene_combat_spawn_remap "
@@ -2031,6 +2043,18 @@ static u32 vm_net_mock_sce_combat_spawn_remap_battle_enemy(
                "evidence=no-silent-wire-fallback\n",
                scene, posx, posy, wireActorId, wireOnlyCount);
         return 0;
+    }
+    /*
+     * Pixi challenge/hangup 4/1 sends catalog challenge_enemy_id (e.g. 204),
+     * which is not an SCE wire (#200).  On wire/real split scenes the miss
+     * path used to refuse or, with borrowed spawn pos, steal the floor bind.
+     */
+    if (vm_net_mock_monster_enemy_id_known(wireActorId))
+    {
+        printf("[info][network] mock_scene_combat_spawn_remap scene=%s "
+               "pos=(%u,%u) wire=%u real=%u source=catalog-keep\n",
+               scene, posx, posy, wireActorId, wireActorId);
+        return wireActorId;
     }
     if (sceneHasSplit)
     {

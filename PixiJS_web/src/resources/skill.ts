@@ -1,4 +1,4 @@
-import { decodeGbk, readU32LE } from "./binary";
+import { decodeGbk, parseDshInt, readU32LE } from "./binary";
 import { fetchResourceBytes } from "./loader";
 
 /** skill.dsh 目标指向 (col 10): 0己 / 1单友 / 2友群 / 3单敌 / 4敌群 */
@@ -69,16 +69,16 @@ export function parseSkillCatalogBytes(raw: Uint8Array): SkillCatalogItem[] {
       rp += vl;
     }
     pos = end;
-    const id = Number(cells[0] ?? "") | 0;
+    const id = parseDshInt(cells[0] ?? "");
     const name = cells[1] ?? "";
     const desc = (cells[3] ?? "").replace(/^-+\s*$/, "").trim();
-    const effectIndex = Number(cells[2] ?? "") | 0;
-    const level = Number(cells[4] ?? "") | 0;
-    const rawJob = Number(cells[6] ?? "") | 0;
-    const targetKind = clampTargetKind(Number(cells[10] ?? "3"));
-    const mpCost = Number(cells[12] ?? "") | 0;
-    const useLimit = Number(cells[8] ?? "") | 0;
-    const hpChange = Number(cells[14] ?? "") | 0;
+    const effectIndex = parseDshInt(cells[2] ?? "");
+    const level = parseDshInt(cells[4] ?? "");
+    const rawJob = parseDshInt(cells[6] ?? "");
+    const targetKind = clampTargetKind(parseDshInt(cells[10] ?? "3", 3));
+    const mpCost = parseDshInt(cells[12] ?? "");
+    const useLimit = parseDshInt(cells[8] ?? "");
+    const hpChange = parseDshInt(cells[14] ?? "");
     if (id > 0 && name) {
       out.push({
         id,

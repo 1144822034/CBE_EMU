@@ -32,7 +32,18 @@ const exePath = join(outDir, "ws-gateway.exe");
 
 mkdirSync(outDir, { recursive: true });
 for (const p of [exePath, blobPath, seaConfigPath]) {
-  if (existsSync(p)) rmSync(p);
+  if (!existsSync(p)) continue;
+  try {
+    rmSync(p);
+  } catch (e) {
+    const code = e && typeof e === "object" && "code" in e ? e.code : "";
+    if (code === "EBUSY" || code === "EPERM") {
+      throw new Error(
+        `[gateway:exe] 无法覆盖 ${p}（文件被占用）。请先结束正在运行的 ws-gateway.exe 再编译。`,
+      );
+    }
+    throw e;
+  }
 }
 
 console.log("[gateway:exe] bundling scripts/ws-gateway.mjs …");

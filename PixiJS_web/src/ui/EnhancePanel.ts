@@ -38,6 +38,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type EnhanceAction =
   | "submit"
@@ -65,6 +66,7 @@ const INK_GREEN = 0x00ff00;
 export class EnhancePanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private mode: Mode = "main";
   private equip: BagItem | null = null;
   private bag: BagItem[] = [];
@@ -416,6 +418,7 @@ export class EnhancePanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
 
     const x = 8;
@@ -517,6 +520,15 @@ export class EnhancePanel extends Container {
         by + btnH / 2,
         hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
       );
+      const idx = i;
+      const hitX = bx;
+      this.rowHits.push(
+        attachRowPointerHit(this, hitX, by, btnW, btnH, () => {
+          this.actionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
       bx += btnW + gap;
     }
   }
@@ -547,6 +559,13 @@ export class EnhancePanel extends Container {
       if (hi) this.box.rect(x + 10, sy, w - 20, 15).fill({ color: SELECT_BG });
       const line = `${row.name} (+${row.rate}%) X${row.count}`;
       this.addAttr(line, x + 14, sy + 1, hi ? CBE.ink : CBE.inkMint);
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 10, sy, w - 20, 15, () => {
+          this.listCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     }
     if (this.listScroll + visible < rows.length) {
       this.drawScrollArrow(x + w - 18, listTop + visible * 16 - 2, false, true);
@@ -604,6 +623,14 @@ export class EnhancePanel extends Container {
           by + btnH / 2,
           hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
         );
+        const idx = i;
+        this.rowHits.push(
+          attachRowPointerHit(this, bx, by, btnW, btnH, () => {
+            this.actionCursor = idx;
+            this.redraw();
+            this.confirm();
+          }),
+        );
       }
       return;
     }
@@ -643,6 +670,13 @@ export class EnhancePanel extends Container {
           x + 14,
           sy + 1,
           hi ? CBE.ink : CBE.inkMint,
+        );
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 10, sy, w - 20, 15, () => {
+            this.listCursor = idx;
+            this.redraw();
+            this.confirm();
+          }),
         );
       }
     }

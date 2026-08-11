@@ -1877,7 +1877,7 @@ export function computeNpcTaskPrompts(
 /** 30/9 challenge confirm prompt (after empty 26/0). */
 export function parseChallengePrompt(
   packet: WtPacket,
-): { isLeader: number; text: string } | null {
+): { isLeader: number; text: string; enemyId: number } | null {
   const obj = packet.objects.find((o) => o.kind === 30 && o.subtype === 9);
   if (!obj) return null;
   const leaderRaw = findField(obj, "isleader");
@@ -1886,7 +1886,15 @@ export function parseChallengePrompt(
     : 0;
   const challenge = findField(obj, "challenge");
   if (!challenge) return null;
-  return { isLeader, text: decodeFieldString(challenge) || "是否挑战守关怪？" };
+  const enemyRaw = findField(obj, "enemy");
+  const enemyId = enemyRaw
+    ? decodeTaggedNumber(enemyRaw) ?? decodeAsciiDigitResult(enemyRaw) ?? 0
+    : 0;
+  return {
+    isLeader,
+    text: decodeFieldString(challenge) || "是否挑战守关怪？",
+    enemyId: enemyId >>> 0,
+  };
 }
 
 export function parseNpcDialog(packet: WtPacket): NpcDialog | null {

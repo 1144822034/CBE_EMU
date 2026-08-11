@@ -7,9 +7,12 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -17,6 +20,10 @@ import android.util.Log;
  * Foreground service while the player is in-world (or hangup-armed) so OEM Doze
  * / background WebView freeze is less likely to kill scene-poll. Complements
  * MainActivity WakeLock + resumeTimers.
+ *
+ * Critical: Chromium still throttles setInterval while document.hidden even with
+ * resumeTimers(). A native Handler tick (held by FGS + WakeLock) re-arms the
+ * WebView and injects JS poll/ping so server presence (~30s) stays fresh.
  */
 public class HangupKeepAliveService extends Service {
     private static final String TAG = "PixiHangupKeepAlive";
@@ -28,10 +35,24 @@ public class HangupKeepAliveService extends Service {
 
     private static final String CHANNEL_ID = "pixijs_hangup_keepalive";
     private static final int NOTIFICATION_ID = 19092;
+    /** Under server presence budget (~30s); also re-arms OEM-paused WebView. */
+    private static final long NATIVE_TICK_MS = 2000L;
 
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
     private String mode = MODE_HANGUP;
+    private final Handler tickHandler = new Handler(Looper.getMainLooper());
+    private boolean tickArmed = false;
+
+    private final Runnable nativeTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!tickArmed)
+                return;
+            MainActivity.pokeKeepAliveFromService();
+            tickHandler.postDelayed(this, NATIVE_TICK_MS);
+        }
+    };
 
     public static void start(Context context) {
         start(context, MODE_HANGUP);
@@ -62,6 +83,7 @@ public class HangupKeepAliveService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : ACTION_START;
         if (ACTION_STOP.equals(action)) {
+            stopNativeTick();
             releaseLocks();
             stopForeground(true);
             stopSelf();
@@ -76,14 +98,35 @@ public class HangupKeepAliveService extends Service {
         }
 
         ensureNotificationChannel();
-        startForeground(NOTIFICATION_ID, buildNotification());
+        startForegroundTyped(buildNotification());
         acquireLocks();
+        startNativeTick();
         Log.i(TAG, "keepalive foreground active mode=" + mode);
         return START_STICKY;
     }
 
     @Override
+    public void onTimeout(int startId) {
+        restartAfterTimeout(startId, -1);
+    }
+
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        restartAfterTimeout(startId, fgsType);
+    }
+
+    private void restartAfterTimeout(int startId, int fgsType) {
+        // API 34+ dataSync budget; we prefer specialUse but still recover.
+        Log.w(TAG, "FGS onTimeout startId=" + startId + " type=" + fgsType + "; restarting");
+        stopNativeTick();
+        stopForeground(true);
+        stopSelf(startId);
+        start(getApplicationContext(), mode);
+    }
+
+    @Override
     public void onDestroy() {
+        stopNativeTick();
         releaseLocks();
         Log.i(TAG, "keepalive stopped");
         super.onDestroy();
@@ -92,6 +135,34 @@ public class HangupKeepAliveService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private void startNativeTick() {
+        tickArmed = true;
+        tickHandler.removeCallbacks(nativeTickRunnable);
+        tickHandler.post(nativeTickRunnable);
+    }
+
+    private void stopNativeTick() {
+        tickArmed = false;
+        tickHandler.removeCallbacks(nativeTickRunnable);
+    }
+
+    private void startForegroundTyped(Notification notification) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            // specialUse: no 6h dataSync cap (overnight hangup). Sideload APK OK.
+            startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
     }
 
     private void ensureNotificationChannel() {

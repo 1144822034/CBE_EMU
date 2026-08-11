@@ -378,7 +378,7 @@ static bool vm_mock_arena_load_config(bool force)
     u32 count = 0;
     char sceneHex[192];
     char kwHex[96];
-    char query[512];
+    char query[1024];
 
     if (g_vm_mock_arena_config_loaded && !force)
         return true;
@@ -567,14 +567,110 @@ static bool vm_mock_arena_peer_visible(const vm_mock_service_client_session *obs
 
     if (observer == NULL || peer == NULL)
         return true;
+    (void)vm_mock_arena_load_config(false);
     if (!vm_mock_arena_is_arena_scene(observer->sceneVisibleScene))
         return true;
+    /* 仅比武进场/比赛期间按职业×段位隔离；结算后恢复同图互见。 */
+    if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_ENTRY &&
+        g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE)
+        return true;
+    if (!vm_mock_arena_is_arena_scene(peer->sceneVisibleScene))
+        return false;
     a = vm_mock_arena_find_part(observer->onlineRoleId);
     b = vm_mock_arena_find_part(peer->onlineRoleId);
-    if (a == NULL || b == NULL)
+    if (a == NULL || b == NULL || !a->inArenaScene || !b->inArenaScene)
         return false;
     return vm_mock_arena_same_bucket(a->job, a->bracket, a->level, b->job,
                                      b->bracket, b->level);
+}
+
+static bool vm_mock_arena_team_forbidden_for_session(
+    const vm_mock_service_client_session *session)
+{
+    if (session == NULL)
+        return false;
+    (void)vm_mock_arena_load_config(false);
+    if (!vm_mock_arena_is_arena_scene(session->sceneVisibleScene))
+        return false;
+    return g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_ENTRY ||
+           g_vm_mock_arena_rt.status == VM_MOCK_ARENA_STATUS_LIVE;
+}
+
+static void vm_mock_arena_disband_team_for_session(
+    vm_mock_service_client_session *session, const char *reason)
+{
+    static const char arenaTeamBanGbk[] =
+        "\xb1\xc8\xce\xe4\xc6\xda\xbc\xe4\xbd\xfb\xd6\xb9\xd7\xe9\xb6\xd3"; /* 比武期间禁止组队 */
+
+    if (session == NULL)
+        return;
+    if (vm_mock_service_team_find_for_client(session->clientId) == NULL)
+        return;
+    (void)vm_mock_service_session_enqueue_system_message(session, arenaTeamBanGbk);
+    (void)vm_mock_service_team_remove_member(session,
+                                              reason ? reason : "arena-no-team");
+}
+
+/* 离线再上线：仍在擂台场景且本场未结束 → 重绑 clientId / inArenaScene。 */
+static void vm_mock_arena_rebind_session_if_needed(
+    vm_mock_service_client_session *session, vm_net_mock_role_state *role)
+{
+    vm_mock_arena_participant *p;
+    const char *scene;
+
+    if (session == NULL || role == NULL || role->roleId == 0)
+        return;
+    (void)vm_mock_arena_tick();
+    if (g_vm_mock_arena_rt.sessionId == 0 ||
+        (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_ENTRY &&
+         g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_LIVE))
+        return;
+    scene = session->sceneVisibleScene[0] ? session->sceneVisibleScene : role->scene;
+    if (!vm_mock_arena_is_arena_scene(scene) &&
+        !vm_mock_arena_is_arena_scene(role->scene))
+        return;
+    p = vm_mock_arena_find_part(role->roleId);
+    if (p == NULL)
+        return;
+    p->clientId = session->clientId;
+    p->inArenaScene = 1;
+    p->job = role->job ? role->job : session->onlineJob;
+    p->bracket = vm_mock_arena_bracket_for_level(role->level);
+    p->level = (u16)(role->level ? role->level : session->onlineLevel);
+    printf("[info][mock-service] arena_rebind role=%u client=%08x scene=%s "
+           "status=%u score=%u evidence=offline-rejoin-keep-venue\n",
+           p->roleId, p->clientId, scene ? scene : "-", g_vm_mock_arena_rt.status,
+           p->score);
+}
+
+static void vm_mock_arena_note_result(vm_mock_service_client_session *session,
+                                      vm_mock_arena_participant *p, const char *kind,
+                                      u32 delta)
+{
+    /* GBK: 比武胜利/失败/平局 积分+N 当前积分M */
+    static const char winGbk[] = "\xb1\xc8\xce\xe4\xca\xa4\xc0\xfb";
+    static const char loseGbk[] = "\xb1\xc8\xce\xe4\xca\xa7\xb0\xdc";
+    static const char drawGbk[] = "\xb1\xc8\xce\xe4\xc6\xbd\xbe\xd3";
+    const char *label = loseGbk;
+
+    if (session == NULL || p == NULL)
+        return;
+    if (kind != NULL)
+    {
+        if (strcmp(kind, "win") == 0 || strcmp(kind, "bye") == 0)
+            label = winGbk;
+        else if (strcmp(kind, "draw") == 0)
+            label = drawGbk;
+        else
+            label = loseGbk;
+    }
+    snprintf(session->arenaResultFdata, sizeof(session->arenaResultFdata),
+             "%s \xbb\xfd\xb7\xd6+%u \xb5\xb1\xc7\xb0\xbb\xfd\xb7\xd6%u", label,
+             delta, p->score);
+    session->arenaResultPending = true;
+    printf("[info][mock-service] arena_result_note role=%u kind=%s delta=%u "
+           "total=%u fdata=%s\n",
+           p->roleId, kind ? kind : "-", delta, p->score, session->arenaResultFdata);
 }
 
 static bool vm_mock_arena_spar_forbidden_on_scene(const char *scene)
@@ -779,7 +875,8 @@ static void vm_mock_arena_settle(void)
         for (j = 0; j < g_vm_mock_arena_part_count; ++j)
         {
             if (g_vm_mock_arena_parts[j].job == job &&
-                g_vm_mock_arena_parts[j].bracket == bracket)
+                g_vm_mock_arena_parts[j].bracket == bracket &&
+                g_vm_mock_arena_parts[j].score > 0)
                 bucket[bucketCount++] = g_vm_mock_arena_parts[j];
         }
         if (bucketCount == 0)
@@ -807,9 +904,11 @@ static void vm_mock_arena_force_duel_draw(vm_mock_service_duel *duel)
     vm_mock_arena_participant *b;
     vm_mock_service_client_session *s0;
     vm_mock_service_client_session *s1;
+    u32 drawPts;
 
     if (duel == NULL || !duel->active || duel->finished || !duel->arenaMode)
         return;
+    drawPts = g_vm_mock_arena_config.scoreDraw;
     s0 = vm_mock_service_find_client_session(duel->clientIds[0]);
     s1 = vm_mock_service_find_client_session(duel->clientIds[1]);
     a = s0 ? vm_mock_arena_find_part(s0->onlineRoleId) : NULL;
@@ -817,12 +916,16 @@ static void vm_mock_arena_force_duel_draw(vm_mock_service_duel *duel)
     if (a != NULL)
     {
         a->draws += 1;
-        vm_mock_arena_add_score(a, g_vm_mock_arena_config.scoreDraw, "draw");
+        vm_mock_arena_add_score(a, drawPts, "draw");
+        if (s0)
+            vm_mock_arena_note_result(s0, a, "draw", drawPts);
     }
     if (b != NULL)
     {
         b->draws += 1;
-        vm_mock_arena_add_score(b, g_vm_mock_arena_config.scoreDraw, "draw");
+        vm_mock_arena_add_score(b, drawPts, "draw");
+        if (s1)
+            vm_mock_arena_note_result(s1, b, "draw", drawPts);
     }
     duel->arenaSettled = true;
     duel->finished = true;
@@ -840,10 +943,14 @@ static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel)
     vm_mock_arena_participant *b;
     bool aDead;
     bool bDead;
+    u32 winPts;
+    u32 drawPts;
 
     if (duel == NULL || !duel->arenaMode || duel->arenaSettled)
         return;
     duel->arenaSettled = true;
+    winPts = g_vm_mock_arena_config.scoreWin;
+    drawPts = g_vm_mock_arena_config.scoreDraw;
     s0 = vm_mock_service_find_client_session(duel->clientIds[0]);
     s1 = vm_mock_service_find_client_session(duel->clientIds[1]);
     a = s0 ? vm_mock_arena_find_part(s0->onlineRoleId) : NULL;
@@ -855,34 +962,50 @@ static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel)
         if (a)
         {
             a->draws += 1;
-            vm_mock_arena_add_score(a, g_vm_mock_arena_config.scoreDraw, "draw");
+            vm_mock_arena_add_score(a, drawPts, "draw");
+            if (s0)
+                vm_mock_arena_note_result(s0, a, "draw", drawPts);
         }
         if (b)
         {
             b->draws += 1;
-            vm_mock_arena_add_score(b, g_vm_mock_arena_config.scoreDraw, "draw");
+            vm_mock_arena_add_score(b, drawPts, "draw");
+            if (s1)
+                vm_mock_arena_note_result(s1, b, "draw", drawPts);
         }
         return;
     }
     if (aDead && !bDead)
     {
         if (a)
+        {
             a->losses += 1;
+            if (s0)
+                vm_mock_arena_note_result(s0, a, "lose", 0);
+        }
         if (b)
         {
             b->wins += 1;
-            vm_mock_arena_add_score(b, g_vm_mock_arena_config.scoreWin, "win");
+            vm_mock_arena_add_score(b, winPts, "win");
+            if (s1)
+                vm_mock_arena_note_result(s1, b, "win", winPts);
         }
         return;
     }
     if (bDead && !aDead)
     {
         if (b)
+        {
             b->losses += 1;
+            if (s1)
+                vm_mock_arena_note_result(s1, b, "lose", 0);
+        }
         if (a)
         {
             a->wins += 1;
-            vm_mock_arena_add_score(a, g_vm_mock_arena_config.scoreWin, "win");
+            vm_mock_arena_add_score(a, winPts, "win");
+            if (s0)
+                vm_mock_arena_note_result(s0, a, "win", winPts);
         }
     }
 }
@@ -984,9 +1107,20 @@ static void vm_mock_arena_match_round(void)
             vm_mock_arena_participant *bye = pool[poolCount - 1];
             if (!bye->matchedThisRound)
             {
+                vm_mock_service_client_session *byeSess =
+                    vm_mock_service_find_client_session(bye->clientId);
+                u32 byePts = g_vm_mock_arena_config.scoreBye;
                 bye->matchedThisRound = 1;
                 bye->byes += 1;
-                vm_mock_arena_add_score(bye, g_vm_mock_arena_config.scoreBye, "bye");
+                vm_mock_arena_add_score(bye, byePts, "bye");
+                if (byeSess != NULL)
+                {
+                    vm_mock_arena_note_result(byeSess, bye, "bye", byePts);
+                    if (byeSess->arenaResultFdata[0] != 0)
+                        (void)vm_mock_service_session_enqueue_system_message(
+                            byeSess, byeSess->arenaResultFdata);
+                    byeSess->arenaResultPending = false;
+                }
             }
         }
     }
@@ -1134,6 +1268,7 @@ static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap)
     }
     p->inArenaScene = 1;
     (void)vm_mock_arena_persist_score(p);
+    vm_mock_arena_disband_team_for_session(session, "arena-enter");
     return vm_net_mock_build_arena_teleport_response(
         out, outCap, g_vm_mock_arena_config.scene, g_vm_mock_arena_config.spawnX,
         g_vm_mock_arena_config.spawnY);
@@ -1303,14 +1438,19 @@ static u32 vm_net_mock_build_arena_rank_response(const u8 *request, u32 requestL
         bracket = vm_mock_arena_bracket_for_level(role->level);
     for (i = 0; i < g_vm_mock_arena_part_count; ++i)
     {
+        /* 0 分不进排行榜（含未打过的进场玩家）。 */
         if (g_vm_mock_arena_parts[i].job == (u8)job &&
-            g_vm_mock_arena_parts[i].bracket == (u16)bracket)
+            g_vm_mock_arena_parts[i].bracket == (u16)bracket &&
+            g_vm_mock_arena_parts[i].score > 0)
             sorted[sortedCount++] = g_vm_mock_arena_parts[i];
     }
     if (sortedCount > 1)
         qsort(sorted, sortedCount, sizeof(sorted[0]), vm_mock_arena_cmp_score_desc);
     if (role != NULL)
     {
+        vm_mock_arena_participant *self = vm_mock_arena_find_part(role->roleId);
+        if (self != NULL)
+            myScore = self->score;
         for (i = 0; i < sortedCount; ++i)
         {
             if (sorted[i].roleId == role->roleId)
@@ -1480,7 +1620,8 @@ static bool vm_net_mock_arena_admin_save_config(
 {
     char sceneHex[192];
     char kwHex[96];
-    char query[1024];
+    char query[2048];
+    int written;
 
     if (!vm_mock_arena_ensure_tables() || scene == NULL || scene[0] == 0)
         return false;
@@ -1490,32 +1631,45 @@ static bool vm_net_mock_arena_admin_save_config(
         npcKeyword = "";
     if (vm_mysql_hex_encode(npcKeyword, strlen(npcKeyword), kwHex, sizeof(kwHex)) == 0)
         return false;
-    snprintf(query, sizeof(query),
-             "INSERT INTO server_arena_config (id,enabled,scene,spawn_x,spawn_y,"
-             "weekday_mask,entry_start_minute,entry_end_minute,match_start_minute,"
-             "match_end_minute,round_seconds,battle_timeout_seconds,score_win,"
-             "score_bye,score_draw,npc_name_keyword,wager_enabled,wager_fee_percent,"
-             "wager_currency) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-             "%u,%u,%u,UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY UPDATE "
-             "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
-             "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
-             "entry_start_minute=VALUES(entry_start_minute),"
-             "entry_end_minute=VALUES(entry_end_minute),"
-             "match_start_minute=VALUES(match_start_minute),"
-             "match_end_minute=VALUES(match_end_minute),"
-             "round_seconds=VALUES(round_seconds),"
-             "battle_timeout_seconds=VALUES(battle_timeout_seconds),"
-             "score_win=VALUES(score_win),score_bye=VALUES(score_bye),"
-             "score_draw=VALUES(score_draw),npc_name_keyword=VALUES(npc_name_keyword),"
-             "wager_enabled=VALUES(wager_enabled),"
-             "wager_fee_percent=VALUES(wager_fee_percent),"
-             "wager_currency=VALUES(wager_currency)",
-             (u32)enabled, sceneHex, (u32)spawnX, (u32)spawnY, weekdayMask,
-             (u32)entryStart, (u32)entryEnd, (u32)matchStart, (u32)matchEnd,
-             roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw, kwHex,
-             (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency);
-    if (!vm_mysql_exec(query))
+    written = snprintf(
+        query, sizeof(query),
+        "INSERT INTO server_arena_config (id,enabled,scene,spawn_x,spawn_y,"
+        "weekday_mask,entry_start_minute,entry_end_minute,match_start_minute,"
+        "match_end_minute,round_seconds,battle_timeout_seconds,score_win,"
+        "score_bye,score_draw,npc_name_keyword,wager_enabled,wager_fee_percent,"
+        "wager_currency) VALUES (1,%u,UNHEX('%s'),%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+        "%u,%u,%u,UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY UPDATE "
+        "enabled=VALUES(enabled),scene=VALUES(scene),spawn_x=VALUES(spawn_x),"
+        "spawn_y=VALUES(spawn_y),weekday_mask=VALUES(weekday_mask),"
+        "entry_start_minute=VALUES(entry_start_minute),"
+        "entry_end_minute=VALUES(entry_end_minute),"
+        "match_start_minute=VALUES(match_start_minute),"
+        "match_end_minute=VALUES(match_end_minute),"
+        "round_seconds=VALUES(round_seconds),"
+        "battle_timeout_seconds=VALUES(battle_timeout_seconds),"
+        "score_win=VALUES(score_win),score_bye=VALUES(score_bye),"
+        "score_draw=VALUES(score_draw),npc_name_keyword=VALUES(npc_name_keyword),"
+        "wager_enabled=VALUES(wager_enabled),"
+        "wager_fee_percent=VALUES(wager_fee_percent),"
+        "wager_currency=VALUES(wager_currency)",
+        (u32)enabled, sceneHex, (u32)spawnX, (u32)spawnY, weekdayMask,
+        (u32)entryStart, (u32)entryEnd, (u32)matchStart, (u32)matchEnd,
+        roundSec, battleTimeout, scoreWin, scoreBye, scoreDraw, kwHex,
+        (u32)wagerEnabled, (u32)wagerFee, (u32)wagerCurrency);
+    if (written < 0 || (size_t)written >= sizeof(query))
+    {
+        printf("[error][mock-service] arena_admin_save_config query truncated "
+               "written=%d cap=%u\n",
+               written, (u32)sizeof(query));
         return false;
+    }
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][mock-service] arena_admin_save_config mysql failed "
+               "error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
     g_vm_mock_arena_config_loaded = false;
     return vm_mock_arena_load_config(true);
 }

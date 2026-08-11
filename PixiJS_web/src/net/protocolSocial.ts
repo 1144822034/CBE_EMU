@@ -949,7 +949,9 @@ export function parseSparAck(packet: WtPacket): SocialNotice | null {
   else if (result === 5) tip = "超出范围";
   else if (result === 6) tip = "等级不足25级无法切磋";
   else if (result === 7) tip = "城镇中无法切磋";
-  else if (result >= 8) tip = "当前状态无法切磋";
+  else if (result === 8) tip = "对方替身人偶生效，无法切磋";
+  else if (result === 9) tip = "切磋冷却中，请稍后再试";
+  else if (result >= 10) tip = "当前状态无法切磋";
   return { kind: "spar_result", result, tip };
 }
 

@@ -6484,6 +6484,9 @@ static void vm_net_mock_battle_restore_role_vitals_to_globals(void)
     g_mockBattleRoleMpMax = mpMax;
 }
 
+static u32 vm_net_mock_build_duel_item_use_response(const u8 *request, u32 requestLen,
+                                                    u8 *out, u32 outCap);
+
 static u32 vm_net_mock_build_synchronized_team_battle_response(
     const u8 *request,
     u32 requestLen,
@@ -6517,13 +6520,10 @@ static u32 vm_net_mock_build_synchronized_team_battle_response(
             if (active != NULL &&
                 vm_mock_service_duel_find_for_client(active->clientId, NULL) != NULL)
             {
-                /* Spar item use is unresolved; PvE 4/3 must not desync duel HP. */
-                vm_net_mock_finish_wt_packet(out, 5, 0);
-                printf("[info][mock-service] duel_item_use_defer client=%08x "
-                       "action=empty-ack reason=spar-item-unresolved "
-                       "evidence=docs/re/2026-07-11-nearby-player-actions.md\n",
-                       active->clientId);
-                return 5;
+                /* Duel/spar/arena: commit item as a round action (same barrier
+                 * as 4/2). Empty-ack without commit left both flask users stuck. */
+                return vm_net_mock_build_duel_item_use_response(request, requestLen,
+                                                               out, outCap);
             }
         }
     }
@@ -8049,9 +8049,18 @@ static u32 vm_net_mock_build_duel_action_packet(
     }
     if (hit->targetSelf)
         targetWire = actorWire;
-    actionType = hit->operate > 2 ? 1 : 0;
-    if (actionType == 1)
-        effectIndex = vm_net_mock_battle_operate_skill_effect(hit->operate);
+    /* Item/flask heal: play as type-1 support (same as PvE medicine heal). */
+    if (hit->operate == 0xfffffffeu)
+    {
+        actionType = (u8)vm_net_mock_env_u32("CBE_BATTLE_ITEM_HEAL_ACTION_TYPE", 1);
+        effectIndex = vm_net_mock_env_u32("CBE_BATTLE_ITEM_EFFECT_INDEX", 13);
+    }
+    else
+    {
+        actionType = hit->operate > 2 ? 1 : 0;
+        if (actionType == 1)
+            effectIndex = vm_net_mock_battle_operate_skill_effect(hit->operate);
+    }
     memset(actionInfo, 0, sizeof(actionInfo));
     if (!vm_net_mock_append_battle_actioninfo_record(
             actionInfo, sizeof(actionInfo), &actionInfoLen,
@@ -8177,6 +8186,12 @@ static void vm_mock_service_duel_clear_round_commits(vm_mock_service_duel *duel)
     duel->roundCommitMask = 0;
     duel->roundCommitOperate[0] = 0;
     duel->roundCommitOperate[1] = 0;
+    duel->roundCommitIsItem[0] = 0;
+    duel->roundCommitIsItem[1] = 0;
+    duel->roundCommitItemHealHp[0] = 0;
+    duel->roundCommitItemHealHp[1] = 0;
+    duel->roundCommitItemHealMp[0] = 0;
+    duel->roundCommitItemHealMp[1] = 0;
     duel->roundCommitDeadlineTick = 0;
 }
 
@@ -8221,17 +8236,50 @@ static bool vm_mock_service_duel_resolve_committed_round(
 
         if (duel->hp[sourceIndex] == 0 || duel->hp[foeIndex] == 0)
             break;
-        if (operate != 0 && operate <= 2)
-            operate = 0;
-        if (operate > 2)
+        if (duel->roundCommitIsItem[sourceIndex])
         {
-            const vm_net_mock_skill_catalog_item *skill =
-                vm_net_mock_battle_operate_skill(operate);
-            if (skill == NULL || duel->mp[sourceIndex] < skill->mpCost)
-                operate = 0;
+            u32 healHp = duel->roundCommitItemHealHp[sourceIndex];
+            u32 healMp = duel->roundCommitItemHealMp[sourceIndex];
+            u32 hpAfter = duel->hp[sourceIndex];
+            u32 mpAfter = duel->mp[sourceIndex];
+
+            memset(&hit, 0, sizeof(hit));
+            if (healHp != 0)
+                hpAfter = vm_net_mock_min_u32(
+                    vm_net_mock_add_capped_u32(duel->hp[sourceIndex], healHp),
+                    duel->hpMax[sourceIndex] ? duel->hpMax[sourceIndex]
+                                             : duel->hp[sourceIndex] + healHp);
+            if (healMp != 0)
+                mpAfter = vm_net_mock_min_u32(
+                    vm_net_mock_add_capped_u32(duel->mp[sourceIndex], healMp),
+                    duel->mpMax[sourceIndex] ? duel->mpMax[sourceIndex]
+                                             : duel->mp[sourceIndex] + healMp);
+            hit.valid = true;
+            hit.sourceIndex = sourceIndex;
+            hit.operate = 0;
+            hit.damage = healHp;
+            hit.sourceMpAfter = mpAfter;
+            hit.targetHpAfter = hpAfter;
+            hit.targetSelf = true;
+            hit.supportNoDamage = true;
+            hit.childFlag = 0;
+            /* Mark item via operate sentinel for action packet type-2. */
+            hit.operate = 0xfffffffeu;
         }
-        if (!vm_mock_service_duel_apply_operate(duel, sourceIndex, operate, &hit))
-            continue;
+        else
+        {
+            if (operate != 0 && operate <= 2)
+                operate = 0;
+            if (operate > 2)
+            {
+                const vm_net_mock_skill_catalog_item *skill =
+                    vm_net_mock_battle_operate_skill(operate);
+                if (skill == NULL || duel->mp[sourceIndex] < skill->mpCost)
+                    operate = 0;
+            }
+            if (!vm_mock_service_duel_apply_operate(duel, sourceIndex, operate, &hit))
+                continue;
+        }
         /*
          * Offensive hits with 0 damage are skipped (nothing to play).
          * Support skills always emit a 4/6 even when heal amount is 0
@@ -8449,6 +8497,9 @@ static bool vm_mock_service_duel_try_timeout_fill(
         if ((duel->roundCommitMask & bit) != 0)
             continue;
         duel->roundCommitOperate[seat] = 0;
+        duel->roundCommitIsItem[seat] = 0;
+        duel->roundCommitItemHealHp[seat] = 0;
+        duel->roundCommitItemHealMp[seat] = 0;
         duel->roundCommitMask = (u8)(duel->roundCommitMask | bit);
         filledMask = (u8)(filledMask | bit);
     }
@@ -8543,13 +8594,17 @@ static bool vm_net_mock_append_duel_spar_status7_object(
     (void)observer->sparExitRecoverHp;
     (void)observer->sparExitRecoverMp;
     {
-        /* GBK: 挑战成功 / 挑战失败 经验-N 金钱-N */
+        /* GBK: 挑战成功 / 挑战失败 经验-N 金钱-N；比武用 arenaResultFdata。 */
         static const char sparWinGbk[] =
             "\xcc\xf8\xd5\xbd\xb3\xc9\xb9\xa6";
         static char sparLoseBuf[96];
         const char *fdataGbk = sparWinGbk;
 
-        if (observer->sparExitWasDead)
+        if (observer->arenaResultPending && observer->arenaResultFdata[0] != 0)
+        {
+            fdataGbk = observer->arenaResultFdata;
+        }
+        else if (observer->sparExitWasDead)
         {
             snprintf(sparLoseBuf, sizeof(sparLoseBuf),
                      "\xcc\xf8\xd5\xbd\xca\xa7\xb0\xdc"
@@ -8964,6 +9019,9 @@ static u32 vm_net_mock_build_duel_operate_response(
     }
 
     duel->roundCommitOperate[sourceIndex] = operate;
+    duel->roundCommitIsItem[sourceIndex] = 0;
+    duel->roundCommitItemHealHp[sourceIndex] = 0;
+    duel->roundCommitItemHealMp[sourceIndex] = 0;
     duel->roundCommitMask = (u8)(duel->roundCommitMask | sourceBit);
     if ((duel->roundCommitMask & (u8)~sourceBit) == 0)
     {
@@ -9003,6 +9061,207 @@ static u32 vm_net_mock_build_duel_operate_response(
     printf("[info][mock-service] duel_round_release serial=%u source=%08x "
            "actor=%d resp=%u mapping=source(0->1),peer(1->0) "
            "evidence=one-4/6-per-hit-merged\n",
+           duel->serial, source->clientId, sourceIndex, responseLen);
+    return responseLen;
+}
+
+static u32 vm_net_mock_build_duel_item_use_response(const u8 *request, u32 requestLen,
+                                                    u8 *out, u32 outCap)
+{
+    vm_mock_service_client_session *source = vm_mock_service_get_active_client_session();
+    vm_mock_service_duel *duel = NULL;
+    int sourceIndex = -1;
+    vm_net_mock_battle_item_use_request parsed;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *item = NULL;
+    const vm_net_mock_item_effect_catalog_item *effect = NULL;
+    u32 responseLen = 0;
+    u8 sourceBit = 0;
+    u32 healHp = 0;
+    u32 healMp = 0;
+    u32 remaining = 0;
+    u32 reservoirBefore = 0;
+    u32 reservoirConsumed = 0;
+    u32 hpPlanned = 0;
+    u32 mpPlanned = 0;
+    bool reservoirItem = false;
+    bool consumed = false;
+    u8 countInfo[32];
+    u32 countInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < 5 || source == NULL ||
+        !vm_net_mock_parse_battle_item_use_request(request, requestLen, &parsed))
+        return 0;
+    duel = vm_mock_service_duel_find_for_client(source->clientId, &sourceIndex);
+    if (duel == NULL || sourceIndex < 0)
+        return 0;
+    if (duel->finished || (duel->startedMask & (1u << sourceIndex)) == 0)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+
+    vm_mock_service_duel_try_timeout_fill(duel);
+    if (vm_mock_service_duel_has_undelivered_action(duel))
+    {
+        responseLen = vm_net_mock_build_pending_duel_action_response(out, outCap,
+                                                                     source);
+        if (responseLen != 0)
+            return responseLen;
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+
+    sourceBit = (u8)(1u << sourceIndex);
+    if ((duel->roundCommitMask & sourceBit) != 0)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        printf("[info][mock-service] duel_item_commit_dup serial=%u source=%08x "
+               "actor=%d action=empty-ack\n",
+               duel->serial, source->clientId, sourceIndex);
+        return 5;
+    }
+
+    role = vm_mock_service_trade_role_for_session(source, NULL);
+    if (role == NULL)
+        role = vm_net_mock_active_role();
+    if (role != NULL)
+        item = vm_net_mock_role_find_backpack_item(role, 0, parsed.seq);
+    if (item != NULL)
+    {
+        effect = vm_net_mock_find_item_effect_catalog_item(item->itemId);
+        if (vm_net_mock_item_effect_is_usable(effect))
+        {
+            reservoirItem = vm_net_mock_item_effect_is_reservoir(effect);
+            if (reservoirItem)
+            {
+                u32 missingHp =
+                    duel->hpMax[sourceIndex] > duel->hp[sourceIndex]
+                        ? duel->hpMax[sourceIndex] - duel->hp[sourceIndex]
+                        : 0;
+                u32 missingMp =
+                    duel->mpMax[sourceIndex] > duel->mp[sourceIndex]
+                        ? duel->mpMax[sourceIndex] - duel->mp[sourceIndex]
+                        : 0;
+                reservoirBefore = item->count;
+                (void)vm_net_mock_item_effect_plan_reservoir_restore(
+                    effect, reservoirBefore, missingHp, missingMp,
+                    VM_NET_MOCK_FLASK_BATTLE_PER_USE_CAP, &hpPlanned, &mpPlanned);
+                reservoirConsumed = vm_net_mock_item_effect_battle_flask_charge(
+                    reservoirBefore, hpPlanned, mpPlanned);
+                remaining = reservoirBefore;
+                if (reservoirConsumed != 0)
+                    consumed = vm_net_mock_role_consume_backpack_item(
+                        role, item->itemId, parsed.seq, reservoirConsumed,
+                        &remaining);
+                else
+                    consumed = true;
+                healHp = hpPlanned;
+                healMp = mpPlanned;
+            }
+            else
+            {
+                consumed = vm_net_mock_role_consume_backpack_item(
+                    role, item->itemId, parsed.seq, 1, &remaining);
+                if (consumed)
+                {
+                    healHp = effect->hp;
+                    healMp = effect->mp;
+                }
+            }
+        }
+    }
+
+    if (!consumed)
+    {
+        /* Invalid/empty item: treat as normal-attack commit so the round
+         * cannot soft-lock when both seats spam items. */
+        duel->roundCommitOperate[sourceIndex] = 0;
+        duel->roundCommitIsItem[sourceIndex] = 0;
+        duel->roundCommitItemHealHp[sourceIndex] = 0;
+        duel->roundCommitItemHealMp[sourceIndex] = 0;
+        printf("[info][mock-service] duel_item_commit_fallback_attack serial=%u "
+               "source=%08x actor=%d seq=%u\n",
+               duel->serial, source->clientId, sourceIndex, parsed.seq);
+    }
+    else
+    {
+        duel->roundCommitOperate[sourceIndex] = 0xfffffffeu;
+        duel->roundCommitIsItem[sourceIndex] = 1;
+        duel->roundCommitItemHealHp[sourceIndex] = healHp;
+        duel->roundCommitItemHealMp[sourceIndex] = healMp;
+    }
+    duel->roundCommitMask = (u8)(duel->roundCommitMask | sourceBit);
+    if ((duel->roundCommitMask & (u8)~sourceBit) == 0)
+    {
+        duel->roundCommitDeadlineTick =
+            g_schedulerTick + vm_mock_service_duel_round_commit_timeout_ticks();
+    }
+    printf("[info][mock-service] duel_item_commit serial=%u source=%08x actor=%d "
+           "heal_hp=%u heal_mp=%u commit=%02x item=%u remaining=%u\n",
+           duel->serial, source->clientId, sourceIndex, healHp, healMp,
+           duel->roundCommitMask, item ? item->itemId : 0, remaining);
+
+    if (duel->roundCommitMask != 3)
+    {
+        if (consumed &&
+            vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                       parsed.seq, remaining,
+                                                       &countInfoLen) &&
+            vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11,
+                                        &objectStart) &&
+            vm_net_mock_put_object_raw(out, outCap, &pos, "info", countInfo,
+                                       (u16)countInfoLen))
+        {
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount = 1;
+            vm_net_mock_finish_wt_packet(out, pos, objectCount);
+            return pos;
+        }
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+
+    if (!vm_mock_service_duel_resolve_committed_round(duel))
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+    responseLen = vm_net_mock_build_duel_undelivered_action_bundle(
+        out, outCap, duel, source, sourceIndex);
+    if (responseLen == 0)
+    {
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        return 5;
+    }
+    if (consumed &&
+        vm_net_mock_build_item_use_count_info_blob(countInfo, sizeof(countInfo),
+                                                   parsed.seq, remaining,
+                                                   &countInfoLen))
+    {
+        u8 sync[96];
+        u32 syncPos = 5;
+        u32 syncStart = 0;
+        u32 merged = 0;
+
+        if (vm_net_mock_begin_wt_object(sync, sizeof(sync), &syncPos, 1, 7, 11,
+                                         &syncStart) &&
+            vm_net_mock_put_object_raw(sync, sizeof(sync), &syncPos, "info",
+                                       countInfo, (u16)countInfoLen))
+        {
+            vm_net_mock_finish_wt_object(sync, syncStart, syncPos);
+            vm_net_mock_finish_wt_packet(sync, syncPos, 1);
+            merged = vm_net_mock_merge_wt_packets(out, outCap, out, responseLen,
+                                                  sync, syncPos);
+            if (merged != 0)
+                responseLen = merged;
+        }
+    }
+    printf("[info][mock-service] duel_item_round_release serial=%u source=%08x "
+           "actor=%d resp=%u evidence=duel-item-commit-barrier\n",
            duel->serial, source->clientId, sourceIndex, responseLen);
     return responseLen;
 }

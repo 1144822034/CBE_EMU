@@ -9689,7 +9689,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
 
     /* Mall warehouse pass: one backpack row, count = remaining durability. */
     if (itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID ||
-        itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID)
+        itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID ||
+        itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -9698,11 +9699,57 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         u32 passDurability =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
                 ? VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY
-                : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY;
+                : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID
+                       ? VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_DURABILITY
+                       : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
                 ? "backpack-add-equip-sell-pass"
-                : "backpack-add-warehouse-pass";
+                : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID
+                       ? "backpack-add-spar-substitute-doll"
+                       : "backpack-add-warehouse-pass");
+
+        /* 替身人偶：耐久1，叠加入已有堆或新行（count=剩余次数）。 */
+        if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID)
+        {
+            vm_net_mock_backpack_item_state *existing =
+                vm_net_mock_role_find_backpack_item(role, itemId, 0);
+            u32 grant = count * passDurability;
+
+            if (grant == 0)
+                return false;
+            if (existing != NULL)
+            {
+                existing->count += grant;
+                if (seqOut)
+                    *seqOut = existing->seq;
+                vm_net_mock_role_normalize_backpack(role);
+                (void)before;
+                vm_net_mock_role_mark_inventory_dirty(saveReason);
+                return true;
+            }
+            if (freeSlots < 1 || itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                return false;
+            {
+                vm_net_mock_backpack_item_state *item =
+                    &role->backpackItems[itemCount];
+                memset(item, 0, sizeof(*item));
+                item->itemId = itemId;
+                item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+                item->count = grant;
+                firstSeq = item->seq;
+                role->nextBackpackSeq = (u16)(item->seq + 1);
+                if (role->nextBackpackSeq == 0)
+                    role->nextBackpackSeq = 1;
+                role->backpackItemCount = (u8)(itemCount + 1);
+            }
+            if (seqOut)
+                *seqOut = firstSeq;
+            vm_net_mock_role_normalize_backpack(role);
+            (void)before;
+            vm_net_mock_role_mark_inventory_dirty(saveReason);
+            return true;
+        }
 
         if (count > freeSlots || count > VM_NET_MOCK_BACKPACK_MAX_ITEMS - itemCount)
             return false;

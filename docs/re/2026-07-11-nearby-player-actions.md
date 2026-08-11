@@ -351,8 +351,8 @@ negative_evidence:
 
 unknowns:
   - name: 切磋中的道具使用与主动技能状态效果
-    current_value: 普攻、伤害型技能与 HP=0 完整离场已同步；切磋中 `4/3` 暂回空确认；状态效果仍 unresolved
-    why_kept: 当前证据只确认 `4/2` 伤害行动；友好切磋是否允许消耗持久化道具、以及状态效果是否应在结束后保留仍缺契约。
+    current_value: 普攻、伤害型技能、HP=0 离场已同步；切磋/比武 `4/3` 已纳入 duel 回合提交（用药/血壶可推进，双方用药不卡死）；状态效果仍部分 unresolved
+    why_kept: 状态效果是否应在结束后保留仍缺完整契约；道具路径见 `2026-08-10-pixi-arena-biwu.md`。
   - name: 入帮邀请的目标端入站通知与接受/拒绝包
     current_value: 未实现
     why_kept: 当前没有完整的目标端确认解析契约；伪造成功包会跳过真实目标端流程。

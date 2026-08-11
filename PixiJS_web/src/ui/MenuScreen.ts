@@ -13,6 +13,7 @@ import {
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { isSoundEnabled } from "../audio/GameBgm";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type MenuLeaf =
   | "mall"
@@ -86,6 +87,7 @@ export class MenuScreen extends Container {
   private subParent: MenuNode | null = null;
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
 
   onSelect: ((leaf: MenuLeaf, label: string) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -174,6 +176,7 @@ export class MenuScreen extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
 
     const labels = this.currentLabels();
@@ -207,8 +210,18 @@ export class MenuScreen extends Container {
         i === cursor ? CBE.ink : CBE.inkMint,
       );
       t.position.set(x + 14, iy + 2);
+      t.eventMode = "none";
       this.addChild(t);
       this.labels.push(t);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 5, iy, w - 10, rowH - 2, () => {
+          if (this.level === 1) this.rootCursor = idx;
+          else this.subCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
   }
 }

@@ -323,6 +323,21 @@ export class ActorLayer {
     return out;
   }
 
+  /** Live peer under map cursor (face-to-face tap → 周围玩家 actions). */
+  peerAt(
+    actorId: number,
+  ): { actorId: number; name: string; x: number; y: number; title: string } | null {
+    const m = this.markers.get(actorId);
+    if (!m || m.kind !== "peer") return null;
+    return {
+      actorId,
+      name: (m.actorName || m.nameLabel || "玩家").slice(0, 12),
+      x: m.x | 0,
+      y: m.y | 0,
+      title: "",
+    };
+  }
+
   /** Dots for minimap (npc / peer / monster / teleport stone). */
   liveMinimapMarkers(): {
     x: number;
@@ -704,7 +719,7 @@ export class ActorLayer {
       if (plus16Sparkles) root.addChild(plus16Sparkles.root);
       root.addChild(body, titleBadge, text);
       root.zIndex = y | 0;
-      if (kind === "npc" || kind === "monster") {
+      if (kind === "npc" || kind === "monster" || kind === "peer") {
         root.eventMode = "static";
         root.cursor = "pointer";
         root.on("pointertap", () => this.onNpcTap?.(id));

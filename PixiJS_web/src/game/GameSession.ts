@@ -61,7 +61,6 @@ import {
   type EnhanceConfirmResult,
   type EnhanceTransferPreviewResult,
   type EnhanceTransferConfirmResult,
-  buildHangupStartRequest,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
   buildChestOpenRequest,
@@ -267,16 +266,14 @@ import {
 } from "../net/Transport";
 import {
   clearHangupResumeStorage,
-  readHangupResume,
   syncNativeKeepAlive,
-  writeHangupResume,
-  type HangupResumeSnapshot,
 } from "../net/hangupResume";
 import {
   resolveLearnedSkills,
   type BattleSkillRow,
 } from "../resources/skill";
 import { lookupItemSync, warmItemCatalogs } from "../resources/itemCatalog";
+import { monsterActorForEnemyId } from "../resources/monsterLevels";
 
 export type SessionStatus = {
   mode: string;
@@ -400,10 +397,15 @@ export class GameSession {
   /** Last 26/1 talk target — challenge confirm binds guide NPC visuals. */
   lastNpcId = 0;
   /**
-   * Guide NPC actorId from EC「挑战守关怪」(low 24 bits). subtype-10 leftId is
-   * challenge_enemy_id (catalog), so Pixi resolves .actor via scene + this guide.
+   * Guide NPC actorId from EC「挑战守关怪」(low 24 bits). Used only as a
+   * last-resort outdoor e_* guide visual — never dream FB_* NPC portraits.
    */
   pendingChallengeGuideActorId = 0;
+  /**
+   * Catalog challenge_enemy_id from 30/9 `enemy`. Confirm assigns this into
+   * hangup-style `startBattleNearPlayer` (4/1 preferNpcId).
+   */
+  pendingChallengeEnemyId = 0;
   /**
    * Spawn touched / nearest when issuing 4/1. Battle left seats must paint this
    * species (multi-clone fights share one template), not other map kinds.
@@ -439,13 +441,17 @@ export class GameSession {
    * (same as BattleScreen). Set via 挂机战斗 skill dialog; does not start hangup.
    */
   hangupSkillOperate = 0;
-  /** True after 2/10 hangup request until leave/stop. Drives server encounters. */
+  /**
+   * Pixi hangup armed: client loop simulates collide (`4/1` via
+   * startBattleNearPlayer). Not driven by server hangup battle delivery.
+   */
   hangupActive = false;
   /**
-   * Player intent to keep hangup running across disconnect/relogin.
-   * Distinct from hangupActive (server chat authority).
+   * Player intent to keep hangup running across disconnect/relogin / between fights.
    */
   hangupDesired = false;
+  /** Delay between client-driven hangup encounters (ms). */
+  private hangupEncounterTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * In-battle [自动] switch (client-side 4/11). No auto-encounter — only
    * auto-operates after the player is already in battle.
@@ -550,23 +556,12 @@ export class GameSession {
     done: boolean;
   } | null = null;
   private titleKeepaliveTimer: number | null = null;
-  private hangupRearmInFlight = false;
-  private lastHangupRearmAt = 0;
-  private hardResumeInFlight = false;
-  private lastHardResumeAt = 0;
+  private nativeKeepAliveInFlight = false;
   private pollFailStreak = 0;
 
   constructor(private readonly cb: SessionCallbacks) {
-    const snap = readHangupResume();
-    if (snap) {
-      this.hangupDesired = true;
-      this.hangupSkillOperate = snap.operate | 0;
-      this.accountUser = snap.user;
-      this.accountPass = snap.password;
-      this.selectedServerId = snap.serverId || 1;
-      this.selectedRoleId = snap.roleId >>> 0;
-      void this.refreshNativeKeepAlive();
-    }
+    // Legacy auto-resume snapshots must not re-arm hangup on launch.
+    clearHangupResumeStorage();
   }
 
   setCredentials(user: string, password: string): void {
@@ -588,8 +583,21 @@ export class GameSession {
     this.transport?.close();
     this.codeVersion = await loadClientCodeVersion();
     this.transport = await connectLiveTransport();
+    this.bindTransportPush(this.transport);
     this.setPhase("connected", `${this.transport.mode} · codeVersion=${this.codeVersion}`);
     await this.fetchServerList();
+  }
+
+  /** Gateway idle scene-poll pushes CBMR without a matching client request. */
+  private bindTransportPush(transport: GameTransport): void {
+    if (!(transport instanceof LiveTransport)) return;
+    transport.onPushBodies = (bodies) => {
+      try {
+        this.handleBodies(bodies);
+      } catch (e) {
+        console.warn("[session] gateway push", e);
+      }
+    };
   }
 
   stop(): void {
@@ -666,6 +674,7 @@ export class GameSession {
     this.sceneMonsters = [];
     this.lastNpcId = 0;
     this.pendingChallengeGuideActorId = 0;
+    this.pendingChallengeEnemyId = 0;
     this.pendingEncounterVisual = null;
     this.nearbyList = [];
     this.scenePeerById.clear();
@@ -1406,49 +1415,54 @@ export class GameSession {
     }
   }
 
-  async startBattleNearPlayer(px: number, py: number, preferNpcId?: number): Promise<void> {
-    if (!this.transport || this.inBattle) return;
-    if (isCitySceneKey(this.scene || this.loadedScene || "")) {
-      // Cities: no automonster / kind=3; refuse so outdoor test bees cannot linger.
-      this.cb.onChat?.([{ type: 5, text: "[系]城内不能遇怪" }]);
-      this.cb.onStatus?.({
-        mode: this.transport?.mode ?? "?",
-        phase: "world",
-        detail: "城内不能遇怪",
-      });
-      console.warn("[session] reject city wild battle", this.scene);
-      return;
-    }
+  /**
+   * Same species seed used by collide / F-key / hangup. Challenge assigns
+   * catalog `challenge_enemy_id` as preferNpcId (hangup path + id).
+   */
+  armEncounterVisualLikeCollide(
+    px = this.x | 0,
+    py = this.y | 0,
+    preferNpcId?: number,
+  ): {
+    id: number;
+    index: number;
+    battleX: number;
+    battleY: number;
+    encounter: NpcActor | null;
+  } {
     let id = preferNpcId ?? 0;
     let index = 0;
-    /* Remap uses spawn (x,y); sending the player tile misses admin binds. */
     let battleX = px | 0;
     let battleY = py | 0;
     let encounter: NpcActor | null = null;
+    const pickNearest = (pool: NpcActor[]): NpcActor | null => {
+      if (!pool.length) return null;
+      let best = pool[0]!;
+      let bestD = Infinity;
+      for (const n of pool) {
+        const d = (n.x - px) * (n.x - px) + (n.y - py) * (n.y - py);
+        if (d < bestD) {
+          bestD = d;
+          best = n;
+        }
+      }
+      return best;
+    };
+    const catalogMonsters = this.npcs.filter(
+      (n) =>
+        /monster|怪|e_/i.test(n.scriptName) ||
+        /^e_/i.test(n.actorResource) ||
+        (/^e_/i.test(n.name) && n.actorId < 100000),
+    );
+    const pool = [...this.sceneMonsters, ...catalogMonsters];
     if (!id) {
       // Prefer SCE combat spawns, then catalog e_* rows; never town NPCs.
-      const catalogMonsters = this.npcs.filter(
-        (n) =>
-          /monster|怪|e_/i.test(n.scriptName) ||
-          /^e_/i.test(n.actorResource) ||
-          (/^e_/i.test(n.name) && n.actorId < 100000),
-      );
-      const pool = [...this.sceneMonsters, ...catalogMonsters];
-      if (pool.length) {
-        let best = pool[0]!;
-        let bestD = Infinity;
-        for (const n of pool) {
-          const d = (n.x - px) * (n.x - px) + (n.y - py) * (n.y - py);
-          if (d < bestD) {
-            bestD = d;
-            best = n;
-          }
-        }
-        encounter = best;
-        id = best.battleActorId ?? best.actorId;
+      encounter = pickNearest(pool);
+      if (encounter) {
+        id = encounter.battleActorId ?? encounter.actorId;
         index = id;
-        battleX = best.x | 0;
-        battleY = best.y | 0;
+        battleX = encounter.x | 0;
+        battleY = encounter.y | 0;
       }
     } else if (id >= 0x70000000) {
       const local = this.sceneMonsters.find((n) => n.actorId === id);
@@ -1460,6 +1474,9 @@ export class GameSession {
         battleY = local.y | 0;
       }
     } else {
+      // Catalog / challenge_enemy_id: keep id + catalog actor. Do not borrow
+      // nearest map spawn visual (wrong species) or its tile (pos remap stole
+      // floor bind stats). Neutral 1,1 matches instance-challenge wire fallback.
       const local = this.sceneMonsters.find(
         (n) => n.battleActorId === id || n.actorId === id,
       );
@@ -1468,31 +1485,60 @@ export class GameSession {
         battleX = local.x | 0;
         battleY = local.y | 0;
         index = local.battleActorId ?? id;
+      } else {
+        encounter = null;
+        battleX = 1;
+        battleY = 1;
+        index = id;
       }
     }
     if (!id) {
-      // Wild encounter fallback — do not challenge town NPCs with F.
       id = 9001;
       index = 0;
+    }
+    const catalogActor = monsterActorForEnemyId(id) || "";
+    const explicitCatalog = (preferNpcId ?? 0) !== 0;
+    const visualRes =
+      (explicitCatalog
+        ? catalogActor ||
+          encounter?.battleActorResource ||
+          encounter?.actorResource
+        : encounter?.battleActorResource ||
+          encounter?.actorResource ||
+          catalogActor) || "";
+    this.pendingEncounterVisual = {
+      battleActorId: id >>> 0,
+      x: battleX,
+      y: battleY,
+      actorResource: visualRes,
+      name: explicitCatalog ? undefined : encounter?.name,
+    };
+    return { id, index, battleX, battleY, encounter };
+  }
+
+  async startBattleNearPlayer(px: number, py: number, preferNpcId?: number): Promise<void> {
+    if (!this.transport || this.inBattle) return;
+    // Cities: no wild automonster. Challenge/hangup with an explicit catalog id
+    // (e.g. 临安守关 / dream challenge_enemy) still uses the same 4/1 path.
+    if (isCitySceneKey(this.scene || this.loadedScene || "") && !((preferNpcId ?? 0) >>> 0)) {
+      // Cities: no automonster / kind=3; refuse so outdoor test bees cannot linger.
+      this.cb.onChat?.([{ type: 5, text: "[系]城内不能遇怪" }]);
+      this.cb.onStatus?.({
+        mode: this.transport?.mode ?? "?",
+        phase: "world",
+        detail: "城内不能遇怪",
+      });
+      console.warn("[session] reject city wild battle", this.scene);
+      return;
+    }
+    const { id, index, battleX, battleY } = this.armEncounterVisualLikeCollide(
+      px,
+      py,
+      preferNpcId,
+    );
+    if (id === 9001 && !preferNpcId) {
       console.warn("[session] battle wild id=9001 (no monster catalog)");
     }
-    const visualRes =
-      encounter?.battleActorResource || encounter?.actorResource || "";
-    this.pendingEncounterVisual = visualRes
-      ? {
-          battleActorId: (encounter?.battleActorId ?? id) >>> 0,
-          x: battleX,
-          y: battleY,
-          actorResource: visualRes,
-          name: encounter?.name,
-        }
-      : {
-          battleActorId: id >>> 0,
-          x: battleX,
-          y: battleY,
-          actorResource: "",
-          name: encounter?.name,
-        };
     this.setPhase("battle-start", `id=${id} index=${index} pos=${battleX},${battleY}`);
     this.inBattle = true;
     const bodies = await this.transport.exchange(
@@ -1524,19 +1570,17 @@ export class GameSession {
   }
 
   /**
-   * Client-side 4/2 auto. Hangup must NOT share this with server poll synth:
-   * hangup start arms 4/11 prefer (CBE-style synth), and a second Pixi 4/2
-   * double-fired the same seat. Hangup casts via server LastOperate instead.
+   * Client-side 4/2 auto for map [自动] and Pixi hangup (same as collide fight).
    */
   shouldInBattleAuto(): boolean {
-    return this.autoBattleActive && !this.hangupActive;
+    return this.autoBattleActive || this.hangupActive;
   }
 
   /**
-   * Operate for in-battle [自动]: last manual operate, else hangup skill setting.
-   * Hangup itself uses server synth (Operate seeded on 2/10 start).
+   * Hangup always uses the configured hangup skill; [自动] prefers last manual.
    */
   inBattleAutoOperate(): number {
+    if (this.hangupActive) return this.hangupSkillOperate | 0;
     if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
     return this.hangupSkillOperate | 0;
   }
@@ -1577,6 +1621,7 @@ export class GameSession {
   async refreshLearnedSkillsFromServer(): Promise<void> {
     if (!this.transport) return;
     try {
+      await this.prepareLiveExchange("skills");
       this.learnedSkillIds = [];
       this.learnedSkills = [];
       this.cb.onSkills?.(this.learnedSkills);
@@ -1586,7 +1631,7 @@ export class GameSession {
       );
       this.handleBodies(bodies);
     } catch (e) {
-      console.warn("[session] skill refresh 12/1+7/42", e);
+      this.notifyPanelFetchFailed("技能", e);
     }
   }
 
@@ -1629,218 +1674,129 @@ export class GameSession {
   /** Persist / clear hangup intent (player wants AFK hangup across disconnect). */
   clearHangupDesired(): void {
     this.hangupDesired = false;
+    this.clearHangupEncounterTimer();
     clearHangupResumeStorage();
     void this.refreshNativeKeepAlive();
   }
 
   markHangupDesired(): void {
     this.hangupDesired = true;
-    this.persistHangupResume();
+    // Session-only intent — do not persist for cold-start / reconnect auto-hangup.
     void this.refreshNativeKeepAlive();
   }
 
-  private persistHangupResume(): void {
+  private clearHangupEncounterTimer(): void {
+    if (this.hangupEncounterTimer != null) {
+      clearTimeout(this.hangupEncounterTimer);
+      this.hangupEncounterTimer = null;
+    }
+  }
+
+  /**
+   * After leaving a hangup fight, wait then start the next collide-style 4/1.
+   * Server does not deliver hangup battles for Pixi.
+   */
+  scheduleNextHangupEncounter(delayMs = 4000): void {
+    this.clearHangupEncounterTimer();
     if (!this.hangupDesired) return;
-    const user = (this.accountUser || "").trim();
-    const roleId = this.selectedRoleId >>> 0;
-    if (!user || !roleId) return;
-    const snap: HangupResumeSnapshot = {
-      desired: true,
-      user,
-      password: this.accountPass || "",
-      serverId: this.selectedServerId || 1,
-      roleId,
-      operate: this.hangupSkillOperate | 0,
-      savedAt: Date.now(),
-    };
-    writeHangupResume(snap);
+    this.hangupEncounterTimer = setTimeout(() => {
+      this.hangupEncounterTimer = null;
+      void this.tickHangupEncounter("schedule");
+    }, Math.max(500, delayMs | 0));
+  }
+
+  /** Call when battle UI returns to world — continue hangup loop if armed. */
+  onLeftBattleForHangup(): void {
+    if (!this.hangupDesired) {
+      this.hangupActive = false;
+      return;
+    }
+    this.hangupActive = true;
+    this.scheduleNextHangupEncounter(4000);
+  }
+
+  private async tickHangupEncounter(reason: string): Promise<void> {
+    if (!this.hangupDesired || this.inBattle || !this.transport) return;
+    if (isCitySceneKey(this.scene || this.loadedScene || "")) {
+      this.hangupActive = false;
+      this.clearHangupDesired();
+      this.cb.onChat?.([{ type: 5, text: "[挂]城内不能挂机" }]);
+      return;
+    }
+    this.hangupActive = true;
+    console.info("[session] hangup encounter", reason);
+    await this.startBattleNearPlayer(this.x | 0, this.y | 0);
+    if (!this.inBattle && this.hangupDesired) {
+      this.scheduleNextHangupEncounter(5000);
+    }
+  }
+
+  private persistHangupResume(): void {
+    /* intentionally empty — auto resume after relaunch is disabled */
   }
 
   hasHangupResumePending(): boolean {
-    return this.hangupDesired || !!readHangupResume();
+    return false;
   }
 
-  /** Apply server hangup chat lines to local flags / intent. */
+  /** Apply server hangup chat lines to local flags (CBE path). Pixi arms hangup itself. */
   private applyHangupChatFlag(text: string): void {
-    // Player already asked to stop; never let stop-after / reject re-arm intent.
     if (text.includes("下一场完成后挂机停止")) {
       this.clearHangupDesired();
+      this.hangupActive = false;
       return;
     }
     const flag = hangupActiveFromChatLine(text);
     if (flag == null) return;
-    this.hangupActive = flag;
     if (text.includes("不能挂机") || text.includes("挂机失败")) {
       this.clearHangupDesired();
+      this.hangupActive = false;
       return;
     }
-    if (flag) {
-      this.markHangupDesired();
-    }
-    // 「已停止挂机」only clears hangupActive; hangupDesired stays unless the
-    // player already called clearHangupDesired (stop tap) or logout.
+    this.hangupActive = flag;
+    if (!flag) this.clearHangupDesired();
   }
 
-  /**
-   * Soft re-arm: send 2/10 again when intent is on but server hangup dropped
-   * (WS flash / presence timeout). Cooldown + in-flight guard.
-   */
-  async tryRearmHangup(reason: string): Promise<void> {
-    if (!this.hangupDesired || this.hangupActive || this.inBattle) return;
-    if (!this.transport || !this.selectedRoleId) return;
-    if (this.hangupRearmInFlight || this.hardResumeInFlight) return;
-    if (!this.scene && !this.loadedScene) return;
-    const now = Date.now();
-    if (now - this.lastHangupRearmAt < 5000) return;
-    this.hangupRearmInFlight = true;
-    this.lastHangupRearmAt = now;
-    try {
-      this.cb.onHangupResumeStatus?.("连接恢复，正在恢复挂机…");
-      console.info("[session] hangup rearm", reason);
-      await this.startHangup();
-    } catch (e) {
-      console.warn("[session] hangup rearm failed", reason, e);
-    } finally {
-      this.hangupRearmInFlight = false;
-    }
+  /** Disabled: no reconnect / cold-start auto hangup. */
+  async tryRearmHangup(_reason: string): Promise<void> {
+    return;
   }
 
-  /**
-   * Hard resume: full login → select server → select role → startHangup.
-   * Only when hangupDesired / stored snapshot is present.
-   */
+  /** Disabled: no silent re-login + hangup. */
   async resumeFromHangupStorage(): Promise<boolean> {
-    const snap = readHangupResume();
-    if (!snap?.desired) return false;
-    if (this.hardResumeInFlight || this.roleSelectInFlight) return false;
-    const now = Date.now();
-    if (now - this.lastHardResumeAt < 30000) return false;
-    this.hardResumeInFlight = true;
-    this.lastHardResumeAt = now;
-    this.hangupDesired = true;
-    this.hangupSkillOperate = snap.operate | 0;
-    this.setCredentials(snap.user, snap.password);
-    this.selectedServerId = snap.serverId || 1;
-    try {
-      this.cb.onHangupResumeStatus?.("连接恢复，正在恢复挂机…");
-      await this.start({ user: snap.user, password: snap.password });
-      const sid =
-        this.servers.find((s) => s.serverId === (snap.serverId || 0))?.serverId ??
-        this.servers[0]?.serverId;
-      if (sid == null) throw new Error("无可用服务器");
-      this.selectedServerId = sid;
-      await this.confirmServer(sid);
-      const roleId = snap.roleId >>> 0;
-      if (!this.roles.some((r) => r.roleId === roleId)) {
-        throw new Error("恢复挂机失败：角色不存在");
-      }
-      this.hangupSkillOperate = snap.operate | 0;
-      this.hangupDesired = true;
-      await this.selectRole(roleId);
-      this.persistHangupResume();
-      await this.tryRearmHangup("hard-resume");
-      return true;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn("[session] hangup hard resume", msg);
-      this.cb.onHangupResumeStatus?.(msg);
-      return false;
-    } finally {
-      this.hardResumeInFlight = false;
-    }
+    clearHangupResumeStorage();
+    return false;
   }
 
   /**
    * Player-requested hangup stop (HUD / battle 关闭).
-   * Always clears resume intent first so keepalive cannot re-arm after stop.
-   * When already in battle (or hangupActive), still send 2/10 even if local
-   * hangupActive desynced — startHangup would otherwise take the START branch
-   * and markHangupDesired again.
+   * Pixi hangup is client-only — no 2/10 toggle / server loop.
    */
   async stopHangup(): Promise<void> {
+    const was = this.hangupActive || this.hangupDesired;
+    this.hangupActive = false;
     this.clearHangupDesired();
-    if (!this.transport) return;
-    // Map-side cancel of pending resume only — 2/10 here would START hangup.
-    if (!this.hangupActive && !this.inBattle) {
-      this.setPhase("hangup", "stop intent cleared");
-      return;
-    }
-    this.setPhase("hangup", "2/10 stop");
-    const bodies = await this.transport.exchange(
-      0,
-      buildHangupStartRequest({
-        operate: this.hangupSkillOperate | 0,
-      }),
-    );
-    this.handleBodies(bodies);
+    this.setPhase("hangup", "client stop");
+    if (was) this.cb.onChat?.([{ type: 5, text: "[挂]已停止挂机" }]);
   }
 
+  /**
+   * Start Pixi hangup: same battle path as collide (`4/1` / startBattleNearPlayer).
+   * Monster id/pos come from the current scene pool; server does not push fights.
+   * Caller must use stopHangup() to cancel (HUD already branches).
+   */
   async startHangup(): Promise<void> {
     if (!this.transport) return;
-    if (this.hangupActive) {
-      await this.stopHangup();
+    if (isCitySceneKey(this.scene || this.loadedScene || "")) {
+      this.cb.onChat?.([{ type: 5, text: "[挂]城内不能挂机" }]);
       return;
     }
     this.markHangupDesired();
-    // Optimistic arm for same-packet battle start; cleared on 「已停止挂机」.
     this.hangupActive = true;
-    this.setPhase("hangup", "2/10 Type=2");
-    /*
-     * Seed the same outdoor live-node fields as manual 4/1 so hangup can use
-     * subtype-5 scene wires (player=1, monsters=[2,3,0]) instead of Pixi's
-     * usual non-scene subtype-10 (player=0). Also seed Operate for server synth.
-     */
-    const px = this.x | 0;
-    const py = this.y | 0;
-    let enemyId = 0;
-    let index = 0;
-    let posx = 0;
-    let posy = 0;
-    if (!isCitySceneKey(this.scene || this.loadedScene || "")) {
-      const catalogMonsters = this.npcs.filter(
-        (n) =>
-          /monster|怪|e_/i.test(n.scriptName) ||
-          /^e_/i.test(n.actorResource) ||
-          (/^e_/i.test(n.name) && n.actorId < 100000),
-      );
-      const pool = [...this.sceneMonsters, ...catalogMonsters];
-      if (pool.length) {
-        let best = pool[0]!;
-        let bestD = Infinity;
-        for (const n of pool) {
-          const d = (n.x - px) * (n.x - px) + (n.y - py) * (n.y - py);
-          if (d < bestD) {
-            bestD = d;
-            best = n;
-          }
-        }
-        enemyId = (best.battleActorId ?? best.actorId) >>> 0;
-        index = enemyId;
-        posx = best.x | 0;
-        posy = best.y | 0;
-        const visualRes =
-          best.battleActorResource || best.actorResource || "";
-        this.pendingEncounterVisual = {
-          battleActorId: enemyId,
-          x: posx,
-          y: posy,
-          actorResource: visualRes,
-          name: best.name,
-        };
-      }
-    }
-    const bodies = await this.transport.exchange(
-      0,
-      buildHangupStartRequest({
-        enemyId: enemyId || undefined,
-        index,
-        posx,
-        posy,
-        operate: this.hangupSkillOperate | 0,
-      }),
-    );
-    this.handleBodies(bodies);
-    if (this.hangupDesired) this.persistHangupResume();
+    this.setPhase("hangup", "client collide-loop");
+    this.cb.onChat?.([{ type: 5, text: "[挂]已开始挂机" }]);
+    if (this.inBattle) return;
+    await this.tickHangupEncounter("start");
   }
 
   async openDesignations(): Promise<DesignationPage | null> {
@@ -1980,18 +1936,31 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
-  async fetchWagerBoard(): Promise<{ rows: WagerListRow[]; mine: WagerMine | null }> {
-    if (!this.transport) return { rows: [], mine: null };
+  async fetchWagerBoard(): Promise<{
+    rows: WagerListRow[];
+    mine: WagerMine | null;
+    listResult: number;
+    listMessage: string;
+  }> {
+    if (!this.transport) {
+      return { rows: [], mine: null, listResult: 0, listMessage: "no-transport" };
+    }
     const listBodies = await this.transport.exchange(0, buildWagerListRequest());
     this.handleBodies(listBodies);
     const mineBodies = await this.transport.exchange(0, buildWagerMineRequest());
     this.handleBodies(mineBodies);
     let rows: WagerListRow[] = [];
     let mine: WagerMine | null = null;
+    let listResult = 0;
+    let listMessage = "";
     for (const body of listBodies) {
       try {
         const list = parseWagerList(decodeWtPacket(body));
-        if (list) rows = list.rows;
+        if (list) {
+          rows = list.rows;
+          listResult = list.result;
+          listMessage = list.message || "";
+        }
       } catch {
         /* ignore */
       }
@@ -2004,7 +1973,7 @@ export class GameSession {
         /* ignore */
       }
     }
-    return { rows, mine };
+    return { rows, mine, listResult, listMessage };
   }
 
   async wagerCreate(stake: number): Promise<WagerResult | null> {
@@ -2367,7 +2336,9 @@ export class GameSession {
   /**
    * subtype-10 PvE left visual bytes are crash-safe player-portrait placeholders
    * (mock default 0/1 → Pixi used to paint 男幻剑). Resolve a real .actor from
-   * the pending collide spawn / scene SCE / catalog NPC / challenge guide.
+   * the pending collide spawn / scene SCE / monster catalog / challenge guide.
+   * Dream challenge: enemy id is catalog real (204), SCE wire is 200 — never
+   * fall through to the guide's FB_* NPC portrait.
    */
   resolvePveEnemyActor(
     enemyId: number,
@@ -2381,6 +2352,13 @@ export class GameSession {
       .trim();
     const fromMon = (n: NpcActor) =>
       n.battleActorResource || n.actorResource || "";
+    /** Combat body — reject map scenery / dialog NPCs (FB_lotus, trees, …). */
+    const isCombatMonsterActor = (res: string) => {
+      const a = (res || "").trim();
+      if (!/\.actor$/i.test(a)) return false;
+      if (/^FB_/i.test(a) || /^_/i.test(a)) return false;
+      return /^e_/i.test(a);
+    };
     const pending = this.pendingEncounterVisual;
     // Collide/tap/F set this for the current 4/1; hangup leaves it null.
     // Prefer it unconditionally so wire→catalog remap cannot pick another SCE kind.
@@ -2409,8 +2387,31 @@ export class GameSession {
       const res = fromMon(monById);
       if (res) return { actorResource: res, name: monById.name || name };
     }
+    // Admin catalog actor for remapped real id (dream 200→204 → e_fireG).
+    const catalogActor = monsterActorForEnemyId(id);
+    if (catalogActor) {
+      return { actorResource: catalogActor, name: name || undefined };
+    }
+    // Challenge/hangup: SCE wire ≠ catalog id — use a scene combat .actor
+    // (prefer e_fire* battle field over e_ghostfire* map blob).
+    if (this.pendingChallengeGuideActorId || this.hangupDesired) {
+      const preferBattle = this.sceneMonsters.find((n) => {
+        const battle = (n.battleActorResource || "").trim();
+        return (
+          isCombatMonsterActor(battle) && !/^e_ghostfire/i.test(battle)
+        );
+      });
+      const anyCombat =
+        preferBattle ||
+        this.sceneMonsters.find((n) => isCombatMonsterActor(fromMon(n)));
+      if (anyCombat) {
+        const res = fromMon(anyCombat);
+        if (res)
+          return { actorResource: res, name: name || anyCombat.name };
+      }
+    }
     const npcById = this.npcs.find((n) => (n.actorId >>> 0) === id);
-    if (npcById?.actorResource) {
+    if (npcById?.actorResource && isCombatMonsterActor(npcById.actorResource)) {
       return {
         actorResource: npcById.actorResource,
         name: npcById.name || name,
@@ -2427,7 +2428,10 @@ export class GameSession {
       const npcByName = this.npcs.find(
         (n) => (n.name || "").replace(/\0+$/g, "").trim() === name,
       );
-      if (npcByName?.actorResource) {
+      if (
+        npcByName?.actorResource &&
+        isCombatMonsterActor(npcByName.actorResource)
+      ) {
         return {
           actorResource: npcByName.actorResource,
           name: npcByName.name || name,
@@ -2438,7 +2442,12 @@ export class GameSession {
       this.pendingChallengeGuideActorId || this.lastNpcId || 0;
     if (guideId) {
       const guide = this.npcs.find((n) => (n.actorId >>> 0) === guideId);
-      if (guide?.actorResource) {
+      // Outdoor monkey challenge: guide is e_monkey — keep.
+      // Dream instance guide: FB_lotus* — must not paint as the enemy.
+      if (
+        guide?.actorResource &&
+        isCombatMonsterActor(guide.actorResource)
+      ) {
         return {
           actorResource: guide.actorResource,
           name: name || guide.name,
@@ -2561,22 +2570,42 @@ export class GameSession {
 
   async confirmChallenge(agree: boolean): Promise<void> {
     if (!this.transport) return;
+    const enemyId = this.pendingChallengeEnemyId >>> 0;
     if (!agree) {
       this.pendingChallengeGuideActorId = 0;
+      this.pendingChallengeEnemyId = 0;
+      this.pendingEncounterVisual = null;
+      // Clear server 30/9 pending without arming subtype-10 followup.
+      try {
+        const bodies = await this.transport.exchange(
+          0,
+          buildChallengeConfirmRequest(false),
+        );
+        this.handleBodies(bodies);
+      } catch {
+        /* local cancel still wins */
+      }
       this.setPhase("inworld", "challenge cancelled");
       return;
     }
-    this.setPhase("challenge", "30/10 agree");
-    const bodies = await this.transport.exchange(
-      0,
-      buildChallengeConfirmRequest(true),
-    );
-    this.handleBodies(bodies);
-    // Battle 4/10 may arrive as HAS_FOLLOWUP on same TCP; LiveTransport drains.
-    // If only 30/10 ack, poll once for deferred 4/10.
-    if (!this.inBattle) {
-      await this.pollOnce();
+    this.pendingChallengeEnemyId = 0;
+    this.pendingChallengeGuideActorId = 0;
+    // Hangup-style: clear 30/9 pending, then 4/1 with challenge_enemy_id.
+    try {
+      const clearBodies = await this.transport.exchange(
+        0,
+        buildChallengeConfirmRequest(false),
+      );
+      this.handleBodies(clearBodies);
+    } catch {
+      /* still start hangup-style battle */
     }
+    this.setPhase("challenge", `4/1 enemy=${enemyId || "nearest"}`);
+    await this.startBattleNearPlayer(
+      this.x | 0,
+      this.y | 0,
+      enemyId || undefined,
+    );
   }
 
   /**
@@ -2643,14 +2672,19 @@ export class GameSession {
 
   async openBag(): Promise<void> {
     if (!this.transport) return;
-    await warmItemCatalogs();
-    // Keep prior rows for seq/durability merge inside handleBodies (30/21 does
-    // not carry equip current durability; CBE keeps item+0x110 across reopen).
-    // Do not onBag([]) while awaiting — that clears battle「物品」mid-fight.
-    const retained = this.bagItems;
-    const bodies = await this.transport.exchange(0, buildBagOpenRequest());
-    this.bagItems = retained;
-    this.handleBodies(bodies);
+    try {
+      await this.prepareLiveExchange("bag");
+      await warmItemCatalogs();
+      // Keep prior rows for seq/durability merge inside handleBodies (30/21 does
+      // not carry equip current durability; CBE keeps item+0x110 across reopen).
+      // Do not onBag([]) while awaiting — that clears battle「物品」mid-fight.
+      const retained = this.bagItems;
+      const bodies = await this.transport.exchange(0, buildBagOpenRequest());
+      this.bagItems = retained;
+      this.handleBodies(bodies);
+    } catch (e) {
+      this.notifyPanelFetchFailed("背包", e);
+    }
   }
 
   /** Merge bag-equip durability: pending unequip/swap → prior seq → wire (1). */
@@ -2672,11 +2706,16 @@ export class GameSession {
   /** Pixi 装备信息：每次打开拉 1/7/22 → 7/7 type=2 当前穿戴. */
   async openWornEquipment(): Promise<void> {
     if (!this.transport) return;
-    await warmItemCatalogs();
-    /* Keep prior wornItems / onWorn until 7/7 type=2 arrives — clearing
-     * here flashed empty equip UI and dropped +16 sparkles mid-refresh. */
-    const bodies = await this.transport.exchange(0, buildWornEquipRequest());
-    this.handleBodies(bodies);
+    try {
+      await this.prepareLiveExchange("worn");
+      await warmItemCatalogs();
+      /* Keep prior wornItems / onWorn until 7/7 type=2 arrives — clearing
+       * here flashed empty equip UI and dropped +16 sparkles mid-refresh. */
+      const bodies = await this.transport.exchange(0, buildWornEquipRequest());
+      this.handleBodies(bodies);
+    } catch (e) {
+      this.notifyPanelFetchFailed("装备", e);
+    }
   }
 
   /**
@@ -3159,46 +3198,64 @@ export class GameSession {
 
   async openMall(): Promise<void> {
     if (!this.transport) return;
-    await warmItemCatalogs();
-    // Reset goods; keep last known coolmoney until 14/4 arrives.
-    // coolmoney 字段实为 role.wcoin，UI 仍显示「酷宝」。
-    this.mallState = {
-      coolmoney: this.mallState?.coolmoney ?? 0,
-      ticket: this.mallState?.ticket ?? 0,
-      goods: [],
-    };
-    this.cb.onMall?.(this.mallState);
+    try {
+      await this.prepareLiveExchange("mall");
+      await warmItemCatalogs();
+      // Reset goods; keep last known coolmoney until 14/4 arrives.
+      // coolmoney 字段实为 role.wcoin，UI 仍显示「酷宝」。
+      this.mallState = {
+        coolmoney: this.mallState?.coolmoney ?? 0,
+        ticket: this.mallState?.ticket ?? 0,
+        goods: [],
+      };
+      this.cb.onMall?.(this.mallState);
 
-    // 余额：1/14/4（勿用 1/1/14，服务端要求 actorId）
-    const balBodies = await this.transport.exchange(0, buildMallBalanceRequest());
-    this.handleBodies(balBodies);
+      // 余额：1/14/4（勿用 1/1/14，服务端要求 actorId）
+      const balBodies = await this.transport.exchange(0, buildMallBalanceRequest());
+      this.handleBodies(balBodies);
 
-    // 商城停售装备：只拉 14/5 非装备酷宝/秘宝（不再拉 14/6..13 神兵页）。
-    for (let page = 0; page < 256; page++) {
-      const pageBodies = await this.transport.exchange(
-        0,
-        buildMallPageRequest(5, page),
-      );
-      let pageRows = 0;
-      for (const body of pageBodies) {
-        const packet = ingestPacket(body);
-        if (!packet) continue;
-        const mall = parseMallState(packet);
-        if (mall) pageRows += mall.goods.length;
+      // 商城停售装备：只拉 14/5 非装备酷宝/秘宝（不再拉 14/6..13 神兵页）。
+      for (let page = 0; page < 256; page++) {
+        const pageBodies = await this.transport.exchange(
+          0,
+          buildMallPageRequest(5, page),
+        );
+        let pageRows = 0;
+        for (const body of pageBodies) {
+          const packet = ingestPacket(body);
+          if (!packet) continue;
+          const mall = parseMallState(packet);
+          if (mall) pageRows += mall.goods.length;
+        }
+        this.handleBodies(pageBodies);
+        if (pageRows === 0) break;
       }
-      this.handleBodies(pageBodies);
-      if (pageRows === 0) break;
-    }
 
-    if (this.mallState) this.cb.onMall?.(this.mallState);
+      if (this.mallState) this.cb.onMall?.(this.mallState);
+      if (!this.mallState?.goods.length) {
+        this.cb.onChat?.([
+          {
+            type: 5,
+            text: "[系]商城无数据，若刚掉线请重试；仍空则重新选角进图",
+          },
+        ]);
+      }
+    } catch (e) {
+      this.notifyPanelFetchFailed("商城", e);
+    }
   }
 
   /** Pixi 人物信息：拉服务端 build_player_stats 全额汇总（1/1/21）. */
   async openCharacterStats(): Promise<void> {
     if (!this.transport) return;
-    this.characterStats = null;
-    const bodies = await this.transport.exchange(0, buildPanelStatsRequest());
-    this.handleBodies(bodies);
+    try {
+      await this.prepareLiveExchange("stats");
+      this.characterStats = null;
+      const bodies = await this.transport.exchange(0, buildPanelStatsRequest());
+      this.handleBodies(bodies);
+    } catch (e) {
+      this.notifyPanelFetchFailed("属性", e);
+    }
   }
 
   async buyMallItem(itemId: number, num = 1): Promise<void> {
@@ -3928,9 +3985,65 @@ export class GameSession {
     }
   }
 
+  /**
+   * Before panel fetches (mall/bag/…): re-open WS if dropped, then one
+   * scene-poll so mock presence/account stay warm.  Heartbeat-timeout unbinds
+   * the session — WS-only reconnect is not enough for 14/4 mall data.
+   */
+  private async prepareLiveExchange(reason: string): Promise<void> {
+    if (!(this.transport instanceof LiveTransport)) return;
+    await this.transport.ensureConnected();
+    if (this.pollTimer == null || !this.selectedRoleId) return;
+    try {
+      const bodies = await this.transport.exchange(
+        CBMS_FLAG_SCENE_POLL,
+        new Uint8Array(0),
+      );
+      this.handleBodies(bodies);
+    } catch (e) {
+      console.warn("[session] prepareLiveExchange", reason, e);
+      throw e;
+    }
+  }
+
+  private notifyPanelFetchFailed(panel: string, err: unknown): void {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[session] ${panel} fetch failed`, err);
+    this.cb.onChat?.([
+      { type: 5, text: `[系]${panel}拉取失败，请检查网络后重试` },
+    ]);
+    this.cb.onStatus?.({
+      mode: this.transport?.mode ?? "?",
+      phase: "panel-fetch-error",
+      detail: `${panel}: ${msg.slice(0, 80)}`,
+    });
+  }
+
+  /**
+   * Native FGS Handler injects this every ~2s while in-world/hangup.
+   * Bypasses Chromium hidden-document setInterval throttling that starves
+   * scene-poll even after resumeTimers() + unrestricted battery.
+   */
+  async backgroundKeepAliveTick(): Promise<void> {
+    if (this.nativeKeepAliveInFlight) return;
+    if (!(this.transport instanceof LiveTransport)) return;
+    this.nativeKeepAliveInFlight = true;
+    try {
+      if (this.pollTimer != null) {
+        await this.pollOnce();
+      } else {
+        await this.transport.ensureConnected();
+        await this.transport.ping();
+      }
+    } catch (e) {
+      console.warn("[session] native keepalive", e);
+    } finally {
+      this.nativeKeepAliveInFlight = false;
+    }
+  }
+
   /** After screen-off / app resume: re-open gateway if OEM killed the WS. */
   async wakeFromBackground(): Promise<void> {
-    if (this.hardResumeInFlight) return;
     try {
       if (this.transport instanceof LiveTransport) {
         await this.transport.ensureConnected();
@@ -3938,44 +4051,25 @@ export class GameSession {
         if (this.pollTimer != null) {
           void this.pollOnce();
         }
-        await this.tryRearmHangup("wake");
-        return;
-      }
-      // Transport gone while hangup intent armed — hard resume.
-      if (this.hangupDesired || readHangupResume()) {
-        await this.resumeFromHangupStorage();
       }
     } catch (e) {
       console.warn("[session] wake reconnect", e);
-      if (this.hangupDesired || readHangupResume()) {
-        void this.resumeFromHangupStorage();
-      }
     }
   }
 
   private async pollOnce(): Promise<void> {
-    if (!this.transport) {
-      if (this.hangupDesired && !this.hardResumeInFlight) {
-        void this.resumeFromHangupStorage();
-      }
-      return;
-    }
+    if (!this.transport) return;
     const runPoll = () =>
       this.transport!.exchange(CBMS_FLAG_SCENE_POLL, new Uint8Array(0));
     try {
       const bodies = await runPoll();
       this.handleBodies(bodies);
-      const recovered = this.pollFailStreak > 0;
       this.pollFailStreak = 0;
       if (!this.inBattle) {
         this.setPhase("inworld", `heartbeat ok · ${this.transport.mode}`);
       }
-      // Only re-arm after a transport recovery — not on every healthy poll
-      // (death/stop chat must not immediately start another fight).
-      if (recovered) void this.tryRearmHangup("poll-recovered");
     } catch (e) {
       this.pollFailStreak++;
-      // Any in-world poll failure: one immediate WS heal + retry (not hangup-only).
       try {
         await this.ensureLiveSocket();
         const bodies = await runPoll();
@@ -3984,15 +4078,11 @@ export class GameSession {
         if (!this.inBattle) {
           this.setPhase("inworld", `heartbeat ok · ${this.transport!.mode}`);
         }
-        void this.tryRearmHangup("poll-retry");
         return;
       } catch {
         /* fall through */
       }
       this.setPhase("poll-error", e instanceof Error ? e.message : String(e));
-      if (this.hangupDesired && this.pollFailStreak >= 3) {
-        void this.resumeFromHangupStorage();
-      }
     }
   }
 
@@ -4488,6 +4578,9 @@ export class GameSession {
 
       const challenge = parseChallengePrompt(packet);
       if (challenge) {
+        if (challenge.enemyId) {
+          this.pendingChallengeEnemyId = challenge.enemyId >>> 0;
+        }
         this.cb.onChallengePrompt?.(challenge.text);
       }
 

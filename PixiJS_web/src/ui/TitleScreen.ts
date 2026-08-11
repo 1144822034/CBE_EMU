@@ -19,6 +19,7 @@ import {
 } from "../resources/actor";
 import { TipBootLayer } from "./TipBootLayer";
 import { LoginIme } from "./LoginIme";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 type Mode = "splash" | "login" | "register" | "servers";
 type LoginField = "user" | "pass" | "pass2";
@@ -51,6 +52,7 @@ export class TitleScreen extends Container {
   private menuLabels: BitmapLabel[] = [];
   private menuSprites: Sprite[] = [];
   private serverRows: BitmapLabel[] = [];
+  private serverHits: Container[] = [];
   private loginLabels: BitmapLabel[] = [];
   private loginHits: Container[] = [];
   private servers: ServerRow[] = [];
@@ -716,6 +718,7 @@ export class TitleScreen extends Container {
   private redrawServers(): void {
     for (const r of this.serverRows) r.destroy();
     this.serverRows = [];
+    clearPointerHits(this.serverHits);
     this.serverGfx.clear();
 
     const boxX = 8;
@@ -744,10 +747,20 @@ export class TitleScreen extends Container {
       }
       const name = makePixelText(s.name || `区服${s.serverId}`, 12, CBE.inkLabel);
       name.position.set(boxX + 12, y);
+      name.eventMode = "none";
       const st = makePixelText(s.label || "推荐", 12, CBE.ink);
       st.position.set(boxX + boxW - 44, y);
+      st.eventMode = "none";
       this.serverLayer.addChild(name, st);
       this.serverRows.push(name, st);
+      const idx = i;
+      this.serverHits.push(
+        attachRowPointerHit(this.serverLayer, boxX + 4, y - 2, boxW - 8, 20, () => {
+          this.serverCursor = idx;
+          this.redrawServers();
+          this.confirm();
+        }),
+      );
     });
   }
 }

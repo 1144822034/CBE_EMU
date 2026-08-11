@@ -95,6 +95,8 @@ export const MONSTER_LEVEL_BY_ID: Record<number, number> = {
 
 /** Runtime rows from server_monsters (via gateway → admin). Wins over builtin. */
 const MONSTER_LEVEL_OVERRIDES: Record<number, number> = {};
+/** Admin `actor_resource` by enemy id (challenge / hangup PvE visuals). */
+const MONSTER_ACTOR_OVERRIDES: Record<number, string> = {};
 
 export function applyMonsterLevelOverrides(
   overrides: Record<string | number, number>,
@@ -108,6 +110,28 @@ export function applyMonsterLevelOverrides(
     n += 1;
   }
   return n;
+}
+
+export function applyMonsterActorOverrides(
+  actors: Record<string | number, string>,
+): number {
+  let n = 0;
+  for (const [key, raw] of Object.entries(actors)) {
+    const id = Number(key) >>> 0;
+    const actor = String(raw || "").trim();
+    if (!id || !/\.actor$/i.test(actor)) continue;
+    MONSTER_ACTOR_OVERRIDES[id] = actor;
+    n += 1;
+  }
+  return n;
+}
+
+/** Battle .actor for catalog/custom enemy id (e.g. dream challenge 204). */
+export function monsterActorForEnemyId(enemyId: number): string | undefined {
+  const id = enemyId >>> 0;
+  if (!id) return undefined;
+  const actor = MONSTER_ACTOR_OVERRIDES[id];
+  return actor || undefined;
 }
 
 export function monsterLevelForEnemyId(enemyId: number): number | undefined {
@@ -180,11 +204,20 @@ export async function loadMonsterLevelOverrides(
     });
     if (timer) window.clearTimeout(timer);
     if (!res.ok) return 0;
-    const data = (await res.json()) as { overrides?: Record<string, number> };
+    const data = (await res.json()) as {
+      overrides?: Record<string, number>;
+      actors?: Record<string, string>;
+    };
     if (!data?.overrides || typeof data.overrides !== "object") return 0;
     const n = applyMonsterLevelOverrides(data.overrides);
-    if (n > 0) {
-      console.info(`[monsterLevels] overrides=${n} from ${target}`);
+    const actorsN =
+      data.actors && typeof data.actors === "object"
+        ? applyMonsterActorOverrides(data.actors)
+        : 0;
+    if (n > 0 || actorsN > 0) {
+      console.info(
+        `[monsterLevels] overrides=${n} actors=${actorsN} from ${target}`,
+      );
     }
     return n;
   } catch (e) {

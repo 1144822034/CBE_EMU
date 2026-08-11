@@ -33,6 +33,7 @@ import type { BagItem } from "../net/protocolExtras";
 import { isBattleMedicineOrFlask } from "../net/protocolExtras";
 import { tryLoadUiTexture, uiSprite, DigitStrip } from "./UiAssets";
 import { BattlePartyHud, BATTLE_PARTY_HUD_H } from "./BattlePartyHud";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 /** Eidolon frames can be 170px+; clamp so FX cannot dominate the 240× stage. */
 const FX_MAX_W = 96;
@@ -152,7 +153,7 @@ export class BattleScreen extends Container {
   private autoBannerBuilt = false;
   private autoBannerTip: BitmapLabel | null = null;
   private autoActive = false;
-  /** Hangup (2/10) — hide operate scroll; server synth owns the seat. */
+  /** Hangup (client collide-loop) — hide operate scroll while armed. */
   private hangupActive = false;
   private partyHud = new BattlePartyHud();
   private log = new BitmapLabel();
@@ -207,6 +208,8 @@ export class BattleScreen extends Container {
   private targetMark = new Graphics();
   private items: BattleBagRow[] = [];
   private itemCursor = 0;
+  /** Menu / skill / item / target pointer hits; cleared each redrawMenu. */
+  private rowHits: Container[] = [];
 
   onAttack: (() => void) | null = null;
   onSkill: ((operate: number) => void) | null = null;
@@ -228,7 +231,7 @@ export class BattleScreen extends Container {
   onAutoToggle: (() => boolean) | null = null;
   /** Fired when banner 关闭 or a manual battle op disarms [自动]. */
   onAutoCancel: (() => void) | null = null;
-  /** Fired when banner 关闭 while hangup owns the fight — request stop (2/10). */
+  /** Fired when banner 关闭 while hangup owns the fight — local stop. */
   onHangupCancel: (() => void) | null = null;
   /** Fired when a round finishes playback and [自动] is still armed. */
   onAutoReady: (() => void) | null = null;
@@ -346,12 +349,13 @@ export class BattleScreen extends Container {
   }
 
   /**
-   * Banner 关闭 while hangup — session.stopHangup (clear intent + 2/10).
-   * Does not locally clear hangupActive; server chat is authority.
+   * Banner 关闭 while hangup — clear local hangup UI then session.stopHangup.
+   * Pixi hangup is client-only (no 2/10 stop request).
    */
   closeHangup(): void {
     if (!this.hangupActive) return;
-    void this.log.setText("请求停止挂机…", CBE.inkTip);
+    this.setHangupActive(false);
+    void this.log.setText("已停止挂机", CBE.inkTip);
     this.onHangupCancel?.();
   }
 
@@ -649,6 +653,7 @@ export class BattleScreen extends Container {
     this.playbackGen += 1;
     this.resetTargetPick();
     this.clearFloats();
+    clearPointerHits(this.rowHits);
     this.unitsHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.units = [];
     this.fxHost.removeChildren().forEach((c) => c.destroy({ children: true }));
@@ -1939,11 +1944,38 @@ export class BattleScreen extends Container {
   }
 
   private redrawMenu(): void {
+    clearPointerHits(this.rowHits);
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     if (this.awaitingExit || this.awaitingDeathPrompt || !this.menuOpen) return;
     // Target pick: hide action list; cursor mark + log carry the UX.
-    if (this.menuMode === "target") return;
+    if (this.menuMode === "target") {
+      this.refreshTargetMark();
+      this.menuHost.eventMode = "static";
+      for (let i = 0; i < this.targetWires.length; i++) {
+        const view = this.unitForWire(this.targetWires[i]!);
+        if (!view) continue;
+        const idx = i;
+        const hitW = 44;
+        const hitH = 64;
+        this.rowHits.push(
+          attachRowPointerHit(
+            this.menuHost,
+            view.feetX - hitW / 2,
+            view.feetY - hitH,
+            hitW,
+            hitH,
+            () => {
+              this.targetCursor = idx;
+              this.redrawMenu();
+              this.confirm();
+            },
+          ),
+        );
+      }
+      return;
+    }
 
+    this.menuHost.eventMode = "static";
     const rootItems = this.rootMenuItems();
     const skillPages = Math.max(
       1,
@@ -1991,6 +2023,7 @@ export class BattleScreen extends Container {
 
     // Parchment scroll (screenshot) — Graphics approximation + optional UI_menu2.
     const panel = new Graphics();
+    panel.eventMode = "none";
     panel
       .roundRect(x, y, w, h, 2)
       .fill({ color: 0xc8c4a0 })
@@ -2000,6 +2033,7 @@ export class BattleScreen extends Container {
     this.menuHost.addChild(panel);
 
     const title = new BitmapLabel();
+    title.eventMode = "none";
     title.position.set(x + 18, y + 4);
     let titleText = "行动";
     if (this.menuMode === "skill" && skillPages > 1) {
@@ -2017,6 +2051,7 @@ export class BattleScreen extends Container {
     if (this.menuMode === "skill") {
       if (!this.skills.length) {
         const lab = new BitmapLabel();
+        lab.eventMode = "none";
         lab.position.set(x + 10, y + 22);
         void lab.setText("(无)", 0x606060);
         this.menuHost.addChild(lab);
@@ -2029,14 +2064,15 @@ export class BattleScreen extends Container {
       pageSkills.forEach((sk, i) => {
         const abs = skillPageStart + i;
         const lab = new BitmapLabel();
+        lab.eventMode = "none";
         lab.position.set(x + 10, y + 22 + i * 16);
         const hi = abs === this.skillCursor;
         if (hi) {
-          this.menuHost.addChild(
-            new Graphics()
-              .rect(x + 6, y + 20 + i * 16, w - 12, 14)
-              .fill({ color: 0x4a4a4a }),
-          );
+          const hiGfx = new Graphics()
+            .rect(x + 6, y + 20 + i * 16, w - 12, 14)
+            .fill({ color: 0x4a4a4a });
+          hiGfx.eventMode = "none";
+          this.menuHost.addChild(hiGfx);
         }
         const line =
           sk.mpCost != null ? `${sk.name} 耗蓝${sk.mpCost}` : sk.name;
@@ -2045,9 +2081,17 @@ export class BattleScreen extends Container {
           maxWidth: w - 16,
         });
         this.menuHost.addChild(lab);
+        this.rowHits.push(
+          attachRowPointerHit(this.menuHost, x + 6, y + 20 + i * 16, w - 12, 14, () => {
+            this.skillCursor = abs;
+            this.redrawMenu();
+            this.confirm();
+          }),
+        );
       });
       if (showPageHint) {
         const foot = new BitmapLabel();
+        foot.eventMode = "none";
         foot.position.set(x + 22, y + 22 + pageSkills.length * 16);
         void foot.setText("↑↓翻页", 0x404040);
         this.menuHost.addChild(foot);
@@ -2058,6 +2102,7 @@ export class BattleScreen extends Container {
     if (this.menuMode === "item") {
       if (!this.items.length) {
         const lab = new BitmapLabel();
+        lab.eventMode = "none";
         lab.position.set(x + 10, y + 22);
         void lab.setText("(无)", 0x606060);
         this.menuHost.addChild(lab);
@@ -2070,14 +2115,15 @@ export class BattleScreen extends Container {
       pageItems.forEach((it, i) => {
         const abs = itemPageStart + i;
         const lab = new BitmapLabel();
+        lab.eventMode = "none";
         lab.position.set(x + 8, y + 22 + i * 16);
         const hi = abs === this.itemCursor;
         if (hi) {
-          this.menuHost.addChild(
-            new Graphics()
-              .rect(x + 4, y + 20 + i * 16, w - 8, 14)
-              .fill({ color: 0x4a4a4a }),
-          );
+          const hiGfx = new Graphics()
+            .rect(x + 4, y + 20 + i * 16, w - 8, 14)
+            .fill({ color: 0x4a4a4a });
+          hiGfx.eventMode = "none";
+          this.menuHost.addChild(hiGfx);
         }
         const label =
           it.count > 1 ? `${it.name}×${it.count}` : it.name;
@@ -2086,9 +2132,17 @@ export class BattleScreen extends Container {
           maxWidth: w - 12,
         });
         this.menuHost.addChild(lab);
+        this.rowHits.push(
+          attachRowPointerHit(this.menuHost, x + 4, y + 20 + i * 16, w - 8, 14, () => {
+            this.itemCursor = abs;
+            this.redrawMenu();
+            this.confirm();
+          }),
+        );
       });
       if (showPageHint) {
         const foot = new BitmapLabel();
+        foot.eventMode = "none";
         foot.position.set(x + 28, y + 22 + pageItems.length * 16);
         void foot.setText("↑↓翻页", 0x404040);
         this.menuHost.addChild(foot);
@@ -2099,17 +2153,26 @@ export class BattleScreen extends Container {
     if (this.menuCursor >= rootItems.length) this.menuCursor = 0;
     rootItems.forEach((label, i) => {
       const lab = new BitmapLabel();
+      lab.eventMode = "none";
       lab.position.set(x + 22, y + 22 + i * 16);
       const hi = i === this.menuCursor;
       if (hi) {
-        this.menuHost.addChild(
-          new Graphics()
-            .rect(x + 6, y + 20 + i * 16, w - 12, 14)
-            .fill({ color: 0x4a4a4a }),
-        );
+        const hiGfx = new Graphics()
+          .rect(x + 6, y + 20 + i * 16, w - 12, 14)
+          .fill({ color: 0x4a4a4a });
+        hiGfx.eventMode = "none";
+        this.menuHost.addChild(hiGfx);
       }
       void lab.setText(label, hi ? CBE.ink : 0x202020, { outline: false });
       this.menuHost.addChild(lab);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this.menuHost, x + 6, y + 20 + i * 16, w - 12, 14, () => {
+          this.menuCursor = idx;
+          this.redrawMenu();
+          this.confirm();
+        }),
+      );
     });
   }
 
@@ -2134,15 +2197,7 @@ export class BattleScreen extends Container {
       const actor = this.unitForWire(rec.actorWire);
       const offensiveGroup =
         rec.children.length > 1 && rec.children.some((c) => c.delta < 0);
-      const enemyWires = offensiveGroup ? this.livingEnemyWires() : [];
-      const childWires = rec.children.map((c, i) => {
-        if (!offensiveGroup || enemyWires.length === 0) return c.wire;
-        const tgt = this.unitForWire(c.wire);
-        // Hangup subtype-10 + stale scene child wire 0 paints on the player
-        // for 天机/幻剑/鬼道 group skills alike — retarget to living enemies.
-        if (tgt && this.state!.left.includes(tgt.side)) return c.wire;
-        return enemyWires[Math.min(i, enemyWires.length - 1)]!;
-      });
+      const childWires = rec.children.map((c) => c.wire);
       const firstTarget =
         childWires[0] != null ? this.unitForWire(childWires[0]) : null;
       const isSkill = rec.type === 1 || rec.type === 2;
@@ -2325,14 +2380,14 @@ export class BattleScreen extends Container {
     // mmBattle 0x24f6: flag 2 → 「暴击」, 3 → 「闪躲」, else numeric float.
     // Pixi also stacks the damage digits under 「暴击」 so the amount stays visible.
     if (flag === 3) {
-      // Black fill + thin green outline.
-      this.spawnTextFloat("闪躲", x, yBody, 0x000000, 0x00ff00, true);
+      // Cyan fill + black outline.
+      this.spawnTextFloat("闪躲", x, yBody, CBE.inkTip, 0x000000, true);
       return;
     }
     if (flag === 2) {
       // Damage higher so 「暴击」 below does not cover it.
       if (delta !== 0) this.spawnDigitFloat(delta, x, yBody - 22);
-      this.spawnTextFloat("暴击", x, yBody + 14, 0x000000, CBE.inkTip, true);
+      this.spawnTextFloat("暴击", x, yBody + 14, CBE.inkTip, 0x000000, true);
       return;
     }
     if (delta !== 0) {
@@ -2365,16 +2420,16 @@ export class BattleScreen extends Container {
     y: number,
     color: number,
     outlineColor = 0x000000,
-    outlineThin = false,
+    withOutline = false,
   ): void {
     const lab = new BitmapLabel();
     lab.anchor.set(0.5, 0.5);
     lab.position.set(x, y);
     this.floatHost.addChild(lab);
     void lab.setText(text, color, {
-      outline: false,
+      outline: withOutline,
       outlineColor,
-      outlineThin,
+      outlineThin: withOutline,
       maxWidth: 80,
     });
     this.animateFloatNode(lab, y);
@@ -2417,19 +2472,34 @@ export class BattleScreen extends Container {
     drawCbePanel(box, 20, 96, LCD_WIDTH - 40, 160, CBE.bgPanelDark);
     this.settleHost.addChild(box);
     const spar = this.isSparBattle();
+    const arenaFdata =
+      spar &&
+      (s.fdata.includes("比武胜利") ||
+        s.fdata.includes("比武失败") ||
+        s.fdata.includes("比武平局"));
     const lose =
       spar &&
-      (s.fdata.includes("挑战失败") || s.expGain < 0 || s.goldGain < 0);
-    const title = spar
-      ? lose
-        ? "切磋失败"
-        : "切磋胜利"
-      : "战斗胜利";
+      (s.fdata.includes("挑战失败") ||
+        s.fdata.includes("比武失败") ||
+        s.expGain < 0 ||
+        s.goldGain < 0);
+    const draw = spar && s.fdata.includes("比武平局");
+    const title = arenaFdata
+      ? draw
+        ? "比武平局"
+        : lose
+          ? "比武失败"
+          : "比武胜利"
+      : spar
+        ? lose
+          ? "切磋失败"
+          : "切磋胜利"
+        : "战斗胜利";
     const lines = [
       title,
-      `经验 ${s.expGain}`,
-      `金钱 ${s.goldGain}`,
-      s.level ? `等级 ${s.level}` : "",
+      arenaFdata ? s.fdata.slice(0, 22) : `经验 ${s.expGain}`,
+      arenaFdata ? "" : `金钱 ${s.goldGain}`,
+      !arenaFdata && s.level ? `等级 ${s.level}` : "",
       !spar && s.fdata ? s.fdata.slice(0, 18) : "",
       "按确定继续",
     ].filter(Boolean);

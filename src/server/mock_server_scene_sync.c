@@ -6137,7 +6137,11 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
         !vm_net_mock_put_object_u8(out, outCap, &pos, "isleader",
                                    leaderBlocked ? 1u : 0u) ||
         !vm_net_mock_put_object_string(out, outCap, &pos, "challenge",
-                                       challengeText))
+                                       challengeText) ||
+        /* Pixi hangup-style 4/1: client reads challenge_enemy_id and assigns
+         * it as preferNpcId. CBE ignores unknown fields. */
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "enemy",
+                                     seed->challengeEnemyId))
     {
         return 0;
     }
@@ -6199,6 +6203,7 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
     u32 pos = 5;
     u32 ackObjectStart = 0;
     u32 ageTicks = 0;
+    u8 agree = 0;
 
     /* HandleResConfirmCb(0x01039566) emits one strict 30/10 {agree} object.
      * Do not consume broader packets: subtype 10 is meaningful here only while
@@ -6210,6 +6215,7 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
     {
         return 0;
     }
+    (void)vm_net_mock_get_object_u8_field(request, requestLen, "agree", &agree);
     ageTicks = g_schedulerTick - session->instanceChallengeTick;
     if (ageTicks > (60u * 1000u / VM_SCHED_FRAME_MS) ||
         !vm_net_mock_scene_name_is_safe(scene) ||
@@ -6237,6 +6243,21 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
     session->instanceChallengePending = false;
+    if (agree == 0)
+    {
+        /* Pixi cancel / clear-pending before hangup-style 4/1 — no 4/10 arm. */
+        session->instanceChallengeBattlePending = false;
+        session->instanceChallengeBattleWireCount = 0;
+        session->instanceChallengeActorId = 0;
+        session->instanceChallengeEnemyId = 0;
+        session->instanceChallengeX = 0;
+        session->instanceChallengeY = 0;
+        session->instanceChallengeTick = 0;
+        session->instanceChallengeScene[0] = 0;
+        printf("[info][network] mock_npc_instance_challenge_confirm_cancel client=%08x age_ticks=%u request=30/10{agree=0} response=30/10{result=0} battle_delivery=none resp=%u\n",
+               session->clientId, ageTicks, pos);
+        return pos;
+    }
     session->instanceChallengeBattlePending = true;
     session->instanceChallengeBattleWireCount = 0;
     session->instanceChallengeTick = g_schedulerTick;

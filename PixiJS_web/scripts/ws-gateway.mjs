@@ -7,10 +7,19 @@
  *   PIX_TCP_HOST / PIX_TCP_PORT — mock-server (default 127.0.0.1:19090)
  *   PIX_ADMIN_HOST / PIX_ADMIN_PORT — admin HTTP for /api/* proxy
  *     (monster-levels, recharge/create, register; default same host as TCP, port 19091)
+ *   PIX_GATEWAY_KEEPALIVE_MS — idle scene-poll interval (default 10000; 0=off)
+ *   PIX_GATEWAY_KEEPALIVE_IDLE_MS — silence before synth poll (default 2200)
+ *   PIX_GATEWAY_ORPHAN_MS — after WS drop (no DISCONNECT), keep TCP scene-poll
+ *     for this clientId so mock presence does not heartbeat-timeout (default
+ *     600000 = 10min; 0=off). Client LiveTransport reconnects with same id.
  *
  * Each CBMS request opens a short-lived TCP to the mock service (CBE host model).
  * Do NOT close the WebSocket on a single TCP failure — the browser session must
  * stay up so the client can retry login/select/role without "live: not connected".
+ *
+ * After the client arms SCENE_POLL (in-world), this process can run a Node
+ * interval and synthesize idle scene-polls so Android WebView timer freezes do
+ * not cause server heartbeat-timeout. See docs/re/2026-08-10-pixi-gateway-idle-keepalive.md.
  */
 import http from "node:http";
 import net from "node:net";
@@ -319,31 +328,206 @@ process.on("unhandledRejection", (err) => {
   console.error("[ws-gateway] unhandledRejection", err?.stack || err);
 });
 
+const CBMS_FLAG_SCENE_POLL = 0x2;
+const CBMS_FLAG_DISCONNECT = 0x4;
+/**
+ * Idle scene-poll (presence keepalive). Default 10000ms (~1/3 of ~30s kick).
+ * Set PIX_GATEWAY_KEEPALIVE_MS=0 to disable. Unrelated to mock hangup 2/10.
+ */
+const GATEWAY_KEEPALIVE_MS = Number(process.env.PIX_GATEWAY_KEEPALIVE_MS || 10000);
+/** Only synth poll when client has been silent this long (avoid double-poll races). */
+const GATEWAY_KEEPALIVE_IDLE_MS = Number(
+  process.env.PIX_GATEWAY_KEEPALIVE_IDLE_MS || 2200,
+);
+/**
+ * After abrupt WS drop (no CBMS DISCONNECT), keep TCP scene-poll for this
+ * clientId so mock does not heartbeat-timeout while the phone reconnects.
+ * Default 10 minutes; 0 disables orphan (old behavior: WS close → stop poll).
+ */
+const GATEWAY_ORPHAN_MS = Number(
+  process.env.PIX_GATEWAY_ORPHAN_MS !== undefined
+    ? process.env.PIX_GATEWAY_ORPHAN_MS
+    : 600_000,
+);
+
+/** @type {Map<number, { timer: NodeJS.Timeout, busy: boolean, startedAt: number }>} */
+const orphanKeepalives = new Map();
+
+function stopOrphanKeepalive(clientId, reason) {
+  const id = clientId >>> 0;
+  const entry = orphanKeepalives.get(id);
+  if (!entry) return;
+  clearInterval(entry.timer);
+  orphanKeepalives.delete(id);
+  console.log(
+    `[ws-gateway] orphan stop clientId=${id.toString(16)} reason=${reason}`,
+  );
+}
+
+function startOrphanKeepalive(clientId) {
+  const id = clientId >>> 0;
+  if (GATEWAY_KEEPALIVE_MS <= 0 || GATEWAY_ORPHAN_MS <= 0 || !id) return;
+  stopOrphanKeepalive(id, "restart");
+  const startedAt = Date.now();
+  const entry = { busy: false, startedAt, timer: null };
+  entry.timer = setInterval(() => {
+    if (Date.now() - startedAt >= GATEWAY_ORPHAN_MS) {
+      stopOrphanKeepalive(id, "grace-expired");
+      return;
+    }
+    if (entry.busy) return;
+    entry.busy = true;
+    const req = encodeScenePollCbms(id);
+    // Presence only — no live WS to push responses to.
+    void exchangeOnce(req)
+      .catch((err) => {
+        console.error(
+          `[ws-gateway] orphan clientId=${id.toString(16)}`,
+          err.message || err,
+        );
+      })
+      .finally(() => {
+        entry.busy = false;
+      });
+  }, GATEWAY_KEEPALIVE_MS);
+  if (typeof entry.timer.unref === "function") entry.timer.unref();
+  orphanKeepalives.set(id, entry);
+  console.log(
+    `[ws-gateway] orphan start clientId=${id.toString(16)} ` +
+      `grace=${GATEWAY_ORPHAN_MS}ms interval=${GATEWAY_KEEPALIVE_MS}ms`,
+  );
+}
+
+function parseCbmsHead(req) {
+  if (!Buffer.isBuffer(req) || req.length < 24) return null;
+  if (req.toString("ascii", 0, 4) !== "CBMS") return null;
+  const flags = req.readUInt32LE(8);
+  const metaLen = req.readUInt32LE(16);
+  if (metaLen < 4 || req.length < 20 + 4) return null;
+  const clientId = req.readUInt32LE(20) >>> 0;
+  return { flags, clientId, metaLen };
+}
+
+function encodeScenePollCbms(clientId) {
+  const out = Buffer.alloc(24);
+  out.write("CBMS", 0, 4, "ascii");
+  out.writeUInt32LE(1, 4);
+  out.writeUInt32LE(CBMS_FLAG_SCENE_POLL, 8);
+  out.writeUInt32LE(4, 12); // payload = meta only
+  out.writeUInt32LE(4, 16); // metaLen
+  out.writeUInt32LE(clientId >>> 0, 20);
+  return out;
+}
+
 wss.on("connection", (ws) => {
   // Serialize per-socket exchanges so overlapping browser sends cannot interleave.
   let chain = Promise.resolve();
+  /** Last CBMS clientId — gateway keepalive reuses it. */
+  let clientId = 0;
+  /** Armed after client sends SCENE_POLL (in-world); cleared on DISCONNECT. */
+  let pollArmed = false;
+  /** True logout — do not orphan-keepalive after this WS closes. */
+  let explicitDisconnect = false;
+  let lastClientMsgAt = 0;
+  let keepaliveBusy = false;
+
+  const clearKeepalive = () => {
+    if (ws._pixKeepaliveTimer) {
+      clearInterval(ws._pixKeepaliveTimer);
+      ws._pixKeepaliveTimer = null;
+    }
+  };
+
+  const enqueueExchange = (req, via) => {
+    const job = chain.then(async () => {
+      if (ws.readyState !== ws.OPEN) return;
+      try {
+        const frames = await exchangeOnce(req);
+        for (const frame of frames) {
+          if (ws.readyState === ws.OPEN) ws.send(frame);
+        }
+      } catch (err) {
+        console.error(`[ws-gateway] ${via}`, err.message || err);
+        // Keep WS alive — client will time out / retry on the same session.
+      }
+    });
+    chain = job.catch((err) => {
+      console.error("[ws-gateway] chain", err.message || err);
+    });
+    return chain;
+  };
+
+  ws._pixKeepaliveTimer = null;
+  if (GATEWAY_KEEPALIVE_MS > 0) {
+    ws._pixKeepaliveTimer = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) {
+        clearKeepalive();
+        return;
+      }
+      if (!pollArmed || !clientId || keepaliveBusy) return;
+      const idleFor = Date.now() - lastClientMsgAt;
+      if (idleFor < GATEWAY_KEEPALIVE_IDLE_MS) return;
+      keepaliveBusy = true;
+      const req = encodeScenePollCbms(clientId);
+      void enqueueExchange(req, `keepalive clientId=${clientId}`).finally(() => {
+        keepaliveBusy = false;
+      });
+    }, GATEWAY_KEEPALIVE_MS);
+    if (typeof ws._pixKeepaliveTimer.unref === "function") {
+      ws._pixKeepaliveTimer.unref();
+    }
+  }
 
   ws.on("error", (err) => {
     console.error("[ws-gateway] ws", err.message || err);
   });
 
+  ws.on("close", () => {
+    clearKeepalive();
+    // Abrupt drop (OEM kill / Wi-Fi blip): keep mock presence warm so the
+    // same LiveTransport.clientId can reconnect without heartbeat-timeout.
+    // Explicit DISCONNECT (logout) must not leave a ghost online.
+    if (pollArmed && clientId && !explicitDisconnect) {
+      startOrphanKeepalive(clientId);
+    } else if (clientId && explicitDisconnect) {
+      stopOrphanKeepalive(clientId, "disconnect");
+    }
+    pollArmed = false;
+  });
+
   ws.on("message", (data) => {
-    chain = chain
-      .then(async () => {
-        if (ws.readyState !== ws.OPEN) return;
-        try {
-          const req = Buffer.isBuffer(data) ? data : Buffer.from(data);
-          const frames = await exchangeOnce(req);
-          for (const frame of frames) {
-            if (ws.readyState === ws.OPEN) ws.send(frame);
-          }
-        } catch (err) {
-          console.error("[ws-gateway]", err.message || err);
-          // Keep WS alive — client will time out / retry on the same session.
-        }
-      })
-      .catch((err) => {
-        console.error("[ws-gateway] chain", err.message || err);
-      });
+    lastClientMsgAt = Date.now();
+    const req = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const head = parseCbmsHead(req);
+    if (head) {
+      clientId = head.clientId || clientId;
+      if (head.flags & CBMS_FLAG_DISCONNECT) {
+        pollArmed = false;
+        explicitDisconnect = true;
+        stopOrphanKeepalive(clientId, "disconnect");
+      } else if (head.flags & CBMS_FLAG_SCENE_POLL) {
+        pollArmed = true;
+        explicitDisconnect = false;
+        // Live WS reclaimed this clientId — stop orphan TCP polls.
+        stopOrphanKeepalive(clientId, "reclaim");
+      } else if (clientId) {
+        // Any other traffic from this id also means the socket is live again.
+        stopOrphanKeepalive(clientId, "reclaim");
+      }
+    }
+    void enqueueExchange(req, "client");
   });
 });
+
+console.log(
+  GATEWAY_KEEPALIVE_MS > 0
+    ? `[ws-gateway] idle scene-poll keepalive ${GATEWAY_KEEPALIVE_MS}ms ` +
+        `(idle≥${GATEWAY_KEEPALIVE_IDLE_MS}ms; PIX_GATEWAY_KEEPALIVE_MS)`
+    : "[ws-gateway] idle scene-poll keepalive off (PIX_GATEWAY_KEEPALIVE_MS=0)",
+);
+console.log(
+  GATEWAY_ORPHAN_MS > 0 && GATEWAY_KEEPALIVE_MS > 0
+    ? `[ws-gateway] orphan keepalive after WS drop ${GATEWAY_ORPHAN_MS}ms ` +
+        `(PIX_GATEWAY_ORPHAN_MS; 0=off)`
+    : "[ws-gateway] orphan keepalive off",
+);

@@ -42,6 +42,33 @@ export function asciiAt(buf: Uint8Array, off: number, len: number): string {
 /** Decode GBK / mixed bytes — shared with WT wire codec. */
 export { decodeGbk } from "../net/gbk";
 
+/**
+ * Match mock_server `parse_dsh_u32` / `parse_dsh_s32`: leading digits, stop at
+ * first non-digit. equip.dsh has dirty cells like `34:` / `70:` that `Number()`
+ * turns into NaN → 0.
+ */
+export function parseDshInt(raw: string, fallback = 0): number {
+  const s = (raw ?? "").trim();
+  if (!s) return fallback;
+  let pos = 0;
+  let sign = 1;
+  if (s.charCodeAt(pos) === 0x2d /* - */) {
+    sign = -1;
+    pos++;
+  } else if (s.charCodeAt(pos) === 0x2b /* + */) {
+    pos++;
+  }
+  let value = 0;
+  let haveDigit = false;
+  for (; pos < s.length; pos++) {
+    const c = s.charCodeAt(pos);
+    if (c < 0x30 || c > 0x39) break;
+    haveDigit = true;
+    value = value * 10 + (c - 0x30);
+  }
+  return haveDigit ? value * sign : fallback;
+}
+
 export function rgb565ToRgba(pixel: number, out: Uint8ClampedArray, i: number): void {
   const r = ((pixel >> 11) & 0x1f) * 255 / 31;
   const g = ((pixel >> 5) & 0x3f) * 255 / 63;

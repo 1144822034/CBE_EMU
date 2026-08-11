@@ -322,6 +322,7 @@ function parseWagerResultObj(obj: WtObject): WagerResult {
 export function parseWagerList(packet: WtPacket): {
   result: number;
   rows: WagerListRow[];
+  message: string;
 } | null {
   const obj = packet.objects.find(
     (o) => o.kind === ARENA_WT_KIND && o.subtype === 10,
@@ -330,6 +331,15 @@ export function parseWagerList(packet: WtPacket): {
   const count = fieldU32(obj, "count");
   const raw = findField(obj, "rows");
   const rows: WagerListRow[] = [];
+  const msgField = findField(obj, "message");
+  let message = "";
+  if (msgField) {
+    try {
+      message = new SeqReader(msgField).string().replace(/\0+$/g, "");
+    } catch {
+      message = "";
+    }
+  }
   if (raw) {
     const r = new SeqReader(raw);
     for (let i = 0; i < count && r.remaining() > 8; i++) {
@@ -362,7 +372,7 @@ export function parseWagerList(packet: WtPacket): {
       }
     }
   }
-  return { result: fieldU32(obj, "result"), rows };
+  return { result: fieldU32(obj, "result"), rows, message };
 }
 
 export function parseWagerMine(packet: WtPacket): WagerMine | null {

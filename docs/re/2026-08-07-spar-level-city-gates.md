@@ -14,6 +14,10 @@ status: fixed
 |--------|------|
 | 6 | 等级不足 25 |
 | 7 | 城镇中无法切磋 |
+| 8 | 对方替身人偶抵挡（不进战） |
+| 9 | 发起方冷却中（5 分钟） |
+
+人偶与冷却细节见 `docs/re/2026-08-11-spar-substitute-doll-and-initiate-cooldown.md`。
 
 ## 修改
 

@@ -29,9 +29,9 @@ Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 
 根因：WebView `onPause` 停定时器 → gateway WS 断。
 
-1. `MainActivity`：`PARTIAL_WAKE_LOCK`；`onPause`/`onStop` 后 `onResume` + `resumeTimers`
-2. 首次弹「忽略电池优化」
-3. 前端 `visibilitychange`/`focus` → `session.wakeFromBackground()`
-4. 进图即拉起 `HangupKeepAlive` 前台服务（`online` 文案；挂机意图武装时为 `hangup`），见 [2026-08-10-pixi-android-background-disconnect.md](2026-08-10-pixi-android-background-disconnect.md)、[2026-08-10-pixi-hangup-keepalive-resume.md](2026-08-10-pixi-hangup-keepalive-resume.md)
+1. `MainActivity`：`PARTIAL_WAKE_LOCK`；`onPause` 前后 `resumeTimers`；运行时申请通知权限
+2. 未授权电池优化时周期性再弹「忽略电池优化」
+3. 前端 `visibilitychange`/`focus` → `session.wakeFromBackground()`；FGS 每 2s 注入 `__pixiNativeKeepAlive`
+4. 进图即拉起 `HangupKeepAlive` 前台服务（API34+ `specialUse`；`online`/`hangup` 文案），见 [2026-08-10-pixi-android-background-disconnect.md](2026-08-10-pixi-android-background-disconnect.md)、[2026-08-10-pixi-hangup-keepalive-resume.md](2026-08-10-pixi-hangup-keepalive-resume.md)
 
-Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`FOREGROUND_SERVICE_DATA_SYNC`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`
+Manifest：`WAKE_LOCK`、`FOREGROUND_SERVICE`/`_DATA_SYNC`/`_SPECIAL_USE`、`POST_NOTIFICATIONS`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`、`usesCleartextTraffic`

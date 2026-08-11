@@ -59,3 +59,9 @@ CBE 仍受 GetMapTileData 六槽限制；Pixi 可直接加载 `.actor`。
 - 切磋：`visual0`∈1..2（sexGroup）仍走玩家六槽。
 - 挑战/挂机 PvE：`resolvePveEnemyActor` 按 leftId / 名 / EC 向导 NPC 取场景
   `battleActorResource` / NPC `actorResource`，不再用占位 visual 当职业性别。
+
+## Pixi 续（2026-08-11）
+
+梦境挑战向导是 `FB_lotus*`，旧回退会把怪画成 NPC。现优先目录
+`actor_resource` 与场景 `e_*` 战斗场；向导仅当资源本身是 `e_*.actor`
+（如小猴子）才采用。见 `2026-08-11-dream-challenge-monster-looks-like-npc.md`。

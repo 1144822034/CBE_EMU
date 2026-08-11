@@ -37,6 +37,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type AuctionPanelAction =
   | "bid"
@@ -93,6 +94,7 @@ export class AuctionPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
   private inputHit = new Graphics();
+  private rowHits: Container[] = [];
   private activeTab = 0;
   private listMode: ListMode = "menu";
   private rows: AuctionListing[] = [];
@@ -142,6 +144,7 @@ export class AuctionPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    this.eventMode = "static";
     this.addChild(this.box);
     this.inputHit.eventMode = "static";
     this.inputHit.cursor = "text";
@@ -283,6 +286,7 @@ export class AuctionPanel extends Container {
   close(): void {
     this.releaseIme();
     clearPanelTip(this.toast);
+    clearPointerHits(this.rowHits);
     this.detailListing = null;
     this.visible = false;
   }
@@ -882,6 +886,7 @@ export class AuctionPanel extends Container {
 
   private addLabel(text: string, x: number, y: number, color: number): void {
     const l = makePixelText(text, 12, color);
+    l.eventMode = "none";
     l.x = x;
     l.y = y;
     this.addChild(l);
@@ -895,6 +900,7 @@ export class AuctionPanel extends Container {
     color: number,
   ): void {
     const l = makePixelText(text, 12, color);
+    l.eventMode = "none";
     l.x = Math.floor(cx - l.width / 2);
     l.y = Math.floor(cy - l.height / 2);
     this.addChild(l);
@@ -933,6 +939,7 @@ export class AuctionPanel extends Container {
 
   private redraw(): void {
     this.clearLabels();
+    clearPointerHits(this.rowHits);
     this.box.clear();
     this.inputHit.clear();
     const x = 4;
@@ -953,7 +960,11 @@ export class AuctionPanel extends Container {
     else this.drawBrowseLike(x, bodyTop, w, h - (bodyTop - y));
 
     drawPanelTipOverlay(this, this.toast);
-    if (this.isPriceMode()) this.ime.show(this.priceInputRect());
+    if (this.isPriceMode()) {
+      // Keep IME hit above labels/tips added this frame.
+      this.addChild(this.inputHit);
+      this.ime.show(this.priceInputRect());
+    }
   }
 
   private drawDetail(
@@ -1052,6 +1063,14 @@ export class AuctionPanel extends Container {
         by + 2,
         hi ? EQUIP_DETAIL_YELLOW : CBE.ink,
       );
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 8, by, w - 16, btnH, () => {
+          this.detailActionCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
     this.addLabel(this.tip || "上下选操作 ←→翻页", x + 10, tipY, CBE.inkMint);
   }
@@ -1121,6 +1140,14 @@ export class AuctionPanel extends Container {
           `${r.itemName}${en}x${r.itemCount} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
       }
       this.addLabel(label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
+      const hitIdx = idx;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 6, ry, w - 12, rowH - 1, () => {
+          this.listCursor = hitIdx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     }
     this.addLabel(this.tip || hint, x + 10, tipY, CBE.inkMint);
   }
@@ -1155,6 +1182,14 @@ export class AuctionPanel extends Container {
             x + 10,
             ry + 1,
             hi ? CBE.ink : qualityColor(it.quality),
+          );
+          const hitIdx = idx;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, ry, w - 12, 15, () => {
+              this.bagCursor = hitIdx;
+              this.redraw();
+              this.confirm();
+            }),
           );
         });
       }
@@ -1216,6 +1251,14 @@ export class AuctionPanel extends Container {
       const hi = i === this.menuCursor;
       if (hi) this.box.rect(x + 6, ry, w - 12, 15).fill({ color: BAG_SELECT });
       this.addLabel(row.label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, x + 6, ry, w - 12, 15, () => {
+          this.menuCursor = idx;
+          this.redraw();
+          this.confirm();
+        }),
+      );
     });
     this.addLabel(
       this.tip || "←→切标签；数量/货币/时长行可调",

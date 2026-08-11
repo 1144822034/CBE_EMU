@@ -10,8 +10,8 @@ import {
 } from "./cbms";
 
 /** Live gateway on this machine's LAN IP (PixiJS web / APK). */
-export const FIXED_LIVE_GATEWAY = "ws://47.108.210.191:19092";
-//export const FIXED_LIVE_GATEWAY = "ws://192.1.1.2:19092";
+//export const FIXED_LIVE_GATEWAY = "ws://47.108.210.191:19092";
+export const FIXED_LIVE_GATEWAY = "ws://192.1.1.2:19092";
 
 export type TransportMode = "live";
 
@@ -48,13 +48,22 @@ export class LiveTransport implements GameTransport {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private exchangeChain: Promise<void> = Promise.resolve();
-  /** Frames that arrived while no exchange was waiting (must not be dropped). */
+  /**
+   * Early responses for the in-flight exchange only.
+   * Gateway keepalive pushes must NOT land here (would steal the next move/login).
+   */
   private inbox: CbmrFrame[] = [];
   private waiters: Array<{
     resolve: (f: CbmrFrame) => void;
     reject: (e: Error) => void;
     timer: number;
   }> = [];
+  /** True between send and finished read of one exchange. */
+  private exchangeInFlight = false;
+  /**
+   * Unsolicited CBMR (gateway idle scene-poll). GameSession applies via handleBodies.
+   */
+  onPushBodies: ((bodies: Uint8Array[]) => void) | null = null;
   clientId = ((Math.random() * 0xffffff) >>> 0) || 1;
   constructor(private readonly url = defaultLiveGatewayUrl()) {}
 
@@ -97,8 +106,16 @@ export class LiveTransport implements GameTransport {
         if (waiter) {
           window.clearTimeout(waiter.timer);
           waiter.resolve(frame);
-        } else {
+        } else if (this.exchangeInFlight) {
+          // Response raced ahead of waiter registration.
           this.inbox.push(frame);
+        } else {
+          // Gateway keepalive (or other push) — do not poison exchange inbox.
+          try {
+            this.onPushBodies?.([frame.body]);
+          } catch (e) {
+            console.warn("[live] onPushBodies", e);
+          }
         }
       } catch (e) {
         const waiter = this.waiters.shift();
@@ -141,6 +158,7 @@ export class LiveTransport implements GameTransport {
     }
     this.rejectWaiters(new Error("socket closed"));
     this.inbox = [];
+    this.onPushBodies = null;
     this.ws?.close();
     this.ws = null;
   }
@@ -164,23 +182,28 @@ export class LiveTransport implements GameTransport {
     }
     const meta = encodeRequestMeta(this.clientId);
     const req = encodeCbms(flags, meta, wtBody);
-    this.ws.send(req);
+    this.exchangeInFlight = true;
+    try {
+      this.ws.send(req);
 
-    const frames: CbmrFrame[] = [];
-    const first = await this.readOne(8000);
-    frames.push(first);
-    let guard = 0;
-    let more = (first.flags & CBMR_FLAG_HAS_FOLLOWUP) !== 0;
-    while (more && guard++ < 8) {
-      try {
-        const next = await this.readOne(600);
-        frames.push(next);
-        more = (next.flags & CBMR_FLAG_HAS_FOLLOWUP) !== 0;
-      } catch {
-        break;
+      const frames: CbmrFrame[] = [];
+      const first = await this.readOne(8000);
+      frames.push(first);
+      let guard = 0;
+      let more = (first.flags & CBMR_FLAG_HAS_FOLLOWUP) !== 0;
+      while (more && guard++ < 8) {
+        try {
+          const next = await this.readOne(600);
+          frames.push(next);
+          more = (next.flags & CBMR_FLAG_HAS_FOLLOWUP) !== 0;
+        } catch {
+          break;
+        }
       }
+      return frames.map((f) => f.body);
+    } finally {
+      this.exchangeInFlight = false;
     }
-    return frames.map((f) => f.body);
   }
 
   private readOne(timeoutMs: number): Promise<CbmrFrame> {

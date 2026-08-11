@@ -19,6 +19,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type TaskTab = "accepted" | "candidates";
 export type TaskAction = "detail" | "abandon" | "accept" | "refresh";
@@ -36,6 +37,7 @@ const STATE_LABEL: Record<number, string> = {
 export class TaskPanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private mode: Mode = "list";
   private tab: TaskTab = "accepted";
   private listCursor = 0;
@@ -237,6 +239,7 @@ export class TaskPanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     const x = 8;
     const y = 28;
@@ -262,6 +265,18 @@ export class TaskPanel extends Container {
       this.tab === "candidates" ? CBE.menuHi : CBE.inkLabel,
     );
     this.addLabel("←→", x + w - 36, tabY, CBE.inkLabel);
+    this.rowHits.push(
+      attachRowPointerHit(this, x + 8, tabY - 2, 60, 18, () => {
+        if (this.mode !== "list") return;
+        this.moveTab(-1);
+      }),
+    );
+    this.rowHits.push(
+      attachRowPointerHit(this, x + 76, tabY - 2, 60, 18, () => {
+        if (this.mode !== "list") return;
+        this.moveTab(1);
+      }),
+    );
 
     try {
       if (this.mode === "detail") {
@@ -279,6 +294,9 @@ export class TaskPanel extends Container {
           y + h - 18,
           CBE.inkLabel,
         );
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, tabY + 16, w - 12, h - 70, () => this.confirm()),
+        );
         return;
       }
 
@@ -293,6 +311,15 @@ export class TaskPanel extends Container {
             this.box.rect(x + 6, ly - 1, w - 12, 16).fill({ color: CBE.select });
           }
           this.addLabel(lab, x + 14, ly, sel ? CBE.ink : CBE.inkMint);
+          const idx = i;
+          const hitY = ly;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, hitY - 1, w - 12, 16, () => {
+              this.actionCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
           ly += 16;
         });
         return;
@@ -310,6 +337,9 @@ export class TaskPanel extends Container {
           CBE.inkLabel,
         );
         this.addLabel("确定·刷新", x + 10, ly + 18, CBE.inkLabel);
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, ly - 1, w - 12, 40, () => this.confirm()),
+        );
       } else {
         pageRows.forEach((row, i) => {
           const idx = start + i;
@@ -319,6 +349,14 @@ export class TaskPanel extends Container {
           }
           this.addLabel(row.name.slice(0, 16), x + 10, ly, sel ? CBE.ink : CBE.inkMint);
           this.addLabel(row.subtitle.slice(0, 18), x + 12, ly + 12, CBE.inkLabel);
+          const hitY = ly;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, hitY - 1, w - 12, 26, () => {
+              this.listCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
           ly += 28;
         });
       }

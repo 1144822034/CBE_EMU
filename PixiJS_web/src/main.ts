@@ -160,6 +160,42 @@ function auctionMsgTip(code: string | undefined, okText: string): string {
   return map[m] ?? `失败:${m}`;
 }
 
+/** Map server wager short codes to Chinese panel tips. */
+function wagerMsgTip(code: string | undefined, okText: string): string {
+  const m = (code || "").trim();
+  if (!m || m === "ok") return okText;
+  const map: Record<string, string> = {
+    disabled: "赏金擂台未开放",
+    "no-session": "角色未在线",
+    "bad-stake": "押金须至少100金",
+    "already-open": "你已有开放中的擂台",
+    busy: "战斗或忙碌中无法参与",
+    party: "队伍无效",
+    "not-leader": "需队长操作",
+    "member-offline": "队员不在线",
+    "member-scene": "队员不在同场景",
+    "member-busy": "队员忙碌中",
+    "member-role": "队员角色无效",
+    "no-role": "角色无效",
+    money: "铜币不足",
+    full: "擂台数量已满",
+    db: "保存失败",
+    "bad-id": "擂台编号无效",
+    denied: "无权操作",
+    "not-open": "该擂台不可挑战",
+    scene: "须在同一场景",
+    self: "不能挑战自己的擂台",
+    size: "双方人数须相等",
+    "not-await": "不在待确认状态",
+    "not-host": "仅擂主方可确认",
+    rejected: "已拒绝挑战",
+    pending: "等待队友确认",
+    fight: "开战",
+    "start-fail": "开战失败，已退挑战方押金",
+  };
+  return map[m] ?? `失败:${m}`;
+}
+
 async function main(): Promise<void> {
   const wrap = document.getElementById("phone-wrap");
   if (!wrap) throw new Error("missing #phone-wrap");
@@ -426,11 +462,28 @@ async function main(): Promise<void> {
 
   const openWagerPanel = async () => {
     const board = await session.fetchWagerBoard();
-    wagerPanel.open(board.rows, board.mine);
+    wagerPanel.open(board.rows, board.mine, session.selectedRoleId);
     showPhase("world");
     syncWorldWalkInput();
     shell.setSoftkeys(wagerPanel.softkeys());
     setChromeStatus("赏金擂台");
+    if (board.listResult === 0 && board.listMessage) {
+      wagerPanel.showTip(wagerMsgTip(board.listMessage, "列表失败"));
+    } else if (
+      board.rows.length === 0 &&
+      !(board.mine?.challengeId && (board.mine.status === 0 || board.mine.status === 1))
+    ) {
+      wagerPanel.showTip("本场景暂无开放擂台");
+    } else if (
+      board.rows.length > 0 &&
+      !board.rows.some(
+        (r) =>
+          r.status === 0 &&
+          r.hostLeaderRoleId !== (session.selectedRoleId >>> 0),
+      )
+    ) {
+      wagerPanel.showTip("列表仅有己方擂台，换号同场景可挑战");
+    }
   };
 
   const openAuctionPanel = async (opts?: {
@@ -498,7 +551,12 @@ async function main(): Promise<void> {
       await openWagerPanel();
       if (tip) wagerPanel.showTip(tip);
     };
-    if (action === "close") {
+    if (action === "close" || action === "noop") {
+      if (action === "noop") {
+        wagerPanel.showTip("请选择应战或撤擂");
+        shell.setSoftkeys(wagerPanel.softkeys());
+        return;
+      }
       wagerPanel.close();
       syncWorldWalkInput();
       shell.setSoftkeys({ left: "菜单", right: "菜单" });
@@ -512,7 +570,7 @@ async function main(): Promise<void> {
       void session.wagerCreate(wagerPanel.stake).then((r) => {
         const tip = r?.result
           ? `摆擂成功#${r.challengeId}`
-          : `摆擂失败:${r?.message ?? "?"}`;
+          : wagerMsgTip(r?.message, "摆擂失败");
         void refresh(tip);
       });
       return;
@@ -520,29 +578,33 @@ async function main(): Promise<void> {
     if (action === "challenge" && challengeId) {
       void session.wagerChallenge(challengeId).then((r) => {
         const tip = r?.result
-          ? "已应战，等待擂主确认"
-          : `应战失败:${r?.message ?? "?"}`;
+          ? wagerMsgTip(r.message, "已应战，等待擂主确认")
+          : wagerMsgTip(r?.message, "应战失败");
         void refresh(tip);
       });
       return;
     }
     if (action === "confirm" && challengeId) {
       void session.wagerConfirm(challengeId, true).then((r) => {
-        const tip = r?.message || (r?.result ? "已确认应战" : "确认失败");
+        const tip = r?.result
+          ? wagerMsgTip(r.message, "已确认应战")
+          : wagerMsgTip(r?.message, "确认失败");
         void refresh(tip);
       });
       return;
     }
     if (action === "reject" && challengeId) {
       void session.wagerConfirm(challengeId, false).then((r) => {
-        const tip = r?.message || "已拒绝应战";
+        const tip = wagerMsgTip(r?.message, "已拒绝应战");
         void refresh(tip);
       });
       return;
     }
     if (action === "cancel" && challengeId) {
       void session.wagerCancel(challengeId).then((r) => {
-        const tip = r?.result ? "已撤擂" : `撤擂失败:${r?.message ?? "?"}`;
+        const tip = r?.result
+          ? "已撤擂"
+          : wagerMsgTip(r?.message, "撤擂失败");
         void refresh(tip);
       });
     }
@@ -679,22 +741,28 @@ async function main(): Promise<void> {
         : bracketForLevel(session.level || activeRole?.level || 1);
     const page = await session.fetchArenaRank(j, b, 0);
     arenaPanel.open(page, j, b);
-    showPhase("dialog");
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(arenaPanel.softkeys());
     setChromeStatus("比武排行榜");
   };
   arenaPanel.onBucketChange = (job, bracket) => {
-    void openArenaPanel(job, bracket);
+    void openArenaPanel(job, bracket).then(() => {
+      shell.setSoftkeys(arenaPanel.softkeys());
+    });
   };
   arenaPanel.onAction = (action) => {
     if (action === "close") {
       arenaPanel.close();
-      showPhase("world");
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
       return;
     }
     if (action === "leave") {
       void session.leaveArena().then(() => {
         arenaPanel.close();
-        showPhase("world");
+        syncWorldWalkInput();
+        shell.setSoftkeys({ left: "菜单", right: "菜单" });
         showGameTip("已离开比武擂台");
       });
       return;
@@ -707,6 +775,7 @@ async function main(): Promise<void> {
             : `领奖失败(${r?.result ?? "?"})`;
         await openArenaPanel(arenaPanel.job, arenaPanel.bracket);
         arenaPanel.showTip(tip);
+        shell.setSoftkeys(arenaPanel.softkeys());
       });
     }
   };
@@ -1384,7 +1453,9 @@ async function main(): Promise<void> {
                 n.battleActorId === encounterId ||
                 n.actorId === encounterId,
             ) ||
-            (state.subtype === 5 ? session.sceneMonsters[0] : undefined);
+            ((state.subtype === 5 || state.subtype === 10)
+              ? session.sceneMonsters[0]
+              : undefined);
           return mon?.battleActorResource || mon?.actorResource || "";
         })() ||
         "e_mucusY.actor";
@@ -1814,6 +1885,16 @@ async function main(): Promise<void> {
       void session.requestTeleportStoneList();
       return;
     }
+    // Face-to-face peer tap → same options as 周围玩家 menu.
+    const mapPeer = view.actors.peerAt(actorId);
+    if (mapPeer) {
+      closeApproach(false);
+      showPhase("social");
+      // Do not openNearbyPlayers here: its page callback calls openNearby()
+      // and would wipe the action sheet back to the list.
+      social.openNearbyPeerActions(actorId, session.nearbyList, mapPeer);
+      return;
+    }
     closeApproach(false);
     void session.openNpc(actorId);
   };
@@ -1825,6 +1906,8 @@ async function main(): Promise<void> {
   };
   view.onMonsterCollide = (actorId) => {
     if (session.inBattle || phase !== "world") return;
+    // Hangup loop owns encounters (same 4/1 path); ignore walk-in while armed.
+    if (session.hangupDesired) return;
     closeApproach(false);
     session.sceneMonsters = view.actors.liveSceneMonsters();
     setChromeStatus("遭遇怪物！");
@@ -1873,7 +1956,7 @@ async function main(): Promise<void> {
   /** Fire now, or retry until the seat can act (or auto is cancelled). */
   let autoArmTimer: number | null = null;
   /**
-   * HUD 挂机按钮打开技能菜单后：选技能即发 2/10 开战。
+   * HUD 挂机按钮打开技能菜单后：选技能即本地 startHangup（客户端遇怪环）。
    * 菜单「挂机战斗」仍只记录，不置此标志。
    */
   let hangupStartAfterSkillPick = false;
@@ -1951,6 +2034,10 @@ async function main(): Promise<void> {
     // HUD was hidden in battle — re-paint top-left bars with post-fight vitals.
     hud.setVitals(session.hp, session.hpMax, session.mp, session.mpMax);
     setChromeStatus(`[${session.transport?.mode}] ${log}`);
+    // Refresh SCE pool then continue hangup as another collide-style 4/1.
+    session.sceneMonsters = view.actors.liveSceneMonsters();
+    session.onLeftBattleForHangup();
+    syncWorldStatusBadges();
   };
 
   const hasRevivalStone = () =>
@@ -3066,7 +3153,7 @@ async function main(): Promise<void> {
       const startNow = hangupStartAfterSkillPick;
       hangupStartAfterSkillPick = false;
       if (startNow) {
-        hud.pushChat(`[挂]技能 ${tip}，请求挂机…`);
+        hud.pushChat(`[挂]技能 ${tip}，开始挂机…`);
         showGameTip(`挂机技能: ${tip}`);
         showPhase("world");
         void session.startHangup();
@@ -3183,7 +3270,8 @@ dialog.hide();
           showGameTip(`消耗${r.cost}个传送石 → ${args.alias}`);
         } else {
           hud.pushChat(`[系]传送失败: ${r.detail}`);
-          worldMap.showTip(r.detail);
+          // Longer toast so「传送石不够」is readable on the confirm panel.
+          worldMap.showTip(r.detail, 1800);
           if (phase === "map") view.inputEnabled = false;
           else view.inputEnabled = true;
         }
@@ -3228,6 +3316,11 @@ dialog.hide();
     if (phase === "battle") endBattleToWorld("战斗结束");
   };
   battle.onDeathPromptShown = () => {
+    // Death ends client hangup loop (same as former server「已停止挂机」).
+    if (session.hangupDesired || session.hangupActive) {
+      void session.stopHangup();
+      syncWorldStatusBadges();
+    }
     battle.setDeathPromptBag(hasRevivalStone());
     setChromeStatus(
       hasRevivalStone()
@@ -3289,9 +3382,12 @@ dialog.hide();
       );
     }
   };
-  /** Dedicated stopHangup — always clears hangupDesired (keepalive must not re-arm). */
+  /** Dedicated stopHangup — local clear; no server 2/10. */
   battle.onHangupCancel = () => {
-    hud.pushChat("[挂] 请求停止挂机…");
+    if (autoArmTimer != null) {
+      window.clearTimeout(autoArmTimer);
+      autoArmTimer = null;
+    }
     void session.stopHangup();
     syncWorldStatusBadges();
   };
@@ -3314,10 +3410,14 @@ dialog.hide();
   hud.onMenu = () => showPhase("menu");
   hud.onHome = () => cycleMapUi();
   hud.onHangup = () => {
-    // Active hangup, or armed resume intent: always stop / cancel re-arm.
+    // Active hangup, or armed resume intent: always stop locally.
     if (session.hangupActive || session.hangupDesired) {
-      hud.pushChat("[挂] 请求停止挂机…");
+      if (autoArmTimer != null) {
+        window.clearTimeout(autoArmTimer);
+        autoArmTimer = null;
+      }
       void session.stopHangup();
+      if (phase === "battle") battle.setHangupActive(false);
       syncWorldStatusBadges();
       return;
     }
@@ -3395,7 +3495,10 @@ dialog.hide();
         return;
       }
       if (arenaPanel.visible) {
-        if (which === "left") arenaPanel.switchJob(1);
+        if (which === "left") {
+          arenaPanel.toggleTabFocus();
+          shell.setSoftkeys(arenaPanel.softkeys());
+        }
         if (which === "center") arenaPanel.confirm();
         if (which === "right") {
           arenaPanel.close();
@@ -3405,8 +3508,10 @@ dialog.hide();
         return;
       }
       if (wagerPanel.visible) {
-        if (which === "left") wagerPanel.adjustStake(1000);
-        if (which === "center") wagerPanel.confirm();
+        if (which === "left" || which === "center") {
+          wagerPanel.confirm();
+          shell.setSoftkeys(wagerPanel.softkeys());
+        }
         if (which === "right") {
           wagerPanel.close();
           syncWorldWalkInput();
@@ -3620,11 +3725,18 @@ dialog.hide();
     if (phase === "world" && (arenaPanel.visible || wagerPanel.visible)) {
       if (!down) return;
       if (arenaPanel.visible) {
-        if (dir === "left" || dir === "right") arenaPanel.switchJob(dir === "left" ? -1 : 1);
-        else arenaPanel.move(dir === "up" ? -1 : 1);
+        if (dir === "left" || dir === "right") {
+          arenaPanel.horizontal(dir === "left" ? -1 : 1);
+          shell.setSoftkeys(arenaPanel.softkeys());
+        } else arenaPanel.move(dir === "up" ? -1 : 1);
       } else if (wagerPanel.visible) {
-        if (dir === "left" || dir === "right") wagerPanel.adjustStake(dir === "left" ? -1000 : 1000);
-        else wagerPanel.move(dir === "up" ? -1 : 1);
+        if (dir === "left" || dir === "right") {
+          // 1金 = 10000铜；最低 100金
+          wagerPanel.adjustStake(dir === "left" ? -10000 : 10000);
+        } else {
+          wagerPanel.move(dir === "up" ? -1 : 1);
+        }
+        shell.setSoftkeys(wagerPanel.softkeys());
       }
       return;
     }
@@ -3939,9 +4051,16 @@ dialog.hide();
   setChromeStatus("就绪");
 
   // Screen unlock / return to app: heal Live WS if OEM suspended the WebView.
+  // Native FGS also injects window.__pixiNativeKeepAlive every ~2s while in-world.
+  (window as Window & { __pixiNativeKeepAlive?: () => void }).__pixiNativeKeepAlive =
+    () => {
+      void session.backgroundKeepAliveTick();
+    };
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") {
       suspendBgm();
+      // Immediate tick when leaving foreground — setInterval may freeze next.
+      void session.backgroundKeepAliveTick();
       return;
     }
     void session.wakeFromBackground();
@@ -3952,21 +4071,6 @@ dialog.hide();
     void unlockAndResumeBgm();
   });
   installBgmGestureUnlock();
-
-  // Cold start after process kill: silent re-login + re-arm hangup.
-  if (session.hasHangupResumePending()) {
-    title.setStatus("连接恢复，正在恢复挂机…");
-    setChromeStatus("连接恢复，正在恢复挂机…");
-    void session.resumeFromHangupStorage().then((ok) => {
-      if (ok) {
-        showPhase("world");
-        setChromeStatus("挂机已恢复");
-      } else {
-        showPhase("splash");
-        title.setStatus("挂机恢复失败，请重新登录");
-      }
-    });
-  }
 
   app.ticker.add(() => {
     if (phase === "battle") battle.tick(app.ticker.deltaMS);

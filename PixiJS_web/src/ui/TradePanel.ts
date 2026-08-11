@@ -24,6 +24,7 @@ import {
   showPanelTip,
   type PanelTipState,
 } from "./panelTip";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type TradeAction =
   | "pick_item"
@@ -42,6 +43,7 @@ const BAG_PAGE_SIZE = 8;
 export class TradePanel extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   private mode: Mode = "actions";
   private actionCursor = 0;
   private bagCursor = 0;
@@ -456,6 +458,7 @@ export class TradePanel extends Container {
   private redraw(): void {
     for (const t of this.labels) t.destroy();
     this.labels = [];
+    clearPointerHits(this.rowHits);
     this.box.clear();
     this.inputHit.clear();
     const x = 6;
@@ -481,6 +484,16 @@ export class TradePanel extends Container {
       const hi = this.mode === "mine" && i === this.mineCursor;
       const line = formatOfferLine(it);
       this.addLabel(line, leftX, y + 56 + i * 14, hi ? CBE.ink : CBE.inkBody);
+      if (this.mode === "mine") {
+        const idx = i;
+        this.rowHits.push(
+          attachRowPointerHit(this, leftX - 2, y + 54 + i * 14, w / 2 - 12, 14, () => {
+            this.mineCursor = idx;
+            this.redraw();
+            this.confirm();
+          }),
+        );
+      }
     });
     if (!this.myItems.length) {
       this.addLabel("(空)", leftX, y + 56, CBE.inkLabel);
@@ -531,6 +544,13 @@ export class TradePanel extends Container {
             midY + 22 + i * 16,
             hi ? CBE.ink : qColor,
           );
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, midY + 20 + i * 16, w - 12, 15, () => {
+              this.bagCursor = idx;
+              this.redraw();
+              this.confirm();
+            }),
+          );
         });
         if (this.bagScroll > 0) {
           this.addLabel("▲", x + w - 18, midY + 22, CBE.inkMint);
@@ -564,6 +584,14 @@ export class TradePanel extends Container {
           leftX,
           midY + 8 + i * 16,
           hi ? CBE.ink : en ? CBE.inkMint : CBE.inkLabel,
+        );
+        const idx = i;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, midY + 6 + i * 16, w - 12, 15, () => {
+            this.actionCursor = idx;
+            this.redraw();
+            this.confirm();
+          }),
         );
       });
     }

@@ -9,6 +9,7 @@ import {
   makePixelText,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
+import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 /**
  * Compact non-modal "和XXX对话?" prompt over the map.
@@ -17,6 +18,7 @@ import { BitmapLabel } from "./BitmapLabel";
 export class ApproachPrompt extends Container {
   private box = new Graphics();
   private labels: BitmapLabel[] = [];
+  private rowHits: Container[] = [];
   actorId = 0;
   private npcName = "";
 
@@ -26,7 +28,7 @@ export class ApproachPrompt extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.eventMode = "none";
+    this.eventMode = "static";
     this.addChild(this.box);
   }
 
@@ -46,6 +48,7 @@ export class ApproachPrompt extends Container {
     this.actorId = 0;
     this.npcName = "";
     this.clearLabels();
+    clearPointerHits(this.rowHits);
     this.box.clear();
   }
 
@@ -69,6 +72,7 @@ export class ApproachPrompt extends Container {
 
   private redraw(): void {
     this.clearLabels();
+    clearPointerHits(this.rowHits);
     this.box.clear();
 
     const body = `和${this.npcName}对话?`;
@@ -85,7 +89,11 @@ export class ApproachPrompt extends Container {
     const text = makePixelText(body, 12, CBE.ink);
     text.anchor.set(0.5, 0.5);
     text.position.set(LCD_WIDTH / 2, y + Math.floor(h / 2));
+    text.eventMode = "none";
     this.addChild(text);
     this.labels.push(text);
+    this.rowHits.push(
+      attachRowPointerHit(this, x, y, w, h, () => this.confirm()),
+    );
   }
 }

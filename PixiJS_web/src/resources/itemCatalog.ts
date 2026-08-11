@@ -1,4 +1,4 @@
-import { decodeGbk, readU32LE } from "./binary";
+import { decodeGbk, parseDshInt, readU32LE } from "./binary";
 import { fetchResourceBytes } from "./loader";
 
 /** item.dsh / equip.dsh lookup — names & quality come from local DSH (CBE paints the same). */
@@ -125,26 +125,26 @@ export function defaultCategoryForBodySlot(slot: number): number {
 function parseItemRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
   const map = new Map<number, ItemCatalogRow>();
   for (const cells of parseDshRows(raw)) {
-    const id = Number(cells[0] ?? "") | 0;
+    const id = parseDshInt(cells[0] ?? "");
     const name = cells[1] ?? "";
     if (!(id > 0 && name)) continue;
     map.set(id, {
       id,
       name,
       desc: cells[4] ?? "",
-      category: Number(cells[5] ?? "") | 0,
-      level: Number(cells[6] ?? "") | 0,
-      quality: Number(cells[9] ?? "") | 0,
-      stack: Number(cells[10] ?? "") | 0,
-      price: Number(cells[8] ?? "") | 0,
-      coolPrice: Number(cells[29] ?? "") | 0,
-      hpChange: Number(cells[15] ?? "") | 0,
-      mpChange: Number(cells[16] ?? "") | 0,
-      expChange: Number(cells[17] ?? "") | 0,
-      consumable: (Number(cells[12] ?? "") | 0) !== 0,
+      category: parseDshInt(cells[5] ?? ""),
+      level: parseDshInt(cells[6] ?? ""),
+      quality: parseDshInt(cells[9] ?? ""),
+      stack: parseDshInt(cells[10] ?? ""),
+      price: parseDshInt(cells[8] ?? ""),
+      coolPrice: parseDshInt(cells[29] ?? ""),
+      hpChange: parseDshInt(cells[15] ?? ""),
+      mpChange: parseDshInt(cells[16] ?? ""),
+      expChange: parseDshInt(cells[17] ?? ""),
+      consumable: parseDshInt(cells[12] ?? "") !== 0,
       kind: "item",
-      questLink: Number(cells[2] ?? "") | 0,
-      bindAttr: Number(cells[7] ?? "") | 0,
+      questLink: parseDshInt(cells[2] ?? ""),
+      bindAttr: parseDshInt(cells[7] ?? ""),
     });
   }
   return map;
@@ -153,36 +153,36 @@ function parseItemRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
 function parseEquipRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
   const map = new Map<number, ItemCatalogRow>();
   for (const cells of parseDshRows(raw)) {
-    const id = Number(cells[0] ?? "") | 0;
+    const id = parseDshInt(cells[0] ?? "");
     const name = cells[1] ?? "";
     if (!(id > 0 && name)) continue;
-    const category = Number(cells[7] ?? "") | 0;
+    const category = parseDshInt(cells[7] ?? "");
     map.set(id, {
       id,
       name,
       desc: cells[2] ?? "",
       category,
-      level: Number(cells[3] ?? "") | 0,
-      quality: Number(cells[6] ?? "") | 0,
+      level: parseDshInt(cells[3] ?? ""),
+      quality: parseDshInt(cells[6] ?? ""),
       stack: 1,
-      price: Number(cells[5] ?? "") | 0,
+      price: parseDshInt(cells[5] ?? ""),
       coolPrice: 0,
-      hpChange: Number(cells[10] ?? "") | 0,
-      mpChange: Number(cells[11] ?? "") | 0,
+      hpChange: parseDshInt(cells[10] ?? ""),
+      mpChange: parseDshInt(cells[11] ?? ""),
       expChange: 0,
       consumable: false,
       kind: "equip",
       equipSlot: mapEquipCategoryToSlot(category),
-      armor: Number(cells[8] ?? "") | 0,
-      attack: Number(cells[9] ?? "") | 0,
-      strength: Number(cells[12] ?? "") | 0,
-      agility: Number(cells[13] ?? "") | 0,
-      wisdom: Number(cells[14] ?? "") | 0,
-      crit: Number(cells[15] ?? "") | 0,
-      hit: Number(cells[16] ?? "") | 0,
-      dodge: Number(cells[17] ?? "") | 0,
-      resist: Number(cells[18] ?? "") | 0,
-      durabilityMax: Number(cells[19] ?? "") | 0,
+      armor: parseDshInt(cells[8] ?? ""),
+      attack: parseDshInt(cells[9] ?? ""),
+      strength: parseDshInt(cells[12] ?? ""),
+      agility: parseDshInt(cells[13] ?? ""),
+      wisdom: parseDshInt(cells[14] ?? ""),
+      crit: parseDshInt(cells[15] ?? ""),
+      hit: parseDshInt(cells[16] ?? ""),
+      dodge: parseDshInt(cells[17] ?? ""),
+      resist: parseDshInt(cells[18] ?? ""),
+      durabilityMax: parseDshInt(cells[19] ?? ""),
     });
   }
   return map;

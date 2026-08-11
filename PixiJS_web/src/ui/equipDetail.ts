@@ -40,17 +40,19 @@ const ATTR_NAMES: Record<number, string> = {
   10: "法力",
 };
 
-/** Weapon +8 护甲表（CBE/截图 Q4=700；非 mock collect 减半表）. */
-const WEAPON_ARMOR_BY_Q = [0, 175, 350, 525, 700] as const;
+/** Quality tables — mirror mock_server_catalog.c k*ByQuality. */
 const HP_MP_FLAT_BY_Q = [0, 150, 300, 450, 600] as const;
 const ATTACK_BY_Q = [0, 23, 50, 123, 296] as const;
 const ARMOR_BY_Q = [0, 87, 175, 262, 350] as const;
 
 type MilestoneDef = { type: number; flag: number };
 
-/** slot → +4/+8/+12/+16 defs (mirror mock_server_catalog.c). */
+/**
+ * slot → +4/+8/+12/+16 defs (mirror mock_server_catalog.c).
+ * Types: 1力 2敏 3智 4物攻 5护甲 6躲闪 7命中 8暴击 9气血 10法力; flag=1 → %.
+ */
 const MILESTONES: MilestoneDef[][] = [
-  // 0 武器
+  // 0 武器 — +16 type remapped by category 7力/8敏/9智
   [
     { type: 8, flag: 0 },
     { type: 5, flag: 0 },
@@ -74,36 +76,36 @@ const MILESTONES: MilestoneDef[][] = [
   // 3 披风
   [
     { type: 8, flag: 0 },
+    { type: 7, flag: 0 },
     { type: 6, flag: 0 },
-    { type: 9, flag: 0 },
     { type: 2, flag: 0 },
   ],
   // 4 腰带
   [
-    { type: 7, flag: 0 },
     { type: 5, flag: 0 },
+    { type: 10, flag: 0 },
     { type: 9, flag: 1 },
     { type: 1, flag: 0 },
   ],
   // 5 护腿
   [
-    { type: 6, flag: 0 },
-    { type: 5, flag: 0 },
     { type: 4, flag: 0 },
-    { type: 2, flag: 0 },
+    { type: 5, flag: 0 },
+    { type: 7, flag: 0 },
+    { type: 9, flag: 0 },
   ],
   // 6 靴子
   [
     { type: 6, flag: 0 },
-    { type: 5, flag: 0 },
     { type: 9, flag: 0 },
+    { type: 7, flag: 0 },
     { type: 2, flag: 0 },
   ],
   // 7 戒指
   [
-    { type: 8, flag: 0 },
     { type: 4, flag: 0 },
-    { type: 7, flag: 0 },
+    { type: 9, flag: 0 },
+    { type: 5, flag: 0 },
     { type: 3, flag: 0 },
   ],
 ];
@@ -159,9 +161,10 @@ function milestoneValue(
   const slot = cat.equipSlot ?? -1;
 
   if (slot === 0) {
+    // Weapon specials: +12 气血 (Q+1)*600; +16 三围 Q*422.
+    // +8 护甲 uses the same halved ARMOR_BY_Q as other slots (server).
     if (unlock === 12 && type === 9 && flag === 0) return q1 * 600;
     if (unlock === 16 && (type === 1 || type === 2 || type === 3)) return q * 422;
-    if (unlock === 8 && type === 5) return WEAPON_ARMOR_BY_Q[tier]!;
   }
 
   switch (type) {
