@@ -2346,6 +2346,7 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
             item,
             (u8)SDL_min(equipped->enhanceLevel,
                         VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+            &equipped->enhanceAffixes,
             bonus);
     }
 }
@@ -3817,31 +3818,143 @@ mysql_failed:
     return false;
 }
 
-static u32 vm_net_mock_battle_role_attack_default(void)
+/* Battle.cbm consumes the server-selected target and final HP delta from
+ * actioninfo; it does not independently roll hit or critical state.  Keep all
+ * chance rolls server-authoritative and derive them only from the current
+ * battle session/turn/role, never from packet timing or scene polling. */
+static u32 vm_net_mock_battle_stat_roll_per_thousand(u32 salt)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    vm_net_mock_player_stats stats;
-    vm_net_mock_role_build_player_stats(role, &stats);
-    vm_net_mock_battle_apply_active_stat_modifier(&stats);
-    return stats.attack ? stats.attack : 1;
+    u32 value = 0x9e3779b9u ^
+                (g_mockBattleOperateSessionSerial * 0x85ebca6bu) ^
+                (g_mockBattleOperateTurnCounter * 0xc2b2ae35u) ^
+                (g_vm_net_mock_battle_role_id_current * 0x27d4eb2du) ^
+                salt;
+
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value % 1000u;
 }
 
-static u32 vm_net_mock_battle_role_defense_default(void)
+static u32 vm_net_mock_battle_rating_chance_per_thousand(
+    u32 attackerRating, u32 defenderRating, u32 minChance, u32 maxChance)
 {
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    vm_net_mock_player_stats stats;
-    vm_net_mock_role_build_player_stats(role, &stats);
-    vm_net_mock_battle_apply_active_stat_modifier(&stats);
-    return stats.defense;
+    uint64_t denominator = (uint64_t)attackerRating + defenderRating;
+    u32 chance = 0;
+
+    if (denominator != 0)
+        chance = (u32)(((uint64_t)attackerRating * 1000u) / denominator);
+    if (chance < minChance)
+        chance = minChance;
+    if (chance > maxChance)
+        chance = maxChance;
+    return chance;
 }
 
-static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent)
+static bool vm_net_mock_battle_player_attack_hits(
+    const vm_net_mock_player_stats *playerStats,
+    const vm_net_mock_monster_stats *monsterStats, u32 salt)
+{
+    u32 monsterDodge = 20u;
+    u32 chance = 0;
+
+    if (monsterStats != NULL)
+    {
+        uint64_t scaled = 20u + (uint64_t)monsterStats->level * 2u;
+        monsterDodge = scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+    }
+    chance = vm_net_mock_battle_rating_chance_per_thousand(
+        playerStats != NULL ? playerStats->hit : 0, monsterDodge, 600u, 950u);
+    return vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0x6a09e667u) < chance;
+}
+
+static bool vm_net_mock_battle_enemy_attack_hits(
+    const vm_net_mock_monster_stats *monsterStats,
+    const vm_net_mock_player_stats *playerStats, u32 salt)
+{
+    uint64_t scaled = 75u;
+    u32 monsterHit = 75u;
+    u32 chance = 0;
+
+    if (monsterStats != NULL)
+    {
+        scaled += (uint64_t)monsterStats->level * 4u;
+        monsterHit = scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
+    }
+    chance = vm_net_mock_battle_rating_chance_per_thousand(
+        monsterHit, playerStats != NULL ? playerStats->dodge : 0, 400u, 950u);
+    return vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0xbb67ae85u) < chance;
+}
+
+static u32 vm_net_mock_battle_apply_player_critical(
+    u32 damage, const vm_net_mock_player_stats *playerStats, u32 salt, bool *criticalOut)
+{
+    uint64_t denominator = 1200u;
+    u32 chance = 0;
+
+    if (criticalOut)
+        *criticalOut = false;
+    if (damage == 0 || playerStats == NULL)
+        return damage;
+
+    denominator += playerStats->crit;
+    chance = (u32)(((uint64_t)playerStats->crit * 1000u) / denominator);
+    if (chance > 350u)
+        chance = 350u;
+    if (vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0x3c6ef372u) >= chance)
+        return damage;
+
+    if (criticalOut)
+        *criticalOut = true;
+    {
+        uint64_t raised = (uint64_t)damage * 150u;
+        raised = (raised + 99u) / 100u;
+        return raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
+    }
+}
+
+static bool vm_net_mock_battle_monster_uses_magic_damage(u32 enemyId)
+{
+    vm_net_mock_monster_family family = vm_net_mock_monster_family_for_enemy(enemyId);
+
+    return family == VM_NET_MOCK_MONSTER_SPIRIT ||
+           family == VM_NET_MOCK_MONSTER_ELEMENTAL;
+}
+
+static u32 vm_net_mock_battle_apply_resistance(u32 damage, u32 resist)
+{
+    uint64_t reduced = 0;
+
+    if (damage == 0 || resist == 0)
+        return damage;
+    reduced = ((uint64_t)damage * 1000u) / ((uint64_t)1000u + resist);
+    if (reduced == 0)
+        reduced = 1;
+    return reduced > 0xffffffffull ? 0xffffffffu : (u32)reduced;
+}
+
+static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCurrent,
+                                                      u32 rollSalt, bool *hitOut,
+                                                      bool *criticalOut)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
-    u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
-                                            vm_net_mock_battle_role_attack_default());
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_player_stats playerStats;
+    u32 attack = 0;
     u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_DEFENSE", stats.defense);
     u32 damage = vm_net_mock_damage_after_defense(attack, defense);
+
+    if (hitOut)
+        *hitOut = false;
+    if (criticalOut)
+        *criticalOut = false;
+    vm_net_mock_role_build_player_stats(role, &playerStats);
+    vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
+    attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_PLAYER_ATTACK",
+                                        playerStats.attack ? playerStats.attack : 1);
+    damage = vm_net_mock_damage_after_defense(attack, defense);
 
     if (g_vm_net_mock_battle_active_enemy_modifier_current.defense < 0)
     {
@@ -3859,6 +3972,12 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
 
     if (enemyHpCurrent == 0)
         return 0;
+    if (!vm_net_mock_battle_player_attack_hits(&playerStats, &stats, rollSalt))
+        return 0;
+    if (hitOut)
+        *hitOut = true;
+    damage = vm_net_mock_battle_apply_player_critical(damage, &playerStats,
+                                                       rollSalt, criticalOut);
     if (damage == 0)
         damage = 1;
     return vm_net_mock_min_u32(damage, enemyHpCurrent);
@@ -3871,34 +3990,79 @@ static u32 vm_net_mock_battle_skill_min_hp_damage(const vm_net_mock_skill_catalo
     return (u32)(0 - skill->hpChange);
 }
 
+/* This is deliberately narrower than "operate > 2": the latter includes
+ * heals, revives, friendly/self buffs and enemy control rows.  Only a
+ * negative-HP skill that selects an opposing unit has a damage formula. */
+static bool vm_net_mock_battle_skill_is_hostile_damage(
+    const vm_net_mock_skill_catalog_item *skill)
+{
+    return skill != NULL &&
+           (skill->targetDirection == 3 || skill->targetDirection == 4) &&
+           skill->hpChange < 0;
+}
+
+/* skill.dsh stores a profession's primary-stat coefficient, but it has no
+ * independent ``spell attack'' column.  Equipment's attack bonus is the
+ * only durable weapon-power value available to both the client and server;
+ * it already includes the native per-level enhancement growth.  Treat that
+ * power as a focus for offensive skills as well as for a normal strike.
+ *
+ * Without this term, a high-level ghost-path staff can raise normal attack
+ * from a few hundred to thousands while spell damage remains capped by the
+ * visible 999 wisdom limit.  That is the first point at which normal attacks
+ * incorrectly overtake a wisdom-scaling spell.  A group spell retains its
+ * lower skill.dsh coefficient per target; this helper only preserves the
+ * equipped weapon's contribution in the skill path. */
+static u32 vm_net_mock_battle_skill_raw_damage_from_stats(
+    const vm_net_mock_skill_catalog_item *skill,
+    const vm_net_mock_player_stats *playerStats)
+{
+    u32 baseDamage = vm_net_mock_battle_skill_min_hp_damage(skill);
+    uint64_t scaled = 0;
+    uint64_t coefficient = 0;
+    uint64_t rawDamage = 0;
+
+    if (baseDamage == 0 || playerStats == NULL)
+        return baseDamage;
+
+    scaled += (uint64_t)playerStats->strength * skill->strengthCoeff;
+    scaled += (uint64_t)playerStats->agility * skill->agilityCoeff;
+    scaled += (uint64_t)playerStats->wisdom * skill->wisdomCoeff;
+    coefficient = (uint64_t)skill->strengthCoeff +
+                  (uint64_t)skill->agilityCoeff +
+                  (uint64_t)skill->wisdomCoeff;
+    scaled += (uint64_t)playerStats->equipment.attack * coefficient;
+    scaled = (scaled + 50u) / 100u;
+    rawDamage = (uint64_t)baseDamage + scaled;
+    return rawDamage > 0xffffffffull ? 0xffffffffu : (u32)rawDamage;
+}
+
 static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enemyId,
-                                                           u32 enemyHpCurrent)
+                                                           u32 enemyHpCurrent, u32 rollSalt,
+                                                           bool *hitOut, bool *criticalOut)
 {
     const vm_net_mock_skill_catalog_item *skill = vm_net_mock_battle_operate_skill(operate);
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     vm_net_mock_player_stats playerStats;
     vm_net_mock_monster_stats monsterStats = vm_net_mock_monster_stats_for_enemy(enemyId);
     u32 baseDamage = vm_net_mock_battle_skill_min_hp_damage(skill);
-    uint64_t coeffDamage = 0;
     u32 rawDamage = 0;
     u32 defense = 0;
     u32 damage = 0;
 
+    if (hitOut)
+        *hitOut = false;
+    if (criticalOut)
+        *criticalOut = false;
     if (enemyHpCurrent == 0)
         return 0;
     if (skill == NULL || baseDamage == 0)
-        return vm_net_mock_battle_player_damage_to_enemy(enemyId, enemyHpCurrent);
+        return vm_net_mock_battle_player_damage_to_enemy(enemyId, enemyHpCurrent,
+                                                          rollSalt, hitOut, criticalOut);
 
     vm_net_mock_role_build_player_stats(role, &playerStats);
     vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
-    coeffDamage += (uint64_t)playerStats.strength * skill->strengthCoeff;
-    coeffDamage += (uint64_t)playerStats.agility * skill->agilityCoeff;
-    coeffDamage += (uint64_t)playerStats.wisdom * skill->wisdomCoeff;
-    coeffDamage = (coeffDamage + 50u) / 100u;
-    if (coeffDamage > 0xffffffffull - baseDamage)
-        rawDamage = 0xffffffffu;
-    else
-        rawDamage = baseDamage + (u32)coeffDamage;
+    rawDamage = vm_net_mock_battle_skill_raw_damage_from_stats(skill, &playerStats);
 
     defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_ENEMY_DEFENSE",
                                          monsterStats.defense);
@@ -3916,6 +4080,12 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     damage = vm_net_mock_damage_after_defense(rawDamage, defense);
     if (damage < baseDamage)
         damage = baseDamage;
+    if (!vm_net_mock_battle_player_attack_hits(&playerStats, &monsterStats, rollSalt))
+        return 0;
+    if (hitOut)
+        *hitOut = true;
+    damage = vm_net_mock_battle_apply_player_critical(damage, &playerStats,
+                                                       rollSalt ^ operate, criticalOut);
     damage = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_DAMAGE", damage);
     if (damage == 0)
         damage = 1;
@@ -3925,10 +4095,15 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
 static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_player_stats playerStats;
     u32 attack = vm_net_mock_env_u32_if_set("CBE_BATTLE_ENEMY_ATTACK", stats.attack);
-    u32 defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE",
-                                             vm_net_mock_battle_role_defense_default());
+    u32 defense = 0;
     u32 damage = 0;
+
+    vm_net_mock_role_build_player_stats(role, &playerStats);
+    vm_net_mock_battle_apply_active_stat_modifier(&playerStats);
+    defense = vm_net_mock_env_u32_if_set("CBE_BATTLE_ROLE_DEFENSE", playerStats.defense);
 
     {
         int64_t modified = (int64_t)attack +
@@ -3941,6 +4116,12 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
 
     if (roleHpCurrent == 0)
         return 0;
+    if (!vm_net_mock_battle_enemy_attack_hits(
+            &stats, &playerStats,
+            enemyId ^ 0xa54ff53au))
+        return 0;
+    if (vm_net_mock_battle_monster_uses_magic_damage(enemyId))
+        damage = vm_net_mock_battle_apply_resistance(damage, playerStats.resist);
     if (damage == 0)
         damage = 1;
     return vm_net_mock_min_u32(damage, roleHpCurrent);
@@ -4206,6 +4387,49 @@ static void vm_net_mock_role_copy_from_v5(vm_net_mock_role_state *dst,
     }
 }
 
+static void vm_net_mock_role_copy_from_v7(vm_net_mock_role_state *dst,
+                                          const vm_net_mock_role_state_v7 *src)
+{
+    if (dst == NULL || src == NULL)
+        return;
+    memset(dst, 0, sizeof(*dst));
+    dst->roleId = src->roleId;
+    memcpy(dst->name, src->name, sizeof(dst->name));
+    dst->job = src->job;
+    dst->sex = src->sex;
+    dst->backpackCapacity = src->backpackCapacity;
+    dst->level = src->level;
+    dst->exp = src->exp;
+    dst->hp = src->hp;
+    dst->hpMax = src->hpMax;
+    dst->mp = src->mp;
+    dst->mpMax = src->mpMax;
+    dst->money = src->money;
+    dst->wcoin = src->wcoin;
+    memcpy(dst->scene, src->scene, sizeof(dst->scene));
+    dst->x = src->x;
+    dst->y = src->y;
+    dst->backpackItemCount = src->backpackItemCount;
+    dst->designationId = src->designationId;
+    dst->nextBackpackSeq = src->nextBackpackSeq;
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        dst->equippedItems[slot].itemId = src->equippedItems[slot].itemId;
+        dst->equippedItems[slot].enhanceLevel = src->equippedItems[slot].enhanceLevel;
+        dst->equippedItems[slot].durability = src->equippedItems[slot].durability;
+        dst->equippedItems[slot].durabilityMax = src->equippedItems[slot].durabilityMax;
+    }
+    for (u32 index = 0; index < VM_NET_MOCK_BACKPACK_MAX_ITEMS; ++index)
+    {
+        dst->backpackItems[index].itemId = src->backpackItems[index].itemId;
+        dst->backpackItems[index].seq = src->backpackItems[index].seq;
+        dst->backpackItems[index].enhanceLevel = src->backpackItems[index].enhanceLevel;
+        dst->backpackItems[index].durability = src->backpackItems[index].durability;
+        dst->backpackItems[index].durabilityMax = src->backpackItems[index].durabilityMax;
+        dst->backpackItems[index].count = src->backpackItems[index].count;
+    }
+}
+
 /* `equip.dsh` owns the maximum durability for a known equipment id.  The
  * durable instance owns its current value.  During the one-time v5 migration
  * the latter did not exist, so only this narrow bootstrap sets it full; later
@@ -4238,6 +4462,9 @@ static void vm_net_mock_role_normalize_equipment_instances(
         }
         if (item->enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
             item->enhanceLevel = VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL;
+        (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+            catalog, (u8)item->enhanceLevel, &item->enhanceAffixes,
+            role->roleId ^ item->itemId ^ ((slot + 1u) * 0x9e3779b9u));
         if (item->durabilityMax == 0)
         {
             item->durabilityMax = expectedMax;
@@ -4424,6 +4651,9 @@ static bool vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
                 if (item.durability > expectedMax)
                     item.durability = expectedMax;
             }
+            (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+                equipment, (u8)item.enhanceLevel, &item.enhanceAffixes,
+                role->roleId ^ item.itemId ^ ((u32)item.seq * 0x9e3779b9u));
             if (instanceCount > 1 &&
                 (compactCount + instanceCount > role->backpackCapacity ||
                  compactCount + instanceCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS))
@@ -5579,6 +5809,7 @@ typedef struct
     bool invalid;
     bool equipmentInstanceBackfillNeeded;
     bool expCurveMigrationNeeded;
+    bool enhancementAffixMigrationNeeded;
     u8 seenRoleMask;
     u8 roleRows;
 } vm_mock_mysql_role_load_context;
@@ -5654,6 +5885,14 @@ static bool vm_net_mock_role_prepare_equipment_instance_schema(void)
             "ALTER TABLE account_role_equipment ADD COLUMN enhance_level "
             "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER item_id") ||
         !vm_net_mock_role_ensure_equipment_instance_column(
+            "account_role_equipment", "enhance_affix_types",
+            "ALTER TABLE account_role_equipment ADD COLUMN enhance_affix_types "
+            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+        !vm_net_mock_role_ensure_equipment_instance_column(
+            "account_role_equipment", "enhance_affix_values",
+            "ALTER TABLE account_role_equipment ADD COLUMN enhance_affix_values "
+            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types") ||
+        !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_equipment", "durability",
             "ALTER TABLE account_role_equipment ADD COLUMN durability "
             "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
@@ -5665,6 +5904,14 @@ static bool vm_net_mock_role_prepare_equipment_instance_schema(void)
             "account_role_backpack", "durability",
             "ALTER TABLE account_role_backpack ADD COLUMN durability "
             "SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+        !vm_net_mock_role_ensure_equipment_instance_column(
+            "account_role_backpack", "enhance_affix_types",
+            "ALTER TABLE account_role_backpack ADD COLUMN enhance_affix_types "
+            "INT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_level") ||
+        !vm_net_mock_role_ensure_equipment_instance_column(
+            "account_role_backpack", "enhance_affix_values",
+            "ALTER TABLE account_role_backpack ADD COLUMN enhance_affix_values "
+            "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER enhance_affix_types") ||
         !vm_net_mock_role_ensure_equipment_instance_column(
             "account_role_backpack", "durability_max",
             "ALTER TABLE account_role_backpack ADD COLUMN durability_max "
@@ -5692,7 +5939,7 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &format_version) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &active_role_id) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &role_count) ||
-        (format_version != 5 && format_version != 6 &&
+        (format_version != 5 && format_version != 6 && format_version != 7 &&
          format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
@@ -5705,7 +5952,8 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
     context->database->activeRoleId = active_role_id;
     context->database->roleCount = role_count;
     context->equipmentInstanceBackfillNeeded = format_version == 5;
-    context->expCurveMigrationNeeded = format_version < VM_NET_MOCK_ROLE_DB_VERSION;
+    context->expCurveMigrationNeeded = format_version < 7;
+    context->enhancementAffixMigrationNeeded = format_version < VM_NET_MOCK_ROLE_DB_VERSION;
     context->found = true;
     return true;
 }
@@ -5809,15 +6057,19 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     u32 slot_index = 0;
     u32 item_id = 0;
     u32 enhance_level = 0;
+    u32 enhance_affix_types = 0;
+    uint64_t enhance_affix_values = 0;
     u32 durability = 0;
     u32 durability_max = 0;
-    if (context == NULL || context->database == NULL || column_count != 6 ||
+    if (context == NULL || context->database == NULL || column_count != 8 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
         !vm_mock_mysql_parse_u32(values[3], lengths[3], &enhance_level) ||
-        !vm_mock_mysql_parse_u32(values[4], lengths[4], &durability) ||
-        !vm_mock_mysql_parse_u32(values[5], lengths[5], &durability_max) ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &enhance_affix_types) ||
+        !vm_mock_mysql_parse_u64(values[5], lengths[5], &enhance_affix_values) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &durability) ||
+        !vm_mock_mysql_parse_u32(values[7], lengths[7], &durability_max) ||
         enhance_level > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL ||
         durability > 0xffffu || durability_max > 0xffffu ||
         (durability_max != 0 && durability > durability_max) ||
@@ -5835,6 +6087,9 @@ static bool vm_mock_mysql_role_equipment_row(void *context_value,
     }
     role->equippedItems[slot_index].itemId = item_id;
     role->equippedItems[slot_index].enhanceLevel = (u16)enhance_level;
+    vm_net_mock_equipment_enhancement_unpack_affixes(
+        &role->equippedItems[slot_index].enhanceAffixes,
+        enhance_affix_types, enhance_affix_values);
     role->equippedItems[slot_index].durability = (u16)durability;
     role->equippedItems[slot_index].durabilityMax = (u16)durability_max;
     if (item_id != 0 && durability_max == 0)
@@ -5854,17 +6109,21 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     u32 item_seq = 0;
     u32 item_count = 0;
     u32 enhance_level = 0;
+    u32 enhance_affix_types = 0;
+    uint64_t enhance_affix_values = 0;
     u32 durability = 0;
     u32 durability_max = 0;
-    if (context == NULL || context->database == NULL || column_count != 8 ||
+    if (context == NULL || context->database == NULL || column_count != 10 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &role_id) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &slot_index) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &item_id) ||
         !vm_mock_mysql_parse_u32(values[3], lengths[3], &item_seq) || item_seq > 65535 ||
         !vm_mock_mysql_parse_u32(values[4], lengths[4], &item_count) ||
         !vm_mock_mysql_parse_u32(values[5], lengths[5], &enhance_level) ||
-        !vm_mock_mysql_parse_u32(values[6], lengths[6], &durability) ||
-        !vm_mock_mysql_parse_u32(values[7], lengths[7], &durability_max) ||
+        !vm_mock_mysql_parse_u32(values[6], lengths[6], &enhance_affix_types) ||
+        !vm_mock_mysql_parse_u64(values[7], lengths[7], &enhance_affix_values) ||
+        !vm_mock_mysql_parse_u32(values[8], lengths[8], &durability) ||
+        !vm_mock_mysql_parse_u32(values[9], lengths[9], &durability_max) ||
         enhance_level > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL ||
         durability > 0xffffu || durability_max > 0xffffu ||
         (durability_max != 0 && durability > durability_max) ||
@@ -5883,6 +6142,9 @@ static bool vm_mock_mysql_role_backpack_row(void *context_value,
     role->backpackItems[slot_index].itemId = item_id;
     role->backpackItems[slot_index].seq = (u16)item_seq;
     role->backpackItems[slot_index].enhanceLevel = (u16)enhance_level;
+    vm_net_mock_equipment_enhancement_unpack_affixes(
+        &role->backpackItems[slot_index].enhanceAffixes,
+        enhance_affix_types, enhance_affix_values);
     role->backpackItems[slot_index].durability = (u16)durability;
     role->backpackItems[slot_index].durabilityMax = (u16)durability_max;
     role->backpackItems[slot_index].count = item_count;
@@ -6083,7 +6345,8 @@ failed:
 
 static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
                                                        bool *backfill_needed_out,
-                                                       bool *exp_curve_migration_out)
+                                                       bool *exp_curve_migration_out,
+                                                       bool *enhancement_affix_migration_out)
 {
     char account_hex[129];
     char query[2048];
@@ -6094,6 +6357,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         *backfill_needed_out = false;
     if (exp_curve_migration_out)
         *exp_curve_migration_out = false;
+    if (enhancement_affix_migration_out)
+        *enhancement_affix_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
     if (!vm_net_mock_role_prepare_equipment_instance_schema())
@@ -6120,6 +6385,7 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         return false;
     snprintf(query, sizeof(query),
              "SELECT e.role_id,e.slot_index,e.item_id,e.enhance_level,"
+             "e.enhance_affix_types,e.enhance_affix_values,"
              "CASE WHEN e.durability_max=0 THEN COALESCE(d.durability,0) ELSE e.durability END,"
              "CASE WHEN e.durability_max=0 THEN COALESCE(d.durability_max,0) ELSE e.durability_max END "
              "FROM account_role_equipment e "
@@ -6131,7 +6397,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
     if (!vm_mysql_query(query, vm_mock_mysql_role_equipment_row, &context) || context.invalid)
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,durability,durability_max "
+             "SELECT role_id,slot_index,item_id,item_seq,item_count,enhance_level,"
+             "enhance_affix_types,enhance_affix_values,durability,durability_max "
              "FROM account_role_backpack WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_id,slot_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_backpack_row, &context) || context.invalid)
@@ -6157,6 +6424,8 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out,
         *backfill_needed_out = context.equipmentInstanceBackfillNeeded;
     if (exp_curve_migration_out)
         *exp_curve_migration_out = context.expCurveMigrationNeeded;
+    if (enhancement_affix_migration_out)
+        *enhancement_affix_migration_out = context.enhancementAffixMigrationNeeded;
     return true;
 }
 
@@ -6166,6 +6435,7 @@ typedef struct
     bool found;
     bool invalid;
     bool expCurveMigrationNeeded;
+    bool enhancementAffixMigrationNeeded;
 } vm_mock_mysql_payload_load_context;
 
 static bool vm_mock_mysql_role_payload_row(void *context_value,
@@ -6182,7 +6452,7 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &format_version) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &active_role_id) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &role_count) || values[3] == NULL ||
-        (format_version != 5 && format_version != 6 &&
+        (format_version != 5 && format_version != 6 && format_version != 7 &&
          format_version != VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
@@ -6190,7 +6460,9 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
             context->invalid = true;
         return true;
     }
-    context->expCurveMigrationNeeded = format_version < VM_NET_MOCK_ROLE_DB_VERSION;
+    context->expCurveMigrationNeeded = format_version < 7;
+    context->enhancementAffixMigrationNeeded =
+        format_version < VM_NET_MOCK_ROLE_DB_VERSION;
     if (format_version == VM_NET_MOCK_ROLE_DB_VERSION)
     {
         if (!vm_mysql_hex_decode(values[3], lengths[3], context->database,
@@ -6205,9 +6477,9 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
             return true;
         }
     }
-    else if (format_version == 6)
+    else if (format_version == 6 || format_version == 7)
     {
-        vm_net_mock_role_db_file legacy;
+        vm_net_mock_role_db_file_v7 legacy;
         memset(&legacy, 0, sizeof(legacy));
         if (!vm_mysql_hex_decode(values[3], lengths[3], &legacy, sizeof(legacy),
                                  &payload_len) ||
@@ -6218,8 +6490,14 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
             context->invalid = true;
             return true;
         }
-        *context->database = legacy;
+        memset(context->database, 0, sizeof(*context->database));
+        memcpy(context->database->magic, "JHR1", 4);
         context->database->version = VM_NET_MOCK_ROLE_DB_VERSION;
+        context->database->activeRoleId = legacy.activeRoleId;
+        context->database->roleCount = legacy.roleCount;
+        for (u32 i = 0; i < legacy.roleCount; ++i)
+            vm_net_mock_role_copy_from_v7(&context->database->roles[i],
+                                          &legacy.roles[i]);
     }
     else
     {
@@ -6249,8 +6527,9 @@ static bool vm_mock_mysql_role_payload_row(void *context_value,
     return true;
 }
 
-static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out,
-                                                           bool *exp_curve_migration_out)
+static bool vm_net_mock_role_db_load_mysql_payload_backup(
+    bool *found_out, bool *exp_curve_migration_out,
+    bool *enhancement_affix_migration_out)
 {
     char account_hex[129];
     char query[512];
@@ -6259,6 +6538,8 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out,
         *found_out = false;
     if (exp_curve_migration_out)
         *exp_curve_migration_out = false;
+    if (enhancement_affix_migration_out)
+        *enhancement_affix_migration_out = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
     memset(&context, 0, sizeof(context));
@@ -6272,6 +6553,8 @@ static bool vm_net_mock_role_db_load_mysql_payload_backup(bool *found_out,
         *found_out = context.found;
     if (exp_curve_migration_out)
         *exp_curve_migration_out = context.expCurveMigrationNeeded;
+    if (enhancement_affix_migration_out)
+        *enhancement_affix_migration_out = context.enhancementAffixMigrationNeeded;
     return true;
 }
 
@@ -6653,7 +6936,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
 
     size_t bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) VALUES");
+        "INSERT INTO account_role_equipment(account_id,role_id,slot_index,item_id,enhance_level,enhance_affix_types,enhance_affix_values,durability,durability_max) VALUES");
     u32 bulk_rows = 0;
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
@@ -6666,9 +6949,14 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             if (item->itemId == 0)
                 continue;
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u)",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%llu,%u,%u)",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
                                    slot, item->itemId, item->enhanceLevel,
+                                   vm_net_mock_equipment_enhancement_pack_affix_types(
+                                       &item->enhanceAffixes),
+                                   (unsigned long long)
+                                       vm_net_mock_equipment_enhancement_pack_affix_values(
+                                           &item->enhanceAffixes),
                                    item->durability, item->durabilityMax);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
@@ -6687,7 +6975,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
 
     bulk_len = (size_t)snprintf(
         bulk_query, bulk_capacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,durability,durability_max) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,enhance_affix_types,enhance_affix_values,durability,durability_max) VALUES");
     bulk_rows = 0;
     for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
     {
@@ -6700,10 +6988,16 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             if (item->itemId == 0 && item->seq == 0 && item->count == 0)
                 continue;
             int written = snprintf(bulk_query + bulk_len, bulk_capacity - bulk_len,
-                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,%u)",
+                                   "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,%llu,%u,%u)",
                                    bulk_rows ? "," : "", account_hex, role->roleId,
                                    slot, item->itemId, item->seq, item->count,
-                                   item->enhanceLevel, item->durability,
+                                   item->enhanceLevel,
+                                   vm_net_mock_equipment_enhancement_pack_affix_types(
+                                       &item->enhanceAffixes),
+                                   (unsigned long long)
+                                       vm_net_mock_equipment_enhancement_pack_affix_values(
+                                           &item->enhanceAffixes),
+                                   item->durability,
                                    item->durabilityMax);
             if (written < 0 || (size_t)written >= bulk_capacity - bulk_len)
             {
@@ -7713,7 +8007,7 @@ static bool vm_net_mock_vitality_schema_prepare(void)
         "CREATE TABLE IF NOT EXISTS account_role_vitality ("
         "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
         "role_id INT UNSIGNED NOT NULL,"
-        "vitality INT UNSIGNED NOT NULL DEFAULT 0,"
+        "vitality INT UNSIGNED NOT NULL DEFAULT 100,"
         "vitality_max INT UNSIGNED NOT NULL DEFAULT 100,"
         "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
         "PRIMARY KEY(account_id,role_id),"
@@ -7748,6 +8042,52 @@ static bool vm_net_mock_vitality_load_row(void *contextValue,
         return true;
     }
     state->found = true;
+    return true;
+}
+
+/* A role with no prior vitality mutation used to receive 100/100 from every
+ * settlement packet.  Materialize that same full initial state before reading
+ * it, rather than letting the first 聚元丹 create an artificial empty row and
+ * consume itself immediately.  Once present, the row is the sole authority;
+ * this helper never normalizes, replenishes, or otherwise changes it. */
+static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
+                                          u32 *currentOut, u32 *maxOut)
+{
+    char accountHex[129];
+    char query[768];
+    vm_net_mock_vitality_state state;
+    vm_net_mock_vitality_load_context loadContext;
+
+    if (currentOut != NULL)
+        *currentOut = 0;
+    if (maxOut != NULL)
+        *maxOut = 0;
+    if (role == NULL || role->roleId == 0 || currentOut == NULL ||
+        maxOut == NULL || !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_vitality_schema_prepare())
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_vitality(account_id,role_id,vitality,vitality_max) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u)",
+             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+             VM_NET_MOCK_VITALITY_MAX);
+    if (!vm_mysql_exec(query))
+        return false;
+    memset(&state, 0, sizeof(state));
+    loadContext.state = &state;
+    snprintf(query, sizeof(query),
+             "SELECT vitality,vitality_max FROM account_role_vitality WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             accountHex, role->roleId);
+    if (!vm_mysql_query(query, vm_net_mock_vitality_load_row, &loadContext) ||
+        !state.found || state.invalid)
+    {
+        return false;
+    }
+    *currentOut = state.current;
+    *maxOut = state.maximum;
     return true;
 }
 
@@ -7794,8 +8134,9 @@ static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
     transactionStarted = true;
     snprintf(query, sizeof(query),
              "INSERT IGNORE INTO account_role_vitality(account_id,role_id,vitality,vitality_max) "
-             "VALUES(CAST(X'%s' AS CHAR),%u,0,%u)",
-             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX);
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u)",
+             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+             VM_NET_MOCK_VITALITY_MAX);
     if (!vm_mysql_exec(query))
         goto failed;
     memset(&state, 0, sizeof(state));
@@ -7805,9 +8146,21 @@ static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
              "account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
              accountHex, role->roleId);
     if (!vm_mysql_query(query, vm_net_mock_vitality_load_row, &loadContext) ||
-        !state.found || state.invalid || state.current >= state.maximum)
+        !state.found || state.invalid)
     {
         goto failed;
+    }
+    if (currentOut != NULL)
+        *currentOut = state.current;
+    if (maxOut != NULL)
+        *maxOut = state.maximum;
+    if (state.current >= state.maximum)
+    {
+        (void)vm_mysql_exec("ROLLBACK");
+        transactionStarted = false;
+        printf("[info][network] mock_vitality_pill_rejected role=%u seq=%u vitality=%u/%u reason=already-full\n",
+               role->roleId, itemSeq, state.current, state.maximum);
+        return false;
     }
     restored = state.maximum - state.current;
     if (restored > VM_NET_MOCK_VITALITY_PILL_RESTORE)
@@ -8087,6 +8440,7 @@ static void vm_net_mock_role_db_load(void)
     char path[128];
     u8 fileBuf[sizeof(vm_net_mock_role_db_file)];
     vm_net_mock_role_db_file loaded;
+    vm_net_mock_role_db_file_v7 enhancementAffixLegacyFile;
     vm_net_mock_role_db_file_v5 equipmentInstanceLegacyFile;
     vm_net_mock_role_db_file_v4 shopWcoinFile;
     vm_net_mock_role_db_file_v3 equippedBackpackFile;
@@ -8097,7 +8451,9 @@ static void vm_net_mock_role_db_load(void)
     bool loadedFromPayload = false;
     bool mysqlEquipmentInstanceBackfill = false;
     bool mysqlExpCurveMigration = false;
+    bool mysqlEnhancementAffixMigration = false;
     bool payloadExpCurveMigration = false;
+    bool payloadEnhancementAffixMigration = false;
     bool expCurveMigrationNeeded = false;
     bool needsSave = false;
     u32 migratedOldIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
@@ -8127,7 +8483,8 @@ static void vm_net_mock_role_db_load(void)
     memset(migratedNewIds, 0, sizeof(migratedNewIds));
     if (!vm_net_mock_role_db_load_mysql_relational(&loadedFromMysql,
                                                     &mysqlEquipmentInstanceBackfill,
-                                                    &mysqlExpCurveMigration))
+                                                    &mysqlExpCurveMigration,
+                                                    &mysqlEnhancementAffixMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=relational error=%s\n",
                          g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
@@ -8137,7 +8494,8 @@ static void vm_net_mock_role_db_load(void)
     }
     if (!loadedFromMysql && !vm_mock_service_mysql_authority_is_sealed() &&
         !vm_net_mock_role_db_load_mysql_payload_backup(&loadedFromPayload,
-                                                        &payloadExpCurveMigration))
+                                                        &payloadExpCurveMigration,
+                                                        &payloadEnhancementAffixMigration))
     {
         vm_autotest_note("mock_role_db_mysql_load_failed account=%s storage=payload-backup error=%s\n",
                          g_vm_mock_service_active_account_id ? g_vm_mock_service_active_account_id : "-",
@@ -8155,8 +8513,17 @@ static void vm_net_mock_role_db_load(void)
     }
     if (loadedFromMysql && mysqlExpCurveMigration)
         expCurveMigrationNeeded = true;
+    if (loadedFromMysql && mysqlEnhancementAffixMigration)
+    {
+        /* Version 8 records the stage rolls in the same relational
+         * transaction as the equipment instance.  Normalization below fills
+         * historical +4/+8/+12/+16 rows before this format marker advances. */
+        needsSave = true;
+    }
     if (loadedFromPayload && payloadExpCurveMigration)
         expCurveMigrationNeeded = true;
+    if (loadedFromPayload && payloadEnhancementAffixMigration)
+        needsSave = true;
 
     vm_net_mock_role_db_path(path, sizeof(path));
     if (path[0] == 0)
@@ -8176,7 +8543,7 @@ static void vm_net_mock_role_db_load(void)
             memcpy(&loaded, fileBuf, sizeof(loaded));
         if (readLen == sizeof(loaded) &&
             memcmp(loaded.magic, "JHR1", 4) == 0 &&
-            (loaded.version == 6 || loaded.version == VM_NET_MOCK_ROLE_DB_VERSION) &&
+            loaded.version == VM_NET_MOCK_ROLE_DB_VERSION &&
             loaded.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
         {
             if (loaded.version < VM_NET_MOCK_ROLE_DB_VERSION)
@@ -8186,6 +8553,36 @@ static void vm_net_mock_role_db_load(void)
             loadedFromFile = true;
             if (expCurveMigrationNeeded)
                 needsSave = true;
+        }
+        else if (readLen == sizeof(enhancementAffixLegacyFile))
+        {
+            memcpy(&enhancementAffixLegacyFile, fileBuf,
+                   sizeof(enhancementAffixLegacyFile));
+            if (memcmp(enhancementAffixLegacyFile.magic, "JHR1", 4) == 0 &&
+                (enhancementAffixLegacyFile.version == 6 ||
+                 enhancementAffixLegacyFile.version == 7) &&
+                enhancementAffixLegacyFile.roleCount <= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+            {
+                memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+                memcpy(g_vm_net_mock_role_db.magic, "JHR1", 4);
+                g_vm_net_mock_role_db.version = VM_NET_MOCK_ROLE_DB_VERSION;
+                g_vm_net_mock_role_db.activeRoleId =
+                    enhancementAffixLegacyFile.activeRoleId;
+                g_vm_net_mock_role_db.roleCount =
+                    enhancementAffixLegacyFile.roleCount;
+                for (u32 i = 0; i < enhancementAffixLegacyFile.roleCount; ++i)
+                    vm_net_mock_role_copy_from_v7(
+                        &g_vm_net_mock_role_db.roles[i],
+                        &enhancementAffixLegacyFile.roles[i]);
+                loadedFromFile = true;
+                needsSave = true;
+                if (enhancementAffixLegacyFile.version < 7)
+                    expCurveMigrationNeeded = true;
+                vm_autotest_note("mock_role_db_migrate version=%u->8 source=file roles=%u active=%u\n",
+                                 enhancementAffixLegacyFile.version,
+                                 g_vm_net_mock_role_db.roleCount,
+                                 g_vm_net_mock_role_db.activeRoleId);
+            }
         }
         else if (readLen == sizeof(equipmentInstanceLegacyFile))
         {
@@ -9064,6 +9461,7 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     }
     item->enhanceLevel = (u16)SDL_min(instance->enhanceLevel,
                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    item->enhanceAffixes = instance->enhanceAffixes;
     item->durabilityMax = expectedMax;
     item->durability = instance->durability > expectedMax
                            ? expectedMax : instance->durability;
@@ -9594,6 +9992,7 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
 
     selectedInstance.itemId = itemId;
     selectedInstance.enhanceLevel = item->enhanceLevel;
+    selectedInstance.enhanceAffixes = item->enhanceAffixes;
     selectedInstance.durability = item->durability;
     selectedInstance.durabilityMax = item->durabilityMax;
 

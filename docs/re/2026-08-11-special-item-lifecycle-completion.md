@@ -20,7 +20,10 @@
 - 新增 `account_role_vitality`，以 `(account_id, role_id)` 为主键保存
   `vitality/vitality_max`。833 在同一 MySQL 事务中锁定活力行和精确的
   `item_seq` 背包行；满活力、库存变更或事务失败均返回 `result=2`，不扣道具。
-  当前资源说明的恢复量为 100，默认上限也设为 100。
+  缺行按历史状态包实例化为 `100/100`，已有行不会被重置。成功的 `7/33` 追加
+  原生 `2/13 {energy,energymax}` 缓存更新；任务、战斗和复活也从同一行读取状态，
+  不再下发固定活力。完整取证见
+  `docs/re/2026-08-11-vitality-contract.md`。
 - `account_role_training_books` 继续以 921 的背包序号为实例身份。只有
   `book_level > recipient_level`、书经验至少达到该书等级的经验起点且角色未满
   70 级时，才在一次

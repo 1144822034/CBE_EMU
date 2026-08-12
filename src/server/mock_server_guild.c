@@ -897,8 +897,11 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos, itemId) ||
             !vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)(slot + 1)) ||
             !vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, itemId, 0,
-                vm_net_mock_item_common_extra_enhance_cap(itemId)))
+                out, outCap, &pos, itemId,
+                (u8)SDL_min(session->onlineEquippedEnhanceLevels[slot],
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                vm_net_mock_item_common_extra_enhance_cap(itemId),
+                &session->onlineEquippedEnhanceAffixes[slot]))
         {
             return false;
         }
@@ -915,7 +918,7 @@ static bool vm_net_mock_build_nearby_equipinfo_blob(
             !vm_net_mock_seq_put_i16(out, outCap, &pos, 1) ||
             !vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos, itemId, 0,
-                vm_net_mock_item_common_extra_enhance_cap(itemId)))
+                vm_net_mock_item_common_extra_enhance_cap(itemId), NULL))
         {
             return false;
         }
@@ -2205,6 +2208,7 @@ static bool vm_net_mock_trade_validate_offer(vm_mock_service_trade_offer *offer,
         offer->items[i].itemId = item->itemId;
         offer->items[i].enhanceLevel = (u16)SDL_min(
             item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        offer->items[i].enhanceAffixes = item->enhanceAffixes;
         offer->items[i].durability = item->durability;
         offer->items[i].durabilityMax = item->durabilityMax;
     }
@@ -2246,7 +2250,8 @@ static bool vm_net_mock_append_trade_offer_object(
                                                        item->enhanceLevel,
                                                        VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                                                    vm_net_mock_item_common_extra_enhance_cap(
-                                                       item->itemId)))
+                                                       item->itemId),
+                                                   &item->enhanceAffixes))
         {
             return false;
         }
