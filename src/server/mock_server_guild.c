@@ -1196,6 +1196,42 @@ static void vm_mock_service_team_enqueue_member_join_for_peers(
     }
 }
 
+/* A successful 1/5/3 reply gives the accepting client its own bootstrap row
+ * and the leader row. Existing non-leader members still need native 5/5
+ * deltas, otherwise the third member's client never learns about them. */
+static u8 vm_mock_service_team_enqueue_existing_members_for_joiner(
+    const vm_mock_service_team *team,
+    const vm_mock_service_client_session *leader,
+    vm_mock_service_client_session *joiner)
+{
+    u8 queued = 0;
+
+    if (team == NULL || !team->active || leader == NULL || joiner == NULL ||
+        !vm_mock_service_team_contains_client(team, leader->clientId) ||
+        !vm_mock_service_team_contains_client(team, joiner->clientId))
+    {
+        return 0;
+    }
+    for (u8 member = 0; member < team->memberCount; ++member)
+    {
+        vm_mock_service_client_session *existing =
+            vm_mock_service_find_client_session(team->memberClientIds[member]);
+
+        if (existing == NULL || existing->clientId == leader->clientId ||
+            existing->clientId == joiner->clientId)
+        {
+            continue;
+        }
+        if (vm_mock_service_session_enqueue_social_notice(
+                joiner, VM_MOCK_SERVICE_SOCIAL_NOTICE_TEAM_MEMBER_JOIN, 0,
+                existing, NULL, existing->accountId))
+        {
+            ++queued;
+        }
+    }
+    return queued;
+}
+
 static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 requestLen,
                                                          u8 *out, u32 outCap)
 {
@@ -1211,6 +1247,7 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     bool accepted = false;
     bool sourceNotified = false;
     bool sourceMemberJoinQueued = false;
+    u8 joinerExistingMembersQueued = 0;
 
     if (out == NULL || outCap < pos ||
         !vm_net_mock_is_team_invite_reply_request(request, requestLen, &sourceWireId, &result))
@@ -1244,6 +1281,9 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
             accepted = true;
             vm_mock_service_team_enqueue_member_join_for_peers(
                 team, source->clientId, responder->clientId, responder);
+            joinerExistingMembersQueued =
+                vm_mock_service_team_enqueue_existing_members_for_joiner(
+                    team, source, responder);
         }
     }
 
@@ -1286,11 +1326,11 @@ static u32 vm_net_mock_build_team_invite_reply_response(const u8 *request, u32 r
     }
     objectCount = 1;
     vm_net_mock_finish_wt_packet(out, pos, (u8)objectCount);
-    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-leader-delta)\n",
+    printf("[info][network] mock_team_invite_reply source=%08x/%u target=%08x/%u result=%u accepted=%u notify_source=%u queued_join=%u queued_existing_for_joiner=%u roster=%s members=%u resp=%u evidence=JianghuOL.CBE:0x0101216A(subtype3-leader-delta)+0x01011F3A(subtype5-member-delta)\n",
            source ? source->clientId : 0, sourceWireId,
            responder->clientId, responderRole->roleId,
            result, accepted ? 1u : 0u, sourceNotified ? 1u : 0u,
-           sourceMemberJoinQueued ? 1u : 0u,
+           sourceMemberJoinQueued ? 1u : 0u, joinerExistingMembersQueued,
            accepted ? "inline-5/3-leader-delta" : "none",
            team ? team->memberCount : 0, pos);
     return pos;
