@@ -3041,7 +3041,8 @@ static bool vm_net_mock_build_task_awardinfo(
                 (u8)SDL_min(rewardItem->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
                 vm_net_mock_item_common_extra_enhance_cap(
-                    configured->itemId)))
+                    configured->itemId),
+                &rewardItem->enhanceAffixes))
         {
             printf("[error][network] mock_task_awardinfo_invalid task=%u role=%u row=%u item=%u reward_seq=%u pos=%u cap=%u reason=serialize\n",
                    task->taskId, role->roleId, i, configured->itemId,
@@ -5766,6 +5767,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
     u8 result = 1;
     u8 responseSubtype = 0;
     u8 responseObjectCount = 1;
+    u32 vitality = 0;
+    u32 vitalityMax = 0;
     bool hasInfoBannerPrefix = false;
     bool hasInfoBannerTail = false;
     bool hasProgressStateTail = false;
@@ -6028,14 +6031,31 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         activeRole = vm_net_mock_active_role();
         if (activeRole == NULL)
             return 0;
+        /* 6/4 case 4 writes energy directly into both client role caches.
+         * Take the authoritative snapshot before committing task rewards so a
+         * database read failure reports a normal task failure rather than
+         * committing an award and then leaving the client request unanswered. */
+        if (!vm_net_mock_vitality_snapshot(activeRole, &vitality,
+                                            &vitalityMax))
+        {
+            printf("[error][mock-service] task_vitality_snapshot_failed task=%u role=%u error=%s\n",
+                   taskId, activeRole->roleId, vm_mysql_last_error());
+        }
         /* Case 4 carries only a task id. For catalog tasks consume the
          * preceding dialog's receiver-bound submit authorization before a
          * state-2 row may award anything. The synthetic test task predates
          * that catalogue contract and retains its existing isolated path. */
-        submitContextValid = taskDefinition == NULL ||
-                             vm_net_mock_task_submit_context_consume(
-                                 taskId, NULL);
-        if (submitContextValid &&
+        /* A failed snapshot is an infrastructure failure, not an attempted
+         * submission.  Do not consume the one-shot dialog authorization in
+         * that case: the client may retry only after the server can build the
+         * complete 6/4 success contract. */
+        if (vitalityMax != 0)
+        {
+            submitContextValid = taskDefinition == NULL ||
+                                 vm_net_mock_task_submit_context_consume(
+                                     taskId, NULL);
+        }
+        if (vitalityMax != 0 && submitContextValid &&
             vm_net_mock_task_state_load(activeRole->roleId, taskId, &taskState) &&
             taskState.found && taskState.state == 2 &&
             ((taskDefinition != NULL &&
@@ -6047,7 +6067,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
         {
             committed = true;
         }
-        if (!committed && taskDefinition != NULL && !submitContextValid)
+        if (!committed && taskDefinition != NULL && vitalityMax != 0 &&
+            !submitContextValid)
         {
             printf("[info][network] mock_task_submit_rejected task=%u role=%u "
                    "reason=delivery-context scene=%s\n",
@@ -6074,8 +6095,8 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                     awardInfo, sizeof(awardInfo), &awardInfoLen, activeRole,
                     taskDefinition, committedRewardSeqs,
                     committedRewardCount) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", 100) ||
-                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", 100) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", vitality) ||
+                !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", vitalityMax) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "exp", totalExp) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "level", activeRole->level) ||
                 !vm_net_mock_put_object_u32(out, outCap, &pos, "lastexp",

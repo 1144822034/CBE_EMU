@@ -198,6 +198,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_equipment
 登录时作为同一 `item_id` 的迁移来源；迁移成功后不再是运行时数据源。服务启动也会
 逐列检查并补齐表结构，但生产升级建议在停服窗口手动执行以上脚本。
 
+强化词条改为装备实例在 `+4/+8/+12/+16` 到达时随机生成、数值小范围波动并持久化后，
+已有数据库可在停服窗口执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_random_equipment_affixes.sql
+```
+
+服务启动也会自动补齐 `enhance_affix_types` 与 `enhance_affix_values` 两列。旧的已强化
+装备以零值标记；首次加载时服务端会为其已解锁的阶段各抽取一次词条，并在同一角色
+事务中写回。之后穿戴、卸下、交易和重新登录都保留同一组结果。
+
 已有数据库升级到动态 NPC 商店、修理和技能导师功能时执行：
 
 ```powershell
@@ -291,10 +302,11 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
-- `account_role_equipment`：按角色和装备槽保存装备实例的物品 ID、强化等级、当前/最大耐久。
+- `account_role_equipment`：按角色和装备槽保存装备实例的物品 ID、强化等级、四阶段随机词条和当前/最大耐久。
 - `account_role_equipment_durability`：旧版耐久表，只在首次实例迁移时按同一物品 ID 读取，不参与运行时保存。
 - `account_role_skills`：按角色保存已学习技能和技能等级。
-- `account_role_backpack`：按角色和背包槽保存物品实例、数量、强化等级和当前/最大耐久；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
+- `account_role_backpack`：按角色和背包槽保存物品实例、数量、强化等级、四阶段随机词条和当前/最大耐久；802/803 的 `item_count` 分别表示剩余 HP/MP 储量。
+- `account_role_vitality`：按账号、角色保存独立于 HP/MP 的活力当前值与上限；聚元丹 833 仅在未满时恢复 100 点，任务/战斗/复活状态包均从此表读取。
 - `account_role_training_books`：921 修炼天书的按账号、角色、背包序号持久化的标题、说明、等级与经验实例数据。
 - `account_role_tasks`：按角色保存任务状态和两组任务进度。
 - `server_tasks`：后台编辑过的 `task.dsh` 覆盖项及新增任务定义、首项奖励和三阶段 NPC 对话。

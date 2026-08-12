@@ -539,8 +539,6 @@ static u32 vm_net_mock_battle_apply_damage_to_role(u32 damage)
 
     if (g_mockBattleRoleHpCurrent == 0)
         return 0;
-    if (actualDamage == 0)
-        actualDamage = 1;
     if (actualDamage > g_mockBattleRoleHpCurrent)
         actualDamage = g_mockBattleRoleHpCurrent;
     g_mockBattleRoleHpCurrent -= actualDamage;
@@ -5259,8 +5257,10 @@ enum
      * current/max durability travel together whether the instance is worn or
      * in the backpack.  Version 5 and older stored only worn item ids. */
     /* Version 7 changes the persisted EXP curve.  EXP is a cumulative value,
-     * so version-6 rows must be migrated before their level is normalized. */
-    VM_NET_MOCK_ROLE_DB_VERSION = 7,
+     * so version-6 rows must be migrated before their level is normalized.
+     * Version 8 makes +4/+8/+12/+16 attribute rolls durable equipment-instance
+     * data instead of deriving one fixed row from the item catalogue. */
+    VM_NET_MOCK_ROLE_DB_VERSION = 8,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
@@ -5425,6 +5425,15 @@ typedef struct
     u32 count;
 } vm_net_mock_backpack_item_state_v5;
 
+/* A stage attribute is an owned equipment-instance roll, not a property of
+ * the catalogue row.  The client supports four threshold rows (+4/+8/+12/
+ * +16); zero is the explicit "not unlocked" representation. */
+typedef struct
+{
+    u8 type[4];
+    u16 value[4];
+} vm_net_mock_equipment_enhance_affix_state;
+
 typedef struct
 {
     u32 itemId;
@@ -5433,6 +5442,9 @@ typedef struct
     u16 durability;
     u16 durabilityMax;
     u32 count;
+    /* Each stage owns one rolled fixed-value attribute.  A zero type/value
+     * means the corresponding +4/+8/+12/+16 stage has not been unlocked. */
+    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
 } vm_net_mock_backpack_item_state;
 
 typedef struct
@@ -5441,6 +5453,7 @@ typedef struct
     u16 enhanceLevel;
     u16 durability;
     u16 durabilityMax;
+    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
 } vm_net_mock_equipped_item_state;
 
 typedef struct
@@ -5549,6 +5562,53 @@ typedef struct
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     vm_net_mock_backpack_item_state_v5 backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
 } vm_net_mock_role_state_v5;
+
+/* Version 6 and version 7 had the same durable equipment layout.  Preserve
+ * it byte-for-byte so an old local/payload snapshot can be promoted to the
+ * per-instance random-affix layout introduced in version 8. */
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u16 enhanceLevel;
+    u16 durability;
+    u16 durabilityMax;
+    u32 count;
+} vm_net_mock_backpack_item_state_v7;
+
+typedef struct
+{
+    u32 itemId;
+    u16 enhanceLevel;
+    u16 durability;
+    u16 durabilityMax;
+} vm_net_mock_equipped_item_state_v7;
+
+typedef struct
+{
+    u32 roleId;
+    char name[32];
+    u8 job;
+    u8 sex;
+    u8 backpackCapacity;
+    u8 reserved0;
+    u32 level;
+    u32 exp;
+    u32 hp;
+    u32 hpMax;
+    u32 mp;
+    u32 mpMax;
+    u32 money;
+    u32 wcoin;
+    char scene[64];
+    u16 x;
+    u16 y;
+    u8 backpackItemCount;
+    u8 designationId;
+    u16 nextBackpackSeq;
+    vm_net_mock_equipped_item_state_v7 equippedItems[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_backpack_item_state_v7 backpackItems[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+} vm_net_mock_role_state_v7;
 
 typedef struct
 {
@@ -5663,6 +5723,15 @@ typedef struct
     u32 roleCount;
     vm_net_mock_role_state_v5 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
 } vm_net_mock_role_db_file_v5;
+
+typedef struct
+{
+    char magic[4];
+    u32 version;
+    u32 activeRoleId;
+    u32 roleCount;
+    vm_net_mock_role_state_v7 roles[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_net_mock_role_db_file_v7;
 
 typedef struct
 {
@@ -5889,6 +5958,11 @@ static void vm_net_mock_practise_mark_offline(const char *accountId,
 static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
                                           u16 itemSeq, u32 *currentOut,
                                           u32 *maxOut);
+/* `energy`/`energymax` is a client-owned role cache which is refreshed by
+ * 2/13, battle 4/7, and task 6/4.  Every one of those paths must read the
+ * same durable vitality row; none may substitute a presentation constant. */
+static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
+                                          u32 *currentOut, u32 *maxOut);
 static void vm_net_mock_offline_exp_mark_offline(const char *accountId,
                                                   u32 roleId);
 static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,

@@ -71,6 +71,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     memset(&newInstance, 0, sizeof(newInstance));
     newInstance.itemId = backpackItem->itemId;
     newInstance.enhanceLevel = backpackItem->enhanceLevel;
+    newInstance.enhanceAffixes = backpackItem->enhanceAffixes;
     newInstance.durability = backpackItem->durability;
     newInstance.durabilityMax = backpackItem->durabilityMax;
 
@@ -101,6 +102,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     backpackItem->itemId = oldInstance.itemId;
     backpackItem->count = 1;
     backpackItem->enhanceLevel = oldInstance.enhanceLevel;
+    backpackItem->enhanceAffixes = oldInstance.enhanceAffixes;
     backpackItem->durability = oldInstance.durability;
     backpackItem->durabilityMax = oldInstance.durabilityMax;
     role->equippedItems[slot] = newInstance;
@@ -153,8 +155,43 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
         return false;
     }
 
-    if (requestedItemId != 0)
+    /*
+     * Equipped rows have a different identity namespace from backpack rows:
+     * their client-facing sequence is exactly slot + 1 (see the login iteminfo
+     * contract and the 7/9 replacement request's `body` field).  The native
+     * 7/8 type=4 request normally carries only that sequence.  It therefore
+     * identifies one slot directly; it is neither a backpack instance id nor
+     * an item id.  Treating it as an unqualified selector used to make every
+     * unload fail as soon as the character wore a second item.
+     */
+    if (requestedSeq != 0)
     {
+        if (requestedSeq > VM_NET_MOCK_EQUIP_SLOT_COUNT)
+        {
+            if (reasonOut)
+                *reasonOut = "equipped-seq-out-of-range";
+            return false;
+        }
+        slot = (u8)(requestedSeq - 1u);
+        itemId = role->equippedItems[slot].itemId;
+        if (itemId == 0)
+        {
+            if (reasonOut)
+                *reasonOut = "equipped-slot-empty";
+            return false;
+        }
+        if (requestedItemId != 0 && requestedItemId != itemId)
+        {
+            if (reasonOut)
+                *reasonOut = "equipped-selector-mismatch";
+            return false;
+        }
+    }
+    else if (requestedItemId != 0)
+    {
+        /* Keep the explicit-id variant for callers that genuinely omit the
+         * native slot selector; duplicate item ids still resolve by catalog
+         * slot when that slot currently contains an item. */
         for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
         {
             if (role->equippedItems[i].itemId == requestedItemId)
@@ -164,43 +201,15 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
                 break;
             }
         }
-    }
-
-    if (slot == 0xff && requestedItemId != 0)
-    {
-        equip = vm_net_mock_find_equipment_catalog_item(requestedItemId);
-        if (equip != NULL && equip->slot < VM_NET_MOCK_EQUIP_SLOT_COUNT &&
-            role->equippedItems[equip->slot].itemId != 0)
+        if (slot == 0xff)
         {
-            slot = equip->slot;
-            itemId = role->equippedItems[slot].itemId;
-        }
-    }
-
-    if (slot == 0xff && requestedSeq != 0)
-    {
-        /*
-         * The server state keeps equipped item ids, while the client request may
-         * only carry the item seq assigned when it was equipped.  If there is a
-         * single equipped item, the selector is still unambiguous.
-         */
-        u8 foundSlot = 0xff;
-        for (u8 i = 0; i < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++i)
-        {
-            if (role->equippedItems[i].itemId == 0)
-                continue;
-            if (foundSlot != 0xff)
+            equip = vm_net_mock_find_equipment_catalog_item(requestedItemId);
+            if (equip != NULL && equip->slot < VM_NET_MOCK_EQUIP_SLOT_COUNT &&
+                role->equippedItems[equip->slot].itemId != 0)
             {
-                if (reasonOut)
-                    *reasonOut = "ambiguous-seq";
-                return false;
+                slot = equip->slot;
+                itemId = role->equippedItems[slot].itemId;
             }
-            foundSlot = i;
-        }
-        if (foundSlot != 0xff)
-        {
-            slot = foundSlot;
-            itemId = role->equippedItems[slot].itemId;
         }
     }
 
@@ -678,7 +687,14 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 equipment = vm_net_mock_role_find_backpack_item(
                     role, 0, parsed.equipSeq);
                 if (enhancementSucceeded && equipment != NULL)
+                {
                     equipment->enhanceLevel = (u16)(currentLevel + 1);
+                    (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+                        catalog, (u8)equipment->enhanceLevel,
+                        &equipment->enhanceAffixes,
+                        role->roleId ^ equipment->itemId ^
+                        ((u32)equipment->seq * 0x9e3779b9u));
+                }
                 vm_net_mock_role_db_save(enhancementSucceeded
                                              ? "equipment-enhance-success"
                                              : "equipment-enhance-failed");
@@ -2026,6 +2042,7 @@ typedef struct
      * belongs to that instance and must follow it through trade instead of
      * being inferred from an item-id match in the recipient's bag. */
     u16 enhanceLevel;
+    vm_net_mock_equipment_enhance_affix_state enhanceAffixes;
     u16 durability;
     u16 durabilityMax;
     u32 count;
@@ -2099,6 +2116,9 @@ typedef struct vm_mock_service_client_session
     u8 onlineSex;
     u16 onlineLevel;
     u32 onlineEquippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    u16 onlineEquippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    vm_net_mock_equipment_enhance_affix_state
+        onlineEquippedEnhanceAffixes[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     u32 onlineHp;
     u32 onlineHpMax;
     u32 onlineMp;
@@ -2981,8 +3001,9 @@ static bool vm_mock_service_trade_role_add_item(
     item->count = incoming->count;
     if (isEquipment)
     {
-        item->enhanceLevel = (u16)SDL_min(
+    item->enhanceLevel = (u16)SDL_min(
             incoming->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        item->enhanceAffixes = incoming->enhanceAffixes;
         item->durabilityMax = equipmentDurabilityMax;
         item->durability = incoming->durability > item->durabilityMax
                                ? item->durabilityMax : incoming->durability;
@@ -3055,7 +3076,7 @@ static bool vm_mock_service_trade_persist_pair(
     }
     bulkLen = (size_t)snprintf(
         bulkQuery, bulkCapacity,
-        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,durability,durability_max) VALUES");
+        "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level,enhance_affix_types,enhance_affix_values,durability,durability_max) VALUES");
     for (u32 side = 0; side < 2; ++side)
     {
         u8 count = vm_net_mock_role_backpack_count(&roles[side]);
@@ -3067,10 +3088,16 @@ static bool vm_mock_service_trade_persist_pair(
                 continue;
             written = snprintf(
                 bulkQuery + bulkLen, bulkCapacity - bulkLen,
-                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,%u)",
+                "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,%u,%llu,%u,%u)",
                 bulkRows ? "," : "", accountHex[side], roles[side].roleId,
                 slot, item->itemId, item->seq, item->count,
-                item->enhanceLevel, item->durability, item->durabilityMax);
+                item->enhanceLevel,
+                vm_net_mock_equipment_enhancement_pack_affix_types(
+                    &item->enhanceAffixes),
+                (unsigned long long)
+                    vm_net_mock_equipment_enhancement_pack_affix_values(
+                        &item->enhanceAffixes),
+                item->durability, item->durabilityMax);
             if (written < 0 || (size_t)written >= bulkCapacity - bulkLen)
                 goto done;
             bulkLen += (size_t)written;
@@ -4723,9 +4750,21 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     session->onlineLevel = (u16)(role->level ? role->level : 1);
     for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
     {
-        session->onlineEquippedItemIds[slot] =
-            vm_net_mock_role_equipment_slot_is_usable(role, slot) ?
-                role->equippedItems[slot].itemId : 0;
+        if (vm_net_mock_role_equipment_slot_is_usable(role, slot))
+        {
+            session->onlineEquippedItemIds[slot] = role->equippedItems[slot].itemId;
+            session->onlineEquippedEnhanceLevels[slot] =
+                role->equippedItems[slot].enhanceLevel;
+            session->onlineEquippedEnhanceAffixes[slot] =
+                role->equippedItems[slot].enhanceAffixes;
+        }
+        else
+        {
+            session->onlineEquippedItemIds[slot] = 0;
+            session->onlineEquippedEnhanceLevels[slot] = 0;
+            memset(&session->onlineEquippedEnhanceAffixes[slot], 0,
+                   sizeof(session->onlineEquippedEnhanceAffixes[slot]));
+        }
     }
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;

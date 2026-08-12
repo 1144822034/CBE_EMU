@@ -2820,24 +2820,212 @@ static void vm_net_mock_equipment_enhancement_stage_types(u8 slot,
     memcpy(out, kStageTypes[slot], sizeof(kStageTypes[slot]));
 }
 
+/* Enhancement stage attributes are item-instance rolls.  They are generated
+ * once, saved with that instance, and then reused for rendering and battle
+ * calculation.  Never generate here while serializing a response: that would
+ * make opening the backpack reroll the equipment. */
+static u32 g_vm_net_mock_equipment_enhance_affix_rng = 0;
+
+static u32 vm_net_mock_equipment_enhancement_affix_rand(u32 salt)
+{
+    /* The service can process independent clients concurrently.  The nonce
+     * is only entropy for a result that will be persisted immediately, but it
+     * must still be acquired atomically so two simultaneous +4 successes do
+     * not race on shared state. */
+    u32 value = __atomic_add_fetch(&g_vm_net_mock_equipment_enhance_affix_rng,
+                                   0x6d2b79f5u, __ATOMIC_RELAXED);
+
+    value ^= salt ^ g_schedulerTick;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    return value ? value : 0x9e3779b9u;
+}
+
+static int vm_net_mock_equipment_enhancement_candidate_index(
+    const u8 candidates[4], u8 type)
+{
+    if (candidates == NULL || type == 0)
+        return -1;
+    for (u8 index = 0; index < 4; ++index)
+    {
+        if (candidates[index] == type)
+            return index;
+    }
+    return -1;
+}
+
+static u16 vm_net_mock_equipment_enhancement_roll_stage_value(
+    u16 baseValue, u32 randomValue)
+{
+    u32 spread = baseValue / 10u;
+    u32 value = 0;
+
+    /* Keep the result close to the catalogue-derived base even for the small
+     * integer stats such as crit/hit/dodge.  Their one-point variation is the
+     * narrowest representable value range on the wire. */
+    if (baseValue == 0)
+        return 0;
+    if (spread == 0)
+        spread = 1;
+    value = baseValue > spread ? baseValue - spread : 1u;
+    value += randomValue % (spread * 2u + 1u);
+    return vm_net_mock_equipment_enhance_attr_value(value);
+}
+
+/* Returns true when a legacy/corrupt state was repaired.  `identity` is only
+ * an entropy salt: the generated result is immediately stored, so later
+ * moves, relogins and displays never depend on it again. */
+static bool vm_net_mock_equipment_enhancement_ensure_affixes(
+    const vm_net_mock_equipment_catalog_item *equipment,
+    u8 enhanceLevel,
+    vm_net_mock_equipment_enhance_affix_state *affixes,
+    u32 identity)
+{
+    u8 candidates[4];
+    u8 effectiveLevel = (u8)SDL_min(
+        enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    u8 usedCandidates = 0;
+    bool changed = false;
+
+    if (equipment == NULL || affixes == NULL)
+        return false;
+    vm_net_mock_equipment_enhancement_stage_types(equipment->slot, candidates);
+
+    for (u8 stage = 0; stage < 4; ++stage)
+    {
+        u8 threshold = (u8)((stage + 1u) * 4u);
+        int candidateIndex = vm_net_mock_equipment_enhancement_candidate_index(
+            candidates, affixes->type[stage]);
+
+        if (effectiveLevel < threshold)
+        {
+            if (affixes->type[stage] != 0 || affixes->value[stage] != 0)
+            {
+                affixes->type[stage] = 0;
+                affixes->value[stage] = 0;
+                changed = true;
+            }
+            continue;
+        }
+        if (candidateIndex < 0 || affixes->value[stage] == 0 ||
+            (usedCandidates & (u8)(1u << candidateIndex)) != 0)
+        {
+            affixes->type[stage] = 0;
+            affixes->value[stage] = 0;
+            changed = true;
+            continue;
+        }
+        usedCandidates |= (u8)(1u << candidateIndex);
+    }
+
+    for (u8 stage = 0; stage < 4; ++stage)
+    {
+        u8 threshold = (u8)((stage + 1u) * 4u);
+        u8 available[4];
+        u8 availableCount = 0;
+        u8 candidateIndex = 0;
+        u32 randomValue = 0;
+        u16 baseValue = 0;
+
+        if (effectiveLevel < threshold || affixes->type[stage] != 0)
+            continue;
+        for (u8 index = 0; index < 4; ++index)
+        {
+            if ((usedCandidates & (u8)(1u << index)) == 0)
+                available[availableCount++] = index;
+        }
+        if (availableCount == 0)
+            return changed;
+        randomValue = vm_net_mock_equipment_enhancement_affix_rand(
+            identity ^ equipment->itemId ^ ((u32)(stage + 1u) * 0x45d9f3bu));
+        candidateIndex = available[randomValue % availableCount];
+        baseValue = vm_net_mock_equipment_enhance_stage_value(
+            candidates[candidateIndex], equipment->levelRequired);
+        affixes->type[stage] = candidates[candidateIndex];
+        affixes->value[stage] = vm_net_mock_equipment_enhancement_roll_stage_value(
+            baseValue, vm_net_mock_equipment_enhancement_affix_rand(
+                           identity ^ equipment->itemId ^
+                           ((u32)(stage + 1u) * 0x27d4eb2du)));
+        if (affixes->value[stage] == 0)
+        {
+            affixes->type[stage] = 0;
+            return changed;
+        }
+        usedCandidates |= (u8)(1u << candidateIndex);
+        changed = true;
+    }
+    return changed;
+}
+
+/* The two relational columns keep all four stage rolls in one equipment row:
+ * types occupy four bytes; values occupy four unsigned 16-bit lanes.  The
+ * client wire also has fixed four-stage capacity, so no variable blob or
+ * lossy catalog reconstruction is involved. */
+static u32 vm_net_mock_equipment_enhancement_pack_affix_types(
+    const vm_net_mock_equipment_enhance_affix_state *affixes)
+{
+    u32 packed = 0;
+
+    if (affixes == NULL)
+        return 0;
+    for (u8 stage = 0; stage < 4; ++stage)
+        packed |= (u32)affixes->type[stage] << (stage * 8u);
+    return packed;
+}
+
+static uint64_t vm_net_mock_equipment_enhancement_pack_affix_values(
+    const vm_net_mock_equipment_enhance_affix_state *affixes)
+{
+    uint64_t packed = 0;
+
+    if (affixes == NULL)
+        return 0;
+    for (u8 stage = 0; stage < 4; ++stage)
+        packed |= (uint64_t)affixes->value[stage] << (stage * 16u);
+    return packed;
+}
+
+static void vm_net_mock_equipment_enhancement_unpack_affixes(
+    vm_net_mock_equipment_enhance_affix_state *affixes,
+    u32 packedTypes, uint64_t packedValues)
+{
+    if (affixes == NULL)
+        return;
+    memset(affixes, 0, sizeof(*affixes));
+    for (u8 stage = 0; stage < 4; ++stage)
+    {
+        affixes->type[stage] = (u8)(packedTypes >> (stage * 8u));
+        affixes->value[stage] = (u16)(packedValues >> (stage * 16u));
+    }
+}
+
 static u8 vm_net_mock_equipment_enhancement_collect_attrs(
     const vm_net_mock_equipment_catalog_item *equipment,
+    u8 enhanceLevel,
+    const vm_net_mock_equipment_enhance_affix_state *affixes,
     vm_net_mock_equipment_enhance_attr *out,
     u8 outCap)
 {
-    u8 types[4];
     u8 count = 0;
+    u8 effectiveLevel = (u8)SDL_min(
+        enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
 
-    if (equipment == NULL || out == NULL || outCap == 0)
+    if (equipment == NULL || affixes == NULL || out == NULL || outCap == 0)
         return 0;
-    vm_net_mock_equipment_enhancement_stage_types(equipment->slot, types);
     for (u8 stage = 0; stage < 4 && count < outCap; ++stage)
     {
+        u8 threshold = (u8)((stage + 1u) * 4u);
+
+        if (effectiveLevel < threshold || affixes->type[stage] == 0 ||
+            affixes->value[stage] == 0)
+        {
+            continue;
+        }
         out[count].threshold = (u8)((stage + 1u) * 4u);
-        out[count].type = types[stage];
+        out[count].type = affixes->type[stage];
         out[count].mode = 0;
-        out[count].value = vm_net_mock_equipment_enhance_stage_value(
-            types[stage], equipment->levelRequired);
+        out[count].value = affixes->value[stage];
         ++count;
     }
 
@@ -2871,6 +3059,7 @@ static u32 vm_net_mock_equipment_enhancement_primary_bonus(
 static void vm_net_mock_equipment_enhancement_add_bonus(
     const vm_net_mock_equipment_catalog_item *equipment,
     u8 enhanceLevel,
+    const vm_net_mock_equipment_enhance_affix_state *affixes,
     vm_net_mock_equipment_bonus *bonus)
 {
     vm_net_mock_equipment_enhance_attr attrs[4];
@@ -2886,11 +3075,9 @@ static void vm_net_mock_equipment_enhancement_add_bonus(
     else
         bonus->armor += primary;
     attrCount = vm_net_mock_equipment_enhancement_collect_attrs(
-        equipment, attrs, 4);
+        equipment, enhanceLevel, affixes, attrs, 4);
     for (u8 i = 0; i < attrCount; ++i)
     {
-        if (enhanceLevel < attrs[i].threshold)
-            continue;
         switch (attrs[i].type)
         {
         case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
@@ -3430,7 +3617,8 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
                                                    u32 *pos,
                                                    u32 itemId,
                                                    u8 enhanceLevel,
-                                                   u8 enhanceMaxLevel)
+                                                   u8 enhanceMaxLevel,
+                                                   const vm_net_mock_equipment_enhance_affix_state *affixes)
 {
     /*
      * JianghuOL.CBE:ParseEquipAttributes (vtable +2452, 0x010185C2) reads
@@ -3444,9 +3632,10 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
     vm_net_mock_equipment_enhance_attr attrs[4];
     u8 attrCount = 0;
 
-    if (equipment != NULL)
+    if (equipment != NULL && affixes != NULL)
         attrCount = vm_net_mock_equipment_enhancement_collect_attrs(
-            equipment, attrs, 4);
+            equipment, (u8)SDL_min(enhanceLevel, enhanceMaxLevel), affixes,
+            attrs, 4);
 
     if (!vm_net_mock_seq_put_i16(out, outCap, pos, enhanceLevel))
         return false;
@@ -3503,7 +3692,7 @@ static bool vm_net_mock_seq_put_shop_page_item_extra(u8 *out, u32 outCap,
      */
     return vm_net_mock_seq_put_item_common_extra(
         out, outCap, pos, itemId, 0,
-        vm_net_mock_item_common_extra_enhance_cap(itemId));
+        vm_net_mock_item_common_extra_enhance_cap(itemId), NULL);
 }
 
 static bool vm_net_mock_build_backpack_iteminfo_blob_with_stage_attrs(
@@ -3532,7 +3721,8 @@ static bool vm_net_mock_build_backpack_iteminfo_blob_with_stage_attrs(
                       out, outCap, &pos, item->itemId,
                       (u8)SDL_min(item->enhanceLevel,
                                   VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                      vm_net_mock_item_common_extra_enhance_cap(item->itemId))
+                      vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                      &item->enhanceAffixes)
                 : !vm_net_mock_seq_put_item_compact_extra(
                       out, outCap, &pos,
                       (u8)SDL_min(item->enhanceLevel,
@@ -3639,7 +3829,8 @@ static bool vm_net_mock_build_shop17_iteminfo_blob(u8 *out, u32 outCap,
                 return false;
             if (!vm_net_mock_seq_put_item_common_extra(
                     out, outCap, &pos, item->itemId, 0,
-                    vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
+                    vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                    NULL))
                 return false;
             ++emitted;
         }
@@ -4424,7 +4615,7 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(
             out, outCap, &pos, itemId, 0,
-            vm_net_mock_item_common_extra_enhance_cap(itemId)))
+            vm_net_mock_item_common_extra_enhance_cap(itemId), NULL))
         return false;
 
     *blobLenOut = pos;
@@ -4465,7 +4656,8 @@ static bool vm_net_mock_build_item_use_iteminfo_rows_blob(
             !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
             !vm_net_mock_seq_put_item_common_extra(
                 out, outCap, &pos, rows[i].itemId, 0,
-                vm_net_mock_item_common_extra_enhance_cap(rows[i].itemId)))
+                vm_net_mock_item_common_extra_enhance_cap(rows[i].itemId),
+                NULL))
         {
             return false;
         }
@@ -4582,7 +4774,8 @@ static bool vm_net_mock_build_equipment_login_iteminfo_blob(
                 itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL))
+                VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL,
+                &item->enhanceAffixes))
         {
             return false;
         }
@@ -5211,7 +5404,9 @@ static u32 vm_net_mock_build_practise_pill16_response(
 /* 833 聚元丹 uses the same CBE result shell as 827, but its `maxnum` is the
  * current vitality, not a disguised HP/MP amount.  result=1 is emitted only
  * after the exact selected stack and account_role_vitality row committed in
- * one transaction. */
+ * one transaction.  HandleShopBuyItem's 7/33 branch does not write the
+ * role's energy cache, so a successful operation is followed by the native
+ * 2/13 energy update that net_handle_actor_move_info already consumes. */
 static u32 vm_net_mock_build_vitality_pill33_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -5221,6 +5416,7 @@ static u32 vm_net_mock_build_vitality_pill33_response(
     u32 maximum = 0;
     u32 pos = 5;
     u32 objectStart = 0;
+    u8 responseObjectCount = 1;
     bool success = false;
     const char *itemInfo =
         "\xBB\xEE\xC1\xA6\xD2\xD1\xC2\xFA\xA3\xAC\xCE\xB4\xCA\xB9\xD3\xC3\xA1\xA3"; /* 活力已满，未使用。 */
@@ -5245,10 +5441,22 @@ static u32 vm_net_mock_build_vitality_pill33_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
-    printf("[info][network] mock_vitality_pill33 role=%u seq=%u success=%u vitality=%u/%u response=%u evidence=JianghuOL.CBE:0x0102355E+0x01025AE6,item.dsh:833\n",
+    if (success)
+    {
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 2, 13,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "energy", current) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "energymax", maximum))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        responseObjectCount = 2;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
+    printf("[info][network] mock_vitality_pill33 role=%u seq=%u success=%u vitality=%u/%u response_objects=%u response=%u evidence=JianghuOL.CBE:0x0102355E+0x01025AE6+0x01012ADC(case13),item.dsh:833\n",
            role ? role->roleId : 0, itemSeq, success ? 1u : 0u,
-           current, maximum, pos);
+           current, maximum, responseObjectCount, pos);
     return pos;
 }
 

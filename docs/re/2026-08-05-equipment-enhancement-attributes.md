@@ -64,7 +64,8 @@ final = base + sum(bonus)
 
 - `src/server/mock_server_catalog.c`
   - 集中保存十六档主属性成长和部位阶段词条规则；
-  - 所有背包、装备栏、商店、交易预览等复用的 common-extra 序列统一下发四项阶段词条。
+  - 所有背包、装备栏、商店、交易预览等复用的 common-extra 序列只下发当前强化等级
+    已解锁的阶段词条：`+0..+3` 为零条，之后每达到 `+4/+8/+12/+16` 新增一条。
 - `src/server/mock_server_role.c`
   - 直接基础词条后叠加强化主属性与已解锁阶段词条，作为服务端战斗权威值。
 - `tmp/equipment-enhancement-attributes-regression.c`
@@ -85,5 +86,5 @@ gcc -DNETWORK_SUPPORT -DCBE_SERVER_ONLY -g -O2 -std=gnu11 -ffunction-sections -f
 
 客户端原生 `CalcEquipStatBonus` 已拥有“按当前强化等级逐级成长”的职责。将服务端计算出的
 最终物攻/护甲再伪装为阶段扩展词条，会在原生表可用时双重加成，也违反扩展字段“每四级
-新增一条”的协议语义。因此 common-extra 只承载阶段词条；逐级主属性由客户端计算器和
-服务端权威计算器分别按同一张十六档表处理。
+新增一条”的协议语义。因此 common-extra 只承载已解锁的阶段词条；逐级主属性由客户端
+计算器和服务端权威计算器分别按同一张十六档表处理。
