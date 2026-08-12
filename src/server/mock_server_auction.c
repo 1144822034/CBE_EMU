@@ -970,12 +970,19 @@ static u32 vm_net_mock_build_auction_browse_response(const u8 *request, u32 requ
     for (i = 0; i < ctx.count; ++i)
     {
         vm_mock_auction_item_name(rows[i].itemId, itemName, sizeof(itemName));
+        /* After enhanceLevel: same common-extra as bag (milestones + wash bit7). */
         if (!vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].listingId) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].sellerRoleId) ||
             !vm_net_mock_seq_put_string(blob, sizeof(blob), &blobLen, rows[i].sellerName) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemId) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].itemCount) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].enhanceLevel) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                blob, sizeof(blob), &blobLen,
+                (u8)SDL_min(rows[i].itemCount, 255u),
+                (u8)SDL_min(rows[i].enhanceLevel,
+                            VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
+                rows[i].itemId, &rows[i].enhanceWash) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].startPrice) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].currentPrice) ||
             !vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, rows[i].buyoutPrice) ||

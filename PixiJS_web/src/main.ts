@@ -903,7 +903,7 @@ async function main(): Promise<void> {
     else if (p === "social") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "quest") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "chat") shell.setSoftkeys({ left: "发送", right: "返回" });
-    else if (p === "trade") shell.setSoftkeys({ left: "确定", right: "取消" });
+    else if (p === "trade") shell.setSoftkeys(tradeUi.softkeys());
     else if (p === "guild") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "map") shell.setSoftkeys({ left: "确定", right: "返回" });
   };
@@ -1168,7 +1168,11 @@ async function main(): Promise<void> {
     onNearbyPage: (page) => {
       session.nearbyList = page.peers;
       if (phase === "social") social.openNearby(page.peers);
-      setChromeStatus(`周围玩家 ×${page.peers.length}`);
+      setChromeStatus(
+        page.peers.length
+          ? `周围玩家 ×${page.peers.length}（↑↓翻页）`
+          : "周围玩家 ×0",
+      );
     },
     onTeamUpdate: (roster) => {
       if (phase === "social") social.openTeam(roster.members, roster.leaderId);
@@ -1373,17 +1377,14 @@ async function main(): Promise<void> {
       }
       if (u.kind === "peer_offer") {
         tradeUi.setPeerOffer(u.offer);
-        showGameTip("对方报价已更新");
         return;
       }
       if (u.kind === "offer_ack") {
         tradeUi.setStatus(u.tip, false, u.result === 1);
-        if (u.tip) showGameTip(u.tip);
         return;
       }
       if (u.kind === "waiting") {
         tradeUi.setStatus("等待对方确认", true, true);
-        showGameTip("等待对方确认交易");
         return;
       }
       if (u.kind === "cancel" || u.kind === "done") {
@@ -3184,15 +3185,13 @@ async function main(): Promise<void> {
   };
 
   tradeUi.onClose = () => showPhase("world");
+  tradeUi.onSoftkeys = () => {
+    if (phase === "trade") shell.setSoftkeys(tradeUi.softkeys());
+  };
   tradeUi.onAction = (action, payload) => {
     if (action === "add_bag_item" && payload && "itemId" in payload) {
-      const bag = payload as import("./net/protocolExtras").BagItem;
-      let count = 1;
-      if (bag.kind !== "equip" && bag.count > 1) {
-        const raw = window.prompt(`放入数量（最多${bag.count}）`, "1") ?? "1";
-        count = Math.max(1, Math.min(bag.count, Number(raw) || 1));
-      }
-      tradeUi.addFromBag(bag, count);
+      // Qty is chosen in-panel with ←→; no prompt / left-softkey input.
+      tradeUi.addFromBag(payload as import("./net/protocolExtras").BagItem);
       return;
     }
     if (action === "set_money") {
@@ -3766,7 +3765,7 @@ dialog.hide();
       return;
     }
     if (phase === "trade") {
-      if (which === "left") tradeUi.confirm();
+      if (which === "left") tradeUi.softLeft();
       if (which === "right") tradeUi.cancel();
       return;
     }
@@ -3970,8 +3969,8 @@ dialog.hide();
         chatPanel.cycleChannel(delta);
         return;
       }
-      if (phase === "trade" && tradeUi.isMoneyMode()) {
-        // Money uses HTML numeric IME — ←→ refocuses the field.
+      if (phase === "trade") {
+        // ←→: stack qty on bag row, or refocus money IME.
         tradeUi.moveHorizontal(delta);
         return;
       }
@@ -4154,15 +4153,18 @@ dialog.hide();
       }
     }
     if (phase === "trade") {
+      if (k === "arrowleft" || k === "a") {
+        tradeUi.moveHorizontal(-1);
+        e.preventDefault();
+        return;
+      }
+      if (k === "arrowright" || k === "d") {
+        tradeUi.moveHorizontal(1);
+        e.preventDefault();
+        return;
+      }
       if (tradeUi.isMoneyMode()) {
-        // Digits go to ChatIme when focused; hardware fallback when blurred.
-        if (k === "arrowleft" || k === "a") {
-          tradeUi.moveHorizontal(-1);
-          e.preventDefault();
-        } else if (k === "arrowright" || k === "d") {
-          tradeUi.moveHorizontal(1);
-          e.preventDefault();
-        } else if (tradeUi.typeMoneyKey(k === "backspace" ? "backspace" : e.key)) {
+        if (tradeUi.typeMoneyKey(k === "backspace" ? "backspace" : e.key)) {
           e.preventDefault();
         }
         return;

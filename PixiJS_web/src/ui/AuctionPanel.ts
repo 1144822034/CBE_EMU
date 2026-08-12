@@ -83,6 +83,9 @@ function listingAsBagItem(r: AuctionListing): BagItem {
     desc: cat?.desc ?? "",
     usable: false,
     equipSlot: cat?.equipSlot ?? -1,
+    ...(kind === "equip" && r.enhanceAttrs && r.enhanceAttrs.length
+      ? { enhanceAttrs: r.enhanceAttrs }
+      : {}),
   };
 }
 

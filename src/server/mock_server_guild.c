@@ -50,7 +50,8 @@ static bool vm_net_mock_append_scene_room_npc_object(u8 *out, u32 outCap, u32 *p
 
 enum
 {
-    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX = 3
+    /* Same-scene peer seeds for 2/10 map + 2/7 surrounding list (was 3). */
+    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX = 64
 };
 
 typedef struct
@@ -181,11 +182,17 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     {
         int dx;
         int dy;
-    } offsets[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX] = {
+    } offsets[] = {
         { 32, 0 },
         { -40, 24 },
         { 20, -36 },
+        { -28, -20 },
+        { 48, 16 },
+        { -16, 40 },
+        { 36, -28 },
+        { -48, 8 },
     };
+    const u8 offsetCount = (u8)(sizeof(offsets) / sizeof(offsets[0]));
     u8 count = 0;
     u16 baseX = vm_net_mock_scene_spawn_x();
     u16 baseY = vm_net_mock_scene_spawn_y();
@@ -215,6 +222,7 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
             vm_mock_service_client_session *observer =
                 vm_mock_service_find_client_session(
                     g_vm_mock_service_active_client_id);
+            u8 oi = offsetCount ? (u8)(count % offsetCount) : 0;
             if (observer != NULL &&
                 !vm_mock_arena_peer_visible(observer, session))
             {
@@ -226,9 +234,9 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
                                                                                count,
                                                                                activeRole);
             seeds[count].x = session->sceneVisibleX ? session->sceneVisibleX :
-                             vm_net_mock_offset_coord(baseX, offsets[count].dx);
+                             vm_net_mock_offset_coord(baseX, offsets[oi].dx);
             seeds[count].y = session->sceneVisibleY ? session->sceneVisibleY :
-                             vm_net_mock_offset_coord(baseY, offsets[count].dy);
+                             vm_net_mock_offset_coord(baseY, offsets[oi].dy);
             seeds[count].job = session->onlineJob ? session->onlineJob : 1;
             seeds[count].sex = session->onlineSex <= 1 ? session->onlineSex : 0;
             seeds[count].level = session->onlineLevel ? session->onlineLevel : 1;

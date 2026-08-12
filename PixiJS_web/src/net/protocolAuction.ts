@@ -11,6 +11,10 @@ import {
   type WtObject,
   type WtPacket,
 } from "./wt";
+import {
+  readItemCommonExtra,
+  type BagEnhanceAttr,
+} from "./protocolExtras";
 
 function fieldU32(obj: WtObject, name: string): number {
   const raw = findField(obj, name);
@@ -64,6 +68,8 @@ export type AuctionListing = {
   itemId: number;
   itemCount: number;
   enhanceLevel: number;
+  /** Bag-identical common-extra attrs (wash bit7); for equip detail. */
+  enhanceAttrs?: BagEnhanceAttr[];
   startPrice: number;
   currentPrice: number;
   /** 0 = 无一口价 */
@@ -189,13 +195,22 @@ function parseListings(obj: WtObject): AuctionListing[] {
   const r = new SeqReader(raw);
   for (let i = 0; i < count && r.remaining() > 8; i++) {
     try {
+      const listingId = r.u32();
+      const sellerRoleId = r.u32();
+      const sellerName = r.string().replace(/\0+$/g, "");
+      const itemId = r.u32();
+      const itemCount = r.u32();
+      const enhanceLevel = r.u32();
+      /* After enhanceLevel: bag common-extra (milestones + wash). */
+      const extra = readItemCommonExtra(r);
       rows.push({
-        listingId: r.u32(),
-        sellerRoleId: r.u32(),
-        sellerName: r.string().replace(/\0+$/g, ""),
-        itemId: r.u32(),
-        itemCount: r.u32(),
-        enhanceLevel: r.u32(),
+        listingId,
+        sellerRoleId,
+        sellerName,
+        itemId,
+        itemCount,
+        enhanceLevel,
+        ...(extra.attrs.length ? { enhanceAttrs: extra.attrs } : {}),
         startPrice: r.u32(),
         currentPrice: r.u32(),
         buyoutPrice: r.u32(),

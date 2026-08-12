@@ -1,4 +1,4 @@
-static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
+static u32 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
 {
     u32 count = 0;
     if (role == NULL)
@@ -8,14 +8,14 @@ static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
         count = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
     if (count > role->backpackCapacity)
         count = role->backpackCapacity;
-    return (u8)count;
+    return count;
 }
 
-static u8 vm_net_mock_backpack_client_capacity(u32 capacity)
+static u16 vm_net_mock_backpack_client_capacity(u32 capacity)
 {
     if (capacity > VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
-        return VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY;
-    return (u8)capacity;
+        return (u16)VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY;
+    return (u16)capacity;
 }
 
 static bool vm_net_mock_backpack_item_is_client_grid_item(
@@ -44,11 +44,11 @@ static bool vm_net_mock_backpack_item_is_client_grid_item(
     }
 }
 
-static u8 vm_net_mock_role_backpack_client_grid_count(
+static u32 vm_net_mock_role_backpack_client_grid_count(
     const vm_net_mock_role_state *role)
 {
-    u8 itemCount = vm_net_mock_role_backpack_count(role);
-    u8 gridCount = 0;
+    u32 itemCount = vm_net_mock_role_backpack_count(role);
+    u32 gridCount = 0;
 
     for (u32 i = 0; i < itemCount; ++i)
     {
@@ -2303,9 +2303,9 @@ static u32 vm_net_mock_shop_client_backpack_expand_price(void)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 capacity = vm_net_mock_backpack_client_capacity(
-        vm_net_mock_env_u8("CBE_ACTOR_BACKPACK_CAPACITY",
-                           role ? role->backpackCapacity :
-                           VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY));
+        vm_net_mock_env_u32("CBE_ACTOR_BACKPACK_CAPACITY",
+                            role ? role->backpackCapacity :
+                            VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY));
 
     /*
      * mmShopMstarWqvga.cbm:0x7EC maps the local capacity halfword:
@@ -3080,14 +3080,17 @@ static bool vm_net_mock_build_backpack_iteminfo_blob(u8 *out, u32 outCap,
                                                      u32 *blobLenOut, u32 *rowCountOut)
 {
     u32 pos = 0;
-    u8 itemCount = vm_net_mock_role_backpack_count(role);
-    u8 rowCount = vm_net_mock_role_backpack_client_grid_count(role);
+    u32 itemCount = vm_net_mock_role_backpack_count(role);
+    u32 rowCount = vm_net_mock_role_backpack_client_grid_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
     if (rowCountOut)
         *rowCountOut = 0;
 
-    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rowCount))
+    /* Pixi 17/1: tagged i16 row count (was u8; 256 slots exceed u8). */
+    if (rowCount > 0xffff)
+        return false;
+    if (!vm_net_mock_seq_put_i16(out, outCap, &pos, (u16)rowCount))
         return false;
     for (u32 i = 0; i < itemCount; ++i)
     {
@@ -3219,8 +3222,8 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
                                                          u32 *blobLenOut, u32 *gridCountOut)
 {
     u32 pos = 0;
-    u8 itemCount = vm_net_mock_role_backpack_count(role);
-    u8 gridCount = vm_net_mock_role_backpack_client_grid_count(role);
+    u32 itemCount = vm_net_mock_role_backpack_count(role);
+    u32 gridCount = vm_net_mock_role_backpack_client_grid_count(role);
     if (out == NULL || blobLenOut == NULL)
         return false;
     if (gridCountOut)
@@ -3504,6 +3507,38 @@ static bool vm_net_mock_append_shop_actor_state14_object(u8 *out, u32 outCap, u3
 {
     return vm_net_mock_append_shop_actor_state14_object_ex(out, outCap, pos,
                                                            actorInfoLenOut, true);
+}
+
+/*
+ * Battle settle baseline seed for Pixi/CBE panel 获得 = (4/7 total) − old.
+ * Live 1/1/14 omits gap09C0 (money); CBE keeps in-memory money, but Pixi only
+ * has session.gold.  Emit fresh actorinfo so money+exp are both on the wire.
+ */
+static bool vm_net_mock_append_settle_baseline_actor14_object(u8 *out, u32 outCap,
+                                                              u32 *pos)
+{
+    u32 objectStart = 0;
+    u8 actorInfo[512];
+    u32 actorInfoLen = 0;
+
+    memset(actorInfo, 0, sizeof(actorInfo));
+    actorInfoLen = vm_net_mock_build_actor_info_ex(actorInfo, sizeof(actorInfo),
+                                                   false, true, false);
+    if (actorInfoLen == 0 || actorInfoLen > 0xffff)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 1, 14, &objectStart))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "revivetype", 0))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "ruffianflag", 0))
+        return false;
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "type", 0))
+        return false;
+    if (!vm_net_mock_put_object_entry(out, outCap, pos, "actorinfo", actorInfo,
+                                      (u16)actorInfoLen))
+        return false;
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
 }
 
 static bool vm_net_mock_build_item_use_count_info_blob(u8 *out, u32 outCap,
@@ -4635,7 +4670,7 @@ static bool vm_net_mock_build_backpack_reservoir_count_info_blob(
     u32 *blobLenOut, u32 *rowCountOut)
 {
     u32 pos = 0;
-    u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u32 itemCount = vm_net_mock_role_backpack_count(role);
     u8 rowCount = 0;
 
     if (blobLenOut)
@@ -4787,24 +4822,24 @@ static u32 vm_net_mock_role_expand_backpack_capacity(vm_net_mock_role_state *rol
                   vm_net_mock_mul_capped_u32(VM_NET_MOCK_BACKPACK_EXPAND_STEP, applied);
     if (newCapacity > VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
         newCapacity = VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY;
-    role->backpackCapacity = (u8)newCapacity;
+    role->backpackCapacity = (u16)newCapacity;
     return applied;
 }
 
-static u8 vm_net_mock_role_round_backpack_capacity_for_count(u32 itemCount)
+static u16 vm_net_mock_role_round_backpack_capacity_for_count(u32 itemCount)
 {
     u32 rounded = 0;
 
     if (itemCount < VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY)
         itemCount = VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY;
     if (itemCount >= VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
-        return VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
+        return (u16)VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
     rounded = ((itemCount + VM_NET_MOCK_BACKPACK_EXPAND_STEP - 1) /
                VM_NET_MOCK_BACKPACK_EXPAND_STEP) *
               VM_NET_MOCK_BACKPACK_EXPAND_STEP;
     if (rounded > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT)
         rounded = VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT;
-    return (u8)rounded;
+    return (u16)rounded;
 }
 
 static void vm_net_mock_role_migrate_legacy_backpack_capacity(vm_net_mock_role_state *role)
@@ -7191,7 +7226,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         }
         if (item == NULL || item->count == 0)
         {
-            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 bagCount = vm_net_mock_role_backpack_count(role);
             printf("[warn][network] mock_warehouse_pass_use_reject role=%u "
                    "req_item=%u req_seq=%u bag_rows=%u evidence=no-live-834-durability\n",
                    role->roleId, parsed.itemId, parsed.seq, bagCount);
@@ -7276,7 +7311,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         }
         if (item == NULL || item->count == 0)
         {
-            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 bagCount = vm_net_mock_role_backpack_count(role);
             printf("[warn][network] mock_equip_sell_pass_use_reject role=%u "
                    "req_item=%u req_seq=%u bag_rows=%u evidence=no-live-839-durability\n",
                    role->roleId, parsed.itemId, parsed.seq, bagCount);
@@ -7739,7 +7774,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
         }
         else
         {
-            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 bagCount = vm_net_mock_role_backpack_count(role);
             char seqDump[160];
             u32 dumpPos = 0;
 

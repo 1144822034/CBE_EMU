@@ -30,3 +30,5 @@
 与短记 [`docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md`](../docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md)。
 
 默认：`npm run build:android` → `android/app/build/outputs/apk/debug/app-debug.apk`。
+
+竖屏 Windows 便携包：`npm run build:exe` → `electron-release/江湖OL-*-portable.exe`（见 `docs/re/2026-08-11-pixijs-electron-portrait-exe.md`）。

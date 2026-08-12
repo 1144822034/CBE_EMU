@@ -1171,7 +1171,9 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
     if (damage == 0 || roleHpCurrent == 0)
         return 0;
 
-    chance = vm_net_mock_env_u32("CBE_BATTLE_BOSS_SKILL_CHANCE", 45);
+    chance = vm_net_mock_env_u32(
+        "CBE_BATTLE_BOSS_SKILL_CHANCE",
+        vm_net_mock_combat_formula_config_get()->bossSkillChancePercent);
     if (chance > 100u)
         chance = 100u;
     roll = (enemyId * 131u + g_mockBattleOperateTurnCounter * 17u +
@@ -1202,8 +1204,10 @@ static u32 vm_net_mock_battle_resolve_enemy_counter_damage(
             return 0;
     }
 
-    /* +200% attack bonus → 300% of resist-mitigated base. */
-    mult = vm_net_mock_env_u32("CBE_BATTLE_BOSS_SKILL_DAMAGE_PCT", 300);
+    /* Admin boss_skill_damage_percent of resist-mitigated base (default 300%). */
+    mult = vm_net_mock_env_u32(
+        "CBE_BATTLE_BOSS_SKILL_DAMAGE_PCT",
+        vm_net_mock_combat_formula_config_get()->bossSkillDamagePercent);
     if (mult < 100u)
         mult = 100u;
     if (mult > 500u)
@@ -7239,7 +7243,7 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
         role->exp = preExp;
         role->money = preGold;
         if (*objectCount < 0xff &&
-            vm_net_mock_append_shop_actor_state14_object(out, outCap, pos, NULL))
+            vm_net_mock_append_settle_baseline_actor14_object(out, outCap, pos))
         {
             ++*objectCount;
             seededBaseline = true;

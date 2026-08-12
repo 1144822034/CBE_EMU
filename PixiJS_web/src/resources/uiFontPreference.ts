@@ -18,19 +18,20 @@ export type Uc3FontOption = {
 export const UC3_FONT_OPTIONS: readonly Uc3FontOption[] = [
   {
     id: "sky",
-    url: "/font_16_sky.uc3",
+    // Relative — absolute `/…` breaks Electron file:// (disk root).
+    url: "./font_16_sky.uc3",
     file: "font_16_sky.uc3",
     label: "天空点阵",
   },
   {
     id: "gb16",
-    url: "/gb16.uc2.uc3",
+    url: "./gb16.uc2.uc3",
     file: "gb16.uc2.uc3",
     label: "全字库",
   },
   {
     id: "gb",
-    url: "/font_gb.uc3",
+    url: "./font_gb.uc3",
     file: "font_gb.uc3",
     label: "经典子集",
   },

@@ -3538,8 +3538,8 @@ static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 out
                                                                u32 *otherInfoLenOut)
 {
     vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
-    u8 otherInfo[512];
-    u8 plus16Info[64];
+    u8 otherInfo[8192];
+    u8 plus16Info[512];
     u32 objectStart = 0;
     u32 otherInfoLen = 0;
     u32 plus16InfoLen = 0;

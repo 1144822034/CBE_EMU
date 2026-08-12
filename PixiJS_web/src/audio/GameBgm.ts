@@ -3,13 +3,15 @@
  * Works in browser and Capacitor Android WebView after a user gesture.
  */
 
+import { publicAssetUrl } from "../resources/publicUrl";
+
 const LS_KEY = "pix_sound_enabled";
 
-const TRACK_URLS = ["/JHOnlineData/jh.mp3", "/JHOnlineData/ss.mp3"] as const;
+const TRACK_PATHS = ["JHOnlineData/jh.mp3", "JHOnlineData/ss.mp3"] as const;
 
 let enabled = readEnabled();
 let starting = false;
-/** Playlist index into TRACK_URLS — preserved across brief suspend. */
+/** Playlist index into TRACK_PATHS — preserved across brief suspend. */
 let trackIndex = 0;
 let playGen = 0;
 
@@ -36,15 +38,15 @@ function writeEnabled(on: boolean): void {
 
 function ensurePlayers(): HTMLAudioElement[] {
   if (players) return players;
-  players = TRACK_URLS.map((url, i) => {
-    const a = new Audio(url);
+  players = TRACK_PATHS.map((rel, i) => {
+    const a = new Audio(publicAssetUrl(rel));
     a.loop = false;
     a.preload = "auto";
     a.setAttribute("playsinline", "true");
     a.volume = 0.55;
     a.addEventListener("ended", () => {
       if (!enabled) return;
-      trackIndex = (i + 1) % TRACK_URLS.length;
+      trackIndex = (i + 1) % TRACK_PATHS.length;
       void playCurrentTrack();
     });
     return a;
@@ -77,9 +79,9 @@ async function playCurrentTrack(): Promise<void> {
       a.currentTime = 0;
       await a.play();
     } catch (e) {
-      console.warn("[bgm] play", TRACK_URLS[trackIndex], e);
+      console.warn("[bgm] play", TRACK_PATHS[trackIndex], e);
       if (!enabled || gen !== playGen) return;
-      trackIndex = (trackIndex + 1) % TRACK_URLS.length;
+      trackIndex = (trackIndex + 1) % TRACK_PATHS.length;
       queueMicrotask(() => {
         void playCurrentTrack();
       });

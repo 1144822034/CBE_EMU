@@ -26,7 +26,7 @@ export type Uc3Font = {
 };
 
 /** Default pack when preference missing. */
-export const UC3_FONT_URL = "/font_16_sky.uc3";
+export const UC3_FONT_URL = "./font_16_sky.uc3";
 
 let cached: Uc3Font | null = null;
 let loadPromise: Promise<Uc3Font> | null = null;

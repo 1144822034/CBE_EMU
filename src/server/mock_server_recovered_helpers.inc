@@ -152,6 +152,9 @@ static void vm_mock_service_clear_inflight_scene_transfer_globals(const char *re
 
 static u32 vm_net_mock_battle_apply_damage_variance(u32 damage)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 variancePct = combatCfg ? combatCfg->naVariancePercent : 5u;
     u32 span;
     u32 roll;
     u32 pct;
@@ -161,9 +164,11 @@ static u32 vm_net_mock_battle_apply_damage_variance(u32 damage)
         return 0;
     if (vm_net_mock_battle_combat_rolls_disabled())
         return damage;
-    span = VM_NET_MOCK_BATTLE_DAMAGE_VARIANCE_PERCENT * 2u + 1u;
+    if (variancePct > 50u)
+        variancePct = 50u;
+    span = variancePct * 2u + 1u;
     roll = vm_net_mock_battle_combat_rand() % span;
-    pct = (100u - VM_NET_MOCK_BATTLE_DAMAGE_VARIANCE_PERCENT) + roll;
+    pct = (100u - variancePct) + roll;
     scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
     if (scaled == 0)
         scaled = 1;
@@ -172,6 +177,9 @@ static u32 vm_net_mock_battle_apply_damage_variance(u32 damage)
 
 static u32 vm_net_mock_battle_apply_skill_damage_variance(u32 damage)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 variancePct = combatCfg ? combatCfg->skillVariancePercent : 8u;
     u32 span;
     u32 roll;
     u32 pct;
@@ -181,9 +189,11 @@ static u32 vm_net_mock_battle_apply_skill_damage_variance(u32 damage)
         return 0;
     if (vm_net_mock_battle_combat_rolls_disabled())
         return damage;
-    span = VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT * 2u + 1u;
+    if (variancePct > 50u)
+        variancePct = 50u;
+    span = variancePct * 2u + 1u;
     roll = vm_net_mock_battle_combat_rand() % span;
-    pct = (100u - VM_NET_MOCK_BATTLE_SKILL_DAMAGE_VARIANCE_PERCENT) + roll;
+    pct = (100u - variancePct) + roll;
     scaled = ((uint64_t)damage * (uint64_t)pct + 50ull) / 100ull;
     if (scaled == 0)
         scaled = 1;
@@ -192,11 +202,14 @@ static u32 vm_net_mock_battle_apply_skill_damage_variance(u32 damage)
 
 static u32 vm_net_mock_battle_job_skill_primary_bonus_percent(u32 job)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+
     if (job == 3)
-        return 12u; /* 鬼刀 */
+        return combatCfg ? combatCfg->duelJobBonusGuidaoPercent : 12u;
     if (job == 2)
-        return 8u; /* 幻剑 */
-    return 10u; /* 天机 */
+        return combatCfg ? combatCfg->duelJobBonusHuanjianPercent : 8u;
+    return combatCfg ? combatCfg->duelJobBonusTianjiPercent : 10u;
 }
 
 static bool vm_net_mock_battle_skill_is_single_target_offensive(
@@ -210,6 +223,9 @@ static u32 vm_net_mock_battle_soft_boost_single_skill_vs_na(
     u32 naReference,
     const vm_net_mock_skill_catalog_item *skill)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 floorPct = combatCfg ? combatCfg->skillVsNaFloorPercent : 90u;
     u32 target;
 
     (void)skill;
@@ -217,7 +233,7 @@ static u32 vm_net_mock_battle_soft_boost_single_skill_vs_na(
         return 0;
     if (naReference == 0)
         return damage;
-    target = (naReference * 90u + 50u) / 100u;
+    target = (naReference * floorPct + 50u) / 100u;
     if (target < 1u)
         target = 1u;
     if (damage < target)

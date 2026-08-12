@@ -1991,7 +1991,7 @@ static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
             }
             else
             {
-                u8 itemCount = vm_net_mock_role_backpack_count(role);
+                u32 itemCount = vm_net_mock_role_backpack_count(role);
                 u32 freeSlots = role->backpackCapacity > itemCount
                                     ? (u32)role->backpackCapacity - itemCount
                                     : 0;
@@ -6463,7 +6463,7 @@ static bool vm_mock_service_trade_role_add_item(
             if (role->nextBackpackSeq == 0)
                 role->nextBackpackSeq = 1;
         }
-        role->backpackItemCount = (u8)(itemCount + count);
+        role->backpackItemCount = (u16)(itemCount + count);
         if (destinationSeqOut)
             *destinationSeqOut = firstSeq;
         return true;
@@ -6481,7 +6481,7 @@ static bool vm_mock_service_trade_role_add_item(
         item->count = count;
         item->enhanceLevel = enhanceLevel;
         vm_net_mock_enhance_wash_copy(&item->enhanceWash, wash);
-        role->backpackItemCount = (u8)(itemCount + 1);
+        role->backpackItemCount = (u16)(itemCount + 1);
         role->nextBackpackSeq = (u16)(item->seq + 1);
         if (role->nextBackpackSeq == 0)
             role->nextBackpackSeq = 1;
@@ -6555,7 +6555,7 @@ static bool vm_mock_service_trade_persist_pair(
         "INSERT INTO account_role_backpack(account_id,role_id,slot_index,item_id,item_seq,item_count,enhance_level) VALUES");
     for (u32 side = 0; side < 2; ++side)
     {
-        u8 count = vm_net_mock_role_backpack_count(&roles[side]);
+        u32 count = vm_net_mock_role_backpack_count(&roles[side]);
         for (u32 slot = 0; slot < count; ++slot)
         {
             const vm_net_mock_backpack_item_state *item = &roles[side].backpackItems[slot];

@@ -287,7 +287,7 @@ import {
   resolveLearnedSkills,
   type BattleSkillRow,
 } from "../resources/skill";
-import { lookupItemSync, warmItemCatalogs } from "../resources/itemCatalog";
+import { lookupItemSync, warmItemCatalogs, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 import { monsterActorForEnemyId } from "../resources/monsterLevels";
 
 export type SessionStatus = {
@@ -3280,6 +3280,17 @@ export class GameSession {
     if (!this.transport) {
       return { ok: false, result: 0, message: "未连接" };
     }
+    const expandId = BACKPACK_EXPAND_ITEM_ID;
+    const cap =
+      this.characterStats?.backpackCapacity ||
+      Math.max(20, this.bagItems.length);
+    if ((itemId >>> 0) === expandId && (cap >>> 0) >= BACKPACK_EXPAND_MAX_CAPACITY) {
+      return {
+        ok: false,
+        result: 3,
+        message: "背包已达上限，不能再扩容",
+      };
+    }
     const bodies = await this.transport.exchange(
       0,
       buildShopBuy14Request(itemId, num),
@@ -3300,7 +3311,7 @@ export class GameSession {
     if (result < 0) {
       return { ok: false, result: 0, message: "购买无响应" };
     }
-    const tip = shopBuy14ResultTip(result);
+    const tip = shopBuy14ResultTip(result, itemId);
     return {
       ok: result === 1,
       result,
@@ -4306,6 +4317,15 @@ export class GameSession {
         this.hpMax = Math.max(mapVitals.hpMax, mapVitals.hp, 1);
         this.mp = mapVitals.mp;
         this.mpMax = Math.max(mapVitals.mpMax, mapVitals.mp, 1);
+        // Settle baseline seed only (same WT as 4/7). Avoid mistaking live
+        // 1/1/14 layout for fresh money/exp.
+        const settleSeed = packet.objects.some(
+          (o) => o.kind === 4 && o.subtype === 7,
+        );
+        if (settleSeed && mapVitals.hasEconomy) {
+          this.exp = (mapVitals.exp ?? this.exp) >>> 0;
+          this.gold = (mapVitals.money ?? this.gold) >>> 0;
+        }
         this.emitVitals();
       }
 
@@ -4694,15 +4714,19 @@ export class GameSession {
           const prevGold = this.gold >>> 0;
           const rawExp = (s.expTotal >>> 0) - prevExp;
           const rawGold = (s.goldTotal >>> 0) - prevGold;
-          // Spar lose (and similar) can drop totals — keep signed deltas for UI.
+          // Signed penalties only for known lose copy — not baseline desync.
+          const f = s.fdata || "";
           const penalized =
-            s.fdata.includes("挑战失败") || rawExp < 0 || rawGold < 0;
+            f.includes("挑战失败") ||
+            f.includes("比武失败") ||
+            /金钱\s*-/.test(f) ||
+            /经验\s*-/.test(f);
           s.expGain = penalized ? rawExp : Math.max(0, rawExp);
           s.goldGain = penalized ? rawGold : Math.max(0, rawGold);
-          if (s.expTotal > 0 || penalized) this.exp = s.expTotal >>> 0;
-          if (s.goldTotal > 0 || penalized) this.gold = s.goldTotal >>> 0;
+          this.exp = s.expTotal >>> 0;
+          this.gold = s.goldTotal >>> 0;
           if (s.level > 0) this.level = s.level;
-          if (this.characterStats && penalized) {
+          if (this.characterStats) {
             this.characterStats = {
               ...this.characterStats,
               money: this.gold,

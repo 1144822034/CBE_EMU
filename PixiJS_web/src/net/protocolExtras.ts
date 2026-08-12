@@ -16,7 +16,7 @@ import {
 import { decodeGbk, encodeWireString } from "./gbk";
 import { ensureSceneFile } from "./protocol";
 import { starterSkillIdForJob } from "../resources/skill";
-import { lookupItemSync } from "../resources/itemCatalog";
+import { lookupItemSync, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 export {
   buildTeamInviteRequest,
   buildTeamReplyRequest,
@@ -1388,6 +1388,7 @@ export function buildShopBuy14Request(
  * Mall buy ack: 1/14/3 { seq, result }.
  * result: 1=ok, 2=酷宝不足(type=2), 3=背包已满/无法入库, 4=礼包空位不足.
  * Evidence: mmShop:0x9DE / docs/re/2026-07-26-shop-buy14-bag-full-as-wcoin.md
+ * For item 806 (direct expand), result=3 means capacity already at the hard cap.
  */
 export function parseShopBuy14Response(
   packet: WtPacket,
@@ -1402,13 +1403,15 @@ export function parseShopBuy14Response(
 }
 
 /** Map shop 14/3 result to panel tip; empty string = unknown / keep generic. */
-export function shopBuy14ResultTip(result: number): string {
+export function shopBuy14ResultTip(result: number, itemId = 0): string {
   switch (result >>> 0) {
     case 1:
       return "";
     case 2:
       return "酷宝不够请右下角赞助";
     case 3:
+      if ((itemId >>> 0) === BACKPACK_EXPAND_ITEM_ID)
+        return "背包已达上限，不能再扩容";
       return "背包已满";
     case 4:
       return "背包已满";
@@ -2460,7 +2463,7 @@ export type CharacterStats = {
 };
 
 /** ParseEquipAttributes common-extra; returns enhance + attr slots. */
-function readItemCommonExtra(r: SeqReader): {
+export function readItemCommonExtra(r: SeqReader): {
   enhance: number;
   stackHint: number;
   attrs: BagEnhanceAttr[];
@@ -2537,7 +2540,7 @@ function enrichBagRow(
 
 /**
  * Parse a full backpack snapshot from a packet.
- * - 17/1: u8 n; repeat u32 itemId + common-extra (no seq on wire)
+ * - 17/1: i16 n; repeat u32 itemId + common-extra (no seq on wire)
  * - 30/21: repeat u32 itemId, i16 seq, u32 count, common-extra
  *
  * When both 17/1 and 30/21 are present (Pixi 7/23), keep 17/1 row order but
@@ -2653,7 +2656,7 @@ function parseBagItems17(packet: WtPacket): BagItem[] {
   const r = new SeqReader(raw);
   let count = 0;
   try {
-    count = r.u8();
+    count = r.i16();
   } catch {
     return [];
   }

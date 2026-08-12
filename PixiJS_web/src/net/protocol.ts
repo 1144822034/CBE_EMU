@@ -658,17 +658,56 @@ function readActorInfoVitals(
 }
 
 /**
- * Map vitals sync `1/1/14` actorinfo (item use / map heal / revival).
+ * Map vitals sync `1/1/14` actorinfo (item use / map heal / revival / settle seed).
  * Evidence: docs/re/2026-07-25-revival-map-vitals-1-1-14.md
+ *
+ * Fresh-layout blobs (settle baseline seed) also expose exp/money for
+ * 获得 = new − old. Live-layout 1/1/14 omits money — hasEconomy stays false.
  */
 export function parseMapActorVitals(
   packet: WtPacket,
-): { hp: number; hpMax: number; mp: number; mpMax: number } | null {
+): {
+  hp: number;
+  hpMax: number;
+  mp: number;
+  mpMax: number;
+  hasEconomy?: boolean;
+  exp?: number;
+  money?: number;
+} | null {
   const obj = packet.objects.find((o) => o.kind === 1 && o.subtype === 14);
   if (!obj) return null;
   const raw = findField(obj, "actorinfo");
   if (!raw) return null;
-  return readActorInfoVitals(raw);
+  const vitals = readActorInfoVitals(raw);
+  if (!vitals) return null;
+  try {
+    const r = new SeqReader(raw);
+    r.u32();
+    r.u8();
+    r.u8();
+    r.string();
+    r.u32();
+    r.string();
+    r.u32(); // summaryStatus (fresh only; live starts HP here — see gate below)
+    r.u32();
+    r.u32();
+    r.u32();
+    r.u32();
+    r.u32(); // charm
+    for (let i = 0; i < 6; i++) r.u32();
+    const exp = r.u32();
+    const money = r.u32();
+    /* Fresh: money u32 then backpackCapacity u8 (tag 00 01). Live: after exp
+     * the next field is displayMax u32 — no intervening u8 pair. */
+    const p = r.pos;
+    const freshMoney =
+      p + 3 <= raw.length && raw[p] === 0 && raw[p + 1] === 1;
+    if (!freshMoney) return vitals;
+    return { ...vitals, hasEconomy: true, exp: exp >>> 0, money: money >>> 0 };
+  } catch {
+    return vitals;
+  }
 }
 
 export function parseRoleSelectEnter(packet: WtPacket): RoleSelectEnter | null {

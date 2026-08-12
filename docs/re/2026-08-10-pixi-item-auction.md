@@ -23,6 +23,11 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 详情操作：出价 / 一口价（有则显示）/ 撤拍（我的且无出价）/ 返回。
 - 一口价成交：条件更新 `OPEN→SOLD`，退还前高价方，卖家待领拍金、买家待领物品；已是最高出价者补差额即可。
 
+## 装备详情与背包一致（2026-08-11）
+
+- 列表/我的 rows：`enhanceLevel` 后追加与背包相同的 common-extra（含洗练 flag bit7）。
+- Pixi 解析进 `AuctionListing.enhanceAttrs`，详情 `listingAsBagItem` 传入 `buildEquipDetailLines`（洗练行红、物攻/护甲 `+基(+Δ)`）。
+
 ## 防刷加固（2026-08-10）
 
 | 路径 | 契约 |

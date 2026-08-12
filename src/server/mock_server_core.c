@@ -4618,13 +4618,13 @@ static void vm_net_mock_append_preview_u32(char *out, u32 outCap, u32 *pos, u32 
 enum
 {
     VM_NET_MOCK_BACKPACK_INITIAL_CAPACITY = 20,
-    /* JianghuOL.CBE scene bootstrap calls InitTimerControl(64, 74): 64
-     * logical backpack records backed by 74 physical slots.  Persistent
-     * storage may retain more rows for a future migration, but no client
-     * packet may advertise a larger usable grid. */
-    VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
-    VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 200,
-    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 200,
+    /*
+     * Pixi usable backpack grid hard cap (was 64 for CBE InitTimerControl).
+     * CBE is art-reference only; expand / maxnum / character backpack use this.
+     */
+    VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 256,
+    VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT = 256,
+    VM_NET_MOCK_BACKPACK_MAX_ITEMS = 256,
     /*
      * Tagged seq fields: u32=6, i16=4, u8=3.
      * Zero-attr baselines: 30/21 ≈27/row, 17/1 ≈17/row.
@@ -4995,8 +4995,7 @@ typedef struct
     char name[32];
     u8 job;
     u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
+    u16 backpackCapacity;
     u32 level;
     u32 exp;
     u32 hp;
@@ -5008,8 +5007,9 @@ typedef struct
     char scene[64];
     u16 x;
     u16 y;
-    u8 backpackItemCount;
+    u16 backpackItemCount;
     u8 designationId;
+    u8 reservedBagMeta;
     u16 nextBackpackSeq;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
@@ -5063,8 +5063,7 @@ typedef struct
     char name[32];
     u8 job;
     u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
+    u16 backpackCapacity;
     u32 level;
     u32 exp;
     u32 hp;
@@ -5088,8 +5087,7 @@ typedef struct
     char name[32];
     u8 job;
     u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
+    u16 backpackCapacity;
     u32 level;
     u32 exp;
     u32 hp;
@@ -5112,8 +5110,7 @@ typedef struct
     char name[32];
     u8 job;
     u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
+    u16 backpackCapacity;
     u32 level;
     u32 exp;
     u32 hp;
@@ -5137,8 +5134,7 @@ typedef struct
     char name[32];
     u8 job;
     u8 sex;
-    u8 backpackCapacity;
-    u8 reserved0;
+    u16 backpackCapacity;
     u32 level;
     u32 exp;
     u32 hp;

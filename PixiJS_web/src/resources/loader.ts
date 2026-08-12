@@ -17,6 +17,7 @@ import {
 } from "./sce";
 import { composeMapRgba, parseMapPayload, type MapPreview } from "./map";
 import { sceneAssetCandidates } from "../net/protocol";
+import { jhOnlineDataUrl, publicAssetUrl } from "./publicUrl";
 
 type CacheEntry = {
   buf: ArrayBuffer;
@@ -48,7 +49,7 @@ export function shouldVersionCheckResource(name: string): boolean {
   return false;
 }
 
-/** Capacitor / Cordova WebView — assets are baked in; skip HEAD revalidate. */
+/** Capacitor / Cordova / Electron — assets are baked in; skip HEAD revalidate. */
 function isPackagedNativeApp(): boolean {
   try {
     const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } })
@@ -57,11 +58,23 @@ function isPackagedNativeApp(): boolean {
   } catch {
     /* ignore */
   }
+  try {
+    if (typeof navigator !== "undefined" && /Electron/i.test(navigator.userAgent)) {
+      return true;
+    }
+    if (typeof location !== "undefined") {
+      if (location.protocol === "file:" || location.protocol === "pix:") {
+        return true;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
   return false;
 }
 
 function resourceUrl(name: string): string {
-  return `/JHOnlineData/${encodeURIComponent(name)}`;
+  return jhOnlineDataUrl(name);
 }
 
 function stampFromHeaders(headers: Headers): string | null {
@@ -292,10 +305,7 @@ export type SceneIndex = {
 };
 
 export async function loadSceneIndex(): Promise<SceneIndex> {
-  const res = await fetch("/scene-index.json");
-  if (res.ok) return (await res.json()) as SceneIndex;
-  // Fallback curated list (UTF-8 names).
-  return {
+  const fallback: SceneIndex = {
     assetRootHint: "web/fs/JHOnlineData",
     defaultScene: "01桃花岛_01.sce",
     scenes: [
@@ -305,4 +315,13 @@ export async function loadSceneIndex(): Promise<SceneIndex> {
       "11终南山_01.sce",
     ],
   };
+  try {
+    const res = await fetch(publicAssetUrl("scene-index.json"), {
+      cache: "no-store",
+    });
+    if (res.ok) return (await res.json()) as SceneIndex;
+  } catch {
+    /* Electron file:// / offline — use curated list */
+  }
+  return fallback;
 }

@@ -31,7 +31,12 @@ import type { BattleSkillRow, SkillTargetKind } from "../resources/skill";
 import { skillNeedsTargetPick } from "../resources/skill";
 import type { BagItem } from "../net/protocolExtras";
 import { isBattleMedicineOrFlask } from "../net/protocolExtras";
-import { tryLoadUiTexture, uiSprite, DigitStrip } from "./UiAssets";
+import {
+  loadUiCrop,
+  tryLoadUiTexture,
+  uiSprite,
+  DigitStrip,
+} from "./UiAssets";
 import { BattlePartyHud, BATTLE_PARTY_HUD_H } from "./BattlePartyHud";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
@@ -193,6 +198,12 @@ export class BattleScreen extends Container {
   private playbackGen = 0;
   /** Drop stale async map loads when show() races. */
   private mapLoadGen = 0;
+  /** Drop stale async settlement paints when a newer settle / exit arrives. */
+  private settlePaintGen = 0;
+  /** Auto-dismiss settle panel (2.5s); cleared on confirm / hide. */
+  private settleCloseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Prevent double onSettleConfirm from timer + 关闭 / softkey. */
+  private settleConfirmBusy = false;
   /** Reuse pose textures — destroy/recreate every tick was thrashing GPU mid-attack. */
   private poseTexCache = new Map<string, Texture>();
   private poseTexKey = new WeakMap<Sprite, string>();
@@ -651,6 +662,9 @@ export class BattleScreen extends Container {
     this.playbackBusy = false;
     this.awaitingRound = false;
     this.playbackGen += 1;
+    this.settlePaintGen += 1;
+    this.clearSettleCloseTimer();
+    this.settleConfirmBusy = false;
     this.resetTargetPick();
     this.clearFloats();
     clearPointerHits(this.rowHits);
@@ -797,7 +811,7 @@ export class BattleScreen extends Container {
       return;
     }
     if (this.awaitingExit) {
-      this.onSettleConfirm?.();
+      this.confirmSettlement();
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -856,7 +870,7 @@ export class BattleScreen extends Container {
       return;
     }
     if (this.awaitingExit) {
-      this.onSettleConfirm?.();
+      this.confirmSettlement();
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -915,7 +929,7 @@ export class BattleScreen extends Container {
       return;
     }
     if (this.awaitingExit) {
-      this.onSettleConfirm?.();
+      this.confirmSettlement();
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -946,7 +960,7 @@ export class BattleScreen extends Container {
       return;
     }
     if (this.awaitingExit) {
-      this.onSettleConfirm?.();
+      this.confirmSettlement();
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -978,7 +992,7 @@ export class BattleScreen extends Container {
       return;
     }
     if (this.awaitingExit) {
-      this.onSettleConfirm?.();
+      this.confirmSettlement();
       return;
     }
     if (this.playbackBusy || this.awaitingRound) return;
@@ -1667,6 +1681,7 @@ export class BattleScreen extends Container {
   }
 
   private paintDeathPrompt(): void {
+    this.settlePaintGen += 1;
     this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
     const opts = this.deathPromptOptions();
@@ -2466,11 +2481,45 @@ export class BattleScreen extends Container {
 
   private showSettlement(s: BattleSettlement): void {
     this.awaitingDeathPrompt = false;
-    this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+    this.settleConfirmBusy = false;
+    this.clearSettleCloseTimer();
     this.menuHost.removeChildren().forEach((c) => c.destroy({ children: true }));
-    const box = new Graphics();
-    drawCbePanel(box, 20, 96, LCD_WIDTH - 40, 160, CBE.bgPanelDark);
-    this.settleHost.addChild(box);
+    void this.paintSettlement(s);
+  }
+
+  private clearSettleCloseTimer(): void {
+    if (this.settleCloseTimer != null) {
+      clearTimeout(this.settleCloseTimer);
+      this.settleCloseTimer = null;
+    }
+  }
+
+  /** Softkey / 关闭 / 2.5s auto — leave battle once. */
+  private confirmSettlement(): void {
+    if (!this.awaitingExit || this.settleConfirmBusy) return;
+    this.settleConfirmBusy = true;
+    this.clearSettleCloseTimer();
+    this.settlePaintGen += 1;
+    this.onSettleConfirm?.();
+  }
+
+  private armSettleAutoClose(gen: number): void {
+    this.clearSettleCloseTimer();
+    this.settleCloseTimer = setTimeout(() => {
+      this.settleCloseTimer = null;
+      if (gen !== this.settlePaintGen) return;
+      this.confirmSettlement();
+    }, 2500);
+  }
+
+  /**
+   * CBE settle panel chrome from JHOnlineData (`pickupimage1.gif` labels).
+   * Display only — gains / recover / fdata already come from 4/7 parse.
+   */
+  private async paintSettlement(s: BattleSettlement): Promise<void> {
+    const gen = ++this.settlePaintGen;
+    this.settleHost.removeChildren().forEach((c) => c.destroy({ children: true }));
+
     const spar = this.isSparBattle();
     const arenaFdata =
       spar &&
@@ -2484,6 +2533,7 @@ export class BattleScreen extends Container {
         s.expGain < 0 ||
         s.goldGain < 0);
     const draw = spar && s.fdata.includes("比武平局");
+    const parsed = parseSettleFdata(s.fdata);
     const title = arenaFdata
       ? draw
         ? "比武平局"
@@ -2494,26 +2544,250 @@ export class BattleScreen extends Container {
         ? lose
           ? "切磋失败"
           : "切磋胜利"
-        : "战斗胜利";
-    const lines = [
-      title,
-      arenaFdata ? s.fdata.slice(0, 22) : `经验 ${s.expGain}`,
-      arenaFdata ? "" : `金钱 ${s.goldGain}`,
-      !arenaFdata && s.level ? `等级 ${s.level}` : "",
-      !spar && s.fdata ? s.fdata.slice(0, 18) : "",
-      "按确定继续",
-    ].filter(Boolean);
-    lines.forEach((t, i) => {
-      const lab = new BitmapLabel();
-      lab.position.set(32, 110 + i * 18);
-      void lab.setText(t, i === 0 ? SETTLE_GOLD : CBE.inkBody, {
-        outline: false,
-        maxWidth: LCD_WIDTH - 64,
+        : parsed.title || "战斗胜利";
+
+    const rows: SettleRow[] = [];
+    if (arenaFdata) {
+      rows.push({ kind: "text", text: s.fdata.slice(0, 22), color: CBE.inkBody });
+    } else {
+      rows.push({ kind: "stat", label: "exp", value: formatSettleDelta(s.expGain) });
+      rows.push({ kind: "stat", label: "gold", value: formatSettleDelta(s.goldGain) });
+      rows.push({
+        kind: "stat",
+        label: "hp",
+        value: formatSettleDelta(s.recoverHp),
       });
-      this.settleHost.addChild(lab);
+      rows.push({
+        kind: "stat",
+        label: "mp",
+        value: formatSettleDelta(s.recoverMp),
+      });
+      if (s.level > 0) {
+        rows.push({ kind: "text", text: `等级 ${s.level}`, color: CBE.inkBody });
+      }
+      if (parsed.prefix) {
+        rows.push({ kind: "text", text: parsed.prefix, color: CBE.inkMint });
+      }
+      if (parsed.extra) {
+        rows.push({
+          kind: "text",
+          text: parsed.extra.slice(0, 20),
+          color: CBE.inkWarn,
+        });
+      }
+    }
+
+    const panelX = 14;
+    const panelY = 70;
+    const panelW = LCD_WIDTH - 28;
+    const rowH = 16;
+    const titleH = 22;
+    const closeH = 22;
+    const pad = 10;
+    const panelH = Math.min(
+      260,
+      pad + titleH + rows.length * rowH + closeH + pad + 4,
+    );
+
+    const box = new Graphics();
+    drawCbePanel(box, panelX, panelY, panelW, panelH, CBE.bgPanelDark);
+    this.settleHost.addChild(box);
+    this.settleHost.eventMode = "static";
+
+    const titleLab = new BitmapLabel();
+    titleLab.anchor.set(0.5, 0);
+    titleLab.position.set(LCD_WIDTH / 2, panelY + 8);
+    void titleLab.setText(title, SETTLE_GOLD, {
+      outline: false,
+      maxWidth: panelW - 24,
     });
+    this.settleHost.addChild(titleLab);
+
+    const labelX = panelX + 12;
+    const valueX = panelX + 118;
+    let y = panelY + 8 + titleH;
+
+    const labels = arenaFdata ? null : await loadSettleLabelTextures();
+    if (gen !== this.settlePaintGen) return;
+
+    for (const row of rows) {
+      if (row.kind === "text") {
+        const lab = new BitmapLabel();
+        lab.position.set(labelX, y);
+        void lab.setText(row.text, row.color, {
+          outline: false,
+          maxWidth: panelW - 24,
+        });
+        this.settleHost.addChild(lab);
+      } else {
+        const fallback: Record<SettleLabelKey, string> = {
+          exp: "获得经验",
+          gold: "金钱",
+          hp: "自动回血",
+          mp: "自动回魔",
+        };
+        if (labels) {
+          if (row.label === "mp" && labels.auto && labels.huoMo) {
+            const a = uiSprite(labels.auto);
+            a.position.set(labelX, y + 2);
+            this.settleHost.addChild(a);
+            const b = uiSprite(labels.huoMo);
+            b.position.set(labelX + PICKUP_CELL * 2, y + 2);
+            this.settleHost.addChild(b);
+          } else {
+            const tex =
+              row.label === "exp"
+                ? labels.exp
+                : row.label === "gold"
+                  ? labels.gold
+                  : row.label === "hp"
+                    ? labels.hp
+                    : null;
+            if (tex) {
+              const spr = uiSprite(tex);
+              spr.position.set(labelX, y + 2);
+              this.settleHost.addChild(spr);
+            } else {
+              const lab = new BitmapLabel();
+              lab.position.set(labelX, y);
+              void lab.setText(fallback[row.label], CBE.inkTip, {
+                outline: false,
+              });
+              this.settleHost.addChild(lab);
+            }
+          }
+        } else {
+          const lab = new BitmapLabel();
+          lab.position.set(labelX, y);
+          void lab.setText(fallback[row.label], CBE.inkTip, { outline: false });
+          this.settleHost.addChild(lab);
+        }
+        const val = new BitmapLabel();
+        val.position.set(valueX, y);
+        void val.setText(row.value, settleValueColor(row.value), {
+          outline: false,
+          maxWidth: panelW - (valueX - panelX) - 12,
+        });
+        this.settleHost.addChild(val);
+      }
+      y += rowH;
+    }
+
+    const btn = new Container();
+    const btnW = 52;
+    const btnH = 18;
+    const btnBg = new Graphics()
+      .roundRect(0, 0, btnW, btnH, 2)
+      .fill({ color: 0x3a2818 })
+      .stroke({ width: 1, color: CBE.inkWarn });
+    const btnLabel = new BitmapLabel();
+    btnLabel.eventMode = "none";
+    btnLabel.anchor.set(0.5, 0.5);
+    btnLabel.position.set(btnW / 2, btnH / 2);
+    btnLabel.show("关闭", CBE.inkWarn, { outline: false });
+    btn.addChild(btnBg, btnLabel);
+    btn.position.set(
+      panelX + Math.floor((panelW - btnW) / 2),
+      panelY + panelH - pad - btnH,
+    );
+    btn.eventMode = "static";
+    btn.cursor = "pointer";
+    btn.on("pointertap", (e) => {
+      e.stopPropagation();
+      if (gen !== this.settlePaintGen) return;
+      this.confirmSettlement();
+    });
+    this.settleHost.addChild(btn);
+
+    this.armSettleAutoClose(gen);
   }
 }
+
+/** pickupimage1.gif: 18×12px cells — 获得经验金钱自动回血回魔战斗场次背包 */
+const PICKUP_CELL = 12;
+
+type SettleLabelKey = "exp" | "gold" | "hp" | "mp";
+
+type SettleRow =
+  | { kind: "stat"; label: SettleLabelKey; value: string }
+  | { kind: "text"; text: string; color: number };
+
+type SettleLabelTextures = {
+  exp: Texture | null;
+  gold: Texture | null;
+  hp: Texture | null;
+  auto: Texture | null;
+  huoMo: Texture | null;
+};
+
+let settleLabelCache: SettleLabelTextures | null = null;
+
+async function loadSettleLabelTextures(): Promise<SettleLabelTextures> {
+  if (settleLabelCache) return settleLabelCache;
+  const sheet = "pickupimage1.gif";
+  settleLabelCache = {
+    exp: await loadUiCrop(sheet, 0, 0, PICKUP_CELL * 4, 11),
+    gold: await loadUiCrop(sheet, PICKUP_CELL * 4, 0, PICKUP_CELL * 2, 11),
+    hp: await loadUiCrop(sheet, PICKUP_CELL * 6, 0, PICKUP_CELL * 4, 11),
+    auto: await loadUiCrop(sheet, PICKUP_CELL * 6, 0, PICKUP_CELL * 2, 11),
+    huoMo: await loadUiCrop(sheet, PICKUP_CELL * 10, 0, PICKUP_CELL * 2, 11),
+  };
+  return settleLabelCache;
+}
+
+function formatSettleDelta(n: number): string {
+  const v = n | 0;
+  if (v > 0) return `+${v}`;
+  return `${v}`;
+}
+
+function settleValueColor(text: string): number {
+  if (text.startsWith("-")) return CBE.inkWarn;
+  if (text.startsWith("+") && text !== "+0") return SETTLE_GOLD;
+  return CBE.inkBody;
+}
+
+/** fdata may be `N/M 战斗胜利` (flask reserve prefix) or drop/extra text. */
+function parseSettleFdata(fdata: string): {
+  title: string;
+  prefix: string;
+  extra: string;
+} {
+  const raw = (fdata || "").trim();
+  if (!raw) return { title: "", prefix: "", extra: "" };
+  const m = raw.match(/^(\d+)\/(\d+)\s*(.*)$/);
+  if (m) {
+    const prefix = `血壶:${m[1]} 蓝壶:${m[2]}`;
+    const rest = (m[3] || "").trim();
+    if (
+      !rest ||
+      rest === "战斗胜利" ||
+      rest === "切磋胜利" ||
+      rest === "切磋失败"
+    ) {
+      return { title: rest, prefix, extra: "" };
+    }
+    if (
+      rest.includes("比武") ||
+      rest.includes("挑战") ||
+      rest.includes("胜利") ||
+      rest.includes("失败")
+    ) {
+      return { title: rest, prefix, extra: "" };
+    }
+    return { title: "战斗胜利", prefix, extra: rest };
+  }
+  if (
+    raw === "战斗胜利" ||
+    raw.includes("比武") ||
+    raw.includes("切磋") ||
+    raw.includes("挑战")
+  ) {
+    return { title: raw, prefix: "", extra: "" };
+  }
+  return { title: "战斗胜利", prefix: "", extra: raw };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

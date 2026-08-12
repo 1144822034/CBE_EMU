@@ -2907,6 +2907,8 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
     }
 }
 
+#include "mock_server_combat_formula_config.inc.c"
+
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats)
 {
@@ -2984,13 +2986,24 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
             equipment.attack,
         65535);
     /* Panel / actorinfo: bare (level/耐力) + full equip.armor.
-     * Soft-curve NA mitigation uses equip.armor/5 via
-     * vm_net_mock_battle_mitigation_defense (K=2000 curve). */
-    stats->defense = 4 + level + stats->endurance / 2 + equipment.armor;
-    /* ?? = 101 ?? + ????????/??/?????????
-     * hitChance = clamp(hit - dodge, 5, 95)????? 101 ????? 0
-     * ??? 95% ????? */
-    stats->hit = vm_net_mock_add_capped_u32(101u, equipment.hit);
+     * Soft-curve NA mitigation uses equip.armor/divisor via
+     * vm_net_mock_battle_mitigation_defense (admin soft_armor_k). */
+    {
+        const vm_net_mock_combat_formula_config *combatCfg =
+            vm_net_mock_combat_formula_config_get();
+        u32 defBase = combatCfg ? combatCfg->panelDefenseBase : 4u;
+        u32 levelCoeff = combatCfg ? combatCfg->panelDefenseLevelCoeff : 1u;
+        u32 endDiv = combatCfg ? combatCfg->panelDefenseEnduranceDiv : 2u;
+        u32 hitBase = combatCfg ? combatCfg->panelHitBase : 101u;
+        u32 endurancePart = 0;
+
+        if (endDiv == 0)
+            endDiv = 1;
+        endurancePart = stats->endurance / endDiv;
+        stats->defense = defBase + level * levelCoeff + endurancePart +
+                         equipment.armor;
+        stats->hit = vm_net_mock_add_capped_u32(hitBase, equipment.hit);
+    }
     stats->dodge = equipment.dodge;
     stats->crit = equipment.crit;
     stats->resist = equipment.resist;
@@ -3115,9 +3128,13 @@ static bool vm_net_mock_role_add_exp(vm_net_mock_role_state *role, u32 addExp)
  */
 static u32 vm_net_mock_damage_after_defense(u32 attack, u32 defense)
 {
-    const u32 kSoft = 2000u;
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 kSoft = combatCfg ? combatCfg->softArmorK : 2000u;
     uint64_t scaled = 0;
 
+    if (kSoft == 0)
+        kSoft = 1;
     if (attack == 0)
         attack = 1;
     scaled = ((uint64_t)attack * (uint64_t)kSoft + defense / 2u) /
@@ -3129,21 +3146,26 @@ static u32 vm_net_mock_damage_after_defense(u32 attack, u32 defense)
     return (u32)scaled;
 }
 
-/* Combat NA only: keep panel stats->defense full, scale equip armor by /5. */
+/* Combat NA only: keep panel stats->defense full, scale equip armor by /div. */
 static u32 vm_net_mock_battle_mitigation_defense(
     const vm_net_mock_player_stats *stats)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
     u32 bare = 0;
     u32 equipArmor = 0;
+    u32 armorDiv = combatCfg ? combatCfg->equipArmorDivisor : 5u;
 
     if (stats == NULL)
         return 0;
+    if (armorDiv == 0)
+        armorDiv = 1;
     equipArmor = stats->equipment.armor;
     if (stats->defense > equipArmor)
         bare = stats->defense - equipArmor;
     else
         bare = stats->defense;
-    return bare + equipArmor / 5u;
+    return bare + equipArmor / armorDiv;
 }
 
 static void vm_net_mock_role_default_vitals(const vm_net_mock_role_state *role,
@@ -4919,33 +4941,43 @@ static void vm_net_mock_monster_secondary_combat_stats(u32 level,
                                                       u32 *critOut,
                                                       u32 *resistOut)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 defHit = combatCfg ? combatCfg->monsterHitDefault : 100u;
+    u32 defDodge = combatCfg ? combatCfg->monsterDodgeDefault : 0u;
+    u32 defCrit = combatCfg ? combatCfg->monsterCritDefault : 0u;
+    u32 defResist = combatCfg ? combatCfg->monsterResistDefault : 0u;
+
     (void)level;
 
     /* Hit/dodge/crit/resist stay fixed (no automonster columns yet).
-     * Monster hit defaults to 100 so counters reliably connect against
-     * typical player dodge; dodge/crit/resist default to 0. */
+     * Admin defaults apply; CBE_BATTLE_MONSTER_* env still overrides. */
     if (hitOut)
-        *hitOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_HIT", 100);
+        *hitOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_HIT", defHit);
     if (dodgeOut)
-        *dodgeOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_DODGE", 0);
+        *dodgeOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_DODGE", defDodge);
     if (critOut)
-        *critOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_CRIT", 0);
+        *critOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_CRIT", defCrit);
     if (resistOut)
-        *resistOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_RESIST", 0);
+        *resistOut = vm_net_mock_env_u32("CBE_BATTLE_MONSTER_RESIST", defResist);
 }
 
 static u32 vm_net_mock_battle_hit_chance(u32 hit, u32 dodge)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 chanceMin = combatCfg ? combatCfg->hitChanceMin : 5u;
+    u32 chanceMax = combatCfg ? combatCfg->hitChanceMax : 95u;
     u32 chance;
 
     if (hit > dodge)
         chance = hit - dodge;
     else
         chance = 0;
-    if (chance < 5u)
-        chance = 5u;
-    if (chance > 95u)
-        chance = 95u;
+    if (chance < chanceMin)
+        chance = chanceMin;
+    if (chance > chanceMax)
+        chance = chanceMax;
     return chance;
 }
 
@@ -4963,11 +4995,6 @@ enum
 };
 
 /* Flat attack bonus applied to all player job offensive skill raw damage. */
-enum
-{
-    VM_NET_MOCK_BATTLE_JOB_SKILL_ATTACK_BONUS_PERCENT = 5
-};
-
 static u8 g_mockBattleLastOutcomeChildFlag = 0;
 
 static void vm_net_mock_battle_clear_outcome_child_flag(void)
@@ -5039,12 +5066,17 @@ static bool vm_net_mock_battle_roll_crit(u32 crit)
 
 static u32 vm_net_mock_battle_apply_crit_damage(u32 damage)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 critPct = combatCfg ? combatCfg->critDamagePercent : 150u;
     uint64_t boosted;
 
     if (damage == 0)
         return 0;
-    /* Provisional 150% crit; original multiplier unresolved. */
-    boosted = ((uint64_t)damage * 150ull + 50ull) / 100ull;
+    if (critPct < 100u)
+        critPct = 100u;
+    /* Provisional crit mult; original CBE multiplier unresolved. */
+    boosted = ((uint64_t)damage * (uint64_t)critPct + 50ull) / 100ull;
     if (boosted < (uint64_t)damage + 1ull)
         boosted = (uint64_t)damage + 1ull;
     return boosted > 0xffffffffull ? 0xffffffffu : (u32)boosted;
@@ -5052,13 +5084,18 @@ static u32 vm_net_mock_battle_apply_crit_damage(u32 damage)
 
 static u32 vm_net_mock_damage_after_resist(u32 damage, u32 resist)
 {
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+    u32 resistCap = combatCfg ? combatCfg->resistCapPercent : 70u;
     u32 pct;
     uint64_t kept;
 
-    /* Resist is a flat percent reduction on spell damage; hard-cap 70%. */
+    /* Resist is a flat percent reduction on spell damage; admin hard-cap. */
     if (damage == 0)
         return 0;
-    pct = resist > 70u ? 70u : resist;
+    if (resistCap > 100u)
+        resistCap = 100u;
+    pct = resist > resistCap ? resistCap : resist;
     if (pct == 0)
         return damage;
     kept = ((uint64_t)damage * (100ull - (uint64_t)pct)) / 100ull;
@@ -5204,15 +5241,17 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
         rawDamage = baseDamage + (u32)coeffDamage;
 
     /*
-     * Play contract: every learned job offensive skill gets a flat +5% attack
-     * bonus on raw damage (before resist/defense).  Stacks multiplicatively
-     * with combat-pill attack percent.
+     * Play contract: every learned job offensive skill gets a flat admin
+     * job_skill_attack_bonus_percent on raw damage (before resist/defense).
+     * Stacks multiplicatively with combat-pill attack percent.
      */
     {
+        const vm_net_mock_combat_formula_config *combatCfg =
+            vm_net_mock_combat_formula_config_get();
+        u32 skillBonusPct =
+            combatCfg ? combatCfg->jobSkillAttackBonusPercent : 5u;
         uint64_t skillBoosted =
-            (uint64_t)rawDamage *
-            (100ull + VM_NET_MOCK_BATTLE_JOB_SKILL_ATTACK_BONUS_PERCENT) /
-            100ull;
+            (uint64_t)rawDamage * (100ull + skillBonusPct) / 100ull;
         rawDamage =
             skillBoosted > 0xffffffffull ? 0xffffffffu : (u32)skillBoosted;
     }
@@ -5616,7 +5655,7 @@ static void vm_net_mock_role_normalize_backpack(vm_net_mock_role_state *role)
     memset(role->backpackItems, 0, sizeof(role->backpackItems));
     if (compactCount > 0)
         memcpy(role->backpackItems, compact, sizeof(compact[0]) * compactCount);
-    role->backpackItemCount = (u8)compactCount;
+        role->backpackItemCount = (u16)compactCount;
     if (role->nextBackpackSeq == 0 || role->nextBackpackSeq <= maxSeq)
         role->nextBackpackSeq = (u16)(maxSeq + 1);
     if (role->nextBackpackSeq == 0)
@@ -6585,7 +6624,7 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
     role->roleId = number[1];
     role->job = (u8)number[2];
     role->sex = (u8)number[3];
-    role->backpackCapacity = (u8)number[4];
+    role->backpackCapacity = (u16)number[4];
     role->level = number[5];
     role->exp = number[6];
     role->hp = number[7];
@@ -6596,7 +6635,7 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
     role->wcoin = number[12];
     role->x = (u16)number[13];
     role->y = (u16)number[14];
-    role->backpackItemCount = (u8)number[15];
+    role->backpackItemCount = (u16)number[15];
     role->designationId = (u8)number[16];
     role->nextBackpackSeq = (u16)number[17];
     context->seenRoleMask |= (u8)(1u << number[0]);
@@ -9775,7 +9814,7 @@ static bool vm_net_mock_role_grant_flask_reservoir_points(
         role->nextBackpackSeq = (u16)(item->seq + 1);
         if (role->nextBackpackSeq == 0)
             role->nextBackpackSeq = 1;
-        role->backpackItemCount = (u8)(itemCount + 1);
+        role->backpackItemCount = (u16)(itemCount + 1);
     }
     vm_net_mock_role_normalize_backpack(role);
     vm_net_mock_role_mark_inventory_dirty(
@@ -9869,7 +9908,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
                 role->nextBackpackSeq = (u16)(item->seq + 1);
                 if (role->nextBackpackSeq == 0)
                     role->nextBackpackSeq = 1;
-                role->backpackItemCount = (u8)(itemCount + 1);
+                role->backpackItemCount = (u16)(itemCount + 1);
             }
             if (seqOut)
                 *seqOut = firstSeq;
@@ -9895,7 +9934,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             if (role->nextBackpackSeq == 0)
                 role->nextBackpackSeq = 1;
         }
-        role->backpackItemCount = (u8)(itemCount + count);
+        role->backpackItemCount = (u16)(itemCount + count);
         if (seqOut)
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
@@ -9953,7 +9992,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
             if (role->nextBackpackSeq == 0)
                 role->nextBackpackSeq = 1;
         }
-        role->backpackItemCount = (u8)(itemCount + count);
+        role->backpackItemCount = (u16)(itemCount + count);
         if (seqOut)
             *seqOut = firstSeq;
         vm_net_mock_role_normalize_backpack(role);
@@ -9992,7 +10031,7 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     if (item->seq == 0)
         item->seq = 1;
     item->count = count;
-    role->backpackItemCount = (u8)(itemCount + 1);
+    role->backpackItemCount = (u16)(itemCount + 1);
     role->nextBackpackSeq = (u16)(item->seq + 1);
     if (role->nextBackpackSeq == 0)
         role->nextBackpackSeq = 1;
@@ -10277,7 +10316,7 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     if (oldItemId != 0)
     {
         bool oldAlreadyStacked = vm_net_mock_role_find_backpack_item(role, oldItemId, 0) != NULL;
-        u8 itemCount = vm_net_mock_role_backpack_count(role);
+        u32 itemCount = vm_net_mock_role_backpack_count(role);
         if (!oldAlreadyStacked && !selectedFreesSlot && itemCount >= role->backpackCapacity)
         {
             if (reasonOut)

@@ -53,6 +53,8 @@ npm run smoke          # 离线 decode / scene / protocol / actor
 npm run smoke:live     # 经 gateway 打 1/12 取服列表
 npm run gateway        # Node 版 WS↔TCP 网关（:19092 → :19090）
 npm run gateway:exe    # 打包 gateway-release/ws-gateway.exe（勿放 dist，避免 Android 出包清掉）
+npm run build:exe      # 竖屏 Electron 便携包 → electron-release/江湖OL-*-portable.exe
+npm run electron       # 已有 dist/ 时本地打开竖屏窗口
 ```
 
-取证短记：`docs/re/2026-08-06-pixijs-live-core-loop.md`、`docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md`、`docs/re/2026-08-08-pixijs-ws-gateway-exe.md`。
+取证短记：`docs/re/2026-08-06-pixijs-live-core-loop.md`、`docs/re/2026-08-08-pixijs-capacitor-apk-offline-assets.md`、`docs/re/2026-08-08-pixijs-ws-gateway-exe.md`、`docs/re/2026-08-11-pixijs-electron-portrait-exe.md`。

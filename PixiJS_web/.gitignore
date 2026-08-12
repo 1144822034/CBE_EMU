@@ -1,6 +1,7 @@
 node_modules/
 dist/
 gateway-release/
+electron-release/
 .DS_Store
 *.log
 .vite/

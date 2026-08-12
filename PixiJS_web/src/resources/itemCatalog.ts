@@ -40,6 +40,22 @@ export type ItemCatalogRow = {
 let itemCache: Map<number, ItemCatalogRow> | null = null;
 let equipCache: Map<number, ItemCatalogRow> | null = null;
 
+/** Mall / bag item 806 — server hard cap (Pixi; CBE 64 no longer binding). */
+export const BACKPACK_EXPAND_ITEM_ID = 806;
+export const BACKPACK_EXPAND_MAX_CAPACITY = 256;
+
+/**
+ * Append expand-cap note on 806 detail text (bag / mall「查看」).
+ * item.dsh base remains「增加您背包的存储空间4格」.
+ */
+export function itemDisplayDesc(itemId: number, desc: string): string {
+  if ((itemId >>> 0) !== BACKPACK_EXPAND_ITEM_ID) return desc;
+  const base = (desc && desc !== "-" ? desc : "增加您背包的存储空间4格").trim();
+  if (base.includes(String(BACKPACK_EXPAND_MAX_CAPACITY))) return base;
+  const trimmed = base.replace(/[。．.]+$/u, "");
+  return `${trimmed}，最大可扩容到${BACKPACK_EXPAND_MAX_CAPACITY}`;
+}
+
 function parseDshRows(raw: Uint8Array): string[][] {
   const out: string[][] = [];
   if (raw.length < 16) return out;
@@ -131,7 +147,7 @@ function parseItemRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
     map.set(id, {
       id,
       name,
-      desc: cells[4] ?? "",
+      desc: itemDisplayDesc(id, cells[4] ?? ""),
       category: parseDshInt(cells[5] ?? ""),
       level: parseDshInt(cells[6] ?? ""),
       quality: parseDshInt(cells[9] ?? ""),

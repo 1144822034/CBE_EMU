@@ -80,8 +80,8 @@ static bool vm_net_mock_is_scene_ctrl_page_request(const u8 *request, u32 reques
 static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 requestLen,
                                                       u8 *out, u32 outCap)
 {
-    u8 otherInfo[512];
-    u8 plus16Info[64];
+    u8 otherInfo[8192];
+    u8 plus16Info[512];
     u32 pos = 5;
     u32 objectStart = 0;
     u32 page = 0;
@@ -126,6 +126,8 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
      * HandleFactionOtherInfoResponse(0x01031162) owns the 2/7 page.  It
      * reads allpgs, othernum and otherinfo from this very object; 30/7 is a
      * distinct task-hall room table and never reaches the page cache.
+     * Emit the full same-scene peer set on page 0 (cap
+     * VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX); clients page the cache locally.
      */
     allowNearbyList = page == 0 && vm_net_mock_active_client_scene_ready_for_nearby(scene);
     if (allowNearbyList)
@@ -8239,7 +8241,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else if (fillDepositMenu)
         {
-            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 bagCount = vm_net_mock_role_backpack_count(role);
             u32 depositable = 0;
             u32 listed = 0;
             u32 start = 0;
@@ -8505,7 +8507,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         else if (fillSellMenu)
         {
-            u8 bagCount = vm_net_mock_role_backpack_count(role);
+            u32 bagCount = vm_net_mock_role_backpack_count(role);
             u32 sellable = 0;
             u32 listed = 0;
             u32 start = 0;

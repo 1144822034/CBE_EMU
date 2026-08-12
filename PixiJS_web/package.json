@@ -1,9 +1,11 @@
 {
   "name": "pixijs-jianghu",
-  "version": "1.0.21",
+  "version": "1.0.26",
   "private": true,
   "description": "PixiJS web client for 江湖 OL — reuses JHOnlineData + mock-server protocol notes",
+  "author": "Jianghu OL",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "sync:assets": "node scripts/sync-offline-assets.mjs",
@@ -14,6 +16,8 @@
     "patch:cap-android8": "node scripts/patch-capacitor-android8.mjs",
     "cap:sync": "npm run patch:cap-android8 && npx cap sync android",
     "build:android": "npm run build && npm run cap:sync && node scripts/assemble-android.mjs",
+    "electron": "electron .",
+    "build:exe": "npm run build && node scripts/build-electron-exe.mjs",
     "smoke": "node scripts/smoke-decode.mjs && tsx scripts/smoke-scene.ts && tsx scripts/smoke-protocol.ts && tsx scripts/smoke-actor.ts",
     "smoke:live": "tsx scripts/smoke-live.ts",
     "smoke:world": "tsx scripts/smoke-world-enter.ts",
@@ -30,11 +34,42 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.2",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vite": "^6.2.2",
     "ws": "^8.18.1"
+  },
+  "build": {
+    "appId": "com.jianghu.pixijs",
+    "productName": "江湖OL",
+    "copyright": "Copyright © Jianghu OL",
+    "directories": {
+      "output": "electron-release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs",
+      "dependencies": {}
+    },
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
   }
 }
