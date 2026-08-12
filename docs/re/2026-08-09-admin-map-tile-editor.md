@@ -18,17 +18,18 @@
 
 - 加载当前场景 SCE2 内嵌 `.map`（宽高 / tile 尺寸固定）
 - 画砖、矩形填、吸管、碰撞笔刷（`0x0` / `0xF` / 定向 N/W/S/E）
-- **加减 tile 图集**：候选来自全服现有场景 `.map` 引用过的 GIF（最多 16 张）
+- **加减 tile 图集**：候选来自权威目录全部 `.gif`（最多 16 张进调色板）
 - 显示碰撞叠加
 - 保存：LZSS type-2 写权威 `.map` → publish 场景+map+引用 GIF → 清 BMP 预览缓存
 - 若其它场景共享同一 `.map`，页内黄色警告
 
 ## 图集加减
 
-1. 左侧「从现有场景图集添加」为可筛选缩略图列表（候选=全服场景 `.map` 用过的 GIF）
+1. 左侧「浏览全部 GIF 资源」为可筛选缩略图列表（候选=JHOnlineData 全部 `.gif`）
 2. 点击条目预览大图；点条目上的 **添加** 或预览区 **添加此图集** 加入调色板
 3. 图集标题旁 **移除**：引用该 sheet 下标的格子会改成 sheet0/tile0（保留碰撞 flags）；其后 sheet 下标前移
 4. 至少保留 1 张图集；上限 `VM_MOCK_ADMIN_PREVIEW_IMAGE_MAX`（16）
+5. 非地砖尺寸的 GIF（如 `level_name*` / `riches_name*`）可预览，但宽高不能整除 tile 时无法加入调色板
 
 ## API
 
@@ -38,7 +39,7 @@
 | `GET /tile-sheet.bmp?name=` | 解码权威目录 GIF → BMP 调色板 |
 | `POST /action` `save-scene-map` | `scene` / `map_name` / `cell_count` / `cells_b64` / `image_names`（换行分隔 UTF-8 GIF 名） |
 
-`map_name` 必须等于该场景 SCE2 解析出的叶子。`image_names` 中每一项必须出现在现有场景图集目录且权威目录存在对应 `.gif`。
+`map_name` 必须等于该场景 SCE2 解析出的叶子。`image_names` 中每一项必须是权威目录中存在的安全 `.gif` 名（目录上限 `VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX`）。
 
 ## 格式契约
 
@@ -65,7 +66,9 @@
 
 ## 风险
 
-- 共享 `.map` 的多场景会一并受影响
+- 克隆场景：复制 `.sce` 后会把源内嵌 `.map` 复制为「新场景名.map」并改写 SCE2 引用，不再与源场景共用；地图编辑页的 `sharedBy` 仅反映仍指向同一 `.map` 叶子的场景
+- 共享 `.map` 的多场景会一并受影响（未按上述流程克隆的旧场景仍可能共用）
 - 不改地图尺寸 / SCE 摆件（传送与刷怪仍用原表单）
-- 不能导入资源包外自定义 GIF；只能复用现有场景已用过的图集
+- 不能导入资源包外自定义 GIF；只能使用权威目录已有 `.gif`
 - 单次 POST 受 `VM_MOCK_ADMIN_REQUEST_MAX`（约 96 KiB）限制
+- 左侧会列出全部 GIF（含称号/UI），首屏缩略图较多；用筛选框缩小范围后再点预览

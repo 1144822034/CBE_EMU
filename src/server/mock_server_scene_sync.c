@@ -23,6 +23,10 @@ static bool vm_net_mock_build_scene_plus16info_blob(const char *scene,
                                                     u8 *plus16Info,
                                                     u32 plus16InfoCap,
                                                     u32 *plus16InfoLenOut);
+static bool vm_net_mock_build_scene_pkinfo_blob(const char *scene,
+                                                u8 *pkInfo,
+                                                u32 pkInfoCap,
+                                                u32 *pkInfoLenOut);
 
 static bool vm_net_mock_active_client_scene_ready_for_nearby(const char *scene)
 {
@@ -82,12 +86,14 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
 {
     u8 otherInfo[8192];
     u8 plus16Info[512];
+    u8 pkInfo[1024];
     u32 pos = 5;
     u32 objectStart = 0;
     u32 page = 0;
     u32 nearbyRoleNum = 0;
     u32 otherInfoLen = 0;
     u32 plus16InfoLen = 0;
+    u32 pkInfoLen = 0;
     u8 objectCount = 0;
     bool allowNearbyList = false;
     bool appendedNearbyList = false;
@@ -105,6 +111,7 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
     scene = vm_net_mock_npc_dialog_scene_name();
     memset(otherInfo, 0, sizeof(otherInfo));
     memset(plus16Info, 0, sizeof(plus16Info));
+    memset(pkInfo, 0, sizeof(pkInfo));
     /*
      * InitSceneCtrlState sends 2/7 only after the current map UI exists.  If
      * the normal post-enter task subset did not run (for example the user
@@ -143,6 +150,11 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
         {
             return 0;
         }
+        if (!vm_net_mock_build_scene_pkinfo_blob(scene, pkInfo, sizeof(pkInfo),
+                                                  &pkInfoLen))
+        {
+            return 0;
+        }
         appendedNearbyList = true;
     }
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 2, 7, &objectStart))
@@ -163,6 +175,12 @@ static u32 vm_net_mock_build_scene_ctrl_page_response(const u8 *request, u32 req
     if (plus16InfoLen > 0 &&
         !vm_net_mock_put_object_raw(out, outCap, &pos, "plus16info", plus16Info,
                                     (u16)plus16InfoLen))
+    {
+        return 0;
+    }
+    if (pkInfoLen > 0 &&
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "pkinfo", pkInfo,
+                                    (u16)pkInfoLen))
     {
         return 0;
     }

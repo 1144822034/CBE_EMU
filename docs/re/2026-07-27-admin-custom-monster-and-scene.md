@@ -10,7 +10,8 @@
    - 覆盖 `automonster.dsh` 三槽，持久化到 `server_scene_monsters`
    - 影响挂机 / 场景战斗选怪
 3. **游戏内容 · 新增场景**
-   - 从现有 `.sce` 二进制克隆；若存在同名 `.map` 一并复制
+   - 从现有 `.sce` 二进制克隆
+   - 解析 SCE2 内嵌 `.map`（或同名回退），复制为「新场景名.map」并改写内嵌引用，避免与源场景共用地图
    - 经具名资源发布，供客户端 WT 18/7 下载
 
 迁移脚本：`server/mysql/migrate_add_custom_monsters_and_scenes.sql`（表定义亦已并入 `schema.sql`）。

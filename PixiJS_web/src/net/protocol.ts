@@ -57,6 +57,11 @@ export type PeerActor = {
    * worn slots with enhance >= 16 (0..8). Absent when field missing.
    */
   plus16Count?: number;
+  /**
+   * Pixi companion field `pkinfo` on 2/10 / 2/7: field PK score.
+   * Red name when >= 60.
+   */
+  pkPoints?: number;
 };
 
 /** 1/2/2 peer timeline: outer x/y = start; dirs 1..4 advance 4px (0=idle). */
@@ -837,6 +842,45 @@ export function applyPlus16Info(
   return peers;
 }
 
+/** Pixi-only 2/10|2/7 `pkinfo`: repeat { u32 actorId, u32 pkPoints }. */
+export function parsePkInfo(
+  raw: Uint8Array | null | undefined,
+): Map<number, number> {
+  const map = new Map<number, number>();
+  if (!raw || raw.length < 8) return map;
+  const r = new SeqReader(raw);
+  while (r.remaining() >= 8) {
+    try {
+      const actorId = r.u32() >>> 0;
+      const pk = r.u32() >>> 0;
+      map.set(actorId, pk);
+    } catch {
+      break;
+    }
+  }
+  return map;
+}
+
+export function applyPkInfo(
+  peers: PeerActor[],
+  pkRaw: Uint8Array | null | undefined,
+): PeerActor[] {
+  const scores = parsePkInfo(pkRaw);
+  if (scores.size === 0) return peers;
+  for (const p of peers) {
+    const n = scores.get(p.actorId >>> 0);
+    if (n !== undefined) p.pkPoints = n;
+  }
+  return peers;
+}
+
+export const PK_RED_NAME_THRESHOLD = 60;
+export const PK_POINTS_MAX = 100;
+
+export function isRedNamePk(pkPoints: number | undefined | null): boolean {
+  return (pkPoints ?? 0) >= PK_RED_NAME_THRESHOLD;
+}
+
 export function parseNearbyPeers(packet: WtPacket): PeerActor[] {
   const obj = packet.objects.find((o) => o.kind === 2 && o.subtype === 10);
   if (!obj) return [];
@@ -876,7 +920,8 @@ export function parseNearbyPeers(packet: WtPacket): PeerActor[] {
       break;
     }
   }
-  return applyPlus16Info(list, findField(obj, "plus16info"));
+  applyPlus16Info(list, findField(obj, "plus16info"));
+  return applyPkInfo(list, findField(obj, "pkinfo"));
 }
 
 /**
@@ -1426,6 +1471,7 @@ export function demoBuildPollPeers(peers: PeerActor[]): Uint8Array {
   if (peers.length === 0) return emptyWt();
   const info = new SeqWriter();
   const plus16 = new SeqWriter();
+  const pk = new SeqWriter();
   for (const p of peers) {
     info
       .u32(p.actorId)
@@ -1439,12 +1485,14 @@ export function demoBuildPollPeers(peers: PeerActor[]): Uint8Array {
       .i16(p.x)
       .i16(p.y);
     plus16.u32(p.actorId).u8(Math.max(0, Math.min(8, p.plus16Count ?? 0)));
+    pk.u32(p.actorId).u32((p.pkPoints ?? 0) >>> 0);
   }
   const b = new WtBuilder();
   b.object(1, 2, 10)
     .u32("othernum", peers.length)
     .raw("otherinfo", info.finish())
-    .raw("plus16info", plus16.finish());
+    .raw("plus16info", plus16.finish())
+    .raw("pkinfo", pk.finish());
   return b.finishResponse();
 }
 

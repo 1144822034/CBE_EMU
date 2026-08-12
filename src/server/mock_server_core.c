@@ -4725,6 +4725,11 @@ enum
     VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT = 5,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_HP_PERCENT = 30,
     VM_NET_MOCK_ROLE_DEATH_REVIVE_MP_PERCENT = 30,
+    /* Field PK / red-name (Pixi): initiate spar +20 (cap 100), red at >=60. */
+    VM_NET_MOCK_PK_INITIATE_GAIN = 20,
+    VM_NET_MOCK_PK_POINTS_MAX = 100,
+    VM_NET_MOCK_PK_RED_THRESHOLD = 60,
+    VM_NET_MOCK_PK_PVE_DECAY_BATTLES = 3,
     VM_NET_MOCK_ROLE_INITIAL_X = 224,
     VM_NET_MOCK_ROLE_INITIAL_Y = 132
 };
@@ -5008,6 +5013,10 @@ typedef struct
     u32 mpMax;
     u32 money;
     u32 wcoin;
+    /* Field PK score; ranking board23 type=2 and red-name (>=60). */
+    u32 pkPoints;
+    /* Wins toward next −1 pk_points while pkPoints>0 (mod 3). */
+    u8 pkPveDecayStreak;
     char scene[64];
     u16 x;
     u16 y;

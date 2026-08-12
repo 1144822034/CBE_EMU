@@ -2972,14 +2972,29 @@ static u32 vm_net_mock_role_apply_death_penalty_to(
     if (levelStartExp == 0xffffffffu || levelStartExp > expBefore)
         levelStartExp = 0;
     levelProgressExp = expBefore - levelStartExp;
-    expPenalty = vm_net_mock_percent_ceil_u32(
-        levelProgressExp, VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT);
-    targetExp = expBefore - expPenalty;
-    role->exp = targetExp;
-    role->level = vm_net_mock_role_level_from_exp(role->exp);
-    moneyPenalty = vm_net_mock_percent_ceil_u32(role->money,
-                                               VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT);
-    role->money -= moneyPenalty;
+    {
+        u32 expPercent = (u32)VM_NET_MOCK_ROLE_DEATH_EXP_PENALTY_PERCENT;
+        u32 moneyPercent = (u32)VM_NET_MOCK_ROLE_DEATH_MONEY_PENALTY_PERCENT;
+        bool redName = vm_net_mock_role_is_red_name(role);
+
+        if (redName)
+        {
+            expPercent *= 2u;
+            moneyPercent *= 2u;
+        }
+        expPenalty = vm_net_mock_percent_ceil_u32(levelProgressExp, expPercent);
+        targetExp = expBefore - expPenalty;
+        role->exp = targetExp;
+        role->level = vm_net_mock_role_level_from_exp(role->exp);
+        moneyPenalty = vm_net_mock_percent_ceil_u32(role->money, moneyPercent);
+        role->money -= moneyPenalty;
+        if (redName)
+        {
+            printf("[info][network] mock_death_penalty_red_name role=%u pk=%u "
+                   "exp_pct=%u money_pct=%u\n",
+                   role->roleId, role->pkPoints, expPercent, moneyPercent);
+        }
+    }
 
     vm_net_mock_role_sync_derived_vitals(role);
     reviveHp = vm_net_mock_percent_ceil_u32(role->hpMax,
@@ -3724,6 +3739,8 @@ typedef struct vm_mock_service_client_session
     u16 onlineLevel;
     u32 onlineEquippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     u16 onlineEquippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
+    /* Mirrored from role->pkPoints for nearby Pixi pkinfo companion. */
+    u32 onlinePkPoints;
     u32 onlineHp;
     u32 onlineHpMax;
     u32 onlineMp;
@@ -9170,6 +9187,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->onlineRoleName[0] = 0;
     session->onlineRoleTitle[0] = 0;
     session->onlineRoleTitleBadge[0] = 0;
+    session->onlinePkPoints = 0;
     session->onlineScene[0] = 0;
     session->onlineX = 0;
     session->onlineY = 0;
@@ -9608,6 +9626,7 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
            sizeof(session->onlineEquippedItemIds));
     memcpy(session->onlineEquippedEnhanceLevels, role->equippedEnhanceLevels,
            sizeof(session->onlineEquippedEnhanceLevels));
+    session->onlinePkPoints = role->pkPoints;
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;
     session->onlineMp = mp;
@@ -12023,6 +12042,136 @@ static bool vm_net_mock_sce_embedded_map_leaf(const u8 *data, u32 len,
     out[nameLen] = 0;
     return vm_net_mock_str_ends_with(out, ".map") &&
            vm_net_mock_update_name_is_safe(out);
+}
+
+/*
+ * Locate SCE2 embedded map leaf as [nameLen byte .. name bytes).
+ * Used when cloning a scene onto a private .map so it no longer shares tiles.
+ */
+static bool vm_net_mock_sce_embedded_map_range(const u8 *data, u32 len,
+                                               u32 *rangeStartOut,
+                                               u32 *rangeEndOut,
+                                               char *out, size_t outCap)
+{
+    u32 base = 0;
+    u32 pos = 0;
+    u8 nameLen = 0;
+
+    if (rangeStartOut)
+        *rangeStartOut = 0;
+    if (rangeEndOut)
+        *rangeEndOut = 0;
+    if (out != NULL && outCap > 0)
+        out[0] = 0;
+    if (data == NULL || len < 24u)
+        return false;
+    for (base = 0; base + 12u <= len && base < 32u; ++base)
+    {
+        if (memcmp(data + base, "SCE2", 4) == 0)
+            break;
+    }
+    if (base + 12u > len || base >= 32u)
+        return false;
+    pos = base + 8u;
+    if (pos + 3u <= len && vm_net_mock_read_le16_at(data, pos) == 1u)
+        pos += 2u;
+    if (pos >= len)
+        return false;
+    nameLen = data[pos];
+    if (nameLen < 5u || pos + 1u + nameLen > len)
+        return false;
+    if (out != NULL)
+    {
+        if (nameLen + 1u > outCap)
+            return false;
+        memcpy(out, data + pos + 1u, nameLen);
+        out[nameLen] = 0;
+        if (!vm_net_mock_str_ends_with(out, ".map") ||
+            !vm_net_mock_update_name_is_safe(out))
+            return false;
+    }
+    if (rangeStartOut)
+        *rangeStartOut = pos;
+    if (rangeEndOut)
+        *rangeEndOut = pos + 1u + nameLen;
+    return true;
+}
+
+/* Rewrite SCE2 embedded .map leaf; does not publish (caller owns publish). */
+static bool vm_net_mock_sce_payload_replace_range(
+    u8 *data, u32 *lenInOut, u32 lenCap, u32 offset, u32 oldEnd,
+    const u8 *replacement, u32 replacementLen);
+static bool vm_net_mock_sce_retarget_embedded_map_leaf(
+    const char *scene, const char *newMapLeaf, const char **errorOut)
+{
+    u8 *data = NULL;
+    u32 len = 0;
+    u32 rangeStart = 0;
+    u32 rangeEnd = 0;
+    char oldLeaf[64];
+    u8 replacement[1 + 63];
+    size_t newLen = 0;
+    const char *writeError = NULL;
+
+    if (errorOut)
+        *errorOut = "改写场景地图引用失败";
+    if (scene == NULL || scene[0] == 0 || newMapLeaf == NULL ||
+        newMapLeaf[0] == 0 || !vm_net_mock_str_ends_with(newMapLeaf, ".map") ||
+        !vm_net_mock_update_name_is_safe(newMapLeaf))
+    {
+        return false;
+    }
+    newLen = strlen(newMapLeaf);
+    if (newLen == 0 || newLen > 63u)
+    {
+        if (errorOut)
+            *errorOut = "新地图文件名过长";
+        return false;
+    }
+    data = (u8 *)malloc(VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    if (data == NULL)
+    {
+        if (errorOut)
+            *errorOut = "改写地图引用内存不足";
+        return false;
+    }
+    len = vm_net_mock_load_scene_resource(scene, data,
+                                          VM_NET_MOCK_SCE_EDIT_DECODE_MAX);
+    memset(oldLeaf, 0, sizeof(oldLeaf));
+    if (len == 0 ||
+        !vm_net_mock_sce_embedded_map_range(data, len, &rangeStart, &rangeEnd,
+                                             oldLeaf, sizeof(oldLeaf)))
+    {
+        free(data);
+        if (errorOut)
+            *errorOut = "场景缺少可改写的内嵌 .map 引用";
+        return false;
+    }
+    if (strcmp(oldLeaf, newMapLeaf) == 0)
+    {
+        free(data);
+        if (errorOut)
+            *errorOut = "ok";
+        return true;
+    }
+    replacement[0] = (u8)newLen;
+    memcpy(replacement + 1, newMapLeaf, newLen);
+    if (!vm_net_mock_sce_payload_replace_range(
+            data, &len, VM_NET_MOCK_SCE_EDIT_DECODE_MAX, rangeStart, rangeEnd,
+            replacement, (u32)(1u + newLen)) ||
+        !vm_net_mock_write_scene_resource_bytes(scene, data, len, &writeError))
+    {
+        free(data);
+        if (errorOut)
+            *errorOut = writeError ? writeError : "写入场景地图引用失败";
+        return false;
+    }
+    free(data);
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] scene_map_retarget scene=%s from=%s to=%s\n",
+           scene, oldLeaf, newMapLeaf);
+    return true;
 }
 
 static bool vm_net_mock_publish_scene_resource(const char *scene,

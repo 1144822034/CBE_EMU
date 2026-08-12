@@ -1,5 +1,6 @@
 import { Container, Graphics, Sprite, type Texture } from "pixi.js";
 import type { NpcActor, PeerActor } from "../net/protocol";
+import { isRedNamePk } from "../net/protocol";
 import { BitmapLabel } from "../ui/BitmapLabel";
 import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
 import { resolveTitleGif } from "../ui/designation";
@@ -24,6 +25,8 @@ import { rgbaToTexture } from "../render/rgbaTexture";
 
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
+/** Map peer nameplate when pk_points >= 60. */
+const PEER_RED = 0xff4040;
 /** Map monster nameplate — green (distinct from peer mint). */
 const MONSTER_GREEN = 0x50e070;
 /** Teleport stone nameplate. */
@@ -385,6 +388,7 @@ export class ActorLayer {
       const job = Math.max(0, Math.min(2, peer.visualVariant | 0));
       const sex = peer.visualGroup >= 1 ? ((peer.visualGroup - 1) & 1) : 0;
       const res = actorResourceForJobSex(job, sex);
+      const nameColor = isRedNamePk(peer.pkPoints) ? PEER_RED : PEER_GREEN;
       void this.upsert(
         peer.actorId,
         peer.x,
@@ -392,7 +396,7 @@ export class ActorLayer {
         peer.name || "玩家",
         "peer",
         res,
-        PEER_GREEN,
+        nameColor,
         true,
         "peer",
         peer.title || "",

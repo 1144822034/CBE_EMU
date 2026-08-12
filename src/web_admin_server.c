@@ -753,26 +753,27 @@ static const char g_vm_mock_admin_script[] =
     "if(showCol&&showCol.checked){const fl=(packed>>>28)&15;if(fl){ctx.fillStyle=fl===15?'rgba(180,35,24,.35)':'rgba(253,176,34,.35)';"
     "ctx.fillRect(dx,dy,map.tileWidth,map.tileHeight);ctx.strokeStyle='rgba(255,255,255,.5)';ctx.strokeRect(dx+.5,dy+.5,map.tileWidth-1,map.tileHeight-1);}}"
     "}};"
-    "const usableCatalog=()=>{const used=new Set(imageNames);const q=((filterEl&&filterEl.value)||'').trim().toLowerCase();"
-    "return availableSheets.filter(n=>!used.has(n)&&(!q||n.toLowerCase().includes(q))).sort((a,b)=>a.localeCompare(b,'zh'));};"
+    "const usableCatalog=()=>{const q=((filterEl&&filterEl.value)||'').trim().toLowerCase();"
+    "return availableSheets.filter(n=>!q||n.toLowerCase().includes(q)).sort((a,b)=>a.localeCompare(b,'zh'));};"
     "const updatePreviewUi=()=>{const max=map&&map.imageMax?map.imageMax:16;const full=imageNames.length>=max;"
+    "const used=selectedCatalog&&imageNames.includes(selectedCatalog);"
     "if(previewBox)previewBox.classList.toggle('on',!!selectedCatalog);"
     "if(previewNameEl)previewNameEl.textContent=selectedCatalog||'';"
     "if(previewImg){if(selectedCatalog){previewImg.src=sheetUrl(selectedCatalog);previewImg.alt=selectedCatalog;}else{previewImg.removeAttribute('src');}}"
-    "if(addBtn){addBtn.disabled=!selectedCatalog||full||imageNames.includes(selectedCatalog);addBtn.textContent=full?'\\u5df2\\u8fbe\\u4e0a\\u9650':'\\u6dfb\\u52a0\\u6b64\\u56fe\\u96c6';}"
-    "if(sheetMeta)sheetMeta.textContent='\\u56fe\\u96c6 '+imageNames.length+' / '+max+' \\u00b7 \\u53ef\\u6dfb\\u52a0 '+usableCatalog().length;};"
+    "if(addBtn){addBtn.disabled=!selectedCatalog||full||used;addBtn.textContent=full?'\\u5df2\\u8fbe\\u4e0a\\u9650':(used?'\\u5df2\\u5728\\u8c03\\u8272\\u677f':'\\u6dfb\\u52a0\\u6b64\\u56fe\\u96c6');}"
+    "if(sheetMeta)sheetMeta.textContent='\\u56fe\\u96c6 '+imageNames.length+' / '+max+' \\u00b7 GIF '+usableCatalog().length+' / '+availableSheets.length;};"
     "const selectCatalog=(name)=>{selectedCatalog=name||'';updatePreviewUi();"
     "catalogEl.querySelectorAll('.sheet-card').forEach(c=>c.classList.toggle('on',c.dataset.name===selectedCatalog));};"
     "const refreshCatalog=()=>{const opts=usableCatalog();const max=map&&map.imageMax?map.imageMax:16;const full=imageNames.length>=max;"
     "catalogEl.innerHTML='';"
     "if(!opts.length){const empty=document.createElement('div');empty.className='meta';"
-    "empty.textContent=availableSheets.length?'\\u6ca1\\u6709\\u5339\\u914d\\u7684\\u53ef\\u6dfb\\u52a0\\u56fe\\u96c6':'\\u6ca1\\u6709\\u53ef\\u7528\\u56fe\\u96c6';catalogEl.appendChild(empty);updatePreviewUi();return;}"
+    "empty.textContent=availableSheets.length?'\\u6ca1\\u6709\\u5339\\u914d\\u7684 GIF':'\\u6ca1\\u6709 GIF \\u8d44\\u6e90';catalogEl.appendChild(empty);updatePreviewUi();return;}"
     "if(selectedCatalog&&!opts.includes(selectedCatalog))selectedCatalog='';"
-    "opts.forEach(name=>{const card=document.createElement('div');card.className='sheet-card'+(name===selectedCatalog?' on':'');card.dataset.name=name;"
+    "opts.forEach(name=>{const used=imageNames.includes(name);const card=document.createElement('div');card.className='sheet-card'+(name===selectedCatalog?' on':'');card.dataset.name=name;"
     "const thumb=document.createElement('img');thumb.className='thumb';thumb.alt=name;thumb.loading='lazy';thumb.src=sheetUrl(name);"
     "thumb.onerror=()=>{const ph=document.createElement('div');ph.className='thumb missing';ph.textContent='?';thumb.replaceWith(ph);};"
     "const label=document.createElement('div');label.className='name';label.textContent=name;"
-    "const btn=document.createElement('button');btn.type='button';btn.textContent='\\u6dfb\\u52a0';btn.disabled=full;"
+    "const btn=document.createElement('button');btn.type='button';btn.textContent=used?'\\u5df2\\u6dfb\\u52a0':'\\u6dfb\\u52a0';btn.disabled=full||used;"
     "btn.addEventListener('click',ev=>{ev.stopPropagation();selectCatalog(name);addSheet(name);});"
     "card.addEventListener('click',()=>selectCatalog(name));"
     "card.appendChild(thumb);card.appendChild(label);card.appendChild(btn);catalogEl.appendChild(card);});"
@@ -4393,7 +4394,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_text_appendf(
         &page,
         "</select></label></div><div class=\"actions\"><button type=\"submit\">克隆创建</button></div>"
-        "<p class=\"foot\" style=\"margin:8px 0 0\">复制源 .sce；若存在同名 .map 一并复制并发布。</p></form></div>"
+        "<p class=\"foot\" style=\"margin:8px 0 0\">复制源 .sce，并复制其内嵌 .map 为新场景同名独立地图（不与源场景共用）。</p></form></div>"
         "<h2>SCE 场景（%u）</h2>"
         "<input class=\"scene-search\" id=\"scene-search\" placeholder=\"按文件名或地图名筛选，如 铜雀台\">"
         "<div class=\"scene-list\" id=\"scene-list\">",
@@ -6595,7 +6596,8 @@ static void vm_mock_admin_redirect_mapedit(vm_mock_service_socket client,
 
 enum
 {
-    VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX = 256
+    /* JHOnlineData has ~370 GIFs; keep headroom for future assets. */
+    VM_MOCK_ADMIN_MAP_SHEET_CATALOG_MAX = 1024
 };
 
 static bool vm_mock_admin_map_sheet_name_known(
@@ -6611,79 +6613,128 @@ static bool vm_mock_admin_map_sheet_name_known(
     return false;
 }
 
-/* Unique tile GIF names referenced by maps of existing scenes. */
+static int vm_mock_admin_sheet_name_compare(const void *lhs, const void *rhs)
+{
+    return strcmp((const char *)lhs, (const char *)rhs);
+}
+
+/* All safe .gif leaves under the authoritative JHOnlineData resource dir. */
 static u32 vm_mock_admin_collect_map_tile_sheets(char names[][64], u32 namesCap)
 {
-    vm_mock_admin_scene_file *sceneFiles = NULL;
-    char (*mapLeaves)[64] = NULL;
-    u32 sceneCount = 0;
-    u32 mapLeafCount = 0;
     u32 sheetCount = 0;
 
     if (names == NULL || namesCap == 0)
         return 0;
-    sceneFiles = (vm_mock_admin_scene_file *)calloc(
-        VM_MOCK_ADMIN_SCENE_FILE_MAX, sizeof(*sceneFiles));
-    mapLeaves = (char (*)[64])calloc(VM_MOCK_ADMIN_SCENE_FILE_MAX, 64);
-    if (sceneFiles == NULL || mapLeaves == NULL)
+    memset(names, 0, (size_t)namesCap * 64u);
+#ifdef _WIN32
     {
-        free(sceneFiles);
-        free(mapLeaves);
-        return 0;
-    }
-    sceneCount = vm_mock_admin_collect_scene_files(
-        sceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
-    for (u32 i = 0; i < sceneCount; ++i)
-    {
-        char runtimeScene[64];
-        char mapName[64];
+        char configuredPattern[1200];
+        const char *patterns[] = {
+            NULL,
+            "../web/fs/JHOnlineData/*.gif",
+            "web/fs/JHOnlineData/*.gif"
+        };
+        WIN32_FIND_DATAA found;
+        HANDLE search = INVALID_HANDLE_VALUE;
 
-        memset(runtimeScene, 0, sizeof(runtimeScene));
-        memset(mapName, 0, sizeof(mapName));
-        if (!vm_mock_admin_scene_file_to_runtime_key(
-                sceneFiles[i].name, runtimeScene, sizeof(runtimeScene)) ||
-            !vm_mock_admin_scene_map_name(runtimeScene, mapName,
-                                          sizeof(mapName)) ||
-            vm_mock_admin_map_sheet_name_known(mapLeaves, mapLeafCount, mapName) ||
-            mapLeafCount >= VM_MOCK_ADMIN_SCENE_FILE_MAX)
+        memset(configuredPattern, 0, sizeof(configuredPattern));
+        if (g_vm_net_mock_resource_dir[0] != 0)
         {
-            continue;
-        }
-        snprintf(mapLeaves[mapLeafCount], sizeof(mapLeaves[mapLeafCount]), "%s",
-                 mapName);
-        mapLeafCount++;
-    }
-    for (u32 i = 0; i < mapLeafCount && sheetCount < namesCap; ++i)
-    {
-        u8 *mapPayload = NULL;
-        u32 mapPayloadLen = 0;
-        vm_mock_admin_scene_preview preview;
-
-        memset(&preview, 0, sizeof(preview));
-        if (!vm_mock_admin_load_data_payload(mapLeaves[i], ".map", &mapPayload,
-                                             &mapPayloadLen, NULL) ||
-            !vm_mock_admin_parse_map_preview(mapPayload, mapPayloadLen,
-                                             mapLeaves[i], &preview))
-        {
-            free(mapPayload);
-            continue;
-        }
-        for (u32 s = 0; s < preview.imageCount && sheetCount < namesCap; ++s)
-        {
-            if (!vm_net_mock_str_ends_with(preview.imageNames[s], ".gif") ||
-                !vm_net_mock_update_name_is_safe(preview.imageNames[s]) ||
-                vm_mock_admin_map_sheet_name_known(names, sheetCount,
-                                                    preview.imageNames[s]))
+            size_t dirLen = strlen(g_vm_net_mock_resource_dir);
+            if (snprintf(configuredPattern, sizeof(configuredPattern),
+                         "%s%s*.gif", g_vm_net_mock_resource_dir,
+                         (dirLen != 0 &&
+                          (g_vm_net_mock_resource_dir[dirLen - 1] == '/' ||
+                           g_vm_net_mock_resource_dir[dirLen - 1] == '\\'))
+                             ? ""
+                             : "/") < (int)sizeof(configuredPattern))
             {
-                continue;
+                patterns[0] = configuredPattern;
             }
-            snprintf(names[sheetCount], 64, "%s", preview.imageNames[s]);
-            sheetCount++;
         }
-        free(mapPayload);
+        for (u32 patternIndex = 0;
+             patternIndex < sizeof(patterns) / sizeof(patterns[0]);
+             ++patternIndex)
+        {
+            if (patterns[patternIndex] == NULL)
+                continue;
+            search = FindFirstFileA(patterns[patternIndex], &found);
+            if (search == INVALID_HANDLE_VALUE)
+                continue;
+            do
+            {
+                char gameName[64];
+                size_t nameLen = strlen(found.cFileName);
+
+                memset(gameName, 0, sizeof(gameName));
+                if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                    nameLen == 0 || nameLen >= sizeof(gameName) ||
+                    !vm_net_mock_str_ends_with(found.cFileName, ".gif") ||
+                    !vm_mock_admin_host_resource_name_to_game(
+                        found.cFileName, gameName, sizeof(gameName)) ||
+                    !vm_net_mock_update_name_is_safe(gameName) ||
+                    vm_mock_admin_map_sheet_name_known(names, sheetCount,
+                                                        gameName))
+                {
+                    continue;
+                }
+                snprintf(names[sheetCount], 64, "%s", gameName);
+                sheetCount++;
+            } while (sheetCount < namesCap && FindNextFileA(search, &found));
+            FindClose(search);
+            break;
+        }
     }
-    free(sceneFiles);
-    free(mapLeaves);
+#else
+    {
+        const char *directories[] = {
+            g_vm_net_mock_resource_dir[0] ? g_vm_net_mock_resource_dir : NULL,
+            "../web/fs/JHOnlineData",
+            "web/fs/JHOnlineData"
+        };
+        for (u32 directoryIndex = 0;
+             directoryIndex < sizeof(directories) / sizeof(directories[0]);
+             ++directoryIndex)
+        {
+            DIR *directory = NULL;
+            struct dirent *entry = NULL;
+
+            if (directories[directoryIndex] == NULL)
+                continue;
+            directory = opendir(directories[directoryIndex]);
+            if (directory == NULL)
+                continue;
+            while (sheetCount < namesCap &&
+                   (entry = readdir(directory)) != NULL)
+            {
+                char path[1400];
+                char gameName[64];
+                struct stat info;
+
+                memset(gameName, 0, sizeof(gameName));
+                if (!vm_net_mock_str_ends_with(entry->d_name, ".gif") ||
+                    !vm_mock_admin_host_resource_name_to_game(
+                        entry->d_name, gameName, sizeof(gameName)) ||
+                    !vm_net_mock_update_name_is_safe(gameName) ||
+                    vm_mock_admin_map_sheet_name_known(names, sheetCount,
+                                                        gameName))
+                {
+                    continue;
+                }
+                snprintf(path, sizeof(path), "%s/%s", directories[directoryIndex],
+                         entry->d_name);
+                if (stat(path, &info) != 0 || !S_ISREG(info.st_mode))
+                    continue;
+                snprintf(names[sheetCount], 64, "%s", gameName);
+                sheetCount++;
+            }
+            closedir(directory);
+            break;
+        }
+    }
+#endif
+    if (sheetCount > 1)
+        qsort(names, sheetCount, 64, vm_mock_admin_sheet_name_compare);
     return sheetCount;
 }
 
@@ -6899,10 +6950,10 @@ static void vm_mock_admin_render_mapedit_page(char *response,
         ".sheet-preview.on{display:grid;gap:8px}"
         ".sheet-preview .preview-head{display:flex;justify-content:space-between;gap:8px;align-items:center}"
         ".sheet-preview .preview-name{font-size:12px;color:#344054;word-break:break-all}"
-        ".sheet-preview img{max-width:100%%;max-height:120px;image-rendering:pixelated;background:#111;border-radius:4px}"
+        ".sheet-preview img{max-width:100%%;max-height:220px;image-rendering:pixelated;background:#111;border-radius:4px}"
         ".sheet-preview button,.sheet-card button{border:0;border-radius:6px;padding:6px 10px;background:#175cd3;color:#fff;cursor:pointer;font-size:12px}"
         ".sheet-preview button:disabled,.sheet-card button:disabled{opacity:.45;cursor:not-allowed}"
-        ".sheet-catalog{display:grid;gap:6px;max-height:260px;overflow:auto;padding-right:2px}"
+        ".sheet-catalog{display:grid;gap:6px;max-height:420px;overflow:auto;padding-right:2px}"
         ".sheet-card{display:grid;grid-template-columns:72px 1fr auto;gap:8px;align-items:center;border:1px solid #e4e7ec;border-radius:8px;padding:6px;background:#fff;cursor:pointer}"
         ".sheet-card:hover{border-color:#98a2b3}.sheet-card.on{border-color:#175cd3;background:#eef4ff}"
         ".sheet-card .thumb{width:72px;height:48px;object-fit:contain;image-rendering:pixelated;background:#111;border-radius:4px}"
@@ -6915,7 +6966,7 @@ static void vm_mock_admin_render_mapedit_page(char *response,
         "#map-canvas{image-rendering:pixelated;cursor:crosshair;display:block;background:#222}"
         ".logout{background:none;color:#667085;border:1px solid #d0d5dd;border-radius:6px;padding:8px 12px;cursor:pointer}"
         "@media(max-width:900px){.layout{grid-template-columns:1fr}}"
-        "</style><script src=\"/admin.js?v=10\" defer></script></head><body>"
+        "</style><script src=\"/admin.js?v=11\" defer></script></head><body>"
         "<main class=\"wrap\" id=\"map-editor\" data-scene=\"");
     vm_mock_admin_text_append_html(
         &page, selectedSceneUtf8[0] ? selectedSceneUtf8 : "");
@@ -6980,12 +7031,12 @@ static void vm_mock_admin_render_mapedit_page(char *response,
         "<span class=\"meta\" id=\"map-cursor-meta\">-</span></div>"
         "<div class=\"layout\"><aside class=\"panel\">"
         "<div class=\"sheet-tools\">"
-        "<div class=\"title\">从现有场景图集添加</div>"
-        "<input type=\"search\" id=\"map-sheet-filter\" placeholder=\"筛选图集名…\" autocomplete=\"off\">"
+        "<div class=\"title\">浏览全部 GIF 资源</div>"
+        "<input type=\"search\" id=\"map-sheet-filter\" placeholder=\"筛选文件名，如 level_name / riches_name / m_castle…\" autocomplete=\"off\">"
         "<div class=\"sheet-preview\" id=\"map-sheet-preview\">"
         "<div class=\"preview-head\"><span class=\"preview-name\" id=\"map-sheet-preview-name\"></span>"
         "<button type=\"button\" id=\"map-sheet-add\">添加此图集</button></div>"
-        "<img id=\"map-sheet-preview-img\" alt=\"图集预览\"></div>"
+        "<img id=\"map-sheet-preview-img\" alt=\"GIF 预览\"></div>"
         "<div class=\"sheet-catalog\" id=\"map-sheet-catalog\"></div>"
         "<div class=\"meta\" id=\"map-sheet-meta\">图集 0 / 16</div></div>"
         "<div id=\"map-palette\"></div></aside>"
@@ -8164,26 +8215,94 @@ static void vm_mock_admin_handle_create_scene(vm_mock_service_socket client,
     }
     publishNames[publishCount++] = newSceneGbk;
 
-    if (vm_mock_admin_replace_extension(cloneSceneGbk, ".map", cloneMapGbk,
-                                        sizeof(cloneMapGbk)) &&
-        vm_mock_admin_replace_extension(newSceneGbk, ".map", newMapGbk,
-                                        sizeof(newMapGbk)) &&
-        vm_net_mock_update_resource_path(cloneMapGbk, sourceMapPath,
-                                          sizeof(sourceMapPath)) &&
-        vm_mock_admin_path_replace_leaf(sourceMapPath, newMapGbk, destMapPath,
-                                         sizeof(destMapPath)))
+    /*
+     * Always clone the walkable .map onto a private leaf named after the new
+     * scene, then retarget SCE2's embedded map reference.  Sibling-only copy
+     * left clones sharing the source .map (map editor sharedBy warning).
+     */
     {
-        FILE *mapProbe = vm_net_mock_fopen_game_path(sourceMapPath, "rb");
-        if (mapProbe != NULL)
+        char runtimeClone[64];
+        FILE *mapProbe = NULL;
+        FILE *destProbe = NULL;
+        const char *retargetError = NULL;
+
+        memset(runtimeClone, 0, sizeof(runtimeClone));
+        if (!vm_mock_admin_scene_file_to_runtime_key(
+                cloneSceneGbk, runtimeClone, sizeof(runtimeClone)) ||
+            !vm_mock_admin_scene_map_name(runtimeClone, cloneMapGbk,
+                                          sizeof(cloneMapGbk)) ||
+            !vm_mock_admin_replace_extension(newSceneGbk, ".map", newMapGbk,
+                                             sizeof(newMapGbk)) ||
+            !vm_net_mock_update_name_is_safe(newMapGbk) ||
+            !vm_net_mock_str_ends_with(newMapGbk, ".map"))
         {
-            fclose(mapProbe);
-            if (vm_mock_admin_copy_file_binary(sourceMapPath, destMapPath,
-                                                &error))
-            {
-                mapCopied = true;
-                publishNames[publishCount++] = newMapGbk;
-            }
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                "无法解析源场景地图，克隆已回滚");
+            return;
         }
+        if (strcmp(cloneMapGbk, newMapGbk) == 0)
+        {
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                "新场景地图名与源地图相同，请换名后再克隆");
+            return;
+        }
+        if (!vm_net_mock_update_resource_path(cloneMapGbk, sourceMapPath,
+                                              sizeof(sourceMapPath)) ||
+            !vm_mock_admin_path_replace_leaf(sourceMapPath, newMapGbk,
+                                             destMapPath, sizeof(destMapPath)))
+        {
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                "无法解析地图资源路径，克隆已回滚");
+            return;
+        }
+        mapProbe = vm_net_mock_fopen_game_path(sourceMapPath, "rb");
+        if (mapProbe == NULL)
+        {
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                "源场景 .map 不存在，克隆已回滚");
+            return;
+        }
+        fclose(mapProbe);
+        destProbe = vm_net_mock_fopen_game_path(destMapPath, "rb");
+        if (destProbe != NULL)
+        {
+            fclose(destProbe);
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                "目标 .map 已存在，克隆已回滚");
+            return;
+        }
+        if (!vm_mock_admin_copy_file_binary(sourceMapPath, destMapPath,
+                                            &error))
+        {
+            (void)remove(destScePath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                error ? error : "复制 .map 失败，克隆已回滚");
+            return;
+        }
+        mapCopied = true;
+        if (!vm_net_mock_sce_retarget_embedded_map_leaf(newSceneGbk, newMapGbk,
+                                                         &retargetError))
+        {
+            (void)remove(destScePath);
+            (void)remove(destMapPath);
+            vm_mock_admin_redirect_content(
+                client, "", "error",
+                retargetError ? retargetError :
+                                "改写场景地图引用失败，克隆已回滚");
+            return;
+        }
+        publishNames[publishCount++] = newMapGbk;
     }
 
     if (!vm_net_mock_update_admin_publish_named_files(publishNames, publishCount,
@@ -8202,7 +8321,7 @@ static void vm_mock_admin_handle_create_scene(vm_mock_service_socket client,
                                   sizeof(newSceneUtf8));
     vm_mock_admin_redirect_content(
         client, newSceneUtf8, "ok",
-        mapCopied ? "场景已克隆并发布（含 .map）" : "场景已克隆并发布");
+        "场景已克隆并发布（含独立 .map）");
 }
 
 static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
@@ -8863,7 +8982,7 @@ static bool vm_mock_admin_parse_map_image_names_form(
                     free(raw);
                     free(catalog);
                     if (errorOut)
-                        *errorOut = "图集不在现有场景资源中或不存在";
+                        *errorOut = "图集不在资源目录或不存在";
                     return false;
                 }
             }

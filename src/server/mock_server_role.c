@@ -3300,6 +3300,7 @@ static u32 vm_net_mock_build_pixi_panel_stats_response(u8 *out, u32 outCap)
         !vm_net_mock_put_object_u32(out, outCap, &pos, "expNext", expNext) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "money", role->money) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "coolmoney", role->wcoin) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "pkpoints", role->pkPoints) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "backpack",
                                      role->backpackCapacity))
     {
@@ -6573,11 +6574,11 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
                                           const size_t *lengths)
 {
     vm_mock_mysql_role_load_context *context = (vm_mock_mysql_role_load_context *)context_value;
-    u32 number[18];
+    u32 number[20];
     size_t name_len = 0;
     size_t scene_len = 0;
     memset(number, 0, sizeof(number));
-    if (context == NULL || context->database == NULL || column_count != 20 ||
+    if (context == NULL || context->database == NULL || column_count != 22 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &number[0]) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[1]) ||
         values[2] == NULL ||
@@ -6598,10 +6599,12 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[17], lengths[17], &number[15]) ||
         !vm_mock_mysql_parse_u32(values[18], lengths[18], &number[16]) ||
         !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[17]) ||
+        !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[18]) ||
+        !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[19]) ||
         number[0] >= context->database->roleCount || number[0] >= VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
         number[1] == 0 || number[2] > 255 || number[3] > 255 || number[4] > 255 ||
         number[13] > 65535 || number[14] > 65535 || number[15] > 255 ||
-        number[16] > 255 || number[17] > 65535 ||
+        number[16] > 255 || number[17] > 65535 || number[19] > 255 ||
         (context->seenRoleMask & (1u << number[0])) != 0)
     {
         if (context != NULL)
@@ -6638,6 +6641,8 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
     role->backpackItemCount = (u16)number[15];
     role->designationId = (u8)number[16];
     role->nextBackpackSeq = (u16)number[17];
+    role->pkPoints = number[18];
+    role->pkPveDecayStreak = (u8)number[19];
     context->seenRoleMask |= (u8)(1u << number[0]);
     ++context->roleRows;
     return true;
@@ -6851,6 +6856,98 @@ static bool vm_net_mock_role_equipment_ensure_enhance_column(void)
     return true;
 }
 
+/* account_roles.pk_points (ranking) + pk_pve_streak (red-name decay). */
+static void vm_net_mock_role_mark_inventory_dirty(const char *reason);
+
+static bool vm_net_mock_role_ensure_pk_columns(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "pk_points",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN pk_points INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER wcoin",
+            "role_pk_points_column"))
+    {
+        ok = false;
+        return false;
+    }
+    if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "pk_pve_streak",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN pk_pve_streak TINYINT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER pk_points",
+            "role_pk_pve_streak_column"))
+    {
+        ok = false;
+        return false;
+    }
+    ok = true;
+    return true;
+}
+
+static bool vm_net_mock_role_is_red_name(const vm_net_mock_role_state *role)
+{
+    return role != NULL &&
+           role->pkPoints >= (u32)VM_NET_MOCK_PK_RED_THRESHOLD;
+}
+
+static void vm_net_mock_role_note_pve_victory_pk_decay(vm_net_mock_role_state *role)
+{
+    u32 before;
+
+    if (role == NULL || role->pkPoints == 0)
+        return;
+    before = role->pkPoints;
+    role->pkPveDecayStreak =
+        (u8)(role->pkPveDecayStreak + 1u);
+    if (role->pkPveDecayStreak < (u8)VM_NET_MOCK_PK_PVE_DECAY_BATTLES)
+    {
+        printf("[info][network] mock_pk_pve_decay_progress role=%u pk=%u "
+               "streak=%u/%u\n",
+               role->roleId, role->pkPoints, role->pkPveDecayStreak,
+               (u32)VM_NET_MOCK_PK_PVE_DECAY_BATTLES);
+        vm_net_mock_role_mark_inventory_dirty("pk-pve-streak");
+        return;
+    }
+    role->pkPveDecayStreak = 0;
+    role->pkPoints -= 1u;
+    printf("[info][network] mock_pk_pve_decay role=%u pk=%u->%u red=%u "
+           "evidence=3-pve-wins\n",
+           role->roleId, before, role->pkPoints,
+           vm_net_mock_role_is_red_name(role) ? 1u : 0u);
+    vm_net_mock_role_mark_inventory_dirty("pk-pve-decay");
+}
+
+static void vm_net_mock_role_add_pk_initiate_points(vm_net_mock_role_state *role,
+                                                     const char *reason)
+{
+    u32 before;
+    u32 gain = (u32)VM_NET_MOCK_PK_INITIATE_GAIN;
+    u32 cap = (u32)VM_NET_MOCK_PK_POINTS_MAX;
+
+    if (role == NULL || gain == 0)
+        return;
+    before = role->pkPoints;
+    if (role->pkPoints >= cap)
+        return;
+    if (role->pkPoints > cap - gain)
+        role->pkPoints = cap;
+    else
+        role->pkPoints += gain;
+    printf("[info][network] mock_pk_initiate_gain role=%u pk=%u->%u gain=%u "
+           "cap=%u red=%u reason=%s\n",
+           role->roleId, before, role->pkPoints, role->pkPoints - before, cap,
+           vm_net_mock_role_is_red_name(role) ? 1u : 0u,
+           reason ? reason : "spar-initiate");
+    vm_net_mock_role_mark_inventory_dirty(reason ? reason : "spar-initiate-pk");
+}
+
 static bool vm_net_mock_warehouse_ensure_enhance_wash_column(void)
 {
     static bool ensured = false;
@@ -6913,8 +7010,10 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
             *found_out = context.found;
         return !context.invalid;
     }
+    if (!vm_net_mock_role_ensure_pk_columns())
+        return false;
     snprintf(query, sizeof(query),
-             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq "
+             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq,pk_points,pk_pve_streak "
              "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
@@ -7103,6 +7202,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
     if (db == NULL || !db_valid ||
         !vm_net_mock_mysql_account_hex_for(account_id, account_hex))
         return false;
+    if (!vm_net_mock_role_ensure_pk_columns())
+        return false;
     if (timed_effect != NULL &&
         (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
          !vm_net_mock_role_prepare_item_effect_schema()))
@@ -7267,18 +7368,20 @@ static bool vm_net_mock_role_db_save_relational_ex(
         if (!scene_len)
             scene_hex[0] = 0;
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
                  "mp=VALUES(mp),mp_max=VALUES(mp_max),money=VALUES(money),wcoin=VALUES(wcoin),"
+                 "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
                  "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
                  "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
                  "next_backpack_seq=VALUES(next_backpack_seq)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
-                 role->mp, role->mpMax, role->money, role->wcoin, scene_hex,
+                 role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
+                 (u32)role->pkPveDecayStreak, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
                  role->nextBackpackSeq);
         if (!vm_mysql_exec(query))

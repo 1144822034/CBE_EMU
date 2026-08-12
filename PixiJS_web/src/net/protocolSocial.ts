@@ -12,7 +12,7 @@ import {
   findField,
   type WtPacket,
 } from "./wt";
-import { applyPlus16Info, type PeerActor } from "./protocol";
+import { applyPlus16Info, applyPkInfo, type PeerActor } from "./protocol";
 import { lookupItemSync } from "../resources/itemCatalog";
 
 /* ---------- builders ---------- */
@@ -339,6 +339,7 @@ export function parseNearbyPage(packet: WtPacket): NearbyPage | null {
     : 0;
   const peers = infoRaw ? parseOtherinfoRows(infoRaw, count) : [];
   applyPlus16Info(peers, findField(obj, "plus16info"));
+  applyPkInfo(peers, findField(obj, "pkinfo"));
   return { pgIdx, allpgs, peers };
 }
 
@@ -956,7 +957,8 @@ export function parseSparAck(packet: WtPacket): SocialNotice | null {
   else if (result === 7) tip = "城镇中无法切磋";
   else if (result === 8) tip = "对方替身人偶生效，无法切磋";
   else if (result === 9) tip = "切磋冷却中，请稍后再试";
-  else if (result >= 10) tip = "当前状态无法切磋";
+  else if (result === 10) tip = "PK值已满，无法发起切磋";
+  else if (result >= 11) tip = "当前状态无法切磋";
   return { kind: "spar_result", result, tip };
 }
 

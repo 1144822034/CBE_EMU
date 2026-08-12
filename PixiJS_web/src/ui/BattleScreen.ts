@@ -471,7 +471,7 @@ export class BattleScreen extends Container {
   /** Right softkey label while battle menu is interactive. */
   softkeyRightLabel(): string {
     if (this.awaitingDeathPrompt) {
-      return this.deathPromptHasStone ? "普通复活" : "复活";
+      return "普通复活";
     }
     if (this.awaitingExit) return "";
     // Hangup / [自动]: no flee / return softkey (menu is hidden).
@@ -483,7 +483,7 @@ export class BattleScreen extends Container {
 
   softkeyLeftLabel(): string {
     if (this.awaitingDeathPrompt) {
-      return this.deathPromptHasStone ? "复活石" : "复活";
+      return this.deathPromptHasStone ? "复活石" : "商城";
     }
     if (this.awaitingExit) return "继续";
     if (this.hangupActive || this.autoActive) return "";
@@ -634,7 +634,14 @@ export class BattleScreen extends Container {
         return;
       }
       // Death arms revival confirm on server — no 4/7/4/8 until 1/7/14.
+      // Spar/duel uses settle/exit (penalty already applied); no 复活石 prompt.
       if (this.isLocalPlayerDead()) {
+        if (this.isSparBattle()) {
+          this.menuOpen = false;
+          this.redrawMenu();
+          this.refreshAutoBannerVisibility();
+          return;
+        }
         this.beginDeathPrompt();
         return;
       }
@@ -881,7 +888,9 @@ export class BattleScreen extends Container {
       return;
     }
     this.selectedTargetWire = wires[0] ?? null;
-    this.noteOperateSubmitted("请求攻击…");
+    this.noteOperateSubmitted(
+      this.isSparBattle() ? "等待对方出招…" : "请求攻击…",
+    );
     this.onAttack?.();
   }
 
@@ -1140,10 +1149,14 @@ export class BattleScreen extends Container {
       return;
     }
     if (operate == null) {
-      this.noteOperateSubmitted("请求攻击…");
+      this.noteOperateSubmitted(
+        this.isSparBattle() ? "等待对方出招…" : "请求攻击…",
+      );
       this.onAttack?.();
     } else {
-      this.noteOperateSubmitted(`施展${name}…`);
+      this.noteOperateSubmitted(
+        this.isSparBattle() ? `已出招·等待对方…` : `施展${name}…`,
+      );
       this.onSkill?.(operate);
     }
   }
@@ -1639,13 +1652,15 @@ export class BattleScreen extends Container {
   }
 
   private deathPromptOptions(): { label: string; result: 1 | 2 }[] {
-    if (this.deathPromptHasStone) {
-      return [
-        { label: "使用复活石", result: 1 },
-        { label: "普通复活", result: 2 },
-      ];
-    }
-    return [{ label: "普通复活", result: 2 }];
+    /* PvE only (spar skips beginDeathPrompt).
+     * No 801: first option is 商城购买 (client opens mall, no 1/7/14). */
+    return [
+      {
+        label: this.deathPromptHasStone ? "使用复活石" : "商城购买",
+        result: 1,
+      },
+      { label: "普通复活", result: 2 },
+    ];
   }
 
   private deathPromptPrimaryResult(): 1 | 2 {
@@ -1692,10 +1707,12 @@ export class BattleScreen extends Container {
     const lines = [
       "你已经死亡",
       this.deathPromptHasStone
-        ? "可使用复活石原地满血"
-        : "确认后传送石附近复活",
+        ? "可使用复活石原地满血（无惩罚）"
+        : "无复活石 · 商城购买后可原地复活",
       ...opts.map((o, i) => `${i === this.deathPromptCursor ? "▶ " : "  "}${o.label}`),
-      "确定选择 · 右键普通复活",
+      this.deathPromptHasStone
+        ? "左键复活石 · 右键普通复活"
+        : "左键打开商城 · 右键普通复活",
     ];
     lines.forEach((t, i) => {
       const lab = new BitmapLabel();
@@ -1710,6 +1727,11 @@ export class BattleScreen extends Container {
       });
       this.settleHost.addChild(lab);
     });
+  }
+
+  /** Softkey / menu path into 1/7/14 (1=复活石, 2=普通). */
+  chooseDeathRevive(result: 1 | 2): void {
+    this.commitDeathPrompt(result);
   }
 
   private commitDeathPrompt(result: 1 | 2): void {

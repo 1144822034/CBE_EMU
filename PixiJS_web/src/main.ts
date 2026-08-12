@@ -67,6 +67,7 @@ import {
 } from "./ui/imeShell";
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
+import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import { isBattleMedicineOrFlask } from "./net/protocolExtras";
 import { isMapHealSkill } from "./resources/skill";
 import { warmItemCatalogs } from "./resources/itemCatalog";
@@ -1112,10 +1113,20 @@ async function main(): Promise<void> {
       if (role) {
         void hud.setPortraitActor(uiActorResourceForJobSex(role.jobIndex, role.sex));
         void view.setPlayerActor(role.jobIndex, role.sex);
-        void view.setPlayerNameplate(role.name, titleTag, titleGif);
+        void view.setPlayerNameplate(
+          role.name,
+          titleTag,
+          titleGif,
+          isRedNamePk(session.pkPoints),
+        );
       } else {
         void view.setPlayerActor(0, 0);
-        void view.setPlayerNameplate(session.roleName || "侠客", titleTag, titleGif);
+        void view.setPlayerNameplate(
+          session.roleName || "侠客",
+          titleTag,
+          titleGif,
+          isRedNamePk(session.pkPoints),
+        );
       }
       // Same-town role switch: showScene skips marker clear on identical map —
       // force catalog/peer refresh so role A's NPCs/players do not linger.
@@ -1293,6 +1304,23 @@ async function main(): Promise<void> {
         hud.pushChat(`[切]${n.tip}`);
         setChromeStatus(n.tip, n.result !== 1);
         if (social.visible && n.tip) social.showTip(n.tip);
+        if (n.result === 1) {
+          /* Server awards +20 on initiate (cap 100); mirror for local red-name. */
+          session.pkPoints = Math.min(
+            PK_POINTS_MAX,
+            (session.pkPoints | 0) + 20,
+          );
+          const name =
+            session.roleName ||
+            activeRole?.name ||
+            "侠客";
+          void view.setPlayerNameplate(
+            name,
+            session.roleTitle,
+            session.roleTitleGif,
+            isRedNamePk(session.pkPoints),
+          );
+        }
       } else if (n.kind === "guild_sent") {
         hud.pushChat("[帮]已发送入帮邀请");
         setChromeStatus("入帮邀请已发送");
@@ -1433,7 +1461,12 @@ async function main(): Promise<void> {
         activeRole?.name ||
         pendingRoles.find((r) => r.roleId === session.selectedRoleId)?.name ||
         "侠客";
-      void view.setPlayerNameplate(name, info.name, info.gif);
+      void view.setPlayerNameplate(
+        name,
+        info.name,
+        info.gif,
+        isRedNamePk(session.pkPoints),
+      );
       hud.setIdentity(name, session.scene, info.name);
     },
     onBattle: (state) => {
@@ -1843,6 +1876,17 @@ async function main(): Promise<void> {
     onCharacterStats: (stats) => {
       system.setStats(stats);
       system.setBagMeta(stats.money, stats.backpackCapacity || 20);
+      const name =
+        stats.name ||
+        session.roleName ||
+        activeRole?.name ||
+        "侠客";
+      void view.setPlayerNameplate(
+        name,
+        stats.title || session.roleTitle,
+        session.roleTitleGif,
+        isRedNamePk(stats.pkPoints),
+      );
     },
     onHangup: (msg) => {
       hud.pushChat(`[挂] ${msg}`);
@@ -2762,7 +2806,31 @@ async function main(): Promise<void> {
     }
   };
 
-  system.onClose = () => showPhase("world");
+  system.onClose = () => {
+    // Mid-battle overlays (bag/mall/skills) must return to battle, not world.
+    if (session.inBattle) {
+      showPhase("battle");
+      if (session.hp <= 0) {
+        battle.resumeDeathPrompt();
+        const refreshStoneUi = () => {
+          battle.setDeathPromptBag(hasRevivalStone());
+          setChromeStatus(
+            hasRevivalStone()
+              ? "死亡 · 左键复活石原地满血 / 右键普通复活"
+              : "死亡 · 左键打开商城购买复活石 / 右键普通复活",
+          );
+          shell.setSoftkeys({
+            left: battle.softkeyLeftLabel(),
+            right: battle.softkeyRightLabel(),
+          });
+        };
+        refreshStoneUi();
+        void session.openBag().then(refreshStoneUi);
+      }
+      return;
+    }
+    showPhase("world");
+  };
   system.onAction = (kind, action, item) => {
     if (action === "refresh") return;
     if (kind === "bag" || kind === "enhance") {
@@ -3069,6 +3137,11 @@ async function main(): Promise<void> {
       if ((session.level | 0) < 25) {
         hud.pushChat("[系]等级不足25级无法切磋");
         showGameTip("等级不足25级无法切磋");
+        return;
+      }
+      if ((session.pkPoints | 0) >= PK_POINTS_MAX) {
+        hud.pushChat("[系]PK值已满，无法发起切磋");
+        showGameTip("PK值已满，无法发起切磋");
         return;
       }
       social.hide();
@@ -3592,18 +3665,30 @@ dialog.hide();
       void session.stopHangup();
       syncWorldStatusBadges();
     }
-    battle.setDeathPromptBag(hasRevivalStone());
-    setChromeStatus(
-      hasRevivalStone()
-        ? "死亡 · 确定使用复活石 / 右键普通复活"
-        : "死亡 · 确定普通复活",
-    );
-    shell.setSoftkeys({
-      left: battle.softkeyLeftLabel(),
-      right: battle.softkeyRightLabel(),
-    });
+    const refreshStoneUi = () => {
+      battle.setDeathPromptBag(hasRevivalStone());
+      setChromeStatus(
+        hasRevivalStone()
+          ? "死亡 · 左键复活石原地满血 / 右键普通复活"
+          : "死亡 · 左键打开商城购买复活石 / 右键普通复活",
+      );
+      shell.setSoftkeys({
+        left: battle.softkeyLeftLabel(),
+        right: battle.softkeyRightLabel(),
+      });
+    };
+    refreshStoneUi();
+    // Bag may be stale mid-fight — refresh so 801 shows as usable.
+    void session.openBag().then(refreshStoneUi);
   };
   battle.onDeathPromptChoice = (result) => {
+    // CBE: no 801 → open mall (no 1/7/14). Buy then return → confirm stone.
+    if (result === 1 && !hasRevivalStone()) {
+      showGameTip("打开商城购买复活石");
+      hud.pushChat("[系]购买复活石后返回，再选使用复活石");
+      openSystem("mall");
+      return;
+    }
     showGameTip(result === 1 ? "使用复活石…" : "普通复活…");
     shell.setSoftkeys({ left: "", right: "" });
     void session.battleDeathPrompt(result).then(() => {
@@ -3818,13 +3903,17 @@ dialog.hide();
     }
     if (phase === "battle") {
       if (battle.isAwaitingRound()) return;
-      if (which === "left") battle.confirm();
+      if (which === "left") {
+        // Death: left softkey is always 复活石 (result=1); OK/↑↓ still use cursor.
+        if (battle.isAwaitingDeathPrompt()) battle.chooseDeathRevive(1);
+        else battle.confirm();
+      }
       if (which === "right") battle.flee();
       shell.setSoftkeys(
         battle.isAwaitingRound()
           ? { left: "", right: "" }
           : {
-              left: "确定",
+              left: battle.softkeyLeftLabel(),
               right: battle.softkeyRightLabel(),
             },
       );
@@ -3935,7 +4024,7 @@ dialog.hide();
         battle.isAwaitingRound()
           ? { left: "", right: "" }
           : {
-              left: "确定",
+              left: battle.softkeyLeftLabel(),
               right: battle.softkeyRightLabel(),
             },
       );
@@ -4334,7 +4423,7 @@ dialog.hide();
           battle.isAwaitingRound()
             ? { left: "", right: "" }
             : {
-                left: "确定",
+                left: battle.softkeyLeftLabel(),
                 right: battle.softkeyRightLabel(),
               },
         );

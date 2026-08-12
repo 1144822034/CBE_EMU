@@ -311,6 +311,38 @@ static bool vm_net_mock_build_plus16info_from_seeds(const vm_net_mock_scene_role
     return true;
 }
 
+/*
+ * Pixi-only companion: field PK score per nearby peer.
+ * Wire: repeat othernum times: u32 actorId, u32 pkPoints.
+ */
+static bool vm_net_mock_build_pkinfo_from_seeds(const vm_net_mock_scene_role_seed *seeds,
+                                                 u8 roleCount,
+                                                 u8 *pkInfo,
+                                                 u32 pkInfoCap,
+                                                 u32 *pkInfoLenOut)
+{
+    u32 pos = 0;
+
+    if (pkInfoLenOut)
+        *pkInfoLenOut = 0;
+    if (pkInfo == NULL || pkInfoCap == 0 || seeds == NULL)
+        return false;
+    for (u8 i = 0; i < roleCount; ++i)
+    {
+        u32 pk = 0;
+        if (seeds[i].session != NULL)
+            pk = seeds[i].session->onlinePkPoints;
+        if (!vm_net_mock_seq_put_u32(pkInfo, pkInfoCap, &pos, seeds[i].actorId) ||
+            !vm_net_mock_seq_put_u32(pkInfo, pkInfoCap, &pos, pk))
+        {
+            return false;
+        }
+    }
+    if (pkInfoLenOut)
+        *pkInfoLenOut = pos;
+    return true;
+}
+
 static bool vm_net_mock_build_scene_plus16info_blob(const char *scene,
                                                     u8 *plus16Info,
                                                     u32 plus16InfoCap,
@@ -325,6 +357,22 @@ static bool vm_net_mock_build_scene_plus16info_blob(const char *scene,
                                                     VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
     return vm_net_mock_build_plus16info_from_seeds(seeds, roleCount, plus16Info,
                                                     plus16InfoCap, plus16InfoLenOut);
+}
+
+static bool vm_net_mock_build_scene_pkinfo_blob(const char *scene,
+                                                u8 *pkInfo,
+                                                u32 pkInfoCap,
+                                                u32 *pkInfoLenOut)
+{
+    vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
+    u8 roleCount = 0;
+
+    if (pkInfoLenOut)
+        *pkInfoLenOut = 0;
+    roleCount = vm_net_mock_build_scene_role_seeds(scene, seeds,
+                                                    VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX);
+    return vm_net_mock_build_pkinfo_from_seeds(seeds, roleCount, pkInfo, pkInfoCap,
+                                                pkInfoLenOut);
 }
 
 static bool vm_net_mock_build_scene_list_otherinfo_blob(const char *scene,
@@ -1871,6 +1919,14 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
                    sourceLevel, targetSeed.session->clientId,
                    targetSeed.session->onlineRoleId, targetLevel);
         }
+        else if (sourceRole->pkPoints >= (u32)VM_NET_MOCK_PK_POINTS_MAX)
+        {
+            result = 10; /* initiator pk cap */
+            printf("[info][network] mock_spar_request_reject actor=%u "
+                   "source=%08x/%u pk=%u reason=pk-cap result=10\n",
+                   actorId, sourceSession->clientId, sourceRole->roleId,
+                   sourceRole->pkPoints);
+        }
         else if (sourceSession->sparInitiateReadyMs != 0 &&
                  scheduler_get_tick_ms() < sourceSession->sparInitiateReadyMs)
         {
@@ -1930,6 +1986,12 @@ static u32 vm_net_mock_build_nearby_spar_request_response(const u8 *request, u32
                 started = true;
                 sourceSession->sparInitiateReadyMs =
                     scheduler_get_tick_ms() + VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS;
+                /* Initiator gains PK on start (win/loss irrelevant); cap 100.
+                 * Mark dirty only — never sync role_db_save on this hot path
+                 * (MySQL DELETE+INSERT can stall 4/14+4/10 and leave the peer
+                 * late while the initiator sits on duel_round_defer). */
+                vm_net_mock_role_add_pk_initiate_points(sourceRole, "spar-initiate");
+                sourceSession->onlinePkPoints = sourceRole->pkPoints;
             }
             else
             {

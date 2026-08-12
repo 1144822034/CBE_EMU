@@ -537,6 +537,8 @@ export class GameSession {
   roleTitle = "";
   /** Overhead GIF: riches_nameN.gif / level_nameN.gif */
   roleTitleGif = "";
+  /** Field PK score; red name when >= 60. */
+  pkPoints = 0;
   roleName = "";
   /** actorinfo jobIndex (raw 0..2) for skill.dsh filter. */
   roleJobIndex = 0;
@@ -738,6 +740,7 @@ export class GameSession {
     this.level = 1;
     this.exp = 0;
     this.gold = 0;
+    this.pkPoints = 0;
     this.bagItems = [];
     this.wornItems = [];
     this.pendingBagEquipDurability.clear();
@@ -4952,6 +4955,7 @@ export class GameSession {
         // Keep settle baseline aligned with 1/1/21 authority when available.
         this.exp = stats.exp >>> 0;
         this.gold = stats.money >>> 0;
+        this.pkPoints = stats.pkPoints >>> 0;
         if (stats.level > 0) this.level = stats.level;
         this.cb.onCharacterStats?.(stats);
       }

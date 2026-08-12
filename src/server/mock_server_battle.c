@@ -7078,6 +7078,14 @@ static bool vm_net_mock_append_battle_status7_object(u8 *out, u32 outCap, u32 *p
                                                  &statusLastExp, &statusCurExp,
                                                  &statusPercentExp, &statusLevel,
                                                  &statusGold, &roleHp, &roleMp);
+        if (victory && !rewardAlreadyGranted)
+            vm_net_mock_role_note_pve_victory_pk_decay(role);
+        {
+            vm_mock_service_client_session *session =
+                vm_mock_service_get_active_client_session();
+            if (session != NULL)
+                session->onlinePkPoints = role->pkPoints;
+        }
         statusExp = role->exp;
     }
     else

@@ -4,6 +4,13 @@ Date: 2026-07-23
 
 Status: revival persistence/client HP-refresh and ordinary-death respawn policy implemented; direct transport regressions passed
 
+## Pixi 2026-08-12：打怪死亡始终显示复活石选项
+
+- 此前仅在本地 `bagItems` 已有 801 时显示「使用复活石」；战斗中背包常未刷新 → 只见普通复活。
+- 现改为 **仅怪物战**（非切磋）死亡提示始终列出双选项；展示时 `openBag` 刷新。
+- **无 801**：首项为「商城购买」，左键直接 `openSystem("mall")`（不发 `1/7/14`）；关商城回到战斗死亡提示并再刷背包。有石后首项变「使用复活石」。
+- 服务端契约不变：`1/7/14 result=1` 消费 801、原地满 HP/MP、无经验/金钱惩罚；`result=2` 普通惩罚+最近传送石。
+
 ## 1. 当前卡点
 
 - 触发：角色在战斗中死亡（HP 归零）→ 在死亡提示中进入商城 → 购买 `801 复活石` → 返回场景。

@@ -2459,6 +2459,8 @@ export type CharacterStats = {
   expNext: number;
   money: number;
   coolmoney: number;
+  /** Field PK score; red name when >= 60. */
+  pkPoints: number;
   backpackCapacity: number;
 };
 
@@ -2855,6 +2857,7 @@ export function parsePanelStats(packet: WtPacket): CharacterStats | null {
     expNext: fieldU32(obj, "expNext"),
     money: fieldU32(obj, "money"),
     coolmoney: fieldU32(obj, "coolmoney"),
+    pkPoints: fieldU32(obj, "pkpoints"),
     backpackCapacity: fieldU32(obj, "backpack"),
   };
 }

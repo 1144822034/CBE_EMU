@@ -3540,9 +3540,11 @@ static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 out
     vm_net_mock_scene_role_seed seeds[VM_NET_MOCK_SCENE_NEARBY_ROLE_MAX];
     u8 otherInfo[8192];
     u8 plus16Info[512];
+    u8 pkInfo[1024];
     u32 objectStart = 0;
     u32 otherInfoLen = 0;
     u32 plus16InfoLen = 0;
+    u32 pkInfoLen = 0;
     u8 roleCount = 0;
 
     if (roleCountOut)
@@ -3555,6 +3557,7 @@ static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 out
         return false;
     memset(otherInfo, 0, sizeof(otherInfo));
     memset(plus16Info, 0, sizeof(plus16Info));
+    memset(pkInfo, 0, sizeof(pkInfo));
     for (u8 i = 0; i < roleCount; ++i)
     {
         if (!vm_net_mock_seq_put_actor_other_scene_role(otherInfo, sizeof(otherInfo),
@@ -3568,6 +3571,11 @@ static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 out
     {
         return false;
     }
+    if (!vm_net_mock_build_pkinfo_from_seeds(seeds, roleCount, pkInfo, sizeof(pkInfo),
+                                              &pkInfoLen))
+    {
+        return false;
+    }
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 2, 10, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u32(out, outCap, pos, "othernum", roleCount))
@@ -3577,6 +3585,8 @@ static bool vm_net_mock_append_actor_other_scene_roles10_object(u8 *out, u32 out
     /* Pixi-only; CBE ignores unknown field names on 2/10. */
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "plus16info", plus16Info,
                                     (u16)plus16InfoLen))
+        return false;
+    if (!vm_net_mock_put_object_raw(out, outCap, pos, "pkinfo", pkInfo, (u16)pkInfoLen))
         return false;
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     if (roleCountOut)

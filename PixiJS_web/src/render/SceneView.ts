@@ -25,6 +25,7 @@ import { rgbaToTexture } from "./rgbaTexture";
 
 /** CBE map nameplate colors (sampled from reference-shots). */
 const NAME_YELLOW = 0xf8dc00;
+const NAME_RED = 0xff4040;
 /** Shared overworld portal FX (`n_teleporter.actor` + `n_teleporter.gif`). */
 const PORTAL_ACTOR = "n_teleporter.actor";
 /**
@@ -105,6 +106,7 @@ export class SceneView {
   private nameLabel = new BitmapLabel();
   private lastName = "";
   private lastTitleGif: string | null = null;
+  private lastRedName = false;
   /** One rainbow gem per worn +16 piece (local player). */
   private plus16Sparkles = new Plus16Sparkles();
   private xiuBadge = new Container();
@@ -474,7 +476,12 @@ export class SceneView {
       this.playerPhase = 0;
       this.applyPlayerFrame(true);
       if (this.lastName) {
-        void this.setPlayerNameplate(this.lastName, undefined, this.lastTitleGif ?? undefined);
+        void this.setPlayerNameplate(
+          this.lastName,
+          undefined,
+          this.lastTitleGif ?? undefined,
+          this.lastRedName,
+        );
       }
     } catch (e) {
       console.warn("[scene] player actor", name, e);
@@ -507,8 +514,10 @@ export class SceneView {
     name: string,
     titleLabel = "",
     titleGif: string | null | undefined = undefined,
+    redName = false,
   ): Promise<void> {
     this.lastName = name.slice(0, 8);
+    this.lastRedName = redName;
     const gif =
       resolveTitleGif(titleGif) ||
       resolveTitleGif(titleLabel) ||
@@ -516,7 +525,7 @@ export class SceneView {
     this.lastTitleGif = gif;
 
     // Map scene self nameplate — only place outside ActorLayer that keeps outline.
-    await this.nameLabel.setText(this.lastName, NAME_YELLOW, {
+    await this.nameLabel.setText(this.lastName, redName ? NAME_RED : NAME_YELLOW, {
       uc3: true,
       smooth: false,
       outline: true,
