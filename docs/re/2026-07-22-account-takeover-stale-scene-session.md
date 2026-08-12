@@ -35,11 +35,19 @@
 在认证成功后唯一的账号绑定入口
 `vm_mock_service_bind_session_account` 中，绑定新 id 前枚举其它同账号会话并
 执行既有 `vm_mock_service_session_mark_offline(..., "account-login-takeover")`。
+随后清空旧会话的 `accountId` 绑定。
+
 这不是显示过滤：它使认证成为单账号单在线会话的权威边界，并沿用正常断线的
-队伍、交易、决斗和移动队列清理流程。
+队伍、交易、决斗和移动队列清理流程。清空绑定同样覆盖尚未进入场景的旧标题
+会话；否则它虽被标为离线，仍可在之后发送请求、重新恢复同一账号快照。
+
+服务端传输为“一请求一 socket”，因此不存在可在对方空闲时立即关闭的长期 TCP
+连接。这里的强制下线边界是撤销旧 `clientId` 的账号授权：旧客户端下一次请求
+无法再还原或保存该账号状态，只有新认证的 `clientId` 可以继续使用该账号。
 
 不会影响不同账号的同场景周围玩家；筛选条件是精确相等的 `accountId` 且
-`clientId` 不同。
+`clientId` 不同。服务日志会记录
+`session_account_takeover ... action=offline-and-unbind`。
 
 ## 回归
 
