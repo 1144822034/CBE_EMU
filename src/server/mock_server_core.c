@@ -5361,7 +5361,12 @@ enum
     VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT = 5,
     VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE = 6,
     VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER = 7,
-    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_EQUIPMENT_BUYER,
+    /* The arena is a parser-backed task-hall service.  It is deliberately a
+     * first-class NPC service instead of a disguised instance or spar action:
+     * its client requests are the independently decoded 1/30/7, 1/30/8 and
+     * 1/30/11 room protocol. */
+    VM_NET_MOCK_NPC_KIND_ARENA_MASTER = 8,
+    VM_NET_MOCK_NPC_KIND_MAX = VM_NET_MOCK_NPC_KIND_ARENA_MASTER,
     /* ParseNPCDialogData stores action rows in ten fixed 64-byte entries.
      * Tasks and direct NPC services share this one client-owned list. */
     VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS = 10,
@@ -5407,6 +5412,12 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE 0xec000000u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE 0xed000000u
 #define VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE 0xee000000u
+/* The native task-hall has two mutually exclusive initial modes.  Keep their
+ * service values separate so one NPC dialog can expose both actions without
+ * ever composing 30/4 (create) and 30/3 (challenge list) in one response. */
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE 0xef000001u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CHALLENGE 0xef000002u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA        VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
@@ -5963,6 +5974,12 @@ static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
  * same durable vitality row; none may substitute a presentation constant. */
 static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
                                           u32 *currentOut, u32 *maxOut);
+/* Activity features with an evidence-backed vitality cost must use this
+ * transaction helper instead of changing a display cache or borrowing HP/MP.
+ * On rejection it returns the authoritative unchanged snapshot. */
+static bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
+                                         u32 amount, u32 *currentOut,
+                                         u32 *maxOut);
 static void vm_net_mock_offline_exp_mark_offline(const char *accountId,
                                                   u32 roleId);
 static bool vm_net_mock_offline_exp_settle(vm_net_mock_role_state *role,

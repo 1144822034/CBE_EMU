@@ -307,6 +307,17 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    /* The arena has its own task-hall screen and scene channel requests.  It
+     * must run before the general action=1 NPC service handler, but accepts
+     * only the exact arena service context and 1/30 room subtypes. */
+    hookedLen = vm_net_mock_build_arena_response(request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-arena", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_npc_service_dialog_response(
         request, requestLen, out, outCap);
     if (hookedLen)

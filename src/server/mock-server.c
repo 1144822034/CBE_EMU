@@ -29,6 +29,16 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 static bool vm_net_mock_role_equipment_slot_is_usable(
     const vm_net_mock_role_state *role, u32 slot);
 
+/* Arena rooms are transient online activity state, like team membership.  The
+ * session module calls this during offline teardown while the role identity
+ * is still available; the implementation lives with the arena protocol. */
+static void vm_net_mock_arena_remove_role(u32 roleId, const char *reason);
+
+/* A duel is released only after both clients consumed its terminal packets.
+ * Arena owns the room-level round count, so it receives that precise battle
+ * lifecycle edge rather than guessing completion from a scene poll. */
+static void vm_net_mock_arena_on_duel_released(u32 roomId, u32 duelSerial);
+
 /* The canonical monster identity set is built from the shipped SCE2 combat
  * nodes after their parser is available.  Role persistence owns the default
  * stats/overrides, while the scene fragment owns the resource scan. */
@@ -79,6 +89,7 @@ static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
 
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
+#include "mock_server_arena.c"
 #include "mock_server_interaction_login.c"
 #include "mock_server_dispatch.c"
 #include "mock_server_transport.c"

@@ -1821,7 +1821,8 @@ static void vm_mock_admin_render_npc_kind_select(vm_mock_admin_text *page,
         "防具商人（含腰带）",
         "药品商人",
         "副本向导（传送／挑战）",
-        "装备回收商人（出售装备）"
+        "装备回收商人（出售装备）",
+        "比武擂台（开设／挑战）"
     };
 
     if (page == NULL)
@@ -1848,7 +1849,7 @@ static void vm_mock_admin_render_npc_service_option_fields(
 {
     static const char *labels[VM_NET_MOCK_NPC_KIND_MAX + 1] = {
         "", "武器商店", "装备修理", "技能导师", "防具商店", "药品商店",
-        "副本传送／挑战", "装备回收"
+        "副本传送／挑战", "装备回收", "比武擂台"
     };
     vm_net_mock_npc_service_option
         options[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
@@ -4729,7 +4730,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "</div><div class=\"actions npc-editor-save\"><button type=\"submit\">增加 NPC</button></div></form></div>"
-        "<p class=\"foot\">对话服务功能决定客户端可操作入口；自定义名称和说明只改变该入口的显示文字。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。装备回收商人仅列出背包中的装备，并按装备基础价值的 50% 回收为铜钱；已装备在角色身上的物品不会出现在回收列表。副本向导可独立启用场景传送、守关怪挑战或同时启用两者，并按最低等级拦截。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
+        "<p class=\"foot\">对话服务功能决定客户端可操作入口；自定义名称和说明只改变该入口的显示文字。武器商人先按剑、匕首、法杖分类；防具商人提供头盔、衣甲、披风、腰带、护腿、鞋靴和戒指；药品商人提供 item.dsh 类别 10 的药品与消耗品。装备回收商人仅列出背包中的装备，并按装备基础价值的 50% 回收为铜钱；已装备在角色身上的物品不会出现在回收列表。副本向导可独立启用场景传送、守关怪挑战或同时启用两者，并按最低等级拦截。比武擂台会打开客户端原生擂台大厅，可开设、查看和加入在线擂台房间；房间随房主离线即时关闭。商品价格和上架状态均来自后台商品目录。装备修理按实际耐久收费；技能导师只列出当前职业、等级可学且尚未学习的技能。SCE 文件中的内置 NPC 不会被改写。客户端同场景最多安全显示 4 个动态名称，超出时仍按任务优先级筛选。</p>"
         "</div>");
     vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
     vm_mock_admin_render_item_picker_modal(&page, false);

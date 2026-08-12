@@ -776,13 +776,13 @@ static const char *vm_mock_payment_provider_create_error(const char *json,
     {
         if (reasonOut)
             *reasonOut = "monitor-offline";
-        return "支付平台监控端离线，请先启动并检查 V免签监控端";
+        return "支付平台监控端离线，暂时无法充值";
     }
     if (strcmp(message, "请您先进入后台配置程序") == 0)
     {
         if (reasonOut)
             *reasonOut = "channel-not-configured";
-        return "支付平台尚未配置该支付方式；微信支付需在平台后台单独配置 wxpay 收款码";
+        return "支付平台尚未配置该支付方式";
     }
     if (strcmp(message, "签名错误") == 0 ||
         strcmp(message, "签名校验不通过") == 0)

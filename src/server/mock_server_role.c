@@ -8091,6 +8091,96 @@ static bool vm_net_mock_vitality_snapshot(vm_net_mock_role_state *role,
     return true;
 }
 
+/* A server-authoritative activity may spend vitality only after the client
+ * has supplied a parser-confirmed request.  Lock the row and make the exact
+ * decrement durable before the feature publishes its success response; a
+ * failed/insufficient request leaves the same snapshot available to explain
+ * the rejection. */
+static bool vm_net_mock_vitality_consume(vm_net_mock_role_state *role,
+                                         u32 amount, u32 *currentOut,
+                                         u32 *maxOut)
+{
+    char accountHex[129];
+    char query[768];
+    char mysqlError[512];
+    vm_net_mock_vitality_state state;
+    vm_net_mock_vitality_load_context loadContext;
+    bool transactionStarted = false;
+    bool consumed = false;
+
+    if (currentOut != NULL)
+        *currentOut = 0;
+    if (maxOut != NULL)
+        *maxOut = 0;
+    if (role == NULL || role->roleId == 0 || amount == 0 ||
+        !vm_net_mock_mysql_account_hex(accountHex) ||
+        !vm_net_mock_vitality_schema_prepare())
+    {
+        return false;
+    }
+    mysqlError[0] = 0;
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_vitality(account_id,role_id,vitality,vitality_max) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u)",
+             accountHex, role->roleId, VM_NET_MOCK_VITALITY_MAX,
+             VM_NET_MOCK_VITALITY_MAX);
+    if (!vm_mysql_exec(query))
+        goto failed;
+    memset(&state, 0, sizeof(state));
+    loadContext.state = &state;
+    snprintf(query, sizeof(query),
+             "SELECT vitality,vitality_max FROM account_role_vitality WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u FOR UPDATE",
+             accountHex, role->roleId);
+    if (!vm_mysql_query(query, vm_net_mock_vitality_load_row, &loadContext) ||
+        !state.found || state.invalid)
+    {
+        goto failed;
+    }
+    if (state.current < amount)
+    {
+        (void)vm_mysql_exec("ROLLBACK");
+        transactionStarted = false;
+        if (currentOut != NULL)
+            *currentOut = state.current;
+        if (maxOut != NULL)
+            *maxOut = state.maximum;
+        printf("[info][network] mock_vitality_consume_rejected role=%u amount=%u vitality=%u/%u reason=insufficient\n",
+               role->roleId, amount, state.current, state.maximum);
+        return false;
+    }
+    state.current -= amount;
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_vitality SET vitality=%u WHERE "
+             "account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             state.current, accountHex, role->roleId);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    consumed = true;
+    if (currentOut != NULL)
+        *currentOut = state.current;
+    if (maxOut != NULL)
+        *maxOut = state.maximum;
+    printf("[info][network] mock_vitality_consume role=%u amount=%u vitality=%u/%u action=committed\n",
+           role->roleId, amount, state.current, state.maximum);
+    return consumed;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] vitality_consume_failed account=%s role=%u amount=%u error=%s\n",
+           g_vm_mock_service_active_account_id ?
+               g_vm_mock_service_active_account_id : "-",
+           role ? role->roleId : 0, amount,
+           mysqlError[0] ? mysqlError : "state-rejected");
+    return false;
+}
+
 static bool vm_net_mock_vitality_use_pill(vm_net_mock_role_state *role,
                                           u16 itemSeq, u32 *currentOut,
                                           u32 *maxOut)
