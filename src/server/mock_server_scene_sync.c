@@ -6790,20 +6790,44 @@ static const char *vm_net_mock_warehouse_item_display_name(u32 itemId)
     return "\xce\xef\xc6\xb7"; /* 物品 */
 }
 
+static void vm_net_mock_warehouse_format_root_text(char *out, size_t outCap,
+                                                   const vm_net_mock_role_state *role,
+                                                   const vm_net_mock_warehouse_state *warehouse)
+{
+    u32 bankGold = 0;
+    u32 bagGold = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    if (warehouse != NULL && warehouse->loaded)
+        bankGold = warehouse->money / VM_NET_MOCK_COPPER_PER_GOLD;
+    if (role != NULL)
+        bagGold = role->money / VM_NET_MOCK_COPPER_PER_GOLD;
+    /* 仓:%u金 身:%u金\n请选择仓库操作： */
+    snprintf(out, outCap,
+             "\xb2\xd6\x3a%u\xbd\xf0 \xc9\xed\x3a%u\xbd\xf0\n"
+             "\xc7\xeb\xd1\xa1\xd4\xf1\xb2\xd6\xbf\xe2\xb2\xd9\xd7\xf7\xa3\xba",
+             bankGold, bagGold);
+}
+
 static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
                                                              u32 *pos)
 {
     u8 dialog[512];
     u32 dialogLen = 0;
     u32 objectStart = 0;
+    char rootText[VM_NET_MOCK_NPC_DIALOG_MAIN_TEXT_BYTES + 1];
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_warehouse_state *warehouse = vm_net_mock_warehouse_active();
 
     if (out == NULL || pos == NULL)
         return false;
+    vm_net_mock_warehouse_format_root_text(rootText, sizeof(rootText), role,
+                                           warehouse);
     if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
-        !vm_net_mock_seq_put_string(
-            dialog, sizeof(dialog), &dialogLen,
-            "\xc7\xeb\xd1\xa1\xd4\xf1\xb2\xd6\xbf\xe2\xb2\xd9\xd7\xf7\xa3\xba") || /* 请选择仓库操作： */
-        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 2) ||
+        !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                    rootText) ||
+        !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
         !vm_net_mock_append_npc_service_dialog_option(
             dialog, sizeof(dialog), &dialogLen,
             "\xc8\xa1\xbb\xd8\xce\xef\xc6\xb7", /* 取回物品 */
@@ -6814,6 +6838,16 @@ static bool vm_net_mock_append_warehouse_root_dialog_object(u8 *out, u32 outCap,
             "\xb4\xe6\xc8\xeb\xce\xef\xc6\xb7", /* 存入物品 */
             1, VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU,
             "\xb1\xb3\xb0\xfc") || /* 背包 */
+        !vm_net_mock_append_npc_service_dialog_option(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xb4\xe6\xc8\xeb\xbd\xf0\xb1\xd2", /* 存入金币 */
+            1, VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_MENU,
+            "\xb1\xb3\xb0\xfc") || /* 背包 */
+        !vm_net_mock_append_npc_service_dialog_option(
+            dialog, sizeof(dialog), &dialogLen,
+            "\xc8\xa1\xb3\xf6\xbd\xf0\xb1\xd2", /* 取出金币 */
+            1, VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU,
+            "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2") || /* 个人仓库 */
         !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 0) ||
         !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 1, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, pos, "hidebtn", 0) ||
@@ -7976,6 +8010,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                  VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU ||
              (serviceValue & 0xffff0000u) ==
                  VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU ||
+             serviceValue ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_MENU ||
+             serviceValue ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU ||
+             (serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE ||
+             (serviceValue & 0xffff0000u) ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE ||
              operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE ||
              operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE)
     {
@@ -7983,6 +8025,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         u32 page = serviceValue & 0xffffu;
         bool fillRetrieveMenu = false;
         bool fillDepositMenu = false;
+        bool fillMoneyDepositMenu = false;
+        bool fillMoneyWithdrawMenu = false;
         const char *failReason = NULL;
 
         if (vm_mock_service_session_on_dream_instance(session))
@@ -8023,8 +8067,10 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE)
         {
             action = "warehouse-root";
-            dialogText =
-                "\xc7\xeb\xd1\xa1\xd4\xf1\xb2\xd6\xbf\xe2\xb2\xd9\xd7\xf7\xa3\xba"; /* 请选择仓库操作： */
+            vm_net_mock_warehouse_format_root_text(dialogTextStorage,
+                                                   sizeof(dialogTextStorage),
+                                                   role, warehouse);
+            dialogText = dialogTextStorage;
             optionNames[optionCount] =
                 "\xc8\xa1\xbb\xd8\xce\xef\xc6\xb7"; /* 取回物品 */
             optionDescriptions[optionCount] =
@@ -8038,6 +8084,87 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             optionValues[optionCount] =
                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU;
             ++optionCount;
+            optionNames[optionCount] =
+                "\xb4\xe6\xc8\xeb\xbd\xf0\xb1\xd2"; /* 存入金币 */
+            optionDescriptions[optionCount] = "\xb1\xb3\xb0\xfc"; /* 背包 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_MENU;
+            ++optionCount;
+            optionNames[optionCount] =
+                "\xc8\xa1\xb3\xf6\xbd\xf0\xb1\xd2"; /* 取出金币 */
+            optionDescriptions[optionCount] =
+                "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2"; /* 个人仓库 */
+            optionValues[optionCount] =
+                VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU;
+            ++optionCount;
+        }
+        else if ((serviceValue & 0xffff0000u) ==
+                     VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE ||
+                 (serviceValue & 0xffff0000u) ==
+                     VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE)
+        {
+            u32 goldSel = serviceValue & 0xffffu;
+            bool deposit = (serviceValue & 0xffff0000u) ==
+                           VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE;
+            bool allGold = goldSel == VM_NET_MOCK_WAREHOUSE_MONEY_ALL;
+
+            action = deposit ? "warehouse-money-deposit"
+                             : "warehouse-money-withdraw";
+            if (vm_net_mock_warehouse_money_transfer(role, deposit, goldSel,
+                                                      allGold, &failReason))
+            {
+                result = 1;
+                appendMoneyRefresh = true;
+                if (deposit)
+                    fillMoneyDepositMenu = true;
+                else
+                    fillMoneyWithdrawMenu = true;
+            }
+            else if (failReason != NULL &&
+                     strcmp(failReason, "money-insufficient") == 0)
+            {
+                dialogText =
+                    "\xbd\xf0\xb1\xd2\xb2\xbb\xd7\xe3\xa1\xa3"; /* 金币不足。 */
+                fillMoneyDepositMenu = true;
+            }
+            else if (failReason != NULL &&
+                     strcmp(failReason, "bank-insufficient") == 0)
+            {
+                dialogText =
+                    "\xb2\xd6\xbf\xe2\xbd\xf0\xb1\xd2\xb2\xbb\xd7\xe3\xa1\xa3"; /* 仓库金币不足。 */
+                fillMoneyWithdrawMenu = true;
+            }
+            else if (failReason != NULL &&
+                     (strcmp(failReason, "no-gold") == 0 ||
+                      strcmp(failReason, "bank-empty") == 0))
+            {
+                dialogText = deposit
+                                 ? "\xc9\xed\xc9\xcf\xce\xde\xbf\xc9\xb4\xe6\xbd\xf0\xb1\xd2\xa1\xa3" /* 身上无可存金币。 */
+                                 : "\xb2\xd6\xbf\xe2\xce\xde\xbd\xf0\xb1\xd2\xbf\xc9\xc8\xa1\xa1\xa3"; /* 仓库无金币可取。 */
+                if (deposit)
+                    fillMoneyDepositMenu = true;
+                else
+                    fillMoneyWithdrawMenu = true;
+            }
+            else
+            {
+                dialogText =
+                    "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                if (deposit)
+                    fillMoneyDepositMenu = true;
+                else
+                    fillMoneyWithdrawMenu = true;
+            }
+        }
+        else if (serviceValue ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_MENU)
+        {
+            fillMoneyDepositMenu = true;
+        }
+        else if (serviceValue ==
+                 VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU)
+        {
+            fillMoneyWithdrawMenu = true;
         }
         else if (operation == VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE)
         {
@@ -8353,6 +8480,95 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         (page + 1u);
                     ++optionCount;
                 }
+            }
+            if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    "\xb7\xb5\xbb\xd8\xb2\xd6\xbf\xe2"; /* 返回仓库 */
+                optionDescriptions[optionCount] =
+                    "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                optionValues[optionCount] =
+                    VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE;
+                ++optionCount;
+            }
+        }
+        else if (fillMoneyDepositMenu || fillMoneyWithdrawMenu)
+        {
+            static const u32 kGoldPresets[] = {1u, 10u, 100u, 1000u};
+            u32 bagGold =
+                role != NULL ? role->money / VM_NET_MOCK_COPPER_PER_GOLD : 0u;
+            u32 bankGold = warehouse != NULL
+                               ? warehouse->money / VM_NET_MOCK_COPPER_PER_GOLD
+                               : 0u;
+            bool deposit = fillMoneyDepositMenu;
+            bool keepFailText =
+                ((serviceValue & 0xffff0000u) ==
+                     VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE ||
+                 (serviceValue & 0xffff0000u) ==
+                     VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE) &&
+                result != 1;
+            u32 availGold = deposit ? bagGold : bankGold;
+            u32 i;
+
+            if (strcmp(action, "warehouse-money-deposit") != 0 &&
+                strcmp(action, "warehouse-money-withdraw") != 0)
+            {
+                action = deposit ? "warehouse-money-deposit-menu"
+                                 : "warehouse-money-withdraw-menu";
+            }
+            if (result == 1)
+            {
+                dialogText =
+                    deposit
+                        ? "\xb4\xe6\xc8\xeb\xbd\xf0\xb1\xd2\xb3\xc9\xb9\xa6\xa1\xa3\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba" /* 存入金币成功。请继续选择： */
+                        : "\xc8\xa1\xb3\xf6\xbd\xf0\xb1\xd2\xb3\xc9\xb9\xa6\xa1\xa3\xc7\xeb\xbc\xcc\xd0\xf8\xd1\xa1\xd4\xf1\xa3\xba"; /* 取出金币成功。请继续选择： */
+            }
+            else if (!keepFailText)
+            {
+                /* 仓:%u金 身:%u金\n请选择存入/取出金额（单位：金）： */
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                         "\xb2\xd6\x3a%u\xbd\xf0 \xc9\xed\x3a%u\xbd\xf0\n%s",
+                         bankGold, bagGold,
+                         deposit
+                             ? "\xc7\xeb\xd1\xa1\xd4\xf1\xb4\xe6\xc8\xeb\xbd\xf0\xb6\xee\xa3\xa8\xb5\xa5\xce\xbb\xa3\xba\xbd\xf0\xa3\xa9\xa3\xba"
+                             : "\xc7\xeb\xd1\xa1\xd4\xf1\xc8\xa1\xb3\xf6\xbd\xf0\xb6\xee\xa3\xa8\xb5\xa5\xce\xbb\xa3\xba\xbd\xf0\xa3\xa9\xa3\xba");
+                dialogText = dialogTextStorage;
+            }
+            for (i = 0; i < sizeof(kGoldPresets) / sizeof(kGoldPresets[0]) &&
+                        optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS;
+                 ++i)
+            {
+                if (availGold < kGoldPresets[i])
+                    continue;
+                snprintf(optionNameStorage[optionCount],
+                         sizeof(optionNameStorage[optionCount]), "%u\xbd\xf0",
+                         kGoldPresets[i]);
+                optionNames[optionCount] = optionNameStorage[optionCount];
+                optionDescriptions[optionCount] =
+                    deposit ? "\xb1\xb3\xb0\xfc" /* 背包 */
+                            : "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2"; /* 个人仓库 */
+                optionValues[optionCount] =
+                    (deposit
+                         ? VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE
+                         : VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE) |
+                    kGoldPresets[i];
+                ++optionCount;
+            }
+            if (availGold != 0 &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
+            {
+                optionNames[optionCount] =
+                    deposit ? "\xc8\xab\xb2\xbf\xb4\xe6\xc8\xeb" /* 全部存入 */
+                            : "\xc8\xab\xb2\xbf\xc8\xa1\xb3\xf6"; /* 全部取出 */
+                optionDescriptions[optionCount] =
+                    deposit ? "\xb1\xb3\xb0\xfc"
+                            : "\xb8\xf6\xc8\xcb\xb2\xd6\xbf\xe2";
+                optionValues[optionCount] =
+                    (deposit
+                         ? VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE
+                         : VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE) |
+                    VM_NET_MOCK_WAREHOUSE_MONEY_ALL;
+                ++optionCount;
             }
             if (optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
             {

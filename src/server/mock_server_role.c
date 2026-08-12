@@ -9288,6 +9288,24 @@ static bool vm_net_mock_warehouse_prepare_schema(void)
                vm_mysql_last_error());
         return false;
     }
+    /* Gold bank is separate from item slots so empty warehouses still keep
+     * stored copper, and item DELETE/INSERT cannot wipe money. */
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_warehouse_bank ("
+            "account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "money INT UNSIGNED NOT NULL DEFAULT 0,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(account_id,role_id),"
+            "CONSTRAINT fk_account_role_warehouse_bank_role FOREIGN KEY(account_id,role_id) "
+            "REFERENCES account_roles(account_id,role_id) ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        printf("[error][network] mock_warehouse_bank_schema_prepare error=%s\n",
+               vm_mysql_last_error());
+        return false;
+    }
     g_vm_net_mock_warehouse_schema_prepared = true;
     return true;
 }
@@ -9344,11 +9362,40 @@ static bool vm_net_mock_warehouse_load_row(void *context_value,
     return true;
 }
 
+typedef struct
+{
+    u32 money;
+    bool found;
+    bool invalid;
+} vm_net_mock_warehouse_bank_load_context;
+
+static bool vm_net_mock_warehouse_bank_load_row(void *context_value,
+                                                unsigned int column_count,
+                                                const char *const *values,
+                                                const size_t *lengths)
+{
+    vm_net_mock_warehouse_bank_load_context *context =
+        (vm_net_mock_warehouse_bank_load_context *)context_value;
+    u32 money = 0;
+
+    if (context == NULL || column_count < 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &money))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->money = money;
+    context->found = true;
+    return true;
+}
+
 static bool vm_net_mock_warehouse_load_for_role(vm_net_mock_role_state *role)
 {
     char account_hex[129];
     char query[384];
     vm_net_mock_warehouse_load_context context;
+    vm_net_mock_warehouse_bank_load_context bankContext;
     const char *account_id = g_vm_mock_service_active_account_id;
 
     if (role == NULL || role->roleId == 0 || account_id == NULL || account_id[0] == 0)
@@ -9386,11 +9433,33 @@ static bool vm_net_mock_warehouse_load_for_role(vm_net_mock_role_state *role)
         memset(&g_vm_net_mock_warehouse, 0, sizeof(g_vm_net_mock_warehouse));
         return false;
     }
+    memset(&bankContext, 0, sizeof(bankContext));
+    snprintf(query, sizeof(query),
+             "SELECT money FROM account_role_warehouse_bank "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             account_hex, role->roleId);
+    if (!vm_mysql_query(query, vm_net_mock_warehouse_bank_load_row, &bankContext) ||
+        bankContext.invalid)
+    {
+        printf("[error][network] mock_warehouse_bank_load role=%u error=%s "
+               "invalid=%u\n",
+               role->roleId, vm_mysql_last_error(),
+               bankContext.invalid ? 1u : 0u);
+        memset(&g_vm_net_mock_warehouse, 0, sizeof(g_vm_net_mock_warehouse));
+        return false;
+    }
+    /* Drop residual copper so only whole 金 can leave the bank. */
+    g_vm_net_mock_warehouse.money =
+        (bankContext.money / VM_NET_MOCK_COPPER_PER_GOLD) *
+        VM_NET_MOCK_COPPER_PER_GOLD;
     if (g_vm_net_mock_warehouse.nextSeq == 0)
         g_vm_net_mock_warehouse.nextSeq = 1;
     g_vm_net_mock_warehouse.loaded = true;
-    printf("[info][network] mock_warehouse_load role=%u slots=%u\n",
-           role->roleId, g_vm_net_mock_warehouse.itemCount);
+    printf("[info][network] mock_warehouse_load role=%u slots=%u money=%u "
+           "gold=%u\n",
+           role->roleId, g_vm_net_mock_warehouse.itemCount,
+           g_vm_net_mock_warehouse.money,
+           g_vm_net_mock_warehouse.money / VM_NET_MOCK_COPPER_PER_GOLD);
     return true;
 }
 
@@ -9442,54 +9511,60 @@ static bool vm_net_mock_warehouse_write_sql(const vm_net_mock_role_state *role,
         free(query);
         return false;
     }
-    if (warehouse->itemCount == 0)
+    if (warehouse->itemCount != 0)
     {
-        free(query);
-        return true;
-    }
-
-    prefixLen = (u32)snprintf(
-        query, queryCap,
-        "INSERT INTO account_role_warehouse(account_id,role_id,slot_index,item_id,"
-        "item_seq,item_count,enhance_level,enhance_wash) VALUES");
-    if (prefixLen == 0 || prefixLen >= queryCap)
-    {
-        if (mysql_error != NULL && mysql_error_cap > 0)
-            snprintf(mysql_error, mysql_error_cap, "warehouse query too large");
-        free(query);
-        return false;
-    }
-    queryLen = prefixLen;
-    for (slot = 0; slot < warehouse->itemCount; ++slot)
-    {
-        const vm_net_mock_backpack_item_state *item = &warehouse->items[slot];
-        char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
-        int written;
-
-        if (item->itemId == 0 || item->count == 0)
-            continue;
-        (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
-                                                sizeof(washText));
-        written = snprintf(query + queryLen, queryCap - queryLen,
-                           "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s')",
-                           valueCount > 0u ? "," : "",
-                           account_hex, role->roleId, slot, item->itemId,
-                           item->seq, item->count, item->enhanceLevel, washText);
-        if (written <= 0 || (u32)written >= queryCap - queryLen)
+        prefixLen = (u32)snprintf(
+            query, queryCap,
+            "INSERT INTO account_role_warehouse(account_id,role_id,slot_index,item_id,"
+            "item_seq,item_count,enhance_level,enhance_wash) VALUES");
+        if (prefixLen == 0 || prefixLen >= queryCap)
         {
             if (mysql_error != NULL && mysql_error_cap > 0)
                 snprintf(mysql_error, mysql_error_cap, "warehouse query too large");
             free(query);
             return false;
         }
-        queryLen += (u32)written;
-        ++valueCount;
+        queryLen = prefixLen;
+        for (slot = 0; slot < warehouse->itemCount; ++slot)
+        {
+            const vm_net_mock_backpack_item_state *item = &warehouse->items[slot];
+            char washText[VM_NET_MOCK_ENHANCE_WASH_TEXT_MAX];
+            int written;
+
+            if (item->itemId == 0 || item->count == 0)
+                continue;
+            (void)vm_net_mock_enhance_wash_sql_text(&item->enhanceWash, washText,
+                                                    sizeof(washText));
+            written = snprintf(query + queryLen, queryCap - queryLen,
+                               "%s(CAST(X'%s' AS CHAR),%u,%u,%u,%u,%u,%u,'%s')",
+                               valueCount > 0u ? "," : "",
+                               account_hex, role->roleId, slot, item->itemId,
+                               item->seq, item->count, item->enhanceLevel, washText);
+            if (written <= 0 || (u32)written >= queryCap - queryLen)
+            {
+                if (mysql_error != NULL && mysql_error_cap > 0)
+                    snprintf(mysql_error, mysql_error_cap, "warehouse query too large");
+                free(query);
+                return false;
+            }
+            queryLen += (u32)written;
+            ++valueCount;
+        }
+        if (valueCount != 0 && !vm_mysql_exec(query))
+        {
+            if (mysql_error != NULL && mysql_error_cap > 0)
+                snprintf(mysql_error, mysql_error_cap, "%s", vm_mysql_last_error());
+            free(query);
+            return false;
+        }
     }
-    if (valueCount == 0)
-    {
-        free(query);
-        return true;
-    }
+
+    /* Bank money commits with the same warehouse snapshot as item rows. */
+    snprintf(query, queryCap,
+             "INSERT INTO account_role_warehouse_bank(account_id,role_id,money) "
+             "VALUES(CAST(X'%s' AS CHAR),%u,%u) "
+             "ON DUPLICATE KEY UPDATE money=VALUES(money)",
+             account_hex, role->roleId, warehouse->money);
     ok = vm_mysql_exec(query);
     if (!ok && mysql_error != NULL && mysql_error_cap > 0)
         snprintf(mysql_error, mysql_error_cap, "%s", vm_mysql_last_error());
@@ -9525,6 +9600,119 @@ static vm_net_mock_warehouse_state *vm_net_mock_warehouse_active(void)
     if (role == NULL || !vm_net_mock_warehouse_load_for_role(role))
         return NULL;
     return &g_vm_net_mock_warehouse;
+}
+
+/*
+ * Move whole 金 between role.money and warehouse.money.
+ * Deduct source first, then credit destination — never invent copper.
+ * Amounts are server-resolved; client only picks preset gold / "all".
+ */
+static bool vm_net_mock_warehouse_money_transfer(vm_net_mock_role_state *role,
+                                                 bool deposit,
+                                                 u32 goldAmount,
+                                                 bool allGold,
+                                                 const char **reasonOut)
+{
+    vm_net_mock_warehouse_state *warehouse = NULL;
+    u32 copper = 0;
+    u32 beforeRoleMoney = 0;
+    u32 beforeBankMoney = 0;
+
+    if (reasonOut)
+        *reasonOut = "ok";
+    if (role == NULL)
+    {
+        if (reasonOut)
+            *reasonOut = "bad-args";
+        return false;
+    }
+    warehouse = vm_net_mock_warehouse_active();
+    if (warehouse == NULL || !warehouse->loaded)
+    {
+        if (reasonOut)
+            *reasonOut = "warehouse-unavailable";
+        return false;
+    }
+
+    beforeRoleMoney = role->money;
+    beforeBankMoney = warehouse->money;
+
+    if (allGold)
+    {
+        if (deposit)
+            copper = (role->money / VM_NET_MOCK_COPPER_PER_GOLD) *
+                     VM_NET_MOCK_COPPER_PER_GOLD;
+        else
+            copper = (warehouse->money / VM_NET_MOCK_COPPER_PER_GOLD) *
+                     VM_NET_MOCK_COPPER_PER_GOLD;
+    }
+    else
+    {
+        if (goldAmount == 0)
+        {
+            if (reasonOut)
+                *reasonOut = "bad-amount";
+            return false;
+        }
+        if (goldAmount > 0xffffffffu / VM_NET_MOCK_COPPER_PER_GOLD)
+        {
+            if (reasonOut)
+                *reasonOut = "overflow";
+            return false;
+        }
+        copper = goldAmount * VM_NET_MOCK_COPPER_PER_GOLD;
+    }
+
+    if (copper == 0)
+    {
+        if (reasonOut)
+            *reasonOut = deposit ? "no-gold" : "bank-empty";
+        return false;
+    }
+
+    if (deposit)
+    {
+        if (role->money < copper)
+        {
+            if (reasonOut)
+                *reasonOut = "money-insufficient";
+            return false;
+        }
+        if (warehouse->money > 0xffffffffu - copper)
+        {
+            if (reasonOut)
+                *reasonOut = "bank-overflow";
+            return false;
+        }
+        role->money -= copper;
+        warehouse->money += copper;
+    }
+    else
+    {
+        if (warehouse->money < copper)
+        {
+            if (reasonOut)
+                *reasonOut = "bank-insufficient";
+            return false;
+        }
+        if (role->money > 0xffffffffu - copper)
+        {
+            if (reasonOut)
+                *reasonOut = "money-overflow";
+            return false;
+        }
+        warehouse->money -= copper;
+        role->money += copper;
+    }
+
+    vm_net_mock_role_mark_inventory_dirty(
+        deposit ? "warehouse-money-deposit" : "warehouse-money-withdraw");
+    printf("[info][network] mock_warehouse_money_%s role=%u gold=%u copper=%u "
+           "role_money=%u->%u bank_money=%u->%u all=%u\n",
+           deposit ? "deposit" : "withdraw", role->roleId,
+           copper / VM_NET_MOCK_COPPER_PER_GOLD, copper, beforeRoleMoney,
+           role->money, beforeBankMoney, warehouse->money, allGold ? 1u : 0u);
+    return true;
 }
 
 static bool vm_net_mock_warehouse_item_is_depositable(u32 itemId)

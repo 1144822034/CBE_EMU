@@ -8327,6 +8327,7 @@ static u32 vm_net_mock_build_pixi_bag_open_response(u8 *out, u32 outCap)
     u8 objectCount = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 gridCount = 0;
+    bool appendedReservoirCounts = false;
 
     if (out == NULL || outCap < 16)
         return 0;
@@ -8344,12 +8345,22 @@ static u32 vm_net_mock_build_pixi_bag_open_response(u8 *out, u32 outCap)
         if (!vm_net_mock_append_backpack_grid_object(out, outCap, &pos))
             return 0;
         objectCount = (u8)(objectCount + 1);
+        /*
+         * 802/803：30/21 可见堆叠=1，储量走 7/11（与 login grid 同合同）。
+         * Pixi 打开背包若不带 7/11，拍卖/背包会把储量显示成 1。
+         */
+        if (!vm_net_mock_append_backpack_reservoir_counts_object(
+                out, outCap, &pos, &appendedReservoirCounts))
+            return 0;
+        if (appendedReservoirCounts)
+            objectCount = (u8)(objectCount + 1);
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_pixi_bag_open role=%u grid=%u objects=%u "
-           "response=17/1%s evidence=pixi-1/7/23-need-real-seq-for-7/15\n",
+           "response=17/1%s%s evidence=pixi-1/7/23-need-real-seq-for-7/15\n",
            role->roleId, gridCount, objectCount,
-           gridCount != 0 ? "+30/21" : "");
+           gridCount != 0 ? "+30/21" : "",
+           appendedReservoirCounts ? "+7/11" : "");
     return pos;
 }
 

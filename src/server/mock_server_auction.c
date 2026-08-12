@@ -465,6 +465,43 @@ static bool vm_mock_auction_wash_sql_text(const vm_net_mock_enhance_wash_state *
     return true;
 }
 
+/*
+ * Restore auction item to bag.
+ * 802/803: listing/claim item_count is raw HP/MP reservoir (same as warehouse
+ * retrieve). add_backpack_item_to_role treats count as flask *units* and would
+ * multiply by 50000 again → FLASK_FULL / false bag-full on cancel/claim.
+ */
+static bool vm_mock_auction_return_item_to_bag(
+    vm_net_mock_role_state *role, u32 itemId, u32 itemCount, u16 enhanceLevel,
+    const vm_net_mock_enhance_wash_state *wash, u16 *seqOut, const char *reason)
+{
+    u16 seq = 0;
+    bool ok = false;
+
+    if (seqOut)
+        *seqOut = 0;
+    if (role == NULL || itemId == 0 || itemCount == 0)
+        return false;
+    if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
+        ok = vm_net_mock_role_grant_flask_reservoir_points(role, itemId, itemCount,
+                                                           &seq, reason);
+    else
+        ok = vm_net_mock_role_add_backpack_item_to_role(role, itemId, itemCount,
+                                                        enhanceLevel, &seq, reason);
+    if (!ok)
+        return false;
+    if (seq != 0 && wash != NULL)
+    {
+        vm_net_mock_backpack_item_state *added =
+            vm_net_mock_role_find_backpack_item(role, itemId, seq);
+        if (added != NULL)
+            vm_net_mock_enhance_wash_copy(&added->enhanceWash, wash);
+    }
+    if (seqOut)
+        *seqOut = seq;
+    return true;
+}
+
 static bool vm_mock_auction_insert_claim_ex(u32 roleId, const char *accountId, u8 kind,
                                             u32 listingId, u32 itemId, u32 itemCount,
                                             u16 enhanceLevel,
@@ -1090,6 +1127,12 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
         count = bag->count;
     if (vm_net_mock_find_equipment_catalog_item(itemId) != NULL)
         count = 1;
+    /*
+     * 802/803：item_count 是储量而非堆叠。可见数量恒为 1，上架必须整行移出
+     * （与交易/仓库合同一致）；禁止按储量点数部分上架。
+     */
+    if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
+        count = bag->count;
     if (count == 0)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
                                                    4, 0, "bad-args");
@@ -1693,17 +1736,17 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
 
     /* Return item first; only then mark cancelled so bag-full cannot destroy items. */
     before = *role;
-    if (!vm_net_mock_role_add_backpack_item_to_role(role, row.itemId, row.itemCount,
-                                                    row.enhanceLevel, &seq,
-                                                    "auction-cancel"))
-        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
-                                                   7, listingId, "bag-full");
-    if (seq != 0)
+    if (!vm_mock_auction_return_item_to_bag(role, row.itemId, row.itemCount,
+                                            row.enhanceLevel, &row.enhanceWash, &seq,
+                                            "auction-cancel"))
     {
-        vm_net_mock_backpack_item_state *added =
-            vm_net_mock_role_find_backpack_item(role, row.itemId, seq);
-        if (added != NULL)
-            vm_net_mock_enhance_wash_copy(&added->enhanceWash, &row.enhanceWash);
+        const char *fail =
+            g_vm_net_mock_backpack_add_fail_kind ==
+                    VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL
+                ? "flask-full"
+                : "bag-full";
+        return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
+                                                   7, listingId, fail);
     }
 
     snprintf(query, sizeof(query),
@@ -1930,18 +1973,10 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
             rows[i].kind == VM_MOCK_AUCTION_CLAIM_WINNER_ITEM)
         {
             if (rows[i].itemId == 0 || rows[i].itemCount == 0 ||
-                !vm_net_mock_role_add_backpack_item_to_role(
+                !vm_mock_auction_return_item_to_bag(
                     role, rows[i].itemId, rows[i].itemCount, rows[i].enhanceLevel,
-                    &seq, "auction-claim-item"))
+                    &rows[i].enhanceWash, &seq, "auction-claim-item"))
                 ok = false;
-            else if (seq != 0)
-            {
-                vm_net_mock_backpack_item_state *added =
-                    vm_net_mock_role_find_backpack_item(role, rows[i].itemId, seq);
-                if (added != NULL)
-                    vm_net_mock_enhance_wash_copy(&added->enhanceWash,
-                                                  &rows[i].enhanceWash);
-            }
         }
         else if (rows[i].kind == VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT ||
                  rows[i].kind == VM_MOCK_AUCTION_CLAIM_BID_REFUND)

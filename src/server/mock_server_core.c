@@ -4788,8 +4788,15 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_WAREHOUSE            0xee000001u
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_MENU   0xee010000u /* | page */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_MENU    0xee020000u /* | page */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_MENU  0xee030000u
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_MENU 0xee040000u
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_DEPOSIT_BASE  0xee050000u /* | gold; 0xffff=all */
+#define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_MONEY_WITHDRAW_BASE 0xee060000u /* | gold; 0xffff=all */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_RETRIEVE_BASE   0xef000000u /* | slot */
 #define VM_NET_MOCK_NPC_SERVICE_WAREHOUSE_DEPOSIT_BASE    0xf0000000u /* | backpack seq */
+/* UI unit is 金; wire/storage is copper.  Transfers only move whole 金. */
+#define VM_NET_MOCK_COPPER_PER_GOLD                       10000u
+#define VM_NET_MOCK_WAREHOUSE_MONEY_ALL                   0xffffu
 /* Equipment sell (mall pass 839): same 26/1 action=1 path as warehouse.
  * Avoid 0xed (VIEW_ITEM).  Sell is permanent — no retrieve.
  * Do not reuse 835: item.dsh already has 红玫瑰 at that id. */
@@ -4995,6 +5002,8 @@ typedef struct
     u16 itemCount;
     u16 nextSeq;
     bool loaded;
+    /* Copper, always whole-金 aligned (multiples of COPPER_PER_GOLD). */
+    u32 money;
     vm_net_mock_backpack_item_state items[VM_NET_MOCK_WAREHOUSE_MAX_ITEMS];
 } vm_net_mock_warehouse_state;
 
