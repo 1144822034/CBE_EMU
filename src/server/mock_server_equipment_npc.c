@@ -4609,7 +4609,14 @@ static const char *vm_mock_service_find_session_account(u32 clientId)
  * copy of the same role during the next scene's 2/10 baseline.  Authentication
  * is the authoritative ownership boundary: one account has one live service
  * session.  Reuse the normal offline transition so team/trade/duel state is
- * removed consistently before the new client enters a scene. */
+ * removed consistently before the new client enters a scene.
+ *
+ * Service sockets are request-scoped: there is no retained TCP socket that can
+ * be closed while another client is idle.  Therefore a forced kick has two
+ * required server-side parts: clear the old online state *and* revoke the old
+ * account binding.  Merely calling session_mark_offline leaves an old title or
+ * scene client authorized to send a later request and restore the same account
+ * snapshot, which violates the single-login boundary. */
 static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
                                                      const char *accountId)
 {
@@ -4623,17 +4630,23 @@ static u32 vm_mock_service_session_take_over_account(u32 authenticatedClientId,
         vm_mock_service_client_session *next = session->next;
 
         if (session->clientId != authenticatedClientId &&
-            strcmp(session->accountId, accountId) == 0 &&
-            (session->roleOnline || session->onlinePresenceValid ||
-             session->sceneVisibleReady))
+            strcmp(session->accountId, accountId) == 0)
         {
-            printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s\n",
+            bool oldOnline = session->roleOnline || session->onlinePresenceValid ||
+                             session->sceneVisibleReady;
+
+            printf("[info][mock-service] session_account_takeover account=%s new_client=%08x old_client=%08x old_role=%u old_scene=%s old_online=%u action=offline-and-unbind\n",
                    accountId,
                    authenticatedClientId,
                    session->clientId,
                    session->onlineRoleId,
-                   session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-");
+                   session->sceneVisibleScene[0] ? session->sceneVisibleScene : "-",
+                   oldOnline ? 1u : 0u);
             vm_mock_service_session_mark_offline(session, "account-login-takeover");
+            /* Match the account-ban and admin-reset disconnect boundary.  A
+             * later request from this client id must not restore or persist
+             * the account after a newer authenticated client took ownership. */
+            session->accountId[0] = 0;
             ++displacedCount;
         }
         session = next;
