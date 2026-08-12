@@ -3449,6 +3449,11 @@ static bool vm_net_mock_npc_service_option_default(
         description = "\xd7\xb0\xb1\xb8\xbb\xd8\xca\xd5"; /* 装备回收 */
         value = VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
         break;
+    case VM_NET_MOCK_NPC_KIND_ARENA_MASTER:
+        name = "\xbf\xaa\xc9\xe8\xc0\xde\xcc\xa8"; /* 开设擂台 */
+        description = "\xc9\xe8\xd6\xc3\xb1\xc8\xce\xe4\xb2\xce\xca\xfd"; /* 设置比武参数 */
+        value = VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE;
+        break;
     default:
         return false;
     }
@@ -3983,7 +3988,17 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             directChallengeUnavailable = true;
             continue;
         }
-        ++emittedServiceCount;
+        /* Arena's native UI has two mutually exclusive entry modes: 30/4 is
+         * creation and 30/3 is the room list.  One service configuration
+         * intentionally projects to two action-1 rows, provided there is room
+         * for both after higher-priority task options. */
+        emittedServiceCount +=
+            configuredServices[serviceIndex].kind ==
+                    VM_NET_MOCK_NPC_KIND_ARENA_MASTER &&
+                taskEntryCount + emittedServiceCount + 1 <
+                    VM_NET_MOCK_NPC_DIALOG_MAX_OPTIONS
+                ? 2u
+                : 1u;
         emittedServiceMask |= vm_net_mock_npc_service_kind_mask(
             configuredServices[serviceIndex].kind);
     }
@@ -4072,6 +4087,40 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
                 serviceDescription = "\xd6\xb1\xbd\xd3\xbf\xaa\xca\xbc\xd5\xbd\xb6\xb7"; /* 直接开始战斗 */
             serviceAction = 13;
             serviceValue = matchedSeed->challengeEnemyId;
+        }
+        if (configuredServices[serviceIndex].kind ==
+            VM_NET_MOCK_NPC_KIND_ARENA_MASTER)
+        {
+            /* The configured custom label remains the create label.  Challenge
+             * is a distinct task-hall action and must use its own documented
+             * service value, otherwise the handler cannot select mode 27. */
+            if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
+                !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                            serviceName) ||
+                !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+                !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
+                                         VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE) ||
+                !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                            serviceDescription))
+            {
+                return 0;
+            }
+            ++emitted;
+            if (emitted >= emittedServiceCount)
+                continue;
+            if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
+                !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                            "\xcc\xf4\xd5\xbd\xc0\xde\xcc\xa8") || /* 挑战擂台 */
+                !vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 1) ||
+                !vm_net_mock_seq_put_u32(dialog, sizeof(dialog), &dialogLen,
+                                         VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CHALLENGE) ||
+                !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
+                                            "\xb2\xe9\xbf\xb4\xbf\xc9\xcc\xf4\xd5\xbd\xb5\xc4\xc0\xde\xcc\xa8")) /* 查看可挑战的擂台 */
+            {
+                return 0;
+            }
+            ++emitted;
+            continue;
         }
         if (!vm_net_mock_seq_put_u8(dialog, sizeof(dialog), &dialogLen, 4) ||
             !vm_net_mock_seq_put_string(dialog, sizeof(dialog), &dialogLen,
@@ -4513,7 +4562,7 @@ static bool vm_net_mock_is_npc_service_dialog_request(
             (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
         (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE &
+            (VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA &
              VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;

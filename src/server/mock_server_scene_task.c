@@ -947,6 +947,19 @@ static bool vm_net_mock_scene_is_linan_south_gate(const char *scene)
                "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31\x2e\x73\x63\x65"); /* c04临安府_01.sce */
 }
 
+/* The original server advertises its arena host at 蜀山南门.  The source SCE
+ * already has 苍古 at a verified walkable placement, so give that real native
+ * actor the server-side arena service by default rather than inventing a
+ * second actor coordinate.  Admin service configuration can still add the
+ * same arena service to any explicitly selected dynamic/native NPC. */
+static bool vm_net_mock_scene_is_shushan_south_gate(const char *scene)
+{
+    return scene != NULL &&
+           vm_net_mock_scene_names_equal_exact(
+               scene,
+               "\x63\x31\x34\xca\xf1\xc9\xbd\x5f\x30\x31\x2e\x73\x63\x65"); /* c14蜀山_01.sce */
+}
+
 enum
 {
     VM_NET_MOCK_DYNAMIC_NPC_OVERRIDE_MAX = 256,
@@ -5060,6 +5073,13 @@ static u32 vm_net_mock_collect_scene_npcinfo_seeds(const char *scene,
                 if (end > off)
                     off = end - 1;
                 continue;
+            }
+            if (vm_net_mock_scene_is_shushan_south_gate(scene) &&
+                seed.kind == VM_NET_MOCK_NPC_KIND_NORMAL &&
+                strcmp(seed.displayName,
+                       "\xb2\xd4\xb9\xc5") == 0) /* 苍古 */
+            {
+                seed.kind = VM_NET_MOCK_NPC_KIND_ARENA_MASTER;
             }
             for (u32 i = 0; i < count; ++i)
             {

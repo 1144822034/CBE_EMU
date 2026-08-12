@@ -2280,6 +2280,9 @@ typedef struct
     bool active;
     bool finished;
     u32 serial;
+    /* Zero is an ordinary nearby-player spar.  A non-zero value records the
+     * transient arena room which owns this same validated PvP wire session. */
+    u32 arenaRoomId;
     u32 clientIds[2];
     char scene[64];
     u32 hp[2];
@@ -2720,6 +2723,8 @@ static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
         }
         printf("[info][mock-service] duel_release serial=%u first=%08x second=%08x\n",
                duel->serial, duel->clientIds[0], duel->clientIds[1]);
+        if (duel->arenaRoomId != 0)
+            vm_net_mock_arena_on_duel_released(duel->arenaRoomId, duel->serial);
         memset(duel, 0, sizeof(*duel));
     }
 }
@@ -4263,6 +4268,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     /* Notify the remaining clients before clearing the departing session's
      * cached role identity; subtype 5/7 needs that id to remove its HUD row. */
     (void)vm_mock_service_team_remove_member(session, reason ? reason : "offline");
+    vm_net_mock_arena_remove_role(session->onlineRoleId,
+                                  reason ? reason : "offline");
     vm_mock_service_trade_cancel_for_client(session->clientId,
                                             reason ? reason : "offline");
     vm_mock_service_duel_cancel_for_client(session->clientId,
