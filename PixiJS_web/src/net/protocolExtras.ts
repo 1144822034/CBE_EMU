@@ -2377,6 +2377,20 @@ export type BagItem = {
 };
 
 /**
+ * 神仙壶/逍遥壶：背包 u32 count 是 HP/MP 储量，可见堆叠恒为 1
+ *（mmGame:0xD04 / docs/re/2026-07-20-vitality-flask-reserve.md）。
+ */
+export function isReservoirFlaskItemId(itemId: number): boolean {
+  return itemId === 802 || itemId === 803;
+}
+
+/** Visible stack for UI qty pickers — flasks/equip are atomic (1). */
+export function bagVisibleStackCount(it: BagItem): number {
+  if (it.kind === "equip" || isReservoirFlaskItemId(it.itemId)) return 1;
+  return Math.max(0, it.count >>> 0);
+}
+
+/**
  * Battle「物品」menu: HP/MP medicines (item.dsh category 10) and flasks 802/803.
  * Excludes EXP-only cards and non-restore props; never equipment.
  * Prefer live item.dsh via lookupItemSync — bag.category may be 0 when the row
@@ -2384,7 +2398,7 @@ export type BagItem = {
  */
 export function isBattleMedicineOrFlask(it: BagItem): boolean {
   if (it.seq <= 0 || it.count <= 0) return false;
-  if (it.itemId === 802 || it.itemId === 803) return true;
+  if (isReservoirFlaskItemId(it.itemId)) return true;
   const cat = lookupItemSync(it.itemId);
   const kind = cat?.kind ?? it.kind;
   if (kind !== "item") return false;
@@ -2564,6 +2578,67 @@ export function parseBagItems(packet: WtPacket): BagItem[] {
   if (from17.length) return from17;
   if (fromGrid.length) return fromGrid;
   return [];
+}
+
+/**
+ * 7/11 `info`: u8 n + repeat { i16 seq, u32 reservoir }.
+ * 802/803 储量权威；30/21 可见堆叠恒为 1。
+ */
+export function parseFlaskReservoirUpdates(
+  packet: WtPacket,
+): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const obj of packet.objects) {
+    if (obj.kind !== 7 || obj.subtype !== 11) continue;
+    const raw = findField(obj, "info");
+    if (!raw || raw.length < 1) continue;
+    const r = new SeqReader(raw);
+    try {
+      const n = r.u8();
+      for (let i = 0; i < n && r.remaining() >= 6; i++) {
+        const seq = r.i16();
+        const value = r.u32() >>> 0;
+        if (seq > 0) map.set(seq, value);
+      }
+    } catch {
+      /* truncated */
+    }
+  }
+  return map;
+}
+
+/** Apply 7/11 reservoirs onto bag rows (by seq). count=0 marks empty flask. */
+export function applyFlaskReservoirsToBag(
+  bag: BagItem[],
+  reservoirs: Map<number, number>,
+): BagItem[] {
+  if (!reservoirs.size) return bag;
+  return bag.map((it) => {
+    if (!isReservoirFlaskItemId(it.itemId)) return it;
+    const v = reservoirs.get(it.seq);
+    if (v == null) return it;
+    return { ...it, count: v };
+  });
+}
+
+/**
+ * 30/21 / 17/1 壶行 count 常为可见堆叠 1；若本包无 7/11，保留先前储量。
+ */
+export function preserveFlaskReservoirAcrossBagRefresh(
+  next: BagItem,
+  prev: BagItem | undefined,
+): BagItem {
+  if (!isReservoirFlaskItemId(next.itemId)) return next;
+  if (next.count > 1) return next;
+  if (
+    prev &&
+    isReservoirFlaskItemId(prev.itemId) &&
+    prev.seq === next.seq &&
+    prev.count > 1
+  ) {
+    return { ...next, count: prev.count };
+  }
+  return next;
 }
 
 /** Overlay 30/21 seq/count onto 17/1 rows (same itemId order / multiset). */

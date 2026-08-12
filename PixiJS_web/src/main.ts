@@ -17,6 +17,10 @@ import {
   type RechargePayType,
 } from "./net/recharge";
 import { registerAccount } from "./net/register";
+import {
+  isClientUpdateRequiredError,
+  promptDownloadLatestApk,
+} from "./net/apkUpdate";
 import { openPayUrl } from "./net/openPayUrl";
 import { SceneView } from "./render/SceneView";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
@@ -27,7 +31,7 @@ import { RoleScreen } from "./ui/RoleScreen";
 import { CreateRoleScreen } from "./ui/CreateRoleScreen";
 import { WorldHud, sceneDisplayName } from "./ui/WorldHud";
 import { MenuScreen, type MenuLeaf } from "./ui/MenuScreen";
-import { BattleScreen } from "./ui/BattleScreen";
+import { BattleScreen, flushBattleSleepsForBackground } from "./ui/BattleScreen";
 import { DialogPanel } from "./ui/DialogPanel";
 import { ApproachPrompt } from "./ui/ApproachPrompt";
 import { SystemPanel, type SystemKind } from "./ui/SystemPanel";
@@ -154,6 +158,7 @@ function auctionMsgTip(code: string | undefined, okText: string): string {
     "not-owner": "非卖家不能下架",
     "has-bid": "已有出价，无法下架",
     "bag-full": "背包已满，无法取回",
+    "flask-full": "壶储量已满，无法取回",
     "buyout-low": "一口价须不低于起拍价",
     "no-buyout": "该拍品无一口价",
     "buyout-gone": "当前价已超一口价",
@@ -2162,6 +2167,15 @@ async function main(): Promise<void> {
       setChromeStatus(msg, true);
       // Keep login form visible when account login failed.
       showPhase(credentials ? "login" : "splash");
+      // codeVersion gate → offer Gitee APK self-update (Android only).
+      if (isClientUpdateRequiredError(msg)) {
+        void promptDownloadLatestApk({
+          onStatus: (text, error) => {
+            title.setStatus(text);
+            setChromeStatus(text, !!error);
+          },
+        });
+      }
     } finally {
       loginInFlight = false;
     }
@@ -4451,6 +4465,33 @@ dialog.hide();
 
   // Screen unlock / return to app: heal Live WS if OEM suspended the WebView.
   // Native FGS also injects window.__pixiNativeKeepAlive every ~2s while in-world.
+  // That tick must also drive hangup / [自动] — Chromium starves setTimeout while hidden.
+  session.onBackgroundGameplayTick = () => {
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
+      return;
+    }
+    flushBattleSleepsForBackground();
+    if (phase !== "battle" || !battle.visible) return;
+    if (
+      battle.isAwaitingExit() &&
+      (session.hangupDesired ||
+        session.hangupActive ||
+        session.autoBattleActive)
+    ) {
+      battle.confirmSettlementIfAwaiting();
+      return;
+    }
+    if (
+      session.shouldInBattleAuto() &&
+      !battle.isAwaitingExit() &&
+      !battle.isAwaitingDeathPrompt()
+    ) {
+      fireInBattleAuto(session.hangupActive ? "挂机出手…" : "自动出手…");
+    }
+  };
   (window as Window & { __pixiNativeKeepAlive?: () => void }).__pixiNativeKeepAlive =
     () => {
       void session.backgroundKeepAliveTick();
@@ -4459,6 +4500,7 @@ dialog.hide();
     if (document.visibilityState !== "visible") {
       suspendBgm();
       // Immediate tick when leaving foreground — setInterval may freeze next.
+      flushBattleSleepsForBackground();
       void session.backgroundKeepAliveTick();
       return;
     }

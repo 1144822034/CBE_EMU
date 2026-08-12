@@ -147,6 +147,9 @@ import {
   npcServiceOpcode,
   parseBagItems,
   parseBagItemUpdates,
+  parseFlaskReservoirUpdates,
+  applyFlaskReservoirsToBag,
+  preserveFlaskReservoirAcrossBagRefresh,
   parseItemEquipResult,
   parseWornEquipmentSnapshot,
   parseMallState,
@@ -248,6 +251,7 @@ import {
   type TaskCandidateRow,
   type TaskListRow,
   type NpcTaskPromptType,
+  isReservoirFlaskItemId,
 } from "../net/protocolExtras";
 import {
   parseNearbyPage,
@@ -485,6 +489,13 @@ export class GameSession {
   hangupDesired = false;
   /** Delay between client-driven hangup encounters (ms). */
   private hangupEncounterTimer: ReturnType<typeof setTimeout> | null = null;
+  /** performance.now() when the next hangup 4/1 is due (0 = none). */
+  private hangupEncounterDueAt = 0;
+  /**
+   * main.ts wires battle auto / settle confirm here — native FGS keepalive
+   * must drive them while Chromium starves setTimeout (document.hidden).
+   */
+  onBackgroundGameplayTick: (() => void) | null = null;
   /**
    * In-battle [自动] switch (client-side 4/11). No auto-encounter — only
    * auto-operates after the player is already in battle.
@@ -1726,6 +1737,7 @@ export class GameSession {
       clearTimeout(this.hangupEncounterTimer);
       this.hangupEncounterTimer = null;
     }
+    this.hangupEncounterDueAt = 0;
   }
 
   /**
@@ -1735,10 +1747,13 @@ export class GameSession {
   scheduleNextHangupEncounter(delayMs = 4000): void {
     this.clearHangupEncounterTimer();
     if (!this.hangupDesired) return;
+    const delay = Math.max(500, delayMs | 0);
+    this.hangupEncounterDueAt = performance.now() + delay;
     this.hangupEncounterTimer = setTimeout(() => {
       this.hangupEncounterTimer = null;
+      this.hangupEncounterDueAt = 0;
       void this.tickHangupEncounter("schedule");
-    }, Math.max(500, delayMs | 0));
+    }, delay);
   }
 
   /** Call when battle UI returns to world — continue hangup loop if armed. */
@@ -4288,23 +4303,47 @@ export class GameSession {
    * Native FGS Handler injects this every ~2s while in-world/hangup.
    * Bypasses Chromium hidden-document setInterval throttling that starves
    * scene-poll even after resumeTimers() + unrestricted battery.
+   * Also drives client hangup / in-battle auto (those use setTimeout too).
    */
   async backgroundKeepAliveTick(): Promise<void> {
     if (this.nativeKeepAliveInFlight) return;
     if (!(this.transport instanceof LiveTransport)) return;
     this.nativeKeepAliveInFlight = true;
     try {
+      // Unblock battle playback sleeps before attempting the next 4/2.
+      this.onBackgroundGameplayTick?.();
       if (this.pollTimer != null) {
         await this.pollOnce();
       } else {
         await this.transport.ensureConnected();
         await this.transport.ping();
       }
+      // Poll/operate responses may have started new playback — flush again.
+      this.onBackgroundGameplayTick?.();
+      await this.driveBackgroundHangup();
     } catch (e) {
       console.warn("[session] native keepalive", e);
     } finally {
       this.nativeKeepAliveInFlight = false;
     }
+  }
+
+  /**
+   * When document.hidden, setTimeout for the next hangup 4/1 is unreliable.
+   * FGS poke checks the deadline and starts the encounter.
+   */
+  private async driveBackgroundHangup(): Promise<void> {
+    if (!this.hangupDesired || this.inBattle || !this.transport) return;
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
+      return;
+    }
+    const dueAt = this.hangupEncounterDueAt;
+    if (dueAt <= 0 || performance.now() < dueAt) return;
+    this.clearHangupEncounterTimer();
+    await this.tickHangupEncounter("native-keepalive");
   }
 
   /** After screen-off / app resume: re-open gateway if OEM killed the WS. */
@@ -4892,6 +4931,7 @@ export class GameSession {
       if (bagFull.length) {
         // Preserve known seq from prior 30/21 when 17/1 only has row order.
         // Equip durability: keep prior/pending (CBE +0x110); 30/21 is stack only.
+        // Flask: 30/21 wire count is visible 1; keep prior reservoir until 7/11.
         const byId = new Map(this.bagItems.map((i) => [i.itemId, i]));
         const bySeq = new Map(this.bagItems.map((i) => [i.seq, i]));
         this.bagItems = bagFull.map((it) => {
@@ -4902,7 +4942,11 @@ export class GameSession {
             prev && prev.seq > 0 && it.seq <= 0
               ? { ...it, seq: prev.seq }
               : it;
-          return this.applyBagEquipDurability(merged, prevSeq ?? prevId);
+          const withFlask = preserveFlaskReservoirAcrossBagRefresh(
+            merged,
+            bySeq.get(merged.seq),
+          );
+          return this.applyBagEquipDurability(withFlask, prevSeq ?? prevId);
         });
         this.cb.onBag?.(this.bagItems);
       } else {
@@ -4914,12 +4958,23 @@ export class GameSession {
               map.delete(u.seq);
               this.pendingBagEquipDurability.delete(u.seq);
             } else {
-              map.set(u.seq, this.applyBagEquipDurability(u, map.get(u.seq)));
+              const prev = map.get(u.seq);
+              const withFlask = preserveFlaskReservoirAcrossBagRefresh(u, prev);
+              map.set(u.seq, this.applyBagEquipDurability(withFlask, prev));
             }
           }
           this.bagItems = [...map.values()];
           this.cb.onBag?.(this.bagItems);
         }
+      }
+      const flaskRes = parseFlaskReservoirUpdates(packet);
+      if (flaskRes.size) {
+        let next = applyFlaskReservoirsToBag(this.bagItems, flaskRes);
+        next = next.filter(
+          (it) => !(isReservoirFlaskItemId(it.itemId) && it.count <= 0),
+        );
+        this.bagItems = next;
+        this.cb.onBag?.(this.bagItems);
       }
       const wornSnap = parseWornEquipmentSnapshot(packet);
       if (wornSnap) {

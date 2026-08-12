@@ -444,6 +444,10 @@ export function formatAuctionClaimRow(row: AuctionClaimRow): string {
   ) {
     const name = row.itemName || `物品${row.itemId}`;
     const en = row.enhanceLevel > 0 ? `+${row.enhanceLevel}` : "";
+    // 802/803：itemCount 是储量，可见件数恒 1
+    if (row.itemId === 802 || row.itemId === 803) {
+      return `${tag} ${name}${en}`;
+    }
     return `${tag} ${name}${en}x${row.itemCount}`;
   }
   if (row.moneyAmount > 0) {

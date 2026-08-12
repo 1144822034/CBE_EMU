@@ -10,7 +10,11 @@ import {
 } from "./constants";
 import { BitmapLabel, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
-import type { BagItem } from "../net/protocolExtras";
+import {
+  bagVisibleStackCount,
+  isReservoirFlaskItemId,
+  type BagItem,
+} from "../net/protocolExtras";
 import { lookupItemSync, qualityColor } from "../resources/itemCatalog";
 import {
   AUCTION_DURATION_LABELS,
@@ -118,7 +122,7 @@ export class AuctionPanel extends Container {
   private bagScroll = 0;
   private menuCursor = 0;
   private selected: BagItem | null = null;
-  /** 上架数量（装备固定 1；道具 1..背包堆叠）. */
+  /** 上架数量（装备/壶固定 1；普通道具 1..背包堆叠）. */
   private listCount = 1;
   private priceDraft = "1";
   private buyoutDraft = "0";
@@ -281,9 +285,11 @@ export class AuctionPanel extends Container {
     this.listMode = "menu";
     this.detailListing = null;
     this.selected = item;
-    this.listCount = item.kind === "equip" ? 1 : Math.max(1, item.count);
-    this.menuCursor = item.kind === "equip" ? 2 : 1; // 起拍 / 数量
-    this.tip = `已选 ${item.name}`;
+    this.listCount = this.defaultListCount(item);
+    this.menuCursor = this.listQtyFixed(item) ? 2 : 1; // 起拍 / 数量
+    this.tip = isReservoirFlaskItemId(item.itemId)
+      ? `已选 ${item.name}（整壶·储量${item.count}）`
+      : `已选 ${item.name}`;
     if (this.visible) this.redraw();
   }
 
@@ -483,8 +489,17 @@ export class AuctionPanel extends Container {
     const start = this.startPriceWire();
     let buyout = this.buyoutPriceWire();
     if (buyout > 0 && buyout < start) buyout = 0;
-    const max = item.kind === "equip" ? 1 : Math.max(1, item.count);
-    const count = item.kind === "equip" ? 1 : Math.max(1, Math.min(this.listCount, max));
+    /*
+     * 装备 count=1；壶类 wire count=整行储量（可见堆叠恒 1）；
+     * 普通道具才按 listCount 部分上架。
+     */
+    let count: number;
+    if (item.kind === "equip") count = 1;
+    else if (isReservoirFlaskItemId(item.itemId)) count = Math.max(1, item.count);
+    else {
+      const max = Math.max(1, item.count);
+      count = Math.max(1, Math.min(this.listCount, max));
+    }
     return {
       bagSeq: item.seq,
       count: count >>> 0,
@@ -575,10 +590,12 @@ export class AuctionPanel extends Container {
         return;
       }
       this.selected = it;
-      this.listCount = it.kind === "equip" ? 1 : Math.max(1, it.count);
+      this.listCount = this.defaultListCount(it);
       this.listMode = "menu";
-      this.menuCursor = it.kind === "equip" ? 2 : 1; // 起拍 / 数量
-      this.tip = `已选 ${it.name} ×${this.listCount}`;
+      this.menuCursor = this.listQtyFixed(it) ? 2 : 1; // 起拍 / 数量
+      this.tip = isReservoirFlaskItemId(it.itemId)
+        ? `已选 ${it.name}（整壶·储量${it.count}）`
+        : `已选 ${it.name} ×${this.listCount}`;
       this.redraw();
       return;
     }
@@ -669,7 +686,9 @@ export class AuctionPanel extends Container {
         ? "—"
         : this.selected.kind === "equip"
           ? "1(装备)"
-          : `${this.listCount}/${max} ←→`;
+          : isReservoirFlaskItemId(this.selected.itemId)
+            ? `1(壶·储${this.selected.count})`
+            : `${this.listCount}/${max} ←→`;
     return [
       { id: "pick", label: `选择物品  ${sel}` },
       { id: "count", label: `上架数量  ${countLabel}` },
@@ -772,10 +791,20 @@ export class AuctionPanel extends Container {
     );
   }
 
+  /** 装备与壶类不可调数量（壶按整行储量上架）. */
+  private listQtyFixed(item: BagItem | null): boolean {
+    if (!item) return true;
+    return item.kind === "equip" || isReservoirFlaskItemId(item.itemId);
+  }
+
+  private defaultListCount(item: BagItem): number {
+    if (this.listQtyFixed(item)) return 1;
+    return Math.max(1, item.count);
+  }
+
   private maxListCount(): number {
     if (!this.selected) return 1;
-    if (this.selected.kind === "equip") return 1;
-    return Math.max(1, this.selected.count);
+    return Math.max(1, bagVisibleStackCount(this.selected));
   }
 
   private clampListCount(): void {
@@ -792,6 +821,12 @@ export class AuctionPanel extends Container {
     if (this.selected.kind === "equip") {
       this.listCount = 1;
       this.tip = "装备固定数量1";
+      this.redraw();
+      return;
+    }
+    if (isReservoirFlaskItemId(this.selected.itemId)) {
+      this.listCount = 1;
+      this.tip = `壶整件上架（储量${this.selected.count}）`;
       this.redraw();
       return;
     }
@@ -1028,13 +1063,17 @@ export class AuctionPanel extends Container {
     } else {
       const desc =
         (item.desc && item.desc !== "-" ? item.desc : "") ||
-        `数量 ${item.count}`;
+        (isReservoirFlaskItemId(item.itemId)
+          ? `储量 ${item.count}`
+          : `数量 ${item.count}`);
       for (const line of wrapUiText(desc, w - 28, 12)) {
         lines.push({ kind: "text", text: line, color: CBE.ink });
       }
       lines.push({
         kind: "text",
-        text: `数量 ${item.count}`,
+        text: isReservoirFlaskItemId(item.itemId)
+          ? `储量 ${item.count}`
+          : `数量 ${item.count}`,
         color: CBE.inkLabel,
       });
     }
@@ -1141,8 +1180,10 @@ export class AuctionPanel extends Container {
         } else {
           tag = formatRemain(r.remainSec);
         }
+        const qty =
+          isReservoirFlaskItemId(r.itemId) ? "" : `x${r.itemCount}`;
         label =
-          `${r.itemName}${en}x${r.itemCount} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
+          `${r.itemName}${en}${qty} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
       }
       this.addLabel(label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
       const hitIdx = idx;
@@ -1182,8 +1223,11 @@ export class AuctionPanel extends Container {
             this.box.rect(x + 6, ry, w - 12, 15).fill({ color: BAG_SELECT });
           }
           const en = it.enhance ? `+${it.enhance}` : "";
+          const qty = isReservoirFlaskItemId(it.itemId)
+            ? `储${it.count}`
+            : `×${it.count}`;
           this.addLabel(
-            `${it.name}${en} ×${it.count}`.slice(0, 22),
+            `${it.name}${en} ${qty}`.slice(0, 22),
             x + 10,
             ry + 1,
             hi ? CBE.ink : qualityColor(it.quality),

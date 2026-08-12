@@ -2525,13 +2525,28 @@ export class BattleScreen extends Container {
     this.onSettleConfirm?.();
   }
 
+  /**
+   * Native FGS keepalive: confirm settle while document.hidden so the
+   * 2.5s setTimeout (and Chromium hidden-tab throttle) cannot stall hangup.
+   */
+  confirmSettlementIfAwaiting(): boolean {
+    if (!this.awaitingExit || this.settleConfirmBusy) return false;
+    this.confirmSettlement();
+    return true;
+  }
+
   private armSettleAutoClose(gen: number): void {
     this.clearSettleCloseTimer();
+    const hidden =
+      typeof document !== "undefined" && document.visibilityState === "hidden";
+    // Background: 0ms — FGS keepalive also calls confirmSettlementIfAwaiting
+    // if Chromium still starves this timer.
+    const delayMs = hidden ? 0 : 2500;
     this.settleCloseTimer = setTimeout(() => {
       this.settleCloseTimer = null;
       if (gen !== this.settlePaintGen) return;
       this.confirmSettlement();
-    }, 2500);
+    }, delayMs);
   }
 
   /**
@@ -2810,6 +2825,45 @@ function parseSettleFdata(fdata: string): {
   return { title: "战斗胜利", prefix: "", extra: raw };
 }
 
+/** Pending battle playback waits — flushed when Android FGS pokes while hidden. */
+const battleSleepWaiters = new Set<() => void>();
+
+/**
+ * Resolve in-flight playActionScript sleeps. Chromium throttles setTimeout
+ * while document.hidden; native keepalive must unblock playbackBusy so the
+ * next hangup / [自动] 4/2 can submit.
+ */
+export function flushBattleSleepsForBackground(): void {
+  if (typeof document !== "undefined" && document.visibilityState !== "hidden") {
+    return;
+  }
+  for (const finish of [...battleSleepWaiters]) finish();
+}
+
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(tid);
+      battleSleepWaiters.delete(finish);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVis);
+      }
+      resolve();
+    };
+    const onVis = () => {
+      if (document.visibilityState === "hidden") finish();
+    };
+    const tid = setTimeout(finish, ms);
+    battleSleepWaiters.add(finish);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVis);
+    }
+  });
 }
