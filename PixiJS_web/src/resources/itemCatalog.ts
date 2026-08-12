@@ -207,6 +207,26 @@ function parseEquipRows(raw: Uint8Array): Map<number, ItemCatalogRow> {
 export async function loadItemCatalog(): Promise<Map<number, ItemCatalogRow>> {
   if (itemCache) return itemCache;
   itemCache = parseItemRows(await fetchResourceBytes("item.dsh"));
+  /* Pixi 自定义商城道具（不在 item.dsh）. */
+  if (!itemCache.has(847)) {
+    itemCache.set(847, {
+      id: 847,
+      name: "江湖追杀令",
+      desc: "对仇人使用可显示其所在地图。耐久1。",
+      category: 10,
+      level: 1,
+      quality: 0,
+      stack: 1,
+      price: 0,
+      coolPrice: 50,
+      hpChange: 0,
+      mpChange: 0,
+      expChange: 0,
+      consumable: true,
+      kind: "item",
+      durabilityMax: 1,
+    });
+  }
   return itemCache;
 }
 

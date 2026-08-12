@@ -112,11 +112,17 @@ static bool vm_net_mock_append_auction_event_object(u8 *out, u32 outCap, u32 *po
 static u32 vm_net_mock_build_auction_protocol_response(const u8 *request,
                                                        u32 requestLen, u8 *out,
                                                        u32 outCap);
+/* Pixi enmity (kind=43); defined in mock_server_enmity.c after auction. */
+static void vm_mock_enmity_record_duel_result(vm_mock_service_duel *duel);
+static u32 vm_net_mock_build_enmity_protocol_response(const u8 *request,
+                                                      u32 requestLen, u8 *out,
+                                                      u32 outCap);
 
 #include "mock_server_scene_sync.c"
 #include "mock_server_guild.c"
 #include "mock_server_arena.c"
 #include "mock_server_auction.c"
+#include "mock_server_enmity.c"
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
 #include "mock_server_interaction_login.c"

@@ -248,6 +248,7 @@ static bool g_vm_net_mock_role_service_tables_valid = false;
 static bool vm_mock_mysql_parse_u32(const char *value, size_t value_len,
                                     u32 *result_out);
 static bool vm_net_mock_shop_admin_db_load(void);
+static void vm_net_mock_ensure_hunt_order_catalog_item(void);
 static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId);
 
 static u32 vm_net_mock_shop_catalog_group(u32 itemId)
@@ -1562,6 +1563,7 @@ static u32 vm_net_mock_load_shop_catalog(void)
      * load them must not hide the immutable DSH catalog, so retain base values
      * and surface the database error through the admin log. */
     (void)vm_net_mock_shop_admin_db_load();
+    vm_net_mock_ensure_hunt_order_catalog_item();
 
     vm_autotest_note("mock_shop_catalog_loaded total=%u items=%u equips=%u source=item.dsh/equip.dsh\n",
                      g_vm_net_mock_shop_catalog_count, itemCount, equipCount);
@@ -1727,6 +1729,73 @@ static bool vm_net_mock_shop_admin_save(u32 itemId, u32 price, bool enabled,
     printf("[info][mock-admin] shop_item_save item=%u price=%u enabled=%u\n",
            itemId, price, enabled ? 1u : 0u);
     return true;
+}
+
+/* Pixi 自定义 847 江湖追杀令：注入商城目录并默认上架（酷宝）. */
+static void vm_net_mock_ensure_hunt_order_catalog_item(void)
+{
+    static const u8 nameGbk[] =
+        "\xbd\xad\xba\xfe\xd7\xb7\xc9\xb1\xc1\xee"; /* 江湖追杀令 */
+    static const u8 descGbk[] =
+        "\xb6\xd4\xb3\xf0\xc8\xcb\xca\xb9\xd3\xc3\xbf\xc9\xcf\xd4\xca\xbe"
+        "\xc6\xe4\xcb\xf9\xd4\xda\xb5\xd8\xcd\xbc\xa1\xa3\xc4\xcd\xbe\xc3"
+        "\x31\xa1\xa3"; /* 对仇人使用可显示其所在地图。耐久1。 */
+    const char *err = NULL;
+    vm_net_mock_shop_catalog_item *item = NULL;
+    vm_net_mock_shop_admin_load_context one;
+    char query[160];
+    u32 i = 0;
+
+    memset(&one, 0, sizeof(one));
+    for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+    {
+        if (g_vm_net_mock_shop_catalog[i].itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
+        {
+            item = &g_vm_net_mock_shop_catalog[i];
+            break;
+        }
+    }
+    if (item == NULL)
+    {
+        if (!vm_net_mock_add_shop_catalog_item(
+                VM_NET_MOCK_HUNT_ORDER_ITEM_ID, nameGbk, sizeof(nameGbk) - 1,
+                descGbk, sizeof(descGbk) - 1, VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE,
+                99, 1, 1, false, 10))
+        {
+            printf("[warn][network] mock_hunt_order_catalog_add_failed\n");
+            return;
+        }
+        vm_net_mock_sort_shop_catalog();
+        item = NULL;
+        for (i = 0; i < g_vm_net_mock_shop_catalog_count; ++i)
+        {
+            if (g_vm_net_mock_shop_catalog[i].itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
+            {
+                item = &g_vm_net_mock_shop_catalog[i];
+                break;
+            }
+        }
+    }
+    if (item == NULL)
+        return;
+    snprintf(query, sizeof(query),
+             "SELECT item_id,price,enabled FROM server_shop_items WHERE item_id=%u",
+             VM_NET_MOCK_HUNT_ORDER_ITEM_ID);
+    if (vm_mysql_query(query, vm_net_mock_shop_admin_db_row, &one) && one.loaded > 0)
+    {
+        printf("[info][network] mock_hunt_order_catalog_bound item=%u price=%u "
+               "enabled=%u\n",
+               item->itemId, item->price, item->enabled);
+        return;
+    }
+    if (!vm_net_mock_shop_admin_save(
+            VM_NET_MOCK_HUNT_ORDER_ITEM_ID,
+            item->price ? item->price : VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE, true,
+            &err))
+    {
+        printf("[warn][network] mock_hunt_order_shop_seed_failed error=%s\n",
+               err ? err : "?");
+    }
 }
 
 static u8 vm_net_mock_equipment_slot_for_category(u32 category)
@@ -2169,6 +2238,7 @@ static bool vm_net_mock_item_requires_special_use_protocol(u32 itemId)
     case 810:
     case 811:
     case 845: /* 三十倍经验卡（自定义，克隆自 811） */
+    case 847: /* 江湖追杀令：走 43/2 对仇人使用，禁止通用 7/1 扣耐久 */
     case 813: /* chest keys must not fall into generic 7/1 category-10 consume */
     case 814:
     case 815:
@@ -7172,6 +7242,14 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
             return vm_net_mock_build_exp_card_use_via_generic_7_1(
                 role, itemId, seq, enhanceLevel,
                 parsed.type ? parsed.type : 1, out, outCap);
+        }
+        if (itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
+        {
+            /* Pixi opens enmity picker; generic 7/1 must clear wait without consume. */
+            static const char huntPickTipGbk[] =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xb3\xf0\xc8\xcb\xca\xb9\xd3\xc3"; /* 请选择仇人使用 */
+            return vm_net_mock_build_item_use_reject_with_hint_response(
+                out, outCap, itemId, parsed.type ? parsed.type : 1, huntPickTipGbk);
         }
         return 0;
     }

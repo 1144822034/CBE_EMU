@@ -1205,8 +1205,32 @@ async function main(): Promise<void> {
       );
     },
     onFriends: (friends) => {
-      if (phase === "social") social.openFriends(friends);
-      setChromeStatus(`好友 ×${friends.length}`);
+      if (phase === "social") {
+        social.openFriends(friends, session.friendPage, session.friendAllPages, {
+          keepHub: true,
+        });
+      }
+      setChromeStatus(
+        session.friendAllPages > 1
+          ? `好友 ${session.friendPage}/${session.friendAllPages}`
+          : `好友 ×${friends.length}`,
+      );
+    },
+    onEnmity: ({ dir, rows }) => {
+      if (phase === "social") {
+        social.openEnmity(
+          rows,
+          dir,
+          social.huntOrderPickSeq,
+          session.enmityPage,
+          session.enmityAllPages,
+        );
+      }
+      setChromeStatus(
+        session.enmityAllPages > 1
+          ? `恩怨 ${session.enmityPage}/${session.enmityAllPages}`
+          : `恩怨 ×${rows.length}`,
+      );
     },
     onSocialInvite: (inv) => {
       const title =
@@ -2323,7 +2347,7 @@ async function main(): Promise<void> {
     if (leaf === "friends") {
       showPhase("social");
       social.openFriends(session.friends);
-      void session.openFriends(0);
+      void session.openFriends(1);
       return;
     }
     if (leaf === "chat") {
@@ -2334,7 +2358,14 @@ async function main(): Promise<void> {
     }
     if (leaf === "rank") {
       showPhase("social");
-      social.openRank({ type: 0, tabs: ["等级榜", "财富榜", "PK榜"], rows: [], myorder: 0 });
+      const fetchGen = social.beginRankFetch();
+      social.openRank({
+        type: 0,
+        tabs: ["等级榜", "财富榜", "PK榜"],
+        rows: [],
+        myorder: 0,
+        fetchGen,
+      });
       showGameTip("排行榜…");
       void session.openRanking(0, 0).then((page) => {
         if (!page) {
@@ -2350,6 +2381,7 @@ async function main(): Promise<void> {
             score: r.score,
           })),
           myorder: page.myorder,
+          fetchGen,
         });
         showGameTip(`排行榜 · ${page.tabs[page.type] ?? "等级榜"}`);
       });
@@ -2738,6 +2770,15 @@ async function main(): Promise<void> {
       if (!bag) return;
       if (action === "use") {
         void (async () => {
+          /* 江湖追杀令：打开恩怨选目标，不直接 7/1. */
+          if (bag.itemId === 847) {
+            system.hide();
+            showPhase("social");
+            social.openEnmity(session.enmityRows, session.enmityDir, bag.seq, 1, 1);
+            void session.openEnmity(0, 1);
+            showGameTip("请选择仇人使用追杀令");
+            return;
+          }
           showGameTip(`使用 ${bag.name}…`);
           const fb = await session.useItem(bag.itemId, bag.seq);
           // Success: refresh bag from server. Failure: keep local stack
@@ -3051,8 +3092,60 @@ async function main(): Promise<void> {
     }
     if (action === "refresh") {
       if (kind === "team") void session.refreshTeamRoster();
-      else if (kind === "friends") void session.openFriends(0);
+      else if (kind === "friends") void session.openFriends(1);
+      else if (kind === "enmity")
+        void session.openEnmity(social.enmityDirection, 1);
       else void session.openNearbyPlayers(0);
+      return;
+    }
+    if (action === "friend_hub_tab" && row) {
+      if (row.id === 0) {
+        social.clearHuntPick();
+        social.openFriends(session.friends, 1, session.friendAllPages);
+        void session.openFriends(1);
+      } else {
+        social.openEnmity(
+          session.enmityRows,
+          social.enmityDirection,
+          social.huntOrderPickSeq,
+          1,
+          session.enmityAllPages,
+        );
+        void session.openEnmity(social.enmityDirection, 1);
+      }
+      return;
+    }
+    if (action === "enmity_dir_tab" && row) {
+      void session.openEnmity(row.id, 1);
+      return;
+    }
+    if (action === "list_page" && row?.id) {
+      const page = Math.max(1, row.id | 0);
+      if (kind === "friends") void session.openFriends(page);
+      else if (kind === "enmity")
+        void session.openEnmity(social.enmityDirection, page);
+      return;
+    }
+    if (action === "hunt_order" && row?.id) {
+      const seq = social.huntOrderPickSeq;
+      if (!seq) {
+        showGameTip("请从背包使用追杀令");
+        return;
+      }
+      void (async () => {
+        showGameTip(`追查 ${row.name}…`);
+        const fb = await session.useHuntOrder(seq, row.id);
+        social.clearHuntPick();
+        if (fb.ok) {
+          await session.openBag();
+          social.hide();
+          showPhase("world");
+        } else {
+          /* Keep picker open so player can try another (e.g. offline). */
+          void session.openEnmity(social.enmityDirection, social.serverListPage);
+        }
+        showGameTip(fb.message || (fb.ok ? "使用成功" : "使用失败"));
+      })();
       return;
     }
     if (action === "invite_pick") {
@@ -3093,8 +3186,17 @@ async function main(): Promise<void> {
     if (action === "rank_tab") {
       const type = row?.id ?? 0;
       showGameTip(`排行榜 · ${row?.name ?? ""}…`);
+      const fetchGen = social.beginRankFetch();
+      /* 切榜期间列表已清空；失败时给空榜，避免残留上一榜分数. */
       void session.openRanking(type, 0).then((page) => {
         if (!page) {
+          social.openRank({
+            type,
+            tabs: ["等级榜", "财富榜", "PK榜"],
+            rows: [],
+            myorder: 0,
+            fetchGen,
+          });
           showGameTip("排行榜失败");
           return;
         }
@@ -3107,6 +3209,7 @@ async function main(): Promise<void> {
             score: r.score,
           })),
           myorder: page.myorder,
+          fetchGen,
         });
         showGameTip(
           `排行榜 · ${page.tabs[page.type] ?? row?.name ?? "等级榜"}`,

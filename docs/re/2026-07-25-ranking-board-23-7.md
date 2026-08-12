@@ -72,6 +72,32 @@ r2 dump @ state+0x80: +0x10 orderlist array = 0
 
 `pk_points` 默认 0；切磋胜负如何累加仍 `unresolved`，但不再回退到 money。
 
+### 2026-08-12 只显示自己
+
+根因：`ranking_board_mysql_row` 对任一角色名 `HEX` 解码失败（常见于满长
+`VARBINARY(32)` 名，解码缓冲只留 31 字节）会把整次查询标 `invalid`，随后
+`query.count=0` 并回退成仅当前角色。
+
+修复：单行失败跳过/占位，满容软截断；查询失败才回退自己；`topplayerinfo`
+首字段改为 `roleId`。
+
+### 2026-08-12 PK 榜出现铜钱数（如 role8 显示 308476）
+
+库证：`role_id=8` 的 `pk_points=0`、`money=216542`；`308476` 是
+`role_id=4` 的 `money`。探测回包确认 **线上 topplayerinfo 分数本身就是错的**
+（非 Pixi 错位）：role2=`69`、role8=`308476`。
+
+根因：MySQL 文本协议字段**没有 NUL 结尾**，排行榜回调对 `values[i]` 直接
+`strtoul`。`pk_points` 在 SELECT 末列且多为 `"0"`（1 字节），最容易把 recv
+缓冲里上一包残留数字吞进去，于是 PK 榜出现等级/铜钱碎片。
+
+修复：按 `lengths[i]` 拷到临时缓冲再解析。
+
+处理（此前）：
+
+- 服务端 type≥2 分数硬编码 `pk_points`，回包增加 `type` 回显
+- 客户端丢弃 `type` 与请求不一致的 `23/7`；`beginRankFetch` 防止慢回包盖住新榜
+
 ## 5. 修改
 
 - `builtin-ranking-board23` 强制 `ordernum=3` 并发送 `orderlist`
@@ -79,3 +105,5 @@ r2 dump @ state+0x80: +0x10 orderlist array = 0
 - topplayerinfo 保持 tagged i32 + 两个字符串
 - 启动/查询时 `ALTER` 兼容补齐 `account_roles.pk_points`
 - type0 按 `exp` 排序、分数仍显示 `level`；type1/2 仍为 money/pk_points
+- 响应带 `type` 回显；PK 分数不回退 money
+- ranking MySQL 数值按 `lengths[]` 有界解析（修 PK 脏读）

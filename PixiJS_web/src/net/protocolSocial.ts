@@ -38,8 +38,13 @@ export function buildOtherEquipRequest(actorId: number): Uint8Array {
   return b.finish();
 }
 
-/** Friend page: 1/10/1 { index:u32, pageSize:u8 }. */
-export function buildFriendPageRequest(index = 0, pageSize = 20): Uint8Array {
+/** Friend page: 1/10/1 { index:u32, pageSize:u8 }. index = skip offset. */
+export const FRIEND_PAGE_SIZE = 10;
+
+export function buildFriendPageRequest(
+  index = 0,
+  pageSize = FRIEND_PAGE_SIZE,
+): Uint8Array {
   const b = new WtBuilder();
   b.object(1, 10, 1)
     .u32("index", index >>> 0)

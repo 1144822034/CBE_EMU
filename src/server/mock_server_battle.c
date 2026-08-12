@@ -8381,6 +8381,7 @@ static bool vm_mock_service_duel_resolve_committed_round(
         duel->terminalPendingMask = duel->startedMask;
         duel->terminalNotBeforeTick = g_schedulerTick + delayTicks;
         vm_mock_service_duel_arm_both_exits(duel);
+        vm_mock_enmity_record_duel_result(duel);
         if (duel->arenaMode)
             vm_mock_arena_on_duel_finished(duel);
         if (duel->wagerMode)

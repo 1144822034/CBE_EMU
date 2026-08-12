@@ -31,6 +31,8 @@ import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 const RANK_TAB_BG = 0x375946;
 const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
+const FRIEND_HUB_TABS = ["好友", "恩怨"];
+const ENMITY_DIR_TABS = ["我击杀", "击杀我"];
 /** 1金元宝 = 10000 铜（与背包金/银/铜栏同源）. */
 const COPPER_PER_GOLD = 10000;
 
@@ -44,6 +46,7 @@ function displayPeerName(name: string | undefined): string {
 export type SocialKind =
   | "nearby"
   | "friends"
+  | "enmity"
   | "team"
   | "info"
   | "otherequip"
@@ -70,7 +73,11 @@ export type SocialAction =
   | "invite_pick"
   | "equip_title"
   | "send_chat"
-  | "rank_tab";
+  | "rank_tab"
+  | "friend_hub_tab"
+  | "enmity_dir_tab"
+  | "hunt_order"
+  | "list_page";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 
@@ -78,6 +85,8 @@ const JOBS = ["天机", "幻剑", "鬼道"];
 const LIST_PAGE_SIZE = 10;
 /** Rank list rows under the tab strip. */
 const RANK_PAGE_SIZE = 9;
+/** 好友 / 恩怨：一屏一条服务端页（与 FRIEND_PAGE_SIZE / ENMITY_PAGE_SIZE 对齐）. */
+export const SOCIAL_LIST_PAGE_SIZE = LIST_PAGE_SIZE;
 
 type Mode = "list" | "actions" | "text";
 
@@ -98,6 +107,17 @@ export class SocialPanel extends Container {
   private rankTabs: string[] = RANK_DEFAULT_TABS.slice();
   private rankType = 0;
   private rankMyorder = 0;
+  /** Bumped on each rank fetch; late openRank must ignore stale replies. */
+  private rankFetchGen = 0;
+  /** 0=好友 1=恩怨（好友页顶栏）. */
+  private friendHubTab = 0;
+  /** 0=我击杀 1=击杀我. */
+  private enmityDir = 0;
+  /** 追杀令选目标模式：列表确定直接对选中仇人使用. */
+  private huntPickSeq = 0;
+  /** 好友/恩怨服务端页（1-based）. */
+  private listPage = 1;
+  private listPages = 1;
   private jinTex: Texture | null = null;
   private jinTexLoading = false;
   private toast: PanelTipState = createPanelTipState();
@@ -170,15 +190,77 @@ export class SocialPanel extends Container {
     this.openActions();
   }
 
-  openFriends(friends: FriendRow[]): void {
+  openFriends(
+    friends: FriendRow[],
+    page = 1,
+    allpgs = 1,
+    opts?: { keepHub?: boolean },
+  ): void {
     this.kind = "friends";
     this.title = "好友";
+    if (!opts?.keepHub) {
+      this.friendHubTab = 0;
+      this.huntPickSeq = 0;
+    }
+    this.listPage = Math.max(1, page | 0);
+    this.listPages = Math.max(1, allpgs | 0);
     this.rows = friends.map((f) => ({
       id: f.id,
       name: f.name,
       subtitle: `${f.online ? "在线" : "离线"} 亲密度${f.degree}`,
     }));
     this.enterList();
+  }
+
+  /**
+   * 恩怨列表（我击杀 / 击杀我）.
+   * @param huntPickSeq 非 0 时为追杀令选目标：确定即使用，不进动作菜单.
+   */
+  openEnmity(
+    rows: { id: number; name: string; online: boolean; kills: number }[],
+    dir: number,
+    huntPickSeq = 0,
+    page = 1,
+    allpgs = 1,
+  ): void {
+    this.kind = "enmity";
+    this.title = huntPickSeq ? "追杀令·选仇人" : "恩怨";
+    this.friendHubTab = 1;
+    this.enmityDir = dir === 1 ? 1 : 0;
+    this.huntPickSeq = huntPickSeq >>> 0;
+    this.listPage = Math.max(1, page | 0);
+    this.listPages = Math.max(1, allpgs | 0);
+    const verb = this.enmityDir === 1 ? "被杀" : "击杀";
+    this.rows = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      subtitle: `${r.online ? "在线" : "离线"} ${verb}×${r.kills || 1}`,
+    }));
+    this.enterList();
+  }
+
+  get enmityDirection(): number {
+    return this.enmityDir;
+  }
+
+  get friendHub(): number {
+    return this.friendHubTab;
+  }
+
+  get huntOrderPickSeq(): number {
+    return this.huntPickSeq;
+  }
+
+  get serverListPage(): number {
+    return this.listPage;
+  }
+
+  get serverListPages(): number {
+    return this.listPages;
+  }
+
+  clearHuntPick(): void {
+    this.huntPickSeq = 0;
   }
 
   openTeam(members: TeamMember[], leaderId: number): void {
@@ -209,6 +291,11 @@ export class SocialPanel extends Container {
     this.enterList();
   }
 
+  /** Call before openRanking(); pass the token into openRank when it returns. */
+  beginRankFetch(): number {
+    return ++this.rankFetchGen;
+  }
+
   /**
    * Ranking board with mall/bag-style category tabs (←→).
    * Wealth tab (type=1) paints score as gold-ingot only (omit 银/铜).
@@ -218,7 +305,15 @@ export class SocialPanel extends Container {
     tabs?: string[];
     rows: { id: number; name: string; score: string }[];
     myorder: number;
+    /** From beginRankFetch(); drop if a newer tab switch already started. */
+    fetchGen?: number;
   }): void {
+    if (
+      opts.fetchGen != null &&
+      opts.fetchGen !== this.rankFetchGen
+    ) {
+      return;
+    }
     this.kind = "rank";
     this.title = "排行榜";
     this.rankTabs =
@@ -282,18 +377,49 @@ export class SocialPanel extends Container {
     return this.rows[this.listCursor];
   }
 
-  /** ←→ on ranking — same contract as mall/bag category tabs. */
+  /** ←→ on ranking / 好友·恩怨 hub / 恩怨方向. */
   moveCategory(delta: number): void {
-    if (!this.visible || this.kind !== "rank" || this.mode !== "list") return;
-    const n = this.rankTabs.length;
-    if (n <= 1) return;
-    const next = (this.rankType + delta + n) % n;
-    if (next === this.rankType) return;
-    this.rankType = next;
-    this.onAction?.(this.kind, "rank_tab", {
-      id: next,
-      name: this.rankTabs[next] ?? `榜${next}`,
-    });
+    if (!this.visible || this.mode !== "list") return;
+    if (this.kind === "rank") {
+      const n = this.rankTabs.length;
+      if (n <= 1) return;
+      const next = (this.rankType + delta + n) % n;
+      if (next === this.rankType) return;
+      /* 先切标签并清空旧行，避免 PK 榜短暂显示财富/等级分数. */
+      this.rankType = next;
+      this.rows = [];
+      this.listCursor = 0;
+      this.rankMyorder = 0;
+      this.redraw();
+      this.onAction?.(this.kind, "rank_tab", {
+        id: next,
+        name: this.rankTabs[next] ?? `榜${next}`,
+      });
+      return;
+    }
+    if (this.kind === "friends" || this.kind === "enmity") {
+      /* Hub 好友|恩怨；恩怨页再 ←→ 切 我击杀|击杀我. */
+      if (this.kind === "enmity" && this.friendHubTab === 1 && !this.huntPickSeq) {
+        const n = ENMITY_DIR_TABS.length;
+        const next = (this.enmityDir + delta + n) % n;
+        if (next !== this.enmityDir) {
+          this.enmityDir = next;
+          this.onAction?.(this.kind, "enmity_dir_tab", {
+            id: next,
+            name: ENMITY_DIR_TABS[next] ?? "",
+          });
+          return;
+        }
+      }
+      const n = FRIEND_HUB_TABS.length;
+      const next = (this.friendHubTab + delta + n) % n;
+      if (next === this.friendHubTab) return;
+      this.friendHubTab = next;
+      this.onAction?.(this.kind, "friend_hub_tab", {
+        id: next,
+        name: FRIEND_HUB_TABS[next] ?? "",
+      });
+    }
   }
 
   private listPageStart(): number {
@@ -324,6 +450,33 @@ export class SocialPanel extends Container {
     }
     if (this.mode === "list") {
       const n = Math.max(1, this.rows.length);
+      if (
+        (this.kind === "friends" || this.kind === "enmity") &&
+        this.listPages > 1
+      ) {
+        if (delta > 0 && this.listCursor >= n - 1 && this.listPage < this.listPages) {
+          this.onAction?.(this.kind, "list_page", {
+            id: this.listPage + 1,
+            name: "next",
+          });
+          return;
+        }
+        if (delta < 0 && this.listCursor <= 0 && this.listPage > 1) {
+          this.onAction?.(this.kind, "list_page", {
+            id: this.listPage - 1,
+            name: "prev",
+          });
+          return;
+        }
+        const next = this.listCursor + delta;
+        if (next < 0 || next >= n) {
+          this.redraw();
+          return;
+        }
+        this.listCursor = next;
+        this.redraw();
+        return;
+      }
       this.listCursor = (this.listCursor + delta + n) % n;
       this.redraw();
     }
@@ -345,6 +498,13 @@ export class SocialPanel extends Container {
     }
     // Ranking: tabs switch via ←→; 确定 is a no-op on the list.
     if (this.mode === "list" && this.kind === "rank") {
+      return;
+    }
+    if (this.mode === "list" && this.kind === "enmity" && this.huntPickSeq) {
+      const row = this.rows[this.listCursor];
+      if (row && row.id) {
+        this.onAction?.(this.kind, "hunt_order", row);
+      }
       return;
     }
     if (this.mode === "list") {
@@ -430,6 +590,11 @@ export class SocialPanel extends Container {
         "返回",
       ];
     }
+    if (this.kind === "enmity") {
+      const row = this.rows[this.listCursor];
+      if (!row || row.id === 0) return ["返回"];
+      return ["玩家信息", "查看装备", "切磋", "返回"];
+    }
     if (this.kind === "titles") {
       return ["装备称号", "返回"];
     }
@@ -509,6 +674,11 @@ export class SocialPanel extends Container {
         return;
       }
 
+      if (this.kind === "friends" || this.kind === "enmity") {
+        this.drawFriendHubList(x, y, w, h);
+        return;
+      }
+
       if (!this.rows.length) {
         this.addLabel("(空)", x + 10, y + 40, CBE.inkMint);
         return;
@@ -562,6 +732,146 @@ export class SocialPanel extends Container {
       }
     } finally {
       drawPanelTipOverlay(this, this.toast);
+    }
+  }
+
+  private drawFriendHubList(x: number, y: number, w: number, h: number): void {
+    const tabY = y + 30;
+    const tabH = 20;
+    this.drawGenericTabs(
+      x + 6,
+      tabY,
+      w - 12,
+      tabH,
+      FRIEND_HUB_TABS,
+      this.friendHubTab,
+      (idx) => {
+        if (idx === this.friendHubTab) return;
+        const delta = idx - this.friendHubTab;
+        this.friendHubTab = idx;
+        this.onAction?.(this.kind, "friend_hub_tab", {
+          id: idx,
+          name: FRIEND_HUB_TABS[idx] ?? "",
+        });
+        void delta;
+      },
+    );
+
+    let listTop = tabY + tabH + 4;
+    if (this.kind === "enmity" && !this.huntPickSeq) {
+      this.drawGenericTabs(
+        x + 6,
+        listTop,
+        w - 12,
+        tabH,
+        ENMITY_DIR_TABS,
+        this.enmityDir,
+        (idx) => {
+          if (idx === this.enmityDir) return;
+          this.enmityDir = idx;
+          this.onAction?.(this.kind, "enmity_dir_tab", {
+            id: idx,
+            name: ENMITY_DIR_TABS[idx] ?? "",
+          });
+        },
+      );
+      listTop += tabH + 4;
+    }
+
+    const footY = y + h - 18;
+    if (!this.rows.length) {
+      this.addLabel(
+        this.kind === "enmity" ? "(暂无恩怨)" : "(暂无好友)",
+        x + 10,
+        listTop + 8,
+        CBE.inkMint,
+      );
+    } else {
+      /* 一屏 = 一服务端页，不再二次本地切片. */
+      const total = this.rows.length;
+      const localCursor = Math.min(this.listCursor, total - 1);
+      this.listCursor = localCursor;
+      this.rows.forEach((row, i) => {
+        const hi = i === localCursor;
+        const ry = listTop + i * 20;
+        if (hi) {
+          this.box.rect(x + 6, ry, w - 12, 18).fill({ color: CBE.select });
+        }
+        this.addLabel(
+          row.name.slice(0, 12),
+          x + 10,
+          ry + 2,
+          hi ? CBE.ink : CBE.inkMint,
+        );
+        if (row.subtitle) {
+          this.addLabel(
+            row.subtitle.slice(0, 14),
+            x + 100,
+            ry + 2,
+            CBE.inkLabel,
+          );
+        }
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 6, ry, w - 12, 18, () => {
+            this.listCursor = i;
+            this.redraw();
+            this.confirm();
+          }),
+        );
+      });
+    }
+    const pageHint =
+      this.listPages > 1
+        ? `↑↓翻页 ${this.listPage}/${this.listPages}`
+        : this.rows.length
+          ? `↑↓ ${this.listCursor + 1}/${this.rows.length}`
+          : "";
+    if (pageHint) {
+      this.addLabel(pageHint, x + 10, footY - 14, CBE.inkLabel);
+    }
+    const hint = this.huntPickSeq
+      ? "确定=使用追杀令"
+      : this.kind === "enmity"
+        ? "←→切方向  顶栏切好友"
+        : "←→切恩怨";
+    this.addLabel(hint, x + 10, footY, CBE.inkLabel);
+  }
+
+  private drawGenericTabs(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    tabs: string[],
+    active: number,
+    onPick: (idx: number) => void,
+  ): void {
+    const n = tabs.length;
+    if (n <= 0) return;
+    const gap = 2;
+    const tw = Math.floor((w - gap * (n - 1)) / n);
+    for (let i = 0; i < n; i++) {
+      const label = tabs[i] || `页${i}`;
+      const tx = x + i * (tw + gap);
+      const isActive = i === active;
+      this.box
+        .roundRect(tx, y, tw, h, 2)
+        .fill({ color: isActive ? CBE.bgPanelDark : RANK_TAB_BG })
+        .stroke({
+          width: 1,
+          color: isActive ? CBE.borderBright : CBE.borderDim,
+        });
+      const text = isActive ? label.slice(0, 4) : label.slice(0, 1);
+      this.addLabelCentered(
+        text,
+        tx + tw / 2,
+        y + h / 2,
+        isActive ? CBE.ink : CBE.inkMint,
+      );
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, tx, y, tw, h, () => onPick(idx)),
+      );
     }
   }
 
@@ -625,7 +935,13 @@ export class SocialPanel extends Container {
     }
 
     const my =
-      this.rankMyorder > 0 ? `我的名次 ${this.rankMyorder}` : "我的名次 -";
+      this.rankType >= 2
+        ? this.rankMyorder > 0
+          ? `我的PK ${this.rankMyorder}`
+          : "我的PK 0"
+        : this.rankMyorder > 0
+          ? `我的名次 ${this.rankMyorder}`
+          : "我的名次 -";
     this.addLabel(my, x + 10, footY, CBE.inkTip);
     this.addLabel("←→切换榜", x + w - 72, footY, CBE.inkLabel);
   }
@@ -761,6 +1077,8 @@ function labelToAction(label: string): SocialAction {
       return "equip_title";
     case "发送消息":
       return "send_chat";
+    case "追杀":
+      return "hunt_order";
     default:
       return "refresh";
   }

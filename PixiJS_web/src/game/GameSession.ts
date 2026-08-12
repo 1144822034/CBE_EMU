@@ -259,6 +259,7 @@ import {
   parseTradePackets,
   parseSparAck,
   parseGuildCreatePackets,
+  FRIEND_PAGE_SIZE,
   type FriendRow,
   type OtherEquipView,
   type PlayerInfoView,
@@ -268,6 +269,15 @@ import {
   type TeamRoster,
   type TradeSessionUpdate,
 } from "../net/protocolSocial";
+import {
+  buildEnmityPageRequest,
+  buildHuntOrderUseRequest,
+  parseEnmityPage,
+  parseHuntOrderResult,
+  HUNT_ORDER_ITEM_ID,
+  ENMITY_PAGE_SIZE,
+  type EnmityRow,
+} from "../net/protocolEnmity";
 import {
   parseGuildManagePackets,
   GUILD_PAGE_SIZE,
@@ -354,6 +364,7 @@ export type SessionCallbacks = {
   onNearbyPage?: (page: { peers: PeerActor[]; allpgs: number }) => void;
   onTeamUpdate?: (roster: TeamRoster) => void;
   onFriends?: (friends: FriendRow[]) => void;
+  onEnmity?: (page: { dir: number; rows: EnmityRow[] }) => void;
   onSocialInvite?: (invite: SocialInvite) => void;
   onSocialNotice?: (notice: SocialNotice) => void;
   onTradeSession?: (update: TradeSessionUpdate) => void;
@@ -439,6 +450,13 @@ export class GameSession {
   teamLeaderId = 0;
   /** Friend list cache (10/1). */
   friends: FriendRow[] = [];
+  friendPage = 1;
+  friendAllPages = 1;
+  /** Enmity list cache (43/1). */
+  enmityRows: EnmityRow[] = [];
+  enmityDir = 0;
+  enmityPage = 1;
+  enmityAllPages = 1;
   /** Title page cache (23/1). */
   designationPage: DesignationPage | null = null;
   arenaHud: ArenaHud | null = null;
@@ -3807,13 +3825,54 @@ export class GameSession {
     this.handleBodies(bodies);
   }
 
-  async openFriends(index = 0): Promise<void> {
+  async openFriends(page = 1): Promise<void> {
     if (!this.transport) return;
+    const p = Math.max(1, page | 0);
+    this.friendPage = p;
+    const index = (p - 1) * FRIEND_PAGE_SIZE;
     const bodies = await this.transport.exchange(
       0,
-      buildFriendPageRequest(index, 20),
+      buildFriendPageRequest(index, FRIEND_PAGE_SIZE),
     );
     this.handleBodies(bodies);
+  }
+
+  async openEnmity(dir = 0, page = 1): Promise<void> {
+    if (!this.transport) return;
+    const p = Math.max(1, page | 0);
+    this.enmityDir = dir === 1 ? 1 : 0;
+    this.enmityPage = p;
+    const index = (p - 1) * ENMITY_PAGE_SIZE;
+    const bodies = await this.transport.exchange(
+      0,
+      buildEnmityPageRequest(this.enmityDir, index, ENMITY_PAGE_SIZE),
+    );
+    this.handleBodies(bodies);
+  }
+
+  async useHuntOrder(seq: number, targetId: number): Promise<ItemUseFeedback> {
+    if (!this.transport) {
+      return { ok: false, message: "未连接服务器" };
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildHuntOrderUseRequest(seq, targetId, HUNT_ORDER_ITEM_ID),
+    );
+    let fb: ItemUseFeedback = { ok: false, message: "追杀令无响应" };
+    for (const body of bodies) {
+      try {
+        const hunt = parseHuntOrderResult(decodeWtPacket(body));
+        if (hunt) {
+          fb = { ok: hunt.ok, message: hunt.tip };
+          break;
+        }
+      } catch {
+        /* try next */
+      }
+    }
+    if (fb.ok) this.handleBodies(bodies);
+    this.emitItemUseFeedback(fb);
+    return fb;
   }
 
   async friendAdd(actorId: number): Promise<void> {
@@ -4494,7 +4553,20 @@ export class GameSession {
       const friendPage = parseFriendPage(packet);
       if (friendPage) {
         this.friends = friendPage.friends;
+        this.friendAllPages = Math.max(1, friendPage.allpgs | 0);
+        if (this.friendPage > this.friendAllPages)
+          this.friendPage = this.friendAllPages;
         this.cb.onFriends?.(friendPage.friends);
+      }
+
+      const enmityPage = parseEnmityPage(packet);
+      if (enmityPage) {
+        this.enmityRows = enmityPage.rows;
+        this.enmityDir = enmityPage.dir;
+        this.enmityAllPages = Math.max(1, enmityPage.allPages | 0);
+        if (this.enmityPage > this.enmityAllPages)
+          this.enmityPage = this.enmityAllPages;
+        this.cb.onEnmity?.({ dir: enmityPage.dir, rows: enmityPage.rows });
       }
 
       const friendInv = parseFriendInvitePackets(packet);

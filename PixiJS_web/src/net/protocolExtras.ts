@@ -3026,10 +3026,26 @@ export type RankingPage = {
 
 export function parseRankingBoard(
   packet: WtPacket,
-  requestType = 0,
+  requestType?: number,
 ): RankingPage | null {
   const obj = packet.objects.find((o) => o.kind === 23 && o.subtype === 7);
   if (!obj) return null;
+  /* Server echoes request type (u8). Prefer it; when caller passes the
+   * openRanking() type, reject stale bodies (wealth under PK label). */
+  const echoedType = fieldU32(obj, "type");
+  const hasEcho = !!findField(obj, "type");
+  if (
+    hasEcho &&
+    requestType != null &&
+    echoedType !== (requestType & 0xff)
+  ) {
+    console.warn(
+      `[rank] drop 23/7 type mismatch req=${requestType} echo=${echoedType}`,
+    );
+    return null;
+  }
+  const boardType =
+    hasEcho ? echoedType : requestType != null ? requestType : 0;
   const ordernum = fieldU32(obj, "ordernum");
   const orderlist = findField(obj, "orderlist");
   const tabs: string[] = [];
@@ -3073,9 +3089,18 @@ export function parseRankingBoard(
       }
     }
   }
+  if (boardType >= 2) {
+    const odd = rows.filter((r) => r.score !== "0").slice(0, 5);
+    if (odd.length) {
+      console.warn(
+        "[rank] PK board non-zero scores (expected pk_points)",
+        odd.map((r) => ({ id: r.roleId, score: r.score })),
+      );
+    }
+  }
   return {
     tabs: tabs.length ? tabs : ["等级榜", "财富榜", "PK榜"],
-    type: requestType,
+    type: boardType,
     myorder: fieldU32(obj, "myorder"),
     colnames,
     pagemax: fieldU32(obj, "pagemax"),

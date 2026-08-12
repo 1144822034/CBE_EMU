@@ -10285,6 +10285,22 @@ static bool vm_net_mock_is_ranking_board23_request(const u8 *request, u32 reques
     return offset == requestLen;
 }
 
+/* MySQL text protocol values are NOT NUL-terminated; only lengths[i] is safe. */
+static u32 vm_net_mock_ranking_parse_u32_field(const char *value, size_t len,
+                                               char *tmp, size_t tmpCap)
+{
+    size_t n;
+
+    if (value == NULL || tmp == NULL || tmpCap < 2)
+        return 0;
+    n = len;
+    if (n >= tmpCap)
+        n = tmpCap - 1;
+    memcpy(tmp, value, n);
+    tmp[n] = 0;
+    return (u32)strtoul(tmp, NULL, 10);
+}
+
 static bool vm_net_mock_ranking_board_mysql_row(void *contextValue,
                                                 unsigned int columnCount,
                                                 const char *const *values,
@@ -10294,6 +10310,8 @@ static bool vm_net_mock_ranking_board_mysql_row(void *contextValue,
         (vm_net_mock_ranking_query_context *)contextValue;
     vm_net_mock_ranking_row *row;
     size_t nameLen = 0;
+    char nameBuf[96];
+    char numBuf[24];
 
     if (context == NULL || context->invalid)
         return true;
@@ -10301,26 +10319,51 @@ static bool vm_net_mock_ranking_board_mysql_row(void *contextValue,
         values[0] == NULL || values[1] == NULL || values[2] == NULL ||
         values[3] == NULL || values[4] == NULL)
     {
-        context->invalid = true;
+        /* Skip a bad row; do not invalidate the whole board (that used to
+         * wipe successful rows and fall back to "only me"). */
         return true;
     }
-    if (context->count >= context->capacity || context->rows == NULL)
+    if (context->rows == NULL)
     {
         context->invalid = true;
         return true;
     }
+    /* Soft-cap: stop accepting more rows without failing the query. */
+    if (context->count >= context->capacity)
+        return true;
     row = &context->rows[context->count];
     memset(row, 0, sizeof(*row));
-    row->roleId = (u32)strtoul(values[0], NULL, 10);
-    if (!vm_mysql_hex_decode(values[1], lengths[1], row->name, sizeof(row->name) - 1, &nameLen))
-    {
-        context->invalid = true;
+    /* MySQL text fields are length-coded and NOT NUL-terminated. strtoul
+     * on values[i] can swallow leftover digits from a previous longer
+     * packet in the reused recv buffer — pk_points is last and usually
+     * "0", so PK board showed random money/level fragments (e.g. 308476,
+     * 69). Always copy through a bounded buffer first. */
+    row->roleId = vm_net_mock_ranking_parse_u32_field(values[0], lengths[0],
+                                                       numBuf, sizeof(numBuf));
+    if (row->roleId == 0)
         return true;
+    memset(nameBuf, 0, sizeof(nameBuf));
+    if (!vm_mysql_hex_decode(values[1], lengths[1], nameBuf, sizeof(nameBuf) - 1,
+                              &nameLen))
+    {
+        /* Odd/overlong HEX: keep a placeholder instead of killing the board. */
+        snprintf(row->name, sizeof(row->name), "Player");
     }
-    row->name[nameLen] = 0;
-    row->level = (u32)strtoul(values[2], NULL, 10);
-    row->money = (u32)strtoul(values[3], NULL, 10);
-    row->pkPoints = (u32)strtoul(values[4], NULL, 10);
+    else
+    {
+        if (nameLen >= sizeof(row->name))
+            nameLen = sizeof(row->name) - 1;
+        memcpy(row->name, nameBuf, nameLen);
+        row->name[nameLen] = 0;
+        if (row->name[0] == 0)
+            snprintf(row->name, sizeof(row->name), "Player");
+    }
+    row->level = vm_net_mock_ranking_parse_u32_field(values[2], lengths[2],
+                                                      numBuf, sizeof(numBuf));
+    row->money = vm_net_mock_ranking_parse_u32_field(values[3], lengths[3],
+                                                      numBuf, sizeof(numBuf));
+    row->pkPoints = vm_net_mock_ranking_parse_u32_field(values[4], lengths[4],
+                                                         numBuf, sizeof(numBuf));
     context->count++;
     return true;
 }
@@ -10331,12 +10374,17 @@ static u32 vm_net_mock_ranking_board_metric(u8 type, const vm_net_mock_ranking_r
         return 0;
     /* Tab names are orderlist entries; type indexes that table.
      * type0 sorted by exp, score shown as level; type1=money;
-     * type2=pk_points (UI label "PK点数为:"). */
-    if (type == 0)
+     * type2+=pk_points only (never fall back to money — Pixi PK tab
+     * shows raw score text, so a money leak looks like a huge PK value). */
+    switch (type)
+    {
+    case 0:
         return row->level;
-    if (type == 1)
+    case 1:
         return row->money;
-    return row->pkPoints;
+    default:
+        return row->pkPoints;
+    }
 }
 
 static const char *vm_net_mock_ranking_board_metric_name(u8 type)
@@ -10413,19 +10461,28 @@ static u32 vm_net_mock_build_ranking_board23_response(const u8 *request, u32 req
              "ORDER BY %s DESC, role_id ASC LIMIT %u",
              vm_net_mock_ranking_board_order_column(requestType),
              VM_NET_MOCK_RANKING_MAX_ROWS);
-    if (!vm_mysql_query(querySql, vm_net_mock_ranking_board_mysql_row, &query) || query.invalid)
+    if (!vm_mysql_query(querySql, vm_net_mock_ranking_board_mysql_row, &query))
     {
+        printf("[warn][network] mock_ranking_board23 query_failed type=%u error=%s\n",
+               requestType, vm_mysql_last_error());
         query.count = 0;
-        if (role != NULL && role->roleId != 0)
-        {
-            rows[0].roleId = role->roleId;
-            rows[0].level = role->level;
-            rows[0].money = role->money;
-            rows[0].pkPoints = 0;
-            snprintf(rows[0].name, sizeof(rows[0].name), "%s",
-                     role->name[0] ? role->name : "role");
-            query.count = 1;
-        }
+    }
+    if (query.invalid)
+    {
+        printf("[warn][network] mock_ranking_board23 query_invalid type=%u "
+               "kept_rows=%u\n",
+               requestType, query.count);
+        /* Keep any rows already accepted; only seed self if completely empty. */
+    }
+    if (query.count == 0 && role != NULL && role->roleId != 0)
+    {
+        rows[0].roleId = role->roleId;
+        rows[0].level = role->level;
+        rows[0].money = role->money;
+        rows[0].pkPoints = 0;
+        snprintf(rows[0].name, sizeof(rows[0].name), "%s",
+                 role->name[0] ? role->name : "role");
+        query.count = 1;
     }
 
     totalCount = query.count;
@@ -10471,14 +10528,26 @@ static u32 vm_net_mock_build_ranking_board23_response(const u8 *request, u32 req
     {
         const vm_net_mock_ranking_row *row = &rows[pageStart + i];
         char scoreText[16];
-        u32 rankNo = pageStart + i + 1;
         u32 metric = vm_net_mock_ranking_board_metric(requestType, row);
 
+        /* Hard fence: PK board score must be pk_points even if metric helper
+         * is ever wrong — wealth copper (e.g. 308476) must not appear here. */
+        if (requestType >= 2)
+            metric = row->pkPoints;
         if (!vm_net_mock_ranking_board_append_score(scoreText, sizeof(scoreText), metric))
             return 0;
-        /* topplayerinfo row = tagged i32 + name + score
+        if (requestType >= 2 && (row->roleId == 4u || row->roleId == 8u ||
+                                 (row->money != 0 && metric == row->money)))
+        {
+            printf("[info][network] mock_ranking_board23 sample type=%u role=%u "
+                   "pk=%u money=%u score=%u name=%s\n",
+                   requestType, row->roleId, row->pkPoints, row->money, metric,
+                   row->name);
+        }
+        /* topplayerinfo row = tagged i32 roleId + name + score
          * (stream+0x20=read_i32_be_tagged, then two cstr_len16). */
-        if (!vm_net_mock_seq_put_u32(topInfo, sizeof(topInfo), &topInfoLen, rankNo) ||
+        if (!vm_net_mock_seq_put_u32(topInfo, sizeof(topInfo), &topInfoLen,
+                                     row->roleId) ||
             !vm_net_mock_seq_put_string(topInfo, sizeof(topInfo), &topInfoLen, row->name) ||
             !vm_net_mock_seq_put_string(topInfo, sizeof(topInfo), &topInfoLen, scoreText))
             return 0;
@@ -10487,6 +10556,9 @@ static u32 vm_net_mock_build_ranking_board23_response(const u8 *request, u32 req
         return 0;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 7, &objectStart))
+        return 0;
+    /* Echo request type so Pixi can drop mismatched/stale 23/7 bodies. */
+    if (!vm_net_mock_put_object_u8(out, outCap, &pos, "type", requestType))
         return 0;
     if (!vm_net_mock_put_object_u8(out, outCap, &pos, "ordernum",
                                    (u8)VM_NET_MOCK_RANKING_TAB_COUNT))

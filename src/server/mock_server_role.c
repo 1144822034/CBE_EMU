@@ -9857,7 +9857,8 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
     /* Mall warehouse pass: one backpack row, count = remaining durability. */
     if (itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID ||
         itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID ||
-        itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID)
+        itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
+        itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
     {
         u32 freeSlots = role->backpackCapacity > itemCount
                             ? (u32)role->backpackCapacity - itemCount
@@ -9866,18 +9867,22 @@ static bool vm_net_mock_role_add_backpack_item_to_role(vm_net_mock_role_state *r
         u32 passDurability =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
                 ? VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY
-                : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID
-                       ? VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_DURABILITY
+                : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
+                           itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID
+                       ? VM_NET_MOCK_HUNT_ORDER_DURABILITY
                        : VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY);
         const char *saveReason =
             itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID
                 ? "backpack-add-equip-sell-pass"
                 : (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID
                        ? "backpack-add-spar-substitute-doll"
-                       : "backpack-add-warehouse-pass");
+                       : (itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID
+                              ? "backpack-add-hunt-order"
+                              : "backpack-add-warehouse-pass"));
 
-        /* 替身人偶：耐久1，叠加入已有堆或新行（count=剩余次数）。 */
-        if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID)
+        /* 替身人偶 / 追杀令：耐久1，叠加入已有堆或新行（count=剩余次数）。 */
+        if (itemId == VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID ||
+            itemId == VM_NET_MOCK_HUNT_ORDER_ITEM_ID)
         {
             vm_net_mock_backpack_item_state *existing =
                 vm_net_mock_role_find_backpack_item(role, itemId, 0);

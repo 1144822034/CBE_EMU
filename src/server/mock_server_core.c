@@ -4819,6 +4819,10 @@ enum
 /* Mall 替身人偶 (item.dsh:846): durability 1; auto-consume to cancel one spar. */
 #define VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_ITEM_ID  846u
 #define VM_NET_MOCK_SPAR_SUBSTITUTE_DOLL_DURABILITY 1u
+/* Pixi 自定义：江湖追杀令 — 对仇人使用显示其所在地图；耐久1；离线不扣。 */
+#define VM_NET_MOCK_HUNT_ORDER_ITEM_ID            847u
+#define VM_NET_MOCK_HUNT_ORDER_DURABILITY         1u
+#define VM_NET_MOCK_HUNT_ORDER_SHOP_PRICE         50u
 /* Initiator cooldown after a successful nearby spar start. */
 #define VM_NET_MOCK_SPAR_INITIATE_COOLDOWN_MS     (5u * 60u * 1000u)
 /* OPEN_CATEGORY value layout (low 24 bits):
