@@ -18,11 +18,13 @@ occupied-slot replacement from the distinct `WT 1/7/9 + 1/2/10` transaction.
 - `JianghuOL.CBE:0x01033544 HandleItemOperationResponse`
   - dispatches on response object subtype.
   - subtype `8` reads field `type`.
-  - `type == 3` is the equip branch:
+- `type == 3` is the equip branch:
     - reads `result`;
     - if `result == 1`, copies the pending backpack item from `R9+38024`;
     - calls the equipment-manager operation at item manager vtable `+104`;
-    - reads field `seq` and writes it into the equipped item at `+276`;
+    - reads field `seq` and writes it into the equipped item at `+276`.
+      This must be the fixed equipment-row identity `slot + 1`, rather than
+      the source backpack sequence;
     - calls the pending UI callback at `R9+38028`;
     - rebuilds the status meter and clears the wait flag.
   - `type == 4` is the add-to-backpack branch used by unequip/acquire:
@@ -109,6 +111,7 @@ Equip (`type=3`):
 - writes the item id to `role->equippedItemIds[slot]`;
 - returns the previously equipped item in that slot to the backpack when there
   is capacity or an existing stack;
+- returns `seq = slot + 1` in `7/8`, matching the equipment list namespace;
 - syncs derived HP/MP/stat caps;
 - saves the role DB with reason `item-equip`.
 

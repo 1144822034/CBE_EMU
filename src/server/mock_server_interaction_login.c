@@ -664,6 +664,48 @@ static bool vm_net_mock_get_shop_return_persisted_position(const char *scene,
     return true;
 }
 
+/*
+ * mmShop returns to mmGame through the normal scene-enter lifecycle.  Do not
+ * use a position-bearing 30/2 here: its client parser recreates the scene and
+ * immediately resets the download state, which leaves the freshly allocated
+ * map-layer table holding encoded resource ids (for example 0x00010001).
+ *
+ * 30/1 owns the new scene shell.  The matching post-enter request is the
+ * first point at which the server may send the final position-bearing 30/2
+ * completion: that request has otherwise restored the SCE default landing.
+ * This is the same ordering used by resource-backed scene transitions.
+ */
+static u32 vm_net_mock_build_shop_scene_return_enter_response(
+    u8 *out, u32 outCap, const char *scene, u16 x, u16 y,
+    const char *source)
+{
+    u32 pos = 5;
+    u8 objectCount = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_append_scene_enter_object_for_scene(
+            out, outCap, &pos, scene, x, y))
+    {
+        return 0;
+    }
+    objectCount = 1;
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+    vm_mock_service_arm_shop_scene_return_post_enter(
+        scene, x, y, source ? source : "shop-return-30-1");
+    /* The 30/1 helper armed the new shell's NPC catalog.  Retire only the
+     * shop-open provenance; the post-enter marker remains authoritative. */
+    vm_mock_service_complete_shop_scene_return(scene,
+                                               source ? source : "shop-return-30-1");
+    printf("[info][network] mock_shop_return_scene_enter scene=%s "
+           "pos=(%u,%u) objects=%u resp=%u source=%s "
+           "contract=30/1-posinfo-then-post-enter-30/2-posinfo\n",
+           scene, (u32)x, (u32)y, (u32)objectCount, pos,
+           source ? source : "-");
+    return pos;
+}
+
 static int vm_net_mock_append_scene_ready_chat_objects(u8 *out,
                                                         u32 outCap,
                                                         u32 *pos,
@@ -930,6 +972,14 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
                currentScene ? currentScene : "-");
         return 0;
     }
+    if (shopReturnReload)
+    {
+        /* The scene shell does not exist yet.  In particular, no NPC/task or
+         * actor object may be delivered before this 30/1 has installed it. */
+        return vm_net_mock_build_shop_scene_return_enter_response(
+            out, outCap, currentScene, shopReturnX, shopReturnY,
+            "scene-resource-followup");
+    }
     /* See the paired direct-map-stone completion response. That WT2/3 sends
      * the required empty 27/11 gate object and leaves this one-shot catalog
      * pending. WT6/1 is the first client-requested scene-runtime phase after
@@ -996,49 +1046,18 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         {
             return 0;
         }
-        if (shopReturnReload)
-        {
-            /*
-             * A real mmShop -> mmGame return creates a new scene shell.  The
-             * historical no-posinfo 30/2 merely ran ResetDownloadState(),
-             * leaving mmShop's payment/module callback installed even though
-             * the old scene was visible again.  A later battle entry then
-             * consumed that stale callback and reloaded mmShop before
-             * mmBattle's first frame.  The subtype-2 result with posinfo is
-             * the matching native scene-reenter contract: CBE
-             * scene_handle_change_result_scene_pos(0x01039770) invokes the
-             * scene entry vtable only when posinfo is present.
-             */
-            if (!vm_net_mock_append_scene_pos_result_object_for_scene(
-                    out, outCap, &pos, currentScene,
-                    shopReturnX, shopReturnY))
-            {
-                return 0;
-            }
-            objectCount += 1;
-            printf("[info][network] mock_shop_return_reenter_pos scene=%s "
-                   "pos=(%u,%u) source=persisted-role completion=30/2-posinfo\n",
-                   currentScene, (u32)shopReturnX, (u32)shopReturnY);
-        }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        if (shopReturnReload)
-        {
-            vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
-            vm_mock_service_complete_shop_scene_return(
-                currentScene, "scene-resource-repeat-ack");
-        }
         printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u completion=%s\n",
                currentScene,
                objectCount,
                pos,
                g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
                recentCompletedScene ? 1u : 0u,
-               shopReturnReload ? 1u : 0u,
-               shopReturnReload ? "30/2-posinfo-reenter" : "none");
+               0u, "none");
         vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
                           currentScene,
                           objectCount,
-                          shopReturnReload ? "resource-followup+30/2-posinfo-reenter" : "resource-followup-no-30/1",
+                          "resource-followup-no-30/1",
                           g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick);
         return pos;
     }
@@ -1245,6 +1264,9 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     if (shopReturnReload)
     {
+        vm_mock_service_arm_shop_scene_return_post_enter(
+            currentScene, shopReturnX, shopReturnY,
+            "scene-resource-followup");
         vm_mock_service_complete_shop_scene_return(
             currentScene, "scene-resource-followup");
     }
@@ -1428,6 +1450,15 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                responseScene ? responseScene : "-");
         return 0;
     }
+    if (shopReturnReload)
+    {
+        /* See vm_net_mock_build_shop_scene_return_enter_response(): this
+         * request is still owned by the outgoing shop shell, so it may only
+         * start the new scene.  Its post-enter request owns all scene data. */
+        return vm_net_mock_build_shop_scene_return_enter_response(
+            out, outCap, responseScene, shopReturnX, shopReturnY,
+            "scene-task-subset-followup");
+    }
     /* scene_runtime_init_and_sync(0x01012FB4) issues this subset only after
      * rebuilding the 25-node scene table. Put 27/11 before 6/1 and 6/14 so
      * their prompt refresh sees the freshly created NPC nodes. */
@@ -1471,25 +1502,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
                                                               seedSubsetNpcOther,
                                                               startupNearbyInRequestedObject))
         return 0;
-
-    if (shopReturnReload)
-    {
-        /* The common return path is this WT6/1 subset.  Unlike a post-enter
-         * repeat acknowledgement, it must re-enter the scene so mmShop can
-         * relinquish its module callback before the player can use a scene
-         * action.  Keep the existing subtype-2 request/result identity and
-         * provide the player's authoritative persisted position. */
-        if (!vm_net_mock_append_scene_pos_result_object_for_scene(
-                out, outCap, &pos, responseScene,
-                shopReturnX, shopReturnY))
-        {
-            return 0;
-        }
-        objectCount += 1;
-        printf("[info][network] mock_shop_return_reenter_pos scene=%s "
-               "pos=(%u,%u) source=persisted-role completion=30/2-posinfo\n",
-               responseScene, (u32)shopReturnX, (u32)shopReturnY);
-    }
 
     if (completeDeferredScene)
     {
@@ -1604,16 +1616,6 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    if (shopReturnReload)
-    {
-        vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
-        vm_mock_service_complete_shop_scene_return(
-            currentScene, "scene-task-subset-followup");
-        printf("[info][network] mock_shop_return_task_subset_complete "
-               "scene=%s objects=%u resp=%u completion=30/2-posinfo-reenter "
-               "evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
-               currentScene, objectCount, pos);
-    }
     if (startupSceneAlreadyEntered && !completeDeferredScene)
         vm_net_mock_complete_startup_scene_followup(currentScene,
                                                     "scene-task-subset-followup",

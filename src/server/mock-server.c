@@ -87,6 +87,12 @@ static void vm_net_mock_scene_hangup_on_scene_default_event(void);
 static u32 vm_net_mock_build_pending_scene_hangup_battle_response(
     u8 *out, u32 outCap, vm_mock_service_client_session *observer);
 
+/* The task-hall room confirmation itself cannot arm the in-game module's
+ * native 30/9 -> 30/10 battle-entry edge.  Arena owns the room lease; social
+ * owns the scene-sync poll that delivers this strictly scene-owned prompt. */
+static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer);
+
 #include "mock_server_social.c"
 #include "mock_server_battle.c"
 #include "mock_server_arena.c"

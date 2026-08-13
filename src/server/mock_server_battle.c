@@ -735,11 +735,23 @@ static u8 vm_net_mock_battle_apply_player_friendly_single_heal_target(
         return 1;
     }
 
-    /* A solo battle has no legitimate selected ally.  Keep the native action
-     * contract (one zero-delta spell child) rather than silently redirecting
-     * the spell into an enemy attack. */
+    /* In a solo battle the caster is the only legal friendly target.  The
+     * previous branch treated that as "no selected ally" and emitted a zero
+     * delta, so 清风拂体 spent MP and played its effect without recovering HP.
+     * Keep the target on the caster, but apply the same max-HP-clamped healing
+     * formula as the party path.  A revive remains a party-only action: a
+     * defeated solo actor cannot issue this operation. */
     targetWireSlots[0] = playerWireSlot;
-    healValues[0] = 0;
+    if (!revive)
+    {
+        healValues[0] = vm_net_mock_battle_player_skill_heal_to_role(
+            operate, g_mockBattleRoleHpCurrent, g_mockBattleRoleHpMax);
+        g_mockBattleRoleHpCurrent += healValues[0];
+    }
+    else
+    {
+        healValues[0] = 0;
+    }
     return 1;
 }
 
@@ -2501,9 +2513,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     {
         vm_net_mock_battle_reset_enemy_hp_from_stats(g_vm_net_mock_battle_enemy_id_current);
     }
-    if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
-        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
-                                                        vm_net_mock_role_current_hp_for_battle());
+    /* A zero battle HP is a terminal state, not a missing initial value.
+     * The lethal 4/6 already carries the matching type-3 death action.  Do
+     * not reload HP here when a later input reaches the same battle session. */
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent > 0)
         requestedTargetSlot = vm_net_mock_battle_select_live_enemy_wire(requestedTargetSlot,
                                                                         playerOnRight,
@@ -2533,7 +2545,6 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
         if (counterDamageValue == 0)
             counterRecordChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
-        counterHpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_A", counterHpDelta);
         counterRecordMpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_B", 0);
         g_mockBattlePendingEnemyTurn = 0;
         ++g_mockBattleOperateTurnCounter;
@@ -2684,8 +2695,9 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                          vm_net_mock_battle_negative_delta_u32(attackDamageValue));
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
     }
-    attackHpDelta = vm_net_mock_env_u32("CBE_BATTLE_FIRST_VALUE_A", attackHpDelta);
-    counterHpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_A", counterHpDelta);
+    /* HP deltas in actioninfo must be the exact values already applied to
+     * the authoritative battle state.  Test overrides here made the client
+     * animate HP below zero even though the server had clamped the hit. */
     skillMpDelta = vm_net_mock_env_u32("CBE_BATTLE_SKILL_MP_VALUE_B",
                                        skillMpPrepared ? skillMpAfter :
                                                          vm_net_mock_battle_role_mp_current());
@@ -3313,9 +3325,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     {
         vm_net_mock_battle_reset_enemy_hp_from_stats(g_vm_net_mock_battle_enemy_id_current);
     }
-    if (!terminalFollowup && g_mockBattleRoleHpCurrent == 0)
-        g_mockBattleRoleHpCurrent = vm_net_mock_env_u32("CBE_BATTLE_ROLE_HP",
-                                                        vm_net_mock_role_current_hp_for_battle());
+    /* Keep zero HP terminal in the lenient 4/2 parser as well; it must have
+     * the same lifecycle as the strict parser above. */
     if (!terminalFollowup && g_mockBattleEnemyHpCurrent > 0)
         requestedTargetSlot = vm_net_mock_battle_select_live_enemy_wire(requestedTargetSlot,
                                                                         playerOnRight,
@@ -3345,7 +3356,6 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
         if (counterDamageValue == 0)
             counterRecordChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
-        counterHpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_A", counterHpDelta);
         counterRecordMpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_B", 0);
         g_mockBattlePendingEnemyTurn = 0;
         ++g_mockBattleOperateTurnCounter;
@@ -3495,8 +3505,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                          vm_net_mock_battle_negative_delta_u32(attackDamageValue));
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
     }
-    attackHpDelta = vm_net_mock_env_u32("CBE_BATTLE_FIRST_VALUE_A", attackHpDelta);
-    counterHpDelta = vm_net_mock_env_u32("CBE_BATTLE_COUNTER_VALUE_A", counterHpDelta);
+    /* Never let a response-only override disagree with the clamped damage
+     * that was applied to g_mockBattleRoleHpCurrent. */
     skillMpDelta = vm_net_mock_env_u32("CBE_BATTLE_SKILL_MP_VALUE_B",
                                        skillMpPrepared ? skillMpAfter :
                                                          vm_net_mock_battle_role_mp_current());

@@ -18,7 +18,12 @@ enum
      * Content-Length has been parsed, so catalog editors are not constrained
      * by this header-buffer size. */
     VM_MOCK_ADMIN_HEADER_MAX = 8192,
-    VM_MOCK_ADMIN_REQUEST_BODY_MAX = 1024 * 1024,
+    /* Multipart image imports are intentionally bounded.  This is large
+     * enough for a source PNG/JPEG while still preventing the local admin
+     * listener from becoming an unbounded file sink. */
+    VM_MOCK_ADMIN_REQUEST_BODY_MAX = 4 * 1024 * 1024,
+    VM_MOCK_ADMIN_GIF_UPLOAD_MAX = 2 * 1024 * 1024,
+    VM_MOCK_ADMIN_GIF_UPLOAD_PIXEL_MAX = 768 * 768,
     /* This is allocation workspace rather than a product-facing page-length
      * rule.  Catalog editors intentionally serialize many selectable rows;
      * 2 MiB accommodates their bounded data model without replacing a valid
@@ -155,6 +160,91 @@ static bool vm_mock_admin_url_decode(const char *value, size_t valueLen,
     return true;
 }
 
+/* Browser fetch(FormData) uses multipart/form-data while native HTML POST
+ * uses application/x-www-form-urlencoded.  Administrative actions use both
+ * paths, so the form reader owns this encoding boundary rather than making
+ * individual editor buttons depend on a particular transport.  The request
+ * handler terminates text bodies before dispatch; binary uploads retain their
+ * dedicated, length-aware parser below. */
+static bool vm_mock_admin_multipart_values(const char *form, const char *key,
+                                           char *values, size_t valueCap,
+                                           u32 valueCapCount, u32 *countOut)
+{
+    const char *lineEnd = NULL;
+    const char *part = NULL;
+    size_t keyLen = key ? strlen(key) : 0;
+    size_t boundaryLen = 0;
+    u32 count = 0;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (form == NULL || keyLen == 0 || values == NULL || valueCap == 0 ||
+        valueCapCount == 0 || strncmp(form, "--", 2) != 0)
+    {
+        return false;
+    }
+    lineEnd = strstr(form, "\r\n");
+    if (lineEnd == NULL || lineEnd == form)
+        return false;
+    boundaryLen = (size_t)(lineEnd - form);
+    part = form;
+    while (part != NULL && strncmp(part, form, boundaryLen) == 0)
+    {
+        const char *headers = part + boundaryLen;
+        const char *headersEnd = NULL;
+        const char *name = NULL;
+        const char *value = NULL;
+        const char *next = NULL;
+        bool matches = false;
+
+        if (headers[0] == '-' && headers[1] == '-')
+            break;
+        if (headers[0] != '\r' || headers[1] != '\n')
+            return false;
+        headers += 2;
+        headersEnd = strstr(headers, "\r\n\r\n");
+        if (headersEnd == NULL)
+            return false;
+        name = strstr(headers, "name=\"");
+        if (name != NULL && name < headersEnd)
+        {
+            const char *nameValue = name + strlen("name=\"");
+            const char *nameEnd = strchr(nameValue, '\"');
+
+            if (nameEnd != NULL && nameEnd <= headersEnd &&
+                (size_t)(nameEnd - nameValue) == keyLen &&
+                memcmp(nameValue, key, keyLen) == 0)
+            {
+                matches = true;
+            }
+        }
+        value = headersEnd + 4;
+        next = value;
+        while ((next = strstr(next, "\r\n--")) != NULL)
+        {
+            if (strncmp(next + 2, form, boundaryLen) == 0)
+                break;
+            ++next;
+        }
+        if (next == NULL)
+            return false;
+        if (matches)
+        {
+            size_t valueLen = (size_t)(next - value);
+
+            if (count >= valueCapCount || valueLen >= valueCap)
+                return false;
+            memcpy(values + (size_t)count * valueCap, value, valueLen);
+            values[(size_t)count * valueCap + valueLen] = 0;
+            ++count;
+        }
+        part = next + 2;
+    }
+    if (countOut != NULL)
+        *countOut = count;
+    return count != 0;
+}
+
 static bool vm_mock_admin_form_value(const char *form, const char *key,
                                      char *out, size_t outCap)
 {
@@ -166,6 +256,9 @@ static bool vm_mock_admin_form_value(const char *form, const char *key,
     out[0] = 0;
     if (form == NULL || keyLen == 0)
         return false;
+    if (strncmp(form, "--", 2) == 0)
+        return vm_mock_admin_multipart_values(form, key, out, outCap, 1,
+                                              NULL);
     while (*cursor != 0)
     {
         const char *pairEnd = strchr(cursor, '&');
@@ -205,6 +298,9 @@ static bool vm_mock_admin_form_values(const char *form, const char *key,
     {
         return false;
     }
+    if (strncmp(form, "--", 2) == 0)
+        return vm_mock_admin_multipart_values(form, key, values, valueCap,
+                                              valueCapCount, countOut);
     while (*cursor != 0)
     {
         const char *pairEnd = strchr(cursor, '&');
@@ -493,6 +589,7 @@ enum
     VM_MOCK_ADMIN_ACTOR_FILE_MAX = 1024,
     VM_MOCK_ADMIN_XSE_FILE_MAX = 512,
     VM_MOCK_ADMIN_UPDATE_FILE_MAX = 2048,
+    VM_MOCK_ADMIN_CONTENT_FILE_MAX = 512,
     VM_MOCK_ADMIN_SHOP_PAGE_SIZE = 50,
     /* A merchant can select each catalog item at most once.  Keep the request
      * parser bounded by the authoritative catalog rather than an arbitrary
@@ -616,9 +713,9 @@ static const char g_vm_mock_admin_script[] =
     "const setupTaskRewards=()=>{const box=document.querySelector('#task-reward-list'),add=document.querySelector('#task-reward-add');if(!box||!add)return;const rows=[...box.querySelectorAll('[data-task-reward-row]')];const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const showNext=()=>{const next=rows.find(row=>row.hidden);if(next){next.hidden=false;sync(next);}add.disabled=!rows.some(row=>row.hidden);};add.addEventListener('click',showNext);for(const remove of box.querySelectorAll('[data-task-reward-remove]'))remove.addEventListener('click',()=>{const row=remove.closest('[data-task-reward-row]');if(!row)return;const input=row.querySelector('[data-item-picker-input]'),quantity=row.querySelector('[data-task-reward-count]'),type=row.querySelector('[data-task-reward-type]');if(input)input.value='0';if(quantity)quantity.value='0';if(type)type.value='0';row.hidden=true;sync(row);if(!rows.some(current=>!current.hidden))showNext();add.disabled=false;});add.disabled=!rows.some(row=>row.hidden);};"
     "const setupChestRewards=()=>{for(const box of document.querySelectorAll('[data-chest-reward-list]')){const form=box.closest('form'),add=form&&form.querySelector('[data-chest-reward-add]'),rows=[...box.querySelectorAll('[data-chest-reward-row]')];if(!form||!add||!rows.length)continue;const sync=row=>{const input=row.querySelector('[data-item-picker-input]');if(input)window.dispatchEvent(new CustomEvent('cbe-item-picker-sync',{detail:{id:input.id}}));};const shown=()=>rows.filter(row=>!row.hidden);const update=()=>{const active=shown(),total=active.reduce((sum,row)=>sum+Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0),0);active.forEach((row,index)=>{const number=row.querySelector('[data-chest-reward-index]'),probability=row.querySelector('[data-chest-reward-probability]'),weight=Math.max(0,Number(row.querySelector('[data-chest-reward-weight]')?.value)||0);if(number)number.textContent='#'+(index+1);if(probability)probability.textContent=total&&weight?(weight*100/total).toFixed(2)+'%':'—';});add.disabled=!rows.some(row=>row.hidden);add.textContent=`＋ 添加奖励（${active.length}/${rows.length}）`;};const showNext=()=>{const next=rows.find(row=>row.hidden);if(!next)return;next.hidden=false;sync(next);update();};add.addEventListener('click',showNext);for(const row of rows){for(const field of row.querySelectorAll('[data-chest-reward-count],[data-chest-reward-weight]'))field.addEventListener('input',update);const remove=row.querySelector('[data-chest-reward-remove]');if(!remove)continue;remove.addEventListener('click',()=>{const item=row.querySelector('[data-item-picker-input]'),count=row.querySelector('[data-chest-reward-count]'),weight=row.querySelector('[data-chest-reward-weight]'),broadcast=row.querySelector('[data-chest-reward-broadcast]');if(item)item.value='0';if(count)count.value='0';if(weight)weight.value='0';if(broadcast)broadcast.checked=false;row.hidden=true;sync(row);if(!shown().length){const first=rows[0];first.hidden=false;sync(first);}update();});}update();}};"
     "const setupMonsterSearch=()=>{const input=document.querySelector('#monster-search'),list=document.querySelector('#monster-list');if(!input||!list||input.dataset.monsterSearchBound==='1')return;input.dataset.monsterSearchBound='1';const apply=()=>{const keyword=input.value.trim().toLowerCase();for(const row of list.querySelectorAll('.monster')){const key=(row.dataset.key||'').toLowerCase(),host=row.closest('[data-monster-row]')||row;host.hidden=!!keyword&&!key.includes(keyword);}};input.addEventListener('input',apply);apply();};"
-    "const setupMonsterBatchReset=()=>{const manager=document.querySelector('[data-monster-batch-manager]'),list=document.querySelector('#monster-list');if(!manager||!list||manager.dataset.monsterBatchBound==='1')return;manager.dataset.monsterBatchBound='1';const ids=manager.querySelector('[data-monster-batch-ids]'),submit=manager.querySelector('[data-monster-batch-reset]'),visible=manager.querySelector('[data-monster-batch-select-visible]'),clear=manager.querySelector('[data-monster-batch-clear]'),items=()=>[...list.querySelectorAll('[data-monster-batch-item]')],sync=()=>{const selected=items().filter(item=>item.checked).map(item=>item.value);if(ids)ids.value=selected.join(',');if(submit){submit.disabled=!selected.length;submit.textContent=`批量重置四项属性（${selected.length}）`;}};list.addEventListener('change',event=>{if(event.target.matches('[data-monster-batch-item]'))sync();});list.addEventListener('cbe-monster-list-updated',sync);visible?.addEventListener('click',()=>{for(const item of items()){const row=item.closest('[data-monster-row]');if(row&&!row.hidden)item.checked=true;}sync();});clear?.addEventListener('click',()=>{for(const item of items())item.checked=false;sync();});sync();};"
-    "const setupMonsterActions=()=>{if(document.documentElement.dataset.monsterActionsBound==='1')return;document.documentElement.dataset.monsterActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-monster-action]')||event.defaultPrevented)return;const confirmation=form.dataset.confirmMessage;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();return;}event.preventDefault();if(form.dataset.submitting==='1')return;const list=document.querySelector('#monster-list'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(form.action,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('#monster-list'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing monster fragment');const top=list.scrollTop;detail.innerHTML=nextDetail.innerHTML;list.innerHTML=nextList.innerHTML;list.scrollTop=top;document.querySelector('#monster-search')?.dispatchEvent(new Event('input'));list.dispatchEvent(new Event('cbe-monster-list-updated'));document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterDrops();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-monster-action-status]');if(status)status.innerHTML='<div class=\"notice error\">怪物操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
-    "const setupTaskActions=()=>{if(document.documentElement.dataset.taskActionsBound==='1')return;document.documentElement.dataset.taskActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-task-action]')||event.defaultPrevented)return;event.preventDefault();if(form.dataset.submitting==='1')return;const catalog=document.querySelector('[data-task-catalog]'),detail=document.querySelector('[data-admin-detail]'),list=catalog?.querySelector('[data-admin-list]');if(!catalog||!detail||!list)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(form.action,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextCatalog=next.querySelector('[data-task-catalog]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextCatalog||!nextDetail)throw new Error('missing task fragment');const top=list.scrollTop;catalog.innerHTML=nextCatalog.innerHTML;detail.innerHTML=nextDetail.innerHTML;catalog.querySelector('[data-admin-list]')?.scrollTo(0,top);document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-task-action-status]');if(status)status.innerHTML='<div class=\"notice error\">任务操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
+    "const setupMonsterBatchReset=()=>{const manager=document.querySelector('[data-monster-batch-manager]'),list=document.querySelector('#monster-list');if(!manager||!list||manager.dataset.monsterBatchBound==='1')return;manager.dataset.monsterBatchBound='1';const ids=[...manager.querySelectorAll('[data-monster-batch-ids]')],combat=manager.querySelector('[data-monster-batch-reset]'),sceneLevel=manager.querySelector('[data-monster-batch-level-reset]'),visible=manager.querySelector('[data-monster-batch-select-visible]'),clear=manager.querySelector('[data-monster-batch-clear]'),items=()=>[...list.querySelectorAll('[data-monster-batch-item]')],sync=()=>{const selected=items().filter(item=>item.checked).map(item=>item.value),value=selected.join(',');for(const input of ids)input.value=value;if(combat){combat.disabled=!selected.length;combat.textContent=`批量重置属性与奖励（${selected.length}）`;}if(sceneLevel){sceneLevel.disabled=!selected.length;sceneLevel.textContent=`按场景等级重置（${selected.length}）`;}};list.addEventListener('change',event=>{if(event.target.matches('[data-monster-batch-item]'))sync();});list.addEventListener('cbe-monster-list-updated',sync);visible?.addEventListener('click',()=>{for(const item of items()){const row=item.closest('[data-monster-row]');if(row&&!row.hidden)item.checked=true;}sync();});clear?.addEventListener('click',()=>{for(const item of items())item.checked=false;sync();});sync();};"
+    "const setupMonsterActions=()=>{if(document.documentElement.dataset.monsterActionsBound==='1')return;document.documentElement.dataset.monsterActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-monster-action]')||event.defaultPrevented)return;const confirmation=form.dataset.confirmMessage;if(confirmation&&!window.confirm(confirmation)){event.preventDefault();return;}event.preventDefault();if(form.dataset.submitting==='1')return;const list=document.querySelector('#monster-list'),detail=document.querySelector('[data-admin-detail]'),actionUrl=form.getAttribute('action')||window.location.href;if(!list||!detail)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('#monster-list'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail){if(new URL(url,window.location.href).pathname.endsWith('/login')){window.location.assign(url);return;}throw new Error('missing monster fragment');}const top=list.scrollTop;detail.innerHTML=nextDetail.innerHTML;list.innerHTML=nextList.innerHTML;list.scrollTop=top;document.querySelector('#monster-search')?.dispatchEvent(new Event('input'));list.dispatchEvent(new Event('cbe-monster-list-updated'));document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupMonsterDrops();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-monster-action-status]');if(status)status.innerHTML='<div class=\"notice error\">怪物操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
+    "const setupTaskActions=()=>{if(document.documentElement.dataset.taskActionsBound==='1')return;document.documentElement.dataset.taskActionsBound='1';document.addEventListener('submit',event=>{const form=event.target;if(!form?.matches('[data-task-action]')||event.defaultPrevented)return;event.preventDefault();if(form.dataset.submitting==='1')return;const catalog=document.querySelector('[data-task-catalog]'),detail=document.querySelector('[data-admin-detail]'),list=catalog?.querySelector('[data-admin-list]'),actionUrl=form.getAttribute('action')||window.location.href;if(!catalog||!detail||!list)return;form.dataset.submitting='1';detail.setAttribute('aria-busy','true');fetch(actionUrl,{method:'POST',body:new FormData(form),credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error('HTTP '+response.status);return response.text().then(html=>({html,url:response.url}));}).then(({html,url})=>{const next=new DOMParser().parseFromString(html,'text/html'),nextCatalog=next.querySelector('[data-task-catalog]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextCatalog||!nextDetail)throw new Error('missing task fragment');const top=list.scrollTop;catalog.innerHTML=nextCatalog.innerHTML;detail.innerHTML=nextDetail.innerHTML;catalog.querySelector('[data-admin-list]')?.scrollTo(0,top);document.title=next.title||document.title;history.replaceState(null,'',url);setupItemPicker();setupTaskRewards();}).catch(()=>{const status=detail.querySelector('[data-task-action-status]');if(status)status.innerHTML='<div class=\"notice error\">任务操作提交失败，请稍后重试。</div>';}).finally(()=>{detail.removeAttribute('aria-busy');form.dataset.submitting='0';});});};"
     "const setupActorPicker=()=>{"
     "const state=window.__cbeActorPickerState||(window.__cbeActorPickerState={bound:false});"
     "const source=document.querySelector('#actor-picker-options'),modal=document.querySelector('#actor-picker-modal'),close=document.querySelector('#actor-picker-close'),search=document.querySelector('#actor-picker-search'),list=document.querySelector('#actor-picker-list'),count=document.querySelector('#actor-result-count'),empty=document.querySelector('#actor-picker-empty'),error=document.querySelector('#actor-picker-error'),selects=[...document.querySelectorAll('select.actor-resource-select')];"
@@ -651,13 +748,11 @@ static const char g_vm_mock_admin_script[] =
     "if(!count())load(true);else updateStatus(`已显示 ${count()} 个账号${more?'，向下滚动加载更多':''}`);};"
     "const setupContentUpdatePicker=()=>{const search=document.querySelector('[data-content-update-search]'),select=document.querySelector('[data-content-update-select]'),selectFiltered=document.querySelector('[data-content-update-select-filtered]'),clear=document.querySelector('[data-content-update-clear-selection]');if(!search||!select||search.dataset.bound==='1')return;search.dataset.bound='1';const apply=()=>{const q=search.value.trim().toLowerCase();for(const option of select.options)option.hidden=!!q&&!option.textContent.toLowerCase().includes(q);};search.addEventListener('input',apply);selectFiltered?.addEventListener('click',()=>{for(const option of select.options)if(!option.hidden)option.selected=true;});clear?.addEventListener('click',()=>{for(const option of select.options)option.selected=false;});apply();};"
     "const setupPartialNavigation=()=>{let serial=0;const selector='[data-admin-select]';const sameTab=url=>{const current=new URL(window.location.href);return url.origin===current.origin&&url.searchParams.get('tab')===current.searchParams.get('tab');};const markSelected=(list,nextList,url)=>{const next=nextList.querySelector(`${selector}[aria-current=page],${selector}.on`),selectedHref=next?new URL(next.getAttribute('href'),url).href:url.href;for(const link of list.querySelectorAll(selector)){const match=new URL(link.getAttribute('href'),window.location.href).href===selectedHref;link.classList.toggle('on',match);if(match){link.setAttribute('aria-current','page');if(next&&next.id)link.id=next.id;}else{link.removeAttribute('aria-current');if(link.id&&link.id.startsWith('selected-'))link.removeAttribute('id');}}};const load=async(url,historyMode)=>{const list=document.querySelector('[data-admin-list]'),detail=document.querySelector('[data-admin-detail]');if(!list||!detail)return false;const request=++serial,scrollTop=list.scrollTop;detail.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const html=await response.text();if(request!==serial)return true;const next=new DOMParser().parseFromString(html,'text/html'),nextList=next.querySelector('[data-admin-list]'),nextDetail=next.querySelector('[data-admin-detail]');if(!nextList||!nextDetail)throw new Error('missing admin fragment');detail.innerHTML=nextDetail.innerHTML;markSelected(list,nextList,url);list.scrollTop=scrollTop;document.title=next.title||document.title;if(historyMode==='push')history.pushState(null,'',url);setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupActorPicker();setupNpcKinds();setupContentUpdatePicker();return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)detail.removeAttribute('aria-busy');}};document.addEventListener('click',event=>{const link=event.target.closest(selector);if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self')return;const url=new URL(link.href,window.location.href);if(!sameTab(url))return;event.preventDefault();void load(url,'push');});window.addEventListener('popstate',()=>{const url=new URL(window.location.href);if(sameTab(url))void load(url,'none');});};"
-    "document.addEventListener('DOMContentLoaded',()=>{"
-    "setupAccountList();"
-    "setupMonsterSearch();setupMonsterBatchReset();setupMonsterActions();setupTaskActions();"
-    "keep('.scene-list','cbe-admin-scenes-scroll');"
-    "keep('.shop-list','cbe-admin-shop-scroll');"
-    "keep('.update-menu','cbe-admin-update-menu-scroll');"
-    "setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupChestRewards();setupActorPicker();setupNpcKinds();setupContentUpdatePicker();setupPartialNavigation();});"
+    "const setupAdminContent=()=>{setupAccountList();setupMonsterSearch();setupMonsterBatchReset();keep('.scene-list','cbe-admin-scenes-scroll');keep('.shop-list','cbe-admin-shop-scroll');keep('.update-menu','cbe-admin-update-menu-scroll');setupItemPicker();setupNpcStock();setupMonsterDrops();setupTaskRewards();setupChestRewards();setupActorPicker();setupNpcKinds();setupContentUpdatePicker();};"
+    "const setupAdminLayout=()=>{if(document.querySelector('#admin-spa-layout-style'))return;const style=document.createElement('style');style.id='admin-spa-layout-style';style.textContent='#admin-spa-content{display:contents!important}#admin-spa-content[aria-busy=true]>*{opacity:.62;pointer-events:none;transition:opacity .12s ease}';document.head.append(style);};"
+    "const setupAdminHeader=()=>{const main=document.querySelector('#admin-spa-shell'),header=main&&[...main.children].find(node=>node.matches&&node.matches('header'));if(!header||header.dataset.adminSpaHeader==='1')return;header.dataset.adminSpaHeader='1';const logout=header.querySelector('form[action$=\"/logout\"]'),intro=document.createElement('div'),style=document.createElement('style');intro.innerHTML='<h1>江湖 OL 后台管理</h1><p class=\"sub\">账号、游戏内容与运营配置统一管理</p>';header.replaceChildren(intro);if(logout)header.append(logout);style.id='admin-spa-header-style';style.textContent='#admin-spa-shell>header[data-admin-spa-header]{display:flex!important;align-items:center;justify-content:space-between;gap:16px;margin:0 0 12px;padding:4px 2px}#admin-spa-shell>header[data-admin-spa-header] h1{margin:0;color:#183d6e;font-size:22px}#admin-spa-shell>header[data-admin-spa-header] .sub{margin:5px 0 0;color:#63738a}';document.head.append(style);};"
+    "const setupAdminSpa=()=>{if(document.documentElement.dataset.adminSpaBound==='1')return;const main=document.querySelector('main.wrap'),nav=main&&[...main.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!main||!nav)return;document.documentElement.dataset.adminSpaBound='1';main.id='admin-spa-shell';nav.id='admin-spa-tabs';nav.classList.add('admin-spa-tabs');const tabs=[['accounts','账号管理'],['content','游戏内容管理'],['tasks','任务管理'],['monsters','怪物管理'],['scene-monsters','场景战斗怪'],['actors','Actor 资源'],['shop','商品管理'],['chests','宝箱管理'],['updates','游戏内容更新管理'],['servers','服务器列表'],['risk','风险角色管理']],content=document.createElement('section'),base=new URL('.',window.location.href).pathname;content.id='admin-spa-content';content.dataset.adminSpaContent='1';for(let node=nav.nextSibling;node;){const next=node.nextSibling;content.append(node);node=next;}main.append(content);if(!document.querySelector('#admin-spa-style')){const style=document.createElement('style');style.id='admin-spa-style';style.textContent='#admin-spa-shell{min-height:100vh}#admin-spa-tabs{display:flex!important;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 16px;padding:10px 12px;border:1px solid #d6dfed;border-radius:12px;background:#f7f9fd;box-shadow:none}#admin-spa-tabs .admin-spa-tab{display:inline-flex!important;align-items:center;justify-content:center;min-height:34px;margin:0!important;padding:0 13px;border:1px solid #d4ddec;border-radius:8px;background:#fff;color:#385170;font-size:14px;font-weight:650;line-height:1;text-decoration:none;box-shadow:none}#admin-spa-tabs .admin-spa-tab:hover{border-color:#4d77bd;color:#174f9d;background:#f3f7ff}#admin-spa-tabs .admin-spa-tab.on,#admin-spa-tabs .admin-spa-tab[aria-current=page]{border-color:#1f62c9;background:#1f62c9;color:#fff}#admin-spa-content{min-width:0}#admin-spa-content[aria-busy=true]{opacity:.62;pointer-events:none;transition:opacity .12s ease}';document.head.append(style);}const currentTab=url=>url.searchParams.get('tab')||'accounts',setTab=url=>{const tab=currentTab(url);nav.innerHTML=tabs.map(([key,label])=>`<a class=\"tab admin-spa-tab${key===tab?' on':''}\" data-admin-tab=\"${key}\"${key===tab?' aria-current=\"page\"':''} href=\"?tab=${encodeURIComponent(key)}\">${label}</a>`).join('');};const own=url=>url.origin===window.location.origin&&url.pathname.startsWith(base),remoteContent=doc=>{const nextMain=doc.querySelector('main.wrap'),nextNav=nextMain&&[...nextMain.children].find(node=>node.matches&&node.matches('nav.tabs'));if(!nextMain||!nextNav)return null;const template=document.createElement('template');for(const style of doc.head.querySelectorAll('style'))template.content.append(style.cloneNode(true));for(let node=nextNav.nextSibling;node;node=node.nextSibling)template.content.append(node.cloneNode(true));return template.innerHTML;};let serial=0;const replace=(doc,url,historyMode,form)=>{const html=remoteContent(doc);if(html===null)return false;const detail=form&&form.closest('[data-admin-detail]'),nextDetail=doc.querySelector('[data-admin-detail]'),list=document.querySelector('[data-admin-list]'),nextList=doc.querySelector('[data-admin-list]');if(detail&&nextDetail){const top=list?list.scrollTop:0;detail.innerHTML=nextDetail.innerHTML;if(list&&nextList){list.innerHTML=nextList.innerHTML;list.scrollTop=top;list.dispatchEvent(new Event('cbe-monster-list-updated'));}}else content.innerHTML=html;setTab(url);document.title=doc.title||document.title;if(historyMode==='push')history.pushState(null,'',url);else if(historyMode==='replace')history.replaceState(null,'',url);setupAdminContent();return true;};const load=async(url,historyMode,form)=>{const request=++serial;content.setAttribute('aria-busy','true');try{const response=await fetch(url,{credentials:'same-origin',cache:'no-store',redirect:'follow'}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),finalUrl=new URL(response.url||url,window.location.href);if(!response.ok)throw new Error(`HTTP ${response.status}`);if(request!==serial)return true;if(!own(finalUrl)||!replace(doc,finalUrl,historyMode,form)){window.location.assign(finalUrl);return false;}return true;}catch(error){if(request===serial)window.location.assign(url);return false;}finally{if(request===serial)content.removeAttribute('aria-busy');}};setTab(new URL(window.location.href));document.addEventListener('click',event=>{const link=event.target.closest('a[href]');if(!link||event.defaultPrevented||event.button!==0||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||link.target&&link.target!=='_self'||link.hasAttribute('download'))return;const url=new URL(link.href,window.location.href);if(!own(url))return;if(link.matches('[data-admin-select]')&&currentTab(url)===currentTab(new URL(window.location.href)))return;event.preventDefault();event.stopPropagation();void load(url,'push',null);},true);document.addEventListener('submit',event=>{const form=event.target;if(!form||event.defaultPrevented||form.matches('[data-monster-action],[data-task-action],[data-account-search-form]')||form.closest('header')||form.target&&form.target!=='_self'||!form.checkValidity())return;const missingActor=form.closest('.npc')&&[...form.querySelectorAll('select.actor-resource-select')].some(select=>!select.value);if(missingActor)return;const url=new URL(form.getAttribute('action')||window.location.href,window.location.href);if(!own(url)||url.pathname.endsWith('/logout'))return;event.preventDefault();event.stopPropagation();if(form.dataset.adminSpaSubmitting==='1')return;form.dataset.adminSpaSubmitting='1';const method=(form.getAttribute('method')||'GET').toUpperCase(),data=new FormData(form);if(method==='GET'){for(const [key,value] of data.entries())url.searchParams.append(key,value);void load(url,'push',form).finally(()=>{form.dataset.adminSpaSubmitting='0';});return;}content.setAttribute('aria-busy','true');fetch(url,{method,body:data,credentials:'same-origin',cache:'no-store',redirect:'follow'}).then(response=>{if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.text().then(html=>({html,url:new URL(response.url||url,window.location.href)}));}).then(({html,url})=>{const doc=new DOMParser().parseFromString(html,'text/html');if(!own(url)||!replace(doc,url,'replace',form))window.location.assign(url);}).catch(()=>{const status=form.querySelector('[data-admin-action-status]')||form.closest('[data-admin-detail]')?.querySelector('[data-admin-action-status]');if(status)status.innerHTML='<div class=\"notice error\">操作提交失败，请稍后重试。</div>';else window.location.assign(url);}).finally(()=>{content.removeAttribute('aria-busy');form.dataset.adminSpaSubmitting='0';});},true);window.addEventListener('popstate',()=>{const url=new URL(window.location.href),shown=nav.querySelector('.admin-spa-tab.on')?.dataset.adminTab;if(own(url)&&shown!==currentTab(url))void load(url,'none',null);});};"
+    "document.addEventListener('DOMContentLoaded',()=>{setupMonsterActions();setupTaskActions();setupPartialNavigation();setupAdminSpa();setupAdminLayout();setupAdminHeader();setupAdminContent();});"
     "})();";
 
 static void vm_mock_admin_ensure_session_token(void)
@@ -1039,11 +1134,31 @@ static bool vm_mock_admin_prefix_page_routes(char *html, size_t htmlCap)
             if (sourcePos + needleLen <= sourceLen &&
                 memcmp(html + sourcePos, needles[i], needleLen) == 0)
             {
+                static const char adminScript[] = "admin.js\"";
+                static const char adminScriptVersion[] =
+                    "admin.js?v=20260813-6\"";
                 if (targetPos + replacementLen >= htmlCap)
                     goto fail;
                 memcpy(rewritten + targetPos, replacements[i], replacementLen);
                 targetPos += replacementLen;
                 sourcePos += needleLen;
+                /* The backend script is emitted by the executable.  It must
+                 * never remain cached across a server restart: an old copy
+                 * used form.action, which is shadowed by the hidden
+                 * name=\"action\" field in administrative forms. */
+                if (i == 2 && sourcePos + sizeof(adminScript) - 1 <= sourceLen &&
+                    memcmp(html + sourcePos, adminScript,
+                           sizeof(adminScript) - 1) == 0)
+                {
+                    size_t versionLen = sizeof(adminScriptVersion) - 1;
+
+                    if (targetPos + versionLen >= htmlCap)
+                        goto fail;
+                    memcpy(rewritten + targetPos, adminScriptVersion,
+                           versionLen);
+                    targetPos += versionLen;
+                    sourcePos += sizeof(adminScript) - 1;
+                }
                 replaced = true;
                 break;
             }
@@ -2076,6 +2191,36 @@ static void vm_mock_admin_render_npc_task_select(vm_mock_admin_text *page,
     vm_mock_admin_text_appendf(page, "</select>");
 }
 
+static void vm_mock_admin_render_npc_task_repeat_policy_select(
+    vm_mock_admin_text *page, const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    u32 policy = VM_NET_MOCK_TASK_REPEAT_NEVER;
+
+    if (page == NULL)
+        return;
+    if (seed != NULL)
+    {
+        policy = seed->taskRepeatPolicy;
+        if (policy == VM_NET_MOCK_TASK_REPEAT_NEVER && seed->taskRepeatable)
+            policy = VM_NET_MOCK_TASK_REPEAT_UNLIMITED;
+        if (policy > VM_NET_MOCK_TASK_REPEAT_MONTHLY)
+            policy = VM_NET_MOCK_TASK_REPEAT_NEVER;
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<select name=\"task_repeat_policy\">"
+        "<option value=\"0\"%s>完成后不可再次接取</option>"
+        "<option value=\"1\"%s>不限次数（完成后可立即再次接取）</option>"
+        "<option value=\"2\"%s>每日一次</option>"
+        "<option value=\"3\"%s>每周一次</option>"
+        "<option value=\"4\"%s>每月一次</option></select>",
+        policy == VM_NET_MOCK_TASK_REPEAT_NEVER ? " selected" : "",
+        policy == VM_NET_MOCK_TASK_REPEAT_UNLIMITED ? " selected" : "",
+        policy == VM_NET_MOCK_TASK_REPEAT_DAILY ? " selected" : "",
+        policy == VM_NET_MOCK_TASK_REPEAT_WEEKLY ? " selected" : "",
+        policy == VM_NET_MOCK_TASK_REPEAT_MONTHLY ? " selected" : "");
+}
+
 static bool vm_mock_admin_utf8_to_gbk_text(const char *utf8,
                                            char *gbk, size_t gbkCap,
                                            bool allowEmpty)
@@ -2148,6 +2293,11 @@ typedef struct
     u32 top;
     u32 right;
     u32 bottom;
+    /* Exact decoded-SCE location of the u8 target-scene string length.  It is
+     * captured while parsing the record so the editor can replace only this
+     * field and never reconstruct or guess the rest of a portal record. */
+    u32 targetLengthOffset;
+    u32 recordOffset;
 } vm_mock_admin_scene_portal;
 
 typedef struct
@@ -2642,6 +2792,46 @@ static bool vm_mock_admin_portal_equals(const vm_mock_admin_scene_portal *a,
            strcmp(a->targetScene, b->targetScene) == 0;
 }
 
+/* Locate the already-validated target string within its parsed record.  The
+ * portal parsers deliberately describe several native record variants; this
+ * narrow capture step keeps the editor tied to the same descriptor that the
+ * client will later parse. */
+static bool vm_mock_admin_capture_portal_target_location(
+    const u8 *data, u32 len, u32 recordOffset, u32 recordEnd,
+    vm_mock_admin_scene_portal *portal)
+{
+    u16 targetField = 0;
+    size_t targetLen = 0;
+
+    if (data == NULL || portal == NULL || recordOffset >= recordEnd ||
+        recordEnd > len)
+    {
+        return false;
+    }
+    targetField = portal->kind == VM_MOCK_ADMIN_PORTAL_NAMED ? 0x17u : 6u;
+    targetLen = strlen(portal->targetScene);
+    if (targetLen == 0 || targetLen > 0xffu)
+        return false;
+    for (u32 pos = recordOffset; pos + 5u <= recordEnd; ++pos)
+    {
+        u32 valueOffset = pos + 4u;
+        u32 valueLen = data[valueOffset];
+
+        if (vm_net_mock_read_le16_at(data, pos) != 3u ||
+            vm_net_mock_read_le16_at(data, pos + 2u) != targetField ||
+            valueLen != targetLen || valueOffset + 1u + valueLen > recordEnd ||
+            memcmp(data + valueOffset + 1u, portal->targetScene,
+                   targetLen) != 0)
+        {
+            continue;
+        }
+        portal->recordOffset = recordOffset;
+        portal->targetLengthOffset = valueOffset;
+        return true;
+    }
+    return false;
+}
+
 static u32 vm_mock_admin_collect_scene_portals(
     const char *scene, vm_mock_admin_scene_portal *portals, u32 portalCap,
     u32 *totalOut)
@@ -2693,6 +2883,16 @@ static u32 vm_mock_admin_collect_scene_portals(
         if (parsed)
         {
             bool duplicate = false;
+
+            if (!vm_mock_admin_capture_portal_target_location(
+                    data, len, off, end, &portal))
+            {
+                /* A preview without a precise source field is safe to show,
+                 * but not safe to expose as an editable destination. */
+                if (end > off + 1)
+                    off = end - 1;
+                continue;
+            }
             for (u32 i = 0; i < count; ++i)
             {
                 if (vm_mock_admin_portal_equals(&portals[i], &portal))
@@ -3666,6 +3866,50 @@ static bool vm_mock_admin_write_actor_resource_atomic(const char *path,
     return true;
 }
 
+/* Resource edits always replace the authoritative file atomically.  The
+ * actor writer predates the generic content editor; retain it for existing
+ * Actor routes and use this neutral sibling for SCE/GIF/DSH edits so neither
+ * temporary filename nor logging claims the wrong resource type. */
+static bool vm_mock_admin_write_resource_atomic(const char *path,
+                                                const u8 *raw,
+                                                u32 rawLen)
+{
+    char tempPath[1240];
+    FILE *fp = NULL;
+    bool writeOk = false;
+
+    if (path == NULL || path[0] == 0 || raw == NULL || rawLen < 5 ||
+        snprintf(tempPath, sizeof(tempPath), "%s.content-edit.tmp", path) >=
+            (int)sizeof(tempPath))
+    {
+        return false;
+    }
+    fp = fopen(tempPath, "wb");
+    if (fp == NULL)
+        return false;
+    writeOk = fwrite(raw, 1, rawLen, fp) == rawLen;
+    if (fflush(fp) != 0)
+        writeOk = false;
+    if (fclose(fp) != 0)
+        writeOk = false;
+    if (!writeOk)
+    {
+        remove(tempPath);
+        return false;
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(tempPath, path,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+#else
+    if (rename(tempPath, path) != 0)
+#endif
+    {
+        remove(tempPath);
+        return false;
+    }
+    return true;
+}
+
 /* Actor/GIF payloads remain server resources.  Missing client files are
  * requested through the normal WT 18/7 path, so no per-resource publication
  * catalogue or version row is needed.  This boundary validates the complete
@@ -4198,6 +4442,631 @@ static void vm_mock_admin_render_npc_stock_picker_modal(vm_mock_admin_text *page
 static void vm_mock_admin_render_scene_battle_monster_page(
     char *response, size_t responseCap, const char *query);
 
+static u32 vm_mock_admin_collect_content_files_by_suffix(
+    vm_mock_admin_scene_file *files, u32 fileCap, const char *suffix)
+{
+    vm_mock_admin_scene_file *all = NULL;
+    u32 allCount = 0;
+    u32 count = 0;
+
+    if (files == NULL || fileCap == 0 || suffix == NULL || suffix[0] == 0)
+        return 0;
+    memset(files, 0, sizeof(*files) * fileCap);
+    all = (vm_mock_admin_scene_file *)calloc(
+        VM_MOCK_ADMIN_UPDATE_FILE_MAX, sizeof(*all));
+    if (all == NULL)
+        return 0;
+    allCount = vm_mock_admin_collect_update_files(
+        all, VM_MOCK_ADMIN_UPDATE_FILE_MAX);
+    for (u32 i = 0; i < allCount && count < fileCap; ++i)
+    {
+        if (!vm_net_mock_str_ends_with(all[i].name, suffix))
+            continue;
+        files[count++] = all[i];
+    }
+    free(all);
+    if (count > 1)
+        qsort(files, count, sizeof(files[0]), vm_mock_admin_scene_file_compare);
+    return count;
+}
+
+static bool vm_mock_admin_content_resource_from_query(
+    const char *query, const char *field, const char *suffix, char *utf8Out,
+    size_t utf8OutCap, char *gameOut, size_t gameOutCap)
+{
+    if (utf8Out == NULL || utf8OutCap == 0 || gameOut == NULL ||
+        gameOutCap == 0)
+    {
+        return false;
+    }
+    utf8Out[0] = 0;
+    gameOut[0] = 0;
+    if (!vm_mock_admin_form_value(query, field, utf8Out, utf8OutCap) ||
+        utf8Out[0] == 0 ||
+        !vm_mock_admin_utf8_to_gbk_text(utf8Out, gameOut, gameOutCap, false) ||
+        !vm_net_mock_str_ends_with(gameOut, suffix) ||
+        vm_net_mock_scene_name_has_path_separator(gameOut))
+    {
+        utf8Out[0] = 0;
+        gameOut[0] = 0;
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_build_gif_preview_bmp(const char *resource,
+                                                u8 **bmpOut, u32 *bmpLenOut,
+                                                u16 *widthOut, u16 *heightOut)
+{
+    u8 *payload = NULL;
+    u32 payloadLen = 0;
+    u8 type = 0;
+    GifOutput image;
+    int mallocSize = 0;
+    u8 *bmp = NULL;
+    u32 rowBytes = 0;
+    u32 pixelBytes = 0;
+    u32 bmpLen = 0;
+    bool ok = false;
+
+    if (bmpOut)
+        *bmpOut = NULL;
+    if (bmpLenOut)
+        *bmpLenOut = 0;
+    if (widthOut)
+        *widthOut = 0;
+    if (heightOut)
+        *heightOut = 0;
+    memset(&image, 0, sizeof(image));
+    if (resource == NULL || bmpOut == NULL || bmpLenOut == NULL ||
+        vm_net_mock_scene_name_has_path_separator(resource) ||
+        !vm_net_mock_str_ends_with(resource, ".gif") ||
+        !vm_mock_admin_load_data_payload(resource, ".gif", &payload,
+                                         &payloadLen, &type) ||
+        type != 1 ||
+        !gifDecodeExt(payload, &image, 1, &mallocSize) || image.pixels == NULL ||
+        image.width == 0 || image.height == 0)
+    {
+        goto done;
+    }
+    rowBytes = ((u32)image.width * 3u + 3u) & ~3u;
+    if (rowBytes == 0 || image.height > (UINT32_MAX - 54u) / rowBytes)
+        goto done;
+    pixelBytes = rowBytes * image.height;
+    bmpLen = 54u + pixelBytes;
+    bmp = (u8 *)calloc(bmpLen, 1);
+    if (bmp == NULL)
+        goto done;
+    memcpy(bmp, "BM", 2);
+    vm_mock_admin_preview_write_le32(bmp, 2, bmpLen);
+    vm_mock_admin_preview_write_le32(bmp, 10, 54);
+    vm_mock_admin_preview_write_le32(bmp, 14, 40);
+    vm_mock_admin_preview_write_le32(bmp, 18, image.width);
+    vm_mock_admin_preview_write_le32(bmp, 22, image.height);
+    vm_mock_admin_preview_write_le16(bmp, 26, 1);
+    vm_mock_admin_preview_write_le16(bmp, 28, 24);
+    vm_mock_admin_preview_write_le32(bmp, 34, pixelBytes);
+    for (u32 y = 0; y < image.height; ++y)
+    {
+        u8 *row = bmp + 54u + (u32)(image.height - 1u - y) * rowBytes;
+        u32 pitch = (u32)image.width + ((4u - ((u32)image.width & 3u)) & 3u);
+        for (u32 x = 0; x < image.width; ++x)
+        {
+            u16 color = image.pixels[y * pitch + x];
+            row[x * 3u] = (u8)((color & 0x1fu) * 255u / 31u);
+            row[x * 3u + 1u] = (u8)(((color >> 5) & 0x3fu) * 255u / 63u);
+            row[x * 3u + 2u] = (u8)(((color >> 11) & 0x1fu) * 255u / 31u);
+        }
+    }
+    *bmpOut = bmp;
+    *bmpLenOut = bmpLen;
+    if (widthOut)
+        *widthOut = image.width;
+    if (heightOut)
+        *heightOut = image.height;
+    bmp = NULL;
+    ok = true;
+
+done:
+    free(payload);
+    if (image.owned && image.pixels)
+        free_mem(image.pixels);
+    free(bmp);
+    return ok;
+}
+
+enum
+{
+    VM_MOCK_ADMIN_DSH_COLUMN_MAX = 64,
+    VM_MOCK_ADMIN_DSH_VALUE_MAX = 255
+};
+
+typedef struct
+{
+    u32 columnCount;
+    u32 rowCount;
+    u32 dataOffset;
+    u32 columnOffsets[VM_MOCK_ADMIN_DSH_COLUMN_MAX];
+    u8 columnLengths[VM_MOCK_ADMIN_DSH_COLUMN_MAX];
+} vm_mock_admin_dsh_table;
+
+static bool vm_mock_admin_dsh_table_parse(const u8 *raw, u32 rawLen,
+                                          vm_mock_admin_dsh_table *table)
+{
+    u32 declaredLen = 0;
+    u32 headerBytes = 0;
+    u32 headerEnd = 0;
+    u32 pos = 0;
+
+    if (table != NULL)
+        memset(table, 0, sizeof(*table));
+    if (raw == NULL || table == NULL || rawLen < 20u ||
+        (declaredLen = vm_mock_service_read_le32(raw)) != rawLen - 4u ||
+        (table->columnCount = vm_mock_service_read_le32(raw + 4u)) == 0 ||
+        table->columnCount > VM_MOCK_ADMIN_DSH_COLUMN_MAX ||
+        (table->rowCount = vm_mock_service_read_le32(raw + 8u)) > 100000u ||
+        (headerBytes = vm_mock_service_read_le32(raw + 12u)) <
+            table->columnCount ||
+        headerBytes > rawLen - 16u)
+    {
+        return false;
+    }
+    headerEnd = 16u + headerBytes;
+    pos = 16u;
+    for (u32 column = 0; column < table->columnCount; ++column)
+    {
+        u32 length = 0;
+        if (pos >= headerEnd || pos >= rawLen ||
+            (length = raw[pos++]) > headerEnd - pos)
+        {
+            return false;
+        }
+        table->columnOffsets[column] = pos;
+        table->columnLengths[column] = (u8)length;
+        pos += length;
+    }
+    if (pos != headerEnd)
+        return false;
+    table->dataOffset = headerEnd;
+    for (u32 row = 0; row < table->rowCount; ++row)
+    {
+        u32 rowLen = 0;
+        u32 rowEnd = 0;
+        if (pos > rawLen - 4u ||
+            (rowLen = vm_mock_service_read_le32(raw + pos)) == 0 ||
+            rowLen > rawLen - pos - 4u)
+        {
+            return false;
+        }
+        pos += 4u;
+        rowEnd = pos + rowLen;
+        for (u32 column = 0; column < table->columnCount; ++column)
+        {
+            u32 valueLen = 0;
+            if (pos >= rowEnd || (valueLen = raw[pos++]) > rowEnd - pos)
+                return false;
+            pos += valueLen;
+        }
+        if (pos != rowEnd)
+            return false;
+    }
+    return pos == rawLen;
+}
+
+static bool vm_mock_admin_dsh_row_at(const u8 *raw, u32 rawLen,
+                                     const vm_mock_admin_dsh_table *table,
+                                     u32 wantedRow, u32 *rowOffsetOut,
+                                     u32 *rowLenOut)
+{
+    u32 pos = 0;
+
+    if (rowOffsetOut)
+        *rowOffsetOut = 0;
+    if (rowLenOut)
+        *rowLenOut = 0;
+    if (raw == NULL || table == NULL || wantedRow >= table->rowCount ||
+        table->dataOffset > rawLen)
+    {
+        return false;
+    }
+    pos = table->dataOffset;
+    for (u32 row = 0; row <= wantedRow; ++row)
+    {
+        u32 rowLen = 0;
+        if (pos > rawLen - 4u ||
+            (rowLen = vm_mock_service_read_le32(raw + pos)) == 0 ||
+            rowLen > rawLen - pos - 4u)
+        {
+            return false;
+        }
+        if (row == wantedRow)
+        {
+            if (rowOffsetOut)
+                *rowOffsetOut = pos + 4u;
+            if (rowLenOut)
+                *rowLenOut = rowLen;
+            return true;
+        }
+        pos += 4u + rowLen;
+    }
+    return false;
+}
+
+static bool vm_mock_admin_dsh_row_value_at(const u8 *raw, u32 rowOffset,
+                                           u32 rowLen, u32 columnCount,
+                                           u32 wantedColumn,
+                                           const u8 **valueOut,
+                                           u8 *valueLenOut)
+{
+    u32 pos = rowOffset;
+    u32 rowEnd = rowOffset + rowLen;
+
+    if (valueOut)
+        *valueOut = NULL;
+    if (valueLenOut)
+        *valueLenOut = 0;
+    if (raw == NULL || wantedColumn >= columnCount || rowEnd < rowOffset)
+        return false;
+    for (u32 column = 0; column < columnCount; ++column)
+    {
+        u32 valueLen = 0;
+        if (pos >= rowEnd || (valueLen = raw[pos++]) > rowEnd - pos)
+            return false;
+        if (column == wantedColumn)
+        {
+            if (valueOut)
+                *valueOut = raw + pos;
+            if (valueLenOut)
+                *valueLenOut = (u8)valueLen;
+            return true;
+        }
+        pos += valueLen;
+    }
+    return false;
+}
+
+static u32 vm_mock_admin_dsh_row_fingerprint(const u8 *row, u32 rowLen)
+{
+    u32 hash = 2166136261u;
+
+    if (row == NULL)
+        return 0;
+    for (u32 i = 0; i < rowLen; ++i)
+    {
+        hash ^= row[i];
+        hash *= 16777619u;
+    }
+    return hash == 0 ? 1u : hash;
+}
+
+static void vm_mock_admin_dsh_bytes_to_utf8(const u8 *bytes, u8 byteLen,
+                                             char *utf8Out,
+                                             size_t utf8OutCap)
+{
+    char gbk[VM_MOCK_ADMIN_DSH_VALUE_MAX + 1u];
+
+    if (utf8Out == NULL || utf8OutCap == 0)
+        return;
+    utf8Out[0] = 0;
+    if (bytes == NULL || byteLen == 0)
+        return;
+    memcpy(gbk, bytes, byteLen);
+    gbk[byteLen] = 0;
+    vm_net_mock_gbk_label_to_utf8(gbk, utf8Out, utf8OutCap);
+}
+
+static bool vm_mock_admin_dsh_raw_is_valid(const u8 *raw, u32 rawLen)
+{
+    vm_mock_admin_dsh_table table;
+
+    return vm_mock_admin_dsh_table_parse(raw, rawLen, &table);
+}
+
+static void vm_mock_admin_render_dsh_resource_editor(
+    vm_mock_admin_text *page, const char *resource, const char *resourceUtf8,
+    const char *query)
+{
+    char path[1200];
+    char rowText[32];
+    char encodedResource[512];
+    u8 *raw = NULL;
+    u32 rawLen = 0;
+    u32 selectedRow = 0;
+    u32 rowOffset = 0;
+    u32 rowLen = 0;
+    vm_mock_admin_dsh_table table;
+
+    memset(path, 0, sizeof(path));
+    memset(rowText, 0, sizeof(rowText));
+    memset(encodedResource, 0, sizeof(encodedResource));
+    memset(&table, 0, sizeof(table));
+    if (page == NULL || resource == NULL || resourceUtf8 == NULL ||
+        !vm_net_mock_update_resource_path(resource, path, sizeof(path)) ||
+        !vm_mock_admin_read_raw_resource_file(path, &raw, &rawLen) ||
+        !vm_mock_admin_dsh_table_parse(raw, rawLen, &table))
+    {
+        vm_mock_admin_text_appendf(
+            page,
+            "<div class=\"notice error\">DSH 表结构校验失败，已拒绝编辑。请使用已校验的 DSH 文件导入替换。</div>");
+        free(raw);
+        return;
+    }
+    if (vm_mock_admin_form_value(query, "dsh_row", rowText, sizeof(rowText)))
+        (void)vm_net_mock_parse_u32_strict(rowText, &selectedRow);
+    if (selectedRow >= table.rowCount)
+        selectedRow = table.rowCount == 0 ? 0 : table.rowCount - 1u;
+    vm_mock_admin_url_encode(resourceUtf8, encodedResource,
+                             sizeof(encodedResource));
+    vm_mock_admin_text_appendf(
+        page,
+        "<style>.dsh-editor{display:grid;gap:14px}.dsh-summary{display:flex;gap:8px;flex-wrap:wrap}.dsh-summary span{padding:4px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px}.dsh-row-tools{display:flex;align-items:end;gap:8px;flex-wrap:wrap;padding:11px;border:1px solid #dbe5f3;border-radius:8px;background:#f8fbff}.dsh-row-tools label{display:grid;gap:4px;min-width:140px}.dsh-row-tools input{width:100%%;padding:7px 8px;border:1px solid #d0d5dd;border-radius:6px}.dsh-link{padding:7px 10px;border:1px solid #bfd1eb;border-radius:6px;background:#fff;color:#175cd3;text-decoration:none}.dsh-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.dsh-fields label{display:grid;gap:4px;font-size:12px;color:#475467}.dsh-fields textarea{min-height:64px;resize:vertical;padding:8px;border:1px solid #d0d5dd;border-radius:6px;font:13px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace}.dsh-save{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.dsh-save button{border:0;border-radius:6px;padding:9px 13px;background:#175cd3;color:#fff;cursor:pointer}@media(max-width:900px){.dsh-fields{grid-template-columns:1fr}}</style><div class=\"dsh-editor\"><div class=\"meta\"><div><strong>");
+    vm_mock_admin_text_append_html(page, resourceUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        "</strong><br><span class=\"hint\">原始 DSH 表格。保存仅改动当前行的列值，字段名、行顺序和其他行保持不变。</span></div></div><div class=\"dsh-summary\"><span>列 %u</span><span>行 %u</span><span>原始数据 %u B</span></div>",
+        table.columnCount, table.rowCount, rawLen);
+    if (table.rowCount == 0 ||
+        !vm_mock_admin_dsh_row_at(raw, rawLen, &table, selectedRow,
+                                  &rowOffset, &rowLen))
+    {
+        vm_mock_admin_text_appendf(
+            page,
+            "<div class=\"notice error\">该 DSH 没有可编辑行，或当前行记录已损坏。</div></div>");
+        free(raw);
+        return;
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<form class=\"dsh-row-tools\" method=\"get\" action=\"/\"><input type=\"hidden\" name=\"tab\" value=\"content\"><input type=\"hidden\" name=\"content_kind\" value=\"dsh\"><input type=\"hidden\" name=\"resource\" value=\"");
+    vm_mock_admin_text_append_html(page, resourceUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><label><span>跳转行号（0–%u）</span><input name=\"dsh_row\" type=\"number\" min=\"0\" max=\"%u\" value=\"%u\"></label><button type=\"submit\">查看</button><a class=\"dsh-link\" data-admin-select href=\"/?tab=content&amp;content_kind=dsh&amp;resource=%s&amp;dsh_row=%u\">上一行</a><a class=\"dsh-link\" data-admin-select href=\"/?tab=content&amp;content_kind=dsh&amp;resource=%s&amp;dsh_row=%u\">下一行</a></form>",
+        table.rowCount - 1u, table.rowCount - 1u, selectedRow,
+        encodedResource, selectedRow == 0 ? 0 : selectedRow - 1u,
+        encodedResource,
+        selectedRow + 1u >= table.rowCount ? table.rowCount - 1u : selectedRow + 1u);
+    vm_mock_admin_text_appendf(
+        page,
+        "<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"action\" value=\"save-dsh-row\"><input type=\"hidden\" name=\"resource\" value=\"");
+    vm_mock_admin_text_append_html(page, resourceUtf8);
+    vm_mock_admin_text_appendf(
+        page,
+        "\"><input type=\"hidden\" name=\"dsh_row\" value=\"%u\"><input type=\"hidden\" name=\"row_fingerprint\" value=\"%u\"><div class=\"dsh-fields\">",
+        selectedRow, vm_mock_admin_dsh_row_fingerprint(raw + rowOffset, rowLen));
+    for (u32 column = 0; column < table.columnCount; ++column)
+    {
+        const u8 *value = NULL;
+        u8 valueLen = 0;
+        char columnUtf8[512];
+        char valueUtf8[1024];
+
+        memset(columnUtf8, 0, sizeof(columnUtf8));
+        memset(valueUtf8, 0, sizeof(valueUtf8));
+        if (!vm_mock_admin_dsh_row_value_at(raw, rowOffset, rowLen,
+                                            table.columnCount, column, &value,
+                                            &valueLen))
+        {
+            continue;
+        }
+        vm_mock_admin_dsh_bytes_to_utf8(raw + table.columnOffsets[column],
+                                        table.columnLengths[column],
+                                        columnUtf8, sizeof(columnUtf8));
+        vm_mock_admin_dsh_bytes_to_utf8(value, valueLen, valueUtf8,
+                                        sizeof(valueUtf8));
+        vm_mock_admin_text_appendf(page,
+            "<label><span>%u · ", column + 1u);
+        vm_mock_admin_text_append_html(page,
+                                       columnUtf8[0] ? columnUtf8 : "未命名字段");
+        vm_mock_admin_text_appendf(page,
+            "</span><textarea name=\"dsh_value_%u\" maxlength=\"255\">",
+            column);
+        vm_mock_admin_text_append_html(page, valueUtf8);
+        vm_mock_admin_text_appendf(page, "</textarea></label>");
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</div><div class=\"dsh-save\"><button type=\"submit\">保存第 %u 行并发布</button><span class=\"hint\">若该行已被其他管理操作修改，保存会被拒绝，避免覆盖新数据。</span></div></form></div>",
+        selectedRow);
+    free(raw);
+}
+
+static void vm_mock_admin_render_content_resource_page(
+    char *response, size_t responseCap, const char *query, const char *suffix,
+    const char *kindLabel, bool gifMode)
+{
+    vm_mock_admin_scene_file files[VM_MOCK_ADMIN_CONTENT_FILE_MAX];
+    vm_mock_admin_text page;
+    char selectedUtf8[192];
+    char selectedGame[64];
+    char status[16];
+    char message[256];
+    u32 count = 0;
+    u8 *payload = NULL;
+    u32 payloadLen = 0;
+    u8 type = 0;
+
+    memset(files, 0, sizeof(files));
+    memset(selectedUtf8, 0, sizeof(selectedUtf8));
+    memset(selectedGame, 0, sizeof(selectedGame));
+    memset(status, 0, sizeof(status));
+    memset(message, 0, sizeof(message));
+    count = vm_mock_admin_collect_content_files_by_suffix(
+        files, VM_MOCK_ADMIN_CONTENT_FILE_MAX, suffix);
+    (void)vm_mock_admin_content_resource_from_query(
+        query, "resource", suffix, selectedUtf8, sizeof(selectedUtf8),
+        selectedGame, sizeof(selectedGame));
+    {
+        bool found = false;
+        for (u32 i = 0; i < count; ++i)
+        {
+            if (strcmp(files[i].name, selectedGame) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found && count != 0)
+            snprintf(selectedGame, sizeof(selectedGame), "%s", files[0].name);
+    }
+    vm_net_mock_gbk_label_to_utf8(selectedGame, selectedUtf8,
+                                  sizeof(selectedUtf8));
+    (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
+    (void)vm_mock_admin_form_value(query, "message", message,
+                                   sizeof(message));
+    vm_mock_admin_text_init(&page, response, responseCap);
+    vm_mock_admin_text_appendf(&page,
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>江湖OL 游戏内容管理</title><style>"
+        "*{box-sizing:border-box}html,body{height:100%%;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1280px;height:100vh;margin:auto;padding:24px 18px;display:flex;flex-direction:column}.head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.head h1{font-size:24px;margin:0}.sub{margin:4px 0 16px;color:#667085}.tabs,.format-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 16px}.tab,.format{padding:8px 13px;border:1px solid #e4e7ec;border-radius:7px;color:#475467;background:#fff;text-decoration:none}.tab.on,.format.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:#fff;color:#475467}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.catalog{display:flex;flex-direction:column;min-height:0}.list{display:grid;gap:4px;overflow:auto;min-height:0}.file{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none}.file:hover,.file.on{background:#eef4ff;color:#175cd3}.size,.hint{font-size:12px;color:#667085}.detail{overflow:auto;min-width:0}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.preview{display:grid;grid-template-columns:minmax(180px,420px) 1fr;gap:18px;align-items:start}.preview img{display:block;max-width:100%%;max-height:520px;image-rendering:pixelated;background:#101828;border:1px solid #d0d5dd}.meta{display:grid;gap:8px}.meta div{padding:9px 10px;border-radius:7px;background:#f8fafc}.upload{margin-top:18px;padding:14px;border:1px solid #bfd4f4;border-radius:9px;background:#f7faff}.upload h3{margin:0 0 5px}.upload form{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.upload label{display:grid;gap:4px;min-width:260px}.upload input{padding:8px;border:1px solid #d0d5dd;border-radius:6px;background:#fff}.upload button{border:0;border-radius:6px;padding:9px 13px;background:#175cd3;color:#fff;cursor:pointer}.empty{color:#667085;padding:16px 0}@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px}.grid,.preview{grid-template-columns:1fr}.catalog{min-height:260px}.detail{overflow:visible}}</style>"
+        "</head><body><main class=\"wrap\"><header class=\"head\"><div><h1>江湖OL 后台管理</h1><p class=\"sub\">游戏内容管理 · 按资源文件格式分类</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
+        "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab on\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a></nav>"
+        "<div class=\"grid\"><aside class=\"card catalog\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format\" data-admin-select href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format%s\" data-admin-select href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format%s\" data-admin-select href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a></nav><h2>%s（%u）</h2><div class=\"list\" data-admin-list>",
+        gifMode ? " on" : "", gifMode ? "" : " on", kindLabel, count);
+    for (u32 i = 0; i < count; ++i)
+    {
+        char utf8[192];
+        char encoded[512];
+
+        vm_net_mock_gbk_label_to_utf8(files[i].name, utf8, sizeof(utf8));
+        vm_mock_admin_url_encode(utf8, encoded, sizeof(encoded));
+        vm_mock_admin_text_appendf(&page,
+            "<a class=\"file%s\" data-admin-select href=\"/?tab=content&amp;content_kind=%s&amp;resource=%s\"><span>",
+            strcmp(files[i].name, selectedGame) == 0 ? " on" : "",
+            gifMode ? "gif" : "dsh", encoded);
+        vm_mock_admin_text_append_html(&page, utf8);
+        vm_mock_admin_text_appendf(&page, "</span><span class=\"size\">%llu B</span></a>",
+                                   (unsigned long long)files[i].size);
+    }
+    if (count == 0)
+        vm_mock_admin_text_appendf(&page, "<p class=\"empty\">未找到 %s 文件。</p>", suffix);
+    vm_mock_admin_text_appendf(&page,
+        "</div></aside><section class=\"card detail\" data-admin-detail><h2>%s 管理</h2>",
+        kindLabel);
+    if (status[0] && message[0])
+    {
+        vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
+                                   strcmp(status, "ok") == 0 ? "ok" : "error");
+        vm_mock_admin_text_append_html(&page, message);
+        vm_mock_admin_text_appendf(&page, "</div>");
+    }
+    if (gifMode && selectedGame[0] &&
+        vm_mock_admin_load_data_payload(selectedGame, suffix, &payload,
+                                        &payloadLen, &type))
+    {
+        char encoded[512];
+
+        vm_mock_admin_url_encode(selectedUtf8, encoded, sizeof(encoded));
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"preview\"><img src=\"/gif-preview.bmp?gif=%s\" alt=\"GIF 预览\"><div class=\"meta\"><div><strong>",
+            encoded);
+        vm_mock_admin_text_append_html(&page, selectedUtf8);
+        vm_mock_admin_text_appendf(&page,
+            "</strong><br><span class=\"hint\">客户端 type-1 GIF 资源，已按游戏调色板/LZW 格式保存。</span></div><div>资源容器：type %u</div><div>解码后图片数据：%u B</div></div></div>",
+            type, payloadLen);
+    }
+    else if (!gifMode && selectedGame[0])
+    {
+        vm_mock_admin_render_dsh_resource_editor(&page, selectedGame,
+                                                 selectedUtf8, query);
+    }
+    else if (selectedGame[0])
+    {
+        vm_mock_admin_text_appendf(&page,
+            "<div class=\"notice error\">资源容器无法解码，已禁止作为可编辑资源导入或发布。</div>");
+    }
+    free(payload);
+    vm_mock_admin_text_appendf(&page,
+        "<section class=\"upload\"><h3>%s</h3><p class=\"hint\">%s</p><form method=\"post\" action=\"/%s-upload\" enctype=\"multipart/form-data\"><label><span>选择文件</span><input type=\"file\" name=\"resource_file\" %s required></label><button type=\"submit\">上传并发布</button></form></section>",
+        gifMode ? "新增或替换 GIF 图片" : "导入或替换 DSH 数据",
+        gifMode ? "支持 PNG、JPG、BMP 或标准 GIF，文件名会保留并自动改为 .gif；最大 768×768 像素。上传后编码为客户端可识别的游戏 GIF 并加入内容更新。" : "仅接受原始 DSH 表格文件：声明长度、字段头和每一行的列记录必须完整。文件名决定新增或替换目标，并自动加入内容更新。",
+        gifMode ? "gif" : "dsh",
+        gifMode ? "accept=\"image/png,image/jpeg,image/bmp,image/gif\"" : "accept=\".dsh\"");
+    vm_mock_admin_text_appendf(&page, "</section></div></main></body></html>");
+    if (page.truncated)
+        snprintf(response, responseCap, "<!doctype html><meta charset=\"utf-8\"><p>游戏内容页面超过大小限制。</p>");
+}
+
+static void vm_mock_admin_render_sce_portal_editor(
+    vm_mock_admin_text *page, const char *sceneUtf8,
+    const vm_mock_admin_scene_portal *portals, u32 portalCount,
+    u32 portalTotal, const vm_mock_admin_scene_file *sceneFiles,
+    u32 sceneCount)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"portal-editor\"><p class=\"foot\">每一项都直接对应已解析 SCE 记录中的目标场景字段。只允许从当前服务端实际存在的 SCE 文件中选择，保存不会改动入口号、坐标、碰撞区域或交互名称。</p><div class=\"portal-list\">");
+    for (u32 i = 0; i < portalCount; ++i)
+    {
+        const vm_mock_admin_scene_portal *portal = &portals[i];
+        char targetUtf8[192];
+        char displayUtf8[192];
+        const char *kind = "边界传送";
+
+        memset(targetUtf8, 0, sizeof(targetUtf8));
+        memset(displayUtf8, 0, sizeof(displayUtf8));
+        vm_net_mock_gbk_label_to_utf8(portal->targetScene, targetUtf8,
+                                      sizeof(targetUtf8));
+        vm_net_mock_gbk_label_to_utf8(portal->displayName, displayUtf8,
+                                      sizeof(displayUtf8));
+        if (portal->kind == VM_MOCK_ADMIN_PORTAL_META)
+            kind = "区域传送";
+        else if (portal->kind == VM_MOCK_ADMIN_PORTAL_NAMED)
+            kind = "具名传送";
+        vm_mock_admin_text_appendf(
+            page,
+            "<form method=\"post\" action=\"/action\" class=\"portal-row\"><input type=\"hidden\" name=\"action\" value=\"save-sce-portal-target\"><input type=\"hidden\" name=\"scene\" value=\"");
+        vm_mock_admin_text_append_html(page, sceneUtf8 ? sceneUtf8 : "");
+        vm_mock_admin_text_appendf(
+            page,
+            "\"><input type=\"hidden\" name=\"portal_offset\" value=\"%u\"><div><strong>%s</strong><span class=\"size\">",
+            portal->targetLengthOffset, kind);
+        if (displayUtf8[0] != 0)
+        {
+            vm_mock_admin_text_append_html(page, displayUtf8);
+            vm_mock_admin_text_appendf(page, " · ");
+        }
+        if (portal->entryId == 0xffffu)
+            vm_mock_admin_text_appendf(page, "入口 -- → %u", portal->targetEntryId);
+        else
+            vm_mock_admin_text_appendf(page, "入口 %u → %u", portal->entryId,
+                                       portal->targetEntryId);
+        vm_mock_admin_text_appendf(
+            page, " · 区域 (%u,%u)-(%u,%u)</span></div><label class=\"field\"><span>目标 SCE</span><select name=\"target_scene\" required>",
+            portal->left, portal->top, portal->right, portal->bottom);
+        for (u32 j = 0; j < sceneCount; ++j)
+        {
+            char candidateUtf8[192];
+
+            memset(candidateUtf8, 0, sizeof(candidateUtf8));
+            vm_net_mock_gbk_label_to_utf8(sceneFiles[j].name, candidateUtf8,
+                                          sizeof(candidateUtf8));
+            vm_mock_admin_text_appendf(page, "<option value=\"");
+            vm_mock_admin_text_append_html(page, candidateUtf8);
+            vm_mock_admin_text_appendf(page, "\"%s>",
+                                       strcmp(sceneFiles[j].name,
+                                              portal->targetScene) == 0 ?
+                                           " selected" : "");
+            vm_mock_admin_text_append_html(page, candidateUtf8);
+            vm_mock_admin_text_appendf(page, "</option>");
+        }
+        vm_mock_admin_text_appendf(
+            page,
+            "</select></label><div class=\"actions\"><button type=\"submit\">保存目标场景</button></div></form>");
+    }
+    if (portalCount == 0)
+        vm_mock_admin_text_appendf(page,
+            "<p class=\"size\">该场景没有可安全编辑的传送点目标。</p>");
+    if (portalTotal > portalCount)
+        vm_mock_admin_text_appendf(page,
+            "<p class=\"foot\">共识别 %u 个传送点；仅显示具有精确原始字段位置的 %u 个记录。</p>",
+            portalTotal, portalCount);
+    vm_mock_admin_text_appendf(page, "</div></div>");
+}
+
 static void vm_mock_admin_render_content_page(char *response,
                                               size_t responseCap,
                                               const char *query)
@@ -4214,6 +5083,8 @@ static void vm_mock_admin_render_content_page(char *response,
     char selectedSceneUtf8[192];
     char selectedSceneFile[64];
     char runtimeScene[64];
+    char contentKind[16];
+    char contentSection[16];
     char status[16];
     char message[256];
     u32 sceneCount = 0;
@@ -4227,6 +5098,7 @@ static void vm_mock_admin_render_content_page(char *response,
     u32 previewPortalCount = 0;
     u32 previewPortalTotal = 0;
     bool previewReady = false;
+    bool portalSection = false;
 
     memset(sceneFiles, 0, sizeof(sceneFiles));
     memset(actorFiles, 0, sizeof(actorFiles));
@@ -4239,8 +5111,27 @@ static void vm_mock_admin_render_content_page(char *response,
     memset(selectedSceneUtf8, 0, sizeof(selectedSceneUtf8));
     memset(selectedSceneFile, 0, sizeof(selectedSceneFile));
     memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(contentKind, 0, sizeof(contentKind));
+    memset(contentSection, 0, sizeof(contentSection));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    (void)vm_mock_admin_form_value(query, "content_kind", contentKind,
+                                   sizeof(contentKind));
+    if (strcmp(contentKind, "gif") == 0)
+    {
+        vm_mock_admin_render_content_resource_page(
+            response, responseCap, query, ".gif", "GIF 图片", true);
+        return;
+    }
+    if (strcmp(contentKind, "dsh") == 0)
+    {
+        vm_mock_admin_render_content_resource_page(
+            response, responseCap, query, ".dsh", "DSH 数据", false);
+        return;
+    }
+    (void)vm_mock_admin_form_value(query, "content_section", contentSection,
+                                   sizeof(contentSection));
+    portalSection = strcmp(contentSection, "portals") == 0;
     vm_mock_admin_text_init(&page, response, responseCap);
     sceneCount = vm_mock_admin_collect_scene_files(
         sceneFiles, VM_MOCK_ADMIN_SCENE_FILE_MAX);
@@ -4299,13 +5190,13 @@ static void vm_mock_admin_render_content_page(char *response,
         "<title>江湖OL 游戏内容管理</title><style>"
         "*{box-sizing:border-box}html,body{height:100vh;overflow:hidden}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
         ".wrap{max-width:1280px;height:100vh;margin:0 auto;padding:24px 18px;display:flex;flex-direction:column;overflow:hidden}header{display:flex;flex:none;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 12px}.sub{color:#667085;margin:4px 0 16px}"
-        ".tabs{display:flex;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
+        ".tabs,.format-tabs,.content-sections{display:flex;gap:6px;margin:0 0 16px;flex-wrap:wrap}.tab,.format,.section-tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on,.format.on,.section-tab.on{background:#175cd3;color:#fff;border-color:#175cd3}"
         ".logout{background:none;color:#667085;border:1px solid #d0d5dd}.grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;flex:1;min-height:0}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d}.grid>aside{display:flex;flex-direction:column;min-height:0;overflow:hidden}.grid>section{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}"
         ".scene-list{display:flex;flex:1;min-height:0;flex-direction:column;gap:4px;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:4px}.scene{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:6px;color:#344054;text-decoration:none;scroll-margin-block:12px}.scene:hover,.scene.on{background:#eef4ff;color:#175cd3}.size{color:#98a2b3;font-size:12px;white-space:nowrap}"
         ".preview{border:1px solid #d0d5dd;border-radius:9px;padding:12px;margin:0 0 16px;background:#f9fafb}.preview-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.map-scroll{overflow:auto;max-height:760px;padding:8px;border-radius:7px;background:#1f2937}.map-stage{position:relative;margin:auto;box-shadow:0 0 0 1px #0008;background:#111;overflow:visible}.map-stage>img{display:block;width:100%%;height:100%%;image-rendering:pixelated}.portal-box{position:absolute;z-index:1;border:2px dashed #fdb022;background:#fec84b26;pointer-events:none}.portal-box.named{border-color:#22d3ee;background:#22d3ee24}.portal-label{position:absolute;left:-2px;bottom:100%%;max-width:220px;padding:1px 4px;border-radius:3px 3px 0 0;background:#7a2e0e;color:#fff;font-size:10px;line-height:15px;white-space:nowrap}.portal-box.named .portal-label{background:#0e7490}.npc-pin{position:absolute;transform:translate(-50%%,-100%%);display:flex;flex-direction:column;align-items:center;z-index:3;filter:drop-shadow(0 1px 1px #0008);pointer-events:none}.pin-name{max-width:140px;padding:1px 4px;border-radius:3px;background:#175cd3;color:#fff;font-size:11px;line-height:16px;white-space:nowrap}.npc-pin.service .pin-name{background:#b54708}.sprite-wrap{position:relative;display:flex;align-items:flex-end;justify-content:center;min-width:18px;min-height:18px}.actor-sprite{display:block;width:auto;height:auto;max-width:72px;max-height:72px;image-rendering:pixelated}.preview-legend,.preview-npcs,.preview-portals{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:9px}.legend-icon{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#175cd3;color:#fff;font-size:11px}.legend-icon.service{background:#b54708}.legend-portal{width:18px;height:12px;border:2px dashed #fdb022;background:#fec84b26}.legend-portal.named{border-color:#22d3ee;background:#22d3ee24}.npc-chip,.portal-chip{font-size:12px;padding:2px 7px;border-radius:999px;background:#eef4ff;color:#344054}.npc-chip.service{background:#fff4e8}.portal-chip{background:#fffaeb;color:#7a2e0e}.portal-chip.named{background:#ecfdff;color:#0e7490}.preview-error{padding:12px;border-radius:7px;background:#fef3f2;color:#b42318;margin-bottom:16px}"
         ".notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.npc-list{display:grid;gap:12px}.npc{border:1px solid #e4e7ec;border-radius:8px;padding:13px}.npc.off{opacity:.62;background:#f9fafb}.npc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.fields{display:grid;grid-template-columns:110px 1.1fr 1fr 90px 90px 90px 90px;gap:8px}.field{display:grid;gap:4px}.field span{font-size:12px;color:#667085}.instance-fields{display:grid;grid-template-columns:minmax(220px,2fr) 90px 90px 120px 100px;gap:8px;align-items:end;margin-top:10px;padding:10px;border-radius:7px;background:#fffaeb;border:1px solid #fedf89}.instance-help{grid-column:1/-1;margin:0;color:#7a2e0e;font-size:12px}"
         ".npc-editor{padding:16px;background:linear-gradient(180deg,#fff 0,#fbfdff 100%%);border-color:#cbd5e1}.npc-editor-grid{display:grid;grid-template-columns:110px minmax(160px,1.1fr) minmax(220px,1.35fr) 96px 96px;gap:10px;align-items:end}.npc-editor-options{display:grid;grid-template-columns:minmax(220px,1.2fr) minmax(250px,1.45fr) minmax(190px,.9fr);gap:10px;align-items:end;margin-top:12px;padding:12px;border:1px solid #dbe7fb;border-radius:8px;background:#f7faff}.npc-services{grid-column:1/-1;display:grid;grid-template-columns:minmax(180px,.85fr) minmax(185px,1fr) minmax(225px,1.35fr);gap:10px;margin:0;padding:12px;border:1px solid #bfd4f4;border-radius:8px;background:#fff}.npc-services legend{padding:0 5px;color:#1849a9;font-weight:700}.npc-services .hint{grid-column:1/-1;margin:0 0 2px;color:#475467;font-size:12px;line-height:1.5}.npc-service-row{display:contents}.npc-service-toggle{display:flex;align-items:center;gap:8px;min-height:39px;padding:8px 10px;border:1px solid #d0d5dd;border-radius:6px;background:#f8fafc;color:#344054;font-weight:600}.npc-service-toggle input{width:auto;margin:0}.npc-service-toggle:has(input:checked){border-color:#84adff;background:#eef4ff;color:#175cd3}.npc-editor-options .instance-fields{grid-column:1/-1}.npc-editor-save{padding-top:2px;margin-top:12px;border-top:1px solid #eaecf0}.npc-editor-post-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-top:8px}.npc-editor-action{margin:0}.npc-editor-action button{min-width:108px}"
-        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.secondary{background:#475467}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}.native-section{margin:0 0 18px;padding:14px;border:1px solid #c7d7fe;border-radius:9px;background:#f5f8ff}.native-title{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.native-meta{margin:4px 0 10px;color:#475467;font-size:12px}.inventory{display:grid;gap:12px;margin-top:12px;padding:13px;border:1px solid #c7d7fe;border-radius:9px;background:#fbfdff}.inventory-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:9px;border-bottom:1px solid #e4e7ec}.inventory h4{margin:0;font-size:14px}.stock-note,.inventory-error{color:#667085;font-size:12px}.inventory-error{margin:0;color:#b42318}.inventory-tools{display:grid;gap:10px}.inventory-add-form,.inventory-remove-form{display:grid;grid-template-columns:minmax(260px,1fr) 118px max-content max-content;gap:9px;align-items:end;margin:0;padding:11px;border:1px solid #dfe7f6;border-left:3px solid #175cd3;border-radius:7px;background:#f8fafc}.inventory-remove-form{grid-template-columns:minmax(180px,1fr) minmax(145px,.8fr) max-content max-content;border-left-color:#b42318}.inventory-form-tag{grid-column:1/-1;font-size:12px;font-weight:700;line-height:1;color:#175cd3}.inventory-form-tag.remove{color:#b42318}.inventory-list{display:grid}.inventory-row{display:grid;grid-template-columns:66px minmax(170px,1fr) 110px 100px 80px 70px;gap:8px;align-items:end;padding:8px 0;border-top:1px solid #eaecf0}.stock-check{display:flex;align-items:center;gap:4px;min-height:39px;color:#475467;font-size:12px}.stock-check input{width:auto}.inventory-row-form{display:contents}.inventory-row .actions{margin:0}.item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-modal{position:fixed;inset:0;z-index:1001;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(820px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-head-actions{display:flex;gap:8px}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.npc-stock-modal .item-picker-tools{grid-template-columns:minmax(150px,.7fr) minmax(130px,.55fr) minmax(220px,1.15fr)}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.npc-stock-picker-actions{display:flex;gap:8px;justify-content:flex-end;padding:0 20px 10px}.npc-stock-choice{grid-template-columns:auto minmax(0,1fr);align-items:start}.npc-stock-choice input{width:auto;margin-top:3px}.npc-stock-choice.selected{border-color:#175cd3;background:#eef4ff}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}"
+        "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}.secondary{background:#475467}.danger{background:#b42318}.enable{background:#027a48}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.new{margin-top:16px}.foot{color:#667085;font-size:12px;margin:12px 0 0}.portal-editor{margin-top:8px}.portal-list{display:grid;gap:10px}.portal-row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(230px,1fr) max-content;gap:12px;align-items:end;padding:13px;border:1px solid #c7d7fe;border-radius:9px;background:#f8fbff}.portal-row>div:first-of-type{display:grid;gap:3px}.portal-row strong{color:#1849a9}.portal-row .actions{margin:0}.native-section{margin:0 0 18px;padding:14px;border:1px solid #c7d7fe;border-radius:9px;background:#f5f8ff}.native-title{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.native-meta{margin:4px 0 10px;color:#475467;font-size:12px}.inventory{display:grid;gap:12px;margin-top:12px;padding:13px;border:1px solid #c7d7fe;border-radius:9px;background:#fbfdff}.inventory-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:9px;border-bottom:1px solid #e4e7ec}.inventory h4{margin:0;font-size:14px}.stock-note,.inventory-error{color:#667085;font-size:12px}.inventory-error{margin:0;color:#b42318}.inventory-tools{display:grid;gap:10px}.inventory-add-form,.inventory-remove-form{display:grid;grid-template-columns:minmax(260px,1fr) 118px max-content max-content;gap:9px;align-items:end;margin:0;padding:11px;border:1px solid #dfe7f6;border-left:3px solid #175cd3;border-radius:7px;background:#f8fafc}.inventory-remove-form{grid-template-columns:minmax(180px,1fr) minmax(145px,.8fr) max-content max-content;border-left-color:#b42318}.inventory-form-tag{grid-column:1/-1;font-size:12px;font-weight:700;line-height:1;color:#175cd3}.inventory-form-tag.remove{color:#b42318}.inventory-list{display:grid}.inventory-row{display:grid;grid-template-columns:66px minmax(170px,1fr) 110px 100px 80px 70px;gap:8px;align-items:end;padding:8px 0;border-top:1px solid #eaecf0}.stock-check{display:flex;align-items:center;gap:4px;min-height:39px;color:#475467;font-size:12px}.stock-check input{width:auto}.inventory-row-form{display:contents}.inventory-row .actions{margin:0}.item-field{display:grid;gap:4px}.item-field>span{font-size:12px;color:#667085}.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.item-picker-trigger small{color:#667085;font-weight:400}.item-modal{position:fixed;inset:0;z-index:1001;display:grid;place-items:center;padding:20px;background:#10182899}.item-picker-panel{width:min(820px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-head-actions{display:flex;gap:8px}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.npc-stock-modal .item-picker-tools{grid-template-columns:minmax(150px,.7fr) minmax(130px,.55fr) minmax(220px,1.15fr)}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.npc-stock-picker-actions{display:flex;gap:8px;justify-content:flex-end;padding:0 20px 10px}.npc-stock-choice{grid-template-columns:auto minmax(0,1fr);align-items:start}.npc-stock-choice input{width:auto;margin-top:3px}.npc-stock-choice.selected{border-color:#175cd3;background:#eef4ff}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}"
         ".actor-picker-field{display:grid;gap:4px}.actor-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:normal}.actor-picker-trigger small{color:#667085;font-weight:400}.actor-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899}.actor-picker-panel{width:min(920px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.actor-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.actor-picker-head h3{font-size:19px;margin:0}.actor-picker-head p{margin:2px 0 0;color:#667085}.actor-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.actor-picker-tools{padding:14px 20px 10px}.actor-picker-tools label{display:grid;gap:4px}.actor-picker-tools label>span{font-size:12px;color:#667085}.actor-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.actor-picker-error{color:#b42318;font-weight:600}.actor-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;min-height:160px;overflow:auto;padding:0 20px 20px}.actor-choice{display:grid;grid-template-rows:92px auto;gap:7px;padding:10px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.actor-choice:hover{border-color:#84adff;background:#f5f8ff}.actor-choice img{display:block;width:100%%;height:88px;object-fit:contain;image-rendering:pixelated;background:#f9fafb;border-radius:5px}.actor-choice strong{font-size:12px;overflow-wrap:anywhere}.actor-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}[hidden]{display:none!important}.modal-open{overflow:hidden}"
         "@media(max-width:900px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.scene-list{flex:none;max-height:260px;overflow:auto}.fields,.instance-fields,.npc-editor-grid,.npc-editor-options,.npc-services{grid-template-columns:1fr 1fr}.inventory-add-form,.inventory-remove-form,.inventory-row{grid-template-columns:1fr 1fr}.inventory-form-tag{grid-column:1/-1}.npc-stock-modal .item-picker-tools{grid-template-columns:1fr}.stock-check{grid-column:1/-1}.inventory-row-form{display:grid;grid-column:1/-1;grid-template-columns:1fr 1fr;gap:8px}.inventory-row>.actions{grid-column:1/-1;justify-self:start}.instance-scene,.instance-help{grid-column:1/-1}}@media(max-width:560px){.npc-editor-grid,.npc-editor-options,.npc-services{grid-template-columns:1fr}.npc-editor-post-actions{justify-content:stretch}.npc-editor-action{flex:1}.npc-editor-action button{width:100%%}}"
         "</style><script src=\"/admin.js\" defer></script></head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1>"
@@ -4322,7 +5213,7 @@ static void vm_mock_admin_render_content_page(char *response,
         "<a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a>"
         "<a class=\"tab\" href=\"/?tab=servers\">服务器列表</a>"
         "<a class=\"tab\" href=\"/?tab=risk\">风险角色管理</a></nav>"
-        "<div class=\"grid\"><aside class=\"card\"><h2>SCE 场景（%u）</h2><div class=\"scene-list\" data-admin-list>",
+        "<div class=\"grid\"><aside class=\"card\"><h2>文件格式</h2><nav class=\"format-tabs\"><a class=\"format on\" href=\"/?tab=content&amp;content_kind=sce\">SCE 场景</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=gif\">GIF 图片</a><a class=\"format\" href=\"/?tab=content&amp;content_kind=dsh\">DSH 数据</a></nav><h2>SCE 场景（%u）</h2><div class=\"scene-list\" data-admin-list>",
         sceneCount);
     for (u32 i = 0; i < sceneCount; ++i)
     {
@@ -4334,14 +5225,14 @@ static void vm_mock_admin_render_content_page(char *response,
         if (strcmp(sceneFiles[i].name, selectedSceneFile) == 0)
         {
             vm_mock_admin_text_appendf(&page,
-                "<a id=\"selected-scene\" class=\"scene on\" data-admin-select aria-current=\"page\" href=\"/?tab=content&amp;scene=%s#selected-scene\"><span>",
-                encoded);
+                "<a id=\"selected-scene\" class=\"scene on\" data-admin-select aria-current=\"page\" href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
+                portalSection ? "portals" : "npcs", encoded);
         }
         else
         {
             vm_mock_admin_text_appendf(&page,
-                "<a class=\"scene\" data-admin-select href=\"/?tab=content&amp;scene=%s#selected-scene\"><span>",
-                encoded);
+                "<a class=\"scene\" data-admin-select href=\"/?tab=content&amp;content_kind=sce&amp;content_section=%s&amp;scene=%s#selected-scene\"><span>",
+                portalSection ? "portals" : "npcs", encoded);
         }
         vm_mock_admin_text_append_html(&page, sceneUtf8);
         vm_mock_admin_text_appendf(&page,
@@ -4351,12 +5242,26 @@ static void vm_mock_admin_render_content_page(char *response,
     if (sceneCount == 0)
         vm_mock_admin_text_appendf(&page, "<span class=\"size\">未找到 SCE 文件</span>");
     vm_mock_admin_text_appendf(&page,
-        "</div></aside><section data-admin-detail><div class=\"card\"><h2>场景 NPC 配置：");
+        "</div></aside><section data-admin-detail><div class=\"card\"><h2>场景 %s：",
+        portalSection ? "坐标传送管理" : "NPC 管理");
     vm_mock_admin_text_append_html(&page,
                                    selectedSceneUtf8[0] ? selectedSceneUtf8 : "未选择场景");
     vm_mock_admin_text_appendf(
         &page,
-        "</h2><p class=\"foot\">保存 NPC 会校验 Actor 及引用 GIF。客户端加载时若文件缺失，会先通过 WT 18/7 从服务端下载、校验并安装，再继续创建 NPC；后台不会向客户端目录复制文件。</p>");
+        "</h2><nav class=\"content-sections\"><a class=\"section-tab%s\" href=\"/?tab=content&amp;content_kind=sce&amp;content_section=npcs&amp;scene=",
+        portalSection ? "" : " on");
+    {
+        char selectedEncoded[512];
+        vm_mock_admin_url_encode(selectedSceneUtf8, selectedEncoded,
+                                 sizeof(selectedEncoded));
+        vm_mock_admin_text_append_html(&page, selectedEncoded);
+        vm_mock_admin_text_appendf(&page,
+            "\">NPC 管理</a><a class=\"section-tab%s\" href=\"/?tab=content&amp;content_kind=sce&amp;content_section=portals&amp;scene=%s\">坐标传送管理</a></nav><p class=\"foot\">%s</p>",
+            portalSection ? " on" : "", selectedEncoded,
+            portalSection ?
+                "传送点只编辑原 SCE 已解析记录的目标场景名称；入口编号、坐标区域和其他字段保持不变。保存会重新封装 SCE 并通过内容更新发布。" :
+                "保存 NPC 会校验 Actor 及引用 GIF。客户端加载时若文件缺失，会先通过 WT 18/7 从服务端下载、校验并安装，再继续创建 NPC；后台不会向客户端目录复制文件。");
+    }
     if (status[0] != 0 && message[0] != 0)
     {
         vm_mock_admin_text_appendf(&page, "<div class=\"notice %s\">",
@@ -4569,6 +5474,14 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_appendf(&page,
             "<div class=\"preview-error\">该 SCE 引用的地图资源无法解析，暂时不能生成预览。</div>");
     }
+    if (portalSection)
+    {
+        vm_mock_admin_render_sce_portal_editor(
+            &page, selectedSceneUtf8, previewPortalRows, previewPortalCount,
+            previewPortalTotal, sceneFiles, sceneCount);
+    }
+    else
+    {
     vm_mock_admin_text_appendf(&page,
         "<div class=\"native-section\"><div class=\"native-title\"><h2>原生 NPC 覆盖</h2><span class=\"badge\">SCE 资源只读</span></div>"
         "<p class=\"foot\">精确绑定当前场景和原生 Actor。仅保存服务类型与启用状态，不会改写 SCE/XSE、模型、坐标或名称；武器/防具/药品商人在下方配置专属库存，单价留空时采用当前商品目录默认价。</p>");
@@ -4664,9 +5577,9 @@ static void vm_mock_admin_render_content_page(char *response,
             "</label><label class=\"field\"><span>可接取任务（可留空；会校验等级与前置任务）</span>");
         vm_mock_admin_render_npc_task_select(&page, row->seed.taskId);
         vm_mock_admin_text_appendf(&page,
-            "</label><label class=\"field\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\"%s>完成后不可再次接取</option><option value=\"1\"%s>完成后允许再次接取</option></select></label>",
-            row->seed.taskRepeatable ? "" : " selected",
-            row->seed.taskRepeatable ? " selected" : "");
+            "</label><label class=\"field\"><span>任务重复接取规则</span>");
+        vm_mock_admin_render_npc_task_repeat_policy_select(&page, &row->seed);
+        vm_mock_admin_text_appendf(&page, "</label>");
         vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount,
                                              &row->seed);
         vm_mock_admin_text_appendf(&page,
@@ -4726,7 +5639,9 @@ static void vm_mock_admin_render_content_page(char *response,
         "</label><label class=\"field\"><span>可接取任务（可留空；会校验等级与前置任务）</span>");
     vm_mock_admin_render_npc_task_select(&page, 0);
     vm_mock_admin_text_appendf(&page,
-        "</label><label class=\"field\"><span>任务重复接取</span><select name=\"task_repeatable\"><option value=\"0\" selected>完成后不可再次接取</option><option value=\"1\">完成后允许再次接取</option></select></label>");
+        "</label><label class=\"field\"><span>任务重复接取规则</span>");
+    vm_mock_admin_render_npc_task_repeat_policy_select(&page, NULL);
+    vm_mock_admin_text_appendf(&page, "</label>");
     vm_mock_admin_render_instance_fields(&page, sceneFiles, sceneCount, NULL);
     vm_mock_admin_text_appendf(&page,
         "</div><div class=\"actions npc-editor-save\"><button type=\"submit\">增加 NPC</button></div></form></div>"
@@ -4735,6 +5650,7 @@ static void vm_mock_admin_render_content_page(char *response,
     vm_mock_admin_render_actor_picker_modal(&page, actorFiles, actorCount);
     vm_mock_admin_render_item_picker_modal(&page, false);
     vm_mock_admin_render_npc_stock_picker_modal(&page);
+    }
     vm_mock_admin_text_appendf(&page, "</section></div></main></body></html>");
 
     if (page.truncated)
@@ -6198,6 +7114,11 @@ static void vm_mock_admin_render_task_page(char *response,
 #include "web_admin_monsters.inc.c"
 static bool vm_mock_admin_form_u32(const char *body, const char *field,
                                    u32 maximum, u32 *valueOut);
+static bool vm_mock_admin_scene_from_form(const char *body,
+                                          char *sceneUtf8,
+                                          size_t sceneUtf8Cap,
+                                          char *runtimeScene,
+                                          size_t runtimeSceneCap);
 #include "web_admin_chests.inc.c"
 
 static void vm_mock_admin_render_servers_page(char *response,
@@ -7644,6 +8565,328 @@ static void vm_mock_admin_redirect_content(vm_mock_service_socket client,
     vm_mock_admin_send_location(client, location, NULL);
 }
 
+static void vm_mock_admin_redirect_content_section(
+    vm_mock_service_socket client, const char *sceneUtf8, const char *section,
+    const char *status, const char *message)
+{
+    char sceneEncoded[512];
+    char sectionEncoded[64];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1700];
+
+    vm_mock_admin_url_encode(sceneUtf8 ? sceneUtf8 : "", sceneEncoded,
+                             sizeof(sceneEncoded));
+    vm_mock_admin_url_encode(section ? section : "npcs", sectionEncoded,
+                             sizeof(sectionEncoded));
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=content&content_kind=sce&content_section=%s&scene=%s&status=%s&message=%s",
+             sectionEncoded, sceneEncoded, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_content_resource(
+    vm_mock_service_socket client, const char *kind, const char *resourceUtf8,
+    const char *status, const char *message)
+{
+    char kindEncoded[64];
+    char resourceEncoded[512];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1700];
+
+    vm_mock_admin_url_encode(kind ? kind : "", kindEncoded,
+                             sizeof(kindEncoded));
+    vm_mock_admin_url_encode(resourceUtf8 ? resourceUtf8 : "",
+                             resourceEncoded, sizeof(resourceEncoded));
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=content&content_kind=%s&resource=%s&status=%s&message=%s",
+             kindEncoded, resourceEncoded, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static void vm_mock_admin_redirect_dsh_row(
+    vm_mock_service_socket client, const char *resourceUtf8, u32 row,
+    const char *status, const char *message)
+{
+    char resourceEncoded[512];
+    char statusEncoded[64];
+    char messageEncoded[768];
+    char location[1800];
+
+    vm_mock_admin_url_encode(resourceUtf8 ? resourceUtf8 : "",
+                             resourceEncoded, sizeof(resourceEncoded));
+    vm_mock_admin_url_encode(status ? status : "error", statusEncoded,
+                             sizeof(statusEncoded));
+    vm_mock_admin_url_encode(message ? message : "操作失败", messageEncoded,
+                             sizeof(messageEncoded));
+    snprintf(location, sizeof(location),
+             VM_MOCK_ADMIN_ROOT_PATH
+             "?tab=content&content_kind=dsh&resource=%s&dsh_row=%u&status=%s&message=%s",
+             resourceEncoded, row, statusEncoded, messageEncoded);
+    vm_mock_admin_send_location(client, location, NULL);
+}
+
+static bool vm_mock_admin_sce_portal_target_replace(
+    const char *scene, const vm_mock_admin_scene_portal *portal,
+    const char *targetScene, const char **errorOut, bool *contentChangedOut)
+{
+    char path[1200];
+    u8 *previousRaw = NULL;
+    u32 previousRawLen = 0;
+    u8 *payload = NULL;
+    u32 payloadLen = 0;
+    u8 type = 0;
+    u8 *newPayload = NULL;
+    u32 newPayloadLen = 0;
+    u8 *encoded = NULL;
+    u32 encodedLen = 0;
+    u8 *raw = NULL;
+    u32 rawLen = 0;
+    u8 *verifyPayload = NULL;
+    u32 verifyPayloadLen = 0;
+    u8 verifyType = 0;
+    const char *publishNames[1];
+    const char *publishError = NULL;
+    bool changed = false;
+    bool restored = false;
+    size_t oldTargetLen = 0;
+    size_t newTargetLen = 0;
+    u32 oldFieldLen = 0;
+    u16 expectedField = 0;
+    bool ok = false;
+
+    if (errorOut)
+        *errorOut = NULL;
+    if (contentChangedOut)
+        *contentChangedOut = false;
+    if (scene == NULL || portal == NULL || targetScene == NULL ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_name_is_safe(targetScene) ||
+        !vm_net_mock_str_ends_with(scene, ".sce") ||
+        !vm_net_mock_str_ends_with(targetScene, ".sce") ||
+        !vm_net_mock_scene_resource_exists(targetScene) ||
+        !vm_net_mock_update_resource_path(scene, path, sizeof(path)) ||
+        !vm_mock_admin_read_raw_resource_file(path, &previousRaw,
+                                              &previousRawLen) ||
+        !vm_mock_admin_load_data_payload(scene, ".sce", &payload,
+                                         &payloadLen, &type))
+    {
+        if (errorOut)
+            *errorOut = "无法读取权威 SCE 资源或目标场景不存在";
+        goto done;
+    }
+    oldTargetLen = strlen(portal->targetScene);
+    newTargetLen = strlen(targetScene);
+    expectedField = portal->kind == VM_MOCK_ADMIN_PORTAL_NAMED ? 0x17u : 6u;
+    if (oldTargetLen == 0 || oldTargetLen > 0xffu || newTargetLen == 0 ||
+        newTargetLen > 0xffu || portal->targetLengthOffset < 4u ||
+        portal->targetLengthOffset >= payloadLen ||
+        vm_net_mock_read_le16_at(payload, portal->targetLengthOffset - 4u) != 3u ||
+        vm_net_mock_read_le16_at(payload, portal->targetLengthOffset - 2u) !=
+            expectedField)
+    {
+        if (errorOut)
+            *errorOut = "传送点字段已变化；请刷新场景后重新选择";
+        goto done;
+    }
+    oldFieldLen = payload[portal->targetLengthOffset];
+    if (oldFieldLen != oldTargetLen ||
+        portal->targetLengthOffset + 1u + oldFieldLen > payloadLen ||
+        memcmp(payload + portal->targetLengthOffset + 1u, portal->targetScene,
+               oldTargetLen) != 0)
+    {
+        if (errorOut)
+            *errorOut = "传送点源字段与当前 SCE 不一致；已拒绝写入";
+        goto done;
+    }
+    if (strcmp(portal->targetScene, targetScene) == 0)
+    {
+        ok = true;
+        goto done;
+    }
+    if (newTargetLen > oldTargetLen &&
+        payloadLen > UINT32_MAX - (u32)(newTargetLen - oldTargetLen))
+    {
+        if (errorOut)
+            *errorOut = "目标场景名称长度超出资源容量";
+        goto done;
+    }
+    newPayloadLen = payloadLen - oldFieldLen + (u32)newTargetLen;
+    newPayload = (u8 *)malloc(newPayloadLen);
+    if (newPayload == NULL)
+    {
+        if (errorOut)
+            *errorOut = "内存不足，未修改 SCE";
+        goto done;
+    }
+    memcpy(newPayload, payload, portal->targetLengthOffset);
+    newPayload[portal->targetLengthOffset] = (u8)newTargetLen;
+    memcpy(newPayload + portal->targetLengthOffset + 1u, targetScene,
+           newTargetLen);
+    memcpy(newPayload + portal->targetLengthOffset + 1u + newTargetLen,
+           payload + portal->targetLengthOffset + 1u + oldFieldLen,
+           payloadLen - (portal->targetLengthOffset + 1u + oldFieldLen));
+    if (type == 1u)
+    {
+        if (newPayloadLen > UINT32_MAX - 5u)
+            goto done;
+        rawLen = newPayloadLen + 5u;
+        raw = (u8 *)malloc(rawLen);
+        if (raw == NULL)
+            goto done;
+        vm_mock_admin_preview_write_le32(raw, 0, newPayloadLen + 1u);
+        raw[4] = 1u;
+        memcpy(raw + 5, newPayload, newPayloadLen);
+    }
+    else if (type == 2u)
+    {
+        u32 encodedCap = 9u + newPayloadLen +
+                         (newPayloadLen + 126u) / 127u;
+
+        encoded = (u8 *)malloc(encodedCap);
+        if (encoded == NULL ||
+            !vm_net_mock_scene_battle_monster_lzss_literal_encode(
+                newPayload, newPayloadLen, encoded, encodedCap, &encodedLen) ||
+            encodedLen == 0 || encodedLen > UINT32_MAX - 4u)
+        {
+            if (errorOut)
+                *errorOut = "SCE 压缩封装失败";
+            goto done;
+        }
+        rawLen = encodedLen + 4u;
+        raw = (u8 *)malloc(rawLen);
+        if (raw == NULL)
+            goto done;
+        vm_mock_admin_preview_write_le32(raw, 0, encodedLen);
+        memcpy(raw + 4, encoded, encodedLen);
+    }
+    else
+    {
+        if (errorOut)
+            *errorOut = "SCE 使用了不支持的资源容器类型";
+        goto done;
+    }
+    if (!vm_mock_admin_write_resource_atomic(path, raw, rawLen) ||
+        !vm_mock_admin_load_data_payload(scene, ".sce", &verifyPayload,
+                                         &verifyPayloadLen, &verifyType) ||
+        verifyType != type || portal->targetLengthOffset >= verifyPayloadLen ||
+        verifyPayload[portal->targetLengthOffset] != newTargetLen ||
+        portal->targetLengthOffset + 1u + newTargetLen > verifyPayloadLen ||
+        memcmp(verifyPayload + portal->targetLengthOffset + 1u, targetScene,
+               newTargetLen) != 0)
+    {
+        restored = vm_mock_admin_write_resource_atomic(path, previousRaw,
+                                                        previousRawLen);
+        if (errorOut)
+            *errorOut = restored ? "SCE 写入后校验失败，已恢复原资源"
+                                 : "SCE 写入后校验失败，恢复原资源也失败";
+        goto done;
+    }
+    publishNames[0] = scene;
+    if (!vm_net_mock_content_update_publish_files(publishNames, 1,
+                                                  &publishError, &changed))
+    {
+        restored = vm_mock_admin_write_resource_atomic(path, previousRaw,
+                                                        previousRawLen);
+        if (errorOut)
+            *errorOut = restored ? "内容更新发布失败，已恢复原 SCE"
+                                 : "内容更新发布失败，恢复原 SCE 也失败";
+        goto done;
+    }
+    if (contentChangedOut)
+        *contentChangedOut = changed;
+    printf("[info][mock-admin] sce_portal_target_save scene=%s offset=%u target=%s raw=%u publish=WT18/9+18/8->18/7\n",
+           scene, portal->targetLengthOffset, targetScene, rawLen);
+    ok = true;
+
+done:
+    free(previousRaw);
+    free(payload);
+    free(newPayload);
+    free(encoded);
+    free(raw);
+    free(verifyPayload);
+    return ok;
+}
+
+static void vm_mock_admin_handle_sce_portal_action(
+    vm_mock_service_socket client, const char *body)
+{
+    vm_mock_admin_scene_portal portals[VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX];
+    char sceneUtf8[192];
+    char runtimeScene[64];
+    char targetUtf8[192];
+    char targetScene[64];
+    u32 fieldOffset = 0;
+    u32 portalCount = 0;
+    const vm_mock_admin_scene_portal *selected = NULL;
+    const char *error = NULL;
+    bool changed = false;
+
+    memset(portals, 0, sizeof(portals));
+    memset(sceneUtf8, 0, sizeof(sceneUtf8));
+    memset(runtimeScene, 0, sizeof(runtimeScene));
+    memset(targetUtf8, 0, sizeof(targetUtf8));
+    memset(targetScene, 0, sizeof(targetScene));
+    if (!vm_mock_admin_scene_from_form(body, sceneUtf8, sizeof(sceneUtf8),
+                                       runtimeScene, sizeof(runtimeScene)) ||
+        !vm_mock_admin_form_u32(body, "portal_offset", 0x00ffffffu,
+                                &fieldOffset) ||
+        !vm_mock_admin_form_value(body, "target_scene", targetUtf8,
+                                  sizeof(targetUtf8)) ||
+        !vm_mock_admin_utf8_to_gbk_text(targetUtf8, targetScene,
+                                        sizeof(targetScene), false) ||
+        !vm_net_mock_str_ends_with(targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(targetScene) ||
+        !vm_net_mock_scene_resource_exists(targetScene))
+    {
+        vm_mock_admin_redirect_content_section(
+            client, sceneUtf8, "portals", "error",
+            "场景、传送点或目标 SCE 参数无效");
+        return;
+    }
+    portalCount = vm_mock_admin_collect_scene_portals(
+        runtimeScene, portals, VM_MOCK_ADMIN_PREVIEW_PORTAL_MAX, NULL);
+    for (u32 i = 0; i < portalCount; ++i)
+    {
+        if (portals[i].targetLengthOffset == fieldOffset)
+        {
+            selected = &portals[i];
+            break;
+        }
+    }
+    if (selected == NULL)
+    {
+        vm_mock_admin_redirect_content_section(
+            client, sceneUtf8, "portals", "error",
+            "传送点记录已变化或不是可编辑的原始 SCE 字段；请刷新后重试");
+        return;
+    }
+    if (!vm_mock_admin_sce_portal_target_replace(
+            runtimeScene, selected, targetScene, &error, &changed))
+    {
+        vm_mock_admin_redirect_content_section(
+            client, sceneUtf8, "portals", "error",
+            error ? error : "传送点目标保存失败");
+        return;
+    }
+    vm_mock_admin_redirect_content_section(
+        client, sceneUtf8, "portals", "ok",
+        changed ? "目标 SCE 已严格更新并发布；客户端下次加载会下载新场景资源"
+                : "目标 SCE 未变化，未重复发布内容更新");
+}
+
 static void vm_mock_admin_redirect_scene_battle_monsters(
     vm_mock_service_socket client, const char *sceneUtf8, const char *status,
     const char *message)
@@ -8223,7 +9466,7 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
         }
         vm_mock_admin_redirect_monster(
             client, row.enemyId, "ok",
-            "已按当前等级和类型重置 HP、MP、攻击、防御；奖励与掉落保持不变");
+            "已按当前等级和类型重置 HP、MP、攻击、防御、经验和铜钱；物品掉落保持不变");
         return;
     }
     if (strcmp(action, "reset-monster-combat-stats-bulk") == 0)
@@ -8253,8 +9496,40 @@ static void vm_mock_admin_handle_monster_action(vm_mock_service_socket client,
             return;
         }
         snprintf(message, sizeof(message),
-                 "已批量按各自等级和类型重置 %u 项 HP、MP、攻击、防御；%u 项原本已使用服务端公式",
+                 "已批量按各自等级和类型重置 %u 项属性和结算奖励；%u 项原本已使用服务端公式",
                  updated, alreadyDefault);
+        vm_mock_admin_redirect_monster(client, row.enemyId, "ok", message);
+        return;
+    }
+    if (strcmp(action, "reset-monster-scene-levels-bulk") == 0)
+    {
+        u32 enemyIds[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+        u32 enemyCount = 0;
+        u32 updated = 0;
+        u32 skipped = 0;
+        char message[224];
+
+        memset(enemyIds, 0, sizeof(enemyIds));
+        memset(message, 0, sizeof(message));
+        if (!vm_mock_admin_form_u32_csv(
+                body, "monster_ids", enemyIds,
+                VM_NET_MOCK_MONSTER_CATALOG_MAX, &enemyCount))
+        {
+            vm_mock_admin_redirect_monster(client, row.enemyId, "error",
+                                           "请至少选择一个有效怪物");
+            return;
+        }
+        if (!vm_net_mock_monster_admin_reset_scene_levels_batch(
+                enemyIds, enemyCount, &updated, &skipped, &error))
+        {
+            vm_mock_admin_redirect_monster(
+                client, row.enemyId, "error",
+                error ? error : "按场景等级批量重置失败");
+            return;
+        }
+        snprintf(message, sizeof(message),
+                 "已按 sMap 场景怪物等级覆盖 %u 项，并重置属性和结算奖励；%u 项缺少有效场景等级，已跳过",
+                 updated, skipped);
         vm_mock_admin_redirect_monster(client, row.enemyId, "ok", message);
         return;
     }
@@ -8498,7 +9773,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     u32 y = 0;
     u32 kind = 0;
     u32 taskId = 0;
-    u32 taskRepeatable = 0;
+    u32 taskRepeatPolicy = VM_NET_MOCK_TASK_REPEAT_NEVER;
     u32 instanceX = 0;
     u32 instanceY = 0;
     u32 challengeEnemyId = 0;
@@ -8904,7 +10179,9 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
         !vm_mock_admin_form_u32(body, "x", 0xffffu, &x) || x == 0 ||
         !vm_mock_admin_form_u32(body, "y", 0xffffu, &y) || y == 0 ||
         !vm_mock_admin_form_u32(body, "task_id", 0xffffffffu, &taskId) ||
-        !vm_mock_admin_form_u32(body, "task_repeatable", 1, &taskRepeatable) ||
+        !vm_mock_admin_form_u32(body, "task_repeat_policy",
+                                VM_NET_MOCK_TASK_REPEAT_MONTHLY,
+                                &taskRepeatPolicy) ||
         !vm_mock_admin_form_value(body, "display_name", displayUtf8,
                                   sizeof(displayUtf8)) ||
         !vm_mock_admin_form_value(body, "actor_resource", actorResource,
@@ -8925,7 +10202,7 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
                                        "绑定任务不存在或已停用");
         return;
     }
-    if (taskId == 0 && taskRepeatable != 0)
+    if (taskId == 0 && taskRepeatPolicy != VM_NET_MOCK_TASK_REPEAT_NEVER)
     {
         vm_mock_admin_redirect_content(client, sceneUtf8, "error",
                                        "只有绑定任务的 NPC 才能设置重复接取");
@@ -9077,7 +10354,9 @@ static void vm_mock_admin_handle_npc_action(vm_mock_service_socket client,
     seed.y = (u16)y;
     seed.kind = (u16)kind;
     seed.taskId = taskId;
-    seed.taskRepeatable = taskRepeatable != 0;
+    seed.taskRepeatPolicy = (u8)taskRepeatPolicy;
+    seed.taskRepeatable = seed.taskRepeatPolicy !=
+                          VM_NET_MOCK_TASK_REPEAT_NEVER;
     seed.instanceX = (u16)instanceX;
     seed.instanceY = (u16)instanceY;
     seed.challengeEnemyId = challengeEnemyId;
@@ -9751,6 +11030,189 @@ static void vm_mock_admin_handle_actor_resource_action(
             "Actor 已保存并通过校验；文件字节未变，客户端不会重复下载");
 }
 
+static void vm_mock_admin_handle_dsh_row_action(vm_mock_service_socket client,
+                                                const char *body)
+{
+    char resourceUtf8[256];
+    char resource[128];
+    char path[1200];
+    char fieldName[40];
+    char valueUtf8[1024];
+    char valueGbk[VM_MOCK_ADMIN_DSH_VALUE_MAX + 1u];
+    u8 *raw = NULL;
+    u8 *newRaw = NULL;
+    u8 *verifyRaw = NULL;
+    u8 *newRow = NULL;
+    u32 rawLen = 0;
+    u32 verifyRawLen = 0;
+    u32 selectedRow = 0;
+    u32 expectedFingerprint = 0;
+    u32 rowOffset = 0;
+    u32 rowLen = 0;
+    u32 newRowLen = 0;
+    u32 newRawLen = 0;
+    vm_mock_admin_dsh_table table;
+    vm_mock_admin_dsh_table verifyTable;
+    const char *publishNames[1];
+    const char *publishError = NULL;
+    const char *failure = NULL;
+    bool changed = false;
+    bool wrote = false;
+    bool restored = false;
+    char failureMessage[384];
+
+    memset(resourceUtf8, 0, sizeof(resourceUtf8));
+    memset(resource, 0, sizeof(resource));
+    memset(path, 0, sizeof(path));
+    memset(fieldName, 0, sizeof(fieldName));
+    memset(valueUtf8, 0, sizeof(valueUtf8));
+    memset(valueGbk, 0, sizeof(valueGbk));
+    memset(failureMessage, 0, sizeof(failureMessage));
+    memset(&table, 0, sizeof(table));
+    memset(&verifyTable, 0, sizeof(verifyTable));
+    if (!vm_mock_admin_content_resource_from_query(
+            body, "resource", ".dsh", resourceUtf8, sizeof(resourceUtf8),
+            resource, sizeof(resource)) ||
+        !vm_mock_admin_form_u32(body, "dsh_row", 0xffffffffu,
+                                &selectedRow) ||
+        !vm_mock_admin_form_u32(body, "row_fingerprint", 0xffffffffu,
+                                &expectedFingerprint) ||
+        !vm_net_mock_update_resource_path(resource, path, sizeof(path)) ||
+        !vm_mock_admin_read_raw_resource_file(path, &raw, &rawLen) ||
+        !vm_mock_admin_dsh_table_parse(raw, rawLen, &table) ||
+        selectedRow >= table.rowCount ||
+        !vm_mock_admin_dsh_row_at(raw, rawLen, &table, selectedRow,
+                                  &rowOffset, &rowLen) ||
+        rowOffset < 4u)
+    {
+        vm_mock_admin_redirect_dsh_row(
+            client, resourceUtf8, selectedRow, "error",
+            "DSH 文件、行号或表结构无效；未写入任何数据");
+        free(raw);
+        return;
+    }
+    if (vm_mock_admin_dsh_row_fingerprint(raw + rowOffset, rowLen) !=
+        expectedFingerprint)
+    {
+        vm_mock_admin_redirect_dsh_row(
+            client, resourceUtf8, selectedRow, "error",
+            "该行已被其他操作修改，请重新打开后再保存");
+        free(raw);
+        return;
+    }
+    newRow = (u8 *)malloc((size_t)table.columnCount *
+                          (VM_MOCK_ADMIN_DSH_VALUE_MAX + 1u));
+    if (newRow == NULL)
+    {
+        vm_mock_admin_redirect_dsh_row(client, resourceUtf8, selectedRow,
+                                       "error", "内存不足，未写入 DSH");
+        free(raw);
+        return;
+    }
+    for (u32 column = 0; column < table.columnCount; ++column)
+    {
+        size_t valueLen = 0;
+
+        snprintf(fieldName, sizeof(fieldName), "dsh_value_%u", column);
+        memset(valueUtf8, 0, sizeof(valueUtf8));
+        memset(valueGbk, 0, sizeof(valueGbk));
+        if (!vm_mock_admin_form_value(body, fieldName, valueUtf8,
+                                      sizeof(valueUtf8)) ||
+            !vm_mock_admin_utf8_to_gbk_text(valueUtf8, valueGbk,
+                                            sizeof(valueGbk), false) ||
+            (valueLen = strlen(valueGbk)) > VM_MOCK_ADMIN_DSH_VALUE_MAX)
+        {
+            failure = "DSH 字段缺失，或内容无法转换为游戏使用的 GBK 文本";
+            goto done;
+        }
+        newRow[newRowLen++] = (u8)valueLen;
+        if (valueLen != 0)
+        {
+            memcpy(newRow + newRowLen, valueGbk, valueLen);
+            newRowLen += (u32)valueLen;
+        }
+    }
+    if (newRowLen == 0 || rowLen > rawLen || rawLen - rowLen > 0xffffffffu - newRowLen)
+    {
+        failure = "DSH 行长度无效，未写入数据";
+        goto done;
+    }
+    newRawLen = rawLen - rowLen + newRowLen;
+    newRaw = (u8 *)malloc(newRawLen);
+    if (newRaw == NULL)
+    {
+        failure = "内存不足，未写入 DSH";
+        goto done;
+    }
+    memcpy(newRaw, raw, rowOffset - 4u);
+    vm_mock_admin_preview_write_le32(newRaw, rowOffset - 4u, newRowLen);
+    memcpy(newRaw + rowOffset, newRow, newRowLen);
+    memcpy(newRaw + rowOffset + newRowLen, raw + rowOffset + rowLen,
+           rawLen - rowOffset - rowLen);
+    vm_mock_admin_preview_write_le32(newRaw, 0, newRawLen - 4u);
+    if (!vm_mock_admin_dsh_raw_is_valid(newRaw, newRawLen))
+    {
+        failure = "DSH 行保存后的完整表校验失败，未写入数据";
+        goto done;
+    }
+    if (newRawLen == rawLen && memcmp(newRaw, raw, rawLen) == 0)
+    {
+        vm_mock_admin_redirect_dsh_row(
+            client, resourceUtf8, selectedRow, "ok",
+            "该行没有变化，未重复发布内容更新");
+        goto done;
+    }
+    if (!vm_mock_admin_write_resource_atomic(path, newRaw, newRawLen))
+    {
+        failure = "DSH 原子写入失败，原文件未替换";
+        goto done;
+    }
+    wrote = true;
+    if (!vm_mock_admin_read_raw_resource_file(path, &verifyRaw,
+                                              &verifyRawLen) ||
+        verifyRawLen != newRawLen ||
+        !vm_mock_admin_dsh_table_parse(verifyRaw, verifyRawLen,
+                                       &verifyTable) ||
+        selectedRow >= verifyTable.rowCount ||
+        !vm_mock_admin_dsh_row_at(verifyRaw, verifyRawLen, &verifyTable,
+                                  selectedRow, &rowOffset, &rowLen) ||
+        vm_mock_admin_dsh_row_fingerprint(verifyRaw + rowOffset, rowLen) !=
+            vm_mock_admin_dsh_row_fingerprint(newRow, newRowLen))
+    {
+        failure = "DSH 写入后的回读校验失败";
+        goto done;
+    }
+    publishNames[0] = resource;
+    if (!vm_net_mock_content_update_publish_files(publishNames, 1,
+                                                  &publishError, &changed))
+    {
+        failure = publishError ? publishError : "内容更新发布失败";
+        goto done;
+    }
+    printf("[info][mock-admin] dsh_row_save resource=%s row=%u old=%u new=%u publish=WT18/9+18/8->18/7\n",
+           resource, selectedRow, rawLen, newRawLen);
+    vm_mock_admin_redirect_dsh_row(
+        client, resourceUtf8, selectedRow, "ok",
+        changed ? "DSH 行已保存、回读校验并发布；下次资源加载会下载更新" :
+                  "DSH 行已保存并校验；内容版本未变化");
+
+done:
+    if (failure != NULL)
+    {
+        if (wrote)
+            restored = vm_mock_admin_write_resource_atomic(path, raw, rawLen);
+        snprintf(failureMessage, sizeof(failureMessage), "%s%s",
+                 restored ? "操作失败，已恢复原始 DSH：" : "操作失败：",
+                 failure);
+        vm_mock_admin_redirect_dsh_row(
+            client, resourceUtf8, selectedRow, "error", failureMessage);
+    }
+    free(verifyRaw);
+    free(newRaw);
+    free(newRow);
+    free(raw);
+}
+
 static void vm_mock_admin_handle_action(vm_mock_service_socket client, const char *body)
 {
     char action[32];
@@ -9783,6 +11245,16 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, "", "error", "请求参数不完整");
         return;
     }
+    if (strcmp(action, "save-dsh-row") == 0)
+    {
+        vm_mock_admin_handle_dsh_row_action(client, body);
+        return;
+    }
+    if (strcmp(action, "save-sce-portal-target") == 0)
+    {
+        vm_mock_admin_handle_sce_portal_action(client, body);
+        return;
+    }
     if (strcmp(action, "save-npc") == 0 ||
         strcmp(action, "toggle-npc") == 0 ||
         strcmp(action, "delete-npc-override") == 0 ||
@@ -9807,7 +11279,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     if (strcmp(action, "save-monster") == 0 ||
         strcmp(action, "reset-monster") == 0 ||
         strcmp(action, "reset-monster-combat-stats") == 0 ||
-        strcmp(action, "reset-monster-combat-stats-bulk") == 0)
+        strcmp(action, "reset-monster-combat-stats-bulk") == 0 ||
+        strcmp(action, "reset-monster-scene-levels-bulk") == 0)
     {
         vm_mock_admin_handle_monster_action(client, action, body);
         return;
@@ -10250,6 +11723,624 @@ static void vm_mock_user_redirect_message(vm_mock_service_socket client,
     snprintf(location, sizeof(location), "/?status=%s&message=%s",
              statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
+}
+
+static const u8 *vm_mock_admin_find_bytes(const u8 *data, u32 dataLen,
+                                          const u8 *needle, u32 needleLen)
+{
+    if (data == NULL || needle == NULL || needleLen == 0 || needleLen > dataLen)
+        return NULL;
+    for (u32 i = 0; i + needleLen <= dataLen; ++i)
+    {
+        if (memcmp(data + i, needle, needleLen) == 0)
+            return data + i;
+    }
+    return NULL;
+}
+
+static bool vm_mock_admin_parse_multipart_upload(
+    const char *request, size_t headerLen, const u8 *body, u32 bodyLen,
+    const u8 **fileDataOut, u32 *fileLenOut, char *filenameOut,
+    size_t filenameCap)
+{
+    char contentType[512];
+    char boundary[192];
+    char separator[200];
+    const char *boundaryText = NULL;
+    size_t boundaryLen = 0;
+    u32 separatorLen = 0;
+    u32 pos = 0;
+
+    if (fileDataOut)
+        *fileDataOut = NULL;
+    if (fileLenOut)
+        *fileLenOut = 0;
+    if (filenameOut && filenameCap != 0)
+        filenameOut[0] = 0;
+    if (request == NULL || body == NULL || fileDataOut == NULL ||
+        fileLenOut == NULL || filenameOut == NULL || filenameCap == 0 ||
+        !vm_mock_admin_header_value(request, headerLen, "Content-Type",
+                                    contentType, sizeof(contentType)))
+    {
+        return false;
+    }
+    boundaryText = strstr(contentType, "boundary=");
+    if (boundaryText == NULL)
+        return false;
+    boundaryText += 9;
+    if (*boundaryText == '"')
+    {
+        ++boundaryText;
+        while (boundaryText[boundaryLen] != 0 &&
+               boundaryText[boundaryLen] != '"')
+            ++boundaryLen;
+    }
+    else
+    {
+        while (boundaryText[boundaryLen] != 0 &&
+               boundaryText[boundaryLen] != ';' &&
+               !isspace((unsigned char)boundaryText[boundaryLen]))
+        {
+            ++boundaryLen;
+        }
+    }
+    if (boundaryLen == 0 || boundaryLen >= sizeof(boundary) ||
+        boundaryLen + 2u >= sizeof(separator))
+    {
+        return false;
+    }
+    memcpy(boundary, boundaryText, boundaryLen);
+    boundary[boundaryLen] = 0;
+    separator[0] = '-';
+    separator[1] = '-';
+    memcpy(separator + 2, boundary, boundaryLen);
+    separatorLen = (u32)boundaryLen + 2u;
+    while (pos < bodyLen)
+    {
+        const u8 *headerEnd = NULL;
+        const u8 *next = NULL;
+        const u8 *dataStart = NULL;
+        u32 headerStart = 0;
+        u32 dataLen = 0;
+        char partHeaders[2048];
+        const char *filename = NULL;
+        const char *filenameEnd = NULL;
+
+        if (pos + separatorLen > bodyLen ||
+            memcmp(body + pos, separator, separatorLen) != 0)
+        {
+            return false;
+        }
+        pos += separatorLen;
+        if (pos + 2u <= bodyLen && body[pos] == '-' && body[pos + 1u] == '-')
+            break;
+        if (pos + 2u > bodyLen || body[pos] != '\r' || body[pos + 1u] != '\n')
+            return false;
+        pos += 2u;
+        headerStart = pos;
+        headerEnd = vm_mock_admin_find_bytes(body + pos, bodyLen - pos,
+                                             (const u8 *)"\r\n\r\n", 4u);
+        if (headerEnd == NULL || (size_t)(headerEnd - (body + headerStart)) >=
+                                     sizeof(partHeaders))
+        {
+            return false;
+        }
+        memcpy(partHeaders, body + headerStart,
+               (size_t)(headerEnd - (body + headerStart)));
+        partHeaders[headerEnd - (body + headerStart)] = 0;
+        dataStart = headerEnd + 4u;
+        next = vm_mock_admin_find_bytes(dataStart,
+                                        bodyLen - (u32)(dataStart - body),
+                                        (const u8 *)"\r\n--", 4u);
+        if (next == NULL || next + 4u + boundaryLen > body + bodyLen ||
+            memcmp(next + 4u, boundary, boundaryLen) != 0)
+        {
+            return false;
+        }
+        dataLen = (u32)(next - dataStart);
+        if (strstr(partHeaders, "name=\"resource_file\"") != NULL &&
+            (filename = strstr(partHeaders, "filename=\"")) != NULL)
+        {
+            filename += 10;
+            filenameEnd = strchr(filename, '"');
+            if (filenameEnd == NULL || filenameEnd == filename ||
+                (size_t)(filenameEnd - filename) >= filenameCap)
+            {
+                return false;
+            }
+            memcpy(filenameOut, filename, (size_t)(filenameEnd - filename));
+            filenameOut[filenameEnd - filename] = 0;
+            *fileDataOut = dataStart;
+            *fileLenOut = dataLen;
+            return dataLen != 0;
+        }
+        pos = (u32)(next - body) + 2u;
+    }
+    return false;
+}
+
+static bool vm_mock_admin_upload_resource_name(const char *filename,
+                                               const char *suffix,
+                                               char *nameOut,
+                                               size_t nameCap)
+{
+    const char *leaf = filename;
+    const char *slash = NULL;
+    const char *dot = NULL;
+    char utf8[256];
+    char gbk[128];
+    size_t stemLen = 0;
+
+    if (filename == NULL || suffix == NULL || nameOut == NULL || nameCap == 0)
+        return false;
+    slash = strrchr(filename, '/');
+    if (slash != NULL)
+        leaf = slash + 1;
+    slash = strrchr(leaf, '\\');
+    if (slash != NULL)
+        leaf = slash + 1;
+    if (leaf[0] == 0 || strlen(leaf) >= sizeof(utf8))
+        return false;
+    snprintf(utf8, sizeof(utf8), "%s", leaf);
+    dot = strrchr(utf8, '.');
+    if (dot == NULL || dot == utf8)
+        return false;
+    stemLen = (size_t)(dot - utf8);
+    if (stemLen + strlen(suffix) >= sizeof(utf8))
+        return false;
+    utf8[stemLen] = 0;
+    if (!vm_mock_admin_utf8_to_gbk_text(utf8, gbk, sizeof(gbk), false) ||
+        gbk[0] == 0 || strlen(gbk) + strlen(suffix) >= nameCap ||
+        snprintf(nameOut, nameCap, "%s%s", gbk, suffix) >= (int)nameCap ||
+        !vm_net_mock_update_name_is_safe(nameOut))
+    {
+        return false;
+    }
+    return true;
+}
+
+static bool vm_mock_admin_raw_resource_is_valid(const u8 *raw, u32 rawLen)
+{
+    u32 declaredLen = 0;
+    u32 decodedLen = 0;
+    u8 *decoded = NULL;
+    bool ok = false;
+
+    if (raw == NULL || rawLen < 5u)
+        return false;
+    declaredLen = (u32)raw[0] | ((u32)raw[1] << 8) |
+                  ((u32)raw[2] << 16) | ((u32)raw[3] << 24);
+    if (declaredLen != rawLen - 4u || declaredLen < 1u)
+        return false;
+    if (raw[4] == 1u)
+        return declaredLen > 1u;
+    if (raw[4] != 2u || declaredLen < 9u)
+        return false;
+    decodedLen = vm_net_mock_read_be32_at(raw + 4, 5) & 0x7fffffffu;
+    if (decodedLen == 0 || decodedLen > VM_MOCK_ADMIN_PREVIEW_RESOURCE_MAX)
+        return false;
+    decoded = (u8 *)malloc(decodedLen);
+    if (decoded != NULL &&
+        vm_net_mock_decode_lzss_resource_stream(raw + 4, declaredLen,
+                                                 decoded, decodedLen) ==
+            decodedLen)
+    {
+        ok = true;
+    }
+    free(decoded);
+    return ok;
+}
+
+static bool vm_mock_admin_gif_write_bits(u8 *out, u32 outCap, u32 *bitPos,
+                                         u16 code)
+{
+    if (out == NULL || bitPos == NULL || *bitPos > outCap * 8u - 9u)
+        return false;
+    for (u32 bit = 0; bit < 9u; ++bit)
+    {
+        if ((code & (1u << bit)) != 0)
+            out[(*bitPos + bit) >> 3] |= (u8)(1u << ((*bitPos + bit) & 7u));
+    }
+    *bitPos += 9u;
+    return true;
+}
+
+static bool vm_mock_admin_encode_uploaded_image_as_game_gif(
+    const u8 *source, u32 sourceLen, u8 **rawOut, u32 *rawLenOut,
+    u16 *widthOut, u16 *heightOut)
+{
+    int width = 0;
+    int height = 0;
+    int components = 0;
+    u8 *rgba = NULL;
+    u32 *histogram = NULL;
+    u16 *colorIndex = NULL;
+    u16 palette[256];
+    u8 *indices = NULL;
+    u8 *lzw = NULL;
+    u8 *payload = NULL;
+    u8 *raw = NULL;
+    u32 pixelCount = 0;
+    u32 paletteCount = 0;
+    u32 lzwLen = 0;
+    u32 payloadLen = 0;
+    u32 rawLen = 0;
+    u32 bitPos = 0;
+    u32 pos = 0;
+    bool ok = false;
+
+    if (rawOut)
+        *rawOut = NULL;
+    if (rawLenOut)
+        *rawLenOut = 0;
+    if (widthOut)
+        *widthOut = 0;
+    if (heightOut)
+        *heightOut = 0;
+    if (source == NULL || sourceLen == 0 ||
+        sourceLen > VM_MOCK_ADMIN_GIF_UPLOAD_MAX || rawOut == NULL ||
+        rawLenOut == NULL ||
+        !stbi_info_from_memory(source, (int)sourceLen, &width, &height,
+                               &components) ||
+        width <= 0 || height <= 0 || width > 0xffff || height > 0xffff ||
+        (u32)width > VM_MOCK_ADMIN_GIF_UPLOAD_PIXEL_MAX / (u32)height)
+    {
+        return false;
+    }
+    pixelCount = (u32)width * (u32)height;
+    rgba = stbi_load_from_memory(source, (int)sourceLen, &width, &height,
+                                 &components, 4);
+    histogram = (u32 *)calloc(65536u, sizeof(*histogram));
+    colorIndex = (u16 *)malloc(65536u * sizeof(*colorIndex));
+    indices = (u8 *)malloc(pixelCount);
+    if (rgba == NULL || histogram == NULL || colorIndex == NULL ||
+        indices == NULL)
+    {
+        goto done;
+    }
+    memset(colorIndex, 0xff, 65536u * sizeof(*colorIndex));
+    memset(palette, 0, sizeof(palette));
+    for (u32 i = 0; i < pixelCount; ++i)
+    {
+        const u8 *px = rgba + i * 4u;
+        u16 color = (u16)(((u16)(px[0] & 0xf8u) << 8) |
+                          ((u16)(px[1] & 0xfcu) << 3) | (px[2] >> 3));
+        if (px[3] >= 128u)
+            ++histogram[color];
+    }
+    for (u32 slot = 1; slot < 256u; ++slot)
+    {
+        u32 bestColor = 0;
+        u32 bestCount = 0;
+        for (u32 color = 0; color < 65536u; ++color)
+        {
+            if (histogram[color] > bestCount)
+            {
+                bestColor = color;
+                bestCount = histogram[color];
+            }
+        }
+        if (bestCount == 0)
+            break;
+        palette[slot] = (u16)bestColor;
+        colorIndex[bestColor] = (u16)slot;
+        histogram[bestColor] = 0;
+        paletteCount = slot;
+    }
+    for (u32 i = 0; i < pixelCount; ++i)
+    {
+        const u8 *px = rgba + i * 4u;
+        u16 color = (u16)(((u16)(px[0] & 0xf8u) << 8) |
+                          ((u16)(px[1] & 0xfcu) << 3) | (px[2] >> 3));
+        u16 chosen = 0;
+
+        if (px[3] >= 128u)
+        {
+            if (colorIndex[color] == 0xffffu)
+            {
+                u32 bestDistance = UINT32_MAX;
+                for (u32 slot = 1; slot <= paletteCount; ++slot)
+                {
+                    int dr = (int)((color >> 11) & 0x1fu) -
+                             (int)((palette[slot] >> 11) & 0x1fu);
+                    int dg = (int)((color >> 5) & 0x3fu) -
+                             (int)((palette[slot] >> 5) & 0x3fu);
+                    int db = (int)(color & 0x1fu) -
+                             (int)(palette[slot] & 0x1fu);
+                    u32 distance = (u32)(dr * dr + dg * dg + db * db);
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        chosen = (u16)slot;
+                    }
+                }
+                colorIndex[color] = chosen;
+            }
+            else
+            {
+                chosen = colorIndex[color];
+            }
+        }
+        indices[i] = (u8)chosen;
+    }
+    lzwLen = (u32)(((uint64_t)pixelCount * 18u + 9u + 7u) / 8u);
+    lzw = (u8 *)calloc(lzwLen, 1u);
+    if (lzw == NULL)
+        goto done;
+    for (u32 i = 0; i < pixelCount; ++i)
+    {
+        if (!vm_mock_admin_gif_write_bits(lzw, lzwLen, &bitPos, 256u) ||
+            !vm_mock_admin_gif_write_bits(lzw, lzwLen, &bitPos, indices[i]))
+        {
+            goto done;
+        }
+    }
+    if (!vm_mock_admin_gif_write_bits(lzw, lzwLen, &bitPos, 257u))
+        goto done;
+    payloadLen = 7u + 512u + 8u + 11u +
+                 (lzwLen + 254u) / 255u + lzwLen + 1u;
+    rawLen = payloadLen + 5u;
+    payload = (u8 *)calloc(payloadLen, 1u);
+    raw = (u8 *)malloc(rawLen);
+    if (payload == NULL || raw == NULL)
+        goto done;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0x10;
+    payload[pos++] = 0;
+    payload[pos++] = 0x87;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    for (u32 i = 0; i < 256u; ++i)
+    {
+        payload[pos++] = (u8)(palette[i] >> 8);
+        payload[pos++] = (u8)(palette[i] & 0xffu);
+    }
+    payload[pos++] = 0x21;
+    payload[pos++] = 0xf9;
+    payload[pos++] = 0x04;
+    payload[pos++] = 0x01;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0x2c;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = 0;
+    payload[pos++] = (u8)((u32)width & 0xffu);
+    payload[pos++] = (u8)((u32)width >> 8);
+    payload[pos++] = (u8)((u32)height & 0xffu);
+    payload[pos++] = (u8)((u32)height >> 8);
+    payload[pos++] = 0;
+    payload[pos++] = 8;
+    for (u32 dataPos = 0; dataPos < lzwLen;)
+    {
+        u32 count = lzwLen - dataPos;
+        if (count > 255u)
+            count = 255u;
+        payload[pos++] = (u8)count;
+        memcpy(payload + pos, lzw + dataPos, count);
+        pos += count;
+        dataPos += count;
+    }
+    payload[pos++] = 0;
+    if (pos != payloadLen)
+        goto done;
+    vm_mock_admin_preview_write_le32(raw, 0, payloadLen + 1u);
+    raw[4] = 1u;
+    memcpy(raw + 5, payload, payloadLen);
+    {
+        GifOutput decoded;
+        int allocationSize = 0;
+
+        memset(&decoded, 0, sizeof(decoded));
+        if (!gifDecodeExt(payload, &decoded, 1, &allocationSize) ||
+            decoded.pixels == NULL || decoded.width != (u16)width ||
+            decoded.height != (u16)height)
+        {
+            if (decoded.owned && decoded.pixels)
+                free_mem(decoded.pixels);
+            goto done;
+        }
+        if (decoded.owned && decoded.pixels)
+            free_mem(decoded.pixels);
+    }
+    *rawOut = raw;
+    *rawLenOut = rawLen;
+    if (widthOut)
+        *widthOut = (u16)width;
+    if (heightOut)
+        *heightOut = (u16)height;
+    raw = NULL;
+    ok = true;
+
+done:
+    stbi_image_free(rgba);
+    free(histogram);
+    free(colorIndex);
+    free(indices);
+    free(lzw);
+    free(payload);
+    free(raw);
+    return ok;
+}
+
+static bool vm_mock_admin_validate_content_resource(const char *name,
+                                                     const char *suffix,
+                                                     bool gifResource)
+{
+    u8 *payload = NULL;
+    u8 *raw = NULL;
+    u32 payloadLen = 0;
+    u32 rawLen = 0;
+    u8 type = 0;
+    char path[1200];
+    bool ok = false;
+
+    if (!gifResource)
+    {
+        memset(path, 0, sizeof(path));
+        if (vm_net_mock_update_resource_path(name, path, sizeof(path)) &&
+            vm_mock_admin_read_raw_resource_file(path, &raw, &rawLen))
+        {
+            ok = vm_mock_admin_dsh_raw_is_valid(raw, rawLen);
+        }
+        free(raw);
+        return ok;
+    }
+    if (!vm_mock_admin_load_data_payload(name, suffix, &payload, &payloadLen,
+                                         &type))
+    {
+        return false;
+    }
+    if (type == 1u)
+    {
+        GifOutput image;
+        int allocationSize = 0;
+
+        memset(&image, 0, sizeof(image));
+        ok = gifDecodeExt(payload, &image, 1, &allocationSize) != 0 &&
+             image.pixels != NULL && image.width != 0 && image.height != 0;
+        if (image.owned && image.pixels)
+            free_mem(image.pixels);
+    }
+    free(payload);
+    return ok;
+}
+
+static void vm_mock_admin_handle_content_file_upload(
+    vm_mock_service_socket client, bool gifResource, const char *request,
+    size_t headerLen, const u8 *body, u32 bodyLen)
+{
+    const u8 *fileData = NULL;
+    u32 fileLen = 0;
+    char filename[256];
+    char resource[128];
+    char resourceUtf8[256];
+    char path[1200];
+    u8 *previousRaw = NULL;
+    u32 previousRawLen = 0;
+    u8 *raw = NULL;
+    u32 rawLen = 0;
+    const char *names[1];
+    const char *error = NULL;
+    bool existed = false;
+    bool pathExists = false;
+    bool restored = false;
+    bool changed = false;
+    const char *kind = gifResource ? "gif" : "dsh";
+    const char *suffix = gifResource ? ".gif" : ".dsh";
+    const char *message = NULL;
+
+    memset(filename, 0, sizeof(filename));
+    memset(resource, 0, sizeof(resource));
+    memset(resourceUtf8, 0, sizeof(resourceUtf8));
+    memset(path, 0, sizeof(path));
+    if (!vm_mock_admin_parse_multipart_upload(request, headerLen, body, bodyLen,
+                                              &fileData, &fileLen, filename,
+                                              sizeof(filename)) ||
+        !vm_mock_admin_upload_resource_name(filename, suffix, resource,
+                                            sizeof(resource)) ||
+        fileLen == 0 || (!gifResource && fileLen > VM_MOCK_ADMIN_REQUEST_BODY_MAX) ||
+        (gifResource && fileLen > VM_MOCK_ADMIN_GIF_UPLOAD_MAX) ||
+        !vm_net_mock_update_resource_path(resource, path, sizeof(path)))
+    {
+        vm_mock_admin_redirect_content_resource(
+            client, kind, "", "error",
+            "上传文件、文件名或资源目录无效；文件名将决定服务端资源名称");
+        return;
+    }
+    vm_net_mock_gbk_label_to_utf8(resource, resourceUtf8, sizeof(resourceUtf8));
+    pathExists = vm_host_file_exists(path);
+    existed = vm_mock_admin_read_raw_resource_file(path, &previousRaw,
+                                                    &previousRawLen);
+    if (pathExists && !existed)
+    {
+        vm_mock_admin_redirect_content_resource(
+            client, kind, resourceUtf8, "error",
+            "已有权威资源无法完整读取；为防止覆盖损坏文件已拒绝上传");
+        return;
+    }
+    if (gifResource)
+    {
+        if (!vm_mock_admin_encode_uploaded_image_as_game_gif(
+                fileData, fileLen, &raw, &rawLen, NULL, NULL))
+        {
+            free(previousRaw);
+            vm_mock_admin_redirect_content_resource(
+                client, kind, resourceUtf8, "error",
+                "图片无法解码或超过 768×768；未写入游戏 GIF");
+            return;
+        }
+    }
+    else
+    {
+        if (!vm_mock_admin_dsh_raw_is_valid(fileData, fileLen))
+        {
+            free(previousRaw);
+            vm_mock_admin_redirect_content_resource(
+                client, kind, resourceUtf8, "error",
+                "DSH 必须是完整的原始表格文件，未写入任何数据");
+            return;
+        }
+        raw = (u8 *)malloc(fileLen);
+        if (raw == NULL)
+        {
+            free(previousRaw);
+            vm_mock_admin_redirect_content_resource(client, kind,
+                                                    resourceUtf8, "error",
+                                                    "内存不足，未写入 DSH");
+            return;
+        }
+        memcpy(raw, fileData, fileLen);
+        rawLen = fileLen;
+    }
+    if (!vm_mock_admin_write_resource_atomic(path, raw, rawLen) ||
+        !vm_mock_admin_validate_content_resource(resource, suffix,
+                                                 gifResource))
+    {
+        if (existed)
+            restored = vm_mock_admin_write_resource_atomic(path, previousRaw,
+                                                            previousRawLen);
+        else
+            restored = remove(path) == 0;
+        free(previousRaw);
+        free(raw);
+        vm_mock_admin_redirect_content_resource(
+            client, kind, resourceUtf8, "error",
+            restored ? "资源写入后客户端格式校验失败，已恢复原文件"
+                     : "资源写入后校验失败，且恢复原文件失败；请检查资源目录");
+        return;
+    }
+    names[0] = resource;
+    if (!vm_net_mock_content_update_publish_files(names, 1, &error, &changed))
+    {
+        if (existed)
+            restored = vm_mock_admin_write_resource_atomic(path, previousRaw,
+                                                            previousRawLen);
+        else
+            restored = remove(path) == 0;
+        free(previousRaw);
+        free(raw);
+        vm_mock_admin_redirect_content_resource(
+            client, kind, resourceUtf8, "error",
+            restored ? "内容更新发布失败，已恢复原资源"
+                     : "内容更新发布失败，且恢复原资源失败；请立即检查资源目录");
+        return;
+    }
+    printf("[info][mock-admin] content_%s_upload resource=%s raw=%u publish=WT18/9+18/8->18/7\n",
+           kind, resource, rawLen);
+    message = changed ?
+                  (gifResource ?
+                       "GIF 已转换为客户端格式、校验并发布；客户端下次加载会下载新资源" :
+                       "DSH 已校验并发布；客户端下次加载会下载新资源") :
+                  "资源字节未变化，未重复发布内容更新";
+    free(previousRaw);
+    free(raw);
+    vm_mock_admin_redirect_content_resource(client, kind, resourceUtf8, "ok",
+                                            message);
 }
 
 /* The request dispatcher only sees a complete, NUL-terminated request.  Its
@@ -10829,7 +12920,8 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
     {
         vm_mock_admin_send_response(client, "200 OK",
                                     "application/javascript; charset=utf-8",
-                                    NULL, g_vm_mock_admin_script);
+                                    "Cache-Control: no-store, max-age=0\r\n",
+                                    g_vm_mock_admin_script);
         return 1;
     }
     if (strcmp(method, "GET") == 0 &&
@@ -10854,6 +12946,34 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
         vm_mock_admin_send_binary_response(client, "200 OK", "image/svg+xml",
                                            svg, svgLen);
         free(svg);
+        return 1;
+    }
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-preview.bmp") == 0)
+    {
+        char resourceUtf8[256];
+        char resource[128];
+        u8 *bmp = NULL;
+        u32 bmpLen = 0;
+
+        memset(resourceUtf8, 0, sizeof(resourceUtf8));
+        memset(resource, 0, sizeof(resource));
+        if (!vm_mock_admin_form_value(query, "gif", resourceUtf8,
+                                      sizeof(resourceUtf8)) ||
+            !vm_mock_admin_utf8_to_gbk_text(resourceUtf8, resource,
+                                            sizeof(resource), false) ||
+            !vm_mock_admin_build_gif_preview_bmp(resource, &bmp, &bmpLen,
+                                                 NULL, NULL))
+        {
+            vm_mock_admin_send_response(client, "422 Unprocessable Content",
+                                        NULL, NULL,
+                                        "GIF 资源无法生成预览。\n");
+            free(bmp);
+            return 0;
+        }
+        vm_mock_admin_send_binary_response(client, "200 OK", "image/bmp",
+                                           bmp, bmpLen);
+        free(bmp);
         return 1;
     }
     if (strcmp(method, "GET") == 0 &&
@@ -10922,6 +13042,20 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
             return 0;
         }
         vm_mock_admin_handle_action(client, body);
+        return 1;
+    }
+    if (strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-upload") == 0 ||
+        strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/dsh-upload") == 0)
+    {
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n", "只允许 POST。\n");
+            return 0;
+        }
+        vm_mock_admin_handle_content_file_upload(
+            client, strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/gif-upload") == 0,
+            request, headerLen, (const u8 *)body, contentLength);
         return 1;
     }
     vm_mock_admin_send_response(client, "404 Not Found", NULL, NULL, "页面不存在。\n");
