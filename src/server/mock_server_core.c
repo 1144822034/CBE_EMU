@@ -48,6 +48,10 @@ typedef struct
     int32_t crit;
     int32_t hit;
     int32_t dodge;
+    /* Some skill.dsh rows describe a percentage dodge effect rather than a
+     * fixed rating.  Keep it separate so equipment and ordinary stat rows
+     * retain their native additive contract. */
+    int32_t dodgePercent;
     int32_t resist;
 } vm_net_mock_battle_stat_modifier;
 

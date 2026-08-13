@@ -3858,6 +3858,30 @@ static u32 vm_net_mock_battle_rating_chance_per_thousand(
     return chance;
 }
 
+/* 混沌鬼气 is a temporary percentage-dodge skill, not an item-like dodge
+ * rating.  Apply it after the ordinary hit/dodge contest so its 20..55%
+ * resource values reduce the remaining chance to hit rather than becoming a
+ * barely visible +20..55 rating.  A short-lived buff must remain powerful,
+ * but retain a 20% minimum hit chance to avoid an absolute-invulnerability
+ * state at the fifth rank. */
+static u32 vm_net_mock_battle_apply_active_dodge_percent_to_monster_hit_chance(
+    u32 chance)
+{
+    const vm_net_mock_battle_stat_modifier *modifier =
+        &g_vm_net_mock_battle_active_modifier_current;
+    int32_t percent = modifier->dodgePercent;
+    uint64_t scaled = 0;
+
+    if (modifier->remainingRounds == 0 || percent <= 0)
+        return chance;
+    if (percent >= 100)
+        return 200u;
+    scaled = ((uint64_t)chance * (u32)(100 - percent)) / 100u;
+    if (scaled < 200u)
+        scaled = 200u;
+    return scaled > 1000u ? 1000u : (u32)scaled;
+}
+
 static bool vm_net_mock_battle_player_attack_hits(
     const vm_net_mock_player_stats *playerStats,
     const vm_net_mock_monster_stats *monsterStats, u32 salt)
@@ -3894,6 +3918,7 @@ static bool vm_net_mock_battle_enemy_attack_hits(
     }
     chance = vm_net_mock_battle_rating_chance_per_thousand(
         monsterHit, playerStats != NULL ? playerStats->dodge : 0, 400u, 950u);
+    chance = vm_net_mock_battle_apply_active_dodge_percent_to_monster_hit_chance(chance);
     return vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0xbb67ae85u) < chance;
 }
 

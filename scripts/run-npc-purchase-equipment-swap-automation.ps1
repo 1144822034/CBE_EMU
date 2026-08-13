@@ -61,7 +61,7 @@ $database = 'jh_online_autotest_' + ([Guid]::NewGuid().ToString('N'))
     max_steps = 7; total_timeout_seconds = 30; step_timeout_seconds = 10
     trigger_rule = 'once'; max_repetitions = 1
     input = @('CBMS login', 'role selection', 'NPC dialog', 'armor category', 'armor item page', 'purchase', 'equipment replacement')
-    assertions = @('purchase response is ordered 26/1 then 7/7 type=1', 'money/backpack transaction committed', '7/9 replacement result and state committed')
+    assertions = @('action=1 purchase returns only terminal 26/1 dialogue', 'native 17/1 backpack query reflects the committed purchase', 'money/backpack transaction committed', '7/9 replacement result and state committed')
     failure_conditions = @('service fails to start', 'wrong response object count', 'uncommitted purchase', 'equipment swap mismatch')
 } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $runDir 'run-context.json') -Encoding utf8
 

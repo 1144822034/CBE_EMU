@@ -5036,8 +5036,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u8 objectCount = 1;
     bool appendSkills = false;
     u16 backpackAddSeq = 0;
-    u32 purchasedItemId = 0;
-    u32 purchasedItemCount = 0;
     const char *action = "invalid";
     u32 result = 0;
     u32 skillEligibleCount = 0;
@@ -5297,16 +5295,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         vm_net_mock_role_find_backpack_item(
                             role, buyItem->itemId, backpackAddSeq);
 
-                    /* The mutation has already committed.  The purchased row
-                     * must be delivered as the one-shot 7/7 type=1 item
-                     * manager increment, not as a 17/1 full list: the latter
-                     * belongs to a backpack-owned query callback.  The remote
-                     * client transport separates that increment from this
-                     * 26/1 dialogue packet into the immediately following
-                     * normal event, so ParseNPCDialogData clears its action=1
-                     * wait before mmGame consumes the new row.  Keep the
-                     * postcondition check so malformed allocation is rolled
-                     * back rather than reported as a successful purchase. */
+                    /* This action-1 request is owned by the task-hall dialog
+                     * parser.  Its only completion object is 26/1.  The
+                     * persisted backpack row will be read by the next native
+                     * backpack query; appending item-manager 7/7 here crosses
+                     * parser ownership and re-arms the action wait. */
                     if (purchasedItem == NULL || backpackAddSeq == 0)
                     {
                         *role = purchaseBefore;
@@ -5317,8 +5310,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                     }
                     else
                     {
-                        purchasedItemId = buyItem->itemId;
-                        purchasedItemCount =
+                        u32 purchasedItemCount =
                             vm_net_mock_backpack_item_id_uses_reservoir_count(
                                 buyItem->itemId)
                                 ? purchasedItem->count
@@ -5331,32 +5323,11 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                             dialogText =
                                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
                         }
-                        else if (session == NULL ||
-                                 session->npcPurchaseSyncPending)
-                        {
-                            /* Do not allow a second mutation to overtake the
-                             * first item's one-shot manager update. */
-                            *role = purchaseBefore;
-                            if (!vm_net_mock_role_db_save("npc-purchase-rollback"))
-                                return 0;
-                            dialogText =
-                                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
-                        }
                         else
                         {
                             dialogText =
                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
                             result = 1;
-                            session->npcPurchaseSyncPending = true;
-                            session->npcPurchaseSyncSeq = backpackAddSeq;
-                            session->npcPurchaseSyncItemId = purchasedItemId;
-                            session->npcPurchaseSyncCount = purchasedItemCount;
-                            /* The immediate reply belongs to the active
-                             * 26/1 callback.  Wait for a later scene poll so
-                             * the 7/7 item-manager path cannot re-enter that
-                             * callback as part of the same WT packet. */
-                            session->npcPurchaseSyncNotBeforeTick =
-                                g_schedulerTick + 1u;
                         }
                     }
                 }
@@ -5841,7 +5812,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
            objectCount, pos,
            result == 1 && (strcmp(action, "shop-buy") == 0 ||
                            strcmp(action, "weapon-buy") == 0)
-               ? "next-scene-poll:role-wallet-10/26+item-manager-7/7"
+               ? "dialog-only:26/1;backpack-on-native-query"
                : "not-applicable");
     return pos;
 }

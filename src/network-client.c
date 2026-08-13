@@ -177,43 +177,10 @@ static void vm_client_finish_wt_packet(u8 *packet, u32 len, u8 objectCount)
     packet[4] = objectCount;
 }
 
-static bool vm_client_object_has_u8_field(const vm_client_wt_object *object,
-                                          const char *field, u8 expected)
-{
-    u32 fieldLen = field ? (u32)strlen(field) : 0;
-    const u8 *payload = object ? object->payload : NULL;
-    u32 payloadLen = object ? object->payloadLen : 0;
-
-    if (payload == NULL || fieldLen == 0 || fieldLen > 0xff)
-        return false;
-    for (u32 offset = 0; offset + fieldLen + 6 <= payloadLen; ++offset)
-    {
-        u32 valueLen = 0;
-        u32 valueStart = 0;
-
-        if (payload[offset] != (u8)fieldLen ||
-            memcmp(payload + offset + 1, field, fieldLen) != 0)
-        {
-            continue;
-        }
-        valueLen = ((u32)payload[offset + 1 + fieldLen] << 8) |
-                   (u32)payload[offset + 2 + fieldLen];
-        valueStart = offset + 3 + fieldLen;
-        if (valueLen != 3 || valueStart + valueLen > payloadLen ||
-            payload[valueStart] != 0 || payload[valueStart + 1] != 1)
-        {
-            continue;
-        }
-        return payload[valueStart + 2] == expected;
-    }
-    return false;
-}
-
 typedef enum
 {
     VM_CLIENT_ITEM_FOLLOWUP_NONE = 0,
-    VM_CLIENT_ITEM_FOLLOWUP_USE_LIST,
-    VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE
+    VM_CLIENT_ITEM_FOLLOWUP_USE_LIST
 } vm_client_item_followup_kind;
 
 static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
@@ -229,8 +196,6 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     u8 seenCount = 0;
     bool haveItemUse = false;
     u8 itemListCount = 0;
-    u8 npcDialogCount = 0;
-    u8 npcPurchaseAddCount = 0;
     vm_client_item_followup_kind followupKind =
         VM_CLIENT_ITEM_FOLLOWUP_NONE;
     vm_client_wt_object object;
@@ -251,13 +216,6 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
             haveItemUse = true;
         if (object.major == 1 && object.kind == 17 && object.subtype == 1)
             ++itemListCount;
-        if (object.major == 1 && object.kind == 26 && object.subtype == 1)
-            ++npcDialogCount;
-        if (object.major == 1 && object.kind == 7 && object.subtype == 7 &&
-            vm_client_object_has_u8_field(&object, "type", 1))
-        {
-            ++npcPurchaseAddCount;
-        }
         ++seenCount;
     }
     if (offset != *responseLen || seenCount != response[4])
@@ -268,15 +226,6 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     if (haveItemUse && itemListCount != 0)
     {
         followupKind = VM_CLIENT_ITEM_FOLLOWUP_USE_LIST;
-    }
-    /* NPC service purchase is a different pairing.  Its success dialog owns
-     * the action=1 callback; 7/7 type=1 belongs to the mmGame item manager.
-     * Restrict the split to this exact two-object contract so unrelated scene
-     * or item responses cannot have objects reordered. */
-    else if (seenCount == 2 && npcDialogCount == 1 &&
-             npcPurchaseAddCount == 1)
-    {
-        followupKind = VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE;
     }
     else
     {
@@ -296,11 +245,8 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
             return false;
         objectLen = offset - start;
         bool isFollowup =
-            (followupKind == VM_CLIENT_ITEM_FOLLOWUP_USE_LIST &&
-             object.major == 1 && object.kind == 17 && object.subtype == 1) ||
-            (followupKind == VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE &&
-             object.major == 1 && object.kind == 7 && object.subtype == 7 &&
-             vm_client_object_has_u8_field(&object, "type", 1));
+            followupKind == VM_CLIENT_ITEM_FOLLOWUP_USE_LIST &&
+            object.major == 1 && object.kind == 17 && object.subtype == 1;
         if (isFollowup)
         {
             if (followPos + objectLen > followupCap || followCount == 0xff)
@@ -521,15 +467,10 @@ static bool vm_client_remote_request(const u8 *request, u32 requestLen,
     if (ok && eventType != NULL && *eventType == 7 && responseLen != NULL &&
         followup != NULL && followupLen != NULL)
     {
-        vm_client_item_followup_kind followupKind =
-            VM_CLIENT_ITEM_FOLLOWUP_NONE;
         if (vm_client_extract_item_followup(response, responseLen,
                                             followup, followupCap, followupLen,
-                                            &followupKind) &&
-            followupKind == VM_CLIENT_ITEM_FOLLOWUP_NPC_PURCHASE)
+                                            NULL))
         {
-            printf("[info][network] remote_npc_purchase_backpack_followup "
-                   "primary=26/1 followup=7/7-type1 delivery=separate-event\n");
         }
     }
     return ok;

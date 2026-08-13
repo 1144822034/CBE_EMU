@@ -2246,14 +2246,6 @@ typedef struct vm_mock_service_client_session
     vm_mock_service_task_offer_context
         taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     vm_mock_service_npc_context npcServiceContext;
-    /* A scene-NPC service response is owned by the 26/1 dialog callback.
-     * The item manager's 7/7 increment must therefore be delivered by the
-     * next ordinary scene event, after that callback has completed. */
-    bool npcPurchaseSyncPending;
-    u16 npcPurchaseSyncSeq;
-    u32 npcPurchaseSyncItemId;
-    u32 npcPurchaseSyncCount;
-    u32 npcPurchaseSyncNotBeforeTick;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
