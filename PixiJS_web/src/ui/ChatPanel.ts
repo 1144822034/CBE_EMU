@@ -1,6 +1,7 @@
 /**
- * Channel chat panel — tabs match CBE overview (世界/派/聊/伍/统).
+ * Channel chat panel — tabs match CBE overview (世界/派/本/伍/统).
  * ←→ switch channel; ↑↓ scroll; compose bar + ChatIme (no window.prompt).
+ * 「本」shows local(4)+private(7); with pmTarget, sends 1/3/2 whisper.
  */
 import { Container, Graphics } from "pixi.js";
 import {
@@ -26,7 +27,12 @@ import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 export type ChatEntry = {
   type: number;
   text: string;
+  /** Sender role / nearby actor id for starting private chat; 0 = none. */
+  senderRoleId?: number;
+  senderName?: string;
 };
+
+export type ChatPmTarget = { id: number; name: string };
 
 type ChannelDef = {
   /** Short tab glyph (screenshot). */
@@ -38,15 +44,16 @@ type ChannelDef = {
   color: number;
 };
 
-/** Screenshot order: 世界 派 聊 伍 统 */
+/** Screenshot order: 世界 派 本 伍 统 */
 const CHANNELS: ChannelDef[] = [
   { tab: "世界", sendType: 0, types: [0], color: 0xffde00 },
   { tab: "派", sendType: 3, types: [3], color: 0xffa040 },
-  { tab: "聊", sendType: 4, types: [4, 7], color: 0xd0e8d5 },
+  { tab: "本", sendType: 4, types: [4, 7], color: 0xd0e8d5 },
   { tab: "伍", sendType: 2, types: [2], color: 0x40e0ff },
   { tab: "统", sendType: -1, types: [5, 6], color: 0x29ff2e },
 ];
 
+const LOCAL_CHANNEL_IDX = 2;
 const MSG_PAGE = 12;
 
 export function chatPrefixForType(type: number): string {
@@ -79,7 +86,11 @@ export function inferChatType(text: string): number {
   return 5;
 }
 
+/** Private (type 7) — purple, distinct from local mint on the same tab. */
+const CHAT_PRIVATE_COLOR = 0xc080ff;
+
 export function colorForChatType(type: number): number {
+  if (type === 7) return CHAT_PRIVATE_COLOR;
   for (const ch of CHANNELS) {
     if (ch.types.includes(type)) return ch.color;
   }
@@ -100,10 +111,21 @@ export class ChatPanel extends Container {
   /** Bumped on open/hide so deferred focus cannot remount IME after close. */
   private openGen = 0;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private pmTarget: ChatPmTarget | null = null;
+  /** Skip starting PM to self when tapping own lines. */
+  selfRoleId = 0;
 
-  /** Return false to keep draft (e.g. missing 小喇叭 tip). */
-  onSend: ((text: string, type: number) => boolean | void | Promise<boolean | void>) | null =
-    null;
+  /**
+   * Return false to keep draft (e.g. missing 小喇叭 tip).
+   * type 7 + opts.sendTo = private whisper (1/3/2).
+   */
+  onSend:
+    | ((
+        text: string,
+        type: number,
+        opts?: { sendTo?: number },
+      ) => boolean | void | Promise<boolean | void>)
+    | null = null;
   onClose: (() => void) | null = null;
 
   constructor() {
@@ -127,23 +149,54 @@ export class ChatPanel extends Container {
     this.ime.onSubmit = () => this.confirm();
   }
 
-  open(entries: ChatEntry[]): void {
+  open(
+    entries: ChatEntry[],
+    opts?: { pm?: ChatPmTarget | null; keepChannel?: boolean },
+  ): void {
     this.openGen += 1;
-    const gen = this.openGen;
     this.clearFocusTimer();
     this.entries = entries.slice();
-    this.channelIdx = 0;
+    if (!opts?.keepChannel) this.channelIdx = 0;
     this.scroll = 0;
     this.draft = "";
+    if (opts && "pm" in opts) {
+      this.pmTarget =
+        opts.pm && opts.pm.id > 0
+          ? { id: opts.pm.id >>> 0, name: opts.pm.name || "玩家" }
+          : null;
+      if (this.pmTarget) this.channelIdx = LOCAL_CHANNEL_IDX;
+    } else {
+      this.pmTarget = null;
+    }
     this.visible = true;
     this.redraw();
-    this.ime.show(this.inputRect());
     this.ime.clear();
-    // Defer focus so soft keyboard opens after paint; must die with hide().
-    this.focusTimer = setTimeout(() => {
-      this.focusTimer = null;
-      if (this.visible && this.openGen === gen) this.focusInput();
-    }, 40);
+    // Mount inert overlay for layout only — keyboard opens when user taps input.
+    this.ime.show(this.inputRect());
+    this.ime.blur();
+  }
+
+  /** Enter private compose against a player (friend / world line / nearby). */
+  beginPrivateChat(id: number, name: string): void {
+    const sendTo = id >>> 0;
+    if (!sendTo) return;
+    if (this.selfRoleId > 0 && sendTo === (this.selfRoleId >>> 0)) return;
+    this.pmTarget = { id: sendTo, name: (name || "玩家").trim() || "玩家" };
+    this.channelIdx = LOCAL_CHANNEL_IDX;
+    this.scroll = 0;
+    if (this.visible) {
+      this.redraw();
+      this.focusInput();
+    }
+  }
+
+  clearPrivateTarget(): void {
+    this.pmTarget = null;
+    if (this.visible) this.redraw();
+  }
+
+  getPrivateTarget(): ChatPmTarget | null {
+    return this.pmTarget;
   }
 
   setEntries(entries: ChatEntry[]): void {
@@ -181,6 +234,7 @@ export class ChatPanel extends Container {
   }
 
   currentSendType(): number {
+    if (this.pmTarget && this.channelIdx === LOCAL_CHANNEL_IDX) return 7;
     return CHANNELS[this.channelIdx]!.sendType;
   }
 
@@ -221,8 +275,19 @@ export class ChatPanel extends Container {
       this.focusInput();
       return;
     }
+    const whisper =
+      this.pmTarget && this.channelIdx === LOCAL_CHANNEL_IDX
+        ? this.pmTarget
+        : null;
+    const sendType = whisper ? 7 : ch.sendType;
     const gen = this.openGen;
-    void Promise.resolve(this.onSend?.(text, ch.sendType)).then((ok) => {
+    void Promise.resolve(
+      this.onSend?.(
+        text,
+        sendType,
+        whisper ? { sendTo: whisper.id } : undefined,
+      ),
+    ).then((ok) => {
       if (!this.visible || this.openGen !== gen) return;
       if (ok === false) {
         this.focusInput();
@@ -268,6 +333,15 @@ export class ChatPanel extends Container {
     const x = 12;
     const y = LCD_HEIGHT - SOFTKEY_H - 36;
     return { x: x + 36, y: y + 4, w: LCD_WIDTH - 28 - 36, h: 22 };
+  }
+
+  private canWhisperEntry(entry: ChatEntry): boolean {
+    const id = (entry.senderRoleId ?? 0) >>> 0;
+    if (!id) return false;
+    if (this.selfRoleId > 0 && id === (this.selfRoleId >>> 0)) return false;
+    // System / hang tips are not player lines even if id sneaks in.
+    if (entry.type === 5 || entry.type === 6) return false;
+    return true;
   }
 
   private redraw(): void {
@@ -335,7 +409,22 @@ export class ChatPanel extends Container {
     const start = Math.max(0, end - MSG_PAGE);
     const shown = displayLines.slice(start, end);
     shown.forEach((row, i) => {
-      this.addLabel(row.text, x + 10, msgTop + i * 16, row.color);
+      const ly = msgTop + i * 16;
+      this.addLabel(row.text, x + 10, ly, row.color);
+      if (this.canWhisperEntry(row.entry)) {
+        const entry = row.entry;
+        this.rowHits.push(
+          attachRowPointerHit(this, x + 8, ly, w - 16, 16, () => {
+            const sid = (entry.senderRoleId ?? 0) >>> 0;
+            const sname =
+              (entry.senderName || "").trim() ||
+              entry.text.replace(/^\[[^\]]+\]/, "").split(":")[0]?.trim() ||
+              "玩家";
+            this.beginPrivateChat(sid, sname);
+            this.showTip(`私聊 ${sname}`);
+          }),
+        );
+      }
     });
     if (!shown.length) {
       this.addLabel("(暂无消息)", x + 10, msgTop + 8, CBE.inkLabel);
@@ -343,16 +432,30 @@ export class ChatPanel extends Container {
 
     // Compose bar
     const ch = CHANNELS[this.channelIdx]!;
+    const whisper =
+      this.pmTarget && this.channelIdx === LOCAL_CHANNEL_IDX
+        ? this.pmTarget
+        : null;
     const barY = y + h - 34;
     this.box
       .roundRect(x + 6, barY, w - 12, 28, 2)
       .fill({ color: 0x12241c })
       .stroke({ width: 1, color: CBE.borderDim });
     const tag =
-      ch.sendType < 0 ? "[统]" : `[${chatPrefixForType(ch.sendType)}]`;
-    this.addLabel(tag, x + 12, barY + 8, ch.color);
-    const placeholder =
-      ch.sendType < 0 ? "系统频道不可发送" : this.draft || "点击输入…";
+      ch.sendType < 0
+        ? "[统]"
+        : whisper
+          ? "[私]"
+          : `[${chatPrefixForType(ch.sendType)}]`;
+    this.addLabel(tag, x + 12, barY + 8, whisper ? CHAT_PRIVATE_COLOR : ch.color);
+    let placeholder: string;
+    if (ch.sendType < 0) placeholder = "系统频道不可发送";
+    else if (whisper) {
+      const nick = whisper.name.slice(0, 6);
+      placeholder = this.draft || `对${nick}…`;
+    } else {
+      placeholder = this.draft || "点击输入…";
+    }
     this.addLabel(
       placeholder.slice(0, 16),
       x + 44,
@@ -371,22 +474,26 @@ export class ChatPanel extends Container {
     const hint =
       ch.sendType < 0
         ? "←→频道  ↑↓翻阅  返回关闭"
-        : "←→频道  ↑↓翻阅  确定发送";
+        : whisper
+          ? `私聊:${whisper.name.slice(0, 8)}  点消息可选人`
+          : "←→频道  ↑↓翻阅  点消息可私聊";
     this.addLabel(hint, x + 10, y + h - 48, CBE.inkLabel);
 
     drawPanelTipOverlay(this, this.toast);
   }
 
   /** One painted row per wrapped line (preserves \n and width wrap). */
-  private buildDisplayLines(maxWidth: number): { text: string; color: number }[] {
-    const out: { text: string; color: number }[] = [];
+  private buildDisplayLines(
+    maxWidth: number,
+  ): { text: string; color: number; entry: ChatEntry }[] {
+    const out: { text: string; color: number; entry: ChatEntry }[] = [];
     for (const entry of this.filtered()) {
       const color = colorForChatType(entry.type);
       const paragraphs = entry.text.split(/\n/);
       for (const para of paragraphs) {
         const wrapped = wrapUiText(para.length ? para : " ", maxWidth, UC3_CELL);
         for (const line of wrapped) {
-          out.push({ text: line, color });
+          out.push({ text: line, color, entry });
         }
       }
     }

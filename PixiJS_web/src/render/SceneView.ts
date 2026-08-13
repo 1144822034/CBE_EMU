@@ -97,6 +97,12 @@ export class SceneView {
   /** Currently nearest in-range NPC (0 = none). */
   private nearNpcId = 0;
   private keys = new Set<string>();
+  /** Click-to-walk destination in map pixels (null = none). */
+  private walkTarget: { x: number; y: number } | null = null;
+  private walkStuckMs = 0;
+  private walkLastX = 0;
+  private walkLastY = 0;
+  private mapPointer: Graphics;
   private clip: Container;
   private lastTick = 0;
   private movePixelAcc = 0;
@@ -137,6 +143,14 @@ export class SceneView {
     const mask = new Graphics().rect(0, 0, this.viewW, this.viewH).fill({ color: 0xffffff });
     this.clip.mask = mask;
     this.clip.addChild(mask);
+    // Behind world: empty-map taps walk here; NPC/peer markers sit above and win hit-test.
+    this.mapPointer = new Graphics()
+      .rect(0, 0, this.viewW, this.viewH)
+      .fill({ color: 0x000000, alpha: 0.001 });
+    this.mapPointer.eventMode = "static";
+    this.mapPointer.cursor = "crosshair";
+    this.mapPointer.on("pointertap", (e) => this.onMapPointerTap(e));
+    this.clip.addChild(this.mapPointer);
     this.clip.addChild(this.world);
     this.world.sortableChildren = true;
 
@@ -146,6 +160,7 @@ export class SceneView {
     this.player = new Container();
     this.player.zIndex = 0;
     this.player.sortableChildren = true;
+    this.player.eventMode = "none";
     this.playerFallback = new Graphics()
       .circle(0, -4, 5)
       .fill({ color: 0xffe08a })
@@ -205,7 +220,20 @@ export class SceneView {
 
     window.addEventListener("keydown", (e) => {
       if (!this.inputEnabled) return;
-      this.keys.add(e.key.toLowerCase());
+      const k = e.key.toLowerCase();
+      if (
+        k === "arrowleft" ||
+        k === "arrowright" ||
+        k === "arrowup" ||
+        k === "arrowdown" ||
+        k === "a" ||
+        k === "d" ||
+        k === "w" ||
+        k === "s"
+      ) {
+        this.clearWalkTarget();
+      }
+      this.keys.add(k);
     });
     window.addEventListener("keyup", (e) => {
       this.keys.delete(e.key.toLowerCase());
@@ -218,13 +246,38 @@ export class SceneView {
   /** Virtual D-pad / HTML controls — same keys as WASD / arrows. */
   setHeldKey(key: string, down: boolean): void {
     const k = key.toLowerCase();
-    if (down) this.keys.add(k);
-    else this.keys.delete(k);
+    if (down) {
+      this.keys.add(k);
+      this.clearWalkTarget();
+    } else this.keys.delete(k);
   }
 
   /** Drop sticky move keys (battle enter / touch release while not in world). */
   clearHeldKeys(): void {
     this.keys.clear();
+    this.clearWalkTarget();
+  }
+
+  clearWalkTarget(): void {
+    this.walkTarget = null;
+    this.walkStuckMs = 0;
+  }
+
+  /** Map-band tap → walk toward that map point (D-pad / keys cancel). */
+  private onMapPointerTap(e: { getLocalPosition: (s: Container) => { x: number; y: number } }): void {
+    if (!this.inputEnabled) return;
+    const local = e.getLocalPosition(this.clip);
+    const scale = this.scale || 1;
+    const mx = (local.x - this.world.x) / scale;
+    const my = (local.y - this.world.y) / scale;
+    if (!Number.isFinite(mx) || !Number.isFinite(my)) return;
+    this.walkTarget = {
+      x: Math.max(8, Math.min(Math.max(8, this.mapWidth - 8), mx)),
+      y: Math.max(8, Math.min(Math.max(8, this.mapHeight - 8), my)),
+    };
+    this.walkStuckMs = 0;
+    this.walkLastX = this.playerX;
+    this.walkLastY = this.playerY;
   }
 
   /** Collision / tile map for minimap. */
@@ -301,6 +354,7 @@ export class SceneView {
       texture.source.scaleMode = "nearest";
       this.mapSprite = new Sprite(texture);
       this.mapSprite.zIndex = 0;
+      this.mapSprite.eventMode = "none";
       this.world.addChildAt(this.mapSprite, 0);
       this.mapIdentity = identity;
     }
@@ -315,6 +369,7 @@ export class SceneView {
     this.playerY = spawnY ?? scene.height * 0.55;
     this.portalCooldownMs = 1200;
     this.nearNpcId = 0;
+    this.clearWalkTarget();
     this.clampPlayer();
     // Soft-shell / map-center / server persist can land in wall or fringe pocket.
     this.ensurePlayerWalkable("showScene");
@@ -392,6 +447,7 @@ export class SceneView {
       spr.scale.set(ACTOR_DISPLAY_SCALE);
       spr.position.set(d.x, d.y);
       spr.zIndex = d.y;
+      spr.eventMode = "none";
       this.world.addChild(spr);
       this.decorSprites.push(spr);
     }
@@ -443,6 +499,7 @@ export class SceneView {
       spr.anchor.set(0.5, 0.5);
       spr.position.set(cx, cy);
       spr.zIndex = feetY;
+      spr.eventMode = "none";
       this.world.addChild(spr);
       this.portalSprites.push(spr);
     }
@@ -747,6 +804,19 @@ export class SceneView {
     if (this.keys.has("arrowup") || this.keys.has("w")) dy -= 1;
     if (this.keys.has("arrowdown") || this.keys.has("s")) dy += 1;
 
+    // Click-to-walk: steer toward target when no D-pad / keyboard hold.
+    if (dx === 0 && dy === 0 && this.walkTarget) {
+      const tx = this.walkTarget.x - this.playerX;
+      const ty = this.walkTarget.y - this.playerY;
+      const dist = Math.hypot(tx, ty);
+      if (dist <= 6) {
+        this.clearWalkTarget();
+      } else {
+        dx = tx / dist;
+        dy = ty / dist;
+      }
+    }
+
     const moving = dx !== 0 || dy !== 0;
     if (moving) {
       const len = Math.hypot(dx, dy) || 1;
@@ -780,6 +850,16 @@ export class SceneView {
       this.player.position.set(this.playerX, this.playerY);
       this.player.zIndex = this.playerY | 0;
       this.applyCamera();
+
+      // Click-path stuck on collision: stop instead of spinning in place.
+      if (this.walkTarget) {
+        const step = Math.hypot(this.playerX - this.walkLastX, this.playerY - this.walkLastY);
+        if (step < 0.15) this.walkStuckMs += dtMove;
+        else this.walkStuckMs = 0;
+        this.walkLastX = this.playerX;
+        this.walkLastY = this.playerY;
+        if (this.walkStuckMs > 450) this.clearWalkTarget();
+      }
 
       let dir = this.playerDir;
       if (Math.abs(dx) >= Math.abs(dy)) dir = dx > 0 ? 2 : 4;

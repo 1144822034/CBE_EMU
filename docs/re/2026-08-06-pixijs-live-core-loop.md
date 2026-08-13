@@ -57,8 +57,8 @@ npm run dev
 | HUD 地图名 | `sMap.dsh` 第 2 列别名（如 `_06` → `临安-庆阳宫`） |
 | 地图装饰 | SCE 装饰表 `01 00 01 00 …` + `b_flowers01.actor` / `FB_*` + 8 字节落点；`showScene` 绘制（非 MAP 地砖） |
 | 战斗施法 | 外壳：忽略地址栏高度抖动、中软键占位；固定 240×400；eidolon≤96；pose 纹理缓存；BufferImageSource rgba8unorm；jian/guang 跳过；进/出战清粘键 |
-| 障碍 | MAP 高 4 位：`0xF`=实心；边缘 N/W/S/E=`1/2/4/8`，跨格用 CBE exit\|entry（见 `2026-08-09-pixi-map-edge-collision.md`）；脚底半径 1 |
-| 遇怪清图 | 碰撞/点击 SCE 怪进战即 `suppressSceneMonster`；开战失败立刻还原；战后 `armSuppressedRespawns(20s)` 回出生点（见 `ActorLayer`） |
+| 障碍 | MAP 高 4 位：`0xF`=实心；边缘 N/W/S/E=`1/2/4/8`，跨格用 CBE exit\|entry（见 `2026-08-09-pixi-map-edge-collision.md`）；桥/岸同方向 fringe 条带接缝放行（见 `2026-08-13-pixi-bridge-fringe-strip.md`）；脚底半径 1 |
+| 遇怪清图 | 碰撞/点击 SCE 怪进战即 `suppressSceneMonster`；开战失败立刻还原；战后 `armSuppressedRespawns(10s)` 回出生点（见 `ActorLayer`） |
 
 证据：admin/mock SCE portal 解析；`docs/re/2026-06-25-teleport-stone.md` 高 nibble 碰撞；碰撞可视化 `tmp/facing-probe/coll_*.png`。
 

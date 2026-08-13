@@ -28,6 +28,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 const RANK_TAB_BG = 0x375946;
 const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
@@ -66,6 +67,7 @@ export type SocialAction =
   | "invite_team"
   | "add_friend"
   | "trade"
+  | "private_chat"
   | "spar"
   | "guild_invite"
   | "leave_team"
@@ -585,6 +587,7 @@ export class SocialPanel extends Container {
         "组队邀请",
         "加为好友",
         "交易",
+        "发起私聊",
         "切磋",
         "入帮",
         "返回",
@@ -639,11 +642,32 @@ export class SocialPanel extends Container {
         });
         const hint =
           pages > 1
-            ? `↑↓翻页 ${this.textPage + 1}/${pages}  确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
+            ? `确定=${this.textPage + 1 < pages ? "下页" : "关闭"}`
             : "确定/取消=关闭";
         this.addLabel(hint, x + 10, y + h - 18, CBE.inkLabel);
+        if (pages > 1) {
+          attachPageNavButtons({
+            host: this,
+            hits: this.rowHits,
+            box: this.box,
+            x: x + 8,
+            y: y + h - 40,
+            w: w - 16,
+            page: this.textPage + 1,
+            pages,
+            addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+            onPrev: () => {
+              this.textPage = Math.max(0, this.textPage - 1);
+              this.redraw();
+            },
+            onNext: () => {
+              this.textPage = Math.min(pages - 1, this.textPage + 1);
+              this.redraw();
+            },
+          });
+        }
         this.rowHits.push(
-          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 60, () => this.confirm()),
+          attachRowPointerHit(this, x + 6, y + 36, w - 12, h - 70, () => this.confirm()),
         );
         return;
       }
@@ -723,12 +747,28 @@ export class SocialPanel extends Container {
       });
 
       if (pages > 1) {
-        this.addLabel(
-          `↑↓ ${page}/${pages} · ${this.listCursor + 1}/${total}`,
-          x + 10,
-          y + h - 18,
-          CBE.inkLabel,
-        );
+        attachPageNavButtons({
+          host: this,
+          hits: this.rowHits,
+          box: this.box,
+          x: x + 8,
+          y: y + h - 22,
+          w: w - 16,
+          page,
+          pages,
+          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+          onPrev: () => {
+            this.listCursor = Math.max(0, pageStart - LIST_PAGE_SIZE);
+            this.redraw();
+          },
+          onNext: () => {
+            this.listCursor = Math.min(
+              total - 1,
+              pageStart + LIST_PAGE_SIZE,
+            );
+            this.redraw();
+          },
+        });
       }
     } finally {
       drawPanelTipOverlay(this, this.toast);
@@ -822,11 +862,37 @@ export class SocialPanel extends Container {
     }
     const pageHint =
       this.listPages > 1
-        ? `↑↓翻页 ${this.listPage}/${this.listPages}`
+        ? ""
         : this.rows.length
           ? `↑↓ ${this.listCursor + 1}/${this.rows.length}`
           : "";
-    if (pageHint) {
+    if (this.listPages > 1) {
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 8,
+        y: footY - 22,
+        w: w - 16,
+        page: this.listPage,
+        pages: this.listPages,
+        addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+        onPrev: () => {
+          if (this.listPage <= 1) return;
+          this.onAction?.(this.kind, "list_page", {
+            id: this.listPage - 1,
+            name: "prev",
+          });
+        },
+        onNext: () => {
+          if (this.listPage >= this.listPages) return;
+          this.onAction?.(this.kind, "list_page", {
+            id: this.listPage + 1,
+            name: "next",
+          });
+        },
+      });
+    } else if (pageHint) {
       this.addLabel(pageHint, x + 10, footY - 14, CBE.inkLabel);
     }
     const hint = this.huntPickSeq
@@ -925,12 +991,28 @@ export class SocialPanel extends Container {
       });
 
       if (pages > 1) {
-        this.addLabel(
-          `↑↓ ${page}/${pages}`,
-          x + 10,
-          footY - 14,
-          CBE.inkLabel,
-        );
+        attachPageNavButtons({
+          host: this,
+          hits: this.rowHits,
+          box: this.box,
+          x: x + 8,
+          y: footY - 4,
+          w: w - 16,
+          page,
+          pages,
+          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+          onPrev: () => {
+            this.listCursor = Math.max(0, pageStart - RANK_PAGE_SIZE);
+            this.redraw();
+          },
+          onNext: () => {
+            this.listCursor = Math.min(
+              total - 1,
+              pageStart + RANK_PAGE_SIZE,
+            );
+            this.redraw();
+          },
+        });
       }
     }
 
@@ -1063,6 +1145,8 @@ function labelToAction(label: string): SocialAction {
       return "add_friend";
     case "交易":
       return "trade";
+    case "发起私聊":
+      return "private_chat";
     case "切磋":
       return "spar";
     case "入帮":

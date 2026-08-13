@@ -91,6 +91,10 @@ export class ChatIme {
         this.onSubmit?.();
       }
     });
+    // Native tap on the overlay also focuses — lock shell then (not on show).
+    this.input.addEventListener("focus", () => {
+      if (this.visible) this.holdShell(true);
+    });
   }
 
   show(rect: ChatImeLcdRect): void {
@@ -103,7 +107,7 @@ export class ChatIme {
     }
     this.visible = true;
     this.armInput(true);
-    this.holdShell(true);
+    // Do not holdShell / focus here — ChatPanel opens without popping the keyboard.
     this.layout();
     if (!this.onResize) {
       this.onResize = () => {

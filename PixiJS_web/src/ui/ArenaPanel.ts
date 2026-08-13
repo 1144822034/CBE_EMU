@@ -22,6 +22,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 const BRACKETS = [10, 20, 30, 40, 50, 70];
@@ -371,10 +372,38 @@ export class ArenaPanel extends Container {
         if (y > listBottom) break;
       }
       if (rows.length > LIST_PAGE) {
-        const page =
-          Math.floor(this.listScroll / LIST_PAGE) + 1;
+        const page = Math.floor(this.listScroll / LIST_PAGE) + 1;
         const pages = Math.ceil(rows.length / LIST_PAGE);
-        this.addLabel(`↑↓ ${page}/${pages}`, 12, listBottom - 2, CBE.inkLabel);
+        attachPageNavButtons({
+          host: this,
+          hits: this.rowHits,
+          box: this.box,
+          x: 10,
+          y: listBottom - 18,
+          w: LCD_WIDTH - 20,
+          page,
+          pages,
+          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+          onPrev: () => {
+            this.listScroll = Math.max(0, this.listScroll - LIST_PAGE);
+            this.listCursor = Math.min(
+              this.listCursor,
+              this.listScroll + LIST_PAGE - 1,
+            );
+            this.listCursor = Math.max(this.listScroll, this.listCursor);
+            this.redraw();
+          },
+          onNext: () => {
+            const maxScroll = Math.max(0, rows.length - LIST_PAGE);
+            this.listScroll = Math.min(maxScroll, this.listScroll + LIST_PAGE);
+            this.listCursor = Math.max(this.listCursor, this.listScroll);
+            this.listCursor = Math.min(
+              rows.length - 1,
+              this.listScroll + LIST_PAGE - 1,
+            );
+            this.redraw();
+          },
+        });
       }
     }
 

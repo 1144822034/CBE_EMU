@@ -54,6 +54,7 @@
         align-items: center;
         justify-content: center;
         background: #05070a;
+        position: relative;
       }
       /* Size set by fitPhoneWrap() to exact 240:400 — no side letterbox */
       #phone-wrap {
@@ -75,34 +76,152 @@
         image-rendering: pixelated;
         image-rendering: crisp-edges;
       }
+      /* Top-right: toggle HTML D-pad / softkey chrome */
+      #touch-chrome-toggle {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 50;
+        width: 14px;
+        height: 14px;
+        padding: 0;
+        margin: 0;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.7);
+        background: #ffffff;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+        cursor: pointer;
+        appearance: none;
+        touch-action: manipulation;
+      }
+      #touch-chrome-toggle:active {
+        transform: scale(0.92);
+      }
+      html.touch-chrome-off #touch-chrome-toggle {
+        background: rgba(255, 255, 255, 0.35);
+        border-color: rgba(255, 255, 255, 0.45);
+      }
+      /*
+       * Compact chrome (white-dot hide OR soft-keyboard ime-open):
+       * hide D-pad arrows only; keep 左软 | OK | 右软 on one row.
+       * Login IME used to display:none the whole bar — softkeys vanished.
+       */
+      html.touch-chrome-off #touch-bar,
+      html.ime-open #touch-bar {
+        --compact-btn: 48px;
+        --compact-ok: 72px;
+        grid-template-columns: minmax(56px, 1fr) auto minmax(56px, 1fr);
+        grid-template-rows: auto;
+        gap: 6px 28px;
+        align-items: center;
+        align-content: center;
+        /* Height = half of full D-pad chrome; set by syncTouchChromeScale. */
+        height: var(--compact-chrome-h, 106px);
+        min-height: var(--compact-chrome-h, 106px);
+        max-height: var(--compact-chrome-h, 106px);
+        padding: 0 14px;
+        margin-top: 0;
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+      html.touch-chrome-off #sk-left,
+      html.ime-open #sk-left {
+        grid-column: 1;
+        grid-row: 1;
+        width: 100%;
+        max-width: 88px;
+        height: var(--compact-btn);
+        justify-self: start;
+        align-self: center;
+        font-size: 0.9rem;
+      }
+      html.touch-chrome-off #sk-right,
+      html.ime-open #sk-right {
+        grid-column: 3;
+        grid-row: 1;
+        width: 100%;
+        max-width: 88px;
+        height: var(--compact-btn);
+        justify-self: end;
+        align-self: center;
+        font-size: 0.9rem;
+      }
+      html.touch-chrome-off .dpad,
+      html.ime-open .dpad {
+        grid-column: 2;
+        grid-row: 1;
+        grid-template-columns: var(--compact-ok);
+        grid-template-rows: var(--compact-ok);
+        gap: 0;
+        justify-self: center;
+        align-self: center;
+      }
+      html.touch-chrome-off .dpad .up,
+      html.touch-chrome-off .dpad .down,
+      html.touch-chrome-off .dpad .left,
+      html.touch-chrome-off .dpad .right,
+      html.ime-open .dpad .up,
+      html.ime-open .dpad .down,
+      html.ime-open .dpad .left,
+      html.ime-open .dpad .right {
+        display: none !important;
+      }
+      html.touch-chrome-off .dpad .ok,
+      html.ime-open .dpad .ok {
+        grid-column: 1;
+        grid-row: 1;
+        width: var(--compact-ok);
+        height: var(--compact-ok);
+        border-radius: 50%;
+        font-size: 1.05rem;
+      }
+      html.touch-chrome-off #sk-center,
+      html.touch-chrome-off #touch-status,
+      html.ime-open #sk-center,
+      html.ime-open #touch-status {
+        display: none !important;
+      }
       /*
        * L softkey | D-pad | R softkey — softkeys top-aligned with ▲ (up).
-       * Touch-bar uses full stage width so R softkey isn't clipped.
+       * --pad-scale is set by syncTouchChromeScale() so short phones
+       * shrink chrome instead of squeezing the LCD above.
        */
       #touch-bar {
+        --pad-scale: 1;
+        --pad-cell-base: 56px;
+        --pad-gap-base: 8px;
+        --sk-h-base: 56px;
+        --sk-center-h-base: 32px;
+        --pad-cell: calc(var(--pad-cell-base) * var(--pad-scale));
+        --pad-gap: calc(var(--pad-gap-base) * var(--pad-scale));
+        --sk-h: calc(var(--sk-h-base) * var(--pad-scale));
+        --sk-center-h: calc(var(--sk-center-h-base) * var(--pad-scale));
         flex: 0 0 auto;
         align-self: stretch;
         width: 100%;
         max-width: 100%;
         box-sizing: border-box;
         display: grid;
-        grid-template-columns: minmax(64px, 80px) minmax(0, 1fr) minmax(64px, 80px);
+        grid-template-columns: minmax(calc(64px * var(--pad-scale)), calc(80px * var(--pad-scale))) minmax(0, 1fr) minmax(calc(64px * var(--pad-scale)), calc(80px * var(--pad-scale)));
         grid-template-rows: auto auto auto;
-        gap: 6px 10px;
+        gap: calc(6px * var(--pad-scale)) calc(10px * var(--pad-scale));
         align-items: start;
-        padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0));
+        padding:
+          calc(6px * var(--pad-scale))
+          calc(10px * var(--pad-scale))
+          calc(8px * var(--pad-scale) + env(safe-area-inset-bottom, 0));
         background: var(--pad-bg);
         border-top: 1px solid rgba(158, 181, 168, 0.25);
-        overflow: visible;
+        overflow: hidden;
       }
       .sk {
         appearance: none;
         border: 2px solid var(--sk-stroke);
-        border-radius: 8px;
+        border-radius: calc(8px * var(--pad-scale, 1));
         background: var(--pad-face);
         color: #d0e8d5;
         font: inherit;
-        font-size: 0.8rem;
+        font-size: calc(0.8rem * var(--pad-scale, 1));
         letter-spacing: 0.04em;
         cursor: pointer;
         touch-action: none;
@@ -127,8 +246,8 @@
       #sk-left,
       #sk-right {
         width: 100%;
-        height: 48px;
-        font-size: 0.8rem;
+        height: var(--sk-h);
+        font-size: calc(0.8rem * var(--pad-scale, 1));
         align-self: start;
       }
       #sk-left {
@@ -150,12 +269,12 @@
         min-height: 0;
         padding: 0;
         border-width: 0;
-        font-size: 0.85rem;
+        font-size: calc(0.85rem * var(--pad-scale, 1));
         overflow: hidden;
         visibility: hidden;
       }
       #sk-center.is-on {
-        height: 32px;
+        height: var(--sk-center-h);
         border-width: 2px;
         visibility: visible;
       }
@@ -163,9 +282,9 @@
         grid-column: 2;
         grid-row: 2;
         display: grid;
-        grid-template-columns: repeat(3, minmax(44px, 60px));
-        grid-template-rows: repeat(3, 48px);
-        gap: 8px;
+        grid-template-columns: repeat(3, var(--pad-cell));
+        grid-template-rows: repeat(3, var(--pad-cell));
+        gap: var(--pad-gap);
         justify-content: center;
         justify-self: center;
         max-width: 100%;
@@ -174,11 +293,14 @@
       .dpad .pad {
         appearance: none;
         border: 2px solid var(--pad-edge);
-        border-radius: 8px;
+        border-radius: 50%;
+        width: 100%;
+        height: 100%;
+        aspect-ratio: 1;
         background: var(--pad-face);
         color: #d0e8d5;
         font: inherit;
-        font-size: 1.1rem;
+        font-size: calc(1.1rem * var(--pad-scale, 1));
         line-height: 1;
         padding: 0;
         cursor: pointer;
@@ -190,7 +312,7 @@
         color: #fff;
       }
       .dpad .ok {
-        font-size: 0.85rem;
+        font-size: calc(0.85rem * var(--pad-scale, 1));
         letter-spacing: 0.04em;
         color: var(--accent);
       }
@@ -203,7 +325,7 @@
         grid-column: 1 / -1;
         grid-row: 3;
         min-height: 0.9em;
-        font-size: 0.65rem;
+        font-size: calc(0.65rem * var(--pad-scale, 1));
         color: var(--muted);
         white-space: nowrap;
         overflow: hidden;
@@ -212,19 +334,37 @@
         line-height: 1.1;
       }
       #touch-status.error { color: var(--danger); }
+      /* Compact: drop status line to reclaim ~12px for the LCD. */
+      #touch-bar.pad-compact #touch-status {
+        display: none;
+      }
       @media (min-width: 720px) {
         #touch-bar {
-          grid-template-columns: minmax(80px, 96px) minmax(0, 1fr) minmax(80px, 96px);
+          --pad-cell-base: 72px;
+          --pad-gap-base: 12px;
+          --sk-h-base: 64px;
+          grid-template-columns: minmax(calc(80px * var(--pad-scale)), calc(96px * var(--pad-scale))) minmax(0, 1fr) minmax(calc(80px * var(--pad-scale)), calc(96px * var(--pad-scale)));
         }
-        #sk-left,
-        #sk-right {
-          height: 52px;
-        }
-        .dpad {
-          grid-template-columns: repeat(3, 72px);
-          grid-template-rows: repeat(3, 52px);
-          gap: 14px;
-        }
+      }
+      /*
+       * Soft keyboard open: pin layout height so 100dvh / adjustResize cannot
+       * shrink #stage; D-pad collapses via shared compact-chrome rules above
+       * (左软|OK|右软 stay visible for login / confirm).
+       */
+      html.ime-open,
+      html.ime-open body {
+        height: var(--ime-layout-h, 100%);
+        max-height: var(--ime-layout-h, 100%);
+        overflow: hidden;
+      }
+      html.ime-open #app {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: var(--ime-layout-h, 100%);
+        max-height: var(--ime-layout-h, 100%);
+        overflow: hidden;
       }
     </style>
   </head>
@@ -232,6 +372,12 @@
     <div id="app">
       <div id="stage">
         <div id="phone-wrap"></div>
+        <button
+          type="button"
+          id="touch-chrome-toggle"
+          aria-label="隐藏或显示方向键"
+          title="隐藏方向键（保留左软/OK/右软）"
+        ></button>
       </div>
       <div id="touch-bar">
         <button type="button" class="sk" id="sk-left" disabled>左软</button>

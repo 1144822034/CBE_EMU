@@ -53,6 +53,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type SystemKind =
   | "bag"
@@ -81,6 +82,7 @@ export type SystemAction =
   | "recharge_alipay"
   | "recharge_wechat"
   | "skill_use"
+  | "skill_forget"
   | "refresh";
 
 /**
@@ -520,7 +522,13 @@ export class SystemPanel extends Container {
   private adjustBuyQty(delta: number): void {
     if (!this.selected || !isGoods(this.selected)) return;
     const max = this.maxBuyQty(this.selected);
-    const next = Math.min(max, Math.max(1, this.buyQty + delta));
+    // 数量为 1 再按 ←：绕到最大可购（受库存/余额/99 限制）
+    let next: number;
+    if (delta < 0 && this.buyQty <= 1) {
+      next = max;
+    } else {
+      next = Math.min(max, Math.max(1, this.buyQty + delta));
+    }
     if (next === this.buyQty) return;
     this.buyQty = next;
     this.redraw();
@@ -628,7 +636,8 @@ export class SystemPanel extends Container {
       action === "use" ||
       action === "combine" ||
       action === "equip" ||
-      action === "buy"
+      action === "buy" ||
+      action === "skill_forget"
     ) {
       this.mode = "list";
       this.selected = null;
@@ -904,6 +913,7 @@ export class SystemPanel extends Container {
         else if (isMapHealSkill(this.selected)) acts.push("回血施放");
         else acts.push("回血(战斗中)");
       }
+      acts.push("遗忘(5金)");
       acts.push("返回");
       return acts;
     }
@@ -1277,7 +1287,31 @@ export class SystemPanel extends Container {
         }),
       );
     }
-    this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 2, false, page < pageCount - 1);
+    if (pageCount > 1) {
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 10,
+        y: listBottom - 4,
+        w: w - 20,
+        page: page + 1,
+        pages: pageCount,
+        addLabel: (t, lx, ly, c) => this.addAttrText(t, lx, ly, c),
+        onPrev: () => {
+          this.cursorIndex = Math.max(0, pageStart - visible);
+          this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
+          this.redraw();
+        },
+        onNext: () => {
+          this.cursorIndex = Math.min(total - 1, pageStart + visible);
+          this.selected = this.replaceCandidates[this.cursorIndex] ?? null;
+          this.redraw();
+        },
+      });
+    } else {
+      this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 2, false, false);
+    }
 
     this.box
       .moveTo(x + 10, splitY)
@@ -1365,13 +1399,11 @@ export class SystemPanel extends Container {
     const page = Math.floor(pageStart / BAG_VISIBLE_ROWS);
 
     const arrowTopY = tabY + tabH + 22;
-    const listTop = arrowTopY + 12;
-    const listBottom = moneyY - 16;
+    const listTop = arrowTopY + 4;
+    const listBottom = moneyY - (pageCount > 1 ? 28 : 16);
     const rowH = Math.max(16, Math.floor((listBottom - listTop) / BAG_VISIBLE_ROWS));
     const listX = x + 10;
     const listW = w - 20;
-
-    this.drawScrollArrow(LCD_WIDTH / 2, arrowTopY + 4, true, page > 0);
 
     for (let i = 0; i < BAG_VISIBLE_ROWS; i++) {
       const ry = listTop + i * rowH;
@@ -1400,7 +1432,28 @@ export class SystemPanel extends Container {
       );
     }
 
-    this.drawScrollArrow(LCD_WIDTH / 2, listBottom + 6, false, page < pageCount - 1);
+    if (pageCount > 1) {
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 10,
+        y: moneyY - 24,
+        w: w - 20,
+        page: page + 1,
+        pages: pageCount,
+        addLabel: (t, lx, ly, c) => this.addAttrText(t, lx, ly, c),
+        onPrev: () => {
+          this.cursorIndex = Math.max(0, pageStart - BAG_VISIBLE_ROWS);
+          this.redraw();
+        },
+        onNext: () => {
+          const maxIdx = Math.max(0, (rows?.length ?? 1) - 1);
+          this.cursorIndex = Math.min(maxIdx, pageStart + BAG_VISIBLE_ROWS);
+          this.redraw();
+        },
+      });
+    }
 
     this.drawBagMoneyBar(x + 8, moneyY, w - 16, moneyH);
   }
@@ -1540,7 +1593,12 @@ export class SystemPanel extends Container {
       metaTop + 8,
       CBE.inkMint,
     );
-    this.addAttrText("左软=操作  右软=返回", descX + 6, metaTop + 24, CBE.inkLabel);
+    this.addAttrText(
+      "左软=操作(含遗忘5金)  右软=返回",
+      descX + 6,
+      metaTop + 24,
+      CBE.inkLabel,
+    );
   }
 
   /**
@@ -1950,9 +2008,25 @@ export class SystemPanel extends Container {
     }
 
     if (pageCount > 1) {
-      const cx = LCD_WIDTH / 2;
-      this.drawScrollArrow(cx - 10, arrowY + 6, true, page > 0);
-      this.drawScrollArrow(cx + 10, arrowY + 6, false, page < pageCount - 1);
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: listX,
+        y: arrowY,
+        w: listW,
+        page: page + 1,
+        pages: pageCount,
+        addLabel: (t, lx, ly, c) => this.addAttrText(t, lx, ly, c),
+        onPrev: () => {
+          this.cursorIndex = Math.max(0, page - 1);
+          this.redraw();
+        },
+        onNext: () => {
+          this.cursorIndex = Math.min(pageCount - 1, page + 1);
+          this.redraw();
+        },
+      });
     }
   }
 
@@ -2055,6 +2129,29 @@ export class SystemPanel extends Container {
     }
 
     const footY = y + LCD_HEIGHT - SOFTKEY_H - 64 - 18;
+    if (this.usesCategoryTabs() && lines.length > PAGE_SIZE) {
+      const pages = Math.max(1, Math.ceil(lines.length / PAGE_SIZE));
+      const page = Math.floor(pageStart / PAGE_SIZE) + 1;
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 8,
+        y: footY - 22,
+        w: w - 16,
+        page,
+        pages,
+        addLabel: (t, lx, ly, c) => this.addAttrText(t, lx, ly, c),
+        onPrev: () => {
+          this.cursorIndex = Math.max(0, pageStart - PAGE_SIZE);
+          this.redraw();
+        },
+        onNext: () => {
+          this.cursorIndex = Math.min(lines.length - 1, pageStart + PAGE_SIZE);
+          this.redraw();
+        },
+      });
+    }
     if (this.kind === "mall" && this.mall && this.mode === "list") {
       this.addLabel(`酷宝 ${this.mall.coolmoney}`, x + 10, footY, CBE.inkTip);
       const rechargeX = x + w - 48;
@@ -2329,6 +2426,9 @@ function actionKey(label: string): SystemAction | string {
     case "施放":
     case "回血施放":
       return "skill_use";
+    case "遗忘":
+    case "遗忘(5金)":
+      return "skill_forget";
     case "回血(战斗中)":
       return "refresh";
     default:

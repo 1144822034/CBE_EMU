@@ -65,7 +65,9 @@ import { TouchControls, type TouchDir } from "./ui/TouchControls";
 import { CBE, LCD_HEIGHT, LCD_WIDTH } from "./ui/constants";
 import { setLcdDisplayScale } from "./ui/BitmapLabel";
 import {
+  imeShellAdoptLock,
   imeShellCaptureLockFromWrap,
+  imeShellClearLockSize,
   imeShellIsActive,
   imeShellLockedSize,
 } from "./ui/imeShell";
@@ -211,13 +213,112 @@ async function main(): Promise<void> {
   if (!stage) throw new Error("missing #stage");
 
   const touchBar = document.getElementById("touch-bar");
+  const touchChromeToggle = document.getElementById("touch-chrome-toggle");
+  const TOUCH_CHROME_KEY = "pix_touch_chrome";
   const app = new Application();
   let rendererReady = false;
+  const applyTouchChromeVisible = (visible: boolean) => {
+    document.documentElement.classList.toggle("touch-chrome-off", !visible);
+    if (touchChromeToggle) {
+      touchChromeToggle.setAttribute(
+        "aria-label",
+        visible ? "隐藏方向键" : "显示方向键",
+      );
+      touchChromeToggle.title = visible
+        ? "隐藏方向键（保留左软/OK/右软）"
+        : "显示方向键";
+    }
+    try {
+      localStorage.setItem(TOUCH_CHROME_KEY, visible ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  };
+  // Restore preference before first fit so stage height is correct.
+  try {
+    applyTouchChromeVisible(localStorage.getItem(TOUCH_CHROME_KEY) !== "0");
+  } catch {
+    applyTouchChromeVisible(true);
+  }
+  /**
+   * Shrink HTML D-pad / softkeys so the 240×400 LCD can stay width-limited
+   * on short phones. Driven by viewport, not stage (avoids feedback loops).
+   */
+  const syncTouchChromeScale = () => {
+    if (!touchBar) return;
+    const chromeOff =
+      document.documentElement.classList.contains("touch-chrome-off") ||
+      document.documentElement.classList.contains("ime-open") ||
+      imeShellIsActive();
+    const appEl = document.getElementById("app");
+    const vh = appEl?.clientHeight || window.innerHeight || 0;
+    const vw = appEl?.clientWidth || window.innerWidth || 0;
+    if (vh < 2 || vw < 2) return;
+
+    const wide = vw >= 720;
+    const cell = wide ? 72 : 56;
+    const gap = wide ? 12 : 8;
+    const padY = 6 + 8;
+    const statusH = 14;
+    const centerOn = !!touchBar.querySelector("#sk-center.is-on");
+    const centerH = centerOn ? 32 + 6 : 0;
+    const naturalPadH = 3 * cell + 2 * gap + padY + statusH + centerH;
+
+    const lcdByWidth = vw * (LCD_HEIGHT / LCD_WIDTH);
+    const padBudget = Math.max(0, vh - lcdByWidth);
+    const PAD_MIN_SCALE = 0.55;
+    let scale = 1;
+    if (padBudget < naturalPadH && naturalPadH > 1) {
+      scale = Math.max(PAD_MIN_SCALE, padBudget / naturalPadH);
+    }
+    const maxPadFrac = 0.4;
+    if (naturalPadH * scale > vh * maxPadFrac && vh > 1) {
+      scale = Math.max(PAD_MIN_SCALE, (vh * maxPadFrac) / naturalPadH);
+    }
+
+    // Full chrome height at current scale (safe-area added by #app padding).
+    const fullChromeH = Math.max(1, Math.round(naturalPadH * scale));
+
+    if (chromeOff) {
+      // Hidden D-pad: softkey row band = half the full chrome height.
+      const halfH = Math.max(48, Math.round(fullChromeH / 2));
+      const btn = Math.min(52, Math.max(36, halfH - 14));
+      // OK dominates the compact row — nearly fill the chrome band.
+      const ok = Math.min(halfH - 2, Math.max(btn + 18, Math.round(halfH * 0.88)));
+      touchBar.style.setProperty("--pad-scale", "1");
+      touchBar.style.setProperty("--compact-chrome-h", `${halfH}px`);
+      touchBar.style.setProperty("--compact-btn", `${btn}px`);
+      touchBar.style.setProperty("--compact-ok", `${ok}px`);
+      touchBar.classList.add("pad-compact");
+      return;
+    }
+
+    touchBar.style.removeProperty("--compact-chrome-h");
+    touchBar.style.removeProperty("--compact-btn");
+    touchBar.style.removeProperty("--compact-ok");
+    const next = (Math.round(scale * 1000) / 1000).toFixed(3);
+    if (touchBar.style.getPropertyValue("--pad-scale") !== next) {
+      touchBar.style.setProperty("--pad-scale", next);
+    }
+    touchBar.classList.toggle("pad-compact", scale < 0.88);
+  };
   const syncTouchBarWidth = () => {
     // Full stage width so L/R softkeys sit beside ▲ and aren't clipped.
-    if (!touchBar) return;
-    const w = stage.clientWidth || wrap.clientWidth || 0;
-    if (w > 2) touchBar.style.width = `${w}px`;
+    if (touchBar) {
+      const w = stage.clientWidth || wrap.clientWidth || 0;
+      if (w > 2) touchBar.style.width = `${w}px`;
+    }
+    // Keep the white-dot toggle on the LCD's top-right (not stage letterbox).
+    if (touchChromeToggle) {
+      const stageRect = stage.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+      if (stageRect.width > 2 && wrapRect.width > 2) {
+        const top = Math.max(4, wrapRect.top - stageRect.top + 6);
+        const right = Math.max(4, stageRect.right - wrapRect.right + 6);
+        touchChromeToggle.style.top = `${top}px`;
+        touchChromeToggle.style.right = `${right}px`;
+      }
+    }
   };
   const lcdCssScaleFromWrap = (): number => {
     const w = wrap.clientWidth || Number.parseFloat(wrap.style.width) || LCD_WIDTH;
@@ -232,6 +333,10 @@ async function main(): Promise<void> {
     app.renderer.resize(LCD_WIDTH, LCD_HEIGHT);
   };
   const fitPhoneWrap = () => {
+    // Size chrome first so #stage height reflects the shrunk D-pad.
+    syncTouchChromeScale();
+    // CSS vars do not reflow until read — force before measuring #stage.
+    if (touchBar) void touchBar.offsetHeight;
     const locked = imeShellLockedSize();
     if (locked) {
       wrap.style.width = `${locked.width}px`;
@@ -248,11 +353,15 @@ async function main(): Promise<void> {
     // Soft keyboard shrink is handled by imeShell lock instead.
     const prevW = Number(wrap.dataset.fitW || "0");
     const prevH = Number(wrap.dataset.fitH || "0");
-    if (prevW > 0 && prevH > 0 && !imeShellIsActive()) {
+    if (prevW > 0 && prevH > 0) {
       const dW = Math.abs(sw - prevW);
       const dH = Math.abs(sh - prevH);
       const heightJitterOnly = dW < 16 && dH < Math.max(64, prevH * 0.1);
-      if (heightJitterOnly) {
+      // While IME is arming (lock not yet captured), also ignore large
+      // keyboard-driven height drops so we do not fit-to-shrunken stage.
+      const imeKeyboardShrink =
+        imeShellIsActive() && dW < 16 && sh < prevH && dH > 48;
+      if (heightJitterOnly || imeKeyboardShrink) {
         syncTouchBarWidth();
         return;
       }
@@ -266,15 +375,31 @@ async function main(): Promise<void> {
     syncLcdResolution(s);
   };
   fitPhoneWrap();
+  if (touchChromeToggle) {
+    touchChromeToggle.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const show =
+        document.documentElement.classList.contains("touch-chrome-off");
+      applyTouchChromeVisible(show);
+      wrap.dataset.fitW = "0";
+      wrap.dataset.fitH = "0";
+      fitPhoneWrap();
+    });
+  }
   window.addEventListener("resize", fitPhoneWrap);
   window.addEventListener("orientationchange", () => setTimeout(fitPhoneWrap, 50));
   window.addEventListener("ime-shell", () => {
-    // Touch-bar hide expands stage — one fresh fit, then lock that size.
+    // Touch-bar hide expands stage — one fresh fit, then lock (never shrink).
     if (imeShellIsActive()) {
+      const floor = imeShellLockedSize();
+      // Suspend lock so fit can use the larger stage after #touch-bar hide.
+      imeShellClearLockSize();
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
       imeShellCaptureLockFromWrap();
+      if (floor) imeShellAdoptLock(floor.width, floor.height);
       fitPhoneWrap();
     } else {
       wrap.style.transform = "";
@@ -857,6 +982,7 @@ async function main(): Promise<void> {
     taskUi.visible = p === "quest";
     if (p !== "quest") taskUi.hide();
     chatPanel.visible = p === "chat";
+    if (p === "chat") chatPanel.selfRoleId = session.selectedRoleId >>> 0;
     tradeUi.visible = p === "trade";
     guildUi.visible = p === "guild";
     worldMap.visible = p === "map";
@@ -1824,7 +1950,10 @@ async function main(): Promise<void> {
           }
           continue;
         }
-        hud.pushChat(line.text, line.type);
+        hud.pushChat(line.text, line.type, {
+          senderRoleId: line.senderRoleId,
+          senderName: line.senderName,
+        });
       }
       if (phase === "chat") chatPanel.setEntries(hud.getChatEntries());
     },
@@ -2056,6 +2185,20 @@ async function main(): Promise<void> {
    * 菜单「挂机战斗」仍只记录，不置此标志。
    */
   let hangupStartAfterSkillPick = false;
+  /** Skill-forget DialogPanel: cancel/close returns to skill list (or battle). */
+  let skillForgetDialogOpen = false;
+
+  const returnFromSkillForgetDialog = (): void => {
+    skillForgetDialogOpen = false;
+    system.setSkills(session.learnedSkills);
+    if (session.inBattle) {
+      showPhase("battle");
+      return;
+    }
+    showPhase("system");
+    system.open("skill");
+    system.setSkills(session.learnedSkills);
+  };
 
   const openHangupSkillDialog = (startAfterPick: boolean): void => {
     hangupStartAfterSkillPick = startAfterPick;
@@ -2123,8 +2266,8 @@ async function main(): Promise<void> {
     touch.releaseAll();
     view.clearHeldKeys();
     view.inputEnabled = true;
-    // Engaged SCE spawn stays hidden; refresh at birth point after 20s.
-    view.actors.armSuppressedRespawns(20_000);
+    // Engaged SCE spawn stays hidden; refresh at birth point after 10s.
+    view.actors.armSuppressedRespawns(10_000);
     view.armCollideCooldown(2000);
     showPhase("world");
     // HUD was hidden in battle — re-paint top-left bars with post-fight vitals.
@@ -3061,6 +3204,26 @@ async function main(): Promise<void> {
       void session.battleOperate(battle.targetIndex(), sk.id + 2);
       showPhase("battle");
     }
+    if (kind === "skill" && action === "skill_forget") {
+      const sk =
+        item && "id" in item && !("itemId" in item)
+          ? (item as import("./resources/skill").BattleSkillRow)
+          : null;
+      if (!sk) {
+        showGameTip("无已学仙术");
+        return;
+      }
+      skillForgetDialogOpen = true;
+      dialog.show({
+        title: "遗忘技能",
+        body: `遗忘「${sk.name}」需消耗5金\n确定要遗忘吗？`,
+        options: [
+          { label: "确认遗忘", action: 280, value: sk.id },
+          { label: "取消", action: 281, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+    }
   };
 
   social.onClose = () => showPhase("world");
@@ -3098,15 +3261,16 @@ async function main(): Promise<void> {
     }
   };
   chatPanel.onClose = () => showPhase("world");
-  chatPanel.onSend = async (text, type) => {
-    const r = await session.sendChat(text, type);
+  chatPanel.onSend = async (text, type, opts) => {
+    const r = await session.sendChat(text, type, opts);
     if (r.tip) showGameTip(r.tip);
     if (!r.ok) {
       if (!r.tip) showGameTip("发送失败");
       return false;
     }
     chatPanel.setEntries(hud.getChatEntries());
-    showGameTip(`已发送 · ${text.slice(0, 12)}`);
+    const tipPrefix = type === 7 ? "私聊" : "已发送";
+    showGameTip(`${tipPrefix} · ${text.slice(0, 12)}`);
     return true;
   };
   social.onAction = (kind, action, row) => {
@@ -3136,6 +3300,16 @@ async function main(): Promise<void> {
       void session.tradeInvite(row.id);
       hud.pushChat(`[交]已邀请 ${row.name} 交易`);
       showGameTip(`交易邀请 ${row.name}`);
+      return;
+    }
+    if (action === "private_chat" && row?.id) {
+      social.hide();
+      chatPanel.selfRoleId = session.selectedRoleId >>> 0;
+      showPhase("chat");
+      chatPanel.open(hud.getChatEntries(), {
+        pm: { id: row.id >>> 0, name: row.name || "玩家" },
+      });
+      showGameTip(`私聊 ${row.name}`);
       return;
     }
     if (action === "spar" && row?.id) {
@@ -3412,6 +3586,10 @@ async function main(): Promise<void> {
 
   dialog.onClose = () => {
     hangupStartAfterSkillPick = false;
+    if (skillForgetDialogOpen) {
+      returnFromSkillForgetDialog();
+      return;
+    }
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
   };
@@ -3427,6 +3605,11 @@ async function main(): Promise<void> {
     }
     if (action === 101) {
       hangupStartAfterSkillPick = false;
+      if (skillForgetDialogOpen) {
+        dialog.hide();
+        returnFromSkillForgetDialog();
+        return;
+      }
       dialog.hide();
       void session.confirmTaskPrompt(false);
       showPhase("world");
@@ -3530,6 +3713,35 @@ async function main(): Promise<void> {
         showGameTip(r.message);
         showPhase("world");
       });
+      return;
+    }
+    if (action === 280) {
+      dialog.hide();
+      skillForgetDialogOpen = false;
+      const skillId = value >>> 0;
+      void (async () => {
+        showGameTip("遗忘中…");
+        const fb = await session.forgetSkill(skillId);
+        system.setSkills(session.learnedSkills);
+        const money = session.characterStats?.money ?? session.gold;
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        system.setBagMeta(money, cap);
+        showGameTip(fb.message || (fb.ok ? "遗忘成功" : "遗忘失败"));
+        if (session.inBattle) {
+          showPhase("battle");
+          return;
+        }
+        showPhase("system");
+        system.open("skill");
+        system.setSkills(session.learnedSkills);
+      })();
+      return;
+    }
+    if (action === 281) {
+      dialog.hide();
+      returnFromSkillForgetDialog();
       return;
     }
     if (action === 270) {
@@ -3779,6 +3991,13 @@ dialog.hide();
 
   hud.onMenu = () => showPhase("menu");
   hud.onHome = () => cycleMapUi();
+  hud.onChat = () => {
+    if (phase !== "world" || session.inBattle) return;
+    if (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible) return;
+    showPhase("chat");
+    chatPanel.open(hud.getChatEntries());
+    setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
+  };
   hud.onHangup = () => {
     // Active hangup, or armed resume intent: always stop locally.
     if (session.hangupActive || session.hangupDesired) {

@@ -246,9 +246,9 @@ export class ActorLayer {
   }
 
   /**
-   * After battle ends: arm 10s (default) refresh for every engaged SCE spawn.
+   * After battle ends: arm refresh delay for every engaged SCE spawn.
    */
-  armSuppressedRespawns(delayMs = 20_000): void {
+  armSuppressedRespawns(delayMs = 10_000): void {
     const at = performance.now() + Math.max(0, delayMs);
     for (const info of this.suppressedScene.values()) {
       if (info.respawnAt == null) info.respawnAt = at;

@@ -11,7 +11,7 @@ import {
 import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
 import { DigitStrip, tryLoadUiTexture, uiSprite } from "./UiAssets";
 import { SLOT_FRAME_SIZE } from "./ItemArt";
-import { colorForChatType } from "./ChatPanel";
+import { colorForChatType, type ChatEntry } from "./ChatPanel";
 import {
   composeActorFrameIndex,
   loadActor,
@@ -112,6 +112,8 @@ export class WorldHud extends Container {
   onMenu: (() => void) | null = null;
   onHome: (() => void) | null = null;
   onHangup: (() => void) | null = null;
+  /** Tap bottom chat strip → open ChatPanel. */
+  onChat: (() => void) | null = null;
   onIcon: ((action: HudIconAction) => void) | null = null;
 
   private locText: BitmapLabel;
@@ -128,12 +130,13 @@ export class WorldHud extends Container {
   private chatLines: BitmapLabel[] = [];
   private chatLog: string[] = [];
   /** Longer history for ChatPanel (HUD still shows 2 lines). */
-  private chatEntries: { type: number; text: string }[] = [];
+  private chatEntries: ChatEntry[] = [];
   private chatHistory: string[] = [];
   private artReady = false;
   private menuHit!: Container;
   private hangHit!: Container;
   private homeHit!: Container;
+  private chatHit!: Container;
   private partyHost = new Container();
   private partySlots: PartySlot[] = [];
   private partyTiao: Texture | null = null;
@@ -251,10 +254,12 @@ export class WorldHud extends Container {
     this.menuHit = hitArea(2, 2, 26, 18);
     this.hangHit = hitArea(HANG_BTN_X, 0, HANG_BTN_W, SOFT_H);
     this.homeHit = hitArea(LCD_WIDTH - 28, 2, 26, 18);
-    this.bottom.addChild(this.menuHit, this.hangHit, this.homeHit);
+    this.chatHit = hitArea(0, SOFT_H, LCD_WIDTH, WORLD_BOTTOM_H - SOFT_H);
+    this.bottom.addChild(this.chatHit, this.menuHit, this.hangHit, this.homeHit);
     this.menuHit.on("pointertap", () => this.onMenu?.());
     this.hangHit.on("pointertap", () => this.onHangup?.());
     this.homeHit.on("pointertap", () => this.onHome?.());
+    this.chatHit.on("pointertap", () => this.onChat?.());
 
     this.setVitals(500, 500, 200, 200);
     this.pushChat("[系]系统: 欢迎进入江湖世界");
@@ -343,8 +348,8 @@ export class WorldHud extends Container {
       spr.position.set(LCD_WIDTH - 27, 3);
       this.bottom.addChild(spr);
     }
-    // Art mounts after hit targets — re-raise so pointer reaches softkeys.
-    this.bottom.addChild(this.menuHit, this.hangHit, this.homeHit);
+    // Art mounts after hit targets — re-raise so pointer reaches softkeys / chat.
+    this.bottom.addChild(this.chatHit, this.menuHit, this.hangHit, this.homeHit);
 
     await this.mountDreamTimerArt();
     this.setLevel(1, 0.1);
@@ -632,7 +637,11 @@ export class WorldHud extends Container {
     return tryDismissPanelTipOnSoftRight(this.toast);
   }
 
-  pushChat(line: string, type?: number): void {
+  pushChat(
+    line: string,
+    type?: number,
+    meta?: { senderRoleId?: number; senderName?: string },
+  ): void {
     const t =
       type ??
       (line.startsWith("[世]")
@@ -646,7 +655,12 @@ export class WorldHud extends Container {
               : line.startsWith("[私]")
                 ? 7
                 : 5);
-    this.chatEntries.unshift({ type: t, text: line });
+    this.chatEntries.unshift({
+      type: t,
+      text: line,
+      senderRoleId: meta?.senderRoleId,
+      senderName: meta?.senderName,
+    });
     this.chatEntries = this.chatEntries.slice(0, 80);
     this.chatHistory.unshift(line);
     this.chatHistory = this.chatHistory.slice(0, 80);
@@ -683,7 +697,7 @@ export class WorldHud extends Container {
   }
 
   /** Oldest→newest typed entries for ChatPanel tabs. */
-  getChatEntries(): { type: number; text: string }[] {
+  getChatEntries(): ChatEntry[] {
     return this.chatEntries.slice().reverse();
   }
 }

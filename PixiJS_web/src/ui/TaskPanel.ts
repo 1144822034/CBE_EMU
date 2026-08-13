@@ -21,6 +21,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type TaskTab = "accepted" | "candidates";
 export type TaskAction = "detail" | "abandon" | "accept" | "refresh";
@@ -296,6 +297,27 @@ export class TaskPanel extends Container {
           y + h - 18,
           CBE.inkLabel,
         );
+        if (pages > 1) {
+          attachPageNavButtons({
+            host: this,
+            hits: this.rowHits,
+            box: this.box,
+            x: x + 8,
+            y: y + h - 40,
+            w: w - 16,
+            page: this.detailPage + 1,
+            pages,
+            addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+            onPrev: () => {
+              this.detailPage = Math.max(0, this.detailPage - 1);
+              this.redraw();
+            },
+            onNext: () => {
+              this.detailPage = Math.min(pages - 1, this.detailPage + 1);
+              this.redraw();
+            },
+          });
+        }
         this.rowHits.push(
           attachRowPointerHit(this, x + 6, tabY + 16, w - 12, h - 70, () => this.confirm()),
         );
@@ -370,6 +392,30 @@ export class TaskPanel extends Container {
         y + h - 18,
         CBE.inkLabel,
       );
+      if (pages > 1) {
+        attachPageNavButtons({
+          host: this,
+          hits: this.rowHits,
+          box: this.box,
+          x: x + 8,
+          y: y + h - 40,
+          w: w - 16,
+          page,
+          pages,
+          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+          onPrev: () => {
+            this.listCursor = Math.max(0, start - LIST_PAGE_SIZE);
+            this.redraw();
+          },
+          onNext: () => {
+            this.listCursor = Math.min(
+              Math.max(0, rows.length - 1),
+              start + LIST_PAGE_SIZE,
+            );
+            this.redraw();
+          },
+        });
+      }
     } finally {
       drawPanelTipOverlay(this, this.toast);
     }
