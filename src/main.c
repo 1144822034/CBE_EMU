@@ -3915,15 +3915,6 @@ static uc_err scheduler_flush_login_tail42_if_needed(const char *reason)
     return err;
 }
 
-
-
-
-
-
-
-
-
-
 static uc_err scheduler_dispatch_net_tasks(void)
 {
     u32 activeBefore = scheduler_count_active_net_tasks();

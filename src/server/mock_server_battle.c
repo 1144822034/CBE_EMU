@@ -793,6 +793,19 @@ static bool vm_net_mock_battle_operate_skill_targets_enemy_control(u32 operate)
            skill->hpChange == 0 && skill->effectKind != 0;
 }
 
+/* skill.dsh's only percentage-dodge rows are 幻剑's 混沌鬼气 1..5.  Their
+ * description explicitly includes `%`, unlike equipment and every other
+ * additive dodge source.  Keep this mapping narrow and resource-backed;
+ * `dodgeChange` otherwise remains a normal fixed combat rating. */
+static bool vm_net_mock_battle_skill_uses_percent_dodge(
+    const vm_net_mock_skill_catalog_item *skill)
+{
+    return skill != NULL && skill->skillId >= 111u && skill->skillId <= 115u &&
+           skill->rawJob == 1u && skill->targetDirection == 0u &&
+           skill->durationRounds == 5u && skill->agilityChange > 0 &&
+           skill->dodgeChange > 0;
+}
+
 static void vm_net_mock_battle_modifier_set_from_skill(
     vm_net_mock_battle_stat_modifier *modifier,
     const vm_net_mock_skill_catalog_item *skill)
@@ -807,7 +820,12 @@ static void vm_net_mock_battle_modifier_set_from_skill(
     modifier->defense = skill->defenseChange;
     modifier->crit = skill->critChange;
     modifier->hit = skill->hitChange;
-    modifier->dodge = skill->dodgeChange;
+    modifier->dodge = vm_net_mock_battle_skill_uses_percent_dodge(skill)
+                          ? 0
+                          : skill->dodgeChange;
+    modifier->dodgePercent = vm_net_mock_battle_skill_uses_percent_dodge(skill)
+                                 ? skill->dodgeChange
+                                 : 0;
     modifier->resist = skill->resistChange;
 }
 

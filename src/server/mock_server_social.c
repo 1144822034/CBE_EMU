@@ -4551,61 +4551,6 @@ static u32 vm_net_mock_build_pending_duel_terminal_response(
     u32 outCap,
     vm_mock_service_client_session *observer);
 
-/* `task_hall_activate_selected_entry` sends the private NPC service request
- * as 26/1.  `DispatchItemEvent` clears that request's pending callback only
- * after ParseNPCDialogData has consumed its reply.  Keep the money/item
- * mutations in a following scene-poll packet: mmGame's 7/7 receiver then
- * updates the item manager without re-entering the dialog callback. */
-static u32 vm_net_mock_build_pending_npc_purchase_sync_response(
-    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
-{
-    vm_net_mock_role_state *role = vm_net_mock_active_role();
-    u32 pos = 5;
-
-    if (out == NULL || outCap < pos || observer == NULL ||
-        !observer->npcPurchaseSyncPending ||
-        g_schedulerTick < observer->npcPurchaseSyncNotBeforeTick)
-    {
-        return 0;
-    }
-    if (role == NULL || role->roleId != observer->onlineRoleId ||
-        observer->npcPurchaseSyncSeq == 0 ||
-        observer->npcPurchaseSyncItemId == 0 ||
-        observer->npcPurchaseSyncCount == 0)
-    {
-        printf("[error][mock-service] npc_purchase_sync_drop client=%08x role=%u seq=%u item=%u count=%u reason=invalid-session-state\n",
-               observer->clientId, role ? role->roleId : 0,
-               observer->npcPurchaseSyncSeq,
-               observer->npcPurchaseSyncItemId,
-               observer->npcPurchaseSyncCount);
-        observer->npcPurchaseSyncPending = false;
-        observer->npcPurchaseSyncSeq = 0;
-        observer->npcPurchaseSyncItemId = 0;
-        observer->npcPurchaseSyncCount = 0;
-        observer->npcPurchaseSyncNotBeforeTick = 0;
-        return 0;
-    }
-    if (!vm_net_mock_append_type1_object(out, outCap, &pos, 0) ||
-        !vm_net_mock_append_backpack_item_add7_object(
-            out, outCap, &pos, observer->npcPurchaseSyncSeq,
-            observer->npcPurchaseSyncItemId,
-            observer->npcPurchaseSyncCount))
-    {
-        return 0;
-    }
-    vm_net_mock_finish_wt_packet(out, pos, 2);
-    printf("[info][mock-service] npc_purchase_sync_deliver client=%08x role=%u seq=%u item=%u count=%u money=%u response=10/26+7/7 source=scene-sync-poll\n",
-           observer->clientId, role->roleId, observer->npcPurchaseSyncSeq,
-           observer->npcPurchaseSyncItemId,
-           observer->npcPurchaseSyncCount, role->money);
-    observer->npcPurchaseSyncPending = false;
-    observer->npcPurchaseSyncSeq = 0;
-    observer->npcPurchaseSyncItemId = 0;
-    observer->npcPurchaseSyncCount = 0;
-    observer->npcPurchaseSyncNotBeforeTick = 0;
-    return pos;
-}
-
 static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *observer = vm_mock_service_get_active_client_session();
@@ -4633,10 +4578,6 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * scene remains pollable during the item/confirmation phase. */
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
-    teamBattleResponseLen = vm_net_mock_build_pending_npc_purchase_sync_response(
-        out, outCap, observer);
-    if (teamBattleResponseLen != 0)
-        return teamBattleResponseLen;
     if (!observer->sceneVisibleReady || observer->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(observer->sceneVisibleScene))
     {

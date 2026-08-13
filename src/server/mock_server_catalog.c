@@ -5841,6 +5841,63 @@ static const char *vm_net_mock_chest_world_broadcast_name_gbk(u32 chestItemId)
     }
 }
 
+/* `1/16/2.result=4` is the mmGame text-notice path.  Keep this separate from
+ * the 1/7/37 item-acquire path: the latter inserts an item itself and would
+ * duplicate the already-proven 1/7/7 type=1 backpack increment below. */
+static bool vm_net_mock_format_chest_open_reward_hint_gbk(
+    u32 chestItemId, const char *rewardNameGbk, u32 rewardCount,
+    char *hintOut, size_t hintOutCap)
+{
+    static const char openedGbk[] = "\xBF\xAA\xC6\xF4"; /* 开启 */
+    static const char receivedGbk[] = "\xA3\xAC\xBB\xF1\xB5\xC3"; /* ，获得 */
+    static const char multiplierGbk[] = "\xA1\xC1"; /* × */
+    const char *chestNameGbk = vm_net_mock_chest_world_broadcast_name_gbk(chestItemId);
+    int written = 0;
+
+    if (hintOut == NULL || hintOutCap == 0)
+        return false;
+    hintOut[0] = 0;
+    if (chestNameGbk == NULL || chestNameGbk[0] == 0 ||
+        rewardNameGbk == NULL || rewardNameGbk[0] == 0 || rewardCount == 0)
+    {
+        return false;
+    }
+    if (rewardCount == 1)
+        written = snprintf(hintOut, hintOutCap, "%s%s%s%s", openedGbk,
+                           chestNameGbk, receivedGbk, rewardNameGbk);
+    else
+        written = snprintf(hintOut, hintOutCap, "%s%s%s%s%s%u", openedGbk,
+                           chestNameGbk, receivedGbk, rewardNameGbk,
+                           multiplierGbk, rewardCount);
+    if (written <= 0 || (size_t)written >= hintOutCap)
+    {
+        hintOut[0] = 0;
+        return false;
+    }
+    return true;
+}
+
+static bool vm_net_mock_append_chest_open_reward_hint_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u32 chestItemId,
+    const char *rewardNameGbk, u32 rewardCount)
+{
+    char hint[192];
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xFF ||
+        !vm_net_mock_format_chest_open_reward_hint_gbk(chestItemId, rewardNameGbk,
+                                                       rewardCount, hint, sizeof(hint)) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 16, 2, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 4) ||
+        !vm_net_mock_put_object_string(out, outCap, pos, "hint", hint))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++*objectCount;
+    return true;
+}
+
 /*
  * Client contract:
  * - JianghuOL.CBE:0x01033544 consumes 1/7/1 only for the pending item-use
@@ -5968,6 +6025,13 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return 0;
     }
     ++objectCount;
+    if (!vm_net_mock_append_chest_open_reward_hint_object(
+            out, outCap, &pos, &objectCount, chest->chestItemId,
+            rewardCatalogItem->name, reward->count))
+    {
+        return vm_net_mock_build_item_use_hint_response(
+            out, outCap, "Chest reward notice is invalid");
+    }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     *role = projected;
@@ -5992,12 +6056,12 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1 evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1+16/2-notice evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1 evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1+16/2-notice evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
                      reward->count, reward->weight, totalWeight,
