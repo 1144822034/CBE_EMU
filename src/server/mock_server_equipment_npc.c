@@ -3935,6 +3935,14 @@ typedef struct vm_mock_service_client_session
     vm_mock_service_chat_notice chatNotices[VM_MOCK_SERVICE_CHAT_NOTICE_MAX];
     u8 chatNoticeHead;
     u8 chatNoticeCount;
+    /*
+     * Ten-pull / rapid 7/15 rares: coalesce same chest+reward into one world
+     * line with count so tip「获得2个十四级玄晶」matches [世]祝贺.
+     */
+    u32 chestAnnounceRewardItemId;
+    u32 chestAnnounceChestItemId;
+    u32 chestAnnounceCount;
+    u32 chestAnnounceFlushTick;
     bool systemWelcomeQueued;
     bool worldChatHistoryQueued;
     bool friendInviteReplyActive;
@@ -7470,54 +7478,126 @@ static bool vm_net_mock_gold_chest_reward_warrants_world_announce(u32 itemId)
     return false;
 }
 
-static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId)
+static void vm_net_mock_chest_announce_flush_pending(
+    vm_mock_service_client_session *session)
 {
     static const char systemNameGbk[] = "\xCF\xB5\xCD\xB3"; /* 系统 */
     const vm_net_mock_shop_catalog_item *shop = NULL;
-    const vm_net_mock_role_state *role = NULL;
-    vm_mock_service_client_session *session = NULL;
     const char *playerName = NULL;
     const char *itemName = NULL;
+    const char *chestNameGbk = NULL;
     char message[82];
     int wrote = 0;
     u32 recipients = 0;
+    u32 rewardItemId = 0;
+    u32 chestItemId = 0;
+    u32 count = 0;
 
-    if (!vm_net_mock_gold_chest_reward_warrants_world_announce(itemId))
+    if (session == NULL || session->chestAnnounceCount == 0 ||
+        session->chestAnnounceRewardItemId == 0)
+    {
         return;
-    shop = vm_net_mock_find_shop_catalog_item(itemId);
+    }
+    rewardItemId = session->chestAnnounceRewardItemId;
+    chestItemId = session->chestAnnounceChestItemId;
+    count = session->chestAnnounceCount;
+    session->chestAnnounceRewardItemId = 0;
+    session->chestAnnounceChestItemId = 0;
+    session->chestAnnounceCount = 0;
+    session->chestAnnounceFlushTick = 0;
+
+    shop = vm_net_mock_find_shop_catalog_item(rewardItemId);
     itemName = (shop != NULL && shop->name[0] != 0) ? shop->name : NULL;
     if (itemName == NULL)
         return;
-
-    role = vm_net_mock_active_role();
-    session = vm_mock_service_get_active_client_session();
-    if (session != NULL && session->onlineRoleName[0] != 0)
+    if (session->onlineRoleName[0] != 0)
         playerName = session->onlineRoleName;
-    else if (role != NULL && role->name[0] != 0)
-        playerName = role->name;
+    else
+    {
+        const vm_net_mock_role_state *role = vm_net_mock_active_role();
+        if (role != NULL && role->name[0] != 0)
+            playerName = role->name;
+    }
     if (playerName == NULL || playerName[0] == 0)
         return;
 
-    /*
-     * 恭喜{玩家}开启黄金宝箱获得{物品}，祝贺！
-     * Kept under the world-chat 81-byte GBK wire limit.
-     */
+    switch (chestItemId)
+    {
+    case 522: /* 青铜宝箱 */
+        chestNameGbk = "\xC7\xE0\xCD\xAD\xB1\xA6\xCF\xE4";
+        break;
+    case 523: /* 白银宝箱 */
+        chestNameGbk = "\xB0\xD7\xD2\xF8\xB1\xA6\xCF\xE4";
+        break;
+    case 524: /* 黄金宝箱 */
+        chestNameGbk = "\xBB\xC6\xBD\xF0\xB1\xA6\xCF\xE4";
+        break;
+    default: /* 宝箱 */
+        chestNameGbk = "\xB1\xA6\xCF\xE4";
+        break;
+    }
+
+    /* 恭喜{玩家}开启{箱}获得{N}个{物品}，祝贺！ — match Pixi tip 获得N个. */
     memset(message, 0, sizeof(message));
     wrote = snprintf(
         message, sizeof(message),
-        "\xB9\xA7\xCF\xB2%s\xBF\xAA\xC6\xF4\xBB\xC6\xBD\xF0\xB1\xA6\xCF\xE4"
-        "\xBB\xF1\xB5\xC3%s\xA3\xAC\xD7\xA3\xBA\xD8\xA3\xA1",
-        playerName, itemName);
+        "\xB9\xA7\xCF\xB2%s\xBF\xAA\xC6\xF4%s\xBB\xF1\xB5\xC3%u\xB8\xF6%s"
+        "\xA3\xAC\xD7\xA3\xBA\xD8\xA3\xA1",
+        playerName, chestNameGbk, count, itemName);
     if (wrote <= 0 || (size_t)wrote >= sizeof(message))
     {
-        printf("[warn][network] mock_chest_open_world_announce item=%u reason=message-overflow\n",
-               itemId);
+        printf("[warn][network] mock_chest_open_world_announce item=%u count=%u "
+               "reason=message-overflow\n",
+               rewardItemId, count);
         return;
     }
 
     recipients = vm_mock_service_broadcast_world_chat_live(systemNameGbk, message);
-    printf("[info][network] mock_chest_open_world_announce item=%u player=%s recipients=%u evidence=1/3/3-type0-world q3-or-crystal5plus-or-tianshu-or-exp10\n",
-           itemId, playerName, recipients);
+    printf("[info][network] mock_chest_open_world_announce item=%u count=%u "
+           "chest=%u player=%s recipients=%u evidence=1/3/3-type0-world "
+           "coalesce-ten-pull-tip-match\n",
+           rewardItemId, count, chestItemId, playerName, recipients);
+}
+
+static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 chestItemId,
+                                                             u32 rewardItemId)
+{
+    vm_mock_service_client_session *session = NULL;
+    u32 debounceTicks = 5u; /* 500ms @ VM_SCHED_FRAME_MS=100 — covers Pixi 十连 gaps */
+
+    if (!vm_net_mock_gold_chest_reward_warrants_world_announce(rewardItemId))
+        return;
+    if (vm_net_mock_find_shop_catalog_item(rewardItemId) == NULL)
+        return;
+
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL)
+        return;
+
+    if (session->chestAnnounceCount > 0 &&
+        session->chestAnnounceRewardItemId == rewardItemId &&
+        session->chestAnnounceChestItemId == chestItemId)
+    {
+        if (session->chestAnnounceCount < 99u)
+            session->chestAnnounceCount += 1u;
+        session->chestAnnounceFlushTick = g_schedulerTick + debounceTicks;
+        printf("[info][network] mock_chest_open_world_announce_coalesce item=%u "
+               "chest=%u count=%u flush_tick=%u\n",
+               rewardItemId, chestItemId, session->chestAnnounceCount,
+               session->chestAnnounceFlushTick);
+        return;
+    }
+
+    if (session->chestAnnounceCount > 0)
+        vm_net_mock_chest_announce_flush_pending(session);
+
+    session->chestAnnounceRewardItemId = rewardItemId;
+    session->chestAnnounceChestItemId = chestItemId;
+    session->chestAnnounceCount = 1u;
+    session->chestAnnounceFlushTick = g_schedulerTick + debounceTicks;
+    printf("[info][network] mock_chest_open_world_announce_pending item=%u "
+           "chest=%u count=1 flush_tick=%u\n",
+           rewardItemId, chestItemId, session->chestAnnounceFlushTick);
 }
 
 static bool vm_mock_service_session_enqueue_system_message_delayed(
@@ -9220,6 +9300,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->awaitsBattleRevivalConfirm = false;
     session->taskPromptRefreshPending = false;
     session->taskPromptRefreshScene[0] = 0;
+    if (session->chestAnnounceCount > 0)
+        vm_net_mock_chest_announce_flush_pending(session);
     memset(session->socialNotices, 0, sizeof(session->socialNotices));
     memset(session->chatNotices, 0, sizeof(session->chatNotices));
     session->chatNoticeHead = 0;

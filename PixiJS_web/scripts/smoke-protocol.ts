@@ -73,6 +73,11 @@ import {
   isBattleMedicineOrFlask,
   parseBagItems,
   parseBagItemUpdates,
+  mergeBagItemUpdateDeltas,
+  applyChestOpenToBag,
+  parseFlaskReservoirUpdates,
+  applyFlaskReservoirsToBag,
+  preserveFlaskReservoirAcrossBagRefresh,
   type BagItem,
 } from "../src/net/protocolExtras";
 import { WtBuilder, SeqWriter } from "../src/net/wt";
@@ -328,6 +333,26 @@ assert(buildBattleStartRequest(1, 0, 1, 1).length > 10, "fight");
     !isBattleMedicineOrFlask({ ...flask, kind: "equip", itemId: 1001 }),
     "equip not battle medicine",
   );
+  // 7/11 seeds flask reservoir (30/21 visible stack stays 1).
+  const resInfo = new SeqWriter().u8(1).i16(14).u32(50000).finish();
+  const resB = new WtBuilder();
+  resB.object(1, 7, 11).raw("info", resInfo);
+  const resPkt = ingestPacket(resB.finishResponse());
+  assert(!!resPkt, "7/11 packet");
+  const resMap = parseFlaskReservoirUpdates(resPkt!);
+  assert(resMap.get(14) === 50000, "7/11 reservoir parse");
+  const applied = applyFlaskReservoirsToBag(
+    [{ ...flask, seq: 14, count: 1 }],
+    resMap,
+  );
+  assert(applied[0]!.count === 50000, "7/11 apply to bag");
+  assert(
+    preserveFlaskReservoirAcrossBagRefresh(
+      { ...flask, seq: 14, count: 1 },
+      { ...flask, seq: 14, count: 42000 },
+    ).count === 42000,
+    "preserve flask reservoir across 30/21 refresh",
+  );
   // Lone 7/7 type=1 (battle drop) must not look like a full bag snapshot.
   const info = new SeqWriter()
     .u8(1)
@@ -346,6 +371,65 @@ assert(buildBattleStartRequest(1, 0, 1, 1).length > 10, "fight");
   assert(parseBagItems(dropPkt!).length === 0, "7/7 alone not full bag");
   const merged = parseBagItemUpdates(dropPkt!);
   assert(merged.length === 1 && merged[0]!.seq === 99, "7/7 merge-by-seq");
+  // type=1 wire count is delta: existing stack 1 + peel 1 → 2 (not SET to 1).
+  const crystalRow: BagItem = {
+    itemId: 914,
+    seq: 50,
+    count: 1,
+    name: "十四级玄晶",
+    quality: 0,
+    enhance: 0,
+    kind: "item",
+    category: 23,
+    desc: "",
+    usable: false,
+    equipSlot: -1,
+  };
+  const peel914 = new SeqWriter()
+    .u8(1)
+    .i16(50)
+    .u32(914)
+    .u32(1)
+    .i16(1)
+    .i16(0)
+    .u8(0)
+    .finish();
+  const peelB = new WtBuilder();
+  peelB.object(1, 7, 7).u8("type", 1).raw("iteminfo", peel914);
+  const peelPkt = ingestPacket(peelB.finishResponse())!;
+  const stacked = mergeBagItemUpdateDeltas(
+    [crystalRow],
+    parseBagItemUpdates(peelPkt),
+  );
+  assert(
+    stacked.length === 1 && stacked[0]!.count === 2,
+    "7/7 type=1 stack ADD not SET",
+  );
+  const afterChest = applyChestOpenToBag(
+    [
+      { ...crystalRow, itemId: 524, seq: 10, count: 3, name: "黄金宝箱", category: 10 },
+      { ...crystalRow, itemId: 815, seq: 11, count: 3, name: "黄金钥匙", category: 10 },
+    ],
+    10,
+    11,
+    [{ itemId: 914, seq: 50, count: 1, name: "十四级玄晶" }],
+  );
+  assert(
+    afterChest.some((it) => it.itemId === 524 && it.count === 2) &&
+      afterChest.some((it) => it.itemId === 815 && it.count === 2) &&
+      afterChest.some((it) => it.itemId === 914 && it.seq === 50 && it.count === 1),
+    "7/15 local deduct box/key + grant crystal",
+  );
+  const secondCrystal = applyChestOpenToBag(
+    afterChest,
+    10,
+    11,
+    [{ itemId: 914, seq: 50, count: 1, name: "十四级玄晶" }],
+  );
+  assert(
+    secondCrystal.some((it) => it.itemId === 914 && it.count === 2),
+    "7/15 second crystal stacks to 2",
+  );
 }
 assert(buildSceneStartupFollowupRequest().length === 49, "followup wt49 with 12/1");
 assert(buildLearnedSkillsRefreshRequest().length === 14, "skill refresh wt14");

@@ -5104,6 +5104,12 @@ static int vm_net_mock_append_scene_sync_chat_objects_limited(
 
     if (out == NULL || pos == NULL || observer == NULL)
         return -1;
+    if (observer->chestAnnounceCount > 0 &&
+        observer->chestAnnounceFlushTick != 0 &&
+        g_schedulerTick >= observer->chestAnnounceFlushTick)
+    {
+        vm_net_mock_chest_announce_flush_pending(observer);
+    }
     while (observer->chatNoticeCount > 0 &&
            appended < VM_MOCK_SERVICE_CHAT_POLL_MAX &&
            appended < maxObjects)

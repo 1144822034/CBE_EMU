@@ -44,6 +44,7 @@ import {
   buildBagOpenRequest,
   buildChallengeConfirmRequest,
   buildChatRequest,
+  buildPrivateChatRequest,
   buildWorldChatHornRequest,
   clampWorldChatText,
   SMALL_HORN_ITEM_ID,
@@ -63,6 +64,9 @@ import {
   parseEnhanceWashPreviewResult,
   parseEnhanceWashConfirmResult,
   parseCrystalCombineResult,
+  buildSkillForgetRequest,
+  parseSkillForgetResult,
+  SKILL_FORGET_COST_COPPER,
   canCombineEnhanceCrystal,
   isEnhanceCrystal,
   type EnhanceOpenResult,
@@ -74,6 +78,7 @@ import {
   type EnhanceWashPreviewResult,
   type EnhanceWashConfirmResult,
   type CrystalCombineResult,
+  type SkillForgetResult,
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
   buildChestOpenRequest,
@@ -145,8 +150,11 @@ import {
   TELEPORT_STONE_ITEM_ID,
   parseMapTeleportConfirm,
   npcServiceOpcode,
+  EquipSellService,
   parseBagItems,
   parseBagItemUpdates,
+  mergeBagItemUpdateDeltas,
+  applyChestOpenToBag,
   parseFlaskReservoirUpdates,
   applyFlaskReservoirsToBag,
   preserveFlaskReservoirAcrossBagRefresh,
@@ -401,7 +409,14 @@ export type SessionCallbacks = {
   onNpcTaskPrompts?: (prompts: Map<string, NpcTaskPromptType>) => void;
   /** Instance challenge confirm after 26/0+30/9. */
   onChallengePrompt?: (text: string) => void;
-  onChat?: (lines: { type: number; text: string }[]) => void;
+  onChat?: (
+    lines: {
+      type: number;
+      text: string;
+      senderRoleId?: number;
+      senderName?: string;
+    }[],
+  ) => void;
   /** Same-account login takeover — return to title. */
   onAccountKicked?: (reason: string) => void;
   /** Hangup soft/hard resume status tip for UI. */
@@ -1682,6 +1697,46 @@ export class GameSession {
     }
   }
 
+  /**
+   * PixiJS-only: forget a learned skill for 5金 (1/12/2).
+   * Server keeps at least one skill; refreshes 12/1 + money via 10/26.
+   */
+  async forgetSkill(skillId: number): Promise<SkillForgetResult> {
+    const fail = (message: string, result = 0): SkillForgetResult => ({
+      result,
+      ok: false,
+      message,
+      skillId: skillId >>> 0,
+    });
+    if (!this.transport || !skillId) return fail("未连接服务器");
+    const money = this.characterStats?.money ?? this.gold;
+    if ((money >>> 0) < SKILL_FORGET_COST_COPPER) {
+      return fail("金钱不足（需5金）", 3);
+    }
+    if (this.learnedSkillIds.length <= 1 && this.learnedSkills.length <= 1) {
+      return fail("至少保留一个技能", 4);
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildSkillForgetRequest(skillId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseSkillForgetResult(packet);
+        if (parsed) {
+          if (parsed.ok) await this.refreshLearnedSkillRows();
+          return parsed;
+        }
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("遗忘无响应");
+  }
+
   private async refreshLearnedSkillRows(): Promise<void> {
     const ids = this.learnedSkillIds.length ? this.learnedSkillIds : [];
     try {
@@ -2585,6 +2640,62 @@ export class GameSession {
     if (value) await this.openNpc(value, 2);
   }
 
+  /**
+   * Client-side batch sell via existing equip-sell 26/1 SELL_BASE.
+   * Sells every backpack equip with enhance==0; skips worn / enhanced.
+   * Suppresses onNpcDialog while looping so the UI does not flicker.
+   */
+  equipSellBatchSilent = false;
+
+  async sellAllUnenhancedBagEquips(): Promise<{
+    sold: number;
+    skipped: number;
+    message: string;
+  }> {
+    if (!this.transport) {
+      return { sold: 0, skipped: 0, message: "未连接服务器" };
+    }
+    await this.openBag();
+    const targets = this.bagItems.filter(
+      (it) => it.kind === "equip" && (it.enhance | 0) === 0 && it.seq > 0,
+    );
+    if (!targets.length) {
+      return { sold: 0, skipped: 0, message: "背包没有可出售的未强化装备" };
+    }
+    this.equipSellBatchSilent = true;
+    let sold = 0;
+    let skipped = 0;
+    try {
+      for (const it of targets) {
+        const still = this.bagItems.some(
+          (b) => b.seq === it.seq && b.kind === "equip",
+        );
+        if (!still) {
+          skipped += 1;
+          continue;
+        }
+        const value = (EquipSellService.SELL_BASE | (it.seq & 0xffff)) >>> 0;
+        await this.pickNpcOption(1, value, "出售");
+        // Optimistic local remove so later seq checks stay accurate if peel lags.
+        if (this.bagItems.some((b) => b.seq === it.seq)) {
+          this.bagItems = this.bagItems.filter((b) => b.seq !== it.seq);
+          this.cb.onBag?.(this.bagItems);
+        }
+        sold += 1;
+      }
+    } finally {
+      this.equipSellBatchSilent = false;
+    }
+    await this.openBag();
+    // Re-open sell root while session is still armed.
+    await this.pickNpcOption(1, EquipSellService.OPEN, "出售装备");
+    const message =
+      skipped > 0
+        ? `已出售 ${sold} 件未强化装备（跳过 ${skipped}）`
+        : `已出售 ${sold} 件未强化装备`;
+    return { sold, skipped, message };
+  }
+
   async openTaskDetail(
     taskId: number,
     mode: "accept" | "submit" = "accept",
@@ -2663,13 +2774,21 @@ export class GameSession {
    * Send chat. World (type=0) requires bag item 807 小喇叭 — tip and skip if missing.
    * Wire: 1/3/1 + 7/1 (seq/id/num). CBE also flushes 2/10 companions; Pixi omits
    * those scene refresh objects. Evidence: docs/re/2026-07-20-small-horn-world-chat.md.
+   * Private (type=7) uses 1/3/2 { sendTo, data } via opts.sendTo.
    */
   async sendChat(
     text: string,
     type = 0,
+    opts?: { sendTo?: number },
   ): Promise<{ ok: boolean; tip?: string }> {
     if (!this.transport || !text.trim()) return { ok: false };
     const body = text.trim();
+
+    if (type === 7 || (opts?.sendTo ?? 0) > 0) {
+      const sendTo = (opts?.sendTo ?? 0) >>> 0;
+      if (!sendTo) return { ok: false, tip: "请选择私聊对象" };
+      return this.sendPrivateChat(sendTo, body);
+    }
 
     if (type === 0) {
       let horn = this.bagItems.find(
@@ -2713,11 +2832,61 @@ export class GameSession {
           ? "帮"
           : type === 4
             ? "本"
-            : type === 7
-              ? "私"
-              : "?";
+            : "?";
     const name = this.roleName || "我";
-    this.cb.onChat?.([{ type, text: `[${prefix}]${name}: ${body}` }]);
+    this.cb.onChat?.([
+      {
+        type,
+        text: `[${prefix}]${name}: ${body}`,
+        senderRoleId: this.selectedRoleId >>> 0,
+        senderName: name,
+      },
+    ]);
+    return { ok: true };
+  }
+
+  /**
+   * Private whisper: 1/3/2 { sendTo, data }.
+   * Online → empty ACK + local type-7 echo; offline → type-5 tip in response.
+   */
+  async sendPrivateChat(
+    sendTo: number,
+    text: string,
+  ): Promise<{ ok: boolean; tip?: string }> {
+    if (!this.transport || !text.trim() || !(sendTo >>> 0)) {
+      return { ok: false, tip: "请选择私聊对象" };
+    }
+    const wire = clampWorldChatText(text.trim());
+    if (!wire) return { ok: false, tip: "消息内容无效" };
+    const bodies = await this.transport.exchange(
+      0,
+      buildPrivateChatRequest(sendTo >>> 0, wire),
+    );
+    this.handleBodies(bodies);
+    let systemTip: string | undefined;
+    for (const bodyBytes of bodies) {
+      const packet = ingestPacket(bodyBytes);
+      if (!packet) continue;
+      for (const line of parseChatNotices(packet)) {
+        if (line.type === 5 || line.type === 6) {
+          systemTip =
+            line.text
+              .replace(/^\[系\]/, "")
+              .replace(/^系统:\s*/, "")
+              .trim() || "对方不在线";
+        }
+      }
+    }
+    if (systemTip) return { ok: false, tip: systemTip };
+    const name = this.roleName || "我";
+    this.cb.onChat?.([
+      {
+        type: 7,
+        text: `[私]${name}: ${wire}`,
+        senderRoleId: this.selectedRoleId >>> 0,
+        senderName: name,
+      },
+    ]);
     return { ok: true };
   }
 
@@ -3075,7 +3244,17 @@ export class GameSession {
       return fb;
     }
 
-    const messages: string[] = [];
+    const qtyBefore = new Map<number, number>();
+    for (const it of this.bagItems) {
+      const add = it.kind === "equip" ? 1 : Math.max(0, it.count | 0);
+      qtyBefore.set(it.itemId, (qtyBefore.get(it.itemId) ?? 0) + add);
+    }
+    const nameById = new Map<number, string>();
+    for (const it of this.bagItems) {
+      if (!nameById.has(it.itemId)) nameById.set(it.itemId, it.name);
+    }
+
+    const gained = new Map<number, { name: string; count: number }>();
     let opened = 0;
     let lastFail: ItemUseFeedback | null = null;
     let seqHint = boxSeq;
@@ -3098,14 +3277,59 @@ export class GameSession {
         break;
       }
       opened += 1;
-      if (fb.message) messages.push(fb.message);
+      for (const rw of fb.rewards ?? []) {
+        nameById.set(rw.itemId, rw.name);
+        const prev = gained.get(rw.itemId);
+        if (prev) prev.count += Math.max(1, rw.count | 0);
+        else
+          gained.set(rw.itemId, {
+            name: rw.name,
+            count: Math.max(1, rw.count | 0),
+          });
+      }
     }
 
     let summary: ItemUseFeedback;
     if (opened <= 0) {
       summary = lastFail ?? { ok: false, message: "开启失败" };
     } else {
-      const joined = messages.join("；");
+      // Authority tip = backpack delta after openBag (same numbers the UI shows).
+      try {
+        await this.openBag();
+      } catch {
+        /* keep local apply / gained if refresh fails */
+      }
+      const qtyAfter = new Map<number, number>();
+      for (const it of this.bagItems) {
+        const add = it.kind === "equip" ? 1 : Math.max(0, it.count | 0);
+        qtyAfter.set(it.itemId, (qtyAfter.get(it.itemId) ?? 0) + add);
+        if (!nameById.has(it.itemId)) nameById.set(it.itemId, it.name);
+      }
+      const tipRows: { itemId: number; name: string; count: number }[] = [];
+      const ids = new Set<number>([...qtyAfter.keys(), ...gained.keys()]);
+      for (const id of ids) {
+        if (id === boxItemId) continue;
+        const keyId = CHEST_KEY_BY_BOX[boxItemId];
+        if (keyId && id === keyId) continue;
+        const delta =
+          (qtyAfter.get(id) ?? 0) - (qtyBefore.get(id) ?? 0);
+        if (delta > 0) {
+          tipRows.push({
+            itemId: id,
+            name: nameById.get(id) ?? gained.get(id)?.name ?? `#${id}`,
+            count: delta,
+          });
+        }
+      }
+      // Fall back to wire rewards if bag delta empty (refresh failed).
+      if (!tipRows.length) {
+        for (const [id, g] of gained) {
+          tipRows.push({ itemId: id, name: g.name, count: g.count });
+        }
+      }
+      tipRows.sort((a, b) => a.name.localeCompare(b.name, "zh"));
+      const parts = tipRows.map((g) => `获得${g.count}个${g.name}`);
+      const joined = parts.join("，");
       const detail =
         joined.length > 72 ? `${joined.slice(0, 71)}…` : joined;
       summary = {
@@ -3114,6 +3338,12 @@ export class GameSession {
           opened < need
             ? `连开${opened}/${need}次：${detail || "开启成功"}`
             : `连开${opened}次：${detail || "开启成功"}`,
+        rewards: tipRows.map((g) => ({
+          itemId: g.itemId,
+          seq: 0,
+          count: g.count,
+          name: g.name,
+        })),
       };
     }
     this.emitItemUseFeedback(summary);
@@ -3153,16 +3383,27 @@ export class GameSession {
       if (emit) this.emitItemUseFeedback(fb);
       return fb;
     }
+    const keySeq = key.seq;
     const bodies = await this.transport.exchange(
       0,
-      buildChestOpenRequest(boxSeq, key.seq),
+      buildChestOpenRequest(boxSeq, keySeq),
     );
     let fb = this.feedbackFromBodies(bodies) ?? {
       ok: false,
       message: "开启无响应",
     };
     if (fb.ok) {
+      // Snapshot before handleBodies: 7/15 itself has no 7/7, but a mixed
+      // exchange body must not let a type=1 peel race the CBE local grant.
+      const bagBefore = this.bagItems;
       this.handleBodies(bodies);
+      this.bagItems = applyChestOpenToBag(
+        bagBefore,
+        boxSeq,
+        keySeq,
+        fb.rewards ?? [],
+      );
+      this.cb.onBag?.(this.bagItems);
     } else if (!fb.message) {
       fb = { ...fb, message: "使用失败" };
     }
@@ -4920,7 +5161,14 @@ export class GameSession {
         for (const c of chats) {
           this.applyHangupChatFlag(c.text);
         }
-        this.cb.onChat?.(chats.map((c) => ({ type: c.type, text: c.text })));
+        this.cb.onChat?.(
+          chats.map((c) => ({
+            type: c.type,
+            text: c.text,
+            senderRoleId: c.senderRoleId,
+            senderName: c.senderName,
+          })),
+        );
         if (chats.some((c) => isAccountKickChatLine(c.text))) {
           this.forceAccountKick("账号已在其他地方登录，你被强制下线");
           return;
@@ -4952,18 +5200,15 @@ export class GameSession {
       } else {
         const updates = parseBagItemUpdates(packet);
         if (updates.length) {
-          const map = new Map(this.bagItems.map((i) => [i.seq, i]));
           for (const u of updates) {
-            if (u.count <= 0) {
-              map.delete(u.seq);
-              this.pendingBagEquipDurability.delete(u.seq);
-            } else {
-              const prev = map.get(u.seq);
-              const withFlask = preserveFlaskReservoirAcrossBagRefresh(u, prev);
-              map.set(u.seq, this.applyBagEquipDurability(withFlask, prev));
-            }
+            if (u.count <= 0) this.pendingBagEquipDurability.delete(u.seq);
           }
-          this.bagItems = [...map.values()];
+          const merged = mergeBagItemUpdateDeltas(this.bagItems, updates);
+          this.bagItems = merged.map((u) => {
+            const prev = this.bagItems.find((i) => i.seq === u.seq);
+            const withFlask = preserveFlaskReservoirAcrossBagRefresh(u, prev);
+            return this.applyBagEquipDurability(withFlask, prev);
+          });
           this.cb.onBag?.(this.bagItems);
         }
       }

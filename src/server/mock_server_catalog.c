@@ -1164,6 +1164,64 @@ static bool vm_net_mock_role_service_add_skill(vm_net_mock_role_state *role,
     return true;
 }
 
+/* Pixi skill-forget fee: 5金 = 50000铜 (VM_NET_MOCK_COPPER_PER_GOLD). */
+#define VM_NET_MOCK_SKILL_FORGET_COST_COPPER (5u * VM_NET_MOCK_COPPER_PER_GOLD)
+
+static bool vm_net_mock_role_service_unpersist_skill(
+    const vm_net_mock_role_service_state *state, u32 skillId)
+{
+    char accountHex[129];
+    char query[640];
+
+    if (state == NULL || skillId == 0 ||
+        !vm_net_mock_role_service_tables_ensure() ||
+        !vm_net_mock_role_service_account_hex(state->accountId, accountHex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_skills WHERE account_id=X'%s' AND "
+             "role_id=%u AND skill_id=%u",
+             accountHex, state->roleId, skillId);
+    return vm_mysql_exec(query);
+}
+
+/*
+ * Remove one learned skill from memory + MySQL.
+ * Caller enforces fee / last-skill policy.
+ */
+static bool vm_net_mock_role_service_remove_skill(vm_net_mock_role_state *role,
+                                                  u32 skillId)
+{
+    vm_net_mock_role_service_state *state =
+        vm_net_mock_role_service_state_get(role);
+    u32 i = 0;
+
+    if (state == NULL || skillId == 0 ||
+        !vm_net_mock_role_service_has_skill(state, skillId))
+    {
+        return false;
+    }
+    if (!vm_net_mock_role_service_unpersist_skill(state, skillId))
+    {
+        printf("[error][network] mock_role_skill_delete role=%u skill=%u error=%s\n",
+               role ? role->roleId : 0, skillId, vm_mysql_last_error());
+        return false;
+    }
+    for (i = 0; i < state->learnedSkillCount; ++i)
+    {
+        if (state->learnedSkillIds[i] != skillId)
+            continue;
+        for (; i + 1 < state->learnedSkillCount; ++i)
+            state->learnedSkillIds[i] = state->learnedSkillIds[i + 1];
+        if (state->learnedSkillCount > 0)
+            state->learnedSkillCount -= 1;
+        state->learnedSkillIds[state->learnedSkillCount] = 0;
+        return true;
+    }
+    return false;
+}
+
 static u32 vm_net_mock_role_service_repair_cost(
     vm_net_mock_role_service_state *state,
     const vm_net_mock_role_state *role,
@@ -6811,7 +6869,7 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     vm_net_mock_finish_wt_packet(out, pos, 1);
 
     (void)vm_net_mock_role_mark_inventory_dirty("chest-open");
-    vm_net_mock_gold_chest_maybe_announce_rare_reward(rewardItemId);
+    vm_net_mock_gold_chest_maybe_announce_rare_reward(chestItemId, rewardItemId);
 
     {
         vm_net_mock_backpack_item_state *rewardItem =
@@ -6985,6 +7043,145 @@ static u32 vm_net_mock_build_map_heal_skill_response(const u8 *request, u32 requ
     vm_autotest_note("mock_map_heal_skill role=%u skill=%u heal=%u "
                      "response=1/1/14+16/2 evidence=skill.dsh:useLimit=1\n",
                      role->roleId, skillId, heal);
+    return pos;
+}
+
+/*
+ * PixiJS-only skill forget: 1/12/2 { skillid } → 12/2 { result, skillid }
+ * + on success 12/1 (learned list) + 10/26 (money).
+ * Fee: 5金. Keep at least one learned skill.
+ * result: 1=ok 2=not-learned 3=money 4=last-skill 5=store-fail.
+ */
+static u32 vm_net_mock_build_skill_forget_response(const u8 *request,
+                                                    u32 requestLen, u8 *out,
+                                                    u32 outCap)
+{
+    u32 offset = 4;
+    u32 skillId = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 0;
+    u8 result = 5;
+    const char *reason = "invalid";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_service_state *service = NULL;
+    u8 learnedSkill[512];
+    u32 learnedSkillLen = 0;
+    u8 learnedCount = 0;
+    char learnedPreview[192];
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 0x0c ||
+        object.subtype != 2 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                          "skillid", &skillId) &&
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                          "skillId", &skillId) &&
+        !vm_net_mock_get_object_u32_field(object.payload, object.payloadLen,
+                                          "id", &skillId))
+    {
+        return 0;
+    }
+    if (skillId == 0)
+        return 0;
+
+    role = vm_net_mock_active_role();
+    service = vm_net_mock_role_service_state_get(role);
+    if (role == NULL || service == NULL)
+    {
+        result = 5;
+        reason = "no-role";
+    }
+    else if (!vm_net_mock_role_service_has_skill(service, skillId))
+    {
+        result = 2;
+        reason = "not-learned";
+    }
+    else if (service->learnedSkillCount <= 1)
+    {
+        result = 4;
+        reason = "last-skill";
+    }
+    else if (role->money < VM_NET_MOCK_SKILL_FORGET_COST_COPPER)
+    {
+        result = 3;
+        reason = "money";
+    }
+    else if (!vm_net_mock_role_service_remove_skill(role, skillId))
+    {
+        result = 5;
+        reason = "store-fail";
+    }
+    else
+    {
+        role->money -= VM_NET_MOCK_SKILL_FORGET_COST_COPPER;
+        vm_net_mock_role_mark_inventory_dirty("skill-forget");
+        result = 1;
+        reason = "ok";
+        service = vm_net_mock_role_service_state_get(role);
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0c, 2,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "skillid", skillId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    objectCount = 1;
+
+    if (result == 1)
+    {
+        memset(learnedSkill, 0, sizeof(learnedSkill));
+        learnedPreview[0] = 0;
+        learnedSkillLen = vm_net_mock_build_role_learned_skill_blob(
+            role, learnedSkill, sizeof(learnedSkill), &learnedCount,
+            learnedPreview, sizeof(learnedPreview));
+        if (vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0c, 1,
+                                         &objectStart) &&
+            vm_net_mock_put_object_u16(out, outCap, &pos, "learnednum",
+                                       learnedCount) &&
+            vm_net_mock_put_object_raw(
+                out, outCap, &pos, "learnedskill",
+                learnedSkillLen ? learnedSkill : NULL, (u16)learnedSkillLen))
+        {
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
+        if (vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x0a, 0x1a,
+                                         &objectStart) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "type", 1) &&
+            vm_net_mock_put_object_u8(out, outCap, &pos, "npcnum", 0) &&
+            vm_net_mock_put_object_string(out, outCap, &pos, "name",
+                                          "\xce\xde") && /* 无 */
+            vm_net_mock_put_object_u32(out, outCap, &pos, "money", role->money))
+        {
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
+    }
+
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_skill_forget role=%u skill=%u result=%u "
+           "reason=%s cost=%u money=%u learned=%u resp=12/2%s%s\n",
+           role ? role->roleId : 0, skillId, result, reason,
+           VM_NET_MOCK_SKILL_FORGET_COST_COPPER, role ? role->money : 0,
+           service ? service->learnedSkillCount : 0,
+           result == 1 ? "+12/1" : "", result == 1 ? "+10/26" : "");
+    vm_autotest_note(
+        "mock_skill_forget role=%u skill=%u result=%u reason=%s cost=%u "
+        "evidence=pixijs-only-12/2\n",
+        role ? role->roleId : 0, skillId, result, reason,
+        VM_NET_MOCK_SKILL_FORGET_COST_COPPER);
     return pos;
 }
 

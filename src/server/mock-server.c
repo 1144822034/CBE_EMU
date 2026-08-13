@@ -23,9 +23,11 @@ static bool vm_net_mock_object_is_independent_combo_candidate(
 static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
     const vm_net_mock_request_object *object, u16 *positionXOut);
 
-/* Gold-chest rare-loot world announce lives with chat delivery in
- * mock_server_equipment_npc.c; the open handler in catalog.c calls it. */
-static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 itemId);
+/* Chest rare-loot world announce lives with chat delivery in
+ * mock_server_equipment_npc.c; the open handler in catalog.c calls it.
+ * Same-player rapid opens (Pixi 十连) coalesce count into one [世] line. */
+static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 chestItemId,
+                                                             u32 rewardItemId);
 
 /* Flask reservoir tip: enqueue 1/3/3 system chat from equipment_npc.c. */
 static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,

@@ -366,11 +366,69 @@ export function npcServiceOpcode(value: number): number {
   return (value >>> 24) & 0xff;
 }
 
+/**
+ * Equip-sell pass (839) 26/1 service values — mirror mock_server_core.c.
+ * Client may batch-call SELL_BASE without a new server opcode.
+ */
+export const EquipSellService = {
+  OPEN: 0xf1000001,
+  MENU: 0xf1010000,
+  SELL_BASE: 0xf2000000,
+  VIEW_BASE: 0xf3000000,
+} as const;
+
+/** True when this 26/1 is the equip-sell voucher UI (root / list / detail). */
+export function isEquipSellDialog(dialog: NpcDialog): boolean {
+  if (/请选择要出售的装备|出售该装备/.test(dialog.body)) return true;
+  return dialog.options.some((o) => {
+    const v = o.value >>> 0;
+    const hi = v & 0xffff0000;
+    return (
+      v === EquipSellService.OPEN ||
+      hi === EquipSellService.MENU ||
+      hi === EquipSellService.SELL_BASE ||
+      hi === EquipSellService.VIEW_BASE ||
+      o.label === "出售装备" ||
+      o.label === "出售该装备"
+    );
+  });
+}
+
+/** Inject client-only「出售背包全部装备」into equip-sell dialogs. */
+export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
+  if (!isEquipSellDialog(dialog)) return dialog;
+  if (
+    dialog.options.some(
+      (o) => o.action === 290 || o.label === "出售背包全部装备",
+    )
+  ) {
+    return dialog;
+  }
+  return {
+    ...dialog,
+    options: [
+      ...dialog.options,
+      { label: "出售背包全部装备", action: 290, value: 0 },
+    ],
+  };
+}
 
 /** World chat: 1/3/1 { type=0, data }. */
 export function buildChatRequest(text: string, type = 0): Uint8Array {
   const b = new WtBuilder();
   b.object(1, 3, 1).u8("type", type).string("data", text);
+  return b.finish();
+}
+
+/**
+ * Private chat: 1/3/2 { sendTo:u32, data }.
+ * Evidence: docs/re/2026-07-16-chat-message-system.md — downlink type 7.
+ */
+export function buildPrivateChatRequest(sendTo: number, text: string): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 3, 2)
+    .u32("sendTo", sendTo >>> 0)
+    .string("data", text);
   return b.finish();
 }
 
@@ -1453,6 +1511,66 @@ export function parseLearnedSkills(packet: WtPacket): {
   return { count: count || ids.length, ids };
 }
 
+/** Pixi skill forget fee: 5金 = 50000铜. */
+export const SKILL_FORGET_COST_GOLD = 5;
+export const SKILL_FORGET_COST_COPPER = SKILL_FORGET_COST_GOLD * 10000;
+
+/**
+ * PixiJS-only: forget a learned skill for 5金.
+ * Wire: `1/12/2 { skillid }` → `12/2 { result, skillid }` (+ `12/1` + `10/26` on ok).
+ */
+export function buildSkillForgetRequest(skillId: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 0x0c, 2).u32("skillid", skillId >>> 0);
+  return b.finish();
+}
+
+export type SkillForgetResult = {
+  result: number;
+  ok: boolean;
+  message: string;
+  skillId: number;
+};
+
+function skillForgetFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "未学会该技能";
+    case 3:
+      return "金钱不足（需5金）";
+    case 4:
+      return "至少保留一个技能";
+    default:
+      return "遗忘失败";
+  }
+}
+
+export function parseSkillForgetResult(
+  packet: WtPacket,
+): SkillForgetResult | null {
+  const obj = packet.objects.find((o) => o.kind === 0x0c && o.subtype === 2);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const skillId =
+    fieldU32(obj, "skillid") ||
+    fieldU32(obj, "skillId") ||
+    fieldU32(obj, "id");
+  if (result === 1) {
+    return {
+      result,
+      ok: true,
+      message: "遗忘成功，消耗5金",
+      skillId,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: skillForgetFailMessage(result),
+    skillId,
+  };
+}
+
 /** Demo / offline: append role-bound starter skill object (kind 12 subtype 1). */
 export function appendDemoLearnedSkills(
   b: WtBuilder,
@@ -2271,7 +2389,13 @@ export function parseNpcDialog(packet: WtPacket): NpcDialog | null {
   return { title, body: body || "(对话)", options };
 }
 
-export type ChatLine = { type: number; text: string };
+export type ChatLine = {
+  type: number;
+  text: string;
+  /** Wire sender role / nearby actor id; 0 = system / unknown. */
+  senderRoleId?: number;
+  senderName?: string;
+};
 
 /** Strip put_object_blob inner BE16(dataLen) prefix. */
 function unwrapChatinfoBlob(raw: Uint8Array): Uint8Array {
@@ -2307,7 +2431,12 @@ export function parseChatNotices(packet: WtPacket): ChatLine[] {
         if (type === 0 && name.trim() === "系统" && senderRoleId !== 0) {
           continue;
         }
-        lines.push({ type, text: `[${chatPrefix(type)}]${name}: ${msg}` });
+        lines.push({
+          type,
+          text: `[${chatPrefix(type)}]${name}: ${msg}`,
+          senderRoleId: senderRoleId >>> 0,
+          senderName: name,
+        });
       } catch {
         break;
       }
@@ -2509,7 +2638,7 @@ export function readItemCommonExtra(r: SeqReader): {
   return { enhance, stackHint, attrs };
 }
 
-function enrichBagRow(
+export function enrichBagRow(
   itemId: number,
   seq: number,
   count: number,
@@ -2681,6 +2810,102 @@ function preferEnhanceAttrs(
 /** Incremental 7/7 type=1 updates — merge by seq into existing bag. */
 export function parseBagItemUpdates(packet: WtPacket): BagItem[] {
   return parseItemManager77(packet).bag;
+}
+
+/**
+ * Merge 7/7 type=1 rows into a bag snapshot.
+ * CBE `TimerControl_ProcessItem` treats wire count as a **delta** (shop buy /
+ * warehouse retrieve / battle drop). Replacing the row with the wire absolute
+ * made a second stackable grant look like count=1 (tip said +1 twice, bag 1).
+ * Equipment / flask visible-stack rows still replace (instance or 7/11 path).
+ */
+export function mergeBagItemUpdateDeltas(
+  bag: BagItem[],
+  updates: BagItem[],
+): BagItem[] {
+  const map = new Map(bag.map((i) => [i.seq, i]));
+  for (const u of updates) {
+    if (!(u.seq > 0)) continue;
+    if (u.count <= 0) {
+      map.delete(u.seq);
+      continue;
+    }
+    const prev = map.get(u.seq);
+    const stackable =
+      !!prev &&
+      prev.kind !== "equip" &&
+      u.kind !== "equip" &&
+      !isReservoirFlaskItemId(prev.itemId) &&
+      !isReservoirFlaskItemId(u.itemId) &&
+      prev.itemId === u.itemId;
+    if (stackable) {
+      map.set(u.seq, {
+        ...prev,
+        ...u,
+        count: (prev.count >>> 0) + (u.count >>> 0),
+      });
+    } else {
+      map.set(u.seq, u);
+    }
+  }
+  return [...map.values()];
+}
+
+/**
+ * CBE 7/15 result=1: client self-deducts box/key (0x01023850) and ADDs each
+ * iteminfo row count into the bag (0x01019228). Wire count is grant delta.
+ */
+export function applyChestOpenToBag(
+  bag: BagItem[],
+  boxSeq: number,
+  keySeq: number,
+  rewards: { itemId: number; seq: number; count: number }[],
+): BagItem[] {
+  let next = bag.slice();
+  const deductSeq = (seq: number) => {
+    if (!(seq > 0)) return;
+    const idx = next.findIndex((it) => it.seq === seq);
+    if (idx < 0) return;
+    const cur = next[idx]!;
+    if (cur.count > 1) {
+      next[idx] = { ...cur, count: cur.count - 1 };
+    } else {
+      next = next.filter((_, i) => i !== idx);
+    }
+  };
+  deductSeq(boxSeq);
+  deductSeq(keySeq);
+  for (const rw of rewards) {
+    if (!(rw.itemId > 0) || !(rw.seq > 0)) continue;
+    const delta = Math.max(1, rw.count | 0);
+    const bySeq = next.findIndex((it) => it.seq === rw.seq);
+    if (bySeq >= 0) {
+      const cur = next[bySeq]!;
+      if (cur.kind === "equip" || isReservoirFlaskItemId(cur.itemId)) {
+        next[bySeq] = enrichBagRow(rw.itemId, rw.seq, delta, cur.enhance, cur.enhanceAttrs);
+      } else {
+        next[bySeq] = { ...cur, count: (cur.count >>> 0) + delta };
+      }
+      continue;
+    }
+    const byId = next.findIndex(
+      (it) =>
+        it.itemId === rw.itemId &&
+        it.kind !== "equip" &&
+        !isReservoirFlaskItemId(it.itemId),
+    );
+    if (byId >= 0) {
+      const cur = next[byId]!;
+      next[byId] = {
+        ...cur,
+        seq: rw.seq > 0 ? rw.seq : cur.seq,
+        count: (cur.count >>> 0) + delta,
+      };
+      continue;
+    }
+    next.push(enrichBagRow(rw.itemId, rw.seq, delta, 0));
+  }
+  return next;
 }
 
 export function parseWornEquipment(packet: WtPacket): BagItem[] {
