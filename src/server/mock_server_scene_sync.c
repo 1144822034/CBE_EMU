@@ -1946,6 +1946,10 @@ typedef struct
     u8 state;
     u8 progress1;
     u8 progress2;
+    /* State 3 is terminal until its dynamic-NPC repeat policy allows a new
+     * acceptance.  `updated_at` is written when state becomes 3 and is the
+     * durable completion instant used for calendar-based policies. */
+    u32 completedAt;
 } vm_net_mock_task_state_list_row;
 
 typedef struct
@@ -1979,12 +1983,14 @@ static bool vm_net_mock_task_state_list_mysql_row(void *contextValue,
     u32 state = 0;
     u32 progress1 = 0;
     u32 progress2 = 0;
+    u32 completedAt = 0;
 
-    if (context == NULL || columnCount != 4 ||
+    if (context == NULL || columnCount != 5 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &taskId) || taskId == 0 ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &state) || state > 0xffu ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &progress1) || progress1 > 0xffu ||
-        !vm_mock_mysql_parse_u32(values[3], lengths[3], &progress2) || progress2 > 0xffu)
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &progress2) || progress2 > 0xffu ||
+        !vm_mock_mysql_parse_u32(values[4], lengths[4], &completedAt))
     {
         if (context)
             context->invalid = true;
@@ -1997,6 +2003,7 @@ static bool vm_net_mock_task_state_list_mysql_row(void *contextValue,
         row->state = (u8)state;
         row->progress1 = (u8)progress1;
         row->progress2 = (u8)progress2;
+        row->completedAt = state == 3 ? completedAt : 0;
     }
     return true;
 }
@@ -2022,7 +2029,9 @@ static bool vm_net_mock_task_state_list_load_mysql(u32 roleId, bool activeOnly,
     context.rows = rows;
     context.rowCap = rowCap;
     snprintf(query, sizeof(query),
-             "SELECT task_id,task_state,progress1,progress2 FROM account_role_tasks "
+             "SELECT task_id,task_state,progress1,progress2,"
+             "CASE WHEN task_state=3 THEN UNIX_TIMESTAMP(updated_at) ELSE 0 END "
+             "FROM account_role_tasks "
              "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u %s"
              "ORDER BY updated_at,task_id LIMIT %u",
              accountHex, roleId,
@@ -2197,12 +2206,53 @@ static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
     return true;
 }
 
+static bool vm_net_mock_task_repeat_policy_allows_completed(
+    u8 repeatPolicy, u32 completedAt)
+{
+    time_t now = time(NULL);
+    time_t completed = (time_t)completedAt;
+    struct tm nowLocal;
+    struct tm completedLocal;
+
+    if (repeatPolicy == VM_NET_MOCK_TASK_REPEAT_UNLIMITED)
+        return true;
+    if (repeatPolicy < VM_NET_MOCK_TASK_REPEAT_DAILY ||
+        repeatPolicy > VM_NET_MOCK_TASK_REPEAT_MONTHLY || completedAt == 0 ||
+        now == (time_t)-1)
+    {
+        return false;
+    }
+#ifdef _WIN32
+    if (localtime_s(&nowLocal, &now) != 0 ||
+        localtime_s(&completedLocal, &completed) != 0)
+#else
+    if (localtime_r(&now, &nowLocal) == NULL ||
+        localtime_r(&completed, &completedLocal) == NULL)
+#endif
+    {
+        return false;
+    }
+    if (repeatPolicy == VM_NET_MOCK_TASK_REPEAT_DAILY)
+        return nowLocal.tm_year != completedLocal.tm_year ||
+               nowLocal.tm_yday != completedLocal.tm_yday;
+    if (repeatPolicy == VM_NET_MOCK_TASK_REPEAT_MONTHLY)
+        return nowLocal.tm_year != completedLocal.tm_year ||
+               nowLocal.tm_mon != completedLocal.tm_mon;
+    nowLocal.tm_hour = completedLocal.tm_hour = 0;
+    nowLocal.tm_min = completedLocal.tm_min = 0;
+    nowLocal.tm_sec = completedLocal.tm_sec = 0;
+    nowLocal.tm_mday -= (nowLocal.tm_wday + 6) % 7;
+    completedLocal.tm_mday -= (completedLocal.tm_wday + 6) % 7;
+    nowLocal.tm_isdst = completedLocal.tm_isdst = -1;
+    return mktime(&nowLocal) != mktime(&completedLocal);
+}
+
 static bool vm_net_mock_task_definition_available(
     const vm_net_mock_task_definition *task,
     const vm_net_mock_role_state *role,
     const vm_net_mock_task_state_list_row *states,
     u32 stateCount,
-    bool allowCompletedRepeat)
+    u8 repeatPolicy)
 {
     const vm_net_mock_task_state_list_row *persisted = NULL;
     const vm_net_mock_task_state_list_row *prerequisite = NULL;
@@ -2213,7 +2263,9 @@ static bool vm_net_mock_task_definition_available(
     }
     persisted = vm_net_mock_task_state_list_find(states, stateCount, task->taskId);
     if (persisted != NULL &&
-        !(allowCompletedRepeat && persisted->state == 3))
+        !(persisted->state == 3 &&
+          vm_net_mock_task_repeat_policy_allows_completed(
+              repeatPolicy, persisted->completedAt)))
     {
         return false;
     }
@@ -2232,7 +2284,7 @@ static const char *vm_net_mock_task_definition_unavailable_reason(
     const vm_net_mock_role_state *role,
     const vm_net_mock_task_state_list_row *states,
     u32 stateCount,
-    bool allowCompletedRepeat,
+    u8 repeatPolicy,
     const char **reasonCodeOut,
     char *out,
     size_t outCap)
@@ -2273,7 +2325,9 @@ static const char *vm_net_mock_task_definition_unavailable_reason(
     persisted = vm_net_mock_task_state_list_find(states, stateCount,
                                                   task->taskId);
     if (persisted != NULL &&
-        !(allowCompletedRepeat && persisted->state == 3))
+        !(persisted->state == 3 &&
+          vm_net_mock_task_repeat_policy_allows_completed(
+              repeatPolicy, persisted->completedAt)))
     {
         if (persisted->state == 1)
         {
@@ -2330,7 +2384,7 @@ static void vm_net_mock_task_interaction_context_reset(void)
 }
 
 static void vm_net_mock_task_interaction_context_record(u32 taskId, u32 actorId,
-                                                         bool repeatable,
+                                                         u8 repeatPolicy,
                                                          u8 interaction,
                                                          const char *scene)
 {
@@ -2365,21 +2419,22 @@ static void vm_net_mock_task_interaction_context_record(u32 taskId, u32 actorId,
     slot->roleId = role->roleId;
     slot->taskId = taskId;
     slot->actorId = actorId;
-    slot->repeatable = repeatable;
+    slot->repeatable = repeatPolicy != VM_NET_MOCK_TASK_REPEAT_NEVER;
+    slot->repeatPolicy = repeatPolicy;
     slot->interaction = interaction;
     snprintf(slot->scene, sizeof(slot->scene), "%s", scene);
 }
 
 static bool vm_net_mock_task_offer_context_consume(u32 taskId,
-                                                    bool *repeatableOut)
+                                                    u8 *repeatPolicyOut)
 {
     vm_mock_service_client_session *session =
         vm_mock_service_get_active_client_session();
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     const char *scene = vm_net_mock_current_scene_name();
 
-    if (repeatableOut != NULL)
-        *repeatableOut = false;
+    if (repeatPolicyOut != NULL)
+        *repeatPolicyOut = VM_NET_MOCK_TASK_REPEAT_NEVER;
     if (session == NULL || role == NULL || taskId == 0 ||
         !vm_net_mock_scene_name_is_safe(scene))
     {
@@ -2395,8 +2450,8 @@ static bool vm_net_mock_task_offer_context_consume(u32 taskId,
         {
             continue;
         }
-        if (repeatableOut != NULL)
-            *repeatableOut = context->repeatable;
+        if (repeatPolicyOut != NULL)
+            *repeatPolicyOut = context->repeatPolicy;
         memset(context, 0, sizeof(*context));
         return true;
     }
@@ -2463,8 +2518,9 @@ static u32 vm_net_mock_scene_npc_seed_priority(
             return 500;
         if (persisted != NULL && persisted->state == 1)
             return 400;
-        if (vm_net_mock_task_definition_available(task, role, states, stateCount,
-                                                  seed->taskRepeatable))
+        if (vm_net_mock_task_definition_available(
+                task, role, states, stateCount,
+                vm_net_mock_task_repeat_policy_from_seed(seed)))
         {
             return 300;
         }
@@ -2507,7 +2563,8 @@ static u32 vm_net_mock_scene_npc_seed_priority(
         }
         else if (persisted == NULL && ref->offer &&
                  vm_net_mock_task_definition_available(task, role, states,
-                                                       stateCount, false))
+                                                       stateCount,
+                                                       VM_NET_MOCK_TASK_REPEAT_NEVER))
         {
             if (priority < 300)
                 priority = 300;
@@ -2708,11 +2765,26 @@ static bool vm_net_mock_task_state_restore(
     {
         return false;
     }
-    snprintf(query, sizeof(query),
-             "UPDATE account_role_tasks SET task_state=%u,progress1=%u,progress2=%u "
-             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
-             state->state, state->progress1, state->progress2,
-             accountHex, roleId, state->taskId);
+    if (state->state == 3 && state->completedAt != 0)
+    {
+        /* A failed re-accept must restore the original completion instant;
+         * otherwise the automatic ON UPDATE timestamp would silently extend
+         * a daily/weekly/monthly cooldown. */
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_tasks SET task_state=%u,progress1=%u,progress2=%u,"
+                 "updated_at=FROM_UNIXTIME(%u) WHERE account_id=CAST(X'%s' AS CHAR) "
+                 "AND role_id=%u AND task_id=%u",
+                 state->state, state->progress1, state->progress2,
+                 state->completedAt, accountHex, roleId, state->taskId);
+    }
+    else
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_tasks SET task_state=%u,progress1=%u,progress2=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u AND task_id=%u",
+                 state->state, state->progress1, state->progress2,
+                 accountHex, roleId, state->taskId);
+    }
     return vm_mysql_exec(query);
 }
 
@@ -3514,19 +3586,23 @@ vm_net_mock_npc_service_context_get(const vm_mock_service_client_session *sessio
 static bool vm_net_mock_npc_shop_selector_allowed_for_service(
     u32 selector, u32 serviceMask)
 {
-    if ((serviceMask & vm_net_mock_npc_service_kind_mask(
-                           VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)) != 0)
+    /* A dynamic NPC can expose several merchant services.  Authorize by the
+     * requested catalog category, not by the first service bit encountered;
+     * otherwise a weapon+armor NPC can open the armor menu but its later
+     * purchase request is incorrectly rejected as weapon-only. */
+    if (selector >= 8u && selector <= 10u)
     {
-        return selector >= 8u && selector <= 10u;
+        return (serviceMask & vm_net_mock_npc_service_kind_mask(
+                                  VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT)) != 0;
     }
-    if ((serviceMask & vm_net_mock_npc_service_kind_mask(
-                           VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)) != 0)
+    if (selector >= 1u && selector <= 7u)
     {
-        return selector >= 1u && selector <= 7u;
+        return (serviceMask & vm_net_mock_npc_service_kind_mask(
+                                  VM_NET_MOCK_NPC_KIND_ARMOR_MERCHANT)) != 0;
     }
-    return (serviceMask & vm_net_mock_npc_service_kind_mask(
-                               VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT)) != 0 &&
-           selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR;
+    return selector == VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR &&
+           (serviceMask & vm_net_mock_npc_service_kind_mask(
+                              VM_NET_MOCK_NPC_KIND_MEDICINE_MERCHANT)) != 0;
 }
 
 static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestLen,
@@ -3708,7 +3784,8 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
             if (state == 0 && ref->offer &&
                 vm_net_mock_task_definition_available(task, activeRole,
                                                       allTaskStates,
-                                                      allTaskStateCount, false) &&
+                                                      allTaskStateCount,
+                                                      VM_NET_MOCK_TASK_REPEAT_NEVER) &&
                 optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
             {
                 optionTasks[optionCount] = task;
@@ -3836,11 +3913,13 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
         deliveryMatches = vm_net_mock_task_delivery_matches_scene_npc(
             task, matchedSeed, scene);
         if (task != NULL && (state == 0 ||
-                             (state == 3 && matchedSeed->taskRepeatable)))
+                             (state == 3 &&
+                              vm_net_mock_task_repeat_policy_from_seed(
+                                  matchedSeed) != VM_NET_MOCK_TASK_REPEAT_NEVER)))
         {
             directOfferAvailable = vm_net_mock_task_definition_available(
                 task, activeRole, allTaskStates, allTaskStateCount,
-                matchedSeed->taskRepeatable);
+                vm_net_mock_task_repeat_policy_from_seed(matchedSeed));
         }
         if (task != NULL && !duplicate &&
             optionCount < VM_NET_MOCK_XSE_TASK_REF_MAX)
@@ -3879,10 +3958,12 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
              * option; only use it when no other XSE task action is present. */
             else if (optionCount == 0 &&
                      (state == 0 ||
-                      (state == 3 && matchedSeed->taskRepeatable)) &&
+                      (state == 3 &&
+                       vm_net_mock_task_repeat_policy_from_seed(matchedSeed) !=
+                           VM_NET_MOCK_TASK_REPEAT_NEVER)) &&
                      vm_net_mock_task_definition_unavailable_reason(
                          task, activeRole, allTaskStates, allTaskStateCount,
-                         matchedSeed->taskRepeatable, NULL,
+                         vm_net_mock_task_repeat_policy_from_seed(matchedSeed), NULL,
                          unavailableTaskText,
                          sizeof(unavailableTaskText)) != NULL)
                 dialogText = unavailableTaskText;
@@ -4217,12 +4298,16 @@ static u32 vm_net_mock_build_npc_dialog_response(const u8 *request, u32 requestL
     for (u32 optionIndex = 0; optionIndex < optionCount; ++optionIndex)
     {
         const vm_net_mock_task_definition *task = optionTasks[optionIndex];
-        bool repeatable = !optionSubmits[optionIndex] && matchedSeed != NULL &&
-                          matchedSeed->taskId == task->taskId &&
-                          matchedSeed->taskRepeatable;
+        u8 repeatPolicy = VM_NET_MOCK_TASK_REPEAT_NEVER;
+
+        if (!optionSubmits[optionIndex] && matchedSeed != NULL &&
+            matchedSeed->taskId == task->taskId)
+        {
+            repeatPolicy = vm_net_mock_task_repeat_policy_from_seed(matchedSeed);
+        }
 
         vm_net_mock_task_interaction_context_record(
-            task->taskId, actorId, repeatable,
+            task->taskId, actorId, repeatPolicy,
             optionSubmits[optionIndex]
                 ? VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT
                 : VM_MOCK_SERVICE_TASK_INTERACTION_OFFER,
@@ -4950,8 +5035,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 objectStart = 0;
     u8 objectCount = 1;
     bool appendSkills = false;
-    bool appendPurchaseBackpackAdd = false;
-    bool appendPurchaseWalletSync = false;
     u16 backpackAddSeq = 0;
     u32 purchasedItemId = 0;
     u32 purchasedItemCount = 0;
@@ -5248,13 +5331,32 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                             dialogText =
                                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
                         }
+                        else if (session == NULL ||
+                                 session->npcPurchaseSyncPending)
+                        {
+                            /* Do not allow a second mutation to overtake the
+                             * first item's one-shot manager update. */
+                            *role = purchaseBefore;
+                            if (!vm_net_mock_role_db_save("npc-purchase-rollback"))
+                                return 0;
+                            dialogText =
+                                "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                        }
                         else
                         {
                             dialogText =
                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
                             result = 1;
-                            appendPurchaseBackpackAdd = true;
-                            appendPurchaseWalletSync = true;
+                            session->npcPurchaseSyncPending = true;
+                            session->npcPurchaseSyncSeq = backpackAddSeq;
+                            session->npcPurchaseSyncItemId = purchasedItemId;
+                            session->npcPurchaseSyncCount = purchasedItemCount;
+                            /* The immediate reply belongs to the active
+                             * 26/1 callback.  Wait for a later scene poll so
+                             * the 7/7 item-manager path cannot re-enter that
+                             * callback as part of the same WT packet. */
+                            session->npcPurchaseSyncNotBeforeTick =
+                                g_schedulerTick + 1u;
                         }
                     }
                 }
@@ -5703,29 +5805,6 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             return 0;
         ++objectCount;
     }
-    if (appendPurchaseBackpackAdd)
-    {
-        /* The purchase mutates both inventory and copper.  The native
-         * 1/10/26 handler (net_handle_role_login_gift_glamour at
-         * 0x010114FC) installs its `money` field into every role state used
-         * by the backpack and scene HUD.  The preceding 26/1 dialog only
-         * parses dialog data, while 7/7 only adds the item row, so neither
-         * can refresh the displayed balance. */
-        if (!appendPurchaseWalletSync ||
-            !vm_net_mock_append_type1_object(out, outCap, &pos, 0))
-        {
-            return 0;
-        }
-        ++objectCount;
-        if (purchasedItemId == 0 || purchasedItemCount == 0 ||
-            !vm_net_mock_append_backpack_item_add7_object(
-                out, outCap, &pos, backpackAddSeq, purchasedItemId,
-                purchasedItemCount))
-        {
-            return 0;
-        }
-        ++objectCount;
-    }
     if (instanceChallengeOptionIndex != 0xff && instanceSeed != NULL &&
         session != NULL)
     {
@@ -5760,11 +5839,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
            skillNextLocked ? skillNextLocked->levelRequired : 0,
            skillNextLocked ? skillNextLocked->learnPrice : 0,
            objectCount, pos,
-           (appendPurchaseBackpackAdd ||
-            (strcmp(action, "equipment-sell") == 0 && result == 1))
-               ? (appendPurchaseWalletSync
-                      ? "role-wallet-10/26+item-manager-7/7"
-                      : "separate-item-manager-followup")
+           result == 1 && (strcmp(action, "shop-buy") == 0 ||
+                           strcmp(action, "weapon-buy") == 0)
+               ? "next-scene-poll:role-wallet-10/26+item-manager-7/7"
                : "not-applicable");
     return pos;
 }
@@ -6325,7 +6402,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
             u32 allStateCount = 0;
             bool canAccept = false;
             bool offeredByNpc = false;
-            bool repeatableOffer = false;
+            u8 repeatPolicyOffer = VM_NET_MOCK_TASK_REPEAT_NEVER;
             bool replacingCompletedState = false;
 
             responseSubtype = 11;
@@ -6335,7 +6412,7 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 bool backpackCanReceive = false;
 
                 offeredByNpc = vm_net_mock_task_offer_context_consume(
-                    taskId, &repeatableOffer);
+                    taskId, &repeatPolicyOffer);
                 taskAcceptOfferContext = offeredByNpc;
                 canAccept = vm_net_mock_task_state_list_load(
                     activeRole->roleId, false, allStates,
@@ -6353,17 +6430,19 @@ static u32 vm_net_mock_build_task_response(const u8 *request, u32 requestLen,
                 {
                     previousState = vm_net_mock_task_state_list_find(
                         allStates, allStateCount, taskId);
-                    replacingCompletedState = offeredByNpc && repeatableOffer &&
+                    replacingCompletedState = offeredByNpc &&
+                                              repeatPolicyOffer !=
+                                                  VM_NET_MOCK_TASK_REPEAT_NEVER &&
                                               previousState != NULL &&
                                               previousState->state == 3;
                     definitionAvailable = vm_net_mock_task_definition_available(
                         taskDefinition, activeRole, allStates, allStateCount,
-                        replacingCompletedState);
+                        repeatPolicyOffer);
                     if (!definitionAvailable)
                     {
                         (void)vm_net_mock_task_definition_unavailable_reason(
                             taskDefinition, activeRole, allStates,
-                            allStateCount, replacingCompletedState,
+                            allStateCount, repeatPolicyOffer,
                             &taskAcceptFailureCode, taskAcceptFailureInfo,
                             sizeof(taskAcceptFailureInfo));
                     }

@@ -1459,6 +1459,8 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
     vm_mock_service_client_session *inviter,
     vm_mock_service_client_session *responder)
 {
+    if (inviter == NULL || responder == NULL)
+        return NULL;
     return vm_mock_service_duel_begin_ex(inviter, responder, true, 0);
 }
 
@@ -1586,8 +1588,13 @@ static u32 vm_net_mock_build_duel_start_response(
     u32 outCap,
     vm_mock_service_client_session *observer)
 {
+    int observerIndex = -1;
+    vm_mock_service_duel *duel = observer ?
+        vm_mock_service_duel_find_for_client(observer->clientId, &observerIndex) : NULL;
     u32 pos = 5;
 
+    if (duel == NULL || observerIndex < 0 || observerIndex > 1)
+        return 0;
     if (!vm_net_mock_append_duel_start_object(out, outCap, &pos, observer))
         return 0;
     vm_net_mock_finish_wt_packet(out, pos, 1);
@@ -1722,7 +1729,6 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
     bool readyIncluded = false;
     bool accepted = false;
     bool sourceNotified = false;
-    bool startDelivered = false;
 
     if (out == NULL || outCap < pos ||
         !vm_net_mock_parse_spar_invite_reply_request(
@@ -1777,35 +1783,20 @@ static u32 vm_net_mock_build_spar_invite_reply_response(
     responder->sparInviteSourceClientId = 0;
     responder->sparInviteSourceWireId = 0;
 
-    /* An inline 4/9 is the responder's battle-ready edge.  PvP uses subtype
-     * 10 rather than the scene-monster subtype 5, so return the responder's
-     * mirrored start immediately and leave the inviter's start pending for
-     * its service poll.  A separated 4/9 is handled below. */
-    if (accepted && readyIncluded && duel != NULL)
-    {
-        pos = vm_net_mock_build_duel_start_response(out, outCap, responder);
-        startDelivered = pos != 0;
-        if (!startDelivered)
-        {
-            vm_mock_service_duel_cancel_for_client(responder->clientId,
-                                                   "inline-start-build-failed");
-            pos = 5;
-            vm_net_mock_finish_wt_packet(out, pos, 0);
-        }
-    }
-    else
-    {
-        vm_net_mock_finish_wt_packet(out, pos, 0);
-    }
+    /* 4/9 completes only the social invitation handshake.  It is not evidence
+     * of a native battle-module transition: the later 4/10 must remain tied
+     * to an already established scene/battle lifecycle, never to an invented
+     * 20/1 result or a guessed 2/10 request. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
     printf("[info][network] mock_spar_reply source=%08x/%u target=%08x/%u "
            "result=%u accepted=%u ready_inline=%u notify_source=%u duel=%u "
-           "start=%u resp=%u evidence=JianghuOL.CBE:0x010124EE+0x01012528;"
+           "entry_wait=%u resp=%u evidence=JianghuOL.CBE:0x010124EE+0x01012528;"
            "mmBattle:0x66CC(subtype10)\n",
            source ? source->clientId : 0, sourceWireId,
            responder->clientId, responderRole->roleId,
            result, accepted ? 1u : 0u, readyIncluded ? 1u : 0u,
            sourceNotified ? 1u : 0u, duel ? duel->serial : 0,
-           startDelivered ? 1u : 0u, pos);
+           (accepted && readyIncluded && duel != NULL) ? 1u : 0u, pos);
     return pos;
 }
 
@@ -1856,22 +1847,16 @@ static u32 vm_net_mock_build_spar_ready_response(
     {
         duel = vm_mock_service_duel_begin(source, responder);
     }
-    if (duel != NULL)
-        pos = vm_net_mock_build_duel_start_response(out, outCap, responder);
-    if (duel == NULL || pos == 0)
-    {
-        if (duel != NULL)
-            vm_mock_service_duel_cancel_for_client(responder->clientId,
-                                                   "ready-start-build-failed");
-        pos = 5;
-        vm_net_mock_finish_wt_packet(out, pos, 0);
-    }
+    /* As with the inline 4/9 path, this acknowledgement completes only the
+     * invite handshake.  Leave a successfully created duel alive until the
+     * verified scene/battle lifecycle can consume its start data. */
+    vm_net_mock_finish_wt_packet(out, pos, 0);
     printf("[info][network] mock_spar_ready target=%08x peer=%08x wire=%u "
            "duel=%u action=%s resp=%u evidence=JianghuOL.CBE:0x01012528(4/9);"
            "mmBattle:0x66CC(subtype10)\n",
            responder->clientId, responder->sparBattlePeerClientId,
            sourceWireId, duel ? duel->serial : 0,
-           duel ? "battle-start" : "empty-ack", pos);
+           duel ? "await-entry-prompt" : "empty-ack", pos);
     responder->sparBattleReadyPending = false;
     responder->sparBattlePeerClientId = 0;
     responder->sparBattlePeerWireId = 0;

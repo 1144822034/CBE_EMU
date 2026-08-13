@@ -3618,11 +3618,11 @@ mysql_failed:
     return false;
 }
 
-/* Recalculate only mutable combat values.  A batch is one MySQL transaction:
- * validate every selected identity and calculate all four values before the
- * first UPDATE, then publish the matching in-memory overrides only after
- * COMMIT.  This avoids a browser-side bulk action leaving a half-reset set
- * when one row is invalid or MySQL rejects the write. */
+/* Recalculate all formula-derived combat and settlement values.  A batch is
+ * one MySQL transaction: validate every selected identity and calculate HP,
+ * MP, attack, defense, experience and money before the first UPDATE, then
+ * publish the matching in-memory overrides only after COMMIT.  Configured
+ * drops remain an explicit operations setting and are intentionally kept. */
 static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
     const u32 *enemyIds, u32 enemyCount, u32 *updatedOut, u32 *alreadyDefaultOut,
     const char **errorOut)
@@ -3707,9 +3707,11 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
 
             snprintf(query, sizeof(query),
                      "UPDATE server_monsters SET hp=%u,mp=%u,attack_value=%u,"
-                     "defense_value=%u WHERE monster_id=%u",
+                     "defense_value=%u,reward_exp=%u,reward_money=%u "
+                     "WHERE monster_id=%u",
                      defaults->hp, defaults->mp, defaults->attack,
-                     defaults->defense, override->stats.enemyId);
+                     defaults->defense, defaults->exp, defaults->gold,
+                     override->stats.enemyId);
             if (!vm_mysql_exec(query))
                 goto mysql_failed;
         }
@@ -3728,10 +3730,13 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
         override->stats.mp = defaults->mp;
         override->stats.attack = defaults->attack;
         override->stats.defense = defaults->defense;
-        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=reward-and-drops\n",
+        override->stats.exp = defaults->exp;
+        override->stats.gold = defaults->gold;
+        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u preserve=drops\n",
                override->stats.enemyId, override->stats.level,
                override->family, defaults->hp, defaults->mp,
-               defaults->attack, defaults->defense);
+               defaults->attack, defaults->defense, defaults->exp,
+               defaults->gold);
     }
     if (updatedOut)
         *updatedOut = pendingCount;
@@ -3865,8 +3870,12 @@ static bool vm_net_mock_battle_player_attack_hits(
         uint64_t scaled = 20u + (uint64_t)monsterStats->level * 2u;
         monsterDodge = scaled > 0xffffffffull ? 0xffffffffu : (u32)scaled;
     }
+    /* A normal attack may miss, but the former 60% floor made an equal-level
+     * monster evade up to 40% of low-agility characters' strikes.  Keep hit,
+     * agility and equipment meaningful above the floor while capping routine
+     * monster evasion at 15%.  Hostile spells deliberately bypass this roll. */
     chance = vm_net_mock_battle_rating_chance_per_thousand(
-        playerStats != NULL ? playerStats->hit : 0, monsterDodge, 600u, 950u);
+        playerStats != NULL ? playerStats->hit : 0, monsterDodge, 850u, 950u);
     return vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0x6a09e667u) < chance;
 }
 
@@ -3888,19 +3897,50 @@ static bool vm_net_mock_battle_enemy_attack_hits(
     return vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0xbb67ae85u) < chance;
 }
 
+typedef enum
+{
+    VM_NET_MOCK_BATTLE_CRITICAL_PHYSICAL = 0,
+    VM_NET_MOCK_BATTLE_CRITICAL_MAGIC = 1
+} vm_net_mock_battle_critical_kind;
+
+/* Equipment and timed effects expose one shared critical rating.  The client
+ * has no separate magic-critical field, so distinguish attack types only in
+ * server settlement: agility favours a physical strike, while wisdom favours
+ * a hostile spell. */
+static u32 vm_net_mock_battle_player_critical_rating(
+    const vm_net_mock_player_stats *playerStats,
+    vm_net_mock_battle_critical_kind kind)
+{
+    uint64_t rating = 0;
+
+    if (playerStats == NULL)
+        return 0;
+
+    rating = playerStats->crit;
+    if (kind == VM_NET_MOCK_BATTLE_CRITICAL_MAGIC)
+        rating += ((uint64_t)playerStats->wisdom * 3u) / 10u;
+    else
+        rating += playerStats->agility / 6u;
+    return rating > 0xffffffffull ? 0xffffffffu : (u32)rating;
+}
+
 static u32 vm_net_mock_battle_apply_player_critical(
-    u32 damage, const vm_net_mock_player_stats *playerStats, u32 salt, bool *criticalOut)
+    u32 damage, const vm_net_mock_player_stats *playerStats, u32 salt,
+    vm_net_mock_battle_critical_kind kind, bool *criticalOut)
 {
     uint64_t denominator = 1200u;
+    u32 rating = 0;
     u32 chance = 0;
+    u32 multiplier = kind == VM_NET_MOCK_BATTLE_CRITICAL_MAGIC ? 200u : 175u;
 
     if (criticalOut)
         *criticalOut = false;
     if (damage == 0 || playerStats == NULL)
         return damage;
 
-    denominator += playerStats->crit;
-    chance = (u32)(((uint64_t)playerStats->crit * 1000u) / denominator);
+    rating = vm_net_mock_battle_player_critical_rating(playerStats, kind);
+    denominator += rating;
+    chance = (u32)(((uint64_t)rating * 1000u) / denominator);
     if (chance > 350u)
         chance = 350u;
     if (vm_net_mock_battle_stat_roll_per_thousand(salt ^ 0x3c6ef372u) >= chance)
@@ -3909,7 +3949,7 @@ static u32 vm_net_mock_battle_apply_player_critical(
     if (criticalOut)
         *criticalOut = true;
     {
-        uint64_t raised = (uint64_t)damage * 150u;
+        uint64_t raised = (uint64_t)damage * multiplier;
         raised = (raised + 99u) / 100u;
         return raised > 0xffffffffull ? 0xffffffffu : (u32)raised;
     }
@@ -3976,8 +4016,9 @@ static u32 vm_net_mock_battle_player_damage_to_enemy(u32 enemyId, u32 enemyHpCur
         return 0;
     if (hitOut)
         *hitOut = true;
-    damage = vm_net_mock_battle_apply_player_critical(damage, &playerStats,
-                                                       rollSalt, criticalOut);
+    damage = vm_net_mock_battle_apply_player_critical(
+        damage, &playerStats, rollSalt, VM_NET_MOCK_BATTLE_CRITICAL_PHYSICAL,
+        criticalOut);
     if (damage == 0)
         damage = 1;
     return vm_net_mock_min_u32(damage, enemyHpCurrent);
@@ -4080,12 +4121,13 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     damage = vm_net_mock_damage_after_defense(rawDamage, defense);
     if (damage < baseDamage)
         damage = baseDamage;
-    if (!vm_net_mock_battle_player_attack_hits(&playerStats, &monsterStats, rollSalt))
-        return 0;
+    /* Hostile spells do not use the normal-strike hit roll: actioninfo must
+     * never report a dodge for a successful spell cast. */
     if (hitOut)
         *hitOut = true;
-    damage = vm_net_mock_battle_apply_player_critical(damage, &playerStats,
-                                                       rollSalt ^ operate, criticalOut);
+    damage = vm_net_mock_battle_apply_player_critical(
+        damage, &playerStats, rollSalt ^ operate, VM_NET_MOCK_BATTLE_CRITICAL_MAGIC,
+        criticalOut);
     damage = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_DAMAGE", damage);
     if (damage == 0)
         damage = 1;
@@ -10008,6 +10050,11 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
     return true;
 }
 
+static u16 vm_net_mock_equipment_row_seq_for_slot(u8 slot)
+{
+    return slot < VM_NET_MOCK_EQUIP_SLOT_COUNT ? (u16)(slot + 1u) : 0;
+}
+
 static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
                                                  u32 requestedItemId,
                                                  u16 requestedSeq,
@@ -10133,7 +10180,21 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
     if (equippedItemIdOut)
         *equippedItemIdOut = itemId;
     if (equippedSeqOut)
-        *equippedSeqOut = seq;
+    {
+        /* `HandleItemOperationResponse(0x01033544)` copies the selected
+         * backpack instance into the client equipment manager, then replaces
+         * its `item+276` identity with the `7/8.seq` response field.  That
+         * identity is the equipment-row namespace (`slot + 1`), not the
+         * source backpack-instance sequence.  Returning `seq` here made an
+         * enhanced item look correct until the next equipment-list rebuild,
+         * at which point its client identity no longer matched the server's
+         * `7/7 type=2` row and its enhancement state could be overwritten.
+         *
+         * Preserve all instance state in `selectedInstance` above; only the
+         * client-facing identity changes when it moves from backpack to the
+         * fixed equipment slot. */
+        *equippedSeqOut = vm_net_mock_equipment_row_seq_for_slot(slot);
+    }
     if (slotOut)
         *slotOut = slot;
     if (oldItemIdOut)

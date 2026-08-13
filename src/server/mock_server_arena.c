@@ -39,6 +39,7 @@ typedef struct
     u8 completedRounds;
     bool challengePending;
     u32 challengeRoleId;
+    u32 challengeOpponentRoleId;
     u32 challengeTick;
     u32 activeDuelSerial;
     u32 createdTick;
@@ -140,6 +141,7 @@ static void vm_net_mock_arena_prune_rooms(void)
         {
             room->challengePending = false;
             room->challengeRoleId = 0;
+            room->challengeOpponentRoleId = 0;
             room->challengeTick = 0;
         }
     }
@@ -173,6 +175,16 @@ static int vm_net_mock_arena_member_index(const vm_net_mock_arena_room *room,
     return -1;
 }
 
+static void vm_net_mock_arena_clear_challenge(vm_net_mock_arena_room *room)
+{
+    if (room == NULL)
+        return;
+    room->challengePending = false;
+    room->challengeRoleId = 0;
+    room->challengeOpponentRoleId = 0;
+    room->challengeTick = 0;
+}
+
 static bool vm_net_mock_arena_append_challenge_prompt_object(
     u8 *out, u32 outCap, u32 *pos, const vm_net_mock_arena_room *room,
     u32 challengerRoleId)
@@ -191,7 +203,7 @@ static bool vm_net_mock_arena_append_challenge_prompt_object(
     opponentName = room->members[1 - challengerIndex].name[0] ?
                        room->members[1 - challengerIndex].name : "Player";
     snprintf(prompt, sizeof(prompt),
-             "\xca\xc7\xb7\xf1\xcc\xf4\xd5\xbd%s\xa3\xbf", /* 是否挑战%s？ */
+             "\xca\xc7\xb7\xf1\xcf\xf2%s\xb7\xa2\xc6\xf0\xb1\xc8\xce\xe4\xcc\xf4\xd5\xbd\xa3\xbf", /* 是否向%s发起比武挑战？ */
              opponentName);
 
     /* The 30/9 parser only installs the confirmation callbacks.  It does not
@@ -244,6 +256,40 @@ static vm_mock_service_duel *vm_net_mock_arena_begin_duel(
     return duel;
 }
 
+static bool vm_net_mock_arena_queue_opponent_challenge(
+    vm_net_mock_arena_room *room,
+    vm_mock_service_client_session *challenger,
+    const vm_net_mock_role_state *challengerRole,
+    const char *challengerAccountId)
+{
+    vm_mock_service_client_session *opponent = NULL;
+    int challengerIndex = -1;
+
+    if (room == NULL || challenger == NULL || challengerRole == NULL ||
+        room->memberCount != VM_NET_MOCK_ARENA_ROOM_MEMBER_MAX)
+    {
+        return false;
+    }
+    challengerIndex = vm_net_mock_arena_member_index(room,
+                                                       challengerRole->roleId);
+    if (challengerIndex < 0)
+        return false;
+    opponent = vm_net_mock_arena_find_online_session(
+        room->members[1 - challengerIndex].roleId);
+    if (opponent == NULL || opponent->clientId == challenger->clientId ||
+        !opponent->sceneVisibleReady)
+    {
+        return false;
+    }
+    /* Arena challenge is a task-hall/scene-channel protocol of its own.
+     * Its parser displays 30/9 and replies with 30/10 {agree}; emitting the
+     * nearby-player 4/15 invitation here opens an unrelated "切磋" dialog and
+     * diverts the reply into the ordinary spar state machine. */
+    return vm_mock_service_session_enqueue_social_notice(
+        opponent, VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE, 0, challenger,
+        challengerRole, challengerAccountId);
+}
+
 static bool vm_net_mock_arena_is_confirm_request(const u8 *request,
                                                   u32 requestLen, u8 *agreeOut)
 {
@@ -270,8 +316,41 @@ static bool vm_net_mock_arena_is_confirm_request(const u8 *request,
     return true;
 }
 
-static bool vm_net_mock_arena_append_confirm_ack_object(u8 *out, u32 outCap,
-                                                         u32 *pos)
+static bool vm_net_mock_arena_append_confirm_ack_object(
+    u8 *out, u32 outCap, u32 *pos, const char *notify)
+{
+    u32 objectStart = 0;
+
+    /*
+     * 30/10 is not a passive acknowledgement in the task-hall client.
+     * net_handle_scene_channel_dispatch routes it to 0x01039528: result=0
+     * only clears the request-pending marker, while result=1 consumes the
+     * failnotify text and calls CleanupTaskHall (0x010491AE).  The arena
+     * confirmation originates from task-hall mode 31, so using result=0
+     * leaves that screen active and makes a later 4/10 battle start inert.
+     *
+     * Keep the native result=1 envelope and provide the field its reader
+     * requires.  The text is rendered as a transient native notification;
+     * it is not a scene transfer and does not alter the character position.
+     */
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 30, 10,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_string(
+            out, outCap, pos, "failnotify",
+            notify ? notify : "\xb1\xc8\xce\xe4\xcc\xf4\xd5\xbd\xd2\xd1\xc8\xb7\xc8\xcf")) /* 比武挑战已确认 */
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
+/* A remote 30/9 challenge is delivered while the target still owns the scene,
+ * rather than the task-hall screen.  Its 30/10 reply must clear that request's
+ * pending layer without running CleanupTaskHall. */
+static bool vm_net_mock_arena_append_confirm_pending_ack_object(
+    u8 *out, u32 outCap, u32 *pos)
 {
     u32 objectStart = 0;
 
@@ -283,6 +362,78 @@ static bool vm_net_mock_arena_append_confirm_ack_object(u8 *out, u32 outCap,
     }
     vm_net_mock_finish_wt_object(out, objectStart, *pos);
     return true;
+}
+
+/* The room-list screen owns the second 30/8 request, but it cannot own the
+ * native 30/9 -> 30/10 confirmation callback that starts a battle module.
+ * Close that screen first using the same 26/0 + result=1 task-hall sequence
+ * used by established task-hall flows; the actual challenge prompt is emitted
+ * by the following scene poll. */
+static bool vm_net_mock_arena_append_prepare_scene_confirm_objects(
+    u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 0,
+                                     &objectStart))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return vm_net_mock_arena_append_confirm_ack_object(
+        out, outCap, pos,
+        "\xd5\xfd\xd4\xda\xd7\xbc\xb1\xb8\xb1\xc8\xce\xe4\xcc\xf4\xd5\xbd\xa1\xa3"); /* 正在准备比武挑战。 */
+}
+
+/* Emit the initiator's 30/9 only after task-hall has been closed and the
+ * scene owns the callback.  This reproduces the proven instance-challenge
+ * order (26/0 -> 30/9 -> 30/10 {agree} -> 4/10), instead of treating a
+ * room-list confirmation as a battle-entry event. */
+static u32 vm_net_mock_build_pending_arena_initiator_confirm_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
+{
+    vm_net_mock_arena_room *room = NULL;
+    u32 pos = 5;
+
+    if (out == NULL || observer == NULL || !observer->roleOnline ||
+        observer->onlineRoleId == 0 ||
+        !observer->arenaChallengeInitiatorPromptPending ||
+        observer->arenaChallengeReplyActive || !observer->sceneVisibleReady ||
+        observer->sceneVisiblePending)
+    {
+        return 0;
+    }
+    vm_net_mock_arena_prune_rooms();
+    for (u32 i = 0; i < VM_NET_MOCK_ARENA_ROOM_MAX; ++i)
+    {
+        vm_net_mock_arena_room *candidate = &g_vm_net_mock_arena_rooms[i];
+
+        if (candidate->active && candidate->challengePending &&
+            candidate->challengeRoleId == observer->onlineRoleId &&
+            candidate->challengeOpponentRoleId == 0 &&
+            candidate->activeDuelSerial == 0)
+        {
+            room = candidate;
+            break;
+        }
+    }
+    if (room == NULL)
+    {
+        observer->arenaChallengeInitiatorPromptPending = false;
+        return 0;
+    }
+    if (!vm_net_mock_arena_append_challenge_prompt_object(
+            out, outCap, &pos, room, observer->onlineRoleId))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    observer->arenaChallengeInitiatorPromptPending = false;
+    observer->arenaChallengeReplyActive = true;
+    observer->arenaChallengeSourceRoleId = observer->onlineRoleId;
+    printf("[info][mock-service] arena_initiator_challenge_notice_deliver observer=%08x room=%u role=%u stage=scene-native-prompt resp=%u\n",
+           observer->clientId, room->roomId, observer->onlineRoleId, pos);
+    return pos;
 }
 
 /* The released-duel edge occurs only after both battle clients consumed their
@@ -757,6 +908,7 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
     u32 vitalityMax = 0;
     u8 type = 0;
     u8 turns = 0;
+    u8 agree = 0;
     u32 pos = 5;
     u8 objectCount = 0;
     const char *action = NULL;
@@ -940,36 +1092,56 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
         else
         {
             /* The second native 30/8 in mode 31 is the challenge edge, not a
-             * duplicate join.  A kind-26 acknowledgement clears the request
-             * progress layer before 30/9 installs its confirmation dialog;
-             * HandleResConfirmCb will then emit the strict 30/10 reply. */
-            if (!vm_net_mock_arena_append_challenge_prompt_object(
-                    out, outCap, &pos, room, role->roleId))
+             * duplicate join.  It must first return to scene.  Delivering
+             * 30/9 here leaves its confirmation callback owned by task-hall,
+             * so even a later 4/10 has no loaded battle module to consume it. */
+            if (!vm_net_mock_arena_append_prepare_scene_confirm_objects(
+                    out, outCap, &pos))
             {
                 return 0;
             }
             room->challengePending = true;
             room->challengeRoleId = role->roleId;
+            room->challengeOpponentRoleId = 0;
             room->challengeTick = g_schedulerTick;
+            session->arenaChallengeInitiatorPromptPending = true;
+            session->arenaChallengeReplyActive = false;
+            session->arenaChallengeSourceRoleId = 0;
             objectCount = 2;
-            action = "challenge-prompt";
+            action = "challenge-prepare-scene-prompt";
         }
     }
-    else if (vm_net_mock_arena_is_confirm_request(request, requestLen, NULL))
+    else if (vm_net_mock_arena_is_confirm_request(request, requestLen, &agree))
     {
         vm_net_mock_arena_room *room = NULL;
         vm_mock_service_duel *duel = NULL;
+        bool opponentPromptQueued = false;
+        bool isInitiator = false;
 
-        /* 30/10 is intentionally accepted only while this exact role owns a
-         * live room-confirmation lease.  It is a common scene-channel opcode,
-         * so widening this branch would steal unrelated NPC confirmations. */
+        /* 30/10 is intentionally accepted only while this role is either the
+         * recorded challenger or the recorded remote opponent of one live
+         * arena challenge.  It is a common scene-channel opcode, so widening
+         * this branch would steal unrelated NPC confirmations. */
         vm_net_mock_arena_prune_rooms();
         for (u32 i = 0; i < VM_NET_MOCK_ARENA_ROOM_MAX; ++i)
         {
             vm_net_mock_arena_room *candidate = &g_vm_net_mock_arena_rooms[i];
 
             if (candidate->active && candidate->challengePending &&
-                candidate->challengeRoleId == role->roleId)
+                candidate->challengeRoleId == role->roleId &&
+                candidate->challengeOpponentRoleId == 0 &&
+                session->arenaChallengeReplyActive &&
+                session->arenaChallengeSourceRoleId == role->roleId)
+            {
+                room = candidate;
+                isInitiator = true;
+                break;
+            }
+            if (candidate->active && candidate->challengePending &&
+                candidate->challengeRoleId != role->roleId &&
+                candidate->challengeOpponentRoleId == role->roleId &&
+                session->arenaChallengeReplyActive &&
+                session->arenaChallengeSourceRoleId == candidate->challengeRoleId)
             {
                 room = candidate;
                 break;
@@ -978,29 +1150,76 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
         if (room == NULL)
             return 0;
         roomId = room->roomId;
-        if (!vm_net_mock_arena_append_confirm_ack_object(out, outCap, &pos))
-            return 0;
-        objectCount = 1;
-        room->challengePending = false;
-        room->challengeRoleId = 0;
-        room->challengeTick = 0;
-        duel = vm_net_mock_arena_begin_duel(room, role->roleId);
-        if (duel != NULL)
+        if (isInitiator)
         {
-            /* Do not put 4/10 in this acknowledgement event.  The main CBE
-             * dispatcher processes 30/10 through HandleTaskResultCheck while
-             * the task-hall screen still owns the current dispatch pass; its
-             * kind-4 handler does not consume subtype 10.  In contrast, the
-             * verified isolated-instance route first returns this standalone
-             * 30/10 acknowledgement, then lets the subsequent scene poll
-             * deliver 4/10 as its own network event after that pass has
-             * completed.  Leave both duel start bits pending so the existing
-             * scene-poll owner performs that one-and-only-one delivery. */
-            action = "challenge-confirmed-await-start-poll";
+            /* This 30/10 now belongs to the scene-owned prompt, so result=0
+             * clears only its request layer.  The original task-hall was
+             * already closed before this prompt was emitted. */
+            if (!vm_net_mock_arena_append_confirm_pending_ack_object(
+                    out, outCap, &pos))
+                return 0;
+            objectCount = 1;
+            session->arenaChallengeReplyActive = false;
+            session->arenaChallengeSourceRoleId = 0;
+            if (agree != 0)
+            {
+                vm_net_mock_arena_clear_challenge(room);
+                action = "challenge-cancelled";
+            }
+            else
+            {
+                opponentPromptQueued = vm_net_mock_arena_queue_opponent_challenge(
+                    room, session, role, g_vm_mock_service_active_account_id);
+                if (opponentPromptQueued)
+                {
+                    int challengerIndex = vm_net_mock_arena_member_index(
+                        room, role->roleId);
+                    room->challengeOpponentRoleId =
+                        room->members[1 - challengerIndex].roleId;
+                    room->challengeTick = g_schedulerTick;
+                    action = "challenge-confirmed-await-opponent";
+                }
+                else
+                {
+                    vm_net_mock_arena_clear_challenge(room);
+                    action = "challenge-confirmed-opponent-unavailable";
+                }
+            }
         }
         else
         {
-            action = "challenge-confirmed-unavailable";
+            /* The remote 30/9 was delivered in a scene poll rather than from
+             * task hall, so result=0 only clears its request overlay.  On an
+             * accept this exact lease, not any generic spar reply, owns duel
+             * creation and the following pending 4/10 start delivery. */
+            if (!vm_net_mock_arena_append_confirm_pending_ack_object(
+                    out, outCap, &pos))
+            {
+                return 0;
+            }
+            objectCount = 1;
+            session->arenaChallengeReplyActive = false;
+            session->arenaChallengeSourceRoleId = 0;
+            if (agree != 0)
+            {
+                vm_net_mock_arena_clear_challenge(room);
+                action = "opponent-rejected";
+            }
+            else
+            {
+                duel = vm_net_mock_arena_begin_duel(room,
+                                                     room->challengeRoleId);
+                if (duel != NULL)
+                {
+                    vm_net_mock_arena_clear_challenge(room);
+                    action = "opponent-accepted-duel-pending";
+                }
+                else
+                {
+                    vm_net_mock_arena_clear_challenge(room);
+                    action = "opponent-accepted-duel-unavailable";
+                }
+            }
         }
     }
     else
@@ -1009,8 +1228,8 @@ static u32 vm_net_mock_build_arena_response(const u8 *request, u32 requestLen,
     }
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    printf("[info][network] mock_arena action=%s role=%u room=%u type=%u award=%u turns=%u vitality=%u/%u reason=%s rooms=%u resp=%u evidence=JianghuOL.CBE:0x01037C02+0x0103965A+0x01049878+0x01049764\n",
-           action ? action : "-", role->roleId, roomId, type, award, turns,
+    printf("[info][network] mock_arena action=%s role=%u room=%u type=%u agree=%u award=%u turns=%u vitality=%u/%u reason=%s rooms=%u resp=%u evidence=JianghuOL.CBE:0x01037C02+0x0103965A+0x01049878+0x01049764\n",
+           action ? action : "-", role->roleId, roomId, type, agree, award, turns,
            vitality, vitalityMax, createReason ? createReason : "-",
            VM_NET_MOCK_ARENA_ROOM_MAX, pos);
     return pos;

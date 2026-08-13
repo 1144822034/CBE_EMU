@@ -906,6 +906,385 @@ static u32 vm_net_mock_monster_admin_list(
     return total;
 }
 
+/* sMap.dsh is the only shipped table that explicitly assigns a monster-level
+ * bracket to every ordinary local scene.  automonster.dsh tells us which
+ * monsters auto-spawn there, but deliberately has no level column.  A bracket
+ * such as "18~25级" has no per-monster split, so its rounded-up midpoint is
+ * the only deterministic scene-wide reset value. */
+static bool vm_net_mock_parse_smap_monster_level(const u8 *value, u32 valueLen,
+                                                  u32 *levelOut)
+{
+    u32 values[2] = {0, 0};
+    u32 count = 0;
+    u32 pos = 0;
+
+    if (levelOut)
+        *levelOut = 0;
+    if (value == NULL || valueLen == 0 || levelOut == NULL)
+        return false;
+    while (pos < valueLen && count < 2)
+    {
+        u32 parsed = 0;
+
+        while (pos < valueLen && (value[pos] < '0' || value[pos] > '9'))
+            ++pos;
+        while (pos < valueLen && value[pos] >= '0' && value[pos] <= '9')
+        {
+            if (parsed > (VM_NET_MOCK_ROLE_LEVEL_CAP -
+                          (u32)(value[pos] - '0')) / 10u)
+            {
+                return false;
+            }
+            parsed = parsed * 10u + (u32)(value[pos] - '0');
+            ++pos;
+        }
+        if (parsed != 0)
+            values[count++] = parsed;
+    }
+    if (count == 0 || values[0] > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        return false;
+    if (count == 1)
+    {
+        *levelOut = values[0];
+        return true;
+    }
+    if (values[1] < values[0] || values[1] > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        return false;
+    *levelOut = values[0] + (values[1] - values[0] + 1u) / 2u;
+    return true;
+}
+
+static bool vm_net_mock_scene_monster_level_from_smap(const char *scene,
+                                                        u32 *levelOut)
+{
+    char path[256];
+    u8 data[16384];
+    u32 len = 0;
+    u32 columnCount = 0;
+    u32 rowCount = 0;
+    u32 pos = 16;
+    size_t sceneLen = 0;
+
+    if (levelOut)
+        *levelOut = 0;
+    if (levelOut == NULL || !vm_net_mock_scene_name_is_persistable(scene) ||
+        !vm_net_mock_open_server_data_resource("sMap.dsh", ".dsh", NULL,
+                                                path, sizeof(path)))
+    {
+        return false;
+    }
+    len = vm_net_mock_load_response_file(path, data, sizeof(data));
+    if (len < 16)
+        return false;
+    columnCount = vm_net_mock_read_le32_at(data, 4);
+    rowCount = vm_net_mock_read_le32_at(data, 8);
+    /* The shipped sMap layout is stable: column 1 is 场景名称 and column 12
+     * is 怪物等级.  Reject a changed layout rather than reading an unrelated
+     * value as a combat level. */
+    if (columnCount < 13 || columnCount > 32 || rowCount > 512)
+        return false;
+    for (u32 column = 0; column < columnCount; ++column)
+    {
+        u32 fieldLen = 0;
+
+        if (pos >= len)
+            return false;
+        fieldLen = data[pos++];
+        if (fieldLen > len - pos)
+            return false;
+        pos += fieldLen;
+    }
+    sceneLen = strlen(scene);
+    for (u32 row = 0; row < rowCount && pos + 4 <= len; ++row)
+    {
+        const u8 *sceneValue = NULL;
+        u32 sceneValueLen = 0;
+        const u8 *levelValue = NULL;
+        u32 levelValueLen = 0;
+        u32 rowLen = vm_net_mock_read_le32_at(data, pos);
+        u32 rowPos = pos + 4;
+        u32 rowEnd = rowPos + rowLen;
+
+        if (rowLen == 0 || rowEnd > len || rowEnd < rowPos)
+            return false;
+        for (u32 column = 0; column < columnCount && rowPos < rowEnd;
+             ++column)
+        {
+            u32 valueLen = data[rowPos++];
+            const u8 *value = data + rowPos;
+
+            if (valueLen > rowEnd - rowPos)
+                return false;
+            if (column == 1)
+            {
+                sceneValue = value;
+                sceneValueLen = valueLen;
+            }
+            else if (column == 12)
+            {
+                levelValue = value;
+                levelValueLen = valueLen;
+            }
+            rowPos += valueLen;
+        }
+        if (sceneValue != NULL && levelValue != NULL &&
+            sceneValueLen == sceneLen &&
+            memcmp(sceneValue, scene, sceneLen) == 0)
+        {
+            return vm_net_mock_parse_smap_monster_level(levelValue,
+                                                         levelValueLen,
+                                                         levelOut);
+        }
+        pos = rowEnd;
+    }
+    return false;
+}
+
+static bool vm_net_mock_monster_admin_level_source_scene(
+    u32 enemyId, char *sceneOut, size_t sceneOutCap, const char **sourceOut)
+{
+    int index = -1;
+    u32 total = 0;
+
+    if (sceneOut != NULL && sceneOutCap != 0)
+        sceneOut[0] = 0;
+    if (sourceOut != NULL)
+        *sourceOut = "-";
+    if (sceneOut == NULL || sceneOutCap == 0 || enemyId == 0)
+        return false;
+
+    /* Auto-spawn rows are the canonical source for ordinary monsters.  A
+     * shared actor ID is intentionally resolved from its first authored
+     * auto-spawn row, matching the existing global monster-template model. */
+    total = vm_net_mock_load_auto_monster_catalog();
+    for (u32 row = 0; row < total; ++row)
+    {
+        const vm_net_mock_auto_monster_catalog_item *item =
+            &g_vm_net_mock_auto_monster_catalog[row];
+
+        for (u32 slot = 0; slot < 3; ++slot)
+        {
+            if (item->monsterIds[slot] != enemyId)
+                continue;
+            if (!vm_net_mock_scene_name_is_persistable(item->scene))
+                return false;
+            snprintf(sceneOut, sceneOutCap, "%s", item->scene);
+            if (sourceOut != NULL)
+                *sourceOut = "automonster";
+            return true;
+        }
+    }
+
+    /* SCE-only combat records have no automonster row.  Their first parsed
+     * combat scene is still an authored map identity and can use sMap's
+     * level, unlike the former monster-ID bucket fallback. */
+    vm_net_mock_monster_resource_labels_load();
+    index = vm_net_mock_monster_catalog_index(enemyId);
+    if (index < 0 ||
+        !vm_net_mock_scene_name_is_persistable(
+            g_vm_net_mock_monster_resource_labels[index].firstScene))
+    {
+        return false;
+    }
+    snprintf(sceneOut, sceneOutCap, "%s",
+             g_vm_net_mock_monster_resource_labels[index].firstScene);
+    if (sourceOut != NULL)
+        *sourceOut = "sce-combat";
+    return true;
+}
+
+/* Persist a scene-derived template for every selected monster as one atomic
+ * operation.  The level, combat quartet and settlement rewards follow sMap
+ * level plus monster family.  Every configured drop remains untouched.  We
+ * duplicate inherited default drops into the first persisted override so a
+ * later service restart cannot turn a level reset into an accidental
+ * drop-table deletion. */
+static bool vm_net_mock_monster_admin_reset_scene_levels_batch(
+    const u32 *enemyIds, u32 enemyCount, u32 *updatedOut, u32 *skippedOut,
+    const char **errorOut)
+{
+    typedef struct
+    {
+        int index;
+        u8 family;
+        u8 dropCount;
+        vm_net_mock_monster_stats stats;
+        vm_net_mock_monster_drop drops[VM_NET_MOCK_MONSTER_DROP_MAX];
+        char scene[64];
+        const char *source;
+    } vm_net_mock_monster_scene_level_pending;
+    vm_net_mock_monster_scene_level_pending
+        pending[VM_NET_MOCK_MONSTER_CATALOG_MAX];
+    char query[1024];
+    char mysqlError[512];
+    u32 pendingCount = 0;
+    u32 skipped = 0;
+    bool transactionStarted = false;
+
+    if (updatedOut)
+        *updatedOut = 0;
+    if (skippedOut)
+        *skippedOut = 0;
+    if (errorOut)
+        *errorOut = "怪物目录中不存在该 ID";
+    if (enemyIds == NULL || enemyCount == 0 ||
+        enemyCount > VM_NET_MOCK_MONSTER_CATALOG_MAX)
+    {
+        return false;
+    }
+    vm_net_mock_monster_resource_labels_load();
+    if (!g_vm_net_mock_monster_db_valid)
+    {
+        g_vm_net_mock_monster_db_loaded = false;
+        if (!vm_net_mock_monster_db_load())
+        {
+            if (errorOut)
+                *errorOut = vm_mysql_last_error();
+            return false;
+        }
+    }
+
+    for (u32 i = 0; i < enemyCount; ++i)
+    {
+        vm_net_mock_monster_entry entry;
+        vm_net_mock_monster_override *override = NULL;
+        u32 sceneLevel = 0;
+        int index = vm_net_mock_monster_catalog_index(enemyIds[i]);
+
+        if (enemyIds[i] == 0 || index < 0)
+            return false;
+        for (u32 previous = 0; previous < i; ++previous)
+        {
+            if (enemyIds[previous] == enemyIds[i])
+            {
+                if (errorOut)
+                    *errorOut = "批量重置中存在重复怪物 ID";
+                return false;
+            }
+        }
+        if (!vm_net_mock_monster_admin_level_source_scene(
+                enemyIds[i], pending[pendingCount].scene,
+                sizeof(pending[pendingCount].scene),
+                &pending[pendingCount].source) ||
+            !vm_net_mock_scene_monster_level_from_smap(
+                pending[pendingCount].scene, &sceneLevel))
+        {
+            ++skipped;
+            continue;
+        }
+
+        override = &g_vm_net_mock_monster_overrides[index];
+        entry = vm_net_mock_monster_entry_for_enemy(enemyIds[i]);
+        entry.level = sceneLevel;
+        if (override->used)
+            entry.family = override->family;
+        pending[pendingCount].index = index;
+        pending[pendingCount].family = entry.family;
+        pending[pendingCount].stats =
+            vm_net_mock_monster_base_stats_for_entry(&entry);
+        pending[pendingCount].dropCount = vm_net_mock_monster_drops_for_enemy(
+            enemyIds[i], pending[pendingCount].drops,
+            VM_NET_MOCK_MONSTER_DROP_MAX);
+        if (pending[pendingCount].dropCount > VM_NET_MOCK_MONSTER_DROP_MAX)
+            return false;
+        ++pendingCount;
+    }
+
+    if (pendingCount != 0)
+    {
+        if (!vm_mysql_exec("START TRANSACTION"))
+            goto mysql_failed;
+        transactionStarted = true;
+        for (u32 i = 0; i < pendingCount; ++i)
+        {
+            const vm_net_mock_monster_scene_level_pending *row = &pending[i];
+
+            snprintf(query, sizeof(query),
+                     "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
+                     "defense_value,reward_exp,reward_money,drop_item_id,drop_rate_percent) "
+                     "VALUES(%u,%u,%u,%u,%u,%u,%u,%u,%u,0,0) ON DUPLICATE KEY UPDATE "
+                     "level=VALUES(level),family=VALUES(family),hp=VALUES(hp),mp=VALUES(mp),"
+                     "attack_value=VALUES(attack_value),defense_value=VALUES(defense_value),"
+                     "reward_exp=VALUES(reward_exp),reward_money=VALUES(reward_money),"
+                     "drop_item_id=0,drop_rate_percent=0",
+                     row->stats.enemyId, row->stats.level, row->family,
+                     row->stats.hp, row->stats.mp, row->stats.attack,
+                     row->stats.defense, row->stats.exp, row->stats.gold);
+            if (!vm_mysql_exec(query))
+                goto mysql_failed;
+            snprintf(query, sizeof(query),
+                     "DELETE FROM server_monster_drops WHERE monster_id=%u",
+                     row->stats.enemyId);
+            if (!vm_mysql_exec(query))
+                goto mysql_failed;
+            for (u8 drop = 0; drop < row->dropCount; ++drop)
+            {
+                snprintf(query, sizeof(query),
+                         "INSERT INTO server_monster_drops("
+                         "monster_id,drop_slot,item_id,drop_rate_percent) "
+                         "VALUES(%u,%u,%u,%u)",
+                         row->stats.enemyId, (u32)drop + 1u,
+                         row->drops[drop].itemId,
+                         (u32)row->drops[drop].ratePercent);
+                if (!vm_mysql_exec(query))
+                    goto mysql_failed;
+            }
+        }
+        if (!vm_mysql_exec("COMMIT"))
+            goto mysql_failed;
+        transactionStarted = false;
+    }
+
+    for (u32 i = 0; i < pendingCount; ++i)
+    {
+        vm_net_mock_monster_override *override =
+            &g_vm_net_mock_monster_overrides[pending[i].index];
+
+        memset(override, 0, sizeof(*override));
+        override->used = true;
+        override->family = pending[i].family;
+        override->stats = pending[i].stats;
+        override->dropCount = pending[i].dropCount;
+        if (override->dropCount != 0)
+        {
+            memcpy(override->drops, pending[i].drops,
+                   sizeof(override->drops[0]) * override->dropCount);
+        }
+        printf("[info][mock-admin] monster_scene_level_reset id=%u scene=%s "
+               "source=%s level=%u family=%u hp=%u mp=%u attack=%u defense=%u "
+               "exp=%u money=%u preserve=drops\n",
+               override->stats.enemyId, pending[i].scene,
+               pending[i].source ? pending[i].source : "-",
+               override->stats.level, override->family, override->stats.hp,
+               override->stats.mp, override->stats.attack,
+               override->stats.defense, override->stats.exp,
+               override->stats.gold);
+    }
+    if (updatedOut)
+        *updatedOut = pendingCount;
+    if (skippedOut)
+        *skippedOut = skipped;
+    if (errorOut)
+        *errorOut = "ok";
+    printf("[info][mock-admin] monster_scene_level_batch_reset selected=%u "
+           "updated=%u skipped_without_smap_level=%u transaction=%s "
+           "source=sMap.dsh\n",
+           enemyCount, pendingCount, skipped,
+           pendingCount == 0 ? "not-needed" : "committed");
+    return true;
+
+mysql_failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-admin] monster_scene_level_batch_reset_failed "
+           "selected=%u staged=%u error=%s\n",
+           enemyCount, pendingCount, mysqlError);
+    if (errorOut)
+        *errorOut = "按场景等级重置失败，请检查服务端 MySQL 日志";
+    return false;
+}
+
 static u32 vm_net_mock_scene_npcinfo_hash(const char *scene,
                                           const vm_net_mock_scene_npcinfo_seed *seed)
 {
@@ -4123,7 +4502,8 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
                                             sizeof(row.seed.serviceOptionDescription)) ||
         !vm_mock_mysql_parse_u32(values[11], lengths[11], &number[5]) || number[5] > 1u ||
         !vm_mock_mysql_parse_u32(values[12], lengths[12], &number[6]) ||
-        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[7]) || number[7] > 1u ||
+        !vm_mock_mysql_parse_u32(values[13], lengths[13], &number[7]) ||
+        number[7] > VM_NET_MOCK_TASK_REPEAT_MONTHLY ||
         !vm_net_mock_dynamic_npc_decode_hex(values[14], lengths[14],
                                             row.seed.instanceScene,
                                             sizeof(row.seed.instanceScene)) ||
@@ -4145,7 +4525,9 @@ static bool vm_net_mock_dynamic_npc_row(void *contextValue,
     row.seed.orientation = (u16)number[4];
     row.enabled = number[5] != 0;
     row.seed.taskId = number[6];
-    row.seed.taskRepeatable = number[7] != 0;
+    row.seed.taskRepeatPolicy = (u8)number[7];
+    row.seed.taskRepeatable = row.seed.taskRepeatPolicy !=
+                              VM_NET_MOCK_TASK_REPEAT_NEVER;
     row.seed.instanceX = (u16)number[8];
     row.seed.instanceY = (u16)number[9];
     row.seed.challengeEnemyId = number[10];
@@ -4332,7 +4714,7 @@ static bool vm_net_mock_dynamic_npc_db_load(void)
         !vm_mysql_exec(
             "CREATE TABLE IF NOT EXISTS server_dynamic_npc_tasks ("
             "scene VARBINARY(64) NOT NULL,actor_id INT UNSIGNED NOT NULL,"
-            "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+            "task_id INT UNSIGNED NOT NULL,repeatable TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=不可重复,1=不限次数,2=每日,3=每周,4=每月',"
             "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
             "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "PRIMARY KEY(scene,actor_id),KEY idx_server_dynamic_npc_tasks_task(task_id),"
@@ -4516,6 +4898,10 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     if (seed == NULL)
         return false;
     normalizedSeed = *seed;
+    normalizedSeed.taskRepeatPolicy =
+        vm_net_mock_task_repeat_policy_from_seed(&normalizedSeed);
+    normalizedSeed.taskRepeatable = normalizedSeed.taskRepeatPolicy !=
+                                    VM_NET_MOCK_TASK_REPEAT_NEVER;
     seed = &normalizedSeed;
     if (!vm_net_mock_dynamic_npc_db_load() ||
         !vm_net_mock_npc_service_options_table_ensure())
@@ -4678,7 +5064,7 @@ static bool vm_net_mock_dynamic_npc_admin_save(
                  "VALUES(X'%s',%u,%u,%u) ON DUPLICATE KEY UPDATE "
                  "task_id=VALUES(task_id),repeatable=VALUES(repeatable)",
                  sceneHex, seed->actorId, seed->taskId,
-                 seed->taskRepeatable ? 1u : 0u);
+                 (u32)seed->taskRepeatPolicy);
     }
     else
     {
@@ -4708,10 +5094,10 @@ static bool vm_net_mock_dynamic_npc_admin_save(
         g_vm_net_mock_dynamic_npc_overrides[g_vm_net_mock_dynamic_npc_override_count++] = row;
     if (errorOut)
         *errorOut = "ok";
-    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeatable=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
+    printf("[info][mock-admin] dynamic_npc_save scene=%s actor=%u enabled=%u kind=%u service_option=%s task=%u repeat_policy=%u pos=(%u,%u) instance=%s@(%u,%u) enemy=%u min_level=%u actor_res=%s script=%s\n",
            scene, seed->actorId, enabled ? 1u : 0u, seed->kind,
            seed->serviceOptionName[0] ? seed->serviceOptionName : "-",
-           seed->taskId, seed->taskRepeatable ? 1u : 0u, seed->x, seed->y,
+           seed->taskId, (u32)seed->taskRepeatPolicy, seed->x, seed->y,
            seed->instanceScene[0] ? seed->instanceScene : "-",
            seed->instanceX, seed->instanceY, seed->challengeEnemyId,
            seed->instanceMinLevel, seed->actorResource,

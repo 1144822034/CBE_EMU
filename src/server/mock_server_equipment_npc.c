@@ -1962,7 +1962,8 @@ enum
     VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_APPROVED = 10,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_GUILD_APPLICATION_REJECTED = 11,
     VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_INVITE = 12,
-    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT = 13
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT = 13,
+    VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE = 14
 };
 
 typedef struct
@@ -2075,7 +2076,15 @@ enum
 {
     VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX = 10,
     VM_MOCK_SERVICE_TASK_INTERACTION_OFFER = 1,
-    VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT = 2
+    VM_MOCK_SERVICE_TASK_INTERACTION_SUBMIT = 2,
+    /* Stored by the server-side NPC binding.  Value 1 is deliberately the
+     * legacy meaning of `repeatable=1`, so existing configured NPCs keep
+     * allowing immediate re-acceptance after this feature is deployed. */
+    VM_NET_MOCK_TASK_REPEAT_NEVER = 0,
+    VM_NET_MOCK_TASK_REPEAT_UNLIMITED = 1,
+    VM_NET_MOCK_TASK_REPEAT_DAILY = 2,
+    VM_NET_MOCK_TASK_REPEAT_WEEKLY = 3,
+    VM_NET_MOCK_TASK_REPEAT_MONTHLY = 4
 };
 
 typedef struct
@@ -2084,6 +2093,7 @@ typedef struct
     u32 taskId;
     u32 actorId;
     bool repeatable;
+    u8 repeatPolicy;
     u8 interaction;
     char scene[64];
 } vm_mock_service_task_offer_context;
@@ -2135,6 +2145,14 @@ typedef struct vm_mock_service_client_session
     u32 sceneVisibleTick;
     bool shopSceneNpcReseedPending;
     char shopSceneNpcReseedScene[64];
+    /* mmShop -> mmGame first delivers a coordinate-bearing 30/2 result, then
+     * immediately emits the regular scene post-enter combo.  That combo can
+     * carry the SCE default landing point even though it is not a teleport.
+     * Keep the authoritative return coordinate for that one completion. */
+    bool shopSceneReturnPostEnterPending;
+    char shopSceneReturnPostEnterScene[64];
+    u16 shopSceneReturnPostEnterX;
+    u16 shopSceneReturnPostEnterY;
     bool taskPromptRefreshPending;
     char taskPromptRefreshScene[64];
     bool lastMoveinfoValid;
@@ -2182,6 +2200,16 @@ typedef struct vm_mock_service_client_session
     bool sparBattleReadyPending;
     u32 sparBattlePeerClientId;
     u32 sparBattlePeerWireId;
+    /* An arena 30/9 prompt has no room id in its eventual 30/10 reply.  The
+     * source can be the remote challenger or the local room member after the
+     * task-hall has returned to scene.  Bind that reply to this exact prompt
+     * so a common scene-channel confirmation cannot be claimed by a room. */
+    bool arenaChallengeReplyActive;
+    u32 arenaChallengeSourceRoleId;
+    /* The room-list 30/8 handler first closes task-hall.  Only its following
+     * scene poll may emit the local 30/9 prompt, matching the native instance
+     * challenge context in which the mmGame callback can arm battle entry. */
+    bool arenaChallengeInitiatorPromptPending;
     u32 pendingTeamBattleSerial;
     /* HandleChallengeResponse(0x010395AA) first consumes 30/9 and its
      * confirmation callback sends 30/10 {agree}.  Keep the target on the
@@ -2218,6 +2246,14 @@ typedef struct vm_mock_service_client_session
     vm_mock_service_task_offer_context
         taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     vm_mock_service_npc_context npcServiceContext;
+    /* A scene-NPC service response is owned by the 26/1 dialog callback.
+     * The item manager's 7/7 increment must therefore be delivered by the
+     * next ordinary scene event, after that callback has completed. */
+    bool npcPurchaseSyncPending;
+    u16 npcPurchaseSyncSeq;
+    u32 npcPurchaseSyncItemId;
+    u32 npcPurchaseSyncCount;
+    u32 npcPurchaseSyncNotBeforeTick;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
@@ -2794,6 +2830,70 @@ static bool vm_mock_service_shop_scene_npc_reseed_matches(const char *scene)
                                                scene);
 }
 
+static void vm_mock_service_arm_shop_scene_return_post_enter(const char *scene,
+                                                              u16 x, u16 y,
+                                                              const char *source)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !vm_net_mock_scene_name_is_safe(scene) ||
+        x == 0 || y == 0)
+    {
+        return;
+    }
+    session->shopSceneReturnPostEnterPending = true;
+    snprintf(session->shopSceneReturnPostEnterScene,
+             sizeof(session->shopSceneReturnPostEnterScene), "%s", scene);
+    session->shopSceneReturnPostEnterX = x;
+    session->shopSceneReturnPostEnterY = y;
+    printf("[info][mock-service] shop_return_post_enter_arm client=%08x "
+           "scene=%s pos=(%u,%u) source=%s contract=30/2-then-post-enter\n",
+           session->clientId, scene, (u32)x, (u32)y, source ? source : "-");
+}
+
+static bool vm_mock_service_shop_scene_return_post_enter_matches(
+    const char *scene, u16 *xOut, u16 *yOut)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->shopSceneReturnPostEnterPending ||
+        session->shopSceneReturnPostEnterScene[0] == 0 ||
+        !vm_net_mock_scene_name_is_safe(scene) ||
+        !vm_net_mock_scene_names_equal_exact(
+            session->shopSceneReturnPostEnterScene, scene) ||
+        session->shopSceneReturnPostEnterX == 0 ||
+        session->shopSceneReturnPostEnterY == 0)
+    {
+        return false;
+    }
+    if (xOut != NULL)
+        *xOut = session->shopSceneReturnPostEnterX;
+    if (yOut != NULL)
+        *yOut = session->shopSceneReturnPostEnterY;
+    return true;
+}
+
+static void vm_mock_service_clear_shop_scene_return_post_enter(const char *source)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->shopSceneReturnPostEnterPending)
+        return;
+    printf("[info][mock-service] shop_return_post_enter_clear client=%08x "
+           "scene=%s pos=(%u,%u) source=%s\n",
+           session->clientId, session->shopSceneReturnPostEnterScene,
+           (u32)session->shopSceneReturnPostEnterX,
+           (u32)session->shopSceneReturnPostEnterY,
+           source ? source : "-");
+    session->shopSceneReturnPostEnterPending = false;
+    session->shopSceneReturnPostEnterScene[0] = 0;
+    session->shopSceneReturnPostEnterX = 0;
+    session->shopSceneReturnPostEnterY = 0;
+}
+
 static int vm_mock_service_trade_client_index(const vm_mock_service_trade *trade,
                                               u32 clientId)
 {
@@ -3160,6 +3260,8 @@ static const char *vm_mock_service_social_notice_name(u8 type)
         return "spar-invite";
     case VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT:
         return "spar-result";
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE:
+        return "arena-challenge";
     default:
         return "unknown";
     }
@@ -4304,6 +4406,10 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->scenePendingScene[0] = 0;
     session->shopSceneNpcReseedPending = false;
     session->shopSceneNpcReseedScene[0] = 0;
+    session->shopSceneReturnPostEnterPending = false;
+    session->shopSceneReturnPostEnterScene[0] = 0;
+    session->shopSceneReturnPostEnterX = 0;
+    session->shopSceneReturnPostEnterY = 0;
     session->taskPromptRefreshPending = false;
     session->taskPromptRefreshScene[0] = 0;
     memset(session->socialNotices, 0, sizeof(session->socialNotices));
@@ -4327,6 +4433,9 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sparBattleReadyPending = false;
     session->sparBattlePeerClientId = 0;
     session->sparBattlePeerWireId = 0;
+    session->arenaChallengeReplyActive = false;
+    session->arenaChallengeSourceRoleId = 0;
+    session->arenaChallengeInitiatorPromptPending = false;
     session->pendingTeamBattleSerial = 0;
     session->instanceChallengePending = false;
     session->instanceChallengeBattlePending = false;
@@ -5683,6 +5792,10 @@ typedef struct
      * flag.  It authorizes replacing a persisted completed (state 3) row only
      * after this NPC has actually offered the task to the active session. */
     bool taskRepeatable;
+    /* 0=not repeatable, 1=unlimited, 2=daily, 3=weekly, 4=monthly.  The
+     * boolean above remains a compatibility projection for older in-memory
+     * data and is always derived from this policy for new DB rows. */
+    u8 taskRepeatPolicy;
     u32 challengeEnemyId;
     u16 x;
     u16 y;
@@ -5708,6 +5821,22 @@ typedef struct
     char instanceScene[64];
     bool nativeSceneActor;
 } vm_net_mock_scene_npcinfo_seed;
+
+/* Old rows persisted only the repeatable boolean.  Preserve their meaning as
+ * unlimited repeats, while new rows retain the explicit cadence. */
+static u8 vm_net_mock_task_repeat_policy_from_seed(
+    const vm_net_mock_scene_npcinfo_seed *seed)
+{
+    if (seed == NULL)
+        return VM_NET_MOCK_TASK_REPEAT_NEVER;
+    if (seed->taskRepeatPolicy >= VM_NET_MOCK_TASK_REPEAT_UNLIMITED &&
+        seed->taskRepeatPolicy <= VM_NET_MOCK_TASK_REPEAT_MONTHLY)
+    {
+        return seed->taskRepeatPolicy;
+    }
+    return seed->taskRepeatable ? VM_NET_MOCK_TASK_REPEAT_UNLIMITED
+                                : VM_NET_MOCK_TASK_REPEAT_NEVER;
+}
 
 typedef struct
 {

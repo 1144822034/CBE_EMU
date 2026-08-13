@@ -1397,6 +1397,9 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     char missingResource[64];
     bool resourcesReady = false;
     bool recentCompletedTarget = false;
+    bool shopReturnPostEnter = false;
+    u16 shopReturnX = 0;
+    u16 shopReturnY = 0;
     u32 nearbyRoleCount = 0;
     u32 nearbyOtherInfoLen = 0;
     u8 nearbyMoveinfoCount = 0;
@@ -1411,6 +1414,32 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_get_scene_change_target(request, requestLen, &target);
     if (target.scene[0] == 0)
         return 0;
+
+    /* A real shop return is a two-step scene re-entry.  The preceding 30/2
+     * result has already restored the role's persisted coordinate; the
+     * standard post-enter request that follows nevertheless contains this
+     * scene's default SCE landing coordinate.  It must complete the existing
+     * return shell, not be persisted as a new teleport destination. */
+    shopReturnPostEnter = vm_mock_service_shop_scene_return_post_enter_matches(
+        target.scene, &shopReturnX, &shopReturnY);
+    if (shopReturnPostEnter)
+    {
+        printf("[info][network] mock_shop_return_post_enter_restore scene=%s "
+               "request_pos=(%u,%u) restore_pos=(%u,%u) "
+               "contract=30/2-then-post-enter\n",
+               target.scene, (u32)target.x, (u32)target.y,
+               (u32)shopReturnX, (u32)shopReturnY);
+        target.x = shopReturnX;
+        target.y = shopReturnY;
+    }
+    else
+    {
+        /* The marker is valid for exactly the immediately following scene
+         * completion.  A different target means the player genuinely left
+         * before that completion and must never inherit stale shop coords. */
+        vm_mock_service_clear_shop_scene_return_post_enter(
+            "post-enter-scene-mismatch");
+    }
     resourcesReady = vm_net_mock_prepare_scene_enter_resources(&target,
                                                                missingResource,
                                                                sizeof(missingResource));
@@ -1423,12 +1452,15 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
             return 0;
         objectCount += 1;
-        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
-            return 0;
-        if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
-            return 0;
-        vm_net_mock_finish_wt_object(out, objectStart, pos);
-        objectCount += 1;
+        if (!shopReturnPostEnter)
+        {
+            if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2, &objectStart))
+                return 0;
+            if (!vm_net_mock_put_scene_ack_without_posinfo(out, outCap, &pos, 2, target.scene))
+                return 0;
+            vm_net_mock_finish_wt_object(out, objectStart, pos);
+            objectCount += 1;
+        }
         if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
             return 0;
         objectCount += 1;
@@ -1439,9 +1471,66 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         vm_net_mock_defer_scene_enter_completion(&target,
                                                  "scene-change-post-enter-followup",
                                                  missingResource);
+        if (shopReturnPostEnter)
+        {
+            printf("[info][network] mock_shop_return_post_enter_deferred scene=%s "
+                   "reason=resources-not-ready completion=defer-30/2-until-resource-followup\n",
+                   target.scene);
+        }
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
         vm_autotest_note("mock_scene_download_followup_ack scene=%s exit=%u response=scene-ack-without-posinfo\n",
                          target.scene, target.exitId);
+        return pos;
+    }
+
+    if (shopReturnPostEnter)
+    {
+        u32 objectStart = 0;
+
+        /* `30/1` has already created this shell.  The post-enter request
+         * carries the SCE default landing, so restore the persisted shop
+         * return coordinate only now, after it proved resources are ready.
+         * Keep this compact completion below the ten-object dispatch limit. */
+        if (!g_vm_net_mock_last_scene_change_target_valid ||
+            !vm_net_mock_scene_change_targets_equal(
+                &target, &g_vm_net_mock_last_scene_change_target))
+        {
+            vm_net_mock_remember_scene_change_target(&target);
+        }
+        if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x1e, 2,
+                                         &objectStart) ||
+            !vm_net_mock_put_scene_fields_with(out, outCap, &pos, true, true,
+                                               2, target.scene, target.x,
+                                               target.y))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        if (!vm_net_mock_append_scene_npcs11_once_or_empty(
+                out, outCap, &pos, target.scene, "shop-return-post-enter"))
+        {
+            return 0;
+        }
+        objectCount += 1;
+        if (!vm_net_mock_append_books42_object(out, outCap, &pos))
+            return 0;
+        objectCount += 1;
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+        vm_net_mock_mark_completed_scene_change_target(&target);
+        vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                          "shop-return-post-enter-complete");
+        vm_mock_service_clear_shop_scene_return_post_enter(
+            "scene-change-shop-return-post-enter");
+        g_vm_net_mock_last_scene_change_target_valid = false;
+        g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        printf("[info][network] mock_shop_return_post_enter_complete scene=%s "
+               "pos=(%u,%u) objects=%u resp=%u "
+               "contract=30/1-posinfo-then-post-enter-30/2-posinfo\n",
+               target.scene, target.x, target.y, objectCount, pos);
         return pos;
     }
 
@@ -1469,6 +1558,9 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
         g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+        if (shopReturnPostEnter)
+            vm_mock_service_clear_shop_scene_return_post_enter(
+                "scene-change-post-enter-repeat");
         printf("[info][network] mock_scene_change_post_enter_repeat_ack scene=%s pos=(%u,%u) objects=%u resp=%u age=%u\n",
                target.scene,
                target.x,
@@ -1549,6 +1641,9 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
 
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     vm_net_mock_save_player_pos_state(target.scene, target.x, target.y, "scene-change-post-enter-complete");
+    if (shopReturnPostEnter)
+        vm_mock_service_clear_shop_scene_return_post_enter(
+            "scene-change-post-enter-complete");
     g_vm_net_mock_last_scene_change_target_valid = false;
     g_vm_net_mock_teleport_stone_map_enter_pending = false;
     g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
@@ -2189,7 +2284,8 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
             if (!duplicate &&
                 vm_net_mock_task_definition_available(boundTask, activeRole,
                                                        states, stateCount,
-                                                       seeds[seedIndex].taskRepeatable))
+                                                       vm_net_mock_task_repeat_policy_from_seed(
+                                                           &seeds[seedIndex])))
             {
                 if (!vm_net_mock_append_catalog_task_candidate_record(
                         taskInfo, sizeof(taskInfo), &taskInfoLen,
@@ -2230,7 +2326,8 @@ static bool vm_net_mock_append_taskaction14_object(u8 *out, u32 outCap, u32 *pos
                 continue;
             task = vm_net_mock_task_catalog_find_by_id(ref->taskId);
             if (!vm_net_mock_task_definition_available(task, activeRole,
-                                                       states, stateCount, false))
+                                                       states, stateCount,
+                                                       VM_NET_MOCK_TASK_REPEAT_NEVER))
             {
                 continue;
             }
@@ -3814,6 +3911,7 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     vm_mock_service_social_notice *notice = NULL;
     u32 objectStart = 0;
     u8 noticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+    int appendedObjectCount = 1;
 
     if (noticeTypeOut)
         *noticeTypeOut = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
@@ -3823,7 +3921,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     /* A modal invitation remains pending until the target emits 10/5, 21/3,
      * 5/3, or 4/16.  Do not stack another modal over it. */
     if (observer->friendInviteReplyActive || observer->tradeInviteReplyActive ||
-        observer->teamInviteReplyActive || observer->sparInviteReplyActive)
+        observer->teamInviteReplyActive || observer->sparInviteReplyActive ||
+        observer->arenaChallengeReplyActive)
         return 0;
 
     for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
@@ -3998,6 +4097,56 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         {
             return -1;
         }
+        break;
+    }
+
+    case VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE:
+    {
+        vm_mock_service_client_session *source =
+            vm_mock_service_find_client_session(notice->sourceClientId);
+        char prompt[128];
+
+        if (source == NULL || !source->roleOnline ||
+            source->onlineRoleId != notice->sourceRoleId ||
+            !observer->sceneVisibleReady)
+        {
+            printf("[warn][mock-service] arena_challenge_drop observer=%08x source=%08x/%u reason=source-unavailable\n",
+                   observer->clientId, notice->sourceClientId,
+                   notice->sourceRoleId);
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+
+        if (notice->result != 0 && notice->result != 1)
+        {
+            memset(notice, 0, sizeof(*notice));
+            return 0;
+        }
+
+        snprintf(prompt, sizeof(prompt),
+                 "\xa1\xbe\xb1\xc8\xce\xe4\xcc\xf4\xd5\xbd\xa1\xbf%s\xcf\xf2\xc4\xfa\xb7\xa2\xc6\xf0\xb1\xc8\xce\xe4\xcc\xf4\xd5\xbd\xa3\xac\xca\xc7\xb7\xf1\xd3\xa6\xd5\xbd\xa3\xbf", /* 【比武挑战】%s向您发起比武挑战，是否应战？ */
+                 notice->sourceName);
+        /* A live NPC instance begins its non-scene battle through the exact
+         * scene-owned 26/0 -> 30/9 -> 30/10{result=0} sequence.  Deliver the
+         * remote arena prompt in that same complete envelope; a bare 30/9
+         * leaves the in-game module unarmed when its later 4/10 arrives. */
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 26, 0,
+                                         &objectStart))
+        {
+            return -1;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, *pos);
+        if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 30, 9,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, pos, "isleader", 0) ||
+            !vm_net_mock_put_object_string(out, outCap, pos, "challenge",
+                                           prompt))
+        {
+            return -1;
+        }
+        observer->arenaChallengeReplyActive = true;
+        observer->arenaChallengeSourceRoleId = notice->sourceRoleId;
+        appendedObjectCount = 2;
         break;
     }
 
@@ -4179,7 +4328,70 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
     memset(notice, 0, sizeof(*notice));
     if (noticeTypeOut)
         *noticeTypeOut = noticeType;
-    return 1;
+    return appendedObjectCount;
+}
+
+static bool vm_net_mock_scene_sync_first_social_notice_is(
+    const vm_mock_service_client_session *observer, u8 type)
+{
+    if (observer == NULL)
+        return false;
+    for (u32 i = 0; i < VM_MOCK_SERVICE_SOCIAL_NOTICE_MAX; ++i)
+    {
+        if (observer->socialNotices[i].type != VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE)
+            return observer->socialNotices[i].type == type;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_build_pending_arena_challenge_notice_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
+{
+    u8 noticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+    u32 pos = 5;
+    int appended = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_scene_sync_first_social_notice_is(
+            observer, VM_MOCK_SERVICE_SOCIAL_NOTICE_ARENA_CHALLENGE))
+    {
+        return 0;
+    }
+    appended = vm_net_mock_append_scene_sync_social_notice_object(
+        out, outCap, &pos, observer, &noticeType);
+    if (appended <= 0)
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, (u8)appended);
+    printf("[info][mock-service] arena_challenge_notice_deliver observer=%08x "
+           "stage=remote-taskhall-prompt resp=%u\n",
+           observer->clientId, pos);
+    return pos;
+}
+
+/* The initiator's 4/17 accepted result is the native PVP state edge.  Deliver
+ * it as its own poll response before that observer can consume the pending
+ * 4/10 start. */
+static u32 vm_net_mock_build_pending_spar_result_notice_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
+{
+    u8 noticeType = VM_MOCK_SERVICE_SOCIAL_NOTICE_NONE;
+    u32 pos = 5;
+    int appended = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_scene_sync_first_social_notice_is(
+            observer, VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT))
+    {
+        return 0;
+    }
+    appended = vm_net_mock_append_scene_sync_social_notice_object(
+        out, outCap, &pos, observer, &noticeType);
+    if (appended <= 0 || noticeType != VM_MOCK_SERVICE_SOCIAL_NOTICE_SPAR_RESULT)
+        return 0;
+    vm_net_mock_finish_wt_packet(out, pos, (u8)appended);
+    printf("[info][mock-service] spar_result_notice_deliver observer=%08x "
+           "stage=before-duel-start resp=%u\n", observer->clientId, pos);
+    return pos;
 }
 
 /*
@@ -4339,6 +4551,61 @@ static u32 vm_net_mock_build_pending_duel_terminal_response(
     u32 outCap,
     vm_mock_service_client_session *observer);
 
+/* `task_hall_activate_selected_entry` sends the private NPC service request
+ * as 26/1.  `DispatchItemEvent` clears that request's pending callback only
+ * after ParseNPCDialogData has consumed its reply.  Keep the money/item
+ * mutations in a following scene-poll packet: mmGame's 7/7 receiver then
+ * updates the item manager without re-entering the dialog callback. */
+static u32 vm_net_mock_build_pending_npc_purchase_sync_response(
+    u8 *out, u32 outCap, vm_mock_service_client_session *observer)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos || observer == NULL ||
+        !observer->npcPurchaseSyncPending ||
+        g_schedulerTick < observer->npcPurchaseSyncNotBeforeTick)
+    {
+        return 0;
+    }
+    if (role == NULL || role->roleId != observer->onlineRoleId ||
+        observer->npcPurchaseSyncSeq == 0 ||
+        observer->npcPurchaseSyncItemId == 0 ||
+        observer->npcPurchaseSyncCount == 0)
+    {
+        printf("[error][mock-service] npc_purchase_sync_drop client=%08x role=%u seq=%u item=%u count=%u reason=invalid-session-state\n",
+               observer->clientId, role ? role->roleId : 0,
+               observer->npcPurchaseSyncSeq,
+               observer->npcPurchaseSyncItemId,
+               observer->npcPurchaseSyncCount);
+        observer->npcPurchaseSyncPending = false;
+        observer->npcPurchaseSyncSeq = 0;
+        observer->npcPurchaseSyncItemId = 0;
+        observer->npcPurchaseSyncCount = 0;
+        observer->npcPurchaseSyncNotBeforeTick = 0;
+        return 0;
+    }
+    if (!vm_net_mock_append_type1_object(out, outCap, &pos, 0) ||
+        !vm_net_mock_append_backpack_item_add7_object(
+            out, outCap, &pos, observer->npcPurchaseSyncSeq,
+            observer->npcPurchaseSyncItemId,
+            observer->npcPurchaseSyncCount))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 2);
+    printf("[info][mock-service] npc_purchase_sync_deliver client=%08x role=%u seq=%u item=%u count=%u money=%u response=10/26+7/7 source=scene-sync-poll\n",
+           observer->clientId, role->roleId, observer->npcPurchaseSyncSeq,
+           observer->npcPurchaseSyncItemId,
+           observer->npcPurchaseSyncCount, role->money);
+    observer->npcPurchaseSyncPending = false;
+    observer->npcPurchaseSyncSeq = 0;
+    observer->npcPurchaseSyncItemId = 0;
+    observer->npcPurchaseSyncCount = 0;
+    observer->npcPurchaseSyncNotBeforeTick = 0;
+    return pos;
+}
+
 static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
 {
     vm_mock_service_client_session *observer = vm_mock_service_get_active_client_session();
@@ -4366,6 +4633,10 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * scene remains pollable during the item/confirmation phase. */
     if (g_vm_net_mock_teleport_stone_deferred_enter_valid)
         return vm_net_mock_build_teleport_stone_deferred_enter_response(out, outCap);
+    teamBattleResponseLen = vm_net_mock_build_pending_npc_purchase_sync_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     if (!observer->sceneVisibleReady || observer->sceneVisiblePending ||
         !vm_net_mock_scene_name_is_safe(observer->sceneVisibleScene))
     {
@@ -4385,6 +4656,15 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
+    teamBattleResponseLen = vm_net_mock_build_pending_spar_result_notice_response(
+        out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen =
+        vm_net_mock_build_pending_arena_initiator_confirm_response(
+            out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
     teamBattleResponseLen = vm_net_mock_build_duel_start_response(
         out, outCap, observer);
     if (teamBattleResponseLen != 0)
@@ -4395,6 +4675,11 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
         return teamBattleResponseLen;
     teamBattleResponseLen = vm_net_mock_build_pending_duel_terminal_response(
         out, outCap, observer);
+    if (teamBattleResponseLen != 0)
+        return teamBattleResponseLen;
+    teamBattleResponseLen =
+        vm_net_mock_build_pending_arena_challenge_notice_response(
+            out, outCap, observer);
     if (teamBattleResponseLen != 0)
         return teamBattleResponseLen;
     if (vm_net_mock_battle_pending_settlement_is_deliverable(observer))

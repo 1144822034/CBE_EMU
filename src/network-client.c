@@ -830,9 +830,11 @@ static bool vm_client_enqueue(vm_client_job_kind kind, u32 connectId,
 /*
  * The post-shop hangup investigation needs the guest callback boundary, not
  * merely the TCP completion.  Recognise only the battle-start object prefix
- * emitted by the old direct builder (2/10, 2/2, 4/5, 4/11) or the corrected
- * scene-poll start (2/2, 4/5, 4/11).  This is observation only; transport
- * scheduling and response bytes remain untouched.
+ * emitted by the old direct builder (2/10, 2/2, 4/5, 4/11), the corrected
+ * scene-poll start (2/2, 4/5, 4/11), or a standalone PVP 4/10 start.  The
+ * PVP form is included solely to prove whether the existing mmBattle module
+ * consumes the packet after an arena/spar confirmation.  This is observation
+ * only; transport scheduling and response bytes remain untouched.
  */
 static void vm_client_capture_hangup_battle_start_response(
     const vm_client_completion *completion,
@@ -851,6 +853,8 @@ static void vm_client_capture_hangup_battle_start_response(
     static const u8 directSubtypes[4] = {10, 2, 5, 11};
     static const u8 pollKinds[3] = {2, 4, 4};
     static const u8 pollSubtypes[3] = {2, 5, 11};
+    static const u8 pvpKinds[1] = {4};
+    static const u8 pvpSubtypes[1] = {10};
 
     if (observation == NULL)
         return;
@@ -871,7 +875,7 @@ static void vm_client_capture_hangup_battle_start_response(
      * six-byte header: major/kind/subtype/reserved/len-hi/len-lo.  Do not use
      * the five-byte request-object helper here. */
     objectCount = packet[4];
-    if (objectCount < 3 || packetLen < 11)
+    if (objectCount == 0 || packetLen < 11)
         return;
     offset = 5;
     if (packet[offset] == 1 && packet[offset + 1] == 2 &&
@@ -888,6 +892,14 @@ static void vm_client_capture_hangup_battle_start_response(
         expectedKinds = pollKinds;
         expectedSubtypes = pollSubtypes;
         expectedCount = 3;
+    }
+    else if (packet[offset] == 1 && packet[offset + 1] == 4 &&
+             packet[offset + 2] == 10)
+    {
+        expectedKinds = pvpKinds;
+        expectedSubtypes = pvpSubtypes;
+        expectedCount = 1;
+        observation->hangupBattleStartDirect = 1;
     }
     else
     {
