@@ -11570,6 +11570,714 @@ static void vm_mock_user_render_backpack_item(vm_mock_admin_text *page,
         role->roleId, item->itemId, item->seq);
 }
 
+enum
+{
+    VM_MOCK_USER_ROLE_TRANSFER_CODE_LEN = 8,
+    VM_MOCK_USER_ROLE_TRANSFER_EXPIRE_SECONDS = 15 * 60
+};
+
+typedef struct
+{
+    bool invalid;
+    u8 count;
+    u32 roleIds[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+    u8 roleIndices[VM_NET_MOCK_ROLE_DB_MAX_ROLES];
+} vm_mock_user_role_transfer_roles;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 activeRoleId;
+    u32 roleCount;
+} vm_mock_user_role_transfer_state;
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    char sourceAccountId[64];
+    u32 roleId;
+    u32 expiresUnix;
+} vm_mock_user_role_transfer_code_row;
+
+static bool g_vm_mock_user_role_transfer_schema_ready = false;
+static u32 g_vm_mock_user_role_transfer_serial = 0;
+
+static bool vm_mock_user_role_transfer_schema_ensure(void)
+{
+    if (g_vm_mock_user_role_transfer_schema_ready)
+        return true;
+    if (!vm_mysql_exec(
+            "CREATE TABLE IF NOT EXISTS account_role_transfer_codes ("
+            "verification_code CHAR(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "source_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
+            "role_id INT UNSIGNED NOT NULL,"
+            "expires_unix INT UNSIGNED NOT NULL,"
+            "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY(verification_code),"
+            "UNIQUE KEY uq_account_role_transfer_source_role(source_account_id,role_id),"
+            "KEY idx_account_role_transfer_expiry(expires_unix),"
+            "CONSTRAINT fk_account_role_transfer_source_role "
+            "FOREIGN KEY(source_account_id,role_id) REFERENCES account_roles(account_id,role_id) "
+            "ON DELETE CASCADE"
+            ") ENGINE=InnoDB"))
+    {
+        return false;
+    }
+    g_vm_mock_user_role_transfer_schema_ready = true;
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_account_hex(const char *accountId,
+                                                    char *out, size_t outCap)
+{
+    size_t accountLen = accountId ? strlen(accountId) : 0;
+
+    return accountLen != 0 && accountLen < 64 &&
+           vm_mysql_hex_encode((const u8 *)accountId, accountLen, out, outCap) != 0;
+}
+
+static bool vm_mock_user_role_transfer_code_is_valid(const char *code)
+{
+    if (code == NULL || strlen(code) != VM_MOCK_USER_ROLE_TRANSFER_CODE_LEN)
+        return false;
+    for (u32 i = 0; i < VM_MOCK_USER_ROLE_TRANSFER_CODE_LEN; ++i)
+    {
+        if (code[i] < '0' || code[i] > '9')
+            return false;
+    }
+    return true;
+}
+
+static void vm_mock_user_role_transfer_make_code(char out[9])
+{
+    u32 entropy = (u32)time(NULL) ^ scheduler_get_tick_ms() ^
+                  ++g_vm_mock_user_role_transfer_serial ^
+                  (u32)(uintptr_t)&g_vm_mock_user_role_transfer_serial;
+    u32 value = 10000000u + (entropy % 90000000u);
+
+    snprintf(out, 9, "%08u", value);
+}
+
+static bool vm_mock_user_role_transfer_roles_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_user_role_transfer_roles *context =
+        (vm_mock_user_role_transfer_roles *)contextValue;
+    u32 roleId = 0;
+    u32 roleIndex = 0;
+
+    if (context == NULL || columnCount != 2 ||
+        context->count >= VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &roleId) || roleId == 0 ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &roleIndex) ||
+        roleIndex >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->roleIds[context->count] = roleId;
+    context->roleIndices[context->count] = (u8)roleIndex;
+    ++context->count;
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_state_row(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_user_role_transfer_state *context =
+        (vm_mock_user_role_transfer_state *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 2 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->activeRoleId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &context->roleCount))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_code_row_cb(
+    void *contextValue, unsigned int columnCount, const char *const *values,
+    const size_t *lengths)
+{
+    vm_mock_user_role_transfer_code_row *context =
+        (vm_mock_user_role_transfer_code_row *)contextValue;
+
+    if (context == NULL || context->found || columnCount != 3 || values[0] == NULL ||
+        lengths[0] == 0 || lengths[0] >= sizeof(context->sourceAccountId) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &context->roleId) ||
+        context->roleId == 0 ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &context->expiresUnix))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    memcpy(context->sourceAccountId, values[0], lengths[0]);
+    context->sourceAccountId[lengths[0]] = 0;
+    context->found = true;
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_table_exists(const char *tableName,
+                                                     bool *existsOut)
+{
+    vm_mock_mysql_u32_context context;
+    char query[256];
+
+    if (existsOut != NULL)
+        *existsOut = false;
+    if (tableName == NULL || tableName[0] == 0)
+        return false;
+    memset(&context, 0, sizeof(context));
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM information_schema.TABLES "
+             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='%s'", tableName);
+    if (!vm_mysql_query(query, vm_mock_mysql_single_u32_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (existsOut != NULL)
+        *existsOut = context.value != 0;
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_load_roles_for_update(
+    const char *accountHex, vm_mock_user_role_transfer_roles *roles)
+{
+    char query[384];
+
+    if (accountHex == NULL || roles == NULL)
+        return false;
+    memset(roles, 0, sizeof(*roles));
+    snprintf(query, sizeof(query),
+             "SELECT role_id,role_index FROM account_roles "
+             "WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_index FOR UPDATE",
+             accountHex);
+    return vm_mysql_query(query, vm_mock_user_role_transfer_roles_row, roles) &&
+           !roles->invalid;
+}
+
+static bool vm_mock_user_role_transfer_load_state_for_update(
+    const char *accountHex, vm_mock_user_role_transfer_state *state)
+{
+    char query[384];
+
+    if (accountHex == NULL || state == NULL)
+        return false;
+    memset(state, 0, sizeof(*state));
+    snprintf(query, sizeof(query),
+             "SELECT active_role_id,role_count FROM account_role_state "
+             "WHERE account_id=CAST(X'%s' AS CHAR) FOR UPDATE", accountHex);
+    return vm_mysql_query(query, vm_mock_user_role_transfer_state_row, state) &&
+           !state->invalid && state->found;
+}
+
+static bool vm_mock_user_role_transfer_load_code(
+    const char *code, bool forUpdate, vm_mock_user_role_transfer_code_row *row)
+{
+    char codeHex[32];
+    char query[512];
+
+    if (!vm_mock_user_role_transfer_code_is_valid(code) || row == NULL ||
+        vm_mysql_hex_encode((const u8 *)code, strlen(code), codeHex,
+                            sizeof(codeHex)) == 0)
+    {
+        return false;
+    }
+    memset(row, 0, sizeof(*row));
+    snprintf(query, sizeof(query),
+             "SELECT source_account_id,role_id,expires_unix "
+             "FROM account_role_transfer_codes "
+             "WHERE verification_code=CAST(X'%s' AS CHAR)%s",
+             codeHex, forUpdate ? " FOR UPDATE" : "");
+    return vm_mysql_query(query, vm_mock_user_role_transfer_code_row_cb, row) &&
+           !row->invalid;
+}
+
+static bool vm_mock_user_role_transfer_contains_role(
+    const vm_mock_user_role_transfer_roles *roles, u32 roleId)
+{
+    if (roles == NULL || roleId == 0)
+        return false;
+    for (u32 i = 0; i < roles->count; ++i)
+    {
+        if (roles->roleIds[i] == roleId)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_mock_user_role_transfer_create_code(const char *sourceAccountId,
+                                                    u32 roleId, char codeOut[9],
+                                                    const char **errorOut)
+{
+    vm_mock_user_role_transfer_roles sourceRoles;
+    char sourceHex[129];
+    char code[9];
+    char codeHex[32];
+    char query[768];
+    u32 nowUnix = (u32)time(NULL);
+    bool transactionStarted = false;
+    bool created = false;
+
+    if (errorOut != NULL)
+        *errorOut = "生成角色迁移验证码失败";
+    if (codeOut != NULL)
+        codeOut[0] = 0;
+    if (sourceAccountId == NULL || roleId == 0 ||
+        !vm_mock_user_role_transfer_schema_ensure() ||
+        !vm_mock_service_account_exists(sourceAccountId) ||
+        !vm_mock_user_role_transfer_account_hex(sourceAccountId, sourceHex,
+                                                sizeof(sourceHex)))
+    {
+        if (errorOut != NULL)
+            *errorOut = "角色迁出参数无效";
+        return false;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto done;
+    transactionStarted = true;
+    if (!vm_mock_user_role_transfer_load_roles_for_update(sourceHex, &sourceRoles) ||
+        !vm_mock_user_role_transfer_contains_role(&sourceRoles, roleId))
+    {
+        if (errorOut != NULL)
+            *errorOut = "该角色不属于当前账号";
+        goto done;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_transfer_codes WHERE expires_unix<%u "
+             "OR (source_account_id=CAST(X'%s' AS CHAR) AND role_id=%u)",
+             nowUnix, sourceHex, roleId);
+    if (!vm_mysql_exec(query))
+        goto done;
+    for (u32 attempt = 0; attempt < 12; ++attempt)
+    {
+        vm_mock_user_role_transfer_make_code(code);
+        if (vm_mysql_hex_encode((const u8 *)code, strlen(code), codeHex,
+                                sizeof(codeHex)) == 0)
+        {
+            goto done;
+        }
+        snprintf(query, sizeof(query),
+                 "INSERT INTO account_role_transfer_codes"
+                 "(verification_code,source_account_id,role_id,expires_unix) "
+                 "VALUES(CAST(X'%s' AS CHAR),CAST(X'%s' AS CHAR),%u,%u)",
+                 codeHex, sourceHex, roleId,
+                 nowUnix + VM_MOCK_USER_ROLE_TRANSFER_EXPIRE_SECONDS);
+        if (vm_mysql_exec(query))
+        {
+            created = true;
+            break;
+        }
+    }
+    if (!created)
+        goto done;
+    if (!vm_mysql_exec("COMMIT"))
+        goto done;
+    transactionStarted = false;
+    if (codeOut != NULL)
+        memcpy(codeOut, code, sizeof(code));
+    if (errorOut != NULL)
+        *errorOut = NULL;
+    return true;
+
+done:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    return false;
+}
+
+static bool vm_mock_user_role_transfer_peek_code(const char *code,
+                                                  char *sourceAccountOut,
+                                                  size_t sourceAccountOutCap,
+                                                  u32 *roleIdOut)
+{
+    vm_mock_user_role_transfer_code_row row;
+
+    if (sourceAccountOut != NULL && sourceAccountOutCap != 0)
+        sourceAccountOut[0] = 0;
+    if (roleIdOut != NULL)
+        *roleIdOut = 0;
+    if (!vm_mock_user_role_transfer_schema_ensure() ||
+        !vm_mock_user_role_transfer_load_code(code, false, &row) || !row.found ||
+        row.expiresUnix < (u32)time(NULL))
+    {
+        return false;
+    }
+    if (sourceAccountOut != NULL && sourceAccountOutCap != 0)
+        snprintf(sourceAccountOut, sourceAccountOutCap, "%s", row.sourceAccountId);
+    if (roleIdOut != NULL)
+        *roleIdOut = row.roleId;
+    return true;
+}
+
+/* Parent-role identity is immutable because role_id is globally unique.
+ * Migration therefore creates a new destination parent first; children can
+ * then be reassigned without ever observing a broken foreign key. */
+static bool vm_mock_user_role_transfer_reassign_role_table(
+    const char *tableName, const char *sourceHex, u32 sourceRoleId,
+    const char *targetHex, u32 targetRoleId)
+{
+    char query[768];
+    bool tableExists = false;
+
+    if (tableName == NULL || sourceHex == NULL || targetHex == NULL ||
+        !vm_mock_user_role_transfer_table_exists(tableName, &tableExists))
+    {
+        return false;
+    }
+    if (!tableExists)
+        return true;
+    snprintf(query, sizeof(query),
+             "UPDATE %s SET account_id=CAST(X'%s' AS CHAR),role_id=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             tableName, targetHex, targetRoleId, sourceHex, sourceRoleId);
+    return vm_mysql_exec(query);
+}
+
+static bool vm_mock_user_role_transfer_reassign_role_tables(
+    const char *sourceHex, u32 sourceRoleId, const char *targetHex,
+    u32 targetRoleId)
+{
+    static const char *const tables[] = {
+        "account_role_equipment",
+        "account_role_equipment_durability",
+        "account_role_skills",
+        "account_role_backpack",
+        "account_role_training_books",
+        "account_role_item_effects",
+        "account_role_tasks",
+        "account_role_offline_exp",
+        "account_role_practise",
+        "account_role_vitality",
+        "account_role_battle_entry_state",
+        "account_role_rapid_battle_entry_audit"
+    };
+
+    for (u32 i = 0; i < sizeof(tables) / sizeof(tables[0]); ++i)
+    {
+        if (!vm_mock_user_role_transfer_reassign_role_table(
+                tables[i], sourceHex, sourceRoleId, targetHex, targetRoleId))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool vm_mock_user_role_transfer_reassign_social_rows(
+    const char *sourceHex, u32 sourceRoleId, const char *targetHex,
+    u32 targetRoleId)
+{
+    static const char *const tableNames[] = {
+        "friendships", "world_chat_messages", "guilds", "guild_members",
+        "guild_applications"
+    };
+    static const char *const queries[] = {
+        "UPDATE friendships SET owner_account_id=CAST(X'%s' AS CHAR),owner_role_id=%u "
+        "WHERE owner_account_id=CAST(X'%s' AS CHAR) AND owner_role_id=%u",
+        "UPDATE world_chat_messages SET source_account_id=CAST(X'%s' AS CHAR),source_role_id=%u "
+        "WHERE source_account_id=CAST(X'%s' AS CHAR) AND source_role_id=%u",
+        "UPDATE guilds SET leader_account_id=CAST(X'%s' AS CHAR),leader_role_id=%u "
+        "WHERE leader_account_id=CAST(X'%s' AS CHAR) AND leader_role_id=%u",
+        "UPDATE guild_members SET account_id=CAST(X'%s' AS CHAR),role_id=%u "
+        "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+        "UPDATE guild_applications SET applicant_account_id=CAST(X'%s' AS CHAR),applicant_role_id=%u "
+        "WHERE applicant_account_id=CAST(X'%s' AS CHAR) AND applicant_role_id=%u"
+    };
+    char query[1024];
+
+    for (u32 i = 0; i < sizeof(tableNames) / sizeof(tableNames[0]); ++i)
+    {
+        bool tableExists = false;
+        if (!vm_mock_user_role_transfer_table_exists(tableNames[i], &tableExists))
+            return false;
+        if (!tableExists)
+            continue;
+        snprintf(query, sizeof(query), queries[i], targetHex, targetRoleId,
+                 sourceHex, sourceRoleId);
+        if (!vm_mysql_exec(query))
+            return false;
+        /* Friend rows may reference the migrating role from the other side. */
+        if (strcmp(tableNames[i], "friendships") == 0)
+        {
+            snprintf(query, sizeof(query),
+                     "UPDATE friendships SET target_account_id=CAST(X'%s' AS CHAR),"
+                     "target_role_id=%u WHERE target_account_id=CAST(X'%s' AS CHAR) "
+                     "AND target_role_id=%u",
+                     targetHex, targetRoleId, sourceHex, sourceRoleId);
+            if (!vm_mysql_exec(query))
+                return false;
+        }
+    }
+    return true;
+}
+
+/* The destination parent is inserted before dependent rows are reassigned.
+ * Thus all foreign keys remain valid throughout this one database transaction. */
+static bool vm_mock_user_role_transfer_claim_code(const char *targetAccountId,
+                                                  const char *code,
+                                                  char *sourceAccountOut,
+                                                  size_t sourceAccountOutCap,
+                                                  u32 *sourceRoleIdOut,
+                                                  u32 *targetRoleIdOut,
+                                                  const char **errorOut)
+{
+    vm_mock_user_role_transfer_code_row codeRow;
+    vm_mock_user_role_transfer_roles sourceRoles;
+    vm_mock_user_role_transfer_roles targetRoles;
+    vm_mock_user_role_transfer_state sourceState;
+    vm_mock_user_role_transfer_state targetState;
+    char sourceHex[129];
+    char targetHex[129];
+    char codeHex[32];
+    char query[2304];
+    u32 targetRoleId = 0;
+    u32 targetRoleIndex = 0;
+    bool transactionStarted = false;
+    bool ok = false;
+
+    if (sourceAccountOut != NULL && sourceAccountOutCap != 0)
+        sourceAccountOut[0] = 0;
+    if (sourceRoleIdOut != NULL)
+        *sourceRoleIdOut = 0;
+    if (targetRoleIdOut != NULL)
+        *targetRoleIdOut = 0;
+    if (errorOut != NULL)
+        *errorOut = "角色迁入失败";
+    if (targetAccountId == NULL || targetAccountId[0] == 0 ||
+        !vm_mock_user_role_transfer_code_is_valid(code) ||
+        !vm_mock_user_role_transfer_schema_ensure() ||
+        !vm_mock_user_role_transfer_account_hex(targetAccountId, targetHex,
+                                                sizeof(targetHex)) ||
+        vm_mysql_hex_encode((const u8 *)code, strlen(code), codeHex,
+                            sizeof(codeHex)) == 0)
+    {
+        if (errorOut != NULL)
+            *errorOut = "角色迁入参数无效";
+        return false;
+    }
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto done;
+    transactionStarted = true;
+    if (!vm_mock_user_role_transfer_load_code(code, true, &codeRow) ||
+        !codeRow.found || codeRow.expiresUnix < (u32)time(NULL))
+    {
+        if (errorOut != NULL)
+            *errorOut = "验证码无效或已过期";
+        goto done;
+    }
+    if (strcmp(codeRow.sourceAccountId, targetAccountId) == 0)
+    {
+        if (errorOut != NULL)
+            *errorOut = "不能迁入当前账号的角色";
+        goto done;
+    }
+    if (!vm_mock_user_role_transfer_account_hex(codeRow.sourceAccountId,
+                                                sourceHex, sizeof(sourceHex)) ||
+        !vm_mock_user_role_transfer_load_roles_for_update(sourceHex, &sourceRoles) ||
+        !vm_mock_user_role_transfer_contains_role(&sourceRoles, codeRow.roleId) ||
+        !vm_mock_user_role_transfer_load_roles_for_update(targetHex, &targetRoles))
+    {
+        if (errorOut != NULL)
+            *errorOut = "迁出角色不存在或账号角色数据异常";
+        goto done;
+    }
+    if (targetRoles.count >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        if (errorOut != NULL)
+            *errorOut = "当前账号角色数量已达上限";
+        goto done;
+    }
+    for (targetRoleIndex = 0; targetRoleIndex < VM_NET_MOCK_ROLE_DB_MAX_ROLES;
+         ++targetRoleIndex)
+    {
+        bool occupied = false;
+        for (u32 i = 0; i < targetRoles.count; ++i)
+        {
+            if (targetRoles.roleIndices[i] == targetRoleIndex)
+            {
+                occupied = true;
+                break;
+            }
+        }
+        if (!occupied)
+            break;
+    }
+    if (targetRoleIndex >= VM_NET_MOCK_ROLE_DB_MAX_ROLES)
+    {
+        if (errorOut != NULL)
+            *errorOut = "当前账号没有可用角色栏位";
+        goto done;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO account_role_state"
+             "(account_id,format_version,active_role_id,role_count) "
+             "VALUES(CAST(X'%s' AS CHAR),1,0,0)", targetHex);
+    if (!vm_mysql_exec(query) ||
+        !vm_mock_user_role_transfer_load_state_for_update(sourceHex, &sourceState) ||
+        !vm_mock_user_role_transfer_load_state_for_update(targetHex, &targetState))
+    {
+        if (errorOut != NULL)
+            *errorOut = "账号角色状态不可用";
+        goto done;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO role_id_sequence(account_id) VALUES(CAST(X'%s' AS CHAR))",
+             targetHex);
+    if (!vm_mysql_exec(query))
+        goto done;
+    {
+        vm_mock_mysql_u32_context idContext;
+        memset(&idContext, 0, sizeof(idContext));
+        if (!vm_mysql_query("SELECT LAST_INSERT_ID()",
+                            vm_mock_mysql_single_u32_row, &idContext) ||
+            idContext.invalid || !idContext.found || idContext.value == 0)
+            goto done;
+        targetRoleId = idContext.value;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO account_roles"
+             "(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,"
+             "level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,"
+             "backpack_item_count,designation_id,next_backpack_seq) "
+             "SELECT CAST(X'%s' AS CHAR),%u,%u,role_name,job,sex,backpack_capacity,"
+             "level,exp,hp,hp_max,mp,mp_max,money,0,scene,pos_x,pos_y,"
+             "backpack_item_count,designation_id,next_backpack_seq "
+             "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+             targetHex, targetRoleId, targetRoleIndex, sourceHex, codeRow.roleId);
+    if (!vm_mysql_exec(query) ||
+        !vm_mock_user_role_transfer_reassign_role_tables(
+            sourceHex, codeRow.roleId, targetHex, targetRoleId) ||
+        !vm_mock_user_role_transfer_reassign_social_rows(
+            sourceHex, codeRow.roleId, targetHex, targetRoleId))
+    {
+        goto done;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_transfer_codes "
+             "WHERE verification_code=CAST(X'%s' AS CHAR)", codeHex);
+    if (!vm_mysql_exec(query))
+        goto done;
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) "
+             "AND role_id=%u", sourceHex, codeRow.roleId);
+    if (!vm_mysql_exec(query))
+        goto done;
+    /* The normal creator expects dense role indices. */
+    for (u32 i = 0, compactIndex = 0; i < sourceRoles.count; ++i)
+    {
+        if (sourceRoles.roleIds[i] == codeRow.roleId)
+            continue;
+        snprintf(query, sizeof(query),
+                 "UPDATE account_roles SET role_index=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                 compactIndex++, sourceHex, sourceRoles.roleIds[i]);
+        if (!vm_mysql_exec(query))
+            goto done;
+    }
+    {
+        u32 sourceRemaining = sourceRoles.count - 1u;
+        u32 sourceActive = sourceState.activeRoleId;
+        u32 targetActive = targetState.activeRoleId;
+        if (sourceActive == codeRow.roleId)
+            sourceActive = sourceRemaining == 0 ? 0 :
+                (sourceRoles.roleIds[0] == codeRow.roleId ? sourceRoles.roleIds[1] :
+                                                           sourceRoles.roleIds[0]);
+        if (!vm_mock_user_role_transfer_contains_role(&targetRoles, targetActive))
+            targetActive = targetRoleId;
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_state SET active_role_id=%u,role_count=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)", sourceActive,
+                 sourceRemaining, sourceHex);
+        if (!vm_mysql_exec(query))
+            goto done;
+        snprintf(query, sizeof(query),
+                 "UPDATE account_role_state SET active_role_id=%u,role_count=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)", targetActive,
+                 targetRoles.count + 1u, targetHex);
+        if (!vm_mysql_exec(query))
+            goto done;
+    }
+    if (!vm_mysql_exec("COMMIT"))
+        goto done;
+    transactionStarted = false;
+    if (sourceAccountOut != NULL && sourceAccountOutCap != 0)
+        snprintf(sourceAccountOut, sourceAccountOutCap, "%s", codeRow.sourceAccountId);
+    if (sourceRoleIdOut != NULL)
+        *sourceRoleIdOut = codeRow.roleId;
+    if (targetRoleIdOut != NULL)
+        *targetRoleIdOut = targetRoleId;
+    if (errorOut != NULL)
+        *errorOut = NULL;
+    ok = true;
+
+done:
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    if (!ok && errorOut != NULL && *errorOut != NULL &&
+        strcmp(*errorOut, "角色迁入失败") == 0)
+        *errorOut = vm_mysql_last_error()[0] ? "角色迁入数据库操作失败" : "角色迁入失败";
+    return ok;
+}
+
+static void vm_mock_user_render_role_transfer_card(vm_mock_admin_text *page,
+                                                   bool hasRoles)
+{
+    if (page == NULL)
+        return;
+    vm_mock_admin_text_appendf(page,
+        "<section class=\"card transfer\"><div class=\"transfer-heading\">"
+        "<div><h2>角色迁移</h2><p class=\"sub\">完整迁移角色资料、背包、装备、技能、任务、好友、帮派与聊天历史。</p></div>"
+        "<span class=\"transfer-badge\">一次性验证码 · 15 分钟有效</span></div>"
+        "<div class=\"transfer-grid\"><div class=\"transfer-panel\"><h3>角色迁出</h3>"
+        "<p>选择角色后生成 8 位验证码。验证码请仅交给目标账号持有人。</p>");
+    if (hasRoles)
+    {
+        vm_mock_admin_text_appendf(page,
+            "<form class=\"transfer-form\" method=\"post\" action=\"/user/role-transfer/export\" "
+            "onsubmit=\"return confirm('确定为这个角色生成迁移验证码？');\">"
+            "<label>迁出角色<select name=\"role_id\" required>");
+        for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
+            char roleNameUtf8[128];
+            memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
+            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+                                          roleNameUtf8, sizeof(roleNameUtf8));
+            vm_mock_admin_text_appendf(page, "<option value=\"%u\">", role->roleId);
+            vm_mock_admin_text_append_html(page, roleNameUtf8);
+            vm_mock_admin_text_appendf(page, "（Lv.%u）</option>", role->level);
+        }
+        vm_mock_admin_text_appendf(page,
+            "</select></label><button type=\"submit\">生成迁出验证码</button></form>");
+    }
+    else
+    {
+        vm_mock_admin_text_appendf(page,
+            "<p class=\"transfer-muted\">当前账号没有可迁出的角色。</p>");
+    }
+    vm_mock_admin_text_appendf(page,
+        "</div><div class=\"transfer-panel\"><h3>角色迁入</h3>"
+        "<p>在目标账号输入迁出方提供的验证码。迁入会保留全部角色关系；账号 W 币与充值记录不会迁移。</p>"
+        "<form class=\"transfer-form\" method=\"post\" action=\"/user/role-transfer/import\" "
+        "onsubmit=\"return confirm('迁入后两边的游戏连接都会断开，确定继续？');\">"
+        "<label>8 位验证码<input name=\"code\" inputmode=\"numeric\" pattern=\"[0-9]{8}\" "
+        "minlength=\"8\" maxlength=\"8\" autocomplete=\"one-time-code\" placeholder=\"例如 12345678\" required></label>"
+        "<button type=\"submit\">确认迁入角色</button></form></div></div>"
+        "<p class=\"transfer-note\">迁入账号须保留至少一个角色栏位。验证码使用后立即失效；迁移成功后请重新登录游戏。</p></section>");
+}
+
 static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
                                           const char *accountId,
                                           const char *status,
@@ -11589,6 +12297,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         "<title>我的江湖账号</title><style>"
         "*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f4f7f9;color:#17202a;font:14px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{width:min(1080px,calc(100%% - 28px));margin:0 auto;padding:30px 0 46px}header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border-radius:12px;background:linear-gradient(145deg,#0f766e,#175cd3);color:#fff;font:700 20px serif}h1{font-size:24px;margin:0}.sub,.muted{color:#667085;margin:2px 0 0}.logout{border:1px solid #d0d5dd;border-radius:8px;padding:8px 13px;background:#fff;color:#475467;cursor:pointer}.hero{position:relative;overflow:hidden;border-radius:16px;padding:24px;background:linear-gradient(125deg,#12372d,#175cd3);color:#fff;box-shadow:0 14px 34px #175cd326;margin-bottom:18px}.hero:after{content:\"\";position:absolute;width:220px;height:220px;border-radius:50%%;right:-70px;top:-125px;background:#ffffff12}.account-line{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.account-name{font-size:25px;font-weight:750}.hero .sub{color:#dbeafe}.badge{font-size:12px;padding:3px 9px;border-radius:999px;background:#ffffff20;color:#fff}.badge.on{background:#d1fadf;color:#05603a}.overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:19px}.overview div{padding:11px 13px;border:1px solid #ffffff20;border-radius:10px;background:#ffffff10}.overview strong{display:block;font-size:18px}.section-title{display:flex;align-items:end;justify-content:space-between;margin:23px 0 10px}.section-title h2{font-size:18px;margin:0}.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:14px}.card,.role{background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:18px;box-shadow:0 2px 7px #1018280a}.role-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.role h3{font-size:19px;margin:0}.active{display:inline-block;color:#175cd3;background:#eef4ff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:650}.vitals{display:grid;gap:10px;margin:17px 0}.vital-head{display:flex;justify-content:space-between;color:#475467}.bar{height:7px;border-radius:999px;background:#edf1f5;overflow:hidden}.bar i{display:block;height:100%%;border-radius:inherit;background:#12b76a}.bar.mp i{background:#2e90fa}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding-top:13px;border-top:1px solid #eaecf0}.stats strong{display:block;color:#667085;font-size:12px;font-weight:550}.bag-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:17px;padding-top:13px;border-top:1px solid #eaecf0}.bag-head h4{margin:0;font-size:15px}.bag-list{list-style:none;padding:0;margin:9px 0 0;border:1px solid #eaecf0;border-radius:9px;max-height:260px;overflow:auto}.bag-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px;border-bottom:1px solid #f0f2f5}.bag-item:last-child{border-bottom:0}.bag-item-main{min-width:0}.bag-item-main strong,.bag-item-main span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bag-item-main span{font-size:12px;color:#667085}.bag-delete{border:1px solid #fecdca;border-radius:7px;padding:6px 10px;background:#fff5f4;color:#b42318;font:inherit;cursor:pointer}.bag-delete:hover{background:#fee4e2}.bag-empty{margin:9px 0 0;padding:12px;border:1px dashed #d0d5dd;border-radius:9px;color:#667085;text-align:center}.empty{color:#667085;text-align:center}.security{display:grid;grid-template-columns:minmax(190px,.65fr) minmax(0,1.35fr);gap:22px;align-items:start;margin-top:18px}.security h2{font-size:18px;margin:0 0 4px}.password-form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.password-form label{display:grid;gap:4px;color:#475467}.password-form .current{grid-column:1/-1}.password-form input{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit}.password-form button{grid-column:1/-1;justify-self:start;border:0;border-radius:8px;padding:9px 14px;background:#175cd3;color:#fff;font-weight:650;cursor:pointer}.notice{padding:11px 13px;border-radius:9px;margin-bottom:16px}.notice.ok{background:#ecfdf3;color:#027a48}.notice.error{background:#fef3f2;color:#b42318}@media(max-width:720px){.wrap{padding:18px 0}.overview{grid-template-columns:1fr}.roles,.security,.password-form{grid-template-columns:1fr}.password-form .current{grid-column:auto}.password-form button{grid-column:auto}.stats{grid-template-columns:1fr}.bag-item{align-items:flex-start;flex-direction:column}.bag-delete{align-self:flex-end}header{align-items:center}}"
         ".recharge{margin-top:18px}.recharge h2{font-size:18px;margin:0 0 4px}.recharge-form{display:grid;grid-template-columns:1.2fr .8fr .8fr auto;gap:10px;align-items:end;margin-top:15px}.recharge-form label{display:grid;gap:4px;color:#475467}.recharge-form input,.recharge-form select{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;font:inherit;background:#fff}.recharge-form button{border:0;border-radius:8px;padding:10px 14px;background:#175cd3;color:#fff;font-weight:700;cursor:pointer}.recharge-unavailable{padding:12px;border-radius:9px;background:#f2f4f7;color:#667085}.recharge-history{margin-top:18px;border-top:1px solid #eaecf0;padding-top:13px}.recharge-history h3{font-size:14px;margin:0 0 6px}.recharge-history a{display:flex;justify-content:space-between;gap:12px;padding:7px 0;color:#344054;text-decoration:none}.recharge-history a strong{color:#175cd3;font-size:12px}.recharge-note{color:#98a2b3;font-size:12px;margin:13px 0 0}@media(max-width:900px){.recharge-form{grid-template-columns:1fr 1fr}.recharge-form button{align-self:stretch}}@media(max-width:720px){.recharge-form{grid-template-columns:1fr}}"
+        ".transfer{margin-top:18px}.transfer-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.transfer h2,.transfer h3{margin:0}.transfer h2{font-size:18px}.transfer h3{font-size:16px}.transfer-badge{flex:0 0 auto;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#175cd3;font-size:12px;font-weight:650}.transfer-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:15px}.transfer-panel{padding:15px;border:1px solid #e4e7ec;border-radius:10px;background:#fcfcfd}.transfer-panel p{min-height:44px;color:#667085;margin:7px 0 12px}.transfer-form{display:grid;gap:9px}.transfer-form label{display:grid;gap:4px;color:#475467}.transfer-form input,.transfer-form select{width:100%%;border:1px solid #d0d5dd;border-radius:8px;padding:9px 10px;background:#fff;font:inherit}.transfer-form button{justify-self:start;border:0;border-radius:8px;padding:9px 13px;background:#175cd3;color:#fff;font-weight:700;cursor:pointer}.transfer-muted,.transfer-note{color:#667085}.transfer-muted{margin:15px 0}.transfer-note{font-size:12px;margin:14px 0 0}@media(max-width:720px){.transfer-heading,.transfer-grid{grid-template-columns:1fr}.transfer-heading{display:grid}.transfer-badge{justify-self:start}}"
         "</style></head><body><main class=\"wrap\"><header><div class=\"brand\"><div class=\"brand-mark\">江</div><div><h1>账号中心</h1><p class=\"sub\">查看角色资料与管理账号安全</p></div></div>"
         "<form method=\"post\" action=\"/user/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>");
     if (status != NULL && status[0] != 0 && message != NULL && message[0] != 0)
@@ -11673,6 +12382,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         }
         vm_mock_admin_text_appendf(&page, "</section>");
         vm_mock_payment_render_dashboard(&page, accountId);
+        vm_mock_user_render_role_transfer_card(&page, true);
         vm_mock_service_close_account_role_db_for_management(accountState, false);
     }
     else
@@ -11684,6 +12394,7 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
         if (accountState != NULL)
         {
             vm_mock_payment_render_dashboard(&page, accountId);
+            vm_mock_user_render_role_transfer_card(&page, false);
             vm_mock_service_close_account_role_db_for_management(accountState, false);
         }
     }
@@ -12674,6 +13385,142 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                     "text/html; charset=utf-8", NULL, response);
         free(response);
         return 1;
+    }
+    if (strcmp(target, "/user/role-transfer/export") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        char roleText[32];
+        char verificationCode[9];
+        char messageText[384];
+        const char *error = NULL;
+        u32 roleId = 0;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "角色迁出只允许 POST。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(roleText, 0, sizeof(roleText));
+        memset(verificationCode, 0, sizeof(verificationCode));
+        if (!vm_mock_admin_form_value(body, "role_id", roleText,
+                                      sizeof(roleText)) ||
+            !vm_net_mock_parse_u32_strict(roleText, &roleId) || roleId == 0)
+        {
+            vm_mock_user_redirect_message(client, "error", "迁出角色参数无效");
+            return 0;
+        }
+        ok = vm_mock_user_role_transfer_create_code(session->accountId, roleId,
+                                                    verificationCode, &error);
+        if (ok)
+        {
+            snprintf(messageText, sizeof(messageText),
+                     "角色迁出验证码：%s。请在目标账号输入；15 分钟内有效且仅可使用一次。",
+                     verificationCode);
+            printf("[info][user-web] role_transfer_export account=%s role=%u "
+                   "result=success\n", session->accountId, roleId);
+            vm_mock_user_redirect_message(client, "ok", messageText);
+        }
+        else
+        {
+            printf("[warn][user-web] role_transfer_export account=%s role=%u "
+                   "result=rejected\n", session->accountId, roleId);
+            vm_mock_user_redirect_message(client, "error",
+                                          error ? error : "生成迁出验证码失败");
+        }
+        return ok ? 1 : 0;
+    }
+    if (strcmp(target, "/user/role-transfer/import") == 0)
+    {
+        vm_mock_user_session *session = NULL;
+        char verificationCode[16];
+        char sourceAccountId[64];
+        char migratedSourceAccountId[64];
+        char messageText[384];
+        const char *error = NULL;
+        u32 sourceRoleId = 0;
+        u32 migratedSourceRoleId = 0;
+        u32 targetRoleId = 0;
+        u32 sourceDisconnected = 0;
+        u32 targetDisconnected = 0;
+        bool ok = false;
+
+        if (strcmp(method, "POST") != 0)
+        {
+            vm_mock_admin_send_response(client, "405 Method Not Allowed", NULL,
+                                        "Allow: POST\r\n",
+                                        "角色迁入只允许 POST。\n");
+            return 0;
+        }
+        session = vm_mock_user_request_session(request, headerLen);
+        if (session == NULL)
+        {
+            vm_mock_admin_send_location(client, "/", NULL);
+            return 0;
+        }
+        memset(verificationCode, 0, sizeof(verificationCode));
+        memset(sourceAccountId, 0, sizeof(sourceAccountId));
+        memset(migratedSourceAccountId, 0, sizeof(migratedSourceAccountId));
+        if (!vm_mock_admin_form_value(body, "code", verificationCode,
+                                      sizeof(verificationCode)) ||
+            !vm_mock_user_role_transfer_code_is_valid(verificationCode))
+        {
+            vm_mock_user_redirect_message(client, "error", "请输入有效的 8 位迁移验证码");
+            return 0;
+        }
+        if (!vm_mock_user_role_transfer_peek_code(verificationCode,
+                                                  sourceAccountId,
+                                                  sizeof(sourceAccountId),
+                                                  &sourceRoleId))
+        {
+            vm_mock_user_redirect_message(client, "error", "验证码无效或已过期");
+            return 0;
+        }
+        if (strcmp(sourceAccountId, session->accountId) == 0)
+        {
+            vm_mock_user_redirect_message(client, "error", "不能迁入当前账号的角色");
+            return 0;
+        }
+        /* Only a committed migration changes live sessions.  Invalid codes,
+         * full target accounts, and database failures leave both players online. */
+        ok = vm_mock_user_role_transfer_claim_code(
+            session->accountId, verificationCode, migratedSourceAccountId,
+            sizeof(migratedSourceAccountId), &migratedSourceRoleId,
+            &targetRoleId, &error);
+        if (ok)
+        {
+            targetDisconnected = vm_mock_service_account_disconnect_bound_sessions(
+                session->accountId, "user-role-transfer-import-target");
+            sourceDisconnected = vm_mock_service_account_disconnect_bound_sessions(
+                migratedSourceAccountId, "user-role-transfer-import-source");
+            snprintf(messageText, sizeof(messageText),
+                     "角色已迁入当前账号（新角色 ID：%u）。角色资料、背包、装备、任务、"
+                     "好友、帮派与聊天历史均已保留；两边游戏连接已断开，请重新登录游戏。",
+                     targetRoleId);
+            printf("[info][user-web] role_transfer_import source=%s role=%u "
+                   "target=%s new_role=%u result=success disconnected=%u/%u\n",
+                   migratedSourceAccountId, migratedSourceRoleId,
+                   session->accountId, targetRoleId, sourceDisconnected,
+                   targetDisconnected);
+            vm_mock_user_redirect_message(client, "ok", messageText);
+        }
+        else
+        {
+            printf("[warn][user-web] role_transfer_import source=%s role=%u "
+                   "target=%s result=rejected\n", sourceAccountId, sourceRoleId,
+                   session->accountId);
+            vm_mock_user_redirect_message(client, "error",
+                                          error ? error : "角色迁入失败");
+        }
+        return ok ? 1 : 0;
     }
     if (strcmp(target, "/user/backpack/delete") == 0)
     {

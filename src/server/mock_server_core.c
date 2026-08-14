@@ -5207,11 +5207,12 @@ enum
      * storage may retain more rows for a future migration, but no client
      * packet may advertise a larger usable grid. */
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
-    /* ParseEquipAttributes consumes an 11-byte common header plus up to four
-     * 13-byte stage attributes.  The tagged stream maximum is therefore 63
-     * bytes; the compact bootstrap header remains 11 bytes. */
+    /* ParseEquipAttributes consumes an 11-byte common header plus up to five
+     * 13-byte attributes: one fallback-primary row for accessories and up to
+     * four +4/+8/+12/+16 stage attributes.  The tagged detail stream maximum
+     * is therefore 76 bytes; the compact bootstrap header remains 11 bytes. */
     VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES = 11,
-    VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 63,
+    VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 76,
     /* HandleItemGridResponse (30/21) is the login bootstrap grid.  Its
      * ParseEquipAttributes reader explicitly accepts attr-count=0, so this
      * packet carries the fixed instance header only.  Detailed stage records
@@ -5221,7 +5222,8 @@ enum
     VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES =
         VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
         VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
-    /* 17/1 is a detail list and can carry all four staged attributes. */
+    /* 17/1 is a detail list and can carry a fallback-primary row plus all
+     * four staged attributes. */
     VM_NET_MOCK_BACKPACK_LIST_ITEMINFO_ROW_BYTES =
         6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
     VM_NET_MOCK_BACKPACK_CLIENT_ITEMINFO_MAX_BYTES =
@@ -5303,8 +5305,8 @@ enum
 
 /* Keep every producer of ParseEquipAttributes streams tied to the same
  * tagged-wire bounds.  A sequence element costs three bytes for u8, four for
- * i16, and six for u32.  The one common-extra bound above includes all four
- * staged enhancement attributes. */
+ * i16, and six for u32.  The one common-extra bound above includes the
+ * fallback-primary entry and all four staged enhancement attributes. */
 enum
 {
     VM_NET_MOCK_ITEMINFO_SEQUENCE_COUNT_BYTES = 3,

@@ -55,30 +55,30 @@ static bool check_curve_sample(u32 level,
     if (level == 1u &&
         (reference->hp != 120u || reference->mp != 100u ||
          reference->attack != 26u || reference->defense != 8u ||
-         normal->hp != 144u || normal->mp != 20u || normal->attack != 10u ||
-         normal->defense != 6u || boss->hp != 690u || boss->mp != 50u ||
-         boss->attack != 19u || boss->defense != 13u))
+         normal->hp != 40u || normal->mp != 20u || normal->attack != 13u ||
+         normal->defense != 3u || boss->hp != 120u || boss->mp != 50u ||
+         boss->attack != 26u || boss->defense != 4u))
         return false;
     if (level == 60u &&
         (reference->hp != 2234u || reference->mp != 1555u ||
          reference->attack != 425u || reference->defense != 3588u ||
-         normal->hp != 1374u || normal->mp != 311u || normal->attack != 5885u ||
-         normal->defense != 85u || boss->hp != 4080u || boss->mp != 778u ||
-         boss->attack != 11770u || boss->defense != 213u))
+         normal->hp != 1561u || normal->mp != 300u || normal->attack != 4704u ||
+         normal->defense != 81u || boss->hp != 4576u || boss->mp != 749u ||
+         boss->attack != 7839u || boss->defense != 182u))
         return false;
     if (level == 70u &&
         (reference->hp != 3496u || reference->mp != 2253u ||
          reference->attack != 791u || reference->defense != 5026u ||
-         normal->hp != 1830u || normal->mp != 451u || normal->attack != 12801u ||
-         normal->defense != 159u || boss->hp != 4770u || boss->mp != 1127u ||
-         boss->attack != 25601u || boss->defense != 396u))
+         normal->hp != 2135u || normal->mp != 451u || normal->attack != 11201u ||
+         normal->defense != 159u || boss->hp != 6228u || boss->mp != 1127u ||
+         boss->attack != 19912u || boss->defense != 356u))
         return false;
     return true;
 }
 
 int main(void)
 {
-    static const u32 levels[] = {1u, 10u, 20u, 30u, 40u, 50u, 60u, 70u};
+    static const u32 levels[] = {1u, 3u, 10u, 20u, 30u, 40u, 50u, 60u, 70u};
 
     for (u32 i = 0; i < sizeof(levels) / sizeof(levels[0]); ++i)
     {
@@ -97,6 +97,21 @@ int main(void)
         bossEntry.family = VM_NET_MOCK_MONSTER_BOSS;
         normal = vm_net_mock_monster_base_stats_for_entry(&normalEntry);
         boss = vm_net_mock_monster_base_stats_for_entry(&bossEntry);
+        if (levels[i] == 3u)
+        {
+            vm_net_mock_monster_entry slimeEntry = normalEntry;
+            vm_net_mock_monster_stats slime;
+
+            slimeEntry.enemyId = VM_NET_MOCK_BATTLE_POISON_SLIME_ID;
+            slimeEntry.family = VM_NET_MOCK_MONSTER_SLIME;
+            slime = vm_net_mock_monster_base_stats_for_entry(&slimeEntry);
+            if (slime.hp != 58u || slime.mp != 29u || slime.attack != 15u ||
+                slime.defense != 3u)
+            {
+                fputs("unexpected level-3 toxic-slime tutorial profile\n", stderr);
+                return 1;
+            }
+        }
         vm_net_mock_monster_level_reference_for_level(levels[i], &reference);
         if (!check_curve_sample(levels[i], &reference, &normal, &boss))
         {
@@ -138,10 +153,16 @@ int main(void)
                 u32 bossCounter = vm_net_mock_damage_after_defense(
                     boss.attack, qualityZero.defense);
 
-                if (ceil_div_u32(normal.hp, normalDamage) != 6u ||
-                    ceil_div_u32(qualityZero.maxHp, normalCounter) != 14u ||
-                    ceil_div_u32(boss.hp, bossDamage) != 30u ||
-                    ceil_div_u32(qualityZero.maxHp, bossCounter) != 8u)
+                u32 expectedNormalSurvive = levels[i] == 60u ? 18u : 16u;
+                u32 expectedBossKill = levels[i] == 60u ? 31u : 36u;
+                u32 expectedBossSurvive = levels[i] == 60u ? 11u : 10u;
+
+                if (ceil_div_u32(normal.hp, normalDamage) != 7u ||
+                    ceil_div_u32(qualityZero.maxHp, normalCounter) !=
+                        expectedNormalSurvive ||
+                    ceil_div_u32(boss.hp, bossDamage) != expectedBossKill ||
+                    ceil_div_u32(qualityZero.maxHp, bossCounter) !=
+                        expectedBossSurvive)
                 {
                     fprintf(stderr,
                             "equal-level turn-economy contract failed at level %u\n",
@@ -151,6 +172,6 @@ int main(void)
             }
         }
     }
-    puts("monster balance profile passed: quality-0 normal=6/14, boss=30/8 at levels 60 and 70");
+    puts("monster balance profile passed: stage-1 bare tutorial plus equipped level-60/70 contracts");
     return 0;
 }

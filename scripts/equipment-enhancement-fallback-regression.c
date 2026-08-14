@@ -1,0 +1,143 @@
+/*
+ * Regression for zero-native-primary equipment enhancement.
+ *
+ * It does not start a listener, contact MySQL, or mutate a role.  The test
+ * uses the same catalog helpers that serialize common-extra and that the
+ * equipped-only role-stat collector consumes.
+ */
+
+#include <stdio.h>
+#include <string.h>
+
+#define main cbe_server_program_main
+#include "../src/main.c"
+#undef main
+
+static int expect_fallback_ring(void)
+{
+    vm_net_mock_equipment_catalog_item ring;
+    vm_net_mock_equipment_enhance_affix_state affixes;
+    vm_net_mock_equipment_enhance_attr attrs[5];
+    vm_net_mock_equipment_bonus bonus;
+    u8 count = 0;
+
+    memset(&ring, 0, sizeof(ring));
+    memset(&affixes, 0, sizeof(affixes));
+    memset(attrs, 0, sizeof(attrs));
+    memset(&bonus, 0, sizeof(bonus));
+    ring.slot = 7; /* ring: client-native non-weapon armour is zero */
+    ring.bonus.mp = 652;
+    ring.bonus.crit = 16;
+
+    count = vm_net_mock_equipment_enhancement_collect_attrs(
+        &ring, 1, &affixes, attrs, (u8)(sizeof(attrs) / sizeof(attrs[0])));
+    if (count != 1 || attrs[0].threshold != 1 ||
+        attrs[0].type != VM_NET_MOCK_EQUIP_ATTR_MP || attrs[0].mode != 0 ||
+        attrs[0].value != 67)
+    {
+        fprintf(stderr, "fallback +1 did not encode MP +67\n");
+        return 1;
+    }
+    vm_net_mock_equipment_enhancement_add_bonus(&ring, 1, &affixes, &bonus);
+    if (bonus.mp != 67 || bonus.armor != 0 || bonus.attack != 0)
+    {
+        fprintf(stderr, "fallback +1 did not affect only MP\n");
+        return 1;
+    }
+
+    memset(attrs, 0, sizeof(attrs));
+    memset(&bonus, 0, sizeof(bonus));
+    count = vm_net_mock_equipment_enhancement_collect_attrs(
+        &ring, 2, &affixes, attrs, (u8)(sizeof(attrs) / sizeof(attrs[0])));
+    vm_net_mock_equipment_enhancement_add_bonus(&ring, 2, &affixes, &bonus);
+    if (count != 1 || attrs[0].value != 135 || bonus.mp != 135 ||
+        bonus.armor != 0 || bonus.attack != 0)
+    {
+        fprintf(stderr, "fallback +2 did not retain cumulative MP growth\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int expect_native_primary_unchanged(void)
+{
+    vm_net_mock_equipment_catalog_item weapon;
+    vm_net_mock_equipment_catalog_item armour;
+    vm_net_mock_equipment_enhance_affix_state affixes;
+    vm_net_mock_equipment_enhance_attr attrs[5];
+    vm_net_mock_equipment_bonus bonus;
+
+    memset(&weapon, 0, sizeof(weapon));
+    memset(&armour, 0, sizeof(armour));
+    memset(&affixes, 0, sizeof(affixes));
+    memset(attrs, 0, sizeof(attrs));
+    memset(&bonus, 0, sizeof(bonus));
+    weapon.slot = 0;
+    weapon.bonus.attack = 100;
+    armour.slot = 1;
+    armour.bonus.armor = 100;
+
+    if (vm_net_mock_equipment_enhancement_collect_attrs(
+            &weapon, 1, &affixes, attrs,
+            (u8)(sizeof(attrs) / sizeof(attrs[0]))) != 0)
+    {
+        fputs("native weapon received a duplicate fallback attribute\n", stderr);
+        return 1;
+    }
+    vm_net_mock_equipment_enhancement_add_bonus(&weapon, 1, &affixes, &bonus);
+    if (bonus.attack != 12 || bonus.armor != 0)
+    {
+        fputs("native weapon primary growth changed\n", stderr);
+        return 1;
+    }
+
+    memset(&bonus, 0, sizeof(bonus));
+    if (vm_net_mock_equipment_enhancement_collect_attrs(
+            &armour, 1, &affixes, attrs,
+            (u8)(sizeof(attrs) / sizeof(attrs[0]))) != 0)
+    {
+        fputs("native armour received a duplicate fallback attribute\n", stderr);
+        return 1;
+    }
+    vm_net_mock_equipment_enhancement_add_bonus(&armour, 1, &affixes, &bonus);
+    if (bonus.armor != 12 || bonus.attack != 0)
+    {
+        fputs("native armour primary growth changed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int expect_native_primary_wire_rules(void)
+{
+    u32 rule0 = vm_net_mock_equipment_enhancement_primary_wire_rule(0);
+    u32 rule1 = vm_net_mock_equipment_enhancement_primary_wire_rule(1);
+    u32 base = 34;
+    u32 clientBonus = 0;
+
+    if ((u8)rule0 != 2 || (u16)(rule0 >> 16) != 10 ||
+        (u8)rule1 != 3 || (u16)(rule1 >> 16) != 10)
+    {
+        fputs("client enhancement primary rule encoding changed\n", stderr);
+        return 1;
+    }
+    clientBonus = (u8)rule0 + (base * (u16)(rule0 >> 16)) / 100u;
+    clientBonus += (u8)rule1 + (base * (u16)(rule1 >> 16)) / 100u;
+    if (clientBonus !=
+        vm_net_mock_equipment_enhancement_bonus_from_base(base, 2))
+    {
+        fputs("client and server +2 primary growth diverged\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void)
+{
+    if (expect_fallback_ring() != 0 || expect_native_primary_unchanged() != 0 ||
+        expect_native_primary_wire_rules() != 0)
+        return 1;
+    puts("equipment enhancement regression passed: MP ring +67/+135; "
+         "client/native primary growth wire agrees at +2");
+    return 0;
+}

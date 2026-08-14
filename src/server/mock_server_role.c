@@ -2952,11 +2952,19 @@ typedef struct
  * the full quality-0 outfit also contributes several thousand armor, so that
  * scalar quietly turned an ordinary equal-level encounter into 12--17 normal
  * attacks.  Version two measures the same soft-defense damage used by battle
- * and targets a bounded number of turns instead. */
+ * and targets a bounded number of turns instead.  Version three keeps that
+ * real-damage basis, but gives ordinary encounters and bosses a slightly
+ * wider recovery window so family multipliers do not make routine fights feel
+ * like a race against one unlucky counterattack.  Version four makes the
+ * expected player profile explicit in seven ten-level stages: new characters
+ * are measured as bare, while the expectation transitions toward a complete
+ * quality-0 outfit over the mid and late game. */
 typedef enum
 {
     VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1 = 1,
-    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2 = 2
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2 = 2,
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3 = 3,
+    VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4 = 4
 } vm_net_mock_monster_balance_curve;
 
 static u32 vm_net_mock_monster_scale_ceil(u32 value, u32 numerator,
@@ -3072,6 +3080,120 @@ static void vm_net_mock_monster_level_reference_for_level(
     }
 }
 
+/* V4 deliberately does not make a level-1 player compete with a notional
+ * complete set of equipment.  The same conservative per-field minimum used
+ * by the quality-0 reference is also collected from the three bare jobs, so
+ * the first stage can be genuinely friendly to a newly created character. */
+static void vm_net_mock_monster_bare_reference_for_level(
+    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+{
+    vm_net_mock_player_stats stats;
+    u32 level = requestedLevel;
+
+    if (reference == NULL)
+        return;
+    if (level == 0)
+        level = 1;
+    if (level > VM_NET_MOCK_ROLE_LEVEL_CAP)
+        level = VM_NET_MOCK_ROLE_LEVEL_CAP;
+    memset(reference, 0, sizeof(*reference));
+    for (u32 job = 1; job <= 3; ++job)
+    {
+        vm_net_mock_role_state role;
+
+        memset(&role, 0, sizeof(role));
+        role.level = level;
+        role.exp = vm_net_mock_role_level_start_exp(role.level);
+        role.job = (u8)job;
+        vm_net_mock_role_build_base_player_stats(&role, &stats);
+        if (reference->hp == 0 || stats.maxHp < reference->hp)
+            reference->hp = stats.maxHp;
+        if (reference->mp == 0 || stats.maxMp < reference->mp)
+            reference->mp = stats.maxMp;
+        if (reference->attack == 0 || stats.attack < reference->attack)
+            reference->attack = stats.attack;
+        if (reference->defense == 0 || stats.defense < reference->defense)
+            reference->defense = stats.defense;
+    }
+}
+
+typedef struct
+{
+    u16 qualityZeroWeight; /* 0=bare profile, 1000=quality-0 profile. */
+    u8 normalHits;
+    u8 normalSurvive;
+    u8 bossDefensePercent;
+    u8 bossHits;
+    u8 bossSurvive;
+} vm_net_mock_monster_balance_stage;
+
+static const vm_net_mock_monster_balance_stage
+    g_vm_net_mock_monster_balance_stages[] = {
+        /* Levels 1-10 are tutorial encounters: a bare newcomer wins normal
+         * fights briskly and has recovery room for mistakes. */
+        {0,    4, 10, 30, 12, 5},
+        /* Equipment begins to matter from the second ten-level stage, then
+         * becomes the full expectation at the cap. */
+        {200,  5, 11, 34, 15, 6},
+        {400,  5, 12, 38, 20, 7},
+        {600,  6, 13, 42, 24, 8},
+        {750,  6, 14, 44, 28, 8},
+        {900,  7, 15, 45, 32, 9},
+        {1000, 7, 16, 45, 36, 9},
+    };
+
+static const vm_net_mock_monster_balance_stage *
+vm_net_mock_monster_balance_stage_for_level(u32 level)
+{
+    u32 index = 0;
+
+    if (level > 1)
+        index = (level - 1u) / 10u;
+    if (index >= sizeof(g_vm_net_mock_monster_balance_stages) /
+                     sizeof(g_vm_net_mock_monster_balance_stages[0]))
+    {
+        index = sizeof(g_vm_net_mock_monster_balance_stages) /
+                sizeof(g_vm_net_mock_monster_balance_stages[0]) - 1u;
+    }
+    return &g_vm_net_mock_monster_balance_stages[index];
+}
+
+static u32 vm_net_mock_monster_blend_reference_value(
+    u32 bareValue, u32 qualityZeroValue, u32 qualityZeroWeight)
+{
+    uint64_t blended;
+
+    if (qualityZeroWeight == 0 || qualityZeroValue <= bareValue)
+        return bareValue;
+    if (qualityZeroWeight >= 1000)
+        return qualityZeroValue;
+    blended = (uint64_t)bareValue * (1000u - qualityZeroWeight) +
+              (uint64_t)qualityZeroValue * qualityZeroWeight;
+    return (u32)((blended + 500u) / 1000u);
+}
+
+static void vm_net_mock_monster_v4_reference_for_level(
+    u32 requestedLevel, vm_net_mock_monster_level_reference *reference)
+{
+    vm_net_mock_monster_level_reference bare;
+    vm_net_mock_monster_level_reference qualityZero;
+    const vm_net_mock_monster_balance_stage *stage =
+        vm_net_mock_monster_balance_stage_for_level(requestedLevel);
+
+    if (reference == NULL)
+        return;
+    vm_net_mock_monster_bare_reference_for_level(requestedLevel, &bare);
+    vm_net_mock_monster_level_reference_for_level(requestedLevel, &qualityZero);
+    reference->hp = vm_net_mock_monster_blend_reference_value(
+        bare.hp, qualityZero.hp, stage->qualityZeroWeight);
+    reference->mp = vm_net_mock_monster_blend_reference_value(
+        bare.mp, qualityZero.mp, stage->qualityZeroWeight);
+    reference->attack = vm_net_mock_monster_blend_reference_value(
+        bare.attack, qualityZero.attack, stage->qualityZeroWeight);
+    reference->defense = vm_net_mock_monster_blend_reference_value(
+        bare.defense, qualityZero.defense, stage->qualityZeroWeight);
+}
+
 static void vm_net_mock_monster_family_scale(
     vm_net_mock_monster_family family,
     u32 *hpScaleOut, u32 *mpScaleOut, u32 *attackScaleOut,
@@ -3149,6 +3271,7 @@ vm_net_mock_monster_base_stats_for_entry_curve(
     u32 normalMp = 0;
     u32 normalAttack = 0;
     u32 normalDefense = 0;
+    const vm_net_mock_monster_balance_stage *stage = NULL;
 
     memset(&entry, 0, sizeof(entry));
     if (entryValue != NULL)
@@ -3157,7 +3280,15 @@ vm_net_mock_monster_base_stats_for_entry_curve(
     memset(&stats, 0, sizeof(stats));
     stats.enemyId = entry.enemyId;
     stats.level = level;
-    vm_net_mock_monster_level_reference_for_level(level, &reference);
+    if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4)
+    {
+        stage = vm_net_mock_monster_balance_stage_for_level(level);
+        vm_net_mock_monster_v4_reference_for_level(level, &reference);
+    }
+    else
+    {
+        vm_net_mock_monster_level_reference_for_level(level, &reference);
+    }
     if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1)
     {
         normalHp = vm_net_mock_monster_scale_ceil(reference.attack, 5, 1);
@@ -3166,7 +3297,7 @@ vm_net_mock_monster_base_stats_for_entry_curve(
             reference.hp, 100 + reference.defense, 1600);
         normalDefense = vm_net_mock_monster_scale_ceil(reference.attack, 30, 100);
     }
-    else
+    else if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2)
     {
         u32 sameLevelDamage = 0;
         u32 qualityZeroMp = 0;
@@ -3188,6 +3319,49 @@ vm_net_mock_monster_base_stats_for_entry_curve(
             normalMp = qualityZeroMp;
         normalAttack = vm_net_mock_monster_scale_ceil(
             reference.hp, 100 + reference.defense, 1400);
+    }
+    else if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3)
+    {
+        u32 sameLevelDamage = 0;
+        u32 qualityZeroMp = 0;
+
+        /* V3 is the administration reset curve.  A normal beast now takes
+         * seven basic hits from the lowest quality-0 profile and defeats it
+         * after sixteen successful counters.  This keeps a two- or
+         * three-monster encounter dangerous, while leaving enough recovery
+         * room for ordinary skills, items, and a missed physical strike. */
+        normalDefense = vm_net_mock_monster_scale_ceil(reference.attack, 20, 100);
+        sameLevelDamage = vm_net_mock_damage_after_defense(
+            reference.attack, normalDefense);
+        normalHp = vm_net_mock_monster_scale_ceil(sameLevelDamage, 7, 1);
+        normalMp = 8 + level * 3;
+        qualityZeroMp = vm_net_mock_monster_scale_ceil(reference.mp, 20, 100);
+        if (qualityZeroMp > normalMp)
+            normalMp = qualityZeroMp;
+        normalAttack = vm_net_mock_monster_scale_ceil(
+            reference.hp, 100 + reference.defense, 1600);
+    }
+    else
+    {
+        u32 sameLevelDamage = 0;
+        u32 expectedMp = 0;
+
+        /* V4 uses the ten-level stage profile above.  The first stage is
+         * intentionally based on bare characters; later stages blend toward
+         * real quality-0 equipment, making gear increasingly valuable rather
+         * than simply multiplying every low-level monster HP. */
+        normalDefense = vm_net_mock_monster_scale_ceil(reference.attack, 20, 100);
+        sameLevelDamage = vm_net_mock_damage_after_defense(
+            reference.attack, normalDefense);
+        normalHp = vm_net_mock_monster_scale_ceil(
+            sameLevelDamage, stage->normalHits, 1);
+        normalMp = 8 + level * 3;
+        expectedMp = vm_net_mock_monster_scale_ceil(reference.mp, 20, 100);
+        if (expectedMp > normalMp)
+            normalMp = expectedMp;
+        normalAttack = vm_net_mock_monster_scale_ceil(
+            reference.hp, 100 + reference.defense,
+            (u32)stage->normalSurvive * 100u);
     }
 
     switch ((vm_net_mock_monster_family)entry.family)
@@ -3243,11 +3417,10 @@ vm_net_mock_monster_base_stats_for_entry_curve(
          * while coordinated healing and combined actions make progress.
          *
          * V1's raw-attack HP multiplier made the level-70 profile require
-         * more than 160 ordinary attacks.  V2 keeps a boss lethal to one
-         * player (about seven successful counters) but limits its health to
-         * thirty equal-level basic attacks: a three-player group still needs
-         * roughly ten coordinated rounds, while a solo player remains unable
-         * to win a straightforward exchange. */
+         * more than 160 ordinary attacks.  V2/V3 replaced that raw multiple
+         * with real mitigated damage.  V4 additionally uses the same
+         * ten-level expected-player stages as ordinary monsters, so an early
+         * boss is not balanced around equipment a beginner cannot yet have. */
         if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1)
         {
             stats.hp = vm_net_mock_monster_scale_ceil(reference.attack, 28, 1);
@@ -3256,7 +3429,7 @@ vm_net_mock_monster_base_stats_for_entry_curve(
                 reference.hp, 100 + reference.defense, 750);
             stats.defense = vm_net_mock_monster_scale_ceil(reference.attack, 60, 100);
         }
-        else
+        else if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2)
         {
             u32 sameLevelDamage = 0;
             u32 qualityZeroMp = 0;
@@ -3272,6 +3445,47 @@ vm_net_mock_monster_base_stats_for_entry_curve(
                 stats.mp = qualityZeroMp;
             stats.attack = vm_net_mock_monster_scale_ceil(
                 reference.hp, 100 + reference.defense, 700);
+        }
+        else if (curve == VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3)
+        {
+            u32 sameLevelDamage = 0;
+            u32 qualityZeroMp = 0;
+
+            /* V3 gives a full group a stable action window: the conservative
+             * quality-0 profile needs thirty-six basic hits, while a solo
+             * player falls after about nine successful counters.  A boss is
+             * still a group-content stat challenge, not a request-time party
+             * restriction. */
+            stats.defense = vm_net_mock_monster_scale_ceil(
+                reference.attack, 45, 100);
+            sameLevelDamage = vm_net_mock_damage_after_defense(
+                reference.attack, stats.defense);
+            stats.hp = vm_net_mock_monster_scale_ceil(sameLevelDamage, 36, 1);
+            stats.mp = 24 + level * 6;
+            qualityZeroMp = vm_net_mock_monster_scale_ceil(reference.mp, 50, 100);
+            if (qualityZeroMp > stats.mp)
+                stats.mp = qualityZeroMp;
+            stats.attack = vm_net_mock_monster_scale_ceil(
+                reference.hp, 100 + reference.defense, 850);
+        }
+        else
+        {
+            u32 sameLevelDamage = 0;
+            u32 expectedMp = 0;
+
+            stats.defense = vm_net_mock_monster_scale_ceil(
+                reference.attack, stage->bossDefensePercent, 100);
+            sameLevelDamage = vm_net_mock_damage_after_defense(
+                reference.attack, stats.defense);
+            stats.hp = vm_net_mock_monster_scale_ceil(
+                sameLevelDamage, stage->bossHits, 1);
+            stats.mp = 24 + level * 6;
+            expectedMp = vm_net_mock_monster_scale_ceil(reference.mp, 50, 100);
+            if (expectedMp > stats.mp)
+                stats.mp = expectedMp;
+            stats.attack = vm_net_mock_monster_scale_ceil(
+                reference.hp, 100 + reference.defense,
+                (u32)stage->bossSurvive * 100u);
         }
         stats.exp = 20 + level * 5;
         stats.gold = 25 + level * 4;
@@ -3306,14 +3520,14 @@ vm_net_mock_monster_base_stats_for_entry_curve(
     return stats;
 }
 
-/* All live battle paths use the current curve.  The V1 helper stays private
- * solely for the one-time migration below, where it distinguishes an old
- * formula-generated MySQL row from a deliberately edited administrator row. */
+/* All live battle paths use the current curve.  Earlier versions stay private
+ * solely for versioned migrations, where they distinguish formula-generated
+ * MySQL rows from deliberately edited administrator rows. */
 static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_entry(
     const vm_net_mock_monster_entry *entryValue)
 {
     return vm_net_mock_monster_base_stats_for_entry_curve(
-        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2);
+        entryValue, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4);
 }
 
 static vm_net_mock_monster_stats vm_net_mock_monster_base_stats_for_enemy(u32 enemyId)
@@ -3370,12 +3584,14 @@ static bool vm_net_mock_monster_balance_migration_mark_row(
 
 /* Persisted monster rows are intentionally explicit administrator overrides.
  * A curve update therefore may not globally reset the table.  This migration
- * only touches rows whose four combat values are an exact V1 formula result
- * for their already configured level and family.  Every other row is a
+ * only touches rows whose four combat values are an exact predecessor-formula
+ * result for their already configured level and family.  Every other row is a
  * deliberate edit and is kept byte-for-byte.  Marking is transactionally
  * coupled to the changes, so a failed update is retried rather than leaving a
  * half-migrated catalog behind. */
-static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
+static bool vm_net_mock_monster_balance_migrate_quality_zero_curve(
+    const char *migrationName, vm_net_mock_monster_balance_curve predecessor,
+    vm_net_mock_monster_balance_curve replacement)
 {
     vm_net_mock_monster_balance_migration_mark_context mark;
     vm_net_mock_monster_balance_migration_pending
@@ -3386,11 +3602,14 @@ static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
     u32 preservedManual = 0;
     bool transactionStarted = false;
 
+    if (migrationName == NULL || migrationName[0] == 0)
+        return false;
     memset(&mark, 0, sizeof(mark));
     memset(pending, 0, sizeof(pending));
-    if (!vm_mysql_query(
-            "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='monster-quality-zero-balance-v2'",
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM server_data_migrations "
+             "WHERE migration_name='%s'", migrationName);
+    if (!vm_mysql_query(query,
             vm_net_mock_monster_balance_migration_mark_row, &mark) ||
         mark.invalid || !mark.found)
     {
@@ -3412,7 +3631,7 @@ static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
         entry.level = (u8)override->stats.level;
         entry.family = override->family;
         legacy = vm_net_mock_monster_base_stats_for_entry_curve(
-            &entry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
+            &entry, predecessor);
         if (override->stats.hp != legacy.hp ||
             override->stats.mp != legacy.mp ||
             override->stats.attack != legacy.attack ||
@@ -3423,7 +3642,7 @@ static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
         }
         pending[pendingCount].index = (int)i;
         pending[pendingCount].stats = vm_net_mock_monster_base_stats_for_entry_curve(
-            &entry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2);
+            &entry, replacement);
         ++pendingCount;
     }
 
@@ -3444,10 +3663,10 @@ static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
         if (!vm_mysql_exec(query))
             goto mysql_failed;
     }
-    if (!vm_mysql_exec(
-            "INSERT IGNORE INTO server_data_migrations (migration_name) "
-            "VALUES ('monster-quality-zero-balance-v2')") ||
-        !vm_mysql_exec("COMMIT"))
+    snprintf(query, sizeof(query),
+             "INSERT IGNORE INTO server_data_migrations (migration_name) "
+             "VALUES ('%s')", migrationName);
+    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
     {
         goto mysql_failed;
     }
@@ -3463,9 +3682,9 @@ static bool vm_net_mock_monster_balance_migrate_quality_zero_v2(void)
         override->stats.attack = pending[i].stats.attack;
         override->stats.defense = pending[i].stats.defense;
     }
-    printf("[info][mock-admin] monster_balance_migration version=q0-v2 "
+    printf("[info][mock-admin] monster_balance_migration version=%s "
            "formula_rows=%u manual_rows_preserved=%u\n",
-           pendingCount, preservedManual);
+           migrationName, pendingCount, preservedManual);
     return true;
 
 mysql_failed:
@@ -3473,8 +3692,8 @@ mysql_failed:
     if (transactionStarted)
         (void)vm_mysql_exec("ROLLBACK");
     printf("[error][mock-admin] monster_balance_migration_failed "
-           "version=q0-v2 staged=%u preserved_manual=%u error=%s\n",
-           pendingCount, preservedManual, mysqlError);
+           "version=%s staged=%u preserved_manual=%u error=%s\n",
+           migrationName, pendingCount, preservedManual, mysqlError);
     return false;
 }
 
@@ -3632,7 +3851,18 @@ static bool vm_net_mock_monster_db_load(void)
             "SELECT monster_id,drop_slot,item_id,drop_rate_percent "
             "FROM server_monster_drops ORDER BY monster_id,drop_slot",
             vm_net_mock_monster_db_drop_row, &context) ||
-        !vm_net_mock_monster_balance_migrate_quality_zero_v2())
+        !vm_net_mock_monster_balance_migrate_quality_zero_curve(
+            "monster-quality-zero-balance-v2",
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1,
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2) ||
+        !vm_net_mock_monster_balance_migrate_quality_zero_curve(
+            "monster-quality-zero-balance-v3",
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2,
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3) ||
+        !vm_net_mock_monster_balance_migrate_quality_zero_curve(
+            "monster-quality-zero-balance-v4",
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V3,
+            VM_NET_MOCK_MONSTER_BALANCE_CURVE_V4))
     {
         printf("[error][mock-admin] monster_db_load failed error=%s\n",
                vm_mysql_last_error());
@@ -3843,11 +4073,12 @@ mysql_failed:
     return false;
 }
 
-/* Recalculate all formula-derived combat and settlement values.  A batch is
- * one MySQL transaction: validate every selected identity and calculate HP,
- * MP, attack, defense, experience and money before the first UPDATE, then
- * publish the matching in-memory overrides only after COMMIT.  Configured
- * drops remain an explicit operations setting and are intentionally kept. */
+/* Recalculate exactly the four combat attributes selected by the admin UI.
+ * A batch is one MySQL transaction: validate every selected identity and
+ * calculate HP, MP, attack and defense before the first UPDATE, then publish
+ * the matching in-memory overrides only after COMMIT.  Experience, money and
+ * configured drops are explicit operations settings and must not be changed
+ * by an attribute reset. */
 static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
     const u32 *enemyIds, u32 enemyCount, u32 *updatedOut, u32 *alreadyDefaultOut,
     const char **errorOut)
@@ -3932,10 +4163,10 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
 
             snprintf(query, sizeof(query),
                      "UPDATE server_monsters SET hp=%u,mp=%u,attack_value=%u,"
-                     "defense_value=%u,reward_exp=%u,reward_money=%u "
+                     "defense_value=%u "
                      "WHERE monster_id=%u",
                      defaults->hp, defaults->mp, defaults->attack,
-                     defaults->defense, defaults->exp, defaults->gold,
+                     defaults->defense,
                      override->stats.enemyId);
             if (!vm_mysql_exec(query))
                 goto mysql_failed;
@@ -3955,13 +4186,10 @@ static bool vm_net_mock_monster_admin_reset_combat_stats_batch(
         override->stats.mp = defaults->mp;
         override->stats.attack = defaults->attack;
         override->stats.defense = defaults->defense;
-        override->stats.exp = defaults->exp;
-        override->stats.gold = defaults->gold;
-        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u exp=%u money=%u preserve=drops\n",
+        printf("[info][mock-admin] monster_combat_stats_reset id=%u level=%u family=%u hp=%u mp=%u attack=%u defense=%u preserve=exp,money,drops\n",
                override->stats.enemyId, override->stats.level,
                override->family, defaults->hp, defaults->mp,
-               defaults->attack, defaults->defense, defaults->exp,
-               defaults->gold);
+               defaults->attack, defaults->defense);
     }
     if (updatedOut)
         *updatedOut = pendingCount;

@@ -125,6 +125,17 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_wcoin
 `callback_base_url` 应填写外网能够访问账号中心的地址；留空时会使用支付后台配置
 的回调地址，并由订单状态查询返回的签名数据提供兜底确认。
 
+已有数据库增加用户中心“角色迁移”功能时执行：
+
+```powershell
+mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_role_transfers.sql
+```
+
+迁出会生成一个仅可使用一次、有效期 15 分钟的 8 位验证码。迁入在单个事务内完成，
+会保留角色属性、背包、装备、技能、任务、好友、帮派与聊天历史；账号级 W 币、充值
+订单和登录资料不会迁移。迁入成功后服务会断开两边该账号的游戏连接，避免旧会话写回
+已迁出的角色数据。服务也会在首次使用迁移功能时自动创建同名表。
+
 已有数据库增加标题服务器列表管理时，停止 mock-service 后执行：
 
 ```powershell
@@ -302,6 +313,7 @@ mysql -h 127.0.0.1 -P 3306 -u root -p jh_online < server/mysql/migrate_add_train
 - `friendships`：双向好友记录和好友列表显示属性。
 - `account_role_state`：每个账号的活动角色和角色数量元数据。
 - `account_roles`：角色基础属性、职业性别、等级、HP/MP、货币和场景坐标。
+- `account_role_transfer_codes`：用户中心角色迁入/迁出的单次、限时验证码；验证码仅关联迁出角色，不保存目标账号。
 - `account_role_equipment`：按角色和装备槽保存装备实例的物品 ID、强化等级、四阶段随机词条和当前/最大耐久。
 - `account_role_equipment_durability`：旧版耐久表，只在首次实例迁移时按同一物品 ID 读取，不参与运行时保存。
 - `account_role_skills`：按角色保存已学习技能和技能等级。
