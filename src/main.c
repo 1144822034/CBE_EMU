@@ -643,8 +643,11 @@ static u8 g_mockServiceOnly = 1;
 static u8 g_mockServiceOnly = 0;
 #endif
 static u8 g_mockServiceWarnedUnavailable = 0;
+#ifdef CBE_PLATFORM_ANDROID
+static char g_mockServiceHost[64] = "23.141.172.143";
+#else
 static char g_mockServiceHost[64] = "127.0.0.1";
-// static char g_mockServiceHost[64] = "23.141.172.143";
+#endif
 #ifdef CBE_SERVER_ONLY
 static char g_mockServiceBindHost[64] = "0.0.0.0";
 static char g_mockAdminBindHost[64] = "0.0.0.0";
