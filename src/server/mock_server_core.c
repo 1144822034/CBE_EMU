@@ -5208,17 +5208,17 @@ enum
      * packet may advertise a larger usable grid. */
     VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY = 64,
     /* ParseEquipAttributes consumes an 11-byte common header plus up to five
-     * 13-byte attributes: one fallback-primary row for accessories and up to
-     * four +4/+8/+12/+16 stage attributes.  The tagged detail stream maximum
-     * is therefore 76 bytes; the compact bootstrap header remains 11 bytes. */
+     * 13-byte attributes: one cumulative primary enhancement row and four
+     * +4/+8/+12/+16 stage rows.  Every item-instance delivery path uses this
+     * same complete representation so an existing grid object is never left
+     * with stale enhancement values. */
     VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES = 11,
     VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES = 76,
-    /* HandleItemGridResponse (30/21) is the login bootstrap grid.  Its
-     * ParseEquipAttributes reader explicitly accepts attr-count=0, so this
-     * packet carries the fixed instance header only.  Detailed stage records
-     * are sent by the later 17/1 backpack list and 7/7 equipment list. */
+    /* HandleItemGridResponse (30/21) constructs the live backpack instance.
+     * It therefore carries the same complete item-extra block as 17/1 and
+     * 7/7, rather than a compact zero-attribute seed. */
     VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES =
-        6 + 4 + 6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_BASE_BYTES,
+        6 + 4 + 6 + VM_NET_MOCK_ITEM_COMMON_EXTRA_MAX_BYTES,
     VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES =
         VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY *
         VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_ROW_BYTES,
