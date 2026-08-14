@@ -12,6 +12,24 @@ Status: implemented (PixiJS_web only; CBE 不做)
 4. 进场/比赛期间擂台内禁组队；进场与 scene_ready 自动解散；离线再上线重绑 `clientId`/`inArenaScene`（仍留在场地）。
 5. 进场/比赛期间同图仅同职业×同段位互见（含周围列表）；结算后恢复。
 
+## 2026-08-14 修复：阶段隔离周围玩家
+
+- 契约：ENTRY/LIVE 时擂台同图仅同 `job×bracket` 互见（地图种子 + `2/7` 周围列表）；SETTLED/IDLE 恢复。
+- 根因：`vm_mock_arena_peer_visible` 要求双方都有内存 `participant` 且 `inArenaScene`。`ensure_session` 换场会 `part_count=0`，重启也不 hydrate scores → `find_part` 失败后一律不可见，或阶段已开仍表现错乱。
+- 修复：有报名快照用进场 job/bracket；否则回退 `onlineJob` + `bracket_for_level(onlineLevel)`。阶段切换 / 新 session 时 invalidate 擂台内 `peerSync`，迫使 poll 重 baseline 与 `1/2/6` 清理。
+- `peer_visible` 内调用 `arena_tick`，避免只开周围列表、未走 scene-sync 时 status 仍为 IDLE。
+
+## 2026-08-14 修复：比武结束后顶栏 HUD 不消失
+
+- 现象：SETTLED 后 Pixi 最上「比武 比赛 …」条仍停留。
+- 根因：结算后服务端不再推 `41/5`，客户端只在 `apply(null)` 时隐藏，最后一帧一直显示。
+- 修复：结算后仍推 `status=3` HUD；客户端仅 ENTRY/LIVE 显示，SETTLED/离场/status 非进行中时清条。
+
+## 2026-08-14 修复：轮空 tip
+
+- 现象：奇数人轮空有积分，但 Pixi 无明确提示（旧文案还写成「比武胜利」）。
+- 修复：服务端 fdata 改为「比武轮空 积分+N 当前积分M」，经 scene-sync `25/12+1/3/3` 下发；Pixi `onChat` 对 比武轮空/胜/负/平 弹 `showGameTip`。
+
 ## 规则摘要
 
 - 地图：`c04比武擂台`（资源 `web/fs/JHOnlineData/c04比武擂台.sce`）

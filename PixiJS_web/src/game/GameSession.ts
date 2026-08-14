@@ -82,6 +82,8 @@ import {
   buildBattleInsightFollowupRequest,
   buildBattleInsightUseRequest,
   buildChestOpenRequest,
+  buildChestOpenBatchRequest,
+  parseChestOpenBatchResult,
   buildExpCardUseRequest,
   buildExpCardStatusRequest,
   buildCombatPillUseRequest,
@@ -1185,6 +1187,7 @@ export class GameSession {
     this.hasServerPos = true;
     console.info(`[session] landing ${source} ${scene} @${x},${y}`);
     this.noteAuthoritativeLanding(scene);
+    this.syncArenaHudForScene(scene);
     // 16/3 unstuck / cross-scene stone: always reload shell so feet+map match.
     if (mapShowing && source !== "16/3") {
       this.cb.onPlayerPos?.(x, y);
@@ -1994,6 +1997,15 @@ export class GameSession {
     return /比武擂台/.test(scene) || scene.includes("\xb1\xc8\xce\xe4\xc0\xde\xcc\xa8");
   }
 
+  private clearArenaHud(_reason: string): void {
+    this.arenaHud = null;
+    this.cb.onArenaHud?.(null);
+  }
+
+  private syncArenaHudForScene(scene: string): void {
+    if (!this.isArenaScene(scene)) this.clearArenaHud("left-arena-scene");
+  }
+
   async fetchArenaStatus(): Promise<ArenaStatus | null> {
     if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildArenaStatusRequest());
@@ -2040,6 +2052,7 @@ export class GameSession {
     if (!this.transport) return;
     const bodies = await this.transport.exchange(0, buildArenaLeaveRequest());
     this.handleBodies(bodies);
+    this.clearArenaHud("leave-arena");
   }
 
   async fetchWagerBoard(): Promise<{
@@ -3192,17 +3205,22 @@ export class GameSession {
   }
 
   /**
-   * Client-side batch open (default 10). Server still receives one 7/15 each.
-   * Pre-check: bag empty slots >= times.
+   * PixiJS-only ten-pull via server 1/7/24 (one request).
+   * Pre-check empty slots / box / key; tip from backpack delta after openBag.
    */
   async openChestBatch(
     boxItemId: number,
     boxSeq: number,
     times = 10,
   ): Promise<ItemUseFeedback> {
-    const need = Math.max(1, Math.min(99, times | 0));
+    const need = Math.max(1, Math.min(10, times | 0));
     if (!isChestBoxItem(boxItemId)) {
       const fb: ItemUseFeedback = { ok: false, message: "无法开启该宝箱" };
+      this.emitItemUseFeedback(fb);
+      return fb;
+    }
+    if (!this.transport) {
+      const fb: ItemUseFeedback = { ok: false, message: "未连接" };
       this.emitItemUseFeedback(fb);
       return fb;
     }
@@ -3219,6 +3237,21 @@ export class GameSession {
       this.emitItemUseFeedback(fb);
       return fb;
     }
+    const box =
+      this.bagItems.find(
+        (it) => it.itemId === boxItemId && it.count > 0 && it.seq > 0,
+      ) ??
+      (boxSeq > 0
+        ? this.bagItems.find((it) => it.seq === boxSeq && it.count > 0)
+        : undefined);
+    if (!box || !(box.seq > 0)) {
+      const fb: ItemUseFeedback = {
+        ok: false,
+        message: "背包序号无效，请重新打开背包",
+      };
+      this.emitItemUseFeedback(fb);
+      return fb;
+    }
     const boxCount = this.bagItems
       .filter((it) => it.itemId === boxItemId)
       .reduce((s, it) => s + Math.max(0, it.count | 0), 0);
@@ -3230,11 +3263,24 @@ export class GameSession {
       this.emitItemUseFeedback(fb);
       return fb;
     }
-    const keyCount = keyId
-      ? this.bagItems
-          .filter((it) => it.itemId === keyId)
-          .reduce((s, it) => s + Math.max(0, it.count | 0), 0)
-      : 0;
+    const key = keyId
+      ? this.bagItems.find(
+          (it) => it.itemId === keyId && it.count > 0 && it.seq > 0,
+        )
+      : undefined;
+    if (!key) {
+      const fb: ItemUseFeedback = {
+        ok: false,
+        message: keyId
+          ? "钥匙不存在（或背包未同步序号）"
+          : "钥匙不存在",
+      };
+      this.emitItemUseFeedback(fb);
+      return fb;
+    }
+    const keyCount = this.bagItems
+      .filter((it) => it.itemId === keyId)
+      .reduce((s, it) => s + Math.max(0, it.count | 0), 0);
     if (keyCount < need) {
       const fb: ItemUseFeedback = {
         ok: false,
@@ -3254,98 +3300,95 @@ export class GameSession {
       if (!nameById.has(it.itemId)) nameById.set(it.itemId, it.name);
     }
 
-    const gained = new Map<number, { name: string; count: number }>();
-    let opened = 0;
-    let lastFail: ItemUseFeedback | null = null;
-    let seqHint = boxSeq;
-    for (let i = 0; i < need; i++) {
-      const box =
-        this.bagItems.find(
-          (it) => it.itemId === boxItemId && it.count > 0 && it.seq > 0,
-        ) ??
-        (seqHint > 0
-          ? this.bagItems.find((it) => it.seq === seqHint && it.count > 0)
-          : undefined);
-      if (!box) {
-        lastFail = { ok: false, message: "宝箱不存在" };
+    const bodies = await this.transport.exchange(
+      0,
+      buildChestOpenBatchRequest(box.seq, key.seq, need),
+    );
+    let batchFb: (ItemUseFeedback & { opened?: number }) | null = null;
+    for (const body of bodies) {
+      if (!body || body.length < 5) continue;
+      const packet = ingestPacket(body);
+      if (!packet) continue;
+      const parsed = parseChestOpenBatchResult(packet);
+      if (parsed) {
+        batchFb = parsed;
         break;
       }
-      seqHint = box.seq;
-      const fb = await this.openChest(box.itemId, box.seq, { emit: false });
-      if (!fb.ok) {
-        lastFail = fb;
-        break;
-      }
-      opened += 1;
-      for (const rw of fb.rewards ?? []) {
-        nameById.set(rw.itemId, rw.name);
-        const prev = gained.get(rw.itemId);
-        if (prev) prev.count += Math.max(1, rw.count | 0);
-        else
-          gained.set(rw.itemId, {
-            name: rw.name,
-            count: Math.max(1, rw.count | 0),
-          });
-      }
+    }
+    this.handleBodies(bodies);
+
+    if (!batchFb?.ok) {
+      const fb: ItemUseFeedback = batchFb ?? {
+        ok: false,
+        message: "开启失败",
+      };
+      this.emitItemUseFeedback(fb);
+      return fb;
     }
 
-    let summary: ItemUseFeedback;
-    if (opened <= 0) {
-      summary = lastFail ?? { ok: false, message: "开启失败" };
-    } else {
-      // Authority tip = backpack delta after openBag (same numbers the UI shows).
-      try {
-        await this.openBag();
-      } catch {
-        /* keep local apply / gained if refresh fails */
-      }
-      const qtyAfter = new Map<number, number>();
-      for (const it of this.bagItems) {
-        const add = it.kind === "equip" ? 1 : Math.max(0, it.count | 0);
-        qtyAfter.set(it.itemId, (qtyAfter.get(it.itemId) ?? 0) + add);
-        if (!nameById.has(it.itemId)) nameById.set(it.itemId, it.name);
-      }
-      const tipRows: { itemId: number; name: string; count: number }[] = [];
-      const ids = new Set<number>([...qtyAfter.keys(), ...gained.keys()]);
-      for (const id of ids) {
-        if (id === boxItemId) continue;
-        const keyId = CHEST_KEY_BY_BOX[boxItemId];
-        if (keyId && id === keyId) continue;
-        const delta =
-          (qtyAfter.get(id) ?? 0) - (qtyBefore.get(id) ?? 0);
-        if (delta > 0) {
-          tipRows.push({
-            itemId: id,
-            name: nameById.get(id) ?? gained.get(id)?.name ?? `#${id}`,
-            count: delta,
-          });
-        }
-      }
-      // Fall back to wire rewards if bag delta empty (refresh failed).
-      if (!tipRows.length) {
-        for (const [id, g] of gained) {
-          tipRows.push({ itemId: id, name: g.name, count: g.count });
-        }
-      }
-      tipRows.sort((a, b) => a.name.localeCompare(b.name, "zh"));
-      const parts = tipRows.map((g) => `获得${g.count}个${g.name}`);
-      const joined = parts.join("，");
-      const detail =
-        joined.length > 72 ? `${joined.slice(0, 71)}…` : joined;
-      summary = {
-        ok: true,
-        message:
-          opened < need
-            ? `连开${opened}/${need}次：${detail || "开启成功"}`
-            : `连开${opened}次：${detail || "开启成功"}`,
-        rewards: tipRows.map((g) => ({
-          itemId: g.itemId,
-          seq: 0,
-          count: g.count,
-          name: g.name,
-        })),
-      };
+    const opened = Math.max(1, batchFb.opened ?? need);
+    try {
+      await this.openBag();
+    } catch {
+      /* tip falls back to wire rewards */
     }
+
+    const qtyAfter = new Map<number, number>();
+    for (const it of this.bagItems) {
+      const add = it.kind === "equip" ? 1 : Math.max(0, it.count | 0);
+      qtyAfter.set(it.itemId, (qtyAfter.get(it.itemId) ?? 0) + add);
+      if (!nameById.has(it.itemId)) nameById.set(it.itemId, it.name);
+    }
+    for (const rw of batchFb.rewards ?? []) {
+      nameById.set(rw.itemId, rw.name);
+    }
+
+    const tipRows: { itemId: number; name: string; count: number }[] = [];
+    const ids = new Set<number>([
+      ...qtyAfter.keys(),
+      ...(batchFb.rewards ?? []).map((r) => r.itemId),
+    ]);
+    for (const id of ids) {
+      if (id === boxItemId) continue;
+      if (keyId && id === keyId) continue;
+      const delta = (qtyAfter.get(id) ?? 0) - (qtyBefore.get(id) ?? 0);
+      if (delta > 0) {
+        tipRows.push({
+          itemId: id,
+          name: nameById.get(id) ?? `#${id}`,
+          count: delta,
+        });
+      }
+    }
+    if (!tipRows.length) {
+      for (const rw of batchFb.rewards ?? []) {
+        tipRows.push({
+          itemId: rw.itemId,
+          name: rw.name,
+          count: Math.max(1, rw.count | 0),
+        });
+      }
+    }
+    tipRows.sort((a, b) => a.name.localeCompare(b.name, "zh"));
+    const parts = tipRows.map((g) =>
+      g.count > 1 ? `${g.count}个${g.name}` : g.name,
+    );
+    const joined = parts.join("，");
+    const detail =
+      joined.length > 72 ? `${joined.slice(0, 71)}…` : joined;
+    const summary: ItemUseFeedback = {
+      ok: true,
+      message:
+        opened < need
+          ? `连开${opened}/${need}次：${detail || "开启成功"}`
+          : `连开${opened}次：${detail || "开启成功"}`,
+      rewards: tipRows.map((g) => ({
+        itemId: g.itemId,
+        seq: 0,
+        count: g.count,
+        name: g.name,
+      })),
+    };
     this.emitItemUseFeedback(summary);
     return summary;
   }
@@ -3584,7 +3627,12 @@ export class GameSession {
       }
     }
     this.handleBodies(bodies);
-    await this.openMall();
+    // 购买后不重拉货架，保持当前详情/列表位置，只刷酷宝余额（1/14/4）。
+    const balBodies = await this.transport.exchange(
+      0,
+      buildMallBalanceRequest(),
+    );
+    this.handleBodies(balBodies);
     if (result < 0) {
       return { ok: false, result: 0, message: "购买无响应" };
     }
@@ -4712,6 +4760,7 @@ export class GameSession {
           this.x = enter.x;
           this.y = enter.y;
           this.inBattle = false;
+          this.syncArenaHudForScene(enter.scene);
           this.trackEnterScene(enter.scene, enter.x, enter.y, true);
           this.setPhase("inworld", `${enter.scene} @${enter.x},${enter.y}`);
         }
@@ -5281,15 +5330,23 @@ export class GameSession {
 
       const arenaHud = parseArenaHud(packet);
       if (arenaHud) {
-        this.arenaHud = arenaHud;
-        this.cb.onArenaHud?.(arenaHud);
+        this.arenaHud =
+          arenaHud.status === 1 || arenaHud.status === 2 ? arenaHud : null;
+        this.cb.onArenaHud?.(this.arenaHud);
       }
       const wagerEv = parseWagerEvent(packet);
       if (wagerEv) this.cb.onWagerEvent?.(wagerEv);
       const auctionEv = parseAuctionEvent(packet);
       if (auctionEv) this.cb.onAuctionEvent?.(auctionEv);
       const arenaSt = parseArenaStatus(packet);
-      if (arenaSt) this.arenaStatus = arenaSt;
+      if (arenaSt) {
+        this.arenaStatus = arenaSt;
+        /* Status poll can outpace HUD push after settle — clear top strip. */
+        if (arenaSt.status !== 1 && arenaSt.status !== 2 && this.arenaHud) {
+          this.arenaHud = null;
+          this.cb.onArenaHud?.(null);
+        }
+      }
       const arenaRk = parseArenaRank(packet);
       if (arenaRk) this.arenaRankPage = arenaRk;
       const arenaCl = parseArenaClaim(packet);

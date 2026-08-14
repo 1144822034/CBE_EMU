@@ -74,7 +74,11 @@ import {
 import { dismissOverlayIme } from "./ui/dismissOverlayIme";
 import type { RoleRow } from "./net/protocol";
 import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
-import { isBattleMedicineOrFlask } from "./net/protocolExtras";
+import {
+  augmentEquipSellDialog,
+  EquipSellService,
+  isBattleMedicineOrFlask,
+} from "./net/protocolExtras";
 import { isMapHealSkill } from "./resources/skill";
 import { warmItemCatalogs } from "./resources/itemCatalog";
 import {
@@ -126,6 +130,18 @@ function showGameTip(text: string): void {
   if (!msg) return;
   if (gameTipSink) gameTipSink(msg);
   else touchStatus?.setStatus(msg, false);
+}
+
+/** Strip chat prefix and keep 比武胜/负/平/轮空 tip body for toast. */
+function extractArenaResultTip(chatLine: string): string | null {
+  const raw = (chatLine || "").trim();
+  if (!raw) return null;
+  const markers = ["比武轮空", "比武胜利", "比武失败", "比武平局"] as const;
+  for (const m of markers) {
+    const i = raw.indexOf(m);
+    if (i >= 0) return raw.slice(i).replace(/^\]/, "").trim();
+  }
+  return null;
 }
 
 /** Map server auction/wager short codes to Chinese panel tips. */
@@ -241,8 +257,10 @@ async function main(): Promise<void> {
     applyTouchChromeVisible(true);
   }
   /**
-   * Shrink HTML D-pad / softkeys so the 240×400 LCD can stay width-limited
-   * on short phones. Driven by viewport, not stage (avoids feedback loops).
+   * Size HTML D-pad / softkeys from phone viewport:
+   * - width → preferred button cell (larger phones → larger keys)
+   * - leftover height after 240×400 LCD → shrink / slight grow
+   * Driven by viewport, not stage (avoids feedback loops).
    */
   const syncTouchChromeScale = () => {
     if (!touchBar) return;
@@ -255,29 +273,66 @@ async function main(): Promise<void> {
     const vw = appEl?.clientWidth || window.innerWidth || 0;
     if (vh < 2 || vw < 2) return;
 
-    const wide = vw >= 720;
-    const cell = wide ? 72 : 56;
-    const gap = wide ? 12 : 8;
-    const padY = 6 + 8;
-    const statusH = 14;
+    const clamp = (n: number, lo: number, hi: number) =>
+      Math.max(lo, Math.min(hi, n));
+    // Design reference: 360px-wide → 56px cells. Scale tracks phone size.
+    const REF_CELL = 56;
+    const cellFromW = clamp(vw * (REF_CELL / 360), 40, 76);
     const centerOn = !!touchBar.querySelector("#sk-center.is-on");
-    const centerH = centerOn ? 32 + 6 : 0;
-    const naturalPadH = 3 * cell + 2 * gap + padY + statusH + centerH;
+    const chromeH = (cell: number, withStatus: boolean) => {
+      const gap = cell * (8 / REF_CELL);
+      const padY = 14 * (cell / REF_CELL);
+      const statusH = withStatus ? 14 * (cell / REF_CELL) : 0;
+      const centerH = centerOn ? 32 * (cell / REF_CELL) + 6 : 0;
+      return 3 * cell + 2 * gap + padY + statusH + centerH;
+    };
 
     const lcdByWidth = vw * (LCD_HEIGHT / LCD_WIDTH);
-    const padBudget = Math.max(0, vh - lcdByWidth);
-    const PAD_MIN_SCALE = 0.55;
-    let scale = 1;
-    if (padBudget < naturalPadH && naturalPadH > 1) {
-      scale = Math.max(PAD_MIN_SCALE, padBudget / naturalPadH);
-    }
     const maxPadFrac = 0.4;
-    if (naturalPadH * scale > vh * maxPadFrac && vh > 1) {
-      scale = Math.max(PAD_MIN_SCALE, (vh * maxPadFrac) / naturalPadH);
+    const padBudget = Math.max(
+      0,
+      Math.min(vh - lcdByWidth, vh * maxPadFrac),
+    );
+    const CELL_MIN = 32;
+    const CELL_MAX = 76;
+    let withStatus = true;
+    let cell = cellFromW;
+    let h = chromeH(cell, true);
+    if (padBudget > 1 && h > padBudget) {
+      cell = clamp(cell * (padBudget / h), CELL_MIN, CELL_MAX);
+      h = chromeH(cell, true);
+      if (h > padBudget) {
+        withStatus = false;
+        h = chromeH(cellFromW, false);
+        cell = clamp(
+          cellFromW * (padBudget / Math.max(1, h)),
+          CELL_MIN,
+          CELL_MAX,
+        );
+      }
+    } else if (padBudget > 1 && h < padBudget * 0.9) {
+      // Tall leftover: grow keys a bit toward the budget (still ≤ CELL_MAX).
+      const grown = cellFromW * (padBudget / h);
+      cell = clamp(Math.min(grown, cellFromW * 1.25), CELL_MIN, CELL_MAX);
     }
 
-    // Full chrome height at current scale (safe-area added by #app padding).
-    const fullChromeH = Math.max(1, Math.round(naturalPadH * scale));
+    const scale = cell / REF_CELL;
+    const fullChromeH = Math.max(1, Math.round(chromeH(cell, withStatus)));
+
+    // Softkey side columns track width + scale.
+    const skColMin = Math.round(clamp(vw * 0.16, 52, 80) * Math.min(1, scale));
+    const skColMax = Math.round(clamp(vw * 0.22, 64, 96) * Math.min(1, scale));
+    touchBar.style.setProperty("--sk-col-min", `${skColMin}px`);
+    touchBar.style.setProperty("--sk-col-max", `${skColMax}px`);
+    // Keep CSS bases at design reference; only --pad-scale varies.
+    touchBar.style.removeProperty("--pad-cell-base");
+    touchBar.style.removeProperty("--pad-gap-base");
+    touchBar.style.removeProperty("--sk-h-base");
+    touchBar.style.removeProperty("--sk-center-h-base");
+    touchBar.style.removeProperty("--pad-cell");
+    touchBar.style.removeProperty("--pad-gap");
+    touchBar.style.removeProperty("--sk-h");
+    touchBar.style.removeProperty("--sk-center-h");
 
     if (chromeOff) {
       // Hidden D-pad: softkey row band = half the full chrome height.
@@ -300,7 +355,7 @@ async function main(): Promise<void> {
     if (touchBar.style.getPropertyValue("--pad-scale") !== next) {
       touchBar.style.setProperty("--pad-scale", next);
     }
-    touchBar.classList.toggle("pad-compact", scale < 0.88);
+    touchBar.classList.toggle("pad-compact", !withStatus || scale < 0.88);
   };
   const syncTouchBarWidth = () => {
     // Full stage width so L/R softkeys sit beside ▲ and aren't clipped.
@@ -430,6 +485,11 @@ async function main(): Promise<void> {
   const shell = new PhoneShell(app);
   const touch = new TouchControls();
   touchStatus = touch;
+  touch.onLayout = () => {
+    wrap.dataset.fitW = "0";
+    wrap.dataset.fitH = "0";
+    fitPhoneWrap();
+  };
   shell.onLabels = (labels) => touch.setSoftkeys(labels);
   shell.content.addChild(
     new Graphics().rect(0, 0, LCD_WIDTH, LCD_HEIGHT).fill({ color: CBE.bgDeep }),
@@ -744,6 +804,9 @@ async function main(): Promise<void> {
     }
   };
 
+  auctionPanel.onSoftkeys = () => {
+    if (auctionPanel.visible) shell.setSoftkeys(auctionPanel.softkeys());
+  };
   auctionPanel.onAction = (action, listingId) => {
     const refresh = async (tip?: string) => {
       await openAuctionPanel({
@@ -1886,9 +1949,11 @@ async function main(): Promise<void> {
       arenaHud.apply(hud);
     },
     onNpcDialog: (d) => {
-      dialog.show(d);
+      if (session.equipSellBatchSilent) return;
+      const shown = augmentEquipSellDialog(d);
+      dialog.show(shown);
       showPhase("dialog");
-      setChromeStatus(`对话 · ${d.options.length} 选项`);
+      setChromeStatus(`对话 · ${shown.options.length} 选项`);
     },
     onTaskPrompt: (p) => {
       dialog.show({
@@ -1950,6 +2015,9 @@ async function main(): Promise<void> {
           }
           continue;
         }
+        /* 比武胜/负/平/轮空：系统条也弹顶 tip（轮空无 4/7 结算面板）。 */
+        const arenaTip = extractArenaResultTip(line.text);
+        if (arenaTip) showGameTip(arenaTip);
         hud.pushChat(line.text, line.type, {
           senderRoleId: line.senderRoleId,
           senderName: line.senderName,
@@ -2187,6 +2255,9 @@ async function main(): Promise<void> {
   let hangupStartAfterSkillPick = false;
   /** Skill-forget DialogPanel: cancel/close returns to skill list (or battle). */
   let skillForgetDialogOpen = false;
+  /** Bag discard confirm: cancel/close returns to bag. */
+  let discardConfirmOpen = false;
+  let pendingDiscard: import("./net/protocolExtras").BagItem | null = null;
 
   const returnFromSkillForgetDialog = (): void => {
     skillForgetDialogOpen = false;
@@ -2198,6 +2269,18 @@ async function main(): Promise<void> {
     showPhase("system");
     system.open("skill");
     system.setSkills(session.learnedSkills);
+  };
+
+  const returnFromDiscardConfirm = (): void => {
+    discardConfirmOpen = false;
+    pendingDiscard = null;
+    showPhase("system");
+    system.open("bag");
+    system.setBag(session.bagItems);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
   };
 
   const openHangupSkillDialog = (startAfterPick: boolean): void => {
@@ -3036,7 +3119,7 @@ async function main(): Promise<void> {
         void (async () => {
           showGameTip(`批量开启 ${bag.name}×10…`);
           const fb = await session.openChestBatch(bag.itemId, bag.seq, 10);
-          if (fb.ok) await session.openBag();
+          // openChestBatch already openBag()'s and builds tip from bag delta.
           system.setBag(session.bagItems);
           const cap =
             session.characterStats?.backpackCapacity ||
@@ -3067,8 +3150,19 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "discard") {
-        void session.discardItem(bag.itemId, bag.seq, bag.count).then(() => void session.openBag());
-        showGameTip(`丢弃 ${bag.name}`);
+        pendingDiscard = bag;
+        discardConfirmOpen = true;
+        const qty = bag.count > 1 ? `×${bag.count}` : "";
+        dialog.show({
+          title: "确认丢弃",
+          body: `确定丢弃「${bag.name}」${qty}？\n丢弃后无法找回。`,
+          options: [
+            { label: "确认丢弃", action: 282, value: 0 },
+            { label: "取消", action: 283, value: 0 },
+          ],
+        });
+        showPhase("dialog");
+        setChromeStatus("确认丢弃物品");
         return;
       }
       if (action === "auction") {
@@ -3590,6 +3684,10 @@ async function main(): Promise<void> {
       returnFromSkillForgetDialog();
       return;
     }
+    if (discardConfirmOpen) {
+      returnFromDiscardConfirm();
+      return;
+    }
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
   };
@@ -3744,6 +3842,38 @@ async function main(): Promise<void> {
       returnFromSkillForgetDialog();
       return;
     }
+    if (action === 282) {
+      dialog.hide();
+      discardConfirmOpen = false;
+      const bag = pendingDiscard;
+      pendingDiscard = null;
+      if (!bag) {
+        returnFromDiscardConfirm();
+        return;
+      }
+      void (async () => {
+        showGameTip(`丢弃 ${bag.name}…`);
+        await session.discardItem(bag.itemId, bag.seq, bag.count);
+        await session.openBag();
+        system.setBag(session.bagItems);
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        system.setBagMeta(
+          session.characterStats?.money ?? session.gold,
+          cap,
+        );
+        showGameTip(`已丢弃 ${bag.name}`);
+        showPhase("system");
+        system.open("bag");
+      })();
+      return;
+    }
+    if (action === 283) {
+      dialog.hide();
+      returnFromDiscardConfirm();
+      return;
+    }
     if (action === 270) {
       dialog.hide();
       const opt = UC3_FONT_OPTIONS[value | 0];
@@ -3764,6 +3894,39 @@ async function main(): Promise<void> {
         }
         showPhase("world");
       })();
+      return;
+    }
+    // Equip-sell voucher: client-only batch sell of unenhanced bag equips.
+    if (action === 290) {
+      dialog.show({
+        title: "确认出售",
+        body: "出售背包中全部未强化装备？售出后不可找回。",
+        options: [
+          { label: "确认出售", action: 291, value: 0 },
+          { label: "取消", action: 292, value: 0 },
+        ],
+      });
+      showPhase("dialog");
+      setChromeStatus("确认批量出售");
+      return;
+    }
+    if (action === 291) {
+      dialog.hide();
+      void (async () => {
+        showGameTip("批量出售中…");
+        const r = await session.sellAllUnenhancedBagEquips();
+        showGameTip(r.message);
+        hud.pushChat(`[系]${r.message}`);
+        if (!dialog.visible) showPhase("world");
+      })();
+      return;
+    }
+    if (action === 292) {
+      void session
+        .pickNpcOption(1, EquipSellService.OPEN, "出售装备")
+        .then(() => {
+          if (!dialog.visible) showPhase("world");
+        });
       return;
     }
     // Approach confirm: 是否与NPC交谈？（legacy action ids from full DialogPanel）

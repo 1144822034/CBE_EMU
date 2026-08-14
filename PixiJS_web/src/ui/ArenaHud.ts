@@ -29,14 +29,20 @@ export class ArenaHud extends Container {
   apply(state: ArenaHudState | null): void {
     if (!state) {
       this.visible = false;
+      this.lastKey = "";
+      return;
+    }
+    /* Only ENTRY(1)/LIVE(2). SETTLED(3)/IDLE hide so tip does not stick after 结束. */
+    if (state.status !== 1 && state.status !== 2) {
+      this.visible = false;
+      this.lastKey = "";
       return;
     }
     const key = `${state.status}|${state.round}|${state.roundRemain}|${state.eventRemain}|${state.score}`;
     if (key === this.lastKey && this.visible) return;
     this.lastKey = key;
     this.visible = true;
-    const phase =
-      state.status === 1 ? "进场" : state.status === 2 ? "比赛" : "结算";
+    const phase = state.status === 1 ? "进场" : "比赛";
     const text = `比武 ${phase} 第${state.round || 0}场 ${fmtSec(state.roundRemain)} 余${fmtSec(state.eventRemain)} 分${state.score}`;
     this.line.text = text;
     this.bg.clear();
