@@ -365,7 +365,7 @@ static int vm_path_looks_like_ucs2_le(const u8 *raw, size_t rawSize, u32 *ucs2Le
 
         if (ch <= 0x7F)
         {
-            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' || ch == '+' ||
+            if (!(ch == '/' || ch == '\\' || ch == '.' || ch == '_' || ch == '-' || ch == '+' || ch == ' ' ||
                   (ch >= '0' && ch <= '9') ||
                   (ch >= 'A' && ch <= 'Z') ||
                   (ch >= 'a' && ch <= 'z')))

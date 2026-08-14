@@ -217,6 +217,12 @@ typedef enum
      * scene boundary, then waits for CalcEquipStatBonus' read-only table
      * capture.  It is a data-forensics scenario, not a synthetic stat test. */
     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE,
+    /* A one-step discovery companion for the rules probe.  It opens the
+     * native backpack toolbar target with a role that owns one enhanced
+     * armor instance, captures the rendered list, and stops.  It exists to
+     * establish the real screen/target contract before scheduling any
+     * enhancement-menu touch in the rules probe. */
+    VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE,
     /* Isolated battle regressions.  Both begin with the same native scene
      * hangup control as the direct control; the first presses the visible
      * battle auto-cancel target, the second waits for a three-enemy round to
@@ -5692,6 +5698,8 @@ static const char *vm_automation_scenario_name(void)
         return "scene-teleport-stone-probe-v1";
     case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE:
         return "equipment-enhance-rules-probe-v1";
+    case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE:
+        return "equipment-enhance-bag-probe-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL:
         return "hangup-auto-cancel-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL:
@@ -6771,20 +6779,33 @@ static void vm_automation_tick(void)
                 vm_automation_finish(1, "initial-scene-25-5-and-rendered-frame");
             }
             else if (g_vmAutomation.scenario ==
-                     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE)
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
             {
-                /* (102,44) is the previously verified scene equipment
-                 * toolbar target.  Deliver one ordinary touch only after
-                 * scene ownership and two render boundaries; success still
-                 * requires the later client CalcEquipStatBonus PC capture. */
+                /* The rules probe starts from the native equipment screen;
+                 * its companion starts from the backpack so the real
+                 * enhanced instance can be selected.  Both actions remain
+                 * ordinary touchscreen events after the scene boundary. */
+                const int targetX =
+                    g_vmAutomation.scenario ==
+                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        ? 132 : 102;
+                const char *targetName =
+                    g_vmAutomation.scenario ==
+                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        ? "scene-toolbar-backpack-icon"
+                        : "scene-toolbar-equipment-icon";
                 g_vmAutomation.initialSceneScreen = vmAddedScreen;
                 vm_automation_request_capture("equipment-enhance-probe-scene");
-                if (vm_automation_issue_tap(102, 44,
-                                            "scene-toolbar-equipment-icon"))
+                if (vm_automation_issue_tap(targetX, 44, targetName))
                 {
                     vm_automation_set_stage(
                         VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
-                        "equipment-toolbar-tapped");
+                        g_vmAutomation.scenario ==
+                            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                            ? "backpack-toolbar-tapped"
+                            : "equipment-toolbar-tapped");
                 }
             }
             else if (vm_automation_scenario_uses_direct_hangup())
@@ -6845,16 +6866,29 @@ static void vm_automation_tick(void)
                                             "direct-hangup-control-tapped");
             }
             else if (g_vmAutomation.scenario ==
-                     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE)
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
             {
+                const int targetX =
+                    g_vmAutomation.scenario ==
+                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        ? 132 : 102;
+                const char *targetName =
+                    g_vmAutomation.scenario ==
+                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        ? "scene-toolbar-backpack-icon"
+                        : "scene-toolbar-equipment-icon";
                 g_vmAutomation.initialSceneScreen = vmAddedScreen;
                 vm_automation_request_capture("equipment-enhance-probe-scene");
-                if (vm_automation_issue_tap(102, 44,
-                                            "scene-toolbar-equipment-icon"))
+                if (vm_automation_issue_tap(targetX, 44, targetName))
                 {
                     vm_automation_set_stage(
                         VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
-                        "equipment-toolbar-tapped");
+                        g_vmAutomation.scenario ==
+                            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                            ? "backpack-toolbar-tapped"
+                            : "equipment-toolbar-tapped");
                 }
             }
             else if (vm_automation_issue_tap(
@@ -6870,6 +6904,36 @@ static void vm_automation_tick(void)
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
+        if (g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
+        {
+            /* The native backpack opens on 道具.  The isolated fixture owns
+             * one armor, so select its visible 装备 category once and then
+             * stop at the rendered list.  This is still discovery only: it
+             * does not select an item or emit an enhancement request. */
+            if (!g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                g_vmAutomation.renderFrames >= g_vmAutomation.stageFrame + 2u)
+            {
+                vm_automation_request_capture(
+                    "equipment-enhance-backpack-default-tab-rendered");
+                if (vm_automation_issue_tap(58, 106,
+                                            "backpack-equipment-category-tab"))
+                {
+                    g_vmAutomation.equipmentEnhanceDetailTapSent = 1;
+                    g_vmAutomation.equipmentEnhanceDetailTapFrame =
+                        g_vmAutomation.renderFrames;
+                }
+            }
+            else if (g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                     g_vmAutomation.renderFrames >=
+                         g_vmAutomation.equipmentEnhanceDetailTapFrame + 2u)
+            {
+                vm_automation_request_capture(
+                    "equipment-enhance-backpack-equipment-tab-rendered");
+                vm_automation_finish(1, "native-backpack-equipment-tab-rendered");
+            }
+            break;
+        }
         /* The first touch has already opened the native equipment list.  Its
          * render path does not calculate an individual item's enhanced
          * attack/armor yet; after that state has crossed two real render
@@ -7440,6 +7504,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE;
     else if (strcmp(scenario, "equipment-enhance-rules-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE;
+    else if (strcmp(scenario, "equipment-enhance-bag-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE;
     else if (strcmp(scenario, "hangup-auto-cancel-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL;
     else if (strcmp(scenario, "hangup-auto-terminal-v1") == 0)
@@ -8373,6 +8439,7 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
     static u32 seenGridCommit = 0;
     static u32 seenGridInsertEntry = 0;
     static u32 seenGridLoadResult = 0;
+    static u32 seenBackpackRenderFilter = 0;
     static u32 seenGlobalNetEntry = 0;
     static u32 seenItemDeltaEntry = 0;
     static u32 seenItemDeltaApply = 0;
@@ -8393,7 +8460,7 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
         pc != 0x0101191A && pc != 0x010119DE &&
         pc != 0x01033544 && pc != 0x0103374E &&
         pc != 0x01039952 && pc != 0x01039AF8 &&
-        pc != 0x0101918E && pc != 0x010191A2 &&
+        pc != 0x0101918E && pc != 0x010191A2 && pc != 0x01028178 &&
         pc != 0x0518164A && pc != 0x0518169C &&
         pc != 0x05182434 && pc != 0x0518248E && pc != 0x051824A4 &&
         pc != 0x0518418C && pc != 0x05184538 &&
@@ -8409,6 +8476,36 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
     uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
     if (r9 == 0)
         r9 = Global_R9;
+
+    if (pc == 0x01028178 &&
+        g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE &&
+        seenBackpackRenderFilter < 8)
+    {
+        u8 globalCategory = 0;
+        u8 screenCategory = 0;
+        u8 itemCategory = 0;
+        u32 screen = 0;
+        u32 item = 0;
+
+        ++seenBackpackRenderFilter;
+        if (r9 != 0)
+        {
+            (void)uc_mem_read(MTK, r9 + 25420, &globalCategory,
+                              sizeof(globalCategory));
+            (void)uc_mem_read(MTK, r9 + 23816, &screen, sizeof(screen));
+            (void)uc_mem_read(MTK, r9 + 25480, &item, sizeof(item));
+        }
+        if (screen != 0)
+            (void)uc_mem_read(MTK, screen + 283, &screenCategory,
+                              sizeof(screenCategory));
+        if (item != 0)
+            (void)uc_mem_read(MTK, item + 282, &itemCategory,
+                              sizeof(itemCategory));
+        vm_autotest_note("backpack_render_filter pc=%08x global_category=%u screen=%08x screen_category=%u item=%08x item_category=%u seen=%u\n",
+                         pc, globalCategory, screen, screenCategory, item,
+                         itemCategory, seenBackpackRenderFilter);
+    }
 
 #define READ_MAIN_BACKPACK_STATE(manager_, count_, cap_, list_, item0_, seq0_, stack242_, stack272_) \
     do                                                                                              \

@@ -5780,6 +5780,39 @@ static bool vm_net_mock_find_sce_edge_portal_by_target_exit(const char *scene,
     return false;
 }
 
+static bool vm_net_mock_find_sce_named_portal_at_pos(const char *scene, u16 x, u16 y,
+                                                      u16 targetEntryId,
+                                                      vm_net_mock_sce_named_portal *portalOut)
+{
+    u8 data[8192];
+    u32 len = vm_net_mock_load_scene_resource(scene, data, sizeof(data));
+    u32 start = vm_net_mock_scene_payload_start(data, len);
+
+    if (portalOut != NULL)
+        memset(portalOut, 0, sizeof(*portalOut));
+    if (len == 0 || start == 0 || targetEntryId == 0)
+        return false;
+
+    for (u32 off = start; off + 12 <= len; ++off)
+    {
+        vm_net_mock_sce_named_portal portal;
+        u32 end = 0;
+
+        if (!vm_net_mock_parse_sce_named_portal_at(data, len, off, &portal, &end))
+            continue;
+        if (portal.targetEntryId != targetEntryId ||
+            x < portal.left || x >= portal.right ||
+            y < portal.top || y >= portal.bottom)
+        {
+            continue;
+        }
+        if (portalOut != NULL)
+            *portalOut = portal;
+        return true;
+    }
+    return false;
+}
+
 static bool vm_net_mock_get_scene_dimensions_from_sce(const char *scene, u16 *widthOut, u16 *heightOut)
 {
     u8 data[8192];
@@ -6166,6 +6199,36 @@ static bool vm_net_mock_resolve_sce_edge_portal_target(const vm_net_mock_sce_edg
     target->x = targetX;
     target->y = targetY;
     target->exitId = portal->entryId;
+    target->mapType = 2;
+    target->hasSceEntry = true;
+    target->needsSceneDownload = false;
+    return true;
+}
+
+static bool vm_net_mock_resolve_sce_named_portal_target(
+    const vm_net_mock_sce_named_portal *portal,
+    vm_net_mock_scene_change_target *target)
+{
+    u16 targetX = 0;
+    u16 targetY = 0;
+    const char *normalizedTarget = NULL;
+
+    if (portal == NULL || target == NULL || portal->targetEntryId == 0 ||
+        portal->targetScene[0] == 0 ||
+        !vm_net_mock_get_scene_entry_spawn_from_sce(portal->targetScene,
+                                                    portal->targetEntryId,
+                                                    &targetX, &targetY))
+    {
+        return false;
+    }
+    normalizedTarget = vm_net_mock_normalize_scene_name_for_enter(portal->targetScene);
+    if (!vm_net_mock_scene_name_is_persistable(normalizedTarget))
+        return false;
+    memset(target, 0, sizeof(*target));
+    snprintf(target->scene, sizeof(target->scene), "%s", normalizedTarget);
+    target->x = targetX;
+    target->y = targetY;
+    target->exitId = portal->targetEntryId;
     target->mapType = 2;
     target->hasSceEntry = true;
     target->needsSceneDownload = false;
@@ -7040,6 +7103,18 @@ static bool vm_net_mock_is_teleport_stone_transfer_request(const u8 *request, u3
         return false;
     if (kind != 0x10 || (subtype != 2 && subtype != 3))
         return false;
+    /* `type=0` belongs to the direct scene / named-portal class.  Its actual
+     * meaning is resolved from the authoritative source SCE before this
+     * detector runs; it can never be a generic teleport-stone confirmation. */
+    {
+        u8 requestType = 0;
+        if (subtype == 3 &&
+            vm_net_mock_get_object_u8_field(request, requestLen, "type", &requestType) &&
+            requestType == 0)
+        {
+            return false;
+        }
+    }
     /* The direct-scene runtime ACK shares 16/3 and an `exitID` field with a
      * teleport selection, but its typed type=0 object carries current X, not
      * a scene exit.  Reject it here even if later stream companions are not
@@ -8452,6 +8527,270 @@ static u32 vm_net_mock_build_settings_unstuck_16_2_response(const u8 *request, u
            target.scene, target.x, target.y, pos);
     vm_autotest_note("mock_settings_unstuck_16_2 scene=%s pos=(%u,%u) response=16/2-result1 evidence=mmGame:0x11CE/0x0BCC\n",
                      target.scene, target.x, target.y);
+    return pos;
+}
+
+typedef struct
+{
+    bool found;
+    bool invalid;
+    u32 wcoinCost;
+    u8 enabled;
+} vm_net_mock_paid_instance_rule_row;
+
+static bool vm_net_mock_is_scene_runtime_position_ack_16_3_request(
+    const u8 *request, u32 requestLen, u16 *positionXOut);
+
+static bool g_vm_net_mock_paid_instance_schema_checked = false;
+static bool g_vm_net_mock_paid_instance_schema_valid = false;
+
+static bool vm_net_mock_paid_instance_rule_row_read(void *contextValue,
+                                                    unsigned int columnCount,
+                                                    const char *const *values,
+                                                    const size_t *lengths)
+{
+    vm_net_mock_paid_instance_rule_row *row =
+        (vm_net_mock_paid_instance_rule_row *)contextValue;
+    u32 enabled = 0;
+
+    if (row == NULL || row->found || columnCount != 2 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &row->wcoinCost) ||
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &enabled) || enabled > 1)
+    {
+        if (row != NULL)
+            row->invalid = true;
+        return true;
+    }
+    row->enabled = (u8)enabled;
+    row->found = true;
+    return true;
+}
+
+static bool vm_net_mock_paid_instance_schema_prepare(void)
+{
+    static const char *const seedStatements[] = {
+        "INSERT IGNORE INTO paid_instance_access_rules"
+        "(background_scene,target_entry_id,wcoin_cost,enabled) "
+        "VALUES(X'625F3231D3C4DAA4B9EDB8AE2E736365',2,1,1)",
+        "INSERT IGNORE INTO paid_instance_access_rules"
+        "(background_scene,target_entry_id,wcoin_cost,enabled) "
+        "VALUES(X'625F3233F3B4C1FAD5AF2E736365',2,1,1)",
+        "INSERT IGNORE INTO paid_instance_access_rules"
+        "(background_scene,target_entry_id,wcoin_cost,enabled) "
+        "VALUES(X'625F3235BBAAC9BDB6B4BFDF2E736365',2,1,1)"
+    };
+
+    if (g_vm_net_mock_paid_instance_schema_checked)
+        return g_vm_net_mock_paid_instance_schema_valid;
+    g_vm_net_mock_paid_instance_schema_checked = true;
+    g_vm_net_mock_paid_instance_schema_valid = vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS paid_instance_access_rules ("
+        "background_scene VARBINARY(63) NOT NULL,"
+        "target_entry_id SMALLINT UNSIGNED NOT NULL,"
+        "wcoin_cost INT UNSIGNED NOT NULL,"
+        "enabled TINYINT UNSIGNED NOT NULL DEFAULT 1,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(background_scene,target_entry_id)"
+        ") ENGINE=InnoDB");
+    if (g_vm_net_mock_paid_instance_schema_valid)
+    {
+        for (u32 i = 0; i < sizeof(seedStatements) / sizeof(seedStatements[0]); ++i)
+        {
+            if (!vm_mysql_exec(seedStatements[i]))
+            {
+                g_vm_net_mock_paid_instance_schema_valid = false;
+                break;
+            }
+        }
+    }
+    if (!g_vm_net_mock_paid_instance_schema_valid)
+    {
+        printf("[error][network] mock_paid_instance_rule_schema_failed error=%s\n",
+               vm_mysql_last_error());
+    }
+    return g_vm_net_mock_paid_instance_schema_valid;
+}
+
+static bool vm_net_mock_paid_instance_rule_read(const char *backgroundScene,
+                                                u16 targetEntryId,
+                                                bool *foundOut,
+                                                bool *enabledOut,
+                                                u32 *wcoinCostOut)
+{
+    char backgroundHex[129];
+    char query[512];
+    vm_net_mock_paid_instance_rule_row row;
+    size_t backgroundLen = 0;
+
+    if (foundOut != NULL)
+        *foundOut = false;
+    if (enabledOut != NULL)
+        *enabledOut = false;
+    if (wcoinCostOut != NULL)
+        *wcoinCostOut = 0;
+    if (backgroundScene == NULL || backgroundScene[0] == 0 || targetEntryId == 0 ||
+        !vm_net_mock_paid_instance_schema_prepare())
+    {
+        return false;
+    }
+    backgroundLen = vm_mock_mysql_bounded_strlen(backgroundScene, 64);
+    if (backgroundLen == 0 || backgroundLen >= 64 ||
+        vm_mysql_hex_encode(backgroundScene, backgroundLen, backgroundHex,
+                            sizeof(backgroundHex)) == 0)
+    {
+        return false;
+    }
+    memset(&row, 0, sizeof(row));
+    snprintf(query, sizeof(query),
+             "SELECT wcoin_cost,enabled FROM paid_instance_access_rules "
+             "WHERE background_scene=X'%s' AND target_entry_id=%u",
+             backgroundHex, targetEntryId);
+    if (!vm_mysql_query(query, vm_net_mock_paid_instance_rule_row_read, &row) ||
+        row.invalid)
+    {
+        return false;
+    }
+    if (foundOut != NULL)
+        *foundOut = row.found;
+    if (enabledOut != NULL)
+        *enabledOut = row.enabled != 0;
+    if (wcoinCostOut != NULL)
+        *wcoinCostOut = row.wcoinCost;
+    return true;
+}
+
+static u32 vm_net_mock_build_paid_instance_failure_response(u8 result,
+                                                            const char *hint,
+                                                            u8 *out, u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x10, 2, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result))
+    {
+        return 0;
+    }
+    if (result == 4 &&
+        (hint == NULL || hint[0] == 0 ||
+         !vm_net_mock_put_object_string(out, outCap, &pos, "hint", hint)))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/* Named-portal state 2/3 is wire-compatible with the later scene-runtime
+ * position acknowledgement.  The only reliable discriminator is the source
+ * SCE rectangle plus its exact target-entry id; this is why this handler is
+ * deliberately placed before the generic type=0 ACK builder. */
+static u32 vm_net_mock_build_named_portal_access_response(const u8 *request,
+                                                          u32 requestLen,
+                                                          u8 *out, u32 outCap)
+{
+    static const char unavailableHint[] =
+        "\xb8\xb1\xb1\xbe\xc8\xeb\xbf\xda\xb2\xbb\xbf\xc9\xd3\xc3";
+    static const char configurationHint[] =
+        "\xb8\xb1\xb1\xbe\xc5\xe4\xd6\xc3\xb6\xc1\xc8\xa1\xca\xa7\xb0\xdc";
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    vm_net_mock_sce_named_portal portal;
+    vm_net_mock_scene_change_target target;
+    u16 targetEntryId = 0;
+    bool ruleFound = false;
+    bool ruleEnabled = false;
+    u32 wcoinCost = 0;
+    u32 wcoinBefore = 0;
+    u32 wcoinAfter = 0;
+    u32 pos = 5;
+
+    if (out == NULL || outCap < pos ||
+        !vm_net_mock_is_scene_runtime_position_ack_16_3_request(
+            request, requestLen, &targetEntryId) ||
+        role == NULL || !vm_net_mock_scene_name_is_safe(role->scene) ||
+        !vm_net_mock_find_sce_named_portal_at_pos(role->scene, role->x, role->y,
+                                                   targetEntryId, &portal))
+    {
+        return 0;
+    }
+
+    if (!vm_net_mock_resolve_sce_named_portal_target(&portal, &target))
+    {
+        printf("[error][network] mock_named_portal_access_unresolved scene=%s pos=(%u,%u) entry=%u target=%s action=result4-no-fallback\n",
+               role->scene, role->x, role->y, targetEntryId, portal.targetScene);
+        return vm_net_mock_build_paid_instance_failure_response(4, unavailableHint,
+                                                                 out, outCap);
+    }
+
+    if (!vm_net_mock_paid_instance_rule_read(portal.backgroundScene, targetEntryId,
+                                             &ruleFound, &ruleEnabled, &wcoinCost))
+    {
+        printf("[error][network] mock_paid_instance_rule_read_failed source=%s entry=%u action=result4\n",
+               portal.backgroundScene[0] ? portal.backgroundScene : "-", targetEntryId);
+        return vm_net_mock_build_paid_instance_failure_response(4, configurationHint,
+                                                                 out, outCap);
+    }
+    /* Entry 2 is the shipped paid-instance class.  A missing or disabled rule
+     * must fail closed instead of falling through to the normal type=0 ACK or
+     * a default teleport target.  Other named entry classes remain free unless
+     * explicitly configured in the same table. */
+    if ((targetEntryId == 2 && !ruleFound) || (ruleFound && !ruleEnabled) ||
+        (ruleFound && wcoinCost == 0))
+    {
+        printf("[info][network] mock_paid_instance_access_denied source=%s entry=%u rule=%u enabled=%u cost=%u action=result4\n",
+               portal.backgroundScene[0] ? portal.backgroundScene : "-", targetEntryId,
+               ruleFound ? 1u : 0u, ruleEnabled ? 1u : 0u, wcoinCost);
+        return vm_net_mock_build_paid_instance_failure_response(4, unavailableHint,
+                                                                 out, outCap);
+    }
+
+    if (ruleFound)
+    {
+        wcoinBefore = vm_net_mock_role_wcoin_balance(role);
+        if (wcoinBefore < wcoinCost)
+        {
+            printf("[info][network] mock_paid_instance_access_insufficient role=%u source=%s entry=%u cost=%u wcoin=%u action=result2-native-recharge\n",
+                   role->roleId, portal.backgroundScene, targetEntryId, wcoinCost,
+                   wcoinBefore);
+            return vm_net_mock_build_paid_instance_failure_response(2, NULL, out, outCap);
+        }
+        if (!vm_net_mock_account_wallet_debit_exact("paid-instance-access",
+                                                    wcoinBefore, wcoinCost,
+                                                    &wcoinAfter))
+        {
+            printf("[error][network] mock_paid_instance_access_debit_failed role=%u source=%s entry=%u cost=%u expected_wcoin=%u action=result4\n",
+                   role->roleId, portal.backgroundScene, targetEntryId, wcoinCost,
+                   wcoinBefore);
+            return vm_net_mock_build_paid_instance_failure_response(4, configurationHint,
+                                                                     out, outCap);
+        }
+    }
+    else
+    {
+        wcoinAfter = vm_net_mock_role_wcoin_balance(role);
+    }
+
+    if (!vm_net_mock_append_mmgame_scene_transfer_object_with_result(out, outCap, &pos,
+                                                                     3, 2, &target))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    vm_net_mock_mark_direct_scene_enter_completed(&target, "named-portal-access");
+    g_vm_net_mock_last_scene_change_from_actor_other_portal = false;
+    g_vm_net_mock_last_scene_change_fb4_type = 1;
+    vm_net_mock_save_player_pos_state(target.scene, target.x, target.y,
+                                      "named-portal-access");
+    printf("[info][network] mock_named_portal_access role=%u source_scene=%s source_pos=(%u,%u) background=%s entry=%u target=%s pos=(%u,%u) paid=%u cost=%u wcoin=%u/%u response=16/3-result2\n",
+           role->roleId, role->scene, role->x, role->y,
+           portal.backgroundScene[0] ? portal.backgroundScene : "-", targetEntryId,
+           target.scene, target.x, target.y, ruleFound ? 1u : 0u, wcoinCost,
+           wcoinBefore, wcoinAfter);
+    vm_autotest_note("mock_named_portal_access scene=%s entry=%u target=%s paid=%u cost=%u response=16/3-result2 evidence=SCE:0x12/0x15/0x17+mmGame:0x11CE\n",
+                     role->scene, targetEntryId, target.scene, ruleFound ? 1u : 0u,
+                     wcoinCost);
     return pos;
 }
 

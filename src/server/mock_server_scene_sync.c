@@ -4743,6 +4743,124 @@ static bool vm_net_mock_append_npc_service_dialog_option(
                                       description ? description : "");
 }
 
+/* NPC merchant items are represented by task-hall dialog options, rather
+ * than mmShop's 14/* iteminfo page.  The description field is what the
+ * client redraws as the cursor moves, so derive it directly from the same
+ * equip.dsh base-stat catalogue used for battle calculations. */
+static void vm_net_mock_format_npc_equipment_option_description(
+    char *out, u32 outCap, const vm_net_mock_equipment_catalog_item *equipment)
+{
+    typedef struct
+    {
+        const char *name;
+        u32 value;
+    } vm_net_mock_npc_equipment_option_attr;
+    vm_net_mock_npc_equipment_option_attr attrs[11];
+    u32 pos = 0;
+    int written = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (equipment == NULL)
+        return;
+
+    written = snprintf(out, outCap, "Lv.%u", equipment->levelRequired);
+    if (written < 0 || (u32)written >= outCap)
+    {
+        out[outCap - 1u] = 0;
+        return;
+    }
+    pos = (u32)written;
+
+    attrs[0].name = "\xce\xef\xb9\xa5"; /* 物攻 */
+    attrs[0].value = equipment->bonus.attack;
+    attrs[1].name = "\xbb\xa4\xbc\xd7"; /* 护甲 */
+    attrs[1].value = equipment->bonus.armor;
+    attrs[2].name = "\xc6\xf8\xd1\xaa"; /* 气血 */
+    attrs[2].value = equipment->bonus.hp;
+    attrs[3].name = "\xb7\xa8\xc1\xa6"; /* 法力 */
+    attrs[3].value = equipment->bonus.mp;
+    attrs[4].name = "\xc1\xa6\xc1\xbf"; /* 力量 */
+    attrs[4].value = equipment->bonus.strength;
+    attrs[5].name = "\xc3\xf4\xbd\xdd"; /* 敏捷 */
+    attrs[5].value = equipment->bonus.agility;
+    attrs[6].name = "\xd6\xc7\xbb\xdb"; /* 智慧 */
+    attrs[6].value = equipment->bonus.wisdom;
+    attrs[7].name = "\xb1\xa9\xbb\xf7"; /* 暴击 */
+    attrs[7].value = equipment->bonus.crit;
+    attrs[8].name = "\xc3\xfc\xd6\xd0"; /* 命中 */
+    attrs[8].value = equipment->bonus.hit;
+    attrs[9].name = "\xb6\xe3\xc9\xc1"; /* 躲闪 */
+    attrs[9].value = equipment->bonus.dodge;
+    attrs[10].name = "\xbf\xb9\xd0\xd4"; /* 抗性 */
+    attrs[10].value = equipment->bonus.resist;
+
+    for (u32 i = 0; i < (u32)(sizeof(attrs) / sizeof(attrs[0])); ++i)
+    {
+        if (attrs[i].value == 0 || pos >= outCap)
+            continue;
+        written = snprintf(out + pos, outCap - pos, " %s+%u",
+                           attrs[i].name, attrs[i].value);
+        if (written < 0 || (u32)written >= outCap - pos)
+        {
+            out[outCap - 1u] = 0;
+            return;
+        }
+        pos += (u32)written;
+    }
+}
+
+/* item.dsh supplies the only authoritative values for ordinary medicine
+ * effects.  Keep the text in the existing 26/1 option-description field:
+ * ParseNPCDialogData allocates 0xC8 bytes for that client-side string. */
+static void vm_net_mock_format_npc_item_effect_option_description(
+    char *out, u32 outCap, const vm_net_mock_item_effect_catalog_item *effect)
+{
+    u32 pos = 0;
+    int written = 0;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (effect == NULL)
+        return;
+
+    written = snprintf(out, outCap, "Lv.%u", effect->levelRequired);
+    if (written < 0 || (u32)written >= outCap)
+    {
+        out[outCap - 1u] = 0;
+        return;
+    }
+    pos = (u32)written;
+
+#define VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT(format, value)                 \
+    do                                                                           \
+    {                                                                            \
+        if ((value) != 0 && pos < outCap)                                       \
+        {                                                                        \
+            written = snprintf(out + pos, outCap - pos, format, (value));       \
+            if (written < 0 || (u32)written >= outCap - pos)                    \
+            {                                                                    \
+                out[outCap - 1u] = 0;                                           \
+                return;                                                          \
+            }                                                                    \
+            pos += (u32)written;                                                \
+        }                                                                        \
+    } while (0)
+
+    VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT(
+        " \xbb\xd6\xb8\xb4\xc6\xf8\xd1\xaa+%u", effect->hp); /* 恢复气血 */
+    VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT(
+        " \xbb\xd6\xb8\xb4\xb7\xa8\xc1\xa6+%u", effect->mp); /* 恢复法力 */
+    VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT(
+        " \xbe\xad\xd1\xe9+%u", effect->exp); /* 经验 */
+    VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT(
+        " \xca\xb1\xd0\xa7%u\xb7\xd6\xd6\xd3", effect->durationMinutes); /* 时效...分钟 */
+
+#undef VM_NET_MOCK_NPC_APPEND_ITEM_EFFECT_TEXT
+}
+
 static u32 vm_net_mock_build_challenge_interaction_response_ex(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap,
     bool forceNonSceneStart, bool forceSceneMonsterStart);
@@ -5094,7 +5212,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     const char *optionNames[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     const char *optionDescriptions[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     char optionNameStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
-    char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][64];
+    char optionDescriptionStorage[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS][192];
     char dialogTextStorage[256];
     u32 optionValues[VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS];
     u32 serviceValue = 0;
@@ -5102,7 +5220,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 value = 0;
     u8 optionCount = 0;
     u8 instanceChallengeOptionIndex = 0xff;
-    u8 dialog[1536];
+    u8 dialog[4096];
     u32 dialogLen = 0;
     u32 pos = 5;
     u32 objectStart = 0;
@@ -5400,6 +5518,9 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         {
                             dialogText =
                                 "\xb9\xba\xc2\xf2\xb3\xc9\xb9\xa6\xa1\xa3"; /* 购买成功。 */
+                            vm_net_mock_backpack_queue_authoritative_role_list(
+                                buyItem->isEquip ? "npc-equipment-buy"
+                                                 : "npc-medicine-buy");
                             result = 1;
                         }
                     }
@@ -5446,9 +5567,24 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                      sizeof(optionNameStorage[optionCount]), "%s%s %u%s",
                      "\xb9\xba\xc2\xf2", item->name, unitPrice,
                      "\xcd\xad"); /* 购买...铜 */
-            snprintf(optionDescriptionStorage[optionCount],
-                     sizeof(optionDescriptionStorage[optionCount]),
-                     "%s Lv.%u", item->name, levelRequired);
+            if (equipment != NULL)
+            {
+                vm_net_mock_format_npc_equipment_option_description(
+                    optionDescriptionStorage[optionCount],
+                    sizeof(optionDescriptionStorage[optionCount]), equipment);
+            }
+            else if (effect != NULL)
+            {
+                vm_net_mock_format_npc_item_effect_option_description(
+                    optionDescriptionStorage[optionCount],
+                    sizeof(optionDescriptionStorage[optionCount]), effect);
+            }
+            else
+            {
+                snprintf(optionDescriptionStorage[optionCount],
+                         sizeof(optionDescriptionStorage[optionCount]),
+                         "%s Lv.%u", item->name, levelRequired);
+            }
             optionNames[optionCount] = optionNameStorage[optionCount];
             optionDescriptions[optionCount] =
                 optionDescriptionStorage[optionCount];
@@ -5559,6 +5695,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
                         else
                         {
                             result = 1;
+                            vm_net_mock_backpack_queue_authoritative_role_list(
+                                "npc-equipment-sell");
                             snprintf(dialogTextStorage,
                                      sizeof(dialogTextStorage), "%s%u%s",
                                      "\xb3\xf6\xca\xdb\xb3\xc9\xb9\xa6\xa3\xac\xbb\xf1\xb5\xc3", /* 出售成功，获得 */

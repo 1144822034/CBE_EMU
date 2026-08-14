@@ -1037,6 +1037,19 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    /* The client uses the same compact 16/3 type=0 shape for a normal runtime
+     * position acknowledgement and a named SCE portal.  The named handler
+     * proves source scene, rectangle and entry id before returning a native
+     * mmGame 16/2 or 16/3 response; keep it before the generic empty ACK. */
+    hookedLen = vm_net_mock_build_named_portal_access_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-named-portal-access", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_scene_runtime_position_ack_16_3_response(
         request, requestLen, out, outCap);
     if (hookedLen)
