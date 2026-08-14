@@ -573,7 +573,6 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     u8 responseObjectCount = 1;
     bool materialsValid = false;
     bool enhancementSucceeded = false;
-    bool backpackDetailRefreshed = false;
     const char *reason = "ok";
 
     memset(&parsed, 0, sizeof(parsed));
@@ -715,20 +714,22 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     {
         if (result == 1)
         {
+            /* 29/1's two arrays are the enhancement screen's material
+             * requirement and crystal-power tables.  They are not the
+             * CalcEquipStatBonus primary-rule table: CBE reads that table
+             * from its separately initialized controller field +0x584. */
             for (u32 level = 0;
-                 level < VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
+                 level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
             {
                 if (!vm_net_mock_seq_put_u32(data1, sizeof(data1), &data1Len,
-                                             vm_net_mock_equipment_enhancement_primary_wire_rule(
-                                                 (u8)level)))
+                                             (level + 1u) * 100u))
                     return 0;
             }
-            for (u32 level = 0;
-                 level < VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
+            for (u32 tier = 1;
+                 tier <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++tier)
             {
                 if (!vm_net_mock_seq_put_u32(data2, sizeof(data2), &data2Len,
-                                             vm_net_mock_equipment_enhancement_primary_wire_rule(
-                                                 (u8)level)))
+                                             tier * 100u))
                     return 0;
             }
         }
@@ -739,7 +740,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL) ||
             !vm_net_mock_put_object_u8(
                 out, outCap, &pos, "num1",
-                result == 1 ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL : 0) ||
+                result == 1 ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL + 1 : 0) ||
             (result == 1 &&
              !vm_net_mock_put_object_raw(out, outCap, &pos, "data1", data1,
                                          (u16)data1Len)) ||
@@ -779,45 +780,18 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    if (parsed.subtype == 3 && enhancementSucceeded)
-    {
-        u32 refreshStart = pos;
-
-        /* 29/3 only has result/material fields.  Its parser updates the
-         * instance's current level but cannot receive the expanded attribute
-         * rows, so append the normal 17/1 backpack detail object afterwards.
-         * It is parsed by the already loaded backpack component and supplies
-         * the complete common-extra for this newly strengthened instance. */
-        if (vm_net_mock_append_backpack_items_object(out, outCap, &pos))
-        {
-            responseObjectCount += 1;
-            backpackDetailRefreshed = true;
-        }
-        else
-        {
-            /* The primary result packet remains valid if a pathological full
-             * backpack cannot fit alongside it in the transport buffer. */
-            pos = refreshStart;
-            printf("[warn][network] mock_equipment_enhance_backpack_refresh_omitted seq=%u item=%u reason=out-capacity\n",
-                   parsed.equipSeq, equipmentItemId);
-        }
-    }
     vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
 
-    printf("[info][network] mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u backpack_detail=%u reason=%s resp=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+mmGame:0x418C\n",
+    printf("[info][network] mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u reason=%s resp=29/%u evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C\n",
            parsed.subtype, parsed.equipSeq,
            equipmentItemId, currentLevel, result,
            parsed.materialRows, materialPower, successRate, moneyCost,
-           enhancementSucceeded ? 1 : 0, backpackDetailRefreshed ? 1 : 0,
-           reason, parsed.subtype,
-           backpackDetailRefreshed ? "+17/1" : "");
-    vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u backpack_detail=%u reason=%s response=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+mmGame:0x418C\n",
+           enhancementSucceeded ? 1 : 0, reason, parsed.subtype);
+    vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u reason=%s response=29/%u evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C\n",
                      parsed.subtype, parsed.equipSeq,
                      equipmentItemId, currentLevel, result,
                      parsed.materialRows, materialPower, successRate, moneyCost,
-                     enhancementSucceeded ? 1 : 0,
-                     backpackDetailRefreshed ? 1 : 0, reason, parsed.subtype,
-                     backpackDetailRefreshed ? "+17/1" : "");
+                     enhancementSucceeded ? 1 : 0, reason, parsed.subtype);
     return pos;
 }
 
@@ -6061,6 +6035,123 @@ static bool vm_net_mock_parse_sce_edge_portal_at(const u8 *data, u32 len, u32 of
     if (portal->right < portal->left || portal->bottom < portal->top)
         return false;
     if (endOut)
+        *endOut = pos;
+    return true;
+}
+
+/* A named SCE portal is deliberately not represented as an edge portal.  Its
+ * field 0x15 is the destination entry id used by scene_runtime_init_and_sync,
+ * and fields 0x16/0x17 are the client-visible label and the real target scene.
+ * The optional 0x12 field is the dungeon/background resource key; it is the
+ * stable server configuration key for paid-access rules. */
+typedef struct
+{
+    char backgroundScene[64];
+    char displayName[64];
+    char targetScene[64];
+    u16 targetEntryId;
+    u16 left;
+    u16 top;
+    u16 right;
+    u16 bottom;
+} vm_net_mock_sce_named_portal;
+
+static bool vm_net_mock_read_sce_named_portal_string_field(const u8 *data, u32 len,
+                                                            u32 *pos, u16 expectedField,
+                                                            char *out, size_t outCap)
+{
+    if (data == NULL || pos == NULL || out == NULL || outCap == 0 || *pos + 5 > len ||
+        vm_net_mock_read_le16_at(data, *pos) != 3 ||
+        vm_net_mock_read_le16_at(data, *pos + 2) != expectedField)
+    {
+        return false;
+    }
+    *pos += 4;
+    return vm_net_mock_read_sce_len_string(data, len, pos, out, outCap);
+}
+
+static bool vm_net_mock_parse_sce_named_portal_at(const u8 *data, u32 len, u32 off,
+                                                  vm_net_mock_sce_named_portal *portal,
+                                                  u32 *endOut)
+{
+    u32 pos = off;
+    u16 kind = 0;
+    u16 tileX = 0;
+    u16 tileY = 0;
+    u16 tileWidth = 0;
+    u16 tileHeight = 0;
+    u32 right = 0;
+    u32 bottom = 0;
+
+    if (data == NULL || portal == NULL || off + 12 > len)
+        return false;
+    memset(portal, 0, sizeof(*portal));
+    kind = vm_net_mock_read_le16_at(data, pos);
+    pos += 2;
+    if (kind == 4)
+    {
+        if (pos + 8 > len)
+            return false;
+        tileX = vm_net_mock_read_le16_at(data, pos);
+        tileY = vm_net_mock_read_le16_at(data, pos + 2);
+        tileWidth = vm_net_mock_read_le16_at(data, pos + 4);
+        tileHeight = vm_net_mock_read_le16_at(data, pos + 6);
+        pos += 8;
+    }
+    else
+    {
+        if (pos + 10 > len || vm_net_mock_read_le16_at(data, pos) != 4)
+            return false;
+        tileX = vm_net_mock_read_le16_at(data, pos + 2);
+        tileY = vm_net_mock_read_le16_at(data, pos + 4);
+        tileWidth = vm_net_mock_read_le16_at(data, pos + 6);
+        tileHeight = vm_net_mock_read_le16_at(data, pos + 8);
+        pos += 10;
+    }
+    if (tileWidth == 0 || tileHeight == 0)
+        return false;
+
+    if (kind == 4 && pos + 3 <= len && vm_net_mock_read_le16_at(data, pos) == 0x12)
+    {
+        pos += 2;
+        if (!vm_net_mock_read_sce_len_string(data, len, &pos, portal->backgroundScene,
+                                             sizeof(portal->backgroundScene)))
+        {
+            return false;
+        }
+    }
+    else if (pos + 5 <= len && vm_net_mock_read_le16_at(data, pos) == 3 &&
+             vm_net_mock_read_le16_at(data, pos + 2) == 0x12)
+    {
+        if (!vm_net_mock_read_sce_named_portal_string_field(
+                data, len, &pos, 0x12, portal->backgroundScene,
+                sizeof(portal->backgroundScene)))
+        {
+            return false;
+        }
+    }
+
+    if (!vm_net_mock_read_sce_scalar_field(data, len, &pos, 0x15,
+                                           &portal->targetEntryId) ||
+        !vm_net_mock_read_sce_named_portal_string_field(
+            data, len, &pos, 0x16, portal->displayName, sizeof(portal->displayName)) ||
+        !vm_net_mock_read_sce_named_portal_string_field(
+            data, len, &pos, 0x17, portal->targetScene, sizeof(portal->targetScene)) ||
+        !vm_net_mock_str_ends_with(portal->targetScene, ".sce") ||
+        !vm_net_mock_scene_name_is_safe(portal->targetScene))
+    {
+        return false;
+    }
+
+    right = ((u32)tileX + (u32)tileWidth) * 16u;
+    bottom = ((u32)tileY + (u32)tileHeight) * 16u;
+    if (right > UINT16_MAX || bottom > UINT16_MAX)
+        return false;
+    portal->left = (u16)((u32)tileX * 16u);
+    portal->top = (u16)((u32)tileY * 16u);
+    portal->right = (u16)right;
+    portal->bottom = (u16)bottom;
+    if (endOut != NULL)
         *endOut = pos;
     return true;
 }

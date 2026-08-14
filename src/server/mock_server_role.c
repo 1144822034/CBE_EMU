@@ -7639,6 +7639,32 @@ static bool vm_net_mock_role_db_save(const char *reason)
                                                 NULL, NULL, NULL);
 }
 
+/* W 币属于账号钱包。场景类收费也必须经同一事务入口提交，不能先改内存余额再尝试
+ * 保存角色位置：失败时会留下“扣费成功但未进入”或“进入成功但未扣费”的分叉状态。 */
+static bool vm_net_mock_account_wallet_debit_exact(const char *reason,
+                                                   u32 expectedBalance,
+                                                   u32 debit,
+                                                   u32 *committedBalanceOut)
+{
+    vm_net_mock_account_wallet_debit walletDebit;
+
+    if (committedBalanceOut != NULL)
+        *committedBalanceOut = expectedBalance;
+    if (debit == 0 || expectedBalance < debit)
+        return false;
+    memset(&walletDebit, 0, sizeof(walletDebit));
+    walletDebit.expectedBalance = expectedBalance;
+    walletDebit.debit = debit;
+    if (!vm_net_mock_role_db_save_relational(reason, NULL, NULL, 0, false,
+                                             NULL, &walletDebit, NULL))
+    {
+        return false;
+    }
+    if (committedBalanceOut != NULL)
+        *committedBalanceOut = walletDebit.committedBalance;
+    return true;
+}
+
 /*
  * 离线修炼
  * --------
@@ -10072,6 +10098,9 @@ static bool vm_net_mock_role_append_backpack_equipment_instance(
     item->enhanceLevel = (u16)SDL_min(instance->enhanceLevel,
                                       VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
     item->enhanceAffixes = instance->enhanceAffixes;
+    (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+        catalog, (u8)item->enhanceLevel, &item->enhanceAffixes,
+        role->roleId ^ item->itemId ^ ((u32)item->seq * 0x9e3779b9u));
     item->durabilityMax = expectedMax;
     item->durability = instance->durability > expectedMax
                            ? expectedMax : instance->durability;

@@ -8,7 +8,7 @@
  *
  * Usage:
  *   php scripts/automation-shop-return-hangup-fixture.php create <database>
- *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00]
+ *   php scripts/automation-shop-return-hangup-fixture.php seed <database> [hangup-peach|hangup-vitals|hangup-vitals-flask|teleport-stone-c00|equipment-enhance]
  *   php scripts/automation-shop-return-hangup-fixture.php client-login <nvram-file>
  *   php scripts/automation-shop-return-hangup-fixture.php cleanup <database>
  */
@@ -163,6 +163,18 @@ if ($profile === 'hangup-peach') {
     $posY = 47;
     $hp = 120;
     $mp = 100;
+} elseif ($profile === 'equipment-enhance') {
+    /* One actual level-3 armor instance in the backpack.  The instance has
+     * exactly the same item ID, sequence, durability, and enhancement shape
+     * as the user's reproduction, while remaining inside an isolated schema.
+     * The list count and next sequence must agree with the inserted row. */
+    $scene = hex2bin('3031CCD2BBA8B5BA5F30312E736365'); /* 01桃花岛_01.sce, GBK */
+    $posX = 146;
+    $posY = 349;
+    $hp = 120;
+    $mp = 100;
+    $backpackItemCount = 1;
+    $nextBackpackSeq = 10;
 } else {
     throw new InvalidArgumentException('unknown isolated automation fixture profile');
 }
@@ -213,6 +225,12 @@ try {
             . 'account_id,role_id,slot_index,item_id,item_seq,item_count,'
             . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
         )->execute([$account, $roleId, 1, 803, 2, 10, 0, 0, 0]);
+    } elseif ($profile === 'equipment-enhance') {
+        $db->prepare(
+            'INSERT INTO account_role_backpack('
+            . 'account_id,role_id,slot_index,item_id,item_seq,item_count,'
+            . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
+        )->execute([$account, $roleId, 0, 3001, 9, 1, 2, 300, 300]);
     }
     $db->commit();
     echo "seeded guest00001 role=810001 profile=$profile in isolated automation database\n";

@@ -108,25 +108,15 @@ static int expect_native_primary_unchanged(void)
     return 0;
 }
 
-static int expect_native_primary_wire_rules(void)
+static int expect_server_primary_curve(void)
 {
-    u32 rule0 = vm_net_mock_equipment_enhancement_primary_wire_rule(0);
-    u32 rule1 = vm_net_mock_equipment_enhancement_primary_wire_rule(1);
-    u32 base = 34;
-    u32 clientBonus = 0;
-
-    if ((u8)rule0 != 2 || (u16)(rule0 >> 16) != 10 ||
-        (u8)rule1 != 3 || (u16)(rule1 >> 16) != 10)
+    /* Server battle aggregation uses the same deliberately designed
+     * sixteen-stage curve, but it must not claim that this curve is encoded
+     * in 29/1's material tables.  The CBE-side controller table remains a
+     * separately investigated initialization contract. */
+    if (vm_net_mock_equipment_enhancement_bonus_from_base(45, 2) != 13)
     {
-        fputs("client enhancement primary rule encoding changed\n", stderr);
-        return 1;
-    }
-    clientBonus = (u8)rule0 + (base * (u16)(rule0 >> 16)) / 100u;
-    clientBonus += (u8)rule1 + (base * (u16)(rule1 >> 16)) / 100u;
-    if (clientBonus !=
-        vm_net_mock_equipment_enhancement_bonus_from_base(base, 2))
-    {
-        fputs("client and server +2 primary growth diverged\n", stderr);
+        fputs("server +2 armour primary curve changed\n", stderr);
         return 1;
     }
     return 0;
@@ -135,9 +125,9 @@ static int expect_native_primary_wire_rules(void)
 int main(void)
 {
     if (expect_fallback_ring() != 0 || expect_native_primary_unchanged() != 0 ||
-        expect_native_primary_wire_rules() != 0)
+        expect_server_primary_curve() != 0)
         return 1;
     puts("equipment enhancement regression passed: MP ring +67/+135; "
-         "client/native primary growth wire agrees at +2");
+         "server armour +2 primary growth is +13");
     return 0;
 }

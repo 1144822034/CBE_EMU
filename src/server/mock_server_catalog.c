@@ -11,6 +11,21 @@ static u8 vm_net_mock_role_backpack_count(const vm_net_mock_role_state *role)
     return (u8)count;
 }
 
+/* A successful inventory mutation is acknowledged by its owning operation
+ * (for NPC services: 26/1).  The next native backpack query must then use
+ * the role-list parser, even if a former mall request still left its
+ * one-shot 17/1 context armed.  Do not reset the grid seed here: the client
+ * item manager already exists and 17/1 is the parser that replaces the
+ * visible backpack list after an in-place mutation. */
+static void vm_net_mock_backpack_queue_authoritative_role_list(
+    const char *reason)
+{
+    g_netMockShop17ListPending = 0;
+    g_netMockBackpackPreferRoleListAfterShopBuy = 1;
+    printf("[info][network] mock_backpack_role_list_pending source=%s shop_pending=0 role_list=1\n",
+           reason != NULL ? reason : "mutation");
+}
+
 static u8 vm_net_mock_backpack_client_capacity(u32 capacity)
 {
     if (capacity > VM_NET_MOCK_BACKPACK_CLIENT_LOGICAL_CAPACITY)
@@ -2883,31 +2898,24 @@ static bool vm_net_mock_equipment_enhancement_ensure_affixes(
     u32 identity)
 {
     u8 candidates[4];
-    u8 effectiveLevel = (u8)SDL_min(
-        enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
     u8 usedCandidates = 0;
     bool changed = false;
 
     if (equipment == NULL || affixes == NULL)
         return false;
+    /* The client only receives the complete attr-count/array when an
+     * equipment instance is first created.  29/3 later changes just its
+     * current enhance level, so all four future-stage rolls must already be
+     * stable here; do not erase them merely because their threshold is not
+     * reached yet. */
+    (void)enhanceLevel;
     vm_net_mock_equipment_enhancement_stage_types(equipment->slot, candidates);
 
     for (u8 stage = 0; stage < 4; ++stage)
     {
-        u8 threshold = (u8)((stage + 1u) * 4u);
         int candidateIndex = vm_net_mock_equipment_enhancement_candidate_index(
             candidates, affixes->type[stage]);
 
-        if (effectiveLevel < threshold)
-        {
-            if (affixes->type[stage] != 0 || affixes->value[stage] != 0)
-            {
-                affixes->type[stage] = 0;
-                affixes->value[stage] = 0;
-                changed = true;
-            }
-            continue;
-        }
         if (candidateIndex < 0 || affixes->value[stage] == 0 ||
             (usedCandidates & (u8)(1u << candidateIndex)) != 0)
         {
@@ -2928,7 +2936,7 @@ static bool vm_net_mock_equipment_enhancement_ensure_affixes(
         u32 randomValue = 0;
         u16 baseValue = 0;
 
-        if (effectiveLevel < threshold || affixes->type[stage] != 0)
+        if (affixes->type[stage] != 0)
             continue;
         for (u8 index = 0; index < 4; ++index)
         {
@@ -3020,23 +3028,6 @@ static u32 vm_net_mock_equipment_enhancement_bonus_from_base(u32 base,
         result += (u32)rule->flat + (base * (u32)rule->percent) / 100u;
     }
     return result;
-}
-
-/*
- * `1/29/1` data1/data2 records are not ordinary integer values.  The client
- * stores each received u32 in native memory and CalcEquipStatBonus
- * (0x01028B34) then reads byte 0 as a fixed gain and bytes 2..3 as a signed
- * percentage gain.  Return the host-order value whose restored memory layout
- * is therefore `{ flat, 0, percent_le }`.
- */
-static u32 vm_net_mock_equipment_enhancement_primary_wire_rule(u8 levelIndex)
-{
-    const vm_net_mock_equipment_enhance_primary_rule *rule = NULL;
-
-    if (levelIndex >= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL)
-        return 0;
-    rule = &g_vm_net_mock_equipment_enhance_primary_rules[levelIndex];
-    return (u32)rule->flat | ((u32)rule->percent << 16);
 }
 
 static bool vm_net_mock_equipment_enhancement_native_primary(
@@ -3175,6 +3166,49 @@ static u8 vm_net_mock_equipment_enhancement_collect_attrs(
         ++count;
     }
 
+    return count;
+}
+
+/* `29/3` updates only item+286/item+287.  The later threshold comparisons
+ * therefore require the complete +4/+8/+12/+16 plan to exist in the client
+ * object before its first successful strengthen.  Keep any immediately
+ * applicable fallback row, then append future stage rows without duplicating
+ * stages that are already unlocked in the normal stat collector. */
+static u8 vm_net_mock_equipment_enhancement_collect_wire_attrs(
+    const vm_net_mock_equipment_catalog_item *equipment,
+    u8 enhanceLevel,
+    const vm_net_mock_equipment_enhance_affix_state *affixes,
+    vm_net_mock_equipment_enhance_attr *out,
+    u8 outCap)
+{
+    u8 count = vm_net_mock_equipment_enhancement_collect_attrs(
+        equipment, enhanceLevel, affixes, out, outCap);
+
+    if (affixes == NULL || out == NULL)
+        return count;
+    for (u8 stage = 0; stage < 4 && count < outCap; ++stage)
+    {
+        const u8 threshold = (u8)((stage + 1u) * 4u);
+        bool present = false;
+
+        if (affixes->type[stage] == 0 || affixes->value[stage] == 0)
+            continue;
+        for (u8 i = 0; i < count; ++i)
+        {
+            if (out[i].threshold == threshold)
+            {
+                present = true;
+                break;
+            }
+        }
+        if (present)
+            continue;
+        out[count].threshold = threshold;
+        out[count].type = affixes->type[stage];
+        out[count].mode = 0;
+        out[count].value = affixes->value[stage];
+        ++count;
+    }
     return count;
 }
 
@@ -3771,7 +3805,7 @@ static bool vm_net_mock_seq_put_item_common_extra(u8 *out, u32 outCap,
     if (equipment != NULL && affixes != NULL &&
         attrCount < (u8)(sizeof(attrs) / sizeof(attrs[0])))
     {
-        attrCount += vm_net_mock_equipment_enhancement_collect_attrs(
+        attrCount += vm_net_mock_equipment_enhancement_collect_wire_attrs(
             equipment, (u8)SDL_min(enhanceLevel, enhanceMaxLevel), affixes,
             &attrs[attrCount],
             (u8)(sizeof(attrs) / sizeof(attrs[0]) - attrCount));
@@ -4740,11 +4774,36 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
                                                      u32 count, u32 *blobLenOut)
 {
     u32 pos = 0;
+    const vm_net_mock_equipment_enhance_affix_state *affixes = NULL;
+    u8 enhanceLevel = 0;
 
     if (blobLenOut)
         *blobLenOut = 0;
     if (out == NULL || blobLenOut == NULL || itemId == 0)
         return false;
+    /* 7/7 is the one path that constructs an item-manager instance.  Resolve
+     * the just-persisted equipment row by its immutable sequence so a newly
+     * acquired sword carries all four future enhancement stages from its
+     * first client-side lifetime.  Ordinary consumables keep their compact
+     * zero-extra representation. */
+    if (itemId >= 1000)
+    {
+        const vm_net_mock_role_state *role = vm_net_mock_active_role();
+        u8 itemCount = vm_net_mock_role_backpack_count(role);
+
+        for (u8 i = 0; role != NULL && i < itemCount; ++i)
+        {
+            const vm_net_mock_backpack_item_state *item = &role->backpackItems[i];
+
+            if (item->seq == seq && item->itemId == itemId)
+            {
+                enhanceLevel = (u8)SDL_min(
+                    item->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+                affixes = &item->enhanceAffixes;
+                break;
+            }
+        }
+    }
     if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 1))
         return false;
     if (!vm_net_mock_seq_put_i16(out, outCap, &pos, seq))
@@ -4754,8 +4813,8 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
     if (!vm_net_mock_seq_put_u32(out, outCap, &pos, count))
         return false;
     if (!vm_net_mock_seq_put_item_common_extra(
-            out, outCap, &pos, itemId, 0,
-            vm_net_mock_item_common_extra_enhance_cap(itemId), NULL))
+            out, outCap, &pos, itemId, enhanceLevel,
+            vm_net_mock_item_common_extra_enhance_cap(itemId), affixes))
         return false;
 
     *blobLenOut = pos;

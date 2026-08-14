@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'equipment-enhance-bag-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -122,6 +122,8 @@ try {
         'hangup-vitals'
     } elseif ($Scenario -eq 'hangup-auto-vitals-flask-v1') {
         'hangup-vitals-flask'
+    } elseif ($Scenario -in @('equipment-enhance-rules-probe-v1', 'equipment-enhance-bag-probe-v1')) {
+        'equipment-enhance'
     } else {
         'hangup-peach'
     }
