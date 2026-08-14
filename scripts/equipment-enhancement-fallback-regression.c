@@ -59,7 +59,7 @@ static int expect_fallback_ring(void)
     return 0;
 }
 
-static int expect_native_primary_unchanged(void)
+static int expect_native_primary_server_bonus(void)
 {
     vm_net_mock_equipment_catalog_item weapon;
     vm_net_mock_equipment_catalog_item armour;
@@ -124,7 +124,8 @@ static int expect_server_primary_curve(void)
 
 int main(void)
 {
-    if (expect_fallback_ring() != 0 || expect_native_primary_unchanged() != 0 ||
+    if (expect_fallback_ring() != 0 ||
+        expect_native_primary_server_bonus() != 0 ||
         expect_server_primary_curve() != 0)
         return 1;
     puts("equipment enhancement regression passed: MP ring +67/+135; "

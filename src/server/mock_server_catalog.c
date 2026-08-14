@@ -3130,26 +3130,6 @@ static u8 vm_net_mock_equipment_enhancement_collect_attrs(
 
     if (equipment == NULL || affixes == NULL || out == NULL || outCap == 0)
         return 0;
-    if (effectiveLevel > 0)
-    {
-        u8 fallbackType =
-            vm_net_mock_equipment_enhancement_fallback_primary_type(equipment);
-        u32 fallbackBase =
-            vm_net_mock_equipment_enhancement_bonus_value_for_type(
-                equipment, fallbackType);
-        u16 fallbackBonus = vm_net_mock_equipment_enhance_attr_value(
-            vm_net_mock_equipment_enhancement_bonus_from_base(
-                fallbackBase, effectiveLevel));
-
-        if (fallbackType != 0 && fallbackBonus != 0 && count < outCap)
-        {
-            out[count].threshold = 1;
-            out[count].type = fallbackType;
-            out[count].mode = 0;
-            out[count].value = fallbackBonus;
-            ++count;
-        }
-    }
     for (u8 stage = 0; stage < 4 && count < outCap; ++stage)
     {
         u8 threshold = (u8)((stage + 1u) * 4u);
@@ -4040,11 +4020,15 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        if (!vm_net_mock_seq_put_item_compact_extra(
-                out, outCap, &pos,
+        /* The initial grid instance owns the persisted +4/+8/+12/+16 plan.
+         * A later 29/3 changes only its enhancement level; it cannot replace
+         * this extension array. */
+        if (!vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos, item->itemId,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
+                &item->enhanceAffixes))
             return false;
     }
     *blobLenOut = pos;
@@ -4781,11 +4765,11 @@ static bool vm_net_mock_build_item_use_iteminfo_blob(u8 *out, u32 outCap,
         *blobLenOut = 0;
     if (out == NULL || blobLenOut == NULL || itemId == 0)
         return false;
-    /* 7/7 is the one path that constructs an item-manager instance.  Resolve
-     * the just-persisted equipment row by its immutable sequence so a newly
-     * acquired sword carries all four future enhancement stages from its
-     * first client-side lifetime.  Ordinary consumables keep their compact
-     * zero-extra representation. */
+    /* In mmGame:sub_D04 only 7/7 type=1 parses iteminfo into a new item row;
+     * type=2 is a current-item operation and ignores this blob.  Resolve the
+     * persisted instance by sequence so a newly acquired sword carries its
+     * complete future-stage plan from its first client-side lifetime.
+     * Ordinary consumables keep their compact zero-extra representation. */
     if (itemId >= 1000)
     {
         const vm_net_mock_role_state *role = vm_net_mock_active_role();

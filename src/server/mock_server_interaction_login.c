@@ -319,12 +319,22 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
     ++objectCount;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_netMockShop17ListPending = 1;
-    g_netMockBackpackGridSeededRoleId = 0;
-    vm_mock_service_mark_shop_scene_npc_reseed_pending(
-        "scene-interaction-followup");
+    /*
+     * `14/*` is mmShop's ordinary data-initialisation family.  In particular,
+     * it is also emitted when the player opens the mall from Backpack.  Its
+     * native module initialiser (mmShop:sub_1038) has no scene-enter call, so
+     * it cannot authorize a server-side 30/1 scene re-entry.  Arming that
+     * lifecycle here used to replace the client-owned Backpack screen with a
+     * newly constructed mmGame shell when the next ordinary scene request
+     * arrived.  Keep the existing screen stack and item manager intact.
+     *
+     * A following `1/1/14(actorId)` status query is handled separately so its
+     * mandatory final ActorInfo object remains ordered for mmShop:sub_9DE;
+     * it is still not a scene-return authorization.
+     */
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, page6Index, 8, page6Ids, sizeof(page6Ids));
-    printf("[info][network] mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u secret_ids=%s weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u weapon_ids=%s actorOther=%u fb11=%u fb4=%u books=%u grid_reseed=1\n",
+    printf("[info][network] mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u secret_ids=%s weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u weapon_ids=%s actorOther=%u fb11=%u fb4=%u books=%u owner=client-stack grid_reseed=0\n",
            page5Index,
            page6Index,
            totalItems,
@@ -339,7 +349,7 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
            needFb11 ? 1 : 0,
            needFb4 ? 1 : 0,
            needBooks ? 1 : 0);
-    vm_autotest_note("mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorOther=%u fb11=%u fb4=%u books=%u grid_reseed=1 evidence=runtime:npc-buy-shop-family mmShop:0x1038/0x618/0x9DE\n",
+    vm_autotest_note("mock_shop_scene_interaction_combo page5=%u page6=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorOther=%u fb11=%u fb4=%u books=%u owner=client-stack grid_reseed=0 evidence=mmShop:0x1038/0x618/0x9DE\n",
                      page5Index,
                      page6Index,
                      totalItems,
@@ -2104,15 +2114,16 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     vm_net_mock_finish_wt_packet(out, pos, 5);
     g_netMockShop17ListPending = 1;
     /*
-     * Entering mmShop can return through a fresh mmGame scene init.  The main
-     * item manager is then recreated client-side, so the next group/type1
-     * response must be allowed to seed the active role backpack again.
+     * `1/1/14(actorId)` is a mmShop status query, not a scene-enter request.
+     * Runtime proves that an ordinary mall open sends the current role id in
+     * this field, so it cannot distinguish an NPC source or authorize a
+     * server-created mmGame shell.  Keep the parent screen and its item
+     * manager client-owned; a successful buy independently triggers its
+     * normal backpack refresh path.
      */
-    g_netMockBackpackGridSeededRoleId = 0;
-    vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-actor-query14");
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
-    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 secret_ids=%s weapon_ids=%s\n",
+    printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u owner=client-stack grid_reseed=0 secret_ids=%s weapon_ids=%s\n",
            actorId,
            activeRole ? activeRole->roleId : 0,
            wcoin,
@@ -2126,7 +2137,7 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
            actorInfoLen,
            page5Ids,
            secretIds);
-    vm_autotest_note("mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u grid_reseed=1 evidence=runtime:no-page-followup-after-1/1/14 mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
+    vm_autotest_note("mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u owner=client-stack grid_reseed=0 evidence=mmShop:0x162C/0x11F0/0x9DE/0x7BC\n",
                      actorId,
                      activeRole ? activeRole->roleId : 0,
                      wcoin,
@@ -2188,10 +2199,12 @@ static u32 vm_net_mock_build_shop_info14_response(const u8 *request, u32 request
 
     vm_net_mock_finish_wt_packet(out, pos, 1);
     g_netMockShop17ListPending = 1;
-    if (subtype == 14)
-        vm_mock_service_mark_shop_scene_npc_reseed_pending("shop-info14");
-    printf("[info][network] mock_shop_info14 subtype=%u response=14/%u\n", subtype, subtype);
-    vm_autotest_note("mock_shop_info14 subtype=%u response=14/%u evidence=mmShop:0x6D6/0x6BC/0x9DE\n",
+    /* A standalone 14/14 is the same generic mmShop refresh family as the
+     * combined request above.  It must not manufacture a scene return and
+     * thereby discard a Backpack parent screen. */
+    printf("[info][network] mock_shop_info14 subtype=%u response=14/%u owner=client-stack\n",
+           subtype, subtype);
+    vm_autotest_note("mock_shop_info14 subtype=%u response=14/%u owner=client-stack evidence=mmShop:0x6D6/0x6BC/0x9DE\n",
                      subtype, subtype);
     return pos;
 }
@@ -2334,13 +2347,14 @@ static bool vm_net_mock_shop_calculate_cost(u8 type, u32 itemId, u32 count,
         *unitPriceOut = unitPrice;
     if (costOut)
         *costOut = cost;
-    /* Type 2 is the premium-store purchase branch consumed by
-     * mmShopMstarWqvga.cbm:sub_9DE.  Its item must belong to the same
-     * server-owned secret listing that generated the visible page; this keeps
-     * an item removed from that page from remaining purchasable through a
-     * stale/crafted 14/2 request. */
-    return item != NULL && item->enabled &&
-           (type != 2 || vm_net_mock_shop_item_is_secret_treasure(item));
+    /* `type` is a client-side purchase-mode selector.  sub_2F6C serializes
+     * it unchanged with the selected row id, and the client can send type=2
+     * for equipment-page rows as well as secret-treasure rows.  Authorize
+     * against the server-owned, enabled catalog entry that was exposed to the
+     * client, rather than imposing a page/category restriction not present in
+     * the wire contract. */
+    (void)type;
+    return item != NULL && item->enabled;
 }
 
 typedef struct

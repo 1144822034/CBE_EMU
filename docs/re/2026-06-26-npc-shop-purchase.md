@@ -181,6 +181,14 @@ Status: implemented for shop open, DSH-backed catalog paging, shop-friendly cata
   - required field: `shopId` as u32
   - optional field: count / `num`
 
+### 2026-08-14 生命周期说明（取代旧的商城重入假设）
+
+早期记录将商城关闭后的新 `mmGame` shell 视作客户端固有流程，并据此让
+`1/1/14(actorId)` 预置 scene-return 标记。后续同会话运行日志证明普通商城同样会发送
+`actorId=当前角色 ID`，而这条服务端标记正是随后 `30/1` 与额外场景加载的来源；
+`mmShop:sub_1038` 和 `sub_11F0` 都没有场景进入调用。因此该请求只保留商城状态与最后
+ActorInfo 的响应契约，不再授权重建 `mmGame` 或清空背包网格种子。
+
 ### Purchase Response
 
 - WT object: `1/14/3`
