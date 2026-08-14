@@ -5776,6 +5776,24 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             return 0;
         ++objectCount;
     }
+    /*
+     * A completed merchant purchase has two independent UI owners.  The
+     * 26/1 dialog is the action=1 completion and must remain the first (and
+     * only dialog) object.  The scene HUD, however, owns copper through
+     * 10/26.  Omitting that native wallet confirmation left the client in the
+     * request wait state after a successful buy even though the transaction
+     * had already committed.  Do not append 7/7 here: that item-manager
+     * packet belongs to a different callback and can re-arm this dialog's
+     * wait state.  The next backpack query remains responsible for the item
+     * row itself.
+     */
+    if (result == 1 &&
+        (strcmp(action, "shop-buy") == 0 || strcmp(action, "weapon-buy") == 0))
+    {
+        if (!vm_net_mock_append_type1_object(out, outCap, &pos, 0))
+            return 0;
+        ++objectCount;
+    }
     if (instanceChallengeOptionIndex != 0xff && instanceSeed != NULL &&
         session != NULL)
     {
@@ -5812,7 +5830,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
            objectCount, pos,
            result == 1 && (strcmp(action, "shop-buy") == 0 ||
                            strcmp(action, "weapon-buy") == 0)
-               ? "dialog-only:26/1;backpack-on-native-query"
+               ? "dialog+wallet:26/1+10/26;backpack-on-native-query"
                : "not-applicable");
     return pos;
 }

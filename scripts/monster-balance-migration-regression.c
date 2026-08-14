@@ -1,0 +1,166 @@
+/*
+ * Isolated persistence regression for monster-quality-zero-balance-v2.
+ *
+ * The launcher creates a disposable cbe_auto_* database.  This test inserts
+ * one exact V1 formula row and one deliberately edited row, then loads the
+ * real service database layer.  It proves the transactional V2 migration
+ * updates only the former and records its marker.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define main cbe_server_program_main
+#include "../src/main.c"
+#undef main
+
+typedef struct
+{
+    u32 count;
+    bool found;
+    bool invalid;
+} migration_count_context;
+
+static bool count_row(void *contextValue, unsigned int columnCount,
+                      const char *const *values, const size_t *lengths)
+{
+    migration_count_context *context =
+        (migration_count_context *)contextValue;
+
+    if (context == NULL || columnCount != 1 || context->found ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &context->count))
+    {
+        if (context != NULL)
+            context->invalid = true;
+        return true;
+    }
+    context->found = true;
+    return true;
+}
+
+static bool query_count(const char *sql, u32 *countOut)
+{
+    migration_count_context context;
+
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(sql, count_row, &context) || context.invalid ||
+        !context.found)
+        return false;
+    if (countOut != NULL)
+        *countOut = context.count;
+    return true;
+}
+
+static bool create_seed_table(void)
+{
+    return vm_mysql_exec(
+        "CREATE TABLE IF NOT EXISTS server_monsters ("
+        "monster_id SMALLINT UNSIGNED NOT NULL,level TINYINT UNSIGNED NOT NULL,"
+        "family TINYINT UNSIGNED NOT NULL,hp INT UNSIGNED NOT NULL,"
+        "mp INT UNSIGNED NOT NULL,attack_value INT UNSIGNED NOT NULL,"
+        "defense_value INT UNSIGNED NOT NULL,reward_exp INT UNSIGNED NOT NULL,"
+        "reward_money INT UNSIGNED NOT NULL,drop_item_id INT UNSIGNED NOT NULL DEFAULT 0,"
+        "drop_rate_percent TINYINT UNSIGNED NOT NULL DEFAULT 0,"
+        "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+        "PRIMARY KEY(monster_id)) ENGINE=InnoDB");
+}
+
+int main(void)
+{
+    const char *database = getenv("CBE_TEST_MYSQL_DATABASE");
+    vm_net_mock_monster_entry automaticEntry;
+    vm_net_mock_monster_entry manualEntry;
+    vm_net_mock_monster_stats automaticV1;
+    vm_net_mock_monster_stats automaticV2;
+    vm_net_mock_monster_stats manualV1;
+    vm_net_mock_monster_override *automaticOverride = NULL;
+    vm_net_mock_monster_override *manualOverride = NULL;
+    char query[1024];
+    u32 markerCount = 0;
+    int automaticIndex = -1;
+    int manualIndex = -1;
+
+    if (database == NULL || strncmp(database, "cbe_auto_", 9) != 0)
+    {
+        fputs("refusing non-isolated database\n", stderr);
+        return 2;
+    }
+    vm_net_mock_monster_catalog_ensure_loaded();
+    if (g_vm_net_mock_monster_catalog_count < 2)
+    {
+        fputs("monster catalog did not provide two real identities\n", stderr);
+        return 1;
+    }
+    automaticEntry = g_vm_net_mock_monster_catalog_entries[0];
+    manualEntry = g_vm_net_mock_monster_catalog_entries[1];
+    automaticEntry.level = 60;
+    automaticEntry.family = VM_NET_MOCK_MONSTER_BEAST;
+    manualEntry.level = 60;
+    manualEntry.family = VM_NET_MOCK_MONSTER_BEAST;
+    automaticV1 = vm_net_mock_monster_base_stats_for_entry_curve(
+        &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
+    automaticV2 = vm_net_mock_monster_base_stats_for_entry_curve(
+        &automaticEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V2);
+    manualV1 = vm_net_mock_monster_base_stats_for_entry_curve(
+        &manualEntry, VM_NET_MOCK_MONSTER_BALANCE_CURVE_V1);
+
+    if (!create_seed_table())
+    {
+        fprintf(stderr, "seed schema failed: %s\n", vm_mysql_last_error());
+        return 1;
+    }
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_monsters(monster_id,level,family,hp,mp,attack_value,"
+             "defense_value,reward_exp,reward_money) VALUES "
+             "(%u,60,%u,%u,%u,%u,%u,901,902),"
+             "(%u,60,%u,%u,%u,%u,%u,903,904)",
+             automaticEntry.enemyId, automaticEntry.family,
+             automaticV1.hp, automaticV1.mp, automaticV1.attack,
+             automaticV1.defense, manualEntry.enemyId, manualEntry.family,
+             manualV1.hp + 1u, manualV1.mp, manualV1.attack, manualV1.defense);
+    if (!vm_mysql_exec(query))
+    {
+        fprintf(stderr, "seed rows failed: %s\n", vm_mysql_last_error());
+        return 1;
+    }
+
+    if (!vm_net_mock_monster_db_load())
+    {
+        fprintf(stderr, "monster database load failed: %s\n", vm_mysql_last_error());
+        return 1;
+    }
+    automaticIndex = vm_net_mock_monster_catalog_index(automaticEntry.enemyId);
+    manualIndex = vm_net_mock_monster_catalog_index(manualEntry.enemyId);
+    if (automaticIndex < 0 || manualIndex < 0)
+    {
+        fputs("seed identities disappeared from monster catalog\n", stderr);
+        return 1;
+    }
+    automaticOverride = &g_vm_net_mock_monster_overrides[automaticIndex];
+    manualOverride = &g_vm_net_mock_monster_overrides[manualIndex];
+    if (!automaticOverride->used || !manualOverride->used ||
+        automaticOverride->stats.hp != automaticV2.hp ||
+        automaticOverride->stats.mp != automaticV2.mp ||
+        automaticOverride->stats.attack != automaticV2.attack ||
+        automaticOverride->stats.defense != automaticV2.defense ||
+        automaticOverride->stats.exp != 901u || automaticOverride->stats.gold != 902u ||
+        manualOverride->stats.hp != manualV1.hp + 1u ||
+        manualOverride->stats.mp != manualV1.mp ||
+        manualOverride->stats.attack != manualV1.attack ||
+        manualOverride->stats.defense != manualV1.defense ||
+        manualOverride->stats.exp != 903u || manualOverride->stats.gold != 904u ||
+        !query_count(
+            "SELECT COUNT(*) FROM server_data_migrations "
+            "WHERE migration_name='monster-quality-zero-balance-v2'",
+            &markerCount) || markerCount != 1u)
+    {
+        fputs("formula/default migration did not preserve the explicit override boundary\n",
+              stderr);
+        return 1;
+    }
+    vm_mysql_close();
+    puts("monster balance migration regression passed: formula row updated, manual row preserved");
+    return 0;
+}
