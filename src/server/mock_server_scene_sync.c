@@ -3143,6 +3143,53 @@ static bool vm_net_mock_task_progress_store(u32 roleId, u32 taskId,
     return vm_mysql_exec(query);
 }
 
+/* `6/3 taskinfo` is client-to-server only, and `1/6/2` is only its result
+ * acknowledgement.  A progress change therefore cannot be represented by a
+ * synthetic task-response object.  Use the already client-proven system
+ * message queue, delivered by the following scene-sync poll, instead of
+ * contaminating the battle response or pretending that the task was turned
+ * in. */
+static bool vm_net_mock_task_progress_enqueue_notice(
+    const vm_net_mock_task_definition *task,
+    bool progress1Advanced, u8 requirementType1, u32 progress1,
+    u32 requirementCount1, bool progress2Advanced, u8 requirementType2,
+    u32 progress2, u32 requirementCount2)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    static const char killLabelGbk[] = "\xBB\xF7\xC9\xB1"; /* 击杀 */
+    static const char collectLabelGbk[] = "\xCA\xD5\xBC\xAF"; /* 收集 */
+    const char *label1 = requirementType1 == 1 ? collectLabelGbk : killLabelGbk;
+    const char *label2 = requirementType2 == 1 ? collectLabelGbk : killLabelGbk;
+    char message[82];
+
+    if (task == NULL || task->name[0] == 0 || session == NULL ||
+        (!progress1Advanced && !progress2Advanced))
+    {
+        return false;
+    }
+    if (progress1Advanced && progress2Advanced)
+    {
+        snprintf(message, sizeof(message),
+                 "\xC8\xCE\xCE\xF1\xBD\xF8\xB6\xC8\xA3\xBA%s %s%u/%u\xA1\xA2%s%u/%u",
+                 task->name, label1, progress1, requirementCount1,
+                 label2, progress2, requirementCount2);
+    }
+    else if (progress1Advanced)
+    {
+        snprintf(message, sizeof(message),
+                 "\xC8\xCE\xCE\xF1\xBD\xF8\xB6\xC8\xA3\xBA%s %s%u/%u",
+                 task->name, label1, progress1, requirementCount1);
+    }
+    else
+    {
+        snprintf(message, sizeof(message),
+                 "\xC8\xCE\xCE\xF1\xBD\xF8\xB6\xC8\xA3\xBA%s %s%u/%u",
+                 task->name, label2, progress2, requirementCount2);
+    }
+    return vm_mock_service_session_enqueue_system_message(session, message);
+}
+
 static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                                                    u32 enemyCount,
                                                    u32 dropItemId,
@@ -3172,7 +3219,12 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
             vm_net_mock_task_catalog_find_by_id(states[i].taskId);
         u32 progress1 = states[i].progress1;
         u32 progress2 = states[i].progress2;
+        u32 previousProgress1 = progress1;
+        u32 previousProgress2 = progress2;
         bool changed = false;
+        bool progress1Advanced = false;
+        bool progress2Advanced = false;
+        bool progressNoticeQueued = false;
         u8 nextState = 1;
 
         if (task == NULL || states[i].state != 1)
@@ -3182,7 +3234,11 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
         {
             progress1 = vm_net_mock_min_u32(progress1 + enemyCount,
                                             task->requirementCount1);
-            changed = true;
+            if (progress1 != previousProgress1)
+            {
+                changed = true;
+                progress1Advanced = true;
+            }
         }
         else if (dropItemId != 0 && dropCount != 0 &&
                  task->requirementType1 == 1 &&
@@ -3190,14 +3246,22 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
         {
             progress1 = vm_net_mock_min_u32(progress1 + dropCount,
                                             task->requirementCount1);
-            changed = true;
+            if (progress1 != previousProgress1)
+            {
+                changed = true;
+                progress1Advanced = true;
+            }
         }
         if (enemyId != 0 && enemyCount != 0 &&
             task->requirementType2 == 2 && task->requirementId2 == enemyId)
         {
             progress2 = vm_net_mock_min_u32(progress2 + enemyCount,
                                             task->requirementCount2);
-            changed = true;
+            if (progress2 != previousProgress2)
+            {
+                changed = true;
+                progress2Advanced = true;
+            }
         }
         else if (dropItemId != 0 && dropCount != 0 &&
                  task->requirementType2 == 1 &&
@@ -3205,7 +3269,11 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
         {
             progress2 = vm_net_mock_min_u32(progress2 + dropCount,
                                             task->requirementCount2);
-            changed = true;
+            if (progress2 != previousProgress2)
+            {
+                changed = true;
+                progress2Advanced = true;
+            }
         }
         if (!changed)
             continue;
@@ -3218,16 +3286,21 @@ static void vm_net_mock_task_progress_after_battle(u32 enemyId,
                                             (u8)progress1, (u8)progress2,
                                             nextState))
         {
+            progressNoticeQueued = vm_net_mock_task_progress_enqueue_notice(
+                task, progress1Advanced, task->requirementType1, progress1,
+                task->requirementCount1, progress2Advanced,
+                task->requirementType2, progress2, task->requirementCount2);
             if (nextState == 2)
             {
                 vm_mock_service_session_arm_task_prompt_refresh(
                     vm_net_mock_current_scene_name());
             }
-            printf("[info][network] mock_task_battle_progress task=%u role=%u enemy=%u enemies=%u drop=%u drop_count=%u progress=%u/%u,%u/%u state=%u\n",
+            printf("[info][network] mock_task_battle_progress task=%u role=%u enemy=%u enemies=%u drop=%u drop_count=%u progress=%u/%u,%u/%u state=%u progress_notice=%u\n",
                    task->taskId, role->roleId, enemyId, enemyCount,
                    dropItemId, dropCount,
                    progress1, task->requirementCount1,
-                   progress2, task->requirementCount2, nextState);
+                   progress2, task->requirementCount2, nextState,
+                   progressNoticeQueued ? 1u : 0u);
         }
     }
 }

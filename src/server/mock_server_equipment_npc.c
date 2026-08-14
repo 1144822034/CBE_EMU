@@ -570,8 +570,10 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     u32 objectStart = 0;
     u8 result = 1;
     u8 currentLevel = 0;
+    u8 responseObjectCount = 1;
     bool materialsValid = false;
     bool enhancementSucceeded = false;
+    bool backpackDetailRefreshed = false;
     const char *reason = "ok";
 
     memset(&parsed, 0, sizeof(parsed));
@@ -714,17 +716,19 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         if (result == 1)
         {
             for (u32 level = 0;
-                 level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
+                 level < VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
             {
                 if (!vm_net_mock_seq_put_u32(data1, sizeof(data1), &data1Len,
-                                             (level + 1u) * 100u))
+                                             vm_net_mock_equipment_enhancement_primary_wire_rule(
+                                                 (u8)level)))
                     return 0;
             }
-            for (u32 tier = 1;
-                 tier <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++tier)
+            for (u32 level = 0;
+                 level < VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
             {
                 if (!vm_net_mock_seq_put_u32(data2, sizeof(data2), &data2Len,
-                                             tier * 100u))
+                                             vm_net_mock_equipment_enhancement_primary_wire_rule(
+                                                 (u8)level)))
                     return 0;
             }
         }
@@ -735,7 +739,7 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                 VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL) ||
             !vm_net_mock_put_object_u8(
                 out, outCap, &pos, "num1",
-                result == 1 ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL + 1 : 0) ||
+                result == 1 ? VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL : 0) ||
             (result == 1 &&
              !vm_net_mock_put_object_raw(out, outCap, &pos, "data1", data1,
                                          (u16)data1Len)) ||
@@ -775,18 +779,45 @@ static u32 vm_net_mock_build_equipment_enhance_response(
         return 0;
     }
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    vm_net_mock_finish_wt_packet(out, pos, 1);
+    if (parsed.subtype == 3 && enhancementSucceeded)
+    {
+        u32 refreshStart = pos;
 
-    printf("[info][network] mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u reason=%s resp=29/%u evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C\n",
+        /* 29/3 only has result/material fields.  Its parser updates the
+         * instance's current level but cannot receive the expanded attribute
+         * rows, so append the normal 17/1 backpack detail object afterwards.
+         * It is parsed by the already loaded backpack component and supplies
+         * the complete common-extra for this newly strengthened instance. */
+        if (vm_net_mock_append_backpack_items_object(out, outCap, &pos))
+        {
+            responseObjectCount += 1;
+            backpackDetailRefreshed = true;
+        }
+        else
+        {
+            /* The primary result packet remains valid if a pathological full
+             * backpack cannot fit alongside it in the transport buffer. */
+            pos = refreshStart;
+            printf("[warn][network] mock_equipment_enhance_backpack_refresh_omitted seq=%u item=%u reason=out-capacity\n",
+                   parsed.equipSeq, equipmentItemId);
+        }
+    }
+    vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
+
+    printf("[info][network] mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u backpack_detail=%u reason=%s resp=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+mmGame:0x418C\n",
            parsed.subtype, parsed.equipSeq,
            equipmentItemId, currentLevel, result,
            parsed.materialRows, materialPower, successRate, moneyCost,
-           enhancementSucceeded ? 1 : 0, reason, parsed.subtype);
-    vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u reason=%s response=29/%u evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C\n",
+           enhancementSucceeded ? 1 : 0, backpackDetailRefreshed ? 1 : 0,
+           reason, parsed.subtype,
+           backpackDetailRefreshed ? "+17/1" : "");
+    vm_autotest_note("mock_equipment_enhance phase=%u seq=%u item=%u level=%u result=%u crystals=%u power=%u rate=%u money=%u success=%u backpack_detail=%u reason=%s response=29/%u%s evidence=JianghuOL.CBE:0x0101CD1E+0x0101DD1E+0x01028C7C+mmGame:0x418C\n",
                      parsed.subtype, parsed.equipSeq,
                      equipmentItemId, currentLevel, result,
                      parsed.materialRows, materialPower, successRate, moneyCost,
-                     enhancementSucceeded ? 1 : 0, reason, parsed.subtype);
+                     enhancementSucceeded ? 1 : 0,
+                     backpackDetailRefreshed ? 1 : 0, reason, parsed.subtype,
+                     backpackDetailRefreshed ? "+17/1" : "");
     return pos;
 }
 
@@ -4341,6 +4372,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
                                                  const char *reason)
 {
     bool wasOnline = false;
+    bool roleIdentityReassigned = false;
     char accountId[sizeof(session->accountId)];
     u32 offlineRoleId = 0;
 
@@ -4348,10 +4380,16 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
         return;
     snprintf(accountId, sizeof(accountId), "%s", session->accountId);
     offlineRoleId = session->onlineRoleId;
+    /* A completed user-center role migration has already removed this source
+     * (account, role) parent and recreated it under the target account with a
+     * new role id.  Do not let the old session recreate stale offline-timer
+     * rows while it is being revoked. */
+    roleIdentityReassigned = reason != NULL &&
+        strcmp(reason, "user-role-transfer-import-source") == 0;
     /* The client never owns an offline timer.  Mark the exact transport
      * lifecycle boundary before clearing the session's role identity; the
      * next online practise-info request will settle only this interval. */
-    if (accountId[0] != 0 && offlineRoleId != 0)
+    if (accountId[0] != 0 && offlineRoleId != 0 && !roleIdentityReassigned)
     {
         vm_net_mock_practise_mark_offline(accountId, offlineRoleId);
         vm_net_mock_offline_exp_mark_offline(accountId, offlineRoleId);
