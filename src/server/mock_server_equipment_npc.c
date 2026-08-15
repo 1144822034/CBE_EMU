@@ -689,12 +689,50 @@ static u32 vm_net_mock_build_equipment_enhance_response(
                     role, 0, parsed.equipSeq);
                 if (enhancementSucceeded && equipment != NULL)
                 {
+                    u8 primaryType = 0;
+                    u32 primaryBase = 0;
+                    u32 primaryBefore = 0;
+                    u32 primaryAfter = 0;
+                    u8 stageThreshold = 0;
+                    u8 stageType = 0;
+                    u16 stageValue = 0;
+
                     equipment->enhanceLevel = (u16)(currentLevel + 1);
                     (void)vm_net_mock_equipment_enhancement_ensure_affixes(
                         catalog, (u8)equipment->enhanceLevel,
                         &equipment->enhanceAffixes,
                         role->roleId ^ equipment->itemId ^
                         ((u32)equipment->seq * 0x9e3779b9u));
+                    if (vm_net_mock_equipment_enhancement_resolve_primary(
+                            catalog, &primaryType, &primaryBase))
+                    {
+                        primaryBefore =
+                            vm_net_mock_equipment_enhancement_bonus_from_base(
+                                primaryBase, currentLevel);
+                        primaryAfter =
+                            vm_net_mock_equipment_enhancement_bonus_from_base(
+                                primaryBase, (u8)equipment->enhanceLevel);
+                    }
+                    if ((equipment->enhanceLevel % 4u) == 0)
+                    {
+                        u8 stage = (u8)(equipment->enhanceLevel / 4u - 1u);
+
+                        stageThreshold = (u8)equipment->enhanceLevel;
+                        stageType = equipment->enhanceAffixes.type[stage];
+                        stageValue = equipment->enhanceAffixes.value[stage];
+                    }
+                    printf("[info][network] mock_equipment_enhance_effect seq=%u item=%u level_before=%u level_after=%u primary_type=%u primary_base=%u primary_bonus_before=%u primary_bonus_after=%u primary_step=%u stage_threshold=%u stage_type=%u stage_value=%u\n",
+                           equipment->seq, equipment->itemId, currentLevel,
+                           equipment->enhanceLevel, primaryType, primaryBase,
+                           primaryBefore, primaryAfter,
+                           primaryAfter - primaryBefore, stageThreshold,
+                           stageType, stageValue);
+                    vm_autotest_note("mock_equipment_enhance_effect seq=%u item=%u level_before=%u level_after=%u primary_type=%u primary_base=%u primary_bonus_before=%u primary_bonus_after=%u primary_step=%u stage_threshold=%u stage_type=%u stage_value=%u\n",
+                                     equipment->seq, equipment->itemId,
+                                     currentLevel, equipment->enhanceLevel,
+                                     primaryType, primaryBase, primaryBefore,
+                                     primaryAfter, primaryAfter - primaryBefore,
+                                     stageThreshold, stageType, stageValue);
                 }
                 vm_net_mock_role_db_save(enhancementSucceeded
                                              ? "equipment-enhance-success"
