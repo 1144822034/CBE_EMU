@@ -2,7 +2,8 @@
 
 Date: 2026-08-14
 
-Status: investigating
+Status: resolved; the native initializer is in the title module and the mock
+role-list response now supplies its missing `num/data` fields
 
 ## 1. 当前卡点
 
@@ -89,11 +90,11 @@ frame 191  立即点击“强化”
 服务端已有 `mock_equipment_enhance phase=1/2/3` 行，包含请求的装备序号、物品 ID、当前等级、材料、成功率、消耗与结果码。
 人工复现一次“查看已强化装备属性 → 打开强化界面”后，应同时保留客户端控制台和 `bin/server_out.txt` 中这些行。
 
-## 8. 当前结论
+## 8. 阶段性结论（已由第 11 节补全）
 
-目前没有证据证明服务端可以用某个现有背包刷新包直接改写“物攻 +34”这一静态基础行。修复必须位于
-客户端原生规则表的真实来源，或证明该来源确实应由服务端下发；在取证完成前，保持强化成功包为已确认的
-`1/29/3` 契约。
+截至当时，没有证据证明服务端可以用背包刷新包直接改写“物攻 +34”这一基础行，所以保持强化成功包为
+已确认的 `1/29/3` 契约是正确的。第 11 节随后从标题模块找到了真正的登录响应初始化入口；修复不需要、
+也没有改变 `29/1..3` 或装备实例生命周期。
 
 ## 9. 构建边界发现
 
@@ -103,3 +104,65 @@ frame 191  立即点击“强化”
 
 正确修复是让 `jh-online-server` 使用独立的、仅聚合 `src/server/mock-server.c` 的无界面入口；它保留
 现有资源根解析和服务监听参数，但不编译或链接客户端模拟器。完成后才可运行隔离强化预览探针。
+
+## 10. 2026-08-15 主 CBE 静态闭环
+
+本轮对规则表的相邻字段、所有直接访问点和已装载模块又做了交叉核对：
+
+- `CalcEquipStatBonus(0x01028B34)` 是确实存在的逐级计算器。它从
+  `itemCtrl+0x584` 读取 16 项、每项 4 字节的 `{u8 fixed, pad, i16 percent}`，并按当前
+  强化等级从第 1 项逐项累计；因此固件的算法层明确支持“每强化 +1，基础物攻/护甲成长”。
+- `LoadItemDataSheet(0x010285B6)` 只向相邻的 `itemCtrl+0x580` 分配并装载
+  `item.dsh` 类别 23。仓库内只读检查得到 17 行：`900 玄晶碎片` 和 `901..916
+  一级..十六级玄晶`。这些是玄晶目录，不是 `+0x584` 的 16 项数值规则。
+- `HandleItemUseAndEquip(0x01028C7C)` 的 `29/1` parser 只写当前/最高等级以及
+  `num1/data1 -> +0x5D0`、`num2/data2 -> +0x5CC`；反编译结果中没有对 `+0x584`
+  的读取、分配或写入。`29/3` 仍只更新物品实例的强化等级。
+- 对主 CBE 内所有构造 `itemCtrl+0x580` 的直接指令序列进行穷举后，只有玄晶目录分配/
+  释放、界面读取、强化计算和材料页面读取；没有任何路径写 `itemCtrl+0x584`。场景对象
+  构造前的整块清零会把该指针置零，构造函数本身也没有补写。
+- 已装载的 `江湖OL.CBE`、`mmGameMstarWqvga.cbm`、`mmShopMstarWqvga.cbm`、
+  `mmTitleMstarWqvga.cbm` 均不存在已恢复 16 档曲线的原始 64 字节表；当前资源目录也没有
+  单独的强化规则 DSH。
+
+这一阶段只证明主 CBE、强化页和资源表本身不拥有初始化器，尚不能排除登录阶段动态模块。
+因此“服务端现有协议没有该字段”只是当时待继续验证的假设。向客户内存写表、补丁修改 CBE、
+把材料数组冒充规则表，或删除再插入同序号装备仍然都会绕过已确认的客户端契约，故不采用。
+
+服务端权威角色/战斗属性已使用同一条恢复曲线按每 `+1` 累计；第 11 节将同一曲线接回客户端
+原生登录初始化入口。
+
+## 11. 标题模块写入点与根因修复（2026-08-15）
+
+继续对全部 CBM 的 `0x580` 分拆常量构造做 Thumb 扫描后，在
+`mmTitleMstarWqvga.cbm:title_parse_equipment_enhance_primary_rules(0x1568)` 找到唯一写入器：
+
+1. 从 `WT 1/1/4` 对象读取 `num:u8` 与 `data:blob`；
+2. 释放旧的 `itemCtrl+0x584`，按 `num * 4` 分配新数组；
+3. 对每行依次从 tagged stream 读取 `flat:u8`、`percent:i16`；
+4. 写成客户端计算器实际使用的 `{flat, pad, percent}` 四字节记录。
+
+它的唯一调用点是
+`mmTitleMstarWqvga.cbm:title_handle_role_list_response(0x3544)`：客户端成功接受 subtype 16
+结果与 subtype 4 的 `actorinfo` 后调用该函数。因此规则既不是 DSH，也不是强化页 `29/1`
+材料数据，而是**角色列表/选服响应的一部分**。
+
+首个错误状态也随之确定：服务端
+`vm_net_mock_build_title_server_select_response()` 与
+`vm_net_mock_build_title_rolelist_stage_response()` 构造 subtype 4 时只写了
+`servconf/actorinfo`，没有写 `num/data`。标题 parser 因找不到 `data` 直接返回，初始化时被
+清零的 `itemCtrl+0x584` 一直保持空指针；随后 `CalcEquipStatBonus` 虽按每级循环，却没有任何
+规则可累计，所以背包看到 `+1` 与 `+0` 的基础物攻/护甲相同。
+
+修复位于真正拥有该契约的登录响应层：
+
+- `mock_server_catalog.c` 在权威 16 档曲线旁增加 tagged wire serializer；
+- 两条会返回 subtype 4 角色列表的 builder 均追加 `num=16` 和 `data=112 bytes`；
+- `data` 每档严格为 `00 01 <flat>` 后接 `00 02 <percent-be16>`；
+- 客户端仍由原生标题 parser 分配和写入规则表，未修改客户内存、CBE 指令或 `29/1..3`。
+
+协议回归逐字节断言 16 行和 subtype-4 `num/data` 字段，并继续验证基础值 100 从 `+0` 到
+`+16` 的累计增量为
+`0,12,25,39,54,75,99,122,148,176,207,237,270,312,359,411,467`；四阶段词条仍只在
+`+4/+8/+12/+16` 生效。`make -j2` 与无数据库回归均通过。完整客户端登录/背包显示仍应在
+隔离账号环境做最终画面验收。

@@ -4568,6 +4568,8 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     u32 rawDamage = 0;
     u32 defense = 0;
     u32 damage = 0;
+    u32 damageBeforeCritical = 0;
+    u32 finalDamage = 0;
 
     if (hitOut)
         *hitOut = false;
@@ -4603,13 +4605,37 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
      * never report a dodge for a successful spell cast. */
     if (hitOut)
         *hitOut = true;
+    damageBeforeCritical = damage;
     damage = vm_net_mock_battle_apply_player_critical(
         damage, &playerStats, rollSalt ^ operate, VM_NET_MOCK_BATTLE_CRITICAL_MAGIC,
         criticalOut);
     damage = vm_net_mock_env_u32_if_set("CBE_BATTLE_SKILL_DAMAGE", damage);
     if (damage == 0)
         damage = 1;
-    return vm_net_mock_min_u32(damage, enemyHpCurrent);
+    finalDamage = vm_net_mock_min_u32(damage, enemyHpCurrent);
+
+    /* This narrow trace is intentionally limited to the 雷震八方/天火熔身
+     * group-spell families under cross-profession comparison.  The client consumes
+     * the final actioninfo HP delta, so record every authoritative component
+     * before changing balancing behavior: a lower result can only come from
+     * the caster snapshot, an explicit damage override, a critical result, or
+     * the target's remaining-HP clamp. */
+    if ((skill->skillId >= 21 && skill->skillId <= 23) ||
+        (skill->skillId >= 231 && skill->skillId <= 234))
+    {
+        printf("[info][network] mock_group_spell_damage_trace role=%u job=%u "
+               "skill=%u base=%u coeff=%u/%u/%u stats=%u/%u/%u weapon=%u "
+               "enemy=%u defense=%u raw=%u precrit=%u crit=%u final=%u "
+               "target_hp=%u\n",
+               role ? role->roleId : 0, playerStats.job, skill->skillId,
+               baseDamage, skill->strengthCoeff, skill->agilityCoeff,
+               skill->wisdomCoeff, playerStats.strength, playerStats.agility,
+               playerStats.wisdom, playerStats.equipment.attack, enemyId,
+               defense, rawDamage, damageBeforeCritical,
+               criticalOut != NULL && *criticalOut ? 1u : 0u, finalDamage,
+               enemyHpCurrent);
+    }
+    return finalDamage;
 }
 
 static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)

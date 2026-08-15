@@ -2747,7 +2747,7 @@ static u16 vm_net_mock_equipment_durability_max_for_item(u32 itemId)
 typedef struct
 {
     u8 flat;
-    u8 percent;
+    u16 percent;
 } vm_net_mock_equipment_enhance_primary_rule;
 
 static const vm_net_mock_equipment_enhance_primary_rule
@@ -2757,6 +2757,33 @@ static const vm_net_mock_equipment_enhance_primary_rule
             {7, 14}, {8, 16}, {9, 14}, {10, 16},
             {14, 14}, {15, 16}, {16, 14}, {17, 16},
             {20, 22}, {23, 24}, {26, 26}, {28, 28}};
+
+/* mmTitleMstarWqvga.cbm:
+ * title_parse_equipment_enhance_primary_rules(0x1568) owns the native
+ * itemCtrl+0x584 table.  The title role-list subtype-4 parser reads `num`,
+ * opens `data` as a tagged stream, then consumes exactly one u8 flat value
+ * followed by one i16 percentage value per level.  Keep this serializer next
+ * to the authoritative curve so the title packet and server-side stat
+ * aggregation cannot silently diverge. */
+static u32 vm_net_mock_build_equipment_enhance_primary_rule_data(
+    u8 *out, u32 outCap)
+{
+    u32 pos = 0;
+
+    if (out == NULL)
+        return 0;
+    for (u8 i = 0; i < VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++i)
+    {
+        const vm_net_mock_equipment_enhance_primary_rule *rule =
+            &g_vm_net_mock_equipment_enhance_primary_rules[i];
+        if (!vm_net_mock_seq_put_u8(out, outCap, &pos, rule->flat) ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, rule->percent))
+        {
+            return 0;
+        }
+    }
+    return pos;
+}
 
 enum
 {
@@ -3015,8 +3042,8 @@ static void vm_net_mock_equipment_enhancement_unpack_affixes(
 
 /* The native client calculator has only two hard-wired primary fields:
  * weapon attack and non-weapon armour.  An accessory can legitimately have
- * neither of them, so its strengthening target must be represented as a
- * normal ParseEquipAttributes row rather than being mislabelled as armour. */
+ * neither of them; the authoritative server therefore resolves one of its
+ * actual non-zero base attributes without mislabelling it as armour. */
 static u32 vm_net_mock_equipment_enhancement_bonus_from_base(u32 base,
                                                               u8 enhanceLevel)
 {
@@ -3156,9 +3183,8 @@ static u8 vm_net_mock_equipment_enhancement_collect_attrs(
 
 /* `29/3` updates only item+286/item+287.  The later threshold comparisons
  * therefore require the complete +4/+8/+12/+16 plan to exist in the client
- * object before its first successful strengthen.  Keep any immediately
- * applicable fallback row, then append future stage rows without duplicating
- * stages that are already unlocked in the normal stat collector. */
+ * object before its first successful strengthen.  Append future stage rows
+ * without duplicating stages already unlocked in the normal stat collector. */
 static u8 vm_net_mock_equipment_enhancement_collect_wire_attrs(
     const vm_net_mock_equipment_catalog_item *equipment,
     u8 enhanceLevel,
@@ -3197,17 +3223,70 @@ static u8 vm_net_mock_equipment_enhancement_collect_wire_attrs(
     return count;
 }
 
-static u32 vm_net_mock_equipment_enhancement_primary_bonus(
-    const vm_net_mock_equipment_catalog_item *equipment,
-    u8 enhanceLevel)
+static bool vm_net_mock_equipment_enhancement_resolve_primary(
+    const vm_net_mock_equipment_catalog_item *equipment, u8 *typeOut,
+    u32 *baseOut)
 {
+    u8 type = 0;
     u32 base = 0;
 
-    if (!vm_net_mock_equipment_enhancement_native_primary(equipment, NULL,
+    if (!vm_net_mock_equipment_enhancement_native_primary(equipment, &type,
                                                           &base))
-        return 0;
-    return vm_net_mock_equipment_enhancement_bonus_from_base(base,
-                                                               enhanceLevel);
+    {
+        type = vm_net_mock_equipment_enhancement_fallback_primary_type(
+            equipment);
+        base = vm_net_mock_equipment_enhancement_bonus_value_for_type(
+            equipment, type);
+    }
+    if (type == 0 || base == 0)
+        return false;
+    if (typeOut)
+        *typeOut = type;
+    if (baseOut)
+        *baseOut = base;
+    return true;
+}
+
+static void vm_net_mock_equipment_enhancement_add_attr_bonus(
+    vm_net_mock_equipment_bonus *bonus, u8 type, u32 value)
+{
+    if (bonus == NULL || value == 0)
+        return;
+    switch (type)
+    {
+    case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
+        bonus->strength += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_AGILITY:
+        bonus->agility += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
+        bonus->wisdom += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
+        bonus->attack += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
+        bonus->armor += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_DODGE:
+        bonus->dodge += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_HIT:
+        bonus->hit += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_CRIT:
+        bonus->crit += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_HP:
+        bonus->hp += value;
+        break;
+    case VM_NET_MOCK_EQUIP_ATTR_MP:
+        bonus->mp += value;
+        break;
+    default:
+        break;
+    }
 }
 
 static void vm_net_mock_equipment_enhancement_add_bonus(
@@ -3218,57 +3297,26 @@ static void vm_net_mock_equipment_enhancement_add_bonus(
 {
     vm_net_mock_equipment_enhance_attr attrs[5];
     u8 attrCount = 0;
+    u8 primaryType = 0;
+    u32 primaryBase = 0;
     u32 primary = 0;
 
     if (equipment == NULL || bonus == NULL)
         return;
-    primary = vm_net_mock_equipment_enhancement_primary_bonus(equipment,
-                                                               enhanceLevel);
-    if (equipment->slot == 0)
-        bonus->attack += primary;
-    else
-        bonus->armor += primary;
+    if (vm_net_mock_equipment_enhancement_resolve_primary(
+            equipment, &primaryType, &primaryBase))
+    {
+        primary = vm_net_mock_equipment_enhancement_bonus_from_base(
+            primaryBase, enhanceLevel);
+        vm_net_mock_equipment_enhancement_add_attr_bonus(
+            bonus, primaryType, primary);
+    }
     attrCount = vm_net_mock_equipment_enhancement_collect_attrs(
         equipment, enhanceLevel, affixes, attrs,
         (u8)(sizeof(attrs) / sizeof(attrs[0])));
     for (u8 i = 0; i < attrCount; ++i)
-    {
-        switch (attrs[i].type)
-        {
-        case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
-            bonus->strength += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_AGILITY:
-            bonus->agility += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
-            bonus->wisdom += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
-            bonus->attack += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
-            bonus->armor += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_DODGE:
-            bonus->dodge += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_HIT:
-            bonus->hit += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_CRIT:
-            bonus->crit += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_HP:
-            bonus->hp += attrs[i].value;
-            break;
-        case VM_NET_MOCK_EQUIP_ATTR_MP:
-            bonus->mp += attrs[i].value;
-            break;
-        default:
-            break;
-        }
-    }
+        vm_net_mock_equipment_enhancement_add_attr_bonus(
+            bonus, attrs[i].type, attrs[i].value);
 }
 
 static bool vm_net_mock_add_item_effect_catalog_item(u32 itemId, u32 category,

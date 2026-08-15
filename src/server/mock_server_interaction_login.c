@@ -3246,6 +3246,27 @@ static u32 vm_net_mock_build_title_role_list_actorinfo(u8 *out, u32 outCap)
     return pos;
 }
 
+static bool vm_net_mock_append_title_equipment_enhance_rules(
+    u8 *out, u32 outCap, u32 *pos)
+{
+    u8 data[VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL * 7];
+    u32 dataLen = vm_net_mock_build_equipment_enhance_primary_rule_data(
+        data, sizeof(data));
+
+    /* mmTitleMstarWqvga.cbm:
+     * title_parse_equipment_enhance_primary_rules(0x1568) is called after
+     * subtype-4 actorinfo is accepted.  It allocates itemCtrl+0x584 from
+     * `num` and parses `data` as repeated tagged (u8 flat, i16 percent) rows.
+     * These fields therefore belong to the title role-list response, not to
+     * 29/1 enhancement preview or item.dsh's occult-crystal category. */
+    return dataLen != 0 &&
+           vm_net_mock_put_object_u8(
+               out, outCap, pos, "num",
+               VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL) &&
+           vm_net_mock_put_object_entry(
+               out, outCap, pos, "data", data, (u16)dataLen);
+}
+
 #define VM_NET_MOCK_LOGIN_SERVER_MAX 8
 #define VM_NET_MOCK_LOGIN_SERVER_NAME_CAP 32
 #define VM_NET_MOCK_LOGIN_SERVER_LABEL_CAP 32
@@ -3955,6 +3976,9 @@ static u32 vm_net_mock_build_title_server_select_response(const u8 *request, u32
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "actorinfo", actorInfo, (u16)actorInfoLen))
         return 0;
+    if (!vm_net_mock_append_title_equipment_enhance_rules(
+            out, outCap, &pos))
+        return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     vm_net_mock_finish_wt_packet(out, pos, 1);
     vm_net_mock_title_login_phase_mark_server_select(serverId);
@@ -3984,6 +4008,9 @@ static u32 vm_net_mock_build_title_rolelist_stage_response(u8 *out, u32 outCap)
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 4, &objectStart))
         return 0;
     if (!vm_net_mock_put_object_entry(out, outCap, &pos, "actorinfo", actorinfo, (u16)actorinfoLen))
+        return 0;
+    if (!vm_net_mock_append_title_equipment_enhance_rules(
+            out, outCap, &pos))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
 
