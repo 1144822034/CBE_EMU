@@ -118,7 +118,7 @@ static int expect_title_rule_table_wire_contract(void)
     return 0;
 }
 
-static int expect_fallback_ring(void)
+static int expect_ring_does_not_infer_a_primary(void)
 {
     vm_net_mock_equipment_catalog_item ring;
     vm_net_mock_equipment_enhance_affix_state affixes;
@@ -128,70 +128,179 @@ static int expect_fallback_ring(void)
     memset(&ring, 0, sizeof(ring));
     memset(&affixes, 0, sizeof(affixes));
     ring.slot = 7;
+    ring.category = 6;
     ring.bonus.mp = 652;
     ring.bonus.crit = 16;
 
-    /* The fallback belongs to authoritative stat aggregation, not to the
-     * client attribute array: 29/3 cannot replace that array in-place. */
+    /* Category 6 follows the firmware armour branch.  This ring has no base
+     * armour, so neither its client attribute array nor authoritative stats
+     * may silently reinterpret MP or critical chance as the primary. */
     if (vm_net_mock_equipment_enhancement_collect_attrs(
             &ring, 1, &affixes, attrs,
             (u8)(sizeof(attrs) / sizeof(attrs[0]))) != 0)
     {
-        fputs("fallback leaked into the client stage-attribute array\n", stderr);
+        fputs("base enhancement leaked into the client stage-attribute array\n",
+              stderr);
         return 1;
     }
 
     memset(&bonus, 0, sizeof(bonus));
     vm_net_mock_equipment_enhancement_add_bonus(&ring, 1, &affixes, &bonus);
-    if (bonus.mp != 67 || bonus.armor != 0 || bonus.attack != 0 ||
+    if (bonus.mp != 0 || bonus.armor != 0 || bonus.attack != 0 ||
         bonus.crit != 0)
     {
-        fputs("fallback +1 did not affect only MP by +67\n", stderr);
+        fputs("ring +1 inferred a non-firmware primary attribute\n", stderr);
         return 1;
     }
 
     memset(&bonus, 0, sizeof(bonus));
     vm_net_mock_equipment_enhancement_add_bonus(&ring, 2, &affixes, &bonus);
-    if (bonus.mp != 135 || bonus.armor != 0 || bonus.attack != 0 ||
+    if (bonus.mp != 0 || bonus.armor != 0 || bonus.attack != 0 ||
         bonus.crit != 0)
     {
-        fputs("fallback +2 did not retain cumulative MP growth +135\n", stderr);
+        fputs("ring +2 inferred a non-firmware primary attribute\n", stderr);
         return 1;
     }
     return 0;
 }
 
-static int expect_primary_curve_every_level(void)
+static int expect_shipped_catalog_native_primary_rule(void)
 {
-    vm_net_mock_equipment_catalog_item weapon;
+    static const struct
+    {
+        u32 itemId;
+        bool resolved;
+        u8 type;
+        u32 base;
+    } cases[] = {
+        {1001, true, VM_NET_MOCK_EQUIP_ATTR_ATTACK, 30},
+        {1501, true, VM_NET_MOCK_EQUIP_ATTR_ATTACK, 30},
+        {2001, true, VM_NET_MOCK_EQUIP_ATTR_ATTACK, 15},
+        {3001, true, VM_NET_MOCK_EQUIP_ATTR_ARMOR, 45},
+        {8001, true, VM_NET_MOCK_EQUIP_ATTR_ARMOR, 10},
+        {7001, false, 0, 0},
+        {9001, false, 0, 0},
+    };
+
+    for (u32 i = 0; i < (u32)(sizeof(cases) / sizeof(cases[0])); ++i)
+    {
+        const vm_net_mock_equipment_catalog_item *equipment =
+            vm_net_mock_find_equipment_catalog_item(cases[i].itemId);
+        u8 type = 0;
+        u32 base = 0;
+
+        bool resolved = equipment != NULL &&
+                        vm_net_mock_equipment_enhancement_resolve_primary(
+                            equipment, &type, &base);
+
+        if (equipment == NULL || resolved != cases[i].resolved ||
+            (resolved &&
+             (type != cases[i].type || base != cases[i].base)))
+        {
+            fprintf(stderr,
+                    "shipped equipment native primary mismatch item=%u "
+                    "got=%u:%u/%u expected=%u:%u/%u\n",
+                    cases[i].itemId, resolved, type, base,
+                    cases[i].resolved, cases[i].type, cases[i].base);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int expect_native_primary_curve_every_level(void)
+{
+    vm_net_mock_equipment_catalog_item sword;
+    vm_net_mock_equipment_catalog_item dagger;
+    vm_net_mock_equipment_catalog_item staff;
     vm_net_mock_equipment_catalog_item armour;
+    vm_net_mock_equipment_catalog_item cloak;
+    vm_net_mock_equipment_catalog_item belt;
+    vm_net_mock_equipment_catalog_item ring;
     vm_net_mock_equipment_enhance_affix_state affixes;
 
-    memset(&weapon, 0, sizeof(weapon));
+    memset(&sword, 0, sizeof(sword));
+    memset(&dagger, 0, sizeof(dagger));
+    memset(&staff, 0, sizeof(staff));
     memset(&armour, 0, sizeof(armour));
+    memset(&cloak, 0, sizeof(cloak));
+    memset(&belt, 0, sizeof(belt));
+    memset(&ring, 0, sizeof(ring));
     memset(&affixes, 0, sizeof(affixes));
-    weapon.slot = 0;
-    weapon.bonus.attack = 100;
-    armour.slot = 1;
+    sword.slot = 0;
+    sword.category = 7;
+    sword.bonus.attack = 100;
+    sword.bonus.strength = 50;
+    dagger.slot = 0;
+    dagger.category = 8;
+    dagger.bonus.attack = 100;
+    dagger.bonus.agility = 40;
+    staff.slot = 0;
+    staff.category = 9;
+    staff.bonus.attack = 100;
+    staff.bonus.wisdom = 150;
+    armour.slot = 2;
+    armour.category = 1;
     armour.bonus.armor = 100;
+    armour.bonus.hp = 40;
+    cloak.slot = 3;
+    cloak.category = 2;
+    cloak.bonus.armor = 100;
+    cloak.bonus.hp = 150;
+    cloak.bonus.mp = 120;
+    belt.slot = 4;
+    belt.category = 3;
+    belt.bonus.hp = 100;
+    ring.slot = 7;
+    ring.category = 6;
+    ring.bonus.mp = 100;
 
     for (u8 level = 0; level <= VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL; ++level)
     {
-        vm_net_mock_equipment_bonus weaponBonus;
+        vm_net_mock_equipment_bonus swordBonus;
+        vm_net_mock_equipment_bonus daggerBonus;
+        vm_net_mock_equipment_bonus staffBonus;
         vm_net_mock_equipment_bonus armourBonus;
+        vm_net_mock_equipment_bonus cloakBonus;
+        vm_net_mock_equipment_bonus beltBonus;
+        vm_net_mock_equipment_bonus ringBonus;
 
-        memset(&weaponBonus, 0, sizeof(weaponBonus));
+        memset(&swordBonus, 0, sizeof(swordBonus));
+        memset(&daggerBonus, 0, sizeof(daggerBonus));
+        memset(&staffBonus, 0, sizeof(staffBonus));
         memset(&armourBonus, 0, sizeof(armourBonus));
+        memset(&cloakBonus, 0, sizeof(cloakBonus));
+        memset(&beltBonus, 0, sizeof(beltBonus));
+        memset(&ringBonus, 0, sizeof(ringBonus));
         vm_net_mock_equipment_enhancement_add_bonus(
-            &weapon, level, &affixes, &weaponBonus);
+            &sword, level, &affixes, &swordBonus);
+        vm_net_mock_equipment_enhancement_add_bonus(
+            &dagger, level, &affixes, &daggerBonus);
+        vm_net_mock_equipment_enhancement_add_bonus(
+            &staff, level, &affixes, &staffBonus);
         vm_net_mock_equipment_enhancement_add_bonus(
             &armour, level, &affixes, &armourBonus);
-        if (weaponBonus.attack != kBase100Cumulative[level] ||
-            weaponBonus.armor != 0 ||
+        vm_net_mock_equipment_enhancement_add_bonus(
+            &cloak, level, &affixes, &cloakBonus);
+        vm_net_mock_equipment_enhancement_add_bonus(
+            &belt, level, &affixes, &beltBonus);
+        vm_net_mock_equipment_enhancement_add_bonus(
+            &ring, level, &affixes, &ringBonus);
+        if (swordBonus.attack != kBase100Cumulative[level] ||
+            swordBonus.strength != 0 ||
+            daggerBonus.attack != kBase100Cumulative[level] ||
+            daggerBonus.agility != 0 ||
+            staffBonus.attack != kBase100Cumulative[level] ||
+            staffBonus.wisdom != 0 ||
             armourBonus.armor != kBase100Cumulative[level] ||
-            armourBonus.attack != 0)
+            armourBonus.hp != 0 ||
+            cloakBonus.armor != kBase100Cumulative[level] ||
+            cloakBonus.hp != 0 || cloakBonus.mp != 0 ||
+            beltBonus.hp != 0 || beltBonus.armor != 0 ||
+            ringBonus.mp != 0 || ringBonus.armor != 0)
         {
-            fprintf(stderr, "primary curve mismatch at +%u\n", level);
+            fprintf(stderr, "native attack/armour curve mismatch at +%u\n",
+                    level);
             return 1;
         }
         if (level != 0 &&
@@ -220,8 +329,10 @@ static int expect_four_stage_activation(void)
     memset(&unpacked, 0, sizeof(unpacked));
     weapon.itemId = 1001;
     weapon.slot = 0;
+    weapon.category = 7;
     weapon.levelRequired = 20;
     weapon.bonus.attack = 100;
+    weapon.bonus.strength = 50;
     memcpy(affixes.type, types, sizeof(types));
     memcpy(affixes.value, values, sizeof(values));
 
@@ -295,6 +406,7 @@ static int expect_four_stage_activation(void)
             &weapon, level, &affixes, &bonus);
         if (bonus.attack != kBase100Cumulative[level] +
                                 (level >= 8 ? values[1] : 0) ||
+            bonus.strength != 0 ||
             bonus.crit != (level >= 4 ? values[0] : 0) ||
             bonus.hit != (level >= 12 ? values[2] : 0) ||
             bonus.wisdom != (level >= 16 ? values[3] : 0))
@@ -302,6 +414,42 @@ static int expect_four_stage_activation(void)
             fprintf(stderr, "stage bonus mismatch at +%u\n", level);
             return 1;
         }
+    }
+    return 0;
+}
+
+static int expect_non_native_primary_does_not_fall_back(void)
+{
+    vm_net_mock_equipment_catalog_item staff;
+    vm_net_mock_equipment_catalog_item cloak;
+    vm_net_mock_equipment_enhance_affix_state affixes;
+    vm_net_mock_equipment_bonus bonus;
+
+    memset(&staff, 0, sizeof(staff));
+    memset(&cloak, 0, sizeof(cloak));
+    memset(&affixes, 0, sizeof(affixes));
+    staff.slot = 0;
+    staff.category = 9;
+    staff.bonus.attack = 45;
+    cloak.slot = 3;
+    cloak.category = 2;
+    cloak.bonus.hp = 100;
+
+    memset(&bonus, 0, sizeof(bonus));
+    vm_net_mock_equipment_enhancement_add_bonus(&staff, 2, &affixes, &bonus);
+    if (bonus.attack != 13 || bonus.wisdom != 0)
+    {
+        fputs("staff did not use its firmware attack primary\n", stderr);
+        return 1;
+    }
+
+    memset(&bonus, 0, sizeof(bonus));
+    vm_net_mock_equipment_enhancement_add_bonus(&cloak, 2, &affixes, &bonus);
+    if (bonus.hp != 0 || bonus.armor != 0)
+    {
+        fputs("cloak without armour fell back to a non-firmware primary\n",
+              stderr);
+        return 1;
     }
     return 0;
 }
@@ -316,6 +464,7 @@ static int expect_new_plan_is_complete_and_stable(void)
     memset(&generated, 0, sizeof(generated));
     equipment.itemId = 1002;
     equipment.slot = 7;
+    equipment.category = 6;
     equipment.levelRequired = 20;
 
     if (!vm_net_mock_equipment_enhancement_ensure_affixes(
@@ -356,15 +505,17 @@ static int expect_new_plan_is_complete_and_stable(void)
 int main(void)
 {
     if (expect_title_rule_table_wire_contract() != 0 ||
-        expect_fallback_ring() != 0 ||
-        expect_primary_curve_every_level() != 0 ||
+        expect_shipped_catalog_native_primary_rule() != 0 ||
+        expect_ring_does_not_infer_a_primary() != 0 ||
+        expect_native_primary_curve_every_level() != 0 ||
+        expect_non_native_primary_does_not_fall_back() != 0 ||
         expect_four_stage_activation() != 0 ||
         expect_new_plan_is_complete_and_stable() != 0)
     {
         return 1;
     }
     puts("equipment enhancement regression passed: title login initializes "
-         "the native 16-level rule table; every +1 grows the resolved base "
-         "attribute; +4/+8/+12/+16 stages activate exactly");
+         "the native 16-level rule table; only weapon attack and non-weapon "
+         "armour grow at every +1; +4/+8/+12/+16 stages activate exactly");
     return 0;
 }

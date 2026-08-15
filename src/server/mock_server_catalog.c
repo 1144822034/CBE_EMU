@@ -3040,10 +3040,11 @@ static void vm_net_mock_equipment_enhancement_unpack_affixes(
     }
 }
 
-/* The native client calculator has only two hard-wired primary fields:
- * weapon attack and non-weapon armour.  An accessory can legitimately have
- * neither of them; the authoritative server therefore resolves one of its
- * actual non-zero base attributes without mislabelling it as armour. */
+/* Match the native client calculator exactly.  Equipment categories 7/8/9
+ * (sword, dagger and staff) strengthen attack; categories 0..6 strengthen
+ * armour.  The title rule table carries only flat/percent rows and provides
+ * no attribute selector, so the authoritative server must not infer another
+ * primary from the remaining equip.dsh fields. */
 static u32 vm_net_mock_equipment_enhancement_bonus_from_base(u32 base,
                                                               u8 enhanceLevel)
 {
@@ -3060,93 +3061,6 @@ static u32 vm_net_mock_equipment_enhancement_bonus_from_base(u32 base,
         result += (u32)rule->flat + (base * (u32)rule->percent) / 100u;
     }
     return result;
-}
-
-static bool vm_net_mock_equipment_enhancement_native_primary(
-    const vm_net_mock_equipment_catalog_item *equipment, u8 *typeOut,
-    u32 *baseOut)
-{
-    u8 type = 0;
-    u32 base = 0;
-
-    if (equipment == NULL)
-        return false;
-    if (equipment->slot == 0)
-    {
-        type = VM_NET_MOCK_EQUIP_ATTR_ATTACK;
-        base = equipment->bonus.attack;
-    }
-    else
-    {
-        type = VM_NET_MOCK_EQUIP_ATTR_ARMOR;
-        base = equipment->bonus.armor;
-    }
-    if (base == 0)
-        return false;
-    if (typeOut)
-        *typeOut = type;
-    if (baseOut)
-        *baseOut = base;
-    return true;
-}
-
-static u32 vm_net_mock_equipment_enhancement_bonus_value_for_type(
-    const vm_net_mock_equipment_catalog_item *equipment, u8 type)
-{
-    if (equipment == NULL)
-        return 0;
-    switch (type)
-    {
-    case VM_NET_MOCK_EQUIP_ATTR_STRENGTH:
-        return equipment->bonus.strength;
-    case VM_NET_MOCK_EQUIP_ATTR_AGILITY:
-        return equipment->bonus.agility;
-    case VM_NET_MOCK_EQUIP_ATTR_WISDOM:
-        return equipment->bonus.wisdom;
-    case VM_NET_MOCK_EQUIP_ATTR_ATTACK:
-        return equipment->bonus.attack;
-    case VM_NET_MOCK_EQUIP_ATTR_ARMOR:
-        return equipment->bonus.armor;
-    case VM_NET_MOCK_EQUIP_ATTR_DODGE:
-        return equipment->bonus.dodge;
-    case VM_NET_MOCK_EQUIP_ATTR_HIT:
-        return equipment->bonus.hit;
-    case VM_NET_MOCK_EQUIP_ATTR_CRIT:
-        return equipment->bonus.crit;
-    case VM_NET_MOCK_EQUIP_ATTR_HP:
-        return equipment->bonus.hp;
-    case VM_NET_MOCK_EQUIP_ATTR_MP:
-        return equipment->bonus.mp;
-    default:
-        return 0;
-    }
-}
-
-static u8 vm_net_mock_equipment_enhancement_fallback_primary_type(
-    const vm_net_mock_equipment_catalog_item *equipment)
-{
-    static const u8 candidates[] = {
-        VM_NET_MOCK_EQUIP_ATTR_ATTACK, VM_NET_MOCK_EQUIP_ATTR_ARMOR,
-        VM_NET_MOCK_EQUIP_ATTR_HP, VM_NET_MOCK_EQUIP_ATTR_MP,
-        VM_NET_MOCK_EQUIP_ATTR_STRENGTH, VM_NET_MOCK_EQUIP_ATTR_AGILITY,
-        VM_NET_MOCK_EQUIP_ATTR_WISDOM, VM_NET_MOCK_EQUIP_ATTR_DODGE,
-        VM_NET_MOCK_EQUIP_ATTR_HIT, VM_NET_MOCK_EQUIP_ATTR_CRIT};
-
-    if (equipment == NULL ||
-        vm_net_mock_equipment_enhancement_native_primary(equipment, NULL,
-                                                          NULL))
-    {
-        return 0;
-    }
-    for (u32 i = 0; i < (u32)(sizeof(candidates) / sizeof(candidates[0])); ++i)
-    {
-        if (vm_net_mock_equipment_enhancement_bonus_value_for_type(
-                equipment, candidates[i]) != 0)
-        {
-            return candidates[i];
-        }
-    }
-    return 0;
 }
 
 static u8 vm_net_mock_equipment_enhancement_collect_attrs(
@@ -3230,15 +3144,19 @@ static bool vm_net_mock_equipment_enhancement_resolve_primary(
     u8 type = 0;
     u32 base = 0;
 
-    if (!vm_net_mock_equipment_enhancement_native_primary(equipment, &type,
-                                                          &base))
+    if (equipment == NULL)
+        return false;
+    if (equipment->category >= 7 && equipment->category <= 9)
     {
-        type = vm_net_mock_equipment_enhancement_fallback_primary_type(
-            equipment);
-        base = vm_net_mock_equipment_enhancement_bonus_value_for_type(
-            equipment, type);
+        type = VM_NET_MOCK_EQUIP_ATTR_ATTACK;
+        base = equipment->bonus.attack;
     }
-    if (type == 0 || base == 0)
+    else if (equipment->category <= 6)
+    {
+        type = VM_NET_MOCK_EQUIP_ATTR_ARMOR;
+        base = equipment->bonus.armor;
+    }
+    if (base == 0)
         return false;
     if (typeOut)
         *typeOut = type;
@@ -7023,63 +6941,6 @@ static u32 vm_net_mock_build_shop_items_books_combo_response(const u8 *request, 
     vm_autotest_note("mock_shop_items_books_combo len=%u items_payload=%u rows=%u iteminfo_len=%u first=%u response=17/1+7/42 evidence=mmGame:0x418C runtime=npc-buy-wt17/1-len25\n",
                      requestLen,
                      itemsPayloadLen,
-                     rowCount,
-                     itemInfoLen,
-                     vm_net_mock_shop17_first_item_id());
-    return pos;
-}
-
-static u32 vm_net_mock_build_shop_items17_response(u8 *out, u32 outCap)
-{
-    u32 pos = 5;
-    u32 rowCount = 0;
-    u32 itemInfoLen = 0;
-    char ids[160];
-
-    if (outCap < pos)
-        return 0;
-    if (!vm_net_mock_append_shop17_items_object(out, outCap, &pos, &rowCount, &itemInfoLen))
-        return 0;
-    vm_net_mock_finish_wt_packet(out, pos, 1);
-    g_netMockShop17ListPending = 0;
-    vm_net_mock_format_shop17_ids(8, ids, sizeof(ids));
-    printf("[info][network] mock_shop_items17 rows=%u iteminfo_len=%u first=%u ids=%s\n",
-           rowCount,
-           itemInfoLen,
-           vm_net_mock_shop17_first_item_id(),
-           ids);
-    vm_autotest_note("mock_shop_items17 rows=%u iteminfo_len=%u first=%u response=17/1 evidence=mmGame:0x418C runtime=shop-context-empty-17/1\n",
-                     rowCount,
-                     itemInfoLen,
-                     vm_net_mock_shop17_first_item_id());
-    return pos;
-}
-
-static u32 vm_net_mock_build_shop_items_books_response(u8 *out, u32 outCap)
-{
-    u32 pos = 5;
-    u8 objectCount = 0;
-    u32 rowCount = 0;
-    u32 itemInfoLen = 0;
-    char ids[160];
-
-    if (outCap < pos)
-        return 0;
-    if (!vm_net_mock_append_shop17_items_object(out, outCap, &pos, &rowCount, &itemInfoLen))
-        return 0;
-    objectCount += 1;
-    if (!vm_net_mock_append_books42_object(out, outCap, &pos))
-        return 0;
-    objectCount += 1;
-    vm_net_mock_finish_wt_packet(out, pos, objectCount);
-    g_netMockShop17ListPending = 0;
-    vm_net_mock_format_shop17_ids(8, ids, sizeof(ids));
-    printf("[info][network] mock_shop_items_books rows=%u iteminfo_len=%u first=%u ids=%s\n",
-           rowCount,
-           itemInfoLen,
-           vm_net_mock_shop17_first_item_id(),
-           ids);
-    vm_autotest_note("mock_shop_items_books rows=%u iteminfo_len=%u first=%u response=17/1+7/42 evidence=mmGame:0x418C runtime=shop-context-7/42\n",
                      rowCount,
                      itemInfoLen,
                      vm_net_mock_shop17_first_item_id());

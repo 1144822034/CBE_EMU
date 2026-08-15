@@ -439,26 +439,6 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
-    if (g_netMockShop17ListPending && vm_net_mock_is_backpack_open_request(request, requestLen))
-    {
-        hookedLen = vm_net_mock_build_shop_items_books_response(out, outCap);
-        if (hookedLen)
-        {
-            vm_net_log_handled_packet("builtin-shop-items-books", request, requestLen, hookedLen);
-            return hookedLen;
-        }
-    }
-
-    if (g_netMockShop17ListPending && vm_net_mock_is_backpack_items_request(request, requestLen))
-    {
-        hookedLen = vm_net_mock_build_shop_items17_response(out, outCap);
-        if (hookedLen)
-        {
-            vm_net_log_handled_packet("builtin-shop-items17", request, requestLen, hookedLen);
-            return hookedLen;
-        }
-    }
-
     hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
     if (hookedLen)
     {
