@@ -8,9 +8,91 @@ Status: implemented (PixiJS_web only; CBE 不做)
 
 1. 排行榜 / 结算排名：`score==0` 不计入。
 2. 切磋/比武 `4/3` 用药：纳入 duel 回合提交屏障（双方用药可推进），不再空 ack 卡死。
-3. 战后 `4/7` fdata + 地图 tip：`比武胜利/失败/平局 积分+N 当前积分M`。
+3. 战后 `4/7` fdata + 地图 tip：`比武胜利/失败/平局 积分+N 当前积分M n胜/n负/n平/n轮空`。
+4. 比赛区间连胜（胜且未死；平/轮空/负不计，负清零）：1 敌将讨伐 … 2 双杀 … 6 势如破竹 … 11 天下无敌。**本场 LIVE 每档仅全场首个达成者**世界频道播报+音效（避免刷屏）；进 LIVE / 新 session / SETTLED 重开时清零档位掩码。Pixi **仅称号**按档着色（天下无敌红）。音效：`JHOnlineData/arena_kill_sfx/arena_kill_1..11.mp3`（切点见 `arena_kill_sfx/killstreak_segments.json`；**不受** BGM/「开关声音」影响）。
 4. 进场/比赛期间擂台内禁组队；进场与 scene_ready 自动解散；离线再上线重绑 `clientId`/`inArenaScene`（仍留在场地）。
 5. 进场/比赛期间同图仅同职业×同段位互见（含周围列表）；结算后恢复。
+
+## 2026-08-15 连杀播报时机
+
+- 比赛开始后：全场**第一个**击杀（连胜1）→ `敌将讨伐`
+- 之后全场**第一个**连胜2 → `双杀`；3 → `大杀特杀` … 11+ → `天下无敌`
+- 同一档位后续达成者不再世界播报/播音效（个人连胜计数仍照常增减）
+- **仅 70 阶段**播报；10/20/…/50 段位只计连胜、不发世界条/音效
+
+## 2026-08-14 修复：仍能看见不同段位玩家
+
+- 现象：ENTRY/LIVE 时地图上仍能看到其它职业/等级段玩家。
+- 根因：`arena_refresh_nearby` → `invalidate` 把 `peerSync.visible=false`，随后 baseline 的 `append_stale_peer_remove6` **要求 visible==true** 才发 `1/2/6` → 客户端幽灵不删；种子过滤即使正确，旧精灵仍留在场上。
+- 次因：`peer_visible` 在 `sceneVisibleScene` 判定失败时 fail-open；缺 observer 时种子路径跳过过滤。
+- 修复：
+  1. stale remove：只要 peerSync 有 `sourceClientId` 且不在当前种子，就发 `1/2/6` 并清空槽（不依赖 visible）
+  2. `is_arena_scene` 增加 GBK/UTF-8「比武擂台」子串兜底
+  3. `peer_visible`：`onlineScene` 回退；ENTRY/LIVE 缺职业/段位 fail-closed；不再要求 `inArenaScene` 才用报名快照
+  4. 种子：擂台场景必须有 observer 且通过 `peer_visible`
+  5. 每场 ENTRY/LIVE 绑定时强制 filter-resync 一次
+
+## 2026-08-14 修复：到点不开战 / 没提示
+
+- 现象（`192.1.1.3` / session=3）：周五 LIVE、`server_arena_scores` 44 人，但 score/wins/byes 全 0；顶栏 HUD 也不出。
+- 根因：
+  1. 参与者只在进程内存；换 session / 重启 `part_count=0` 且不 hydrate DB → 场上有人却不可匹配、HUD `find_part` 失败。
+  2. 活动中途改 `match_start`（20:30→20:40）不回写 runtime 时钟；LIVE→新 ENTRY 窗口也不会回落，轮次/`lastMatchRound` 易错乱。
+  3. 阶段切换只推世界频道，Pixi `onChat` 仅对胜负平轮空弹 tip；阶段文案不进顶 tip，晚进号也会错过一次性广播。
+- 修复：
+  - session bind 时按 DB status 恢复，并 hydrate `server_arena_scores`
+  - 每 tick 把已在擂台图的在线角色 sync 进 participant（`inArenaScene=1`）
+  - 配置时刻变化时 resync `match_*_ts` 并重置 `lastMatchRound`；LIVE 遇新 ENTRY 窗口可回落再开战
+  - ENTRY/LIVE/SETTLED：全服 `1/3/3` 系统条 + 状态边沿世界频道；每座位 `arenaPhaseTipStatus` 补发晚进
+  - Pixi：`extractArenaPhaseTip`（擂台已开放 / 比赛开始 / 已结束）→ `showGameTip`
+  - HUD 用当前 observer 角色而非全局 active_role
+- 验证：阶段切换或晚登录应立刻顶 tip；聊天栏有对应系统/世界条。
+
+## 2026-08-14 修复：顶栏「比武 进场/比赛」条消失
+
+- 现象：人在擂台，阶段正确，但最上状态条没有。
+- 根因：scene-sync **idle fast path** 在无社交/交易/周围可见玩家时直接 `return 0`。阶段隔离或场上只剩自己时 `hasOtherPlayers=false`，整包跳过，`41/5` HUD 永远挂不上。
+- 修复：idle 判断增加 `vm_mock_arena_poll_needs_body`；在场则继续组包并自愈 `inArenaScene`/报名。
+- 验证：独自进擂台也应持续出现「比武 进场/比赛 …」顶栏。
+
+## 2026-08-14 修复：192.1.1.3 顶栏仍无（HUD 独包 + 客户端兜底）
+
+- 现象：库里 ENTRY/LIVE 与 `match_*_ts` 已对齐，进擂台仍无顶栏。
+- 根因：idle 放行后仍可能饿死 `41/5`；条带画在 y=0 易被 WorldHud 顶栏盖住。
+- 修复：idle 时直接下发 HUD-only WT；Pixi 条带移到 `WORLD_TOP_H`；进场/poll 缺 41/5 时用 41/1 status 兜底。
+- 验证：进 `c04比武擂台` 后地图顶应出现绿色「比武 进场/比赛 …」。
+
+## 2026-08-14 修复：到点 LIVE 仍不开战（赛程时间戳陈旧）
+
+- 现象（session=3）：后台已改开战窗口，库里 status=LIVE、报名人数>0 但 score 全 0。
+- 根因：`server_arena_sessions.match_*_ts` 未跟随 `server_arena_config` 的分钟配置更新；`match_round` 按陈旧 end_ts 直接 return。
+- 修复：
+  - 权威来源仅为后台可配的 `entry/match_*_minute`（禁止写死具体钟点）
+  - tick / 匹配前 `sync_schedule_timestamps`；**保存比武配置时立刻** `apply_config_schedule_now` 回写今日场次并 `reconcile` 状态
+  - 结算只认 `desired==SETTLED`；**同日把时刻改回进场/比赛窗口时允许 `SETTLED→ENTRY/LIVE`**（否则进场 tip/HUD 不再触发）
+  - `sceneVisibleReady` 短暂未就绪不挡匹配
+- 验证：后台改开战/结束时刻并保存后，`server_arena_sessions` 的 ts 应马上变成「当日 0 点 + 配置分钟」；日志有 `arena_schedule_resync` / `arena_open_sessions_resync`。
+
+## 2026-08-14 修复：本机改进场时间后顶上无提示
+
+- 现象：今日已 SETTLED 后，后台把进场分钟改到当前仍无「比武擂台已开放进场」顶 tip / 进场 HUD。
+- 根因：tick 只允许 `LIVE→ENTRY`，且 `desired==LIVE` 时显式跳过 `SETTLED`；同日重开窗口时状态卡在 3。
+- 修复：`vm_mock_arena_reconcile_status_from_desired`；保存配置与每 tick 都可 `SETTLED→ENTRY/LIVE` 并重置 announce 边沿。
+- 验证：改进场窗口保存后日志 `arena_status …→1` + `arena_announce`；在线角色收到系统 tip。
+
+## 2026-08-14 修复：提示「比赛开始」但不开战
+
+- 现象：LIVE 提示已出，`server_arena_scores` 仍全 0。
+- 根因：空池仍先写 `lastMatchRound` 烧掉本轮；`duel_begin` 强依赖 `sceneVisibleReady`，进场未就绪时匹配全失败。
+- 修复：匹配前再 sync 场上人员；空池不消费轮次；双方都在擂台图时放宽 ready/pending。
+- 验证：替换并重启 `jh-online-server.exe` 后应出现 `arena_match`/`arena_bye`，积分开始增加。
+
+## 2026-08-14 修复：不点周围玩家地图只见自己
+
+- 现象：擂台图上默认只有自己；打开「周围玩家」后别人才出现（甚至含其他段位）。
+- 根因：NPC 进擂台只回 `30/1`，未走实例同款 post-enter；`sceneVisible` 一直 pending，scene-sync 不推 `2/10`。打开 `2/7` 会 promote ready，随后才出 peer。
+- 修复：进场后 `settleArenaSceneEnter`（post-enter + poll）；`onNearbyPage` 同步 `applyPeers`，擂台上清掉不在列表里的幽灵。
+- 验证：进擂台后无需开周围列表也应看到同段位玩家；列表与地图一致。
 
 ## 2026-08-14 修复：阶段隔离周围玩家
 
@@ -46,8 +128,8 @@ Status: implemented (PixiJS_web only; CBE 不做)
 | subtype | 方向 | 用途 |
 |--------|------|------|
 | 1 | req/resp | status |
-| 2 | req/resp | rank（job/bracket/page） |
-| 3 | req/resp | claim |
+| 2 | req/resp | rank（job/bracket/page；rows 含 rewardName/Count；myReward*） |
+| 3 | req/resp | claim（成功时 `tip` GBK 明细 + 系统 `1/3/3` 同文案） |
 | 4 | req | leave → 30/1 回原场景 |
 | 5 | push | HUD（挂在 scene-sync poll） |
 
@@ -86,12 +168,12 @@ NPC 服务 opcode：`0xf6000001` 进场 / `0xf6000002` 离场 / `0xf6000003` 排
 - [ ] 70 级仅同职业 70 可见
 - [ ] 0 分不进排行榜
 - [ ] 双方同回合用药/血壶可出 4/6，不卡回合
-- [ ] 战后 tip：胜/败/平 + 积分增量 + 当前积分
+- [ ] 战后 tip：胜/败/平 + 积分增量 + 当前积分 + n胜/n负/n平/n轮空
 - [ ] 比武期间擂台内无法组队；已组队进场自动解散
 - [ ] 离线再上线仍在擂台且可继续匹配
 - [ ] 奇数人轮空 +20
 - [ ] 4 分钟未分胜负平局 +10 双方退战场
-- [ ] 21:00 结算称号覆盖；1–10 领奖幂等
+- [ ] 21:00 结算称号覆盖；1–10 领奖幂等；领奖系统消息含经验/金钱/酷宝/物品明细
 - [ ] 城市场景切磋不受影响；擂台内手动切磋拒绝
 - [ ] `make -j2`；Pixi `tsc --noEmit`
 

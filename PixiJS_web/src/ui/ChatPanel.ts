@@ -11,7 +11,7 @@ import {
   SOFTKEY_H,
   drawCbePanel,
 } from "./constants";
-import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import {
   clearPanelTip,
@@ -30,6 +30,11 @@ export type ChatEntry = {
   /** Sender role / nearby actor id for starting private chat; 0 = none. */
   senderRoleId?: number;
   senderName?: string;
+  /** Optional whole-line override (rare). */
+  color?: number;
+  /** Arena kill-streak: color only this title substring (survives wrap). */
+  streakTitle?: string;
+  streakColor?: number;
 };
 
 export type ChatPmTarget = { id: number; name: string };
@@ -95,6 +100,74 @@ export function colorForChatType(type: number): number {
     if (ch.types.includes(type)) return ch.color;
   }
   return CBE.inkMint;
+}
+
+/**
+ * 比武连杀：仅「称号」着色；1…10 各色，11+ 天下无敌红色。
+ * Wire: `{玩家} 比武 {阶段} 连胜N人,已经{称号} !`
+ * 服务端：本场 LIVE 每档仅全场首个达成者播报。
+ */
+const ARENA_KILL_STREAK_COLORS: { title: string; color: number }[] = [
+  { title: "敌将讨伐", color: 0xfff0c0 },
+  { title: "双杀", color: 0xffc060 },
+  { title: "大杀特杀", color: 0xffa040 },
+  { title: "所向披靡", color: 0xffe040 },
+  { title: "浑身是胆", color: 0x80ff40 },
+  { title: "势如破竹", color: 0x40ffb0 },
+  { title: "勇冠三军", color: 0x40e8ff },
+  { title: "一骑当千", color: 0x6080ff },
+  { title: "万夫莫敌", color: 0xc080ff },
+  { title: "举世无双", color: 0xff60c8 },
+  { title: "天下无敌", color: 0xff2020 },
+];
+
+export function findArenaKillStreakTitle(
+  text: string,
+): { title: string; color: number; index: number } | null {
+  const raw = text || "";
+  if (!raw.includes("比武") || !raw.includes("连胜") || !raw.includes("已经"))
+    return null;
+  for (let i = ARENA_KILL_STREAK_COLORS.length - 1; i >= 0; i--) {
+    const row = ARENA_KILL_STREAK_COLORS[i]!;
+    const index = raw.indexOf(row.title);
+    if (index >= 0) return { title: row.title, color: row.color, index };
+  }
+  return null;
+}
+
+/** True when line is a kill-streak announce (for tip / detection). */
+export function arenaKillStreakColor(text: string): number | null {
+  return findArenaKillStreakTitle(text)?.color ?? null;
+}
+
+/** Split one display line so only the streak title uses its color. */
+export function chatLineColorRuns(
+  text: string,
+  baseColor: number,
+  entry?: ChatEntry,
+): { text: string; color: number }[] {
+  let title = entry?.streakTitle ?? "";
+  let color = entry?.streakColor;
+  let index = title ? text.indexOf(title) : -1;
+  if (index < 0 || !title || color == null) {
+    const hit = findArenaKillStreakTitle(text);
+    if (!hit) return [{ text, color: baseColor }];
+    title = hit.title;
+    color = hit.color;
+    index = hit.index;
+  }
+  if (index < 0) return [{ text, color: baseColor }];
+  const out: { text: string; color: number }[] = [];
+  if (index > 0) out.push({ text: text.slice(0, index), color: baseColor });
+  out.push({ text: title, color });
+  const after = text.slice(index + title.length);
+  if (after) out.push({ text: after, color: baseColor });
+  return out;
+}
+
+export function colorForChatEntry(entry: ChatEntry): number {
+  if (entry.color != null) return entry.color;
+  return colorForChatType(entry.type);
 }
 
 export class ChatPanel extends Container {
@@ -410,7 +483,13 @@ export class ChatPanel extends Container {
     const shown = displayLines.slice(start, end);
     shown.forEach((row, i) => {
       const ly = msgTop + i * 16;
-      this.addLabel(row.text, x + 10, ly, row.color);
+      let lx = x + 10;
+      const runs = chatLineColorRuns(row.text, row.color, row.entry);
+      for (const run of runs) {
+        if (!run.text) continue;
+        this.addLabel(run.text, lx, ly, run.color);
+        lx += measureUiTextWidth(run.text, UC3_CELL);
+      }
       if (this.canWhisperEntry(row.entry)) {
         const entry = row.entry;
         this.rowHits.push(
@@ -488,7 +567,7 @@ export class ChatPanel extends Container {
   ): { text: string; color: number; entry: ChatEntry }[] {
     const out: { text: string; color: number; entry: ChatEntry }[] = [];
     for (const entry of this.filtered()) {
-      const color = colorForChatType(entry.type);
+      const color = colorForChatEntry(entry);
       const paragraphs = entry.text.split(/\n/);
       for (const para of paragraphs) {
         const wrapped = wrapUiText(para.length ? para : " ", maxWidth, UC3_CELL);
