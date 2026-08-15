@@ -1863,7 +1863,7 @@ static const vm_net_mock_shop_catalog_item *vm_net_mock_find_shop_catalog_item(u
 
 /* Battle心得 may free a single physical bag row only when a rolled reward
  * cannot be inserted.  Sell the least valuable ordinary equipment instance
- * first, use the same 50% base-price rule as the explicit recovery NPC, and
+ * first, use the same 10% base-price rule as the explicit recovery NPC, and
  * never touch consumables, quest items, equipped instances or enhanced-price
  * guesses.  The caller retries its normal grant only after this commit. */
 static bool vm_net_mock_battle_insight_auto_sell_one_equipment(
@@ -1901,7 +1901,12 @@ static bool vm_net_mock_battle_insight_auto_sell_one_equipment(
         {
             continue;
         }
-        resale = (catalog->price / 2u) + (catalog->price & 1u);
+        resale = (catalog->price / 100u) *
+                     VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+                 (((catalog->price % 100u) *
+                       VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
+                   99u) /
+                  100u);
         if (bestItem == NULL || resale < bestPrice ||
             (resale == bestPrice && item->seq < bestItem->seq))
         {
@@ -6804,12 +6809,20 @@ static bool vm_net_mock_append_equipment_login_object(
         return false;
     }
 
-    /* mmGameMstarWqvga.cbm:sub_D04(0x0D04) dispatches 7/7 type=2 rows to
-     * the main item manager's +104 operation.  JianghuOL.CBE:0x01032B8A
-     * copies each row, preserves the original DSH category in item+283,
-     * changes item+282 to category 15, and inserts it into the equipment
-     * list.  Passing -1 on this bootstrap path deliberately does not remove a
-     * pending backpack row. */
+    /* A zero-row 7/7 type=2 is not an equipment-list initializer.  The
+     * mmGame parser dispatches type=2 to a parameterless operation on the
+     * current selected item, so emitting it after a 30/21 backpack grid can
+     * mutate that newly selected row despite there being no equipped row to
+     * describe.  With no equipped rows the correct response is no 7/7
+     * object at all. */
+    if (rowCount == 0)
+        return true;
+
+    /* A non-empty worn-equipment reply remains an unresolved contract: the
+     * native mmGame type=2 branch is a parameterless selected-item operation,
+     * not a row-consuming equipment-list initializer.  Preserve the legacy
+     * packet only for existing worn roles until its real login protocol is
+     * traced; never emit a fabricated zero-row form. */
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
         !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
         !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
@@ -6856,7 +6869,8 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
         if (!vm_net_mock_append_equipment_login_object(
                 out, outCap, pos, &equipmentRows))
             return false;
-        *objectCount = (u8)(*objectCount + 1);
+        if (equipmentRows != 0)
+            *objectCount = (u8)(*objectCount + 1);
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;

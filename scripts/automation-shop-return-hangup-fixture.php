@@ -164,7 +164,7 @@ if ($profile === 'hangup-peach') {
     $hp = 120;
     $mp = 100;
 } elseif ($profile === 'equipment-enhance') {
-    /* One actual level-3 armor instance in the backpack.  The instance has
+    /* One actual level-3 wooden wide-sword instance in the backpack.  The instance has
      * exactly the same item ID, sequence, durability, and enhancement shape
      * as the user's reproduction, while remaining inside an isolated schema.
      * The list count and next sequence must agree with the inserted row. */
@@ -207,11 +207,13 @@ try {
      * its native CalcEquipStatBonus path during scene status reconstruction.
      * The automation probe only reads that client-owned enhancement table;
      * it does not synthesize a result or modify any production role. */
-    $db->prepare(
-        'INSERT INTO account_role_equipment('
-        . 'account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) '
-        . 'VALUES(?,?,?,?,?,?,?)'
-    )->execute([$account, $roleId, 0, 1001, 0, 50, 50]);
+    if ($profile !== 'equipment-enhance') {
+        $db->prepare(
+            'INSERT INTO account_role_equipment('
+            . 'account_id,role_id,slot_index,item_id,enhance_level,durability,durability_max) '
+            . 'VALUES(?,?,?,?,?,?,?)'
+        )->execute([$account, $roleId, 0, 1001, 0, 50, 50]);
+    }
     if ($profile === 'hangup-vitals-flask') {
         /* item_count is the native reservoir amount for 802/803, not a stack
          * quantity.  One terminal result consumes these exact 15/10 units. */
@@ -230,7 +232,7 @@ try {
             'INSERT INTO account_role_backpack('
             . 'account_id,role_id,slot_index,item_id,item_seq,item_count,'
             . 'enhance_level,durability,durability_max) VALUES(?,?,?,?,?,?,?,?,?)'
-        )->execute([$account, $roleId, 0, 3001, 9, 1, 2, 300, 300]);
+        )->execute([$account, $roleId, 0, 1101, 9, 1, 2, 80, 80]);
     }
     $db->commit();
     echo "seeded guest00001 role=810001 profile=$profile in isolated automation database\n";

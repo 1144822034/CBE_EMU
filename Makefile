@@ -38,7 +38,7 @@ SERVER_SOURCES := \
 	src/mystd.c \
 	src/mysql-client.c \
 	src/md5.c \
-	src/main.c
+	src/server_main.c
 
 ifeq ($(OS),Windows_NT)
 CLIENT_OBJDIR := obj/client
@@ -73,9 +73,9 @@ boundary-check: build
 
 $(CLIENT_OBJDIR)/main.o: src/main.c src/network-client.c src/md5.h \
 	src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
-$(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
+$(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
+	src/mysql-client.h src/config.h
 
 $(CLIENT_OBJDIR)/%.o: src/%.c | $(CLIENT_OBJDIR)
 	$(CC) $(CLIENT_CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -121,9 +121,9 @@ server: $(SERVER_TARGET)
 boundary-check: build
 	@echo "boundary-check: Linux builds the service target only; run the Windows dual-target check in CI."
 
-$(SERVER_OBJDIR)/main.o: src/main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
+$(SERVER_OBJDIR)/server_main.o: src/server_main.c $(MOCK_SERVER_FRAGMENTS) src/web_admin_server.c \
 	src/web_payment.inc.c src/md5.h src/web_admin_monsters.inc.c \
-	src/mysql-client.h src/vmFunc.c src/hookRam.c src/vmEvent.c src/config.h
+	src/mysql-client.h src/config.h
 
 $(SERVER_OBJDIR)/%.o: src/%.c | $(SERVER_OBJDIR)
 	$(CC) $(SERVER_CPPFLAGS) $(SERVER_CFLAGS) -c $< -o $@

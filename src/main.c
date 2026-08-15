@@ -223,6 +223,10 @@ typedef enum
      * establish the real screen/target contract before scheduling any
      * enhancement-menu touch in the rules probe. */
     VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE,
+    /* Traverses the real backpack enhancement entry only through the first
+     * 29/1 preview response.  It never presses the material submit button,
+     * so the isolated role's enhancement level and inventory remain intact. */
+    VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE,
     /* Isolated battle regressions.  Both begin with the same native scene
      * hangup control as the direct control; the first presses the visible
      * battle auto-cancel target, the second waits for a three-enemy round to
@@ -309,6 +313,11 @@ typedef struct
     u8 battleSceneCharListSeen;
     u8 equipmentEnhanceDetailTapSent;
     u8 equipmentEnhanceConfirmTapSent;
+    u8 equipmentEnhanceStage1ResponseSeen;
+    u8 equipmentEnhanceBackpackGridCommitted;
+    u8 equipmentEnhanceBackpackCategoryBefore;
+    u8 equipmentEnhanceBackpackCategoryCurrent;
+    u8 equipmentEnhanceEquipmentCategoryRendered;
     u8 capturePending;
     u8 captureLabelIndex;
     u8 exitRequested;
@@ -345,6 +354,10 @@ typedef struct
     u32 battleStartHandlerFrame;
     u32 battleSceneCharListFrame;
     u32 equipmentEnhanceDetailTapFrame;
+    u32 equipmentEnhanceBackpackGridCommittedFrame;
+    u32 equipmentEnhanceEquipmentCategoryRenderedFrame;
+    u32 equipmentEnhanceStage1ResponseFrame;
+    u32 equipmentEnhanceStage1ResponseSequence;
     u32 battleModuleSpBf;
     u32 hangupBattleResponseCount;
     u32 battleActionResponseCount;
@@ -5700,6 +5713,8 @@ static const char *vm_automation_scenario_name(void)
         return "equipment-enhance-rules-probe-v1";
     case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE:
         return "equipment-enhance-bag-probe-v1";
+    case VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE:
+        return "equipment-enhance-stage1-probe-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL:
         return "hangup-auto-cancel-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL:
@@ -5938,6 +5953,36 @@ static int vm_automation_issue_tap(int x, int y, const char *trigger)
     ++g_vmAutomation.inputCount;
     vm_autotest_note("automation_input type=tap point=(%d,%d) trigger=%s frame=%u\n",
                      x, y, trigger ? trigger : "-", g_vmAutomation.renderFrames);
+    return 1;
+}
+
+/* The backpack screen keeps its currently selected category in the screen
+ * object pointed to by R9+0x5D08.  This is a read-only automation observation
+ * taken from the native renderer's data contract; it is deliberately not a
+ * screen transition or a replacement for a rendered input event. */
+static int vm_automation_read_backpack_category(u8 *categoryOut,
+                                                u32 *screenOut)
+{
+    u32 screen = 0;
+    u8 category = 0;
+
+    if (categoryOut == NULL)
+        return 0;
+    *categoryOut = 0;
+    if (screenOut != NULL)
+        *screenOut = 0;
+    if (Global_R9 == 0 ||
+        uc_mem_read(MTK, Global_R9 + 23816u, &screen, sizeof(screen)) !=
+            UC_ERR_OK ||
+        screen == 0 ||
+        uc_mem_read(MTK, screen + 283u, &category, sizeof(category)) !=
+            UC_ERR_OK)
+    {
+        return 0;
+    }
+    *categoryOut = category;
+    if (screenOut != NULL)
+        *screenOut = screen;
     return 1;
 }
 
@@ -6440,6 +6485,7 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawBattleAction = 0;
     u8 sawActorOtherAck = 0;
     u8 sawModuleUpdateChunk = 0;
+    u8 sawEquipmentEnhanceStage1 = 0;
 
     if ((!g_vmAutomation.active && !g_vmHangupAutoConfirm.enabled) ||
         packet == NULL || eventType != 7 ||
@@ -6475,6 +6521,8 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
             sawSceneComplete = 1;
         if (kind == 2 && subtype == 10)
             sawActorOtherAck = 1;
+        if (kind == 29 && subtype == 1)
+            sawEquipmentEnhanceStage1 = 1;
         if (kind == 4 && subtype == 5)
             sawHangup = 1;
         if (kind == 4 && subtype == 6)
@@ -6603,6 +6651,18 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                          sequence, g_vmAutomation.battleActionResponseCount,
                          g_vmAutomation.renderFrames);
     }
+    if (sawEquipmentEnhanceStage1 &&
+        g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE &&
+        !g_vmAutomation.equipmentEnhanceStage1ResponseSeen)
+    {
+        g_vmAutomation.equipmentEnhanceStage1ResponseSeen = 1;
+        g_vmAutomation.equipmentEnhanceStage1ResponseFrame =
+            g_vmAutomation.renderFrames;
+        g_vmAutomation.equipmentEnhanceStage1ResponseSequence = sequence;
+        vm_autotest_note("automation_equipment_enhance_stage1_response seq=%u frame=%u\n",
+                         sequence, g_vmAutomation.renderFrames);
+    }
     if (sawSettlement)
     {
         g_vmAutomation.hangupSettlementResponseSeen = 1;
@@ -6632,9 +6692,9 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                          "actor_other_ack=1 battle_start=%u frame=%u\n",
                          sequence, sawHangup, g_vmAutomation.renderFrames);
     }
-    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u enhance_stage1=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
                      sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
-                     sawSceneComplete, sawActorOtherAck, sawHangup, sawAutoEnable, sawAutoDisable,
+                     sawSceneComplete, sawActorOtherAck, sawEquipmentEnhanceStage1, sawHangup, sawAutoEnable, sawAutoDisable,
                      sawSettlement, g_vmAutomation.hangupBattleResponseCount,
                      g_vmAutomation.battleActionResponseCount);
 }
@@ -6781,19 +6841,25 @@ static void vm_automation_tick(void)
             else if (g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE ||
                      g_vmAutomation.scenario ==
-                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
             {
                 /* The rules probe starts from the native equipment screen;
                  * its companion starts from the backpack so the real
                  * enhanced instance can be selected.  Both actions remain
                  * ordinary touchscreen events after the scene boundary. */
                 const int targetX =
-                    g_vmAutomation.scenario ==
-                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                    (g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                         ? 132 : 102;
                 const char *targetName =
-                    g_vmAutomation.scenario ==
-                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                    (g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                         ? "scene-toolbar-backpack-icon"
                         : "scene-toolbar-equipment-icon";
                 g_vmAutomation.initialSceneScreen = vmAddedScreen;
@@ -6802,8 +6868,10 @@ static void vm_automation_tick(void)
                 {
                     vm_automation_set_stage(
                         VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
-                        g_vmAutomation.scenario ==
-                            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        (g_vmAutomation.scenario ==
+                             VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                         g_vmAutomation.scenario ==
+                             VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                             ? "backpack-toolbar-tapped"
                             : "equipment-toolbar-tapped");
                 }
@@ -6868,15 +6936,21 @@ static void vm_automation_tick(void)
             else if (g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE ||
                      g_vmAutomation.scenario ==
-                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
             {
                 const int targetX =
-                    g_vmAutomation.scenario ==
-                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                    (g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                         ? 132 : 102;
                 const char *targetName =
-                    g_vmAutomation.scenario ==
-                        VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                    (g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                     g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                         ? "scene-toolbar-backpack-icon"
                         : "scene-toolbar-equipment-icon";
                 g_vmAutomation.initialSceneScreen = vmAddedScreen;
@@ -6885,8 +6959,10 @@ static void vm_automation_tick(void)
                 {
                     vm_automation_set_stage(
                         VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES,
-                        g_vmAutomation.scenario ==
-                            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE
+                        (g_vmAutomation.scenario ==
+                             VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE ||
+                         g_vmAutomation.scenario ==
+                             VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
                             ? "backpack-toolbar-tapped"
                             : "equipment-toolbar-tapped");
                 }
@@ -6904,6 +6980,123 @@ static void vm_automation_tick(void)
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_EQUIPMENT_ENHANCE_RULES:
+        if (g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE)
+        {
+            /* The fixture contains exactly one un-equipped sword.  These are
+             * the three visible, ordered controls on its native route:
+             * backpack's 装备 tab, its first list row, then the detail page's
+             * 强化 button.  The scenario stops at 29/1; no material action
+             * is scheduled after the preview page is rendered. */
+            if (!g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                g_vmAutomation.renderFrames >= g_vmAutomation.stageFrame + 2u)
+            {
+                u8 category = 0;
+                u32 screen = 0;
+
+                vm_automation_request_capture(
+                    "equipment-enhance-stage1-backpack-default-tab-rendered");
+                if (vm_automation_read_backpack_category(&category, &screen))
+                {
+                    g_vmAutomation.equipmentEnhanceBackpackCategoryBefore =
+                        category;
+                    g_vmAutomation.equipmentEnhanceBackpackCategoryCurrent =
+                        category;
+                    vm_autotest_note(
+                        "automation_equipment_enhance_category_before "
+                        "screen=%08x category=%u frame=%u\n",
+                        screen, category, g_vmAutomation.renderFrames);
+                }
+                else
+                {
+                    vm_autotest_note(
+                        "automation_equipment_enhance_category_before "
+                        "unavailable frame=%u\n",
+                        g_vmAutomation.renderFrames);
+                }
+                if (vm_automation_issue_tap(58, 106,
+                                            "backpack-equipment-category-tab"))
+                {
+                    g_vmAutomation.equipmentEnhanceDetailTapSent = 1;
+                    g_vmAutomation.equipmentEnhanceDetailTapFrame =
+                        g_vmAutomation.renderFrames;
+                }
+            }
+            else if (g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                     !g_vmAutomation.equipmentEnhanceEquipmentCategoryRendered)
+            {
+                u8 category = 0;
+                u32 screen = 0;
+
+                if (vm_automation_read_backpack_category(&category, &screen))
+                {
+                    g_vmAutomation.equipmentEnhanceBackpackCategoryCurrent =
+                        category;
+                    if (category !=
+                        g_vmAutomation.equipmentEnhanceBackpackCategoryBefore)
+                    {
+                        g_vmAutomation.equipmentEnhanceEquipmentCategoryRendered =
+                            1;
+                        g_vmAutomation
+                            .equipmentEnhanceEquipmentCategoryRenderedFrame =
+                            g_vmAutomation.renderFrames;
+                        vm_autotest_note(
+                            "automation_equipment_enhance_category_changed "
+                            "screen=%08x from=%u to=%u frame=%u\n",
+                            screen,
+                            g_vmAutomation.equipmentEnhanceBackpackCategoryBefore,
+                            category, g_vmAutomation.renderFrames);
+                        vm_automation_request_capture(
+                            "equipment-enhance-stage1-equipment-category-rendered");
+                    }
+                }
+            }
+            else if (g_vmAutomation.equipmentEnhanceDetailTapSent &&
+                     g_vmAutomation.equipmentEnhanceEquipmentCategoryRendered &&
+                     !g_vmAutomation.equipmentEnhanceConfirmTapSent &&
+                     g_vmAutomation.equipmentEnhanceBackpackGridCommitted &&
+                     g_vmAutomation.renderFrames >=
+                         g_vmAutomation
+                             .equipmentEnhanceEquipmentCategoryRenderedFrame + 2u)
+            {
+                vm_automation_request_capture(
+                    "equipment-enhance-stage1-equipment-list-rendered");
+                if (vm_automation_issue_tap(28, 128,
+                                            "backpack-first-equipment-row"))
+                {
+                    g_vmAutomation.equipmentEnhanceConfirmTapSent = 1;
+                    g_vmAutomation.equipmentEnhanceDetailTapFrame =
+                        g_vmAutomation.renderFrames;
+                }
+            }
+            else if (g_vmAutomation.equipmentEnhanceConfirmTapSent &&
+                     !g_vmAutomation.equipmentEnhanceStage1ResponseSeen &&
+                     g_vmAutomation.renderFrames >=
+                         g_vmAutomation.equipmentEnhanceDetailTapFrame + 2u)
+            {
+                vm_automation_request_capture(
+                    "equipment-enhance-stage1-detail-rendered");
+                if (vm_automation_issue_tap(120, 372,
+                                            "backpack-equipment-strengthen-button"))
+                {
+                    /* No further visible input is scheduled after this one.
+                     * The high watermark prevents a repeated strengthen tap
+                     * while the ordinary network callback owns the screen. */
+                    g_vmAutomation.equipmentEnhanceDetailTapFrame =
+                        g_vmAutomation.renderFrames + 0x40000000u;
+                }
+            }
+            else if (g_vmAutomation.equipmentEnhanceStage1ResponseSeen &&
+                     g_vmAutomation.renderFrames >=
+                         g_vmAutomation.equipmentEnhanceStage1ResponseFrame + 2u)
+            {
+                vm_automation_request_capture(
+                    "equipment-enhance-stage1-preview-rendered");
+                vm_automation_finish(1,
+                    "native-backpack-strengthen-29-1-preview-rendered");
+            }
+            break;
+        }
         if (g_vmAutomation.scenario ==
             VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE)
         {
@@ -7506,6 +7699,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_RULES_PROBE;
     else if (strcmp(scenario, "equipment-enhance-bag-probe-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_BAG_PROBE;
+    else if (strcmp(scenario, "equipment-enhance-stage1-probe-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE;
     else if (strcmp(scenario, "hangup-auto-cancel-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL;
     else if (strcmp(scenario, "hangup-auto-terminal-v1") == 0)
@@ -8034,8 +8229,8 @@ static void vm_autotest_arm_equipment_enhance_rules_watch(void)
     /* This runs after the normal ROM R9 restoration.  Arming on the first
      * observable item controller lets the memory hook see a startup-time
      * initialization, which the later CalcEquipStatBonus consumer cannot. */
-    if (!g_autotestEnabled || MTK == NULL ||
-        g_vmEquipmentEnhanceRulesWatchAddress != 0 || Global_R9 == 0)
+    if (MTK == NULL || g_vmEquipmentEnhanceRulesWatchAddress != 0 ||
+        Global_R9 == 0)
     {
         return;
     }
@@ -8045,6 +8240,8 @@ static void vm_autotest_arm_equipment_enhance_rules_watch(void)
         return;
     }
     g_vmEquipmentEnhanceRulesWatchAddress = itemCtrl + 0x584;
+    printf("[info][equipment] enhance_rule_table_watch_arm global_r9=%08x item_ctrl=%08x pointer_addr=%08x\n",
+           Global_R9, itemCtrl, g_vmEquipmentEnhanceRulesWatchAddress);
     vm_autotest_note("equipment_enhance_rules_pointer_watch_arm global_r9=%08x item_ctrl=%08x address=%08x\\n",
                      Global_R9, itemCtrl,
                      g_vmEquipmentEnhanceRulesWatchAddress);
@@ -8054,10 +8251,15 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
 {
     static u32 reportedTable = 0;
     static u32 entryCount = 0;
+    static u32 manualTraceCount = 0;
     u32 itemCtrl = 0;
     u32 ruleTable = 0;
     u32 baseStat = 0;
     u32 enhanceLevel = 0;
+    u32 outputPtr = 0;
+    u16 seededTotal = 0;
+    u32 flatBonus = 0;
+    int32_t percentBonus = 0;
     uc_err itemCtrlRead = UC_ERR_OK;
     uc_err ruleTableRead = UC_ERR_OK;
 
@@ -8065,9 +8267,14 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
      * invocation.  The former 0x01028BCE is inside its optional secondary
      * calculation (`a6 == 1`) and is therefore not reached by normal scene
      * weapon/armor reconstruction. */
-    if (!g_autotestEnabled || pc != 0x01028B5C)
+    if (pc != 0x01028B5C)
         return;
     ++entryCount;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &outputPtr);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &baseStat);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &enhanceLevel);
+    if (outputPtr != 0)
+        (void)uc_mem_read(MTK, outputPtr, &seededTotal, sizeof(seededTotal));
     if (entryCount == 1)
     {
         vm_autotest_note("equipment_enhance_rules_entry pc=%08x global_r9=%08x\n",
@@ -8088,6 +8295,36 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
                          (int)itemCtrlRead, itemCtrl, (int)ruleTableRead,
                          ruleTable);
     }
+    /* Normal manual play needs a compact trace too.  Only enhanced items
+     * are emitted and the count is capped, so ordinary scene reconstruction
+     * cannot turn this into a high-frequency client log. */
+    if (enhanceLevel != 0 && manualTraceCount < 32)
+    {
+        u32 steps = enhanceLevel > 16u ? 16u : enhanceLevel;
+
+        if (ruleTableRead == UC_ERR_OK && ruleTable != 0)
+        {
+            for (u32 i = 0; i < steps; ++i)
+            {
+                u8 raw[4] = {0, 0, 0, 0};
+                int16_t percent = 0;
+
+                if (uc_mem_read(MTK, ruleTable + i * 4u, raw,
+                                sizeof(raw)) != UC_ERR_OK)
+                    break;
+                percent = (int16_t)((u16)raw[2] | ((u16)raw[3] << 8));
+                flatBonus += raw[0];
+                percentBonus += ((int32_t)percent * (int32_t)baseStat) / 100;
+            }
+        }
+        printf("[info][equipment] enhance_calc client=CalcEquipStatBonus call=%u pc=%08x output=%08x seeded=%u base=%u level=%u table=%08x rule_state=%s flat_add=%u percent_add=%d total=%d\n",
+               manualTraceCount + 1u, pc, outputPtr, seededTotal, baseStat,
+               enhanceLevel, ruleTable,
+               ruleTableRead == UC_ERR_OK && ruleTable != 0 ? "ready" : "missing",
+               flatBonus, percentBonus,
+               (int)seededTotal + (int)flatBonus + percentBonus);
+        ++manualTraceCount;
+    }
     if (itemCtrlRead != UC_ERR_OK || itemCtrl == 0 ||
         ruleTableRead != UC_ERR_OK || ruleTable == 0 ||
         ruleTable == reportedTable)
@@ -8103,6 +8340,8 @@ static void vm_autotest_note_equipment_enhance_rules_pc(u32 pc)
     uc_reg_read(MTK, UC_ARM_REG_R2, &baseStat);
     uc_reg_read(MTK, UC_ARM_REG_R3, &enhanceLevel);
     reportedTable = ruleTable;
+    printf("[info][equipment] enhance_rule_table_ready client=CalcEquipStatBonus pc=%08x item_ctrl=%08x table=%08x base=%u level=%u entries=16\n",
+           pc, itemCtrl, ruleTable, baseStat, enhanceLevel);
     vm_autotest_note("equipment_enhance_rules pc=%08x item_ctrl=%08x table=%08x base=%u level=%u entries=16\\n",
                      pc, itemCtrl, ruleTable, baseStat, enhanceLevel);
 
@@ -8912,6 +9151,21 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
         vm_autotest_note("backpack_grid commit pc=%08x r9=%08x busy_ptr=%08x busy=%u manager=%08x item_count=%u cap=%u list=%08x item0=%u seq0=%u stack242=%u stack272=%u count=%u\n",
                          pc, r9, busyPtr, busy, manager, itemCount, itemCap,
                          itemList, item0, seq0, stack242, stack272, seenGridCommit);
+        if (g_vmAutomation.scenario ==
+                VM_AUTOMATION_SCENARIO_EQUIPMENT_ENHANCE_STAGE1_PROBE &&
+            !g_vmAutomation.equipmentEnhanceBackpackGridCommitted &&
+            itemCount != 0 && item0 == 1101u && seq0 == 9u)
+        {
+            /* The stage-1 probe must not treat the network queue as a
+             * rendered backpack.  This PC runs only after the real 30/21
+             * object became a client item row, so the following touch is
+             * still ordinary UI input but cannot race the parser. */
+            g_vmAutomation.equipmentEnhanceBackpackGridCommitted = 1;
+            g_vmAutomation.equipmentEnhanceBackpackGridCommittedFrame =
+                g_vmAutomation.renderFrames;
+            vm_autotest_note("automation_equipment_enhance_backpack_grid_committed frame=%u item=%u seq=%u\n",
+                             g_vmAutomation.renderFrames, item0, seq0);
+        }
     }
     else if (pc == 0x0101918E && seenGridInsertEntry < 8)
     {
