@@ -6870,6 +6870,8 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
 
     (void)vm_net_mock_role_mark_inventory_dirty("chest-open");
     vm_net_mock_gold_chest_maybe_announce_rare_reward(chestItemId, rewardItemId);
+    /* Non-rare opens also release an overdue sticky pending (solo idle gap). */
+    vm_net_mock_gold_chest_announce_flush_if_due();
 
     {
         vm_net_mock_backpack_item_state *rewardItem =
@@ -6888,6 +6890,401 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                          chestItemId, keyItemId, rewardItemId, rewardSeq,
                          rewardCount, chestItemId);
     }
+    return pos;
+}
+
+enum
+{
+    VM_NET_MOCK_CHEST_BATCH_MAX = 10u
+};
+
+typedef struct
+{
+    u32 itemId;
+    u16 seq;
+    u32 count;
+} vm_net_mock_chest_batch_grant;
+
+static bool vm_net_mock_build_chest_open_info_blob_rows(
+    u8 *out, u32 outCap, const vm_net_mock_chest_batch_grant *rows, u8 rowCount,
+    u32 *blobLenOut)
+{
+    u32 pos = 0;
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || rows == NULL || blobLenOut == NULL || rowCount == 0)
+        return false;
+    for (u8 i = 0; i < rowCount; ++i)
+    {
+        u32 rowStart = pos;
+        if (rows[i].itemId == 0 || rows[i].seq == 0 || rows[i].count == 0)
+            return false;
+        if (!vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].itemId) ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, rows[i].seq) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, rows[i].count) ||
+            !vm_net_mock_seq_put_item_common_extra(
+                out, outCap, &pos,
+                vm_net_mock_item_common_extra_stack_byte(rows[i].itemId,
+                                                         rows[i].count),
+                0, rows[i].itemId, NULL))
+        {
+            (void)rowStart;
+            return false;
+        }
+    }
+    *blobLenOut = pos;
+    return true;
+}
+
+static bool vm_net_mock_request_is_chest_open_batch(const u8 *request,
+                                                    u32 requestLen,
+                                                    vm_net_mock_request_object *objectOut)
+{
+    u32 offset = 4;
+    vm_net_mock_request_object object;
+
+    if (objectOut)
+        memset(objectOut, 0, sizeof(*objectOut));
+    if (request == NULL || requestLen < 9 || request[0] != 'W' || request[1] != 'T')
+        return false;
+    if (!vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 7 ||
+        object.subtype != 24)
+    {
+        return false;
+    }
+    if (objectOut)
+        *objectOut = object;
+    return true;
+}
+
+static bool vm_net_mock_parse_chest_open_batch_request(const u8 *request,
+                                                       u32 requestLen,
+                                                       u16 *boxSeqOut,
+                                                       u16 *keySeqOut,
+                                                       u8 *timesOut)
+{
+    vm_net_mock_request_object object;
+    u32 boxSeq = 0;
+    u32 keySeq = 0;
+    u32 times = 0;
+
+    if (boxSeqOut)
+        *boxSeqOut = 0;
+    if (keySeqOut)
+        *keySeqOut = 0;
+    if (timesOut)
+        *timesOut = 0;
+    if (!vm_net_mock_request_is_chest_open_batch(request, requestLen, &object))
+        return false;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "box", &boxSeq) &&
+        !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "x", &boxSeq))
+    {
+        return false;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "key", &keySeq))
+    {
+        /* Second dual-x style is not used for Pixi 7/24; require named key. */
+        return false;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "times", &times))
+    {
+        return false;
+    }
+    if (boxSeq == 0 || boxSeq > 0xffffu || keySeq == 0 || keySeq > 0xffffu ||
+        times == 0 || times > VM_NET_MOCK_CHEST_BATCH_MAX)
+    {
+        return false;
+    }
+    if (boxSeqOut)
+        *boxSeqOut = (u16)boxSeq;
+    if (keySeqOut)
+        *keySeqOut = (u16)keySeq;
+    if (timesOut)
+        *timesOut = (u8)times;
+    return true;
+}
+
+static u32 vm_net_mock_build_chest_open_batch_result_response(u8 *out, u32 outCap,
+                                                              u8 result,
+                                                              u8 opened)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (out == NULL || outCap < 32)
+        return 0;
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 24, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "opened", opened) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "total", 0))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+/*
+ * PixiJS-only ten-pull: 1/7/24 { box:u16, key:u16, times:u8=1..10 }.
+ * Server rolls/consumes/grants times times in one request; response iteminfo
+ * rows are aggregated by itemId (equip stays one row per grant). Rare world
+ * congratulate is one [世] per rare itemId with total count.
+ */
+static u32 vm_net_mock_build_chest_open_batch_response(const u8 *request,
+                                                       u32 requestLen, u8 *out,
+                                                       u32 outCap)
+{
+    u16 boxSeq = 0;
+    u16 keySeq = 0;
+    u8 times = 0;
+    u8 opened = 0;
+    u8 result = 6;
+    u32 chestItemId = 0;
+    u32 keyItemId = 0;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_chest_batch_grant grants[VM_NET_MOCK_CHEST_BATCH_MAX];
+    u8 grantRows = 0;
+    u8 itemInfo[8 + VM_NET_MOCK_CHEST_BATCH_MAX * VM_NET_MOCK_ITEMINFO_ROW_WIRE_MAX];
+    u32 itemInfoLen = 0;
+    u32 pos = 5;
+    u32 objectStart = 0;
+    u32 i = 0;
+
+    if (out == NULL || outCap < pos)
+        return 0;
+    if (!vm_net_mock_request_is_chest_open_batch(request, requestLen, NULL))
+        return 0;
+    if (!vm_net_mock_parse_chest_open_batch_request(request, requestLen, &boxSeq,
+                                                    &keySeq, &times))
+    {
+        pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 6, 0);
+        printf("[warn][network] mock_chest_open_batch result=6 reason=parse-failed "
+               "resp=%u evidence=pixijs-only-7/24\n",
+               pos);
+        return pos;
+    }
+
+    memset(grants, 0, sizeof(grants));
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+        return vm_net_mock_build_chest_open_batch_result_response(out, outCap, 6, 0);
+
+    {
+        vm_net_mock_backpack_item_state *boxItem =
+            vm_net_mock_role_find_backpack_item(role, 0, boxSeq);
+        vm_net_mock_backpack_item_state *keyItem =
+            vm_net_mock_role_find_backpack_item(role, 0, keySeq);
+        u32 itemCount = 0;
+        u32 freeSlots = 0;
+        u32 boxCount = 0;
+        u32 keyCount = 0;
+
+        if (boxItem == NULL || boxItem->count == 0 ||
+            !vm_net_mock_chest_box_is_supported(boxItem->itemId))
+        {
+            pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 2, 0);
+            printf("[info][network] mock_chest_open_batch result=2 reason=box-missing "
+                   "box_seq=%u resp=%u\n",
+                   boxSeq, pos);
+            return pos;
+        }
+        chestItemId = boxItem->itemId;
+        keyItemId = vm_net_mock_chest_key_for_box(chestItemId);
+        if (keyItem == NULL || keyItem->count == 0 || keyItem->itemId != keyItemId)
+        {
+            pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 3, 0);
+            printf("[info][network] mock_chest_open_batch result=3 reason=key-missing "
+                   "key_seq=%u need=%u resp=%u\n",
+                   keySeq, keyItemId, pos);
+            return pos;
+        }
+
+        itemCount = role->backpackItemCount;
+        if (itemCount > VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+            itemCount = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+        freeSlots = role->backpackCapacity > itemCount
+                        ? (u32)role->backpackCapacity - itemCount
+                        : 0;
+        for (i = 0; i < itemCount; ++i)
+        {
+            const vm_net_mock_backpack_item_state *it = &role->backpackItems[i];
+            if (it->itemId == chestItemId)
+                boxCount += it->count;
+            if (it->itemId == keyItemId)
+                keyCount += it->count;
+        }
+        if (boxCount < times)
+        {
+            pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 2, 0);
+            printf("[info][network] mock_chest_open_batch result=2 reason=box-count "
+                   "have=%u need=%u resp=%u\n",
+                   boxCount, times, pos);
+            return pos;
+        }
+        if (keyCount < times)
+        {
+            pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 3, 0);
+            printf("[info][network] mock_chest_open_batch result=3 reason=key-count "
+                   "have=%u need=%u resp=%u\n",
+                   keyCount, times, pos);
+            return pos;
+        }
+        /* Conservative: each open may need a free slot (equip / new stack). */
+        if (freeSlots < times)
+        {
+            pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 4, 0);
+            printf("[info][network] mock_chest_open_batch result=4 reason=bag-slots "
+                   "free=%u need=%u resp=%u\n",
+                   freeSlots, times, pos);
+            return pos;
+        }
+    }
+
+    for (i = 0; i < times; ++i)
+    {
+        vm_net_mock_role_state before;
+        vm_net_mock_backpack_item_state *boxItem = NULL;
+        vm_net_mock_backpack_item_state *keyItem = NULL;
+        u32 rewardItemId = 0;
+        u16 rewardSeq = 0;
+        u8 g = 0;
+        bool stackedGrant = false;
+
+        boxItem = vm_net_mock_role_find_backpack_item(role, 0, boxSeq);
+        if (boxItem == NULL || boxItem->count == 0 ||
+            boxItem->itemId != chestItemId)
+        {
+            boxItem = vm_net_mock_role_find_backpack_item(role, chestItemId, 0);
+        }
+        keyItem = vm_net_mock_role_find_backpack_item(role, 0, keySeq);
+        if (keyItem == NULL || keyItem->count == 0 ||
+            keyItem->itemId != keyItemId)
+        {
+            keyItem = vm_net_mock_role_find_backpack_item(role, keyItemId, 0);
+        }
+        if (boxItem == NULL || boxItem->count == 0)
+        {
+            result = 2;
+            break;
+        }
+        if (keyItem == NULL || keyItem->count == 0)
+        {
+            result = 3;
+            break;
+        }
+        boxSeq = boxItem->seq;
+        keySeq = keyItem->seq;
+
+        if (!vm_net_mock_chest_roll_reward_item(chestItemId, &rewardItemId) ||
+            rewardItemId == 0)
+        {
+            result = 6;
+            break;
+        }
+
+        before = *role;
+        if (!vm_net_mock_role_consume_backpack_item(role, chestItemId, boxSeq, 1,
+                                                     NULL) ||
+            !vm_net_mock_role_consume_backpack_item(role, keyItemId, keySeq, 1,
+                                                     NULL) ||
+            !vm_net_mock_role_add_backpack_item_to_role(role, rewardItemId, 1, 0,
+                                                        &rewardSeq,
+                                                        "chest-open-batch"))
+        {
+            *role = before;
+            result = 4;
+            printf("[warn][network] mock_chest_open_batch stop i=%u/%u "
+                   "reason=consume-or-grant-failed reward=%u\n",
+                   i, times, rewardItemId);
+            break;
+        }
+
+        stackedGrant = false;
+        for (g = 0; g < grantRows; ++g)
+        {
+            if (grants[g].itemId == rewardItemId &&
+                vm_net_mock_find_equipment_catalog_item(rewardItemId) == NULL)
+            {
+                grants[g].count += 1u;
+                grants[g].seq = rewardSeq;
+                stackedGrant = true;
+                break;
+            }
+        }
+        if (!stackedGrant && grantRows < VM_NET_MOCK_CHEST_BATCH_MAX)
+        {
+            grants[grantRows].itemId = rewardItemId;
+            grants[grantRows].seq = rewardSeq;
+            grants[grantRows].count = 1u;
+            grantRows++;
+        }
+
+        opened++;
+        result = 1;
+    }
+
+    if (opened == 0)
+    {
+        pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap,
+                                                                  result ? result : 6,
+                                                                  0);
+        printf("[info][network] mock_chest_open_batch opened=0 result=%u "
+               "chest=%u times=%u resp=%u evidence=pixijs-only-7/24\n",
+               result, chestItemId, times, pos);
+        return pos;
+    }
+
+    if (!vm_net_mock_build_chest_open_info_blob_rows(itemInfo, sizeof(itemInfo),
+                                                      grants, grantRows,
+                                                      &itemInfoLen) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu)
+    {
+        pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 6,
+                                                                  opened);
+        printf("[warn][network] mock_chest_open_batch result=6 reason=info-build "
+               "opened=%u grant_rows=%u resp=%u\n",
+               opened, grantRows, pos);
+        return pos;
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 24, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "opened", opened) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "total", grantRows) ||
+        !vm_net_mock_put_object_raw(out, outCap, &pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
+    {
+        pos = vm_net_mock_build_chest_open_batch_result_response(out, outCap, 6,
+                                                                  opened);
+        printf("[warn][network] mock_chest_open_batch result=6 reason=encode "
+               "opened=%u resp=%u\n",
+               opened, pos);
+        return pos;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+
+    (void)vm_net_mock_role_mark_inventory_dirty("chest-open-batch");
+    for (i = 0; i < grantRows; ++i)
+    {
+        vm_net_mock_gold_chest_announce_rare_reward_count(
+            chestItemId, grants[i].itemId, grants[i].count);
+    }
+
+    printf("[info][network] mock_chest_open_batch chest=%u times=%u opened=%u "
+           "grant_rows=%u result=1 resp=%u "
+           "evidence=pixijs-only-7/24-server-ten-pull\n",
+           chestItemId, times, opened, grantRows, pos);
+    vm_autotest_note("mock_chest_open_batch chest=%u times=%u opened=%u "
+                     "grant_rows=%u response=7/24 evidence=pixijs-only\n",
+                     chestItemId, times, opened, grantRows);
     return pos;
 }
 

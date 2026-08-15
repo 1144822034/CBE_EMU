@@ -3990,6 +3990,8 @@ typedef struct vm_mock_service_client_session
     /* Pixi 比武擂台: 4/7 fdata + map tip「胜/败/平 积分+N 当前积分」。 */
     bool arenaResultPending;
     char arenaResultFdata[96];
+    /* Last arena phase tip delivered to this client (ENTRY/LIVE/SETTLED). */
+    u8 arenaPhaseTipStatus;
     u32 pendingTeamBattleSerial;
     /* HandleChallengeResponse(0x010395AA) first consumes 30/9 and its
      * confirmation callback sends 30/10 {agree}.  Keep the target on the
@@ -7563,7 +7565,7 @@ static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 chestItemId,
                                                              u32 rewardItemId)
 {
     vm_mock_service_client_session *session = NULL;
-    u32 debounceTicks = 5u; /* 500ms @ VM_SCHED_FRAME_MS=100 — covers Pixi 十连 gaps */
+    u32 debounceTicks = 5u; /* 500ms @ VM_SCHED_FRAME_MS=100 — covers rapid single opens */
 
     if (!vm_net_mock_gold_chest_reward_warrants_world_announce(rewardItemId))
         return;
@@ -7598,6 +7600,55 @@ static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 chestItemId,
     printf("[info][network] mock_chest_open_world_announce_pending item=%u "
            "chest=%u count=1 flush_tick=%u\n",
            rewardItemId, chestItemId, session->chestAnnounceFlushTick);
+}
+
+/* Deliver overdue coalesce pending even when this open's reward is not rare. */
+static void vm_net_mock_gold_chest_announce_flush_if_due(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || session->chestAnnounceCount == 0 ||
+        session->chestAnnounceFlushTick == 0 ||
+        g_schedulerTick < session->chestAnnounceFlushTick)
+    {
+        return;
+    }
+    vm_net_mock_chest_announce_flush_pending(session);
+}
+
+/*
+ * PixiJS-only 1/7/24 ten-pull: one [世] line per rare itemId with total count.
+ * Flushes immediately (no debounce) so bag tip「获得N个」matches world.
+ */
+static void vm_net_mock_gold_chest_announce_rare_reward_count(u32 chestItemId,
+                                                             u32 rewardItemId,
+                                                             u32 count)
+{
+    vm_mock_service_client_session *session = NULL;
+
+    if (count == 0)
+        return;
+    if (!vm_net_mock_gold_chest_reward_warrants_world_announce(rewardItemId))
+        return;
+    if (vm_net_mock_find_shop_catalog_item(rewardItemId) == NULL)
+        return;
+
+    session = vm_mock_service_get_active_client_session();
+    if (session == NULL)
+        return;
+
+    if (session->chestAnnounceCount > 0)
+        vm_net_mock_chest_announce_flush_pending(session);
+
+    session->chestAnnounceRewardItemId = rewardItemId;
+    session->chestAnnounceChestItemId = chestItemId;
+    session->chestAnnounceCount = count > 99u ? 99u : count;
+    session->chestAnnounceFlushTick = 0;
+    vm_net_mock_chest_announce_flush_pending(session);
+    printf("[info][network] mock_chest_open_world_announce_batch item=%u "
+           "chest=%u count=%u evidence=pixijs-only-7/24\n",
+           rewardItemId, chestItemId, count > 99u ? 99u : count);
 }
 
 static bool vm_mock_service_session_enqueue_system_message_delayed(
@@ -9238,6 +9289,8 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
                                             reason ? reason : "offline");
     vm_mock_service_duel_cancel_for_client(session->clientId,
                                            reason ? reason : "offline");
+    /* Capture venue presence before sceneVisible* is cleared. */
+    vm_mock_arena_on_session_offline(session);
     if (wasOnline)
     {
         if (session->accountId[0] != '\0' && session->onlineRoleId != 0)

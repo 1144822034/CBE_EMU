@@ -4766,6 +4766,8 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * wall-clock end before any bonus reads for this role. */
         (void)vm_net_mock_role_exp_card_resume_on_login(role);
         (void)vm_net_mock_role_battle_insight_resume_on_login(role);
+        /* 比武未结束且本场已进场：选角后立刻写回擂台场景，避免重登落原图仍被匹配。 */
+        vm_mock_arena_restore_venue_scene_if_needed(role);
         /*
          * Role select creates a new first-scene lifecycle on the client. Do
          * not inherit the previous connection's completed/pending scene

@@ -1940,9 +1940,10 @@ export class GameSession {
       }
       const upd = parseDesignationSceneUpdate(packet);
       if (upd) {
-        if (upd.gif) gif = upd.gif;
-        if (upd.name) name = upd.name;
-        this.applySelfDesignation(upd.name, upd.gif);
+        /* Always take wire fields — arena titles send empty overhead gif. */
+        name = upd.name;
+        gif = upd.gif;
+        this.applySelfDesignation(name, gif);
       }
     }
     this.handleBodies(bodies);
@@ -1953,26 +1954,27 @@ export class GameSession {
         (r) => r.id === (page.equippedId || designationId),
       );
       if (row) {
-        if (!gif && row.gif) gif = row.gif;
-        if (!name && row.name) name = row.name;
-        /* Prefer catalog overhead resource from refreshed list. */
-        if (row.gif) gif = row.gif;
-        if (row.name) name = row.name;
+        /* Prefer refreshed list; empty row.gif must clear prior wealth/level badge. */
+        name = row.name || name;
+        gif = row.gif || "";
       }
       this.applySelfDesignation(name, gif);
     }
     return { ok, name: name || undefined, gif: gif || undefined };
   }
 
+  /**
+   * Apply equipped designation to self nameplate state.
+   * Always overwrite gif (including "") — arena text titles have empty overhead;
+   * keeping a prior riches/level gif hid the new title until re-login.
+   */
   private applySelfDesignation(name: string, gif: string): void {
-    if (name) this.roleTitle = name;
-    if (gif) this.roleTitleGif = gif;
-    if (name || gif) {
-      this.cb.onDesignationUpdate?.({
-        name: this.roleTitle,
-        gif: this.roleTitleGif,
-      });
-    }
+    this.roleTitle = name || "";
+    this.roleTitleGif = gif || "";
+    this.cb.onDesignationUpdate?.({
+      name: this.roleTitle,
+      gif: this.roleTitleGif,
+    });
   }
 
   async openRanking(type = 0, pageIndex = 0): Promise<RankingPage | null> {
@@ -2003,7 +2005,59 @@ export class GameSession {
   }
 
   private syncArenaHudForScene(scene: string): void {
-    if (!this.isArenaScene(scene)) this.clearArenaHud("left-arena-scene");
+    if (!this.isArenaScene(scene)) {
+      this.clearArenaHud("left-arena-scene");
+      return;
+    }
+    /* Entering venue: if 41/5 is starved, status poll still drives the strip. */
+    void this.ensureArenaHudFallback("enter-scene");
+  }
+
+  /** When scene-sync omits 41/5, synthesize strip from 41/1 status. */
+  private arenaHudFallbackAt = 0;
+  private async ensureArenaHudFallback(reason: string): Promise<void> {
+    if (!this.isArenaScene() || !this.transport) return;
+    const now = Date.now();
+    if (
+      this.arenaHud &&
+      (this.arenaHud.status === 1 || this.arenaHud.status === 2) &&
+      now - this.arenaHudFallbackAt < 8000
+    ) {
+      return;
+    }
+    if (now - this.arenaHudFallbackAt < 2500 && reason !== "enter-scene") return;
+    this.arenaHudFallbackAt = now;
+    try {
+      const st = await this.fetchArenaStatus();
+      if (!this.isArenaScene()) return;
+      if (!st || (st.status !== 1 && st.status !== 2)) {
+        if (this.arenaHud) this.clearArenaHud("status-idle");
+        return;
+      }
+      /* Prefer live 41/5 if it arrived during the await. */
+      if (
+        this.arenaHud &&
+        (this.arenaHud.status === 1 || this.arenaHud.status === 2) &&
+        reason !== "enter-scene"
+      ) {
+        return;
+      }
+      this.arenaHud = {
+        status: st.status,
+        round: st.round || 0,
+        roundRemain: 0,
+        eventRemain: 0,
+        score: this.arenaHud?.score ?? 0,
+        job: this.arenaHud?.job ?? 0,
+        bracket: this.arenaHud?.bracket ?? 0,
+      };
+      this.cb.onArenaHud?.(this.arenaHud);
+      console.info(
+        `[session] arena_hud_fallback reason=${reason} status=${st.status} round=${st.round}`,
+      );
+    } catch (e) {
+      console.warn("[session] arena_hud_fallback failed", reason, e);
+    }
   }
 
   async fetchArenaStatus(): Promise<ArenaStatus | null> {
@@ -2040,6 +2094,7 @@ export class GameSession {
     result: number;
     rank: number;
     claimed: boolean;
+    tip: string;
   } | null> {
     if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildArenaClaimRequest());
@@ -2053,6 +2108,43 @@ export class GameSession {
     const bodies = await this.transport.exchange(0, buildArenaLeaveRequest());
     this.handleBodies(bodies);
     this.clearArenaHud("leave-arena");
+  }
+
+  /**
+   * After NPC arena enter (30/1): same post-enter catalog settle as instance
+   * enter so sceneVisibleReady promotes and scene-sync can push 2/10 peers
+   * without requiring the player to open「周围玩家」first.
+   */
+  async settleArenaSceneEnter(): Promise<void> {
+    if (!this.transport) return;
+    await this.awaitEnterScene();
+    const landed = this.scene || "";
+    if (!this.isArenaScene(landed)) return;
+    const catalogBodies = await this.transport.exchange(
+      0,
+      buildSceneChangePostEnterFollowupRequest(landed, 0, 2),
+    );
+    this.handleBodies(catalogBodies);
+    await this.awaitEnterScene();
+    if (!this.inBattle) await this.pollOnce();
+    void this.ensureArenaHudFallback("enter-scene");
+  }
+
+  /** Sync map peer set from a 2/7 page (and drop arena ghosts not on the page). */
+  syncMapPeersFromNearbyPage(peers: PeerActor[]): {
+    peers: PeerActor[];
+    removed: number[];
+  } {
+    const keep = new Set(peers.map((p) => p.actorId >>> 0));
+    const removed: number[] = [];
+    if (this.isArenaScene()) {
+      for (const id of this.scenePeerById.keys()) {
+        if (!keep.has(id >>> 0)) removed.push(id >>> 0);
+      }
+    }
+    for (const id of removed) this.scenePeerById.delete(id >>> 0);
+    for (const p of peers) this.scenePeerById.set(p.actorId >>> 0, p);
+    return { peers, removed };
   }
 
   async fetchWagerBoard(): Promise<{
@@ -5333,6 +5425,9 @@ export class GameSession {
         this.arenaHud =
           arenaHud.status === 1 || arenaHud.status === 2 ? arenaHud : null;
         this.cb.onArenaHud?.(this.arenaHud);
+        if (this.arenaHud) this.arenaHudFallbackAt = Date.now();
+      } else if (this.isArenaScene() && !this.arenaHud) {
+        void this.ensureArenaHudFallback("poll-miss");
       }
       const wagerEv = parseWagerEvent(packet);
       if (wagerEv) this.cb.onWagerEvent?.(wagerEv);

@@ -983,7 +983,177 @@ static void vm_mock_arena_announce_kill_streak(const vm_mock_arena_participant *
 }
 
 /* Win while alive → streak++; loss → 0; draw/bye unchanged.
- * 播报：仅 70 阶段；本场 LIVE 每个档位（1敌将讨伐…11天下无敌）仅全场首个达成者。 */
+ * 播报+文字称号：仅 70 阶段；本场 LIVE 每档仅全场首个达成者播报并解锁称号。 */
+static void vm_mock_arena_unlock_kill_streak_designation(
+    vm_mock_arena_participant *winner)
+{
+    vm_mock_service_client_session *session;
+    vm_mock_service_account_state *account = NULL;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    vm_net_mock_role_state *role = NULL;
+    u8 designationId;
+    u32 bit;
+    u32 i;
+
+    if (winner == NULL || winner->bracket != 70 || winner->killStreak == 0)
+        return;
+    designationId =
+        vm_net_mock_arena_designation_id_for_streak(winner->killStreak);
+    bit = vm_net_mock_arena_designation_mask_bit(designationId);
+    if (bit == 0)
+        return;
+
+    session = vm_mock_service_find_client_session(winner->clientId);
+    if (session == NULL || session->accountId[0] == 0 ||
+        session->onlineRoleId == 0)
+        return;
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+    account = vm_mock_service_account_find_or_create(session->accountId);
+    if (account == NULL)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return;
+    }
+    vm_mock_service_account_restore(account);
+    g_vm_mock_service_active_client_id = session->clientId;
+    if (!vm_mock_service_account_ensure_role_db_loaded(account) ||
+        !g_vm_net_mock_role_db_valid)
+    {
+        if (savedActive != NULL)
+            vm_mock_service_account_restore(savedActive);
+        else
+            vm_mock_service_account_restore(NULL);
+        g_vm_mock_service_active_account_id = savedActiveId;
+        g_vm_mock_service_active_client_id = savedClientId;
+        return;
+    }
+    for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+    {
+        if (g_vm_net_mock_role_db.roles[i].roleId == winner->roleId)
+        {
+            role = &g_vm_net_mock_role_db.roles[i];
+            break;
+        }
+    }
+    if (role != NULL && (role->arenaDesignationMask & bit) == 0)
+    {
+        role->arenaDesignationMask |= bit;
+        vm_net_mock_role_mark_inventory_dirty("arena-kill-streak-title");
+        if (g_vm_net_mock_role_position_dirty || g_vm_net_mock_role_inventory_dirty)
+            vm_net_mock_role_db_save("arena-kill-streak-title");
+        printf("[info][mock-service] arena_title_unlock role=%u streak=%u "
+               "designation=%u mask=0x%x\n",
+               role->roleId, winner->killStreak, (u32)designationId,
+               role->arenaDesignationMask);
+    }
+    vm_mock_service_account_capture(account);
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+}
+
+static void vm_mock_arena_clear_kill_streak_designations(const char *reason)
+{
+    vm_mock_service_client_session *session = g_vm_mock_service_client_sessions;
+    vm_mock_service_account_state *savedActive = g_vm_mock_service_active_account;
+    const char *savedActiveId = g_vm_mock_service_active_account_id;
+    u32 savedClientId = g_vm_mock_service_active_client_id;
+    u32 clearedOnline = 0;
+
+    (void)vm_net_mock_role_ensure_arena_designation_column();
+    (void)vm_mysql_exec(
+        "UPDATE account_roles SET arena_designation_mask=0 "
+        "WHERE arena_designation_mask<>0");
+
+    if (savedActive != NULL)
+        vm_mock_service_account_capture(savedActive);
+
+    while (session != NULL)
+    {
+        vm_mock_service_account_state *account = NULL;
+        vm_net_mock_role_state *role = NULL;
+        u32 i;
+        bool changed = false;
+
+        if (session->accountId[0] == 0 || session->onlineRoleId == 0)
+        {
+            session = session->next;
+            continue;
+        }
+        account = vm_mock_service_account_find_or_create(session->accountId);
+        if (account == NULL ||
+            !vm_mock_service_account_ensure_role_db_loaded(account) ||
+            !g_vm_net_mock_role_db_valid)
+        {
+            session = session->next;
+            continue;
+        }
+        vm_mock_service_account_restore(account);
+        g_vm_mock_service_active_client_id = session->clientId;
+        for (i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
+        {
+            if (g_vm_net_mock_role_db.roles[i].roleId != session->onlineRoleId)
+                continue;
+            role = &g_vm_net_mock_role_db.roles[i];
+            break;
+        }
+        if (role != NULL)
+        {
+            if (role->arenaDesignationMask != 0)
+            {
+                role->arenaDesignationMask = 0;
+                changed = true;
+            }
+            if (vm_net_mock_designation_is_arena_id(role->designationId))
+            {
+                const vm_net_mock_designation_entry *best =
+                    vm_net_mock_role_best_designation(role);
+                role->designationId = best ? best->id : 0;
+                changed = true;
+                snprintf(session->onlineRoleTitle,
+                         sizeof(session->onlineRoleTitle), "%s",
+                         best ? best->name : "");
+                snprintf(session->onlineRoleTitleBadge,
+                         sizeof(session->onlineRoleTitleBadge), "%s",
+                         best && best->overheadResource
+                             ? best->overheadResource
+                             : "");
+            }
+            if (changed)
+            {
+                vm_net_mock_role_mark_inventory_dirty("arena-title-clear");
+                if (g_vm_net_mock_role_position_dirty ||
+                    g_vm_net_mock_role_inventory_dirty)
+                    vm_net_mock_role_db_save("arena-title-clear");
+                ++clearedOnline;
+            }
+        }
+        vm_mock_service_account_capture(account);
+        session = session->next;
+    }
+
+    if (savedActive != NULL)
+        vm_mock_service_account_restore(savedActive);
+    else
+        vm_mock_service_account_restore(NULL);
+    g_vm_mock_service_active_account_id = savedActiveId;
+    g_vm_mock_service_active_client_id = savedClientId;
+    printf("[info][mock-service] arena_title_clear reason=%s online=%u\n",
+           reason ? reason : "-", clearedOnline);
+}
+
 static void vm_mock_arena_apply_kill_streak(vm_mock_arena_participant *winner,
                                             vm_mock_arena_participant *loser)
 {
@@ -993,11 +1163,13 @@ static void vm_mock_arena_apply_kill_streak(vm_mock_arena_participant *winner,
         return;
     if (winner->killStreak < 0xffffffffu)
         winner->killStreak += 1;
-    /* 10/20/…/50 段位不播报；仅 70 级档。 */
+    /* 10/20/…/50 段位不播报/不发称号；仅 70 级档。 */
     if (winner->bracket != 70)
         return;
+    /* 仅被世界播报的首个达成者解锁文字称号。 */
     if (!vm_mock_arena_kill_streak_claim_first(winner->killStreak))
         return;
+    vm_mock_arena_unlock_kill_streak_designation(winner);
     vm_mock_arena_announce_kill_streak(winner);
 }
 
@@ -1488,8 +1660,9 @@ static void vm_mock_arena_set_status(u8 status)
     if (status == VM_MOCK_ARENA_STATUS_LIVE && prev != VM_MOCK_ARENA_STATUS_LIVE)
     {
         g_vm_mock_arena_rt.lastMatchRound = 0xffffffffu;
-        /* 新比赛区间：连杀档位首杀播报重新计数。 */
+        /* 新比赛区间：连杀档位首杀播报重新计数；清比武文字称号。 */
         g_vm_mock_arena_kill_streak_announced_mask = 0;
+        vm_mock_arena_clear_kill_streak_designations("live-begin");
     }
     /* Re-open after SETTLED (admin moved minutes back into window). */
     if ((status == VM_MOCK_ARENA_STATUS_ENTRY ||
@@ -1499,6 +1672,8 @@ static void vm_mock_arena_set_status(u8 status)
         g_vm_mock_arena_announced_status = 0xffu;
         g_vm_mock_arena_rt.lastMatchRound = 0xffffffffu;
         g_vm_mock_arena_kill_streak_announced_mask = 0;
+        if (status == VM_MOCK_ARENA_STATUS_LIVE)
+            vm_mock_arena_clear_kill_streak_designations("settled-reopen-live");
     }
     vm_mock_arena_announce_status(status);
     vm_mock_arena_refresh_nearby_for_arena_clients("arena-status-change");

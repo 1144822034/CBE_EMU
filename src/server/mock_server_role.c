@@ -2401,6 +2401,8 @@ typedef enum
 {
     VM_NET_MOCK_DESIGNATION_KIND_MONEY = 0,
     VM_NET_MOCK_DESIGNATION_KIND_LEVEL = 1,
+    /* Pixi-only：比武连杀文字称号（overhead 空串，客户端画字）。 */
+    VM_NET_MOCK_DESIGNATION_KIND_ARENA = 2,
 } vm_net_mock_designation_kind;
 
 typedef struct
@@ -2656,6 +2658,76 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         "\xd2\xbb\xb4\xfa\xd7\xda\xca\xa6", /* GBK: ???? */
         "level_name12.gif",
     },
+    /*
+     * Arena kill-streak text titles (Pixi): id 30–40, empty overhead —
+     * client draws the display name. Unlock via arenaDesignationMask bits.
+     */
+    {
+        30, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xb5\xd0\xbd\xab\xcc\xd6\xb7\xa5", /* 敌将讨伐 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5", /* 比武连胜称号 */
+        "",
+    },
+    {
+        31, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xcb\xab\xc9\xb1", /* 双杀 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        32, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xb4\xf3\xc9\xb1\xcc\xd8\xc9\xb1", /* 大杀特杀 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        33, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xcb\xf9\xcf\xf2\xc5\xfb\xc3\xd2", /* 所向披靡 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        34, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xbb\xeb\xc9\xed\xca\xc7\xb5\xa8", /* 浑身是胆 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        35, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xca\xc6\xc8\xe7\xc6\xc6\xd6\xf1", /* 势如破竹 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        36, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xd3\xc2\xb9\xda\xc8\xfd\xbe\xfc", /* 勇冠三军 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        37, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xd2\xbb\xc6\xef\xb5\xb1\xc7\xa7", /* 一骑当千 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        38, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xcd\xf2\xb7\xf2\xc4\xaa\xb5\xd0", /* 万夫莫敌 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        39, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xbe\xd9\xca\xc0\xce\xde\xcb\xab", /* 举世无双 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
+    {
+        40, 0, VM_NET_MOCK_DESIGNATION_KIND_ARENA, 0, 0,
+        "\xcc\xec\xcf\xc2\xce\xde\xb5\xd0", /* 天下无敌 */
+        "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
+        "",
+    },
 
 };
 
@@ -2676,6 +2748,27 @@ static const vm_net_mock_designation_entry *vm_net_mock_designation_by_id(u8 id)
     return &g_vm_net_mock_designation_entries[0];
 }
 
+static bool vm_net_mock_designation_is_arena_id(u8 id)
+{
+    return id >= 30 && id <= 40;
+}
+
+static u8 vm_net_mock_arena_designation_id_for_streak(u32 streak)
+{
+    if (streak == 0)
+        return 0;
+    if (streak >= 11u)
+        return 40;
+    return (u8)(29u + streak);
+}
+
+static u32 vm_net_mock_arena_designation_mask_bit(u8 id)
+{
+    if (!vm_net_mock_designation_is_arena_id(id))
+        return 0;
+    return 1u << (id - 30u);
+}
+
 static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *role,
                                                 const vm_net_mock_designation_entry *entry)
 {
@@ -2683,6 +2776,12 @@ static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *ro
     u32 level = role ? role->level : 1;
     if (entry == NULL)
         return false;
+    if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_ARENA)
+    {
+        u32 bit = vm_net_mock_arena_designation_mask_bit(entry->id);
+        return bit != 0 && role != NULL &&
+               (role->arenaDesignationMask & bit) != 0;
+    }
     if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_LEVEL)
         return level >= entry->minLevel;
     return money >= entry->minMoney;
@@ -2713,10 +2812,14 @@ static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(co
         vm_net_mock_role_best_designation_of_kind(role, current->kind);
     if (best != NULL)
         return best;
+    /* Prefer durable wealth/level titles over transient arena text titles. */
     best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_MONEY);
     if (best != NULL)
         return best;
     best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_LEVEL);
+    if (best != NULL)
+        return best;
+    best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_ARENA);
     if (best != NULL)
         return best;
     return &g_vm_net_mock_designation_entries[0];
@@ -5481,6 +5584,7 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
                                                               NULL);
     }
     role->designationId = 0;
+    role->arenaDesignationMask = 0;
     vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
     vm_net_mock_role_sync_derived_vitals(role);
@@ -6574,11 +6678,11 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
                                           const size_t *lengths)
 {
     vm_mock_mysql_role_load_context *context = (vm_mock_mysql_role_load_context *)context_value;
-    u32 number[20];
+    u32 number[21];
     size_t name_len = 0;
     size_t scene_len = 0;
     memset(number, 0, sizeof(number));
-    if (context == NULL || context->database == NULL || column_count != 22 ||
+    if (context == NULL || context->database == NULL || column_count != 23 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &number[0]) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[1]) ||
         values[2] == NULL ||
@@ -6601,10 +6705,13 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[19], lengths[19], &number[17]) ||
         !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[18]) ||
         !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[19]) ||
+        !vm_mock_mysql_parse_u32(values[22], lengths[22], &number[20]) ||
         number[0] >= context->database->roleCount || number[0] >= VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
-        number[1] == 0 || number[2] > 255 || number[3] > 255 || number[4] > 255 ||
-        number[13] > 65535 || number[14] > 65535 || number[15] > 255 ||
-        number[16] > 255 || number[17] > 65535 || number[19] > 255 ||
+        number[1] == 0 || number[2] > 255 || number[3] > 255 ||
+        number[4] > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT ||
+        number[13] > 65535 || number[14] > 65535 ||
+        number[15] > VM_NET_MOCK_BACKPACK_MAX_ITEMS ||
+        number[16] > 255 || number[18] > 65535 || number[20] > 255 ||
         (context->seenRoleMask & (1u << number[0])) != 0)
     {
         if (context != NULL)
@@ -6640,9 +6747,10 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
     role->y = (u16)number[14];
     role->backpackItemCount = (u16)number[15];
     role->designationId = (u8)number[16];
-    role->nextBackpackSeq = (u16)number[17];
-    role->pkPoints = number[18];
-    role->pkPveDecayStreak = (u8)number[19];
+    role->arenaDesignationMask = number[17];
+    role->nextBackpackSeq = (u16)number[18];
+    role->pkPoints = number[19];
+    role->pkPveDecayStreak = (u8)number[20];
     context->seenRoleMask |= (u8)(1u << number[0]);
     ++context->roleRows;
     return true;
@@ -6859,6 +6967,55 @@ static bool vm_net_mock_role_equipment_ensure_enhance_column(void)
 /* account_roles.pk_points (ranking) + pk_pve_streak (red-name decay). */
 static void vm_net_mock_role_mark_inventory_dirty(const char *reason);
 
+/*
+ * Legacy DBs kept backpack_capacity / backpack_item_count as TINYINT UNSIGNED
+ * (max 255). Pixi cap is 256; leave them tinyint and load rejects capacity=256
+ * as invalid → empty title role list. Widen once when still tinyint.
+ */
+static bool vm_net_mock_role_ensure_backpack_u16_columns(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+    vm_mock_mysql_equipment_enhance_column_context context;
+    char probe[384];
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    memset(&context, 0, sizeof(context));
+    snprintf(probe, sizeof(probe),
+             "SELECT COUNT(*) FROM information_schema.COLUMNS "
+             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='account_roles' "
+             "AND COLUMN_NAME IN ('backpack_capacity','backpack_item_count') "
+             "AND DATA_TYPE='tinyint'");
+    if (!vm_mysql_query(probe, vm_mock_mysql_equipment_enhance_column_row, &context) ||
+        context.invalid || !context.found)
+    {
+        printf("[error][network] mock_backpack_u16_columns probe error=%s\n",
+               vm_mysql_last_error());
+        ok = false;
+        return false;
+    }
+    if (context.count > 0)
+    {
+        if (!vm_mysql_exec(
+                "ALTER TABLE account_roles "
+                "MODIFY COLUMN backpack_capacity SMALLINT UNSIGNED NOT NULL, "
+                "MODIFY COLUMN backpack_item_count SMALLINT UNSIGNED NOT NULL"))
+        {
+            printf("[error][network] mock_backpack_u16_columns alter error=%s\n",
+                   vm_mysql_last_error());
+            ok = false;
+            return false;
+        }
+        printf("[info][network] mock_backpack_u16_columns widened "
+               "tinyint_cols=%u evidence=capacity-256\n",
+               context.count);
+    }
+    ok = true;
+    return true;
+}
+
 static bool vm_net_mock_role_ensure_pk_columns(void)
 {
     static bool ensured = false;
@@ -6867,6 +7024,11 @@ static bool vm_net_mock_role_ensure_pk_columns(void)
     if (ensured)
         return ok;
     ensured = true;
+    if (!vm_net_mock_role_ensure_backpack_u16_columns())
+    {
+        ok = false;
+        return false;
+    }
     if (!vm_net_mock_role_table_ensure_column(
             "account_roles", "pk_points",
             "ALTER TABLE account_roles "
@@ -6883,6 +7045,33 @@ static bool vm_net_mock_role_ensure_pk_columns(void)
             "ADD COLUMN pk_pve_streak TINYINT UNSIGNED NOT NULL DEFAULT 0 "
             "AFTER pk_points",
             "role_pk_pve_streak_column"))
+    {
+        ok = false;
+        return false;
+    }
+    ok = true;
+    return true;
+}
+
+static bool vm_net_mock_role_ensure_arena_designation_column(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    if (!vm_net_mock_role_ensure_pk_columns())
+    {
+        ok = false;
+        return false;
+    }
+    if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "arena_designation_mask",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN arena_designation_mask INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER designation_id",
+            "role_arena_designation_mask_column"))
     {
         ok = false;
         return false;
@@ -7012,8 +7201,10 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     }
     if (!vm_net_mock_role_ensure_pk_columns())
         return false;
+    if (!vm_net_mock_role_ensure_arena_designation_column())
+        return false;
     snprintf(query, sizeof(query),
-             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq,pk_points,pk_pve_streak "
+             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,next_backpack_seq,pk_points,pk_pve_streak "
              "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
@@ -7204,6 +7395,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         return false;
     if (!vm_net_mock_role_ensure_pk_columns())
         return false;
+    if (!vm_net_mock_role_ensure_arena_designation_column())
+        return false;
     if (timed_effect != NULL &&
         (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
          !vm_net_mock_role_prepare_item_effect_schema()))
@@ -7368,8 +7561,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         if (!scene_len)
             scene_hex[0] = 0;
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,next_backpack_seq) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,next_backpack_seq) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
@@ -7377,13 +7570,14 @@ static bool vm_net_mock_role_db_save_relational_ex(
                  "pk_points=VALUES(pk_points),pk_pve_streak=VALUES(pk_pve_streak),"
                  "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
                  "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
+                 "arena_designation_mask=VALUES(arena_designation_mask),"
                  "next_backpack_seq=VALUES(next_backpack_seq)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
                  role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
                  (u32)role->pkPveDecayStreak, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
-                 role->nextBackpackSeq);
+                 role->arenaDesignationMask, role->nextBackpackSeq);
         if (!vm_mysql_exec(query))
         {
             snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -9809,6 +10003,25 @@ static bool vm_net_mock_role_grant_flask_reservoir_points(
     u16 *seqOut,
     const char *reason);
 
+/*
+ * Restore one mall durable pass (834/839) with exact remaining uses.
+ * add_backpack_item_to_role treats count as NEW full-pass quantity (mall buy):
+ * count=50 would spawn 50 rows of durability 50. Auction claim / warehouse
+ * retrieve store remaining durability in item_count and must use this path.
+ */
+static bool vm_net_mock_role_grant_durable_pass_remaining(
+    vm_net_mock_role_state *role,
+    u32 itemId,
+    u32 remaining,
+    u16 *seqOut,
+    const char *reason);
+
+static bool vm_net_mock_backpack_item_id_is_durable_mall_pass(u32 itemId)
+{
+    return itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID ||
+           itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID;
+}
+
 static bool vm_net_mock_warehouse_deposit_backpack_seq(vm_net_mock_role_state *role,
                                                        u16 backpackSeq,
                                                        const char **reasonOut)
@@ -9964,6 +10177,18 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
             return false;
         }
     }
+    else if (vm_net_mock_backpack_item_id_is_durable_mall_pass(moved.itemId))
+    {
+        if (!vm_net_mock_role_grant_durable_pass_remaining(
+                role, moved.itemId, moved.count, &addedSeq,
+                "warehouse-retrieve-durable-pass"))
+        {
+            *warehouse = beforeWarehouse;
+            if (reasonOut)
+                *reasonOut = "backpack-full";
+            return false;
+        }
+    }
     else
     {
         u32 addCount = moved.count;
@@ -10003,6 +10228,68 @@ static bool vm_net_mock_warehouse_retrieve_slot(vm_net_mock_role_state *role,
 
 static vm_net_mock_backpack_item_state *vm_net_mock_role_find_backpack_item(
     vm_net_mock_role_state *role, u32 itemId, u16 seq);
+
+/*
+ * One backpack row; item.count = remaining open-uses (wire durability).
+ * Does not multiply into N full mall vouchers.
+ */
+static bool vm_net_mock_role_grant_durable_pass_remaining(
+    vm_net_mock_role_state *role,
+    u32 itemId,
+    u32 remaining,
+    u16 *seqOut,
+    const char *reason)
+{
+    u8 itemCount = 0;
+    u32 maxDur = 0;
+    u32 freeSlots = 0;
+    vm_net_mock_backpack_item_state *item = NULL;
+
+    if (seqOut)
+        *seqOut = 0;
+    g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_NONE;
+    if (role == NULL || remaining == 0)
+        return false;
+    if (itemId == VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID)
+        maxDur = VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY;
+    else if (itemId == VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID)
+        maxDur = VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY;
+    else
+        return false;
+    if (remaining > maxDur)
+        remaining = maxDur;
+
+    vm_net_mock_role_normalize_backpack(role);
+    itemCount = vm_net_mock_role_backpack_count(role);
+    freeSlots = role->backpackCapacity > itemCount
+                    ? (u32)role->backpackCapacity - itemCount
+                    : 0;
+    if (freeSlots < 1 || itemCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+    {
+        g_vm_net_mock_backpack_add_fail_kind = VM_NET_MOCK_BACKPACK_ADD_FAIL_SPACE;
+        return false;
+    }
+
+    item = &role->backpackItems[itemCount];
+    memset(item, 0, sizeof(*item));
+    item->itemId = itemId;
+    item->seq = role->nextBackpackSeq ? role->nextBackpackSeq : 1;
+    item->count = remaining;
+    role->nextBackpackSeq = (u16)(item->seq + 1);
+    if (role->nextBackpackSeq == 0)
+        role->nextBackpackSeq = 1;
+    role->backpackItemCount = (u16)(itemCount + 1);
+    if (seqOut)
+        *seqOut = item->seq;
+    vm_net_mock_role_normalize_backpack(role);
+    vm_net_mock_role_mark_inventory_dirty(
+        reason ? reason : "backpack-grant-durable-pass");
+    printf("[info][network] mock_grant_durable_pass role=%u item=%u remaining=%u "
+           "seq=%u reason=%s evidence=one-row-not-mall-unit-loop\n",
+           role->roleId, itemId, remaining, (u32)item->seq,
+           reason ? reason : "-");
+    return true;
+}
 
 /*
  * Grant HP/MP reservoir points onto a single bag row for itemId (802/803).
