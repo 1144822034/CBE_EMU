@@ -40,6 +40,8 @@ enum
 #define VM_MOCK_ADMIN_LOGOUT_PATH VM_MOCK_ADMIN_BASE_PATH "/logout"
 #define VM_MOCK_ADMIN_ACTION_PATH VM_MOCK_ADMIN_BASE_PATH "/action"
 #define VM_MOCK_ADMIN_ACCOUNT_LIST_PATH VM_MOCK_ADMIN_BASE_PATH "/accounts"
+#define VM_MOCK_ADMIN_MONSTER_BOSS_EXPORT_PATH \
+    VM_MOCK_ADMIN_BASE_PATH "/monster-boss-drops.xlsx"
 
 typedef struct
 {
@@ -536,6 +538,40 @@ static int vm_mock_admin_send_binary_response(vm_mock_service_socket client,
         contentType ? contentType : "application/octet-stream",
         bodyLen);
 
+    if (headerLen <= 0 || (size_t)headerLen >= sizeof(header))
+        return 0;
+    if (!vm_mock_service_send_all(client, (const u8 *)header, (u32)headerLen))
+        return 0;
+    return bodyLen == 0 ||
+           (body != NULL && vm_mock_service_send_all(client, body, bodyLen));
+}
+
+static int vm_mock_admin_send_binary_download(vm_mock_service_socket client,
+                                              const char *contentType,
+                                              const char *filename,
+                                              const u8 *body, u32 bodyLen)
+{
+    char header[1024];
+    int headerLen = 0;
+
+    /* Callers provide fixed ASCII filenames.  Keeping the attachment name in
+     * this response helper, rather than in page JavaScript, makes the export
+     * usable from a direct authenticated URL as well. */
+    if (filename == NULL || filename[0] == 0 || strpbrk(filename, "\r\n") != NULL)
+        return 0;
+    headerLen = snprintf(
+        header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Disposition: attachment; filename=\"%s\"\r\n"
+        "Content-Length: %u\r\n"
+        "Connection: close\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\n"
+        "\r\n",
+        contentType ? contentType : "application/octet-stream", filename,
+        bodyLen);
     if (headerLen <= 0 || (size_t)headerLen >= sizeof(header))
         return 0;
     if (!vm_mock_service_send_all(client, (const u8 *)header, (u32)headerLen))
@@ -13770,6 +13806,11 @@ static int vm_mock_admin_dispatch_request(vm_mock_service_socket client,
                                     "Cache-Control: no-store, max-age=0\r\n",
                                     g_vm_mock_admin_script);
         return 1;
+    }
+    if (strcmp(method, "GET") == 0 &&
+        strcmp(target, VM_MOCK_ADMIN_MONSTER_BOSS_EXPORT_PATH) == 0)
+    {
+        return vm_mock_admin_handle_monster_boss_drop_export(client);
     }
     if (strcmp(method, "GET") == 0 &&
         strcmp(target, VM_MOCK_ADMIN_BASE_PATH "/actor-preview.svg") == 0)

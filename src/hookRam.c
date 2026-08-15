@@ -267,7 +267,7 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
                     (void)uc_mem_read(uc, sp + 16u, &callerLr,
                                       sizeof(callerLr));
                 }
-                printf("[info][automation] equipment_enhance_rules_pointer_write count=%u pc=%08x lr=%08x saved_lr=%08x caller_lr=%08x sp=%08x last=%08x addr=%08x size=%u value=%llx r0=%08x r1=%08x\\n",
+                printf("[info][equipment] enhance_rule_table_pointer_write count=%u pc=%08x lr=%08x saved_lr=%08x caller_lr=%08x sp=%08x last=%08x addr=%08x size=%u value=%llx r0=%08x r1=%08x\\n",
                        g_vmEquipmentEnhanceRulesWatchWriteCount + 1, pc,
                        lr, savedLr, callerLr, sp, lastAddress, start, size, value,
                        r0, r1);

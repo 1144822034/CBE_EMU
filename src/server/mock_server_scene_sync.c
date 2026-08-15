@@ -4587,7 +4587,7 @@ static u32 vm_net_mock_npc_sell_equipment_price(
         return 0;
     /* The configured price is the DSH/server-catalog base value.  There is no
      * client or resource evidence for an enhancement surcharge, so recovery
-     * intentionally remains 50% of that base value. */
+     * intentionally remains 10% of that base value. */
     return (catalogItem->price / 100u) *
                VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT +
            (((catalogItem->price % 100u) *

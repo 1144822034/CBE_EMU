@@ -5429,7 +5429,10 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
-#define VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT 50u
+/* Equipment resale is deliberately a low-value copper sink/source.  Both the
+ * explicit recovery NPC and the Battle Insight full-bag auto-sale consume this
+ * one authoritative percentage. */
+#define VM_NET_MOCK_NPC_SERVICE_EQUIPMENT_SELL_PERCENT 10u
 
 /* Keep the exact pre-v6 binary layout for one-time nvram/payload migration.
  * Do not reuse this type for live state: it cannot represent durable
