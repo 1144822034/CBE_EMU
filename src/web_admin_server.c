@@ -5710,6 +5710,17 @@ static bool vm_mock_admin_account_is_online(const char *accountId)
     return false;
 }
 
+static const char *vm_mock_admin_role_job_label(u8 job)
+{
+    switch (job)
+    {
+    case 1: return "战士";
+    case 2: return "刺客";
+    case 3: return "法师";
+    default: return "未知职业";
+    }
+}
+
 static const char *vm_mock_admin_item_category_name(bool equipment, u8 category)
 {
     if (equipment)
@@ -8323,7 +8334,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         ".dot{color:#12b76a}.muted{color:#98a2b3}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}"
         "table{border-collapse:collapse;width:100%%}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600}"
         "input,select{width:100%%;min-width:0;border:1px solid #d0d5dd;border-radius:6px;padding:8px 9px;background:#fff}button{border:0;border-radius:6px;padding:8px 12px;background:#175cd3;color:#fff;cursor:pointer;white-space:nowrap}button:hover{background:#1849a9}"
-        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.level-set{align-items:center;margin:7px 0 0}.level-set input{width:76px;min-width:76px}.level-set button{padding:6px 9px;font-size:12px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
+        ".inline{display:flex;gap:7px;margin:0 0 7px}.inline input{min-width:105px}.role-rename{align-items:center;margin-top:7px}.role-rename input{width:112px;min-width:112px}.role-rename button{padding:6px 9px;font-size:12px}.level-set{align-items:center;margin:7px 0 0}.level-set input{width:76px;min-width:76px}.level-set button{padding:6px 9px;font-size:12px}.level-note{display:block;margin-top:4px;color:#98a2b3;font-size:12px;line-height:1.35}.scene-reset-input{min-width:230px!important}.reset-position{background:#b54708}.reset-position:hover{background:#93370d}.forms{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.stack{display:grid;gap:9px}.badge{font-size:12px;background:#eef4ff;color:#175cd3;padding:2px 7px;border-radius:999px}.money{white-space:nowrap}.position{min-width:150px}.item-grant{border-top:1px solid #eaecf0;margin-top:18px;padding-top:18px}.grant-form{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(280px,2fr) 90px auto;gap:9px;align-items:end}.grant-form label,.grant-form .item-field{display:grid;gap:4px}.grant-form label>span,.grant-form .item-field>span{font-size:12px;color:#667085}.grant-note{margin:8px 0 0;font-size:12px}"
         "button.item-picker-trigger{width:100%%;min-height:39px;padding:6px 10px;border:1px solid #d0d5dd;background:#fff;color:#344054;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:12px}button.item-picker-trigger:hover{background:#f9fafb;border-color:#84adff}button.item-picker-trigger small{color:#98a2b3;font-weight:400}.item-picker-head-actions{display:flex;align-items:center;gap:8px}.item-picker-head-actions #item-picker-clear{background:#f2f4f7;color:#475467}.item-picker-trigger.compact{min-height:32px;font-size:12px}"
         "[hidden]{display:none!important}.modal-open{overflow:hidden}.item-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:20px;background:#10182899;backdrop-filter:blur(2px)}.item-picker-panel{width:min(780px,100%%);max-height:calc(100vh - 40px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #d0d5dd;border-radius:14px;background:#fff;box-shadow:0 24px 64px #10182840}.item-picker-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #eaecf0}.item-picker-head h3{font-size:19px;margin:0}.item-picker-head p{margin:2px 0 0;color:#667085}.item-picker-close{width:34px;height:34px;padding:0;border-radius:8px;background:#f2f4f7;color:#475467;font-size:24px;line-height:1}.item-picker-close:hover{background:#e4e7ec;color:#1d2939}.item-picker-tools{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(260px,1.2fr);gap:10px;padding:14px 20px 10px}.item-picker-tools label{display:grid;gap:4px}.item-picker-tools label>span{font-size:12px;color:#667085}.item-result-bar{display:flex;justify-content:space-between;gap:12px;padding:0 20px 9px;color:#667085;font-size:12px}.item-picker-error{color:#b42318;font-weight:600}.item-picker-list{display:grid;grid-template-columns:1fr 1fr;gap:8px;min-height:140px;overflow:auto;padding:0 20px 20px;scrollbar-gutter:stable}.item-choice{display:grid;gap:2px;padding:10px 12px;border:1px solid #e4e7ec;background:#fff;color:#344054;text-align:left;white-space:normal}.item-choice:hover{border-color:#84adff;background:#f5f8ff}.item-choice.selected{border-color:#175cd3;background:#eef4ff}.item-choice strong{font-size:14px}.item-choice span{color:#667085;font-size:12px}.item-picker-empty{margin:12px 20px 24px;padding:24px;border:1px dashed #d0d5dd;border-radius:9px;color:#98a2b3;text-align:center}.foot{margin-top:16px;color:#667085;font-size:12px}"
         "@media(max-width:780px){html,body{height:auto;overflow:auto}.wrap{height:auto;min-height:100vh;padding:18px 10px;overflow:visible}.grid,.forms{grid-template-columns:1fr;flex:none}.grid>aside,.grid>section{overflow:visible}.accounts{flex:none;max-height:220px;overflow:auto}.table-wrap{overflow:auto}.grant-form{grid-template-columns:1fr}.grant-form>button[type=submit]{justify-self:start}.item-modal{padding:10px}.item-picker-panel{max-height:calc(100vh - 20px)}.item-picker-tools,.item-picker-list{grid-template-columns:1fr}.item-picker-list{padding-inline:12px}.item-picker-head,.item-picker-tools{padding-inline:14px}}"
@@ -8391,7 +8402,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
         }
     }
     vm_mock_admin_text_appendf(&page, "<div class=\"table-wrap\"><table><thead><tr>"
-                               "<th>角色</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>操作</th>"
+                               "<th>角色 / 职业</th><th>等级 / 状态</th><th>当前位置</th><th>普通钱币</th><th>操作</th>"
                                "</tr></thead><tbody>");
     if (accountState != NULL)
     {
@@ -8419,13 +8430,29 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             }
             vm_mock_admin_text_appendf(&page, "<tr><td><strong>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);
-            vm_mock_admin_text_appendf(&page, "</strong><br><span class=\"muted\">ID %u</span></td>", role->roleId);
+            vm_mock_admin_text_appendf(&page,
+                                       "</strong><br><span class=\"muted\">ID %u · %s</span>"
+                                       "<form class=\"inline role-rename\" method=\"post\" action=\"/action\" "
+                                       "onsubmit=\"return confirm('确定修改这个角色的名称？');\">"
+                                       "<input type=\"hidden\" name=\"action\" value=\"set-role-name\">"
+                                       "<input type=\"hidden\" name=\"account\" value=\"",
+                                       role->roleId,
+                                       vm_mock_admin_role_job_label(role->job));
+            vm_mock_admin_text_append_html(&page, selectedAccount);
+            vm_mock_admin_text_appendf(&page,
+                                       "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
+                                       "<input name=\"role_name\" value=\"",
+                                       role->roleId);
+            vm_mock_admin_text_append_html(&page, roleNameUtf8);
+            vm_mock_admin_text_appendf(&page,
+                                       "\" minlength=\"2\" maxlength=\"15\" aria-label=\"角色名称\" required>"
+                                       "<button type=\"submit\">改名</button></form></td>");
             vm_mock_admin_text_appendf(&page, "<td><div>Lv.%u%s</div>", role->level,
                                        active ? " <span class=\"badge\">当前角色</span>" : "");
             vm_mock_admin_text_appendf(
                 &page,
                 "<form class=\"inline level-set\" method=\"post\" action=\"/action\" "
-                "onsubmit=\"return confirm('将等级设为指定值，并把经验重置到该等级起点？角色需离线才能设置。');\">"
+                "onsubmit=\"return confirm('将等级设为指定值，并把经验重置到该等级起点？在线账号会先被强制断开。');\">"
                 "<input type=\"hidden\" name=\"action\" value=\"set-role-level\">"
                 "<input type=\"hidden\" name=\"account\" value=\"");
             vm_mock_admin_text_append_html(&page, selectedAccount);
@@ -8434,7 +8461,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 "\"><input type=\"hidden\" name=\"role\" value=\"%u\">"
                 "<input type=\"number\" name=\"level\" min=\"1\" max=\"%u\" value=\"%u\" aria-label=\"角色等级\" required>"
                 "<button type=\"submit\">设定等级</button></form>"
-                "<span class=\"level-note\">经验将定位到该等级起点；HP/MP 上限按新等级重算。</span></td>",
+                "<span class=\"level-note\">在线账号会先强制离线；经验将定位到该等级起点，HP/MP 上限按新等级重算。</span></td>",
                 role->roleId, VM_NET_MOCK_ROLE_LEVEL_CAP, role->level);
             vm_mock_admin_text_appendf(&page, "<td class=\"position\">");
             vm_mock_admin_text_append_html(&page, sceneUtf8);
@@ -8455,7 +8482,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
                 "<button type=\"submit\">加钱</button></form>", role->roleId);
             vm_mock_admin_text_appendf(&page,
                 "<form class=\"inline\" method=\"post\" action=\"/action\" "
-                "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？若该角色在线，将在保存后强制断开其游戏连接。');\">"
+                "onsubmit=\"return confirm('将角色重置到所选场景的服务端安全落点？若该角色在线，会先强制断开其游戏连接。');\">"
                 "<input type=\"hidden\" name=\"action\" value=\"reset-role-selected-scene\">"
                 "<input type=\"hidden\" name=\"account\" value=\"");
             vm_mock_admin_text_append_html(&page, selectedAccount);
@@ -8495,7 +8522,7 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     vm_mock_admin_text_appendf(&page,
                                "\" required><input type=\"password\" name=\"password\" maxlength=\"63\" placeholder=\"新密码\" required>"
                                "<button type=\"submit\">保存新密码</button></form></div></div>"
-                               "<p class=\"foot\">位置重置仅对离线账号开放：选择服务端资源目录中的精确 SCE 场景后，服务端从该 SCE 解析安全落点并保存；目标资源或落点无法验证时不会改写位置，也不会回退到出生点。</p>"
+                               "<p class=\"foot\">位置重置会先断开目标角色的在线游戏连接：选择服务端资源目录中的精确 SCE 场景后，服务端从该 SCE 解析安全落点并保存；目标资源或落点无法验证时不会改写位置，也不会回退到出生点。</p>"
                                "</section></div></main></body></html>");
 
     if (page.truncated)
@@ -11258,6 +11285,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     char itemText[32];
     char amountText[32];
     char levelText[32];
+    char roleNameUtf8[128];
+    char roleNameGbk[32];
     char resetSceneUtf8[192];
     char resetRuntimeScene[64];
     const char *error = NULL;
@@ -11274,6 +11303,8 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     memset(itemText, 0, sizeof(itemText));
     memset(amountText, 0, sizeof(amountText));
     memset(levelText, 0, sizeof(levelText));
+    memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
+    memset(roleNameGbk, 0, sizeof(roleNameGbk));
     memset(resetSceneUtf8, 0, sizeof(resetSceneUtf8));
     memset(resetRuntimeScene, 0, sizeof(resetRuntimeScene));
     if (!vm_mock_admin_form_value(body, "action", action, sizeof(action)))
@@ -11417,6 +11448,25 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             ok = vm_mock_service_account_set_password(account, password, &error);
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "密码修改成功" : (error ? error : "密码修改失败"));
+        return;
+    }
+    if (strcmp(action, "set-role-name") == 0)
+    {
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            !vm_mock_admin_form_value(body, "role_name", roleNameUtf8,
+                                      sizeof(roleNameUtf8)) ||
+            !vm_mock_admin_utf8_to_gbk_text(roleNameUtf8, roleNameGbk,
+                                            sizeof(roleNameGbk), false))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "角色名称参数无效");
+            return;
+        }
+        ok = vm_mock_service_account_set_role_name(account, role, roleNameGbk,
+                                                   &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? (error ? error : "角色名称已更新")
+                                  : (error ? error : "角色名称修改失败"));
         return;
     }
     if (strcmp(action, "add-money") == 0 || strcmp(action, "add-wcoin") == 0)

@@ -429,14 +429,20 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         }
     }
 
-    if (g_netMockShop17ListPending)
+    /*
+     * The NPC shop list has a stable request signature: a 17/1 object with
+     * a non-empty payload followed by an empty 7/42 object.  Do not gate this
+     * handler on g_netMockShop17ListPending.  Closing the shop is a local
+     * screen transition and emits no packet that can clear that flag, so a
+     * stale value would otherwise route a later backpack refresh through the
+     * shop list response.  The shop builder itself rejects the empty 17/1
+     * backpack form, which then falls through to the role-backpack builder.
+     */
+    hookedLen = vm_net_mock_build_shop_items_books_combo_response(request, requestLen, out, outCap);
+    if (hookedLen)
     {
-        hookedLen = vm_net_mock_build_shop_items_books_combo_response(request, requestLen, out, outCap);
-        if (hookedLen)
-        {
-            vm_net_log_handled_packet("builtin-shop-items-books-combo", request, requestLen, hookedLen);
-            return hookedLen;
-        }
+        vm_net_log_handled_packet("builtin-shop-items-books-combo", request, requestLen, hookedLen);
+        return hookedLen;
     }
 
     hookedLen = vm_net_mock_build_backpack_items_books_combo_response(request, requestLen, out, outCap);
