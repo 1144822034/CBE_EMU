@@ -554,6 +554,8 @@ typedef struct
 {
     u8 active;
     u8 fired;
+    u8 downloadSnapshotValid;
+    u8 downloadSnapshotState;
     u16 delayTicks;
     u32 eventType;
     u32 r0;
@@ -561,6 +563,7 @@ typedef struct
     u32 r2;
     u32 callback;
     u32 context;
+    u8 downloadSnapshot[0x60];
     vm_net_remote_observation remoteObservation;
 } vm_net_task;
 
@@ -610,20 +613,6 @@ static u32 g_netUpLinkData = 0;
 static u32 g_netDownLinkData = 0;
 static u32 g_netCurrentObject = 0;
 static u32 g_netDebugReadWindow = 0;
-/* Temporary, read-only evidence window for the manual enhancement-shop
- * return reproduction.  It is armed only after the client receives the
- * exact mall catalog sequence, then records a bounded set of transport and
- * touch-gate observations. */
-u8 g_shopReturnForensicsActive = 0;
-u32 g_shopReturnForensicsGateWatchAddress = 0;
-u32 g_shopReturnForensicsGateWriteCount = 0;
-static u32 g_shopReturnForensicsTraceCount = 0;
-static u32 g_shopReturnForensicsCatalogSequence = 0;
-static u8 g_shopReturnForensicsActorQuerySeen = 0;
-static u32 g_shopReturnForensicsCatalogScreen = 0;
-static u32 g_shopReturnForensicsReturnLogicEntry = 0;
-static u32 g_shopReturnForensicsReturnLogicEntryHits = 0;
-static u32 g_shopReturnForensicsReturnLogicGateHits = 0;
 static const u32 VM_GAME_NET_BUSINESS_CALLBACK = 0x01012e4d;
 /* Read-only memory-watch target armed immediately after JianghuOL.CBE's
  * HandleBattleEnterReq writes its state=3 marker.  hookRam.c only observes
@@ -1768,52 +1757,6 @@ static u32 vm_dl_current_sp_bf(void)
     return g_vmDlLoadedApps[idx].spBf;
 }
 
-/* The load-manager ABI is the authority for a CBM's code and static-data
- * bases.  Keep a bounded, read-only record while that contract is recovered;
- * do not derive either base from an arbitrary screen callback. */
-static void vm_dl_trace_loader_call(const char *phase, u32 index)
-{
-    static u32 traceCount = 0;
-    u32 r0 = 0;
-    u32 r1 = 0;
-    u32 r2 = 0;
-    u32 r3 = 0;
-    u32 r9 = 0;
-    u32 lr = 0;
-    FILE *trace;
-
-    if (traceCount >= 96)
-        return;
-    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
-    uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
-    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
-    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
-    uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
-    trace = fopen("logs/dl-context-trace.log", "ab");
-    if (trace == NULL)
-        return;
-    ++traceCount;
-    fprintf(trace,
-            "[info][dl-context] count=%u tick=%u phase=%s idx=%u "
-            "r0=%08x r1=%08x r2=%08x r3=%08x r9=%08x lr=%08x "
-            "current_app=%u current_spbf=%08x remembered_spbf=%08x "
-            "loaded=%u",
-            traceCount, g_schedulerTick, phase ? phase : "-", index,
-            r0, r1, r2, r3, r9, lr, g_vmDlCurrAppId,
-            vm_dl_current_sp_bf(), g_dlSpBf, g_vmDlLoadedCount);
-    for (u32 i = 0; i < g_vmDlLoadedCount; ++i)
-    {
-        fprintf(trace, " app[%u]=%u:%08x/%08x/%08x", i,
-                g_vmDlLoadedApps[i].appId, g_vmDlLoadedApps[i].buffer,
-                g_vmDlLoadedApps[i].spBf,
-                g_vmDlLoadedApps[i].context);
-    }
-    fputc('\n', trace);
-    fflush(trace);
-    fclose(trace);
-}
-
 static void vm_dl_note_sp_bf(u32 moduleR9, const char *reason)
 {
     static u32 s_traceCount = 0;
@@ -2599,260 +2542,14 @@ static u32 scheduler_count_active_net_tasks(void)
 }
 
 
-static void vm_shop_return_forensics_log(const char *phase, u32 eventType,
-                                         u32 r0, u32 callback, u32 context)
-{
-    u8 gate = 0xff;
-    u32 managerCallback = 0;
-    u32 touchCallback = 0;
-    FILE *trace;
-
-    if (!g_shopReturnForensicsActive ||
-        g_shopReturnForensicsTraceCount >= 160)
-    {
-        return;
-    }
-    if (Global_R9 != 0)
-    {
-        (void)uc_mem_read(MTK, Global_R9 + 0x9594, &gate, sizeof(gate));
-        (void)uc_mem_read(MTK, Global_R9 + 0x95cc, &managerCallback,
-                          sizeof(managerCallback));
-        (void)uc_mem_read(MTK, Global_R9 + 0x95e0, &touchCallback,
-                          sizeof(touchCallback));
-    }
-    trace = fopen("logs/shop-return-input-v2.log", "ab");
-    if (trace == NULL)
-        return;
-    ++g_shopReturnForensicsTraceCount;
-    fprintf(trace,
-            "[info][shop-return-v2] count=%u tick=%u phase=%s event=%u "
-            "r0=%08x callback=%08x context=%08x gate=%u manager_cb=%08x "
-            "touch_cb=%08x active=%08x top=%08x depth=%u catalog_seq=%u "
-            "actor_query=%u last=%08x\n",
-            g_shopReturnForensicsTraceCount, g_schedulerTick,
-            phase ? phase : "-", eventType, r0, callback, context, gate,
-            managerCallback, touchCallback, g_currentScreenThis,
-            g_screenStackCount ? g_screenStack[g_screenStackCount - 1] : 0,
-            g_screenStackCount, g_shopReturnForensicsCatalogSequence,
-            g_shopReturnForensicsActorQuerySeen, lastAddress);
-    fflush(trace);
-    fclose(trace);
-}
-
-static void vm_shop_return_forensics_arm_from_catalog(u32 sequence)
-{
-    if (Global_R9 == 0)
-        return;
-    g_shopReturnForensicsActive = 1;
-    g_shopReturnForensicsGateWatchAddress = Global_R9 + 0x9594;
-    g_shopReturnForensicsGateWriteCount = 0;
-    g_shopReturnForensicsTraceCount = 0;
-    g_shopReturnForensicsCatalogSequence = sequence;
-    g_shopReturnForensicsActorQuerySeen = 0;
-    g_shopReturnForensicsCatalogScreen = g_currentScreenThis;
-    g_shopReturnForensicsReturnLogicEntry = 0;
-    g_shopReturnForensicsReturnLogicEntryHits = 0;
-    g_shopReturnForensicsReturnLogicGateHits = 0;
-    vm_shop_return_forensics_log("catalog-arm", 7, 0, 0, 0);
-}
-
-static void vm_shop_return_forensics_note_uplink(const u8 *packet,
-                                                 u32 packetLen,
-                                                 u32 connectId)
-{
-    u16 objectLen;
-
-    if (!g_shopReturnForensicsActive || packet == NULL || packetLen < 9 ||
-        packet[0] != 'W' || packet[1] != 'T' || packet[4] != 1 ||
-        packet[5] != 1 || packet[6] != 14)
-    {
-        return;
-    }
-    objectLen = (u16)(((u16)packet[7] << 8) | packet[8]);
-    if (objectLen < 5 || objectLen + 4 != packetLen)
-        return;
-    g_shopReturnForensicsActorQuerySeen = 1;
-    vm_shop_return_forensics_log("actor-query-uplink", 0, connectId, 0, 0);
-}
-
-static void vm_shop_return_forensics_note_downlink(const u8 *packet,
-                                                   u32 packetLen,
-                                                   u32 eventType,
-                                                   u32 sequence,
-                                                   u32 connectId)
-{
-    u16 declaredLen;
-    u16 objectLen;
-    u32 offset;
-    static const u8 subtypes[4] = {14, 4, 5, 6};
-
-    if (packet == NULL || packetLen < 11 || packet[0] != 'W' ||
-        packet[1] != 'T')
-    {
-        return;
-    }
-    declaredLen = (u16)(((u16)packet[2] << 8) | packet[3]);
-    if (declaredLen != packetLen || packet[4] < 4)
-        return;
-    offset = 5;
-    u32 catalogIndex = 0;
-    while (offset < packetLen)
-    {
-        if (offset + 6 > packetLen)
-            return;
-        objectLen = (u16)(((u16)packet[offset + 4] << 8) |
-                          packet[offset + 5]);
-        if (objectLen < 6 || offset + objectLen > packetLen)
-            return;
-        if (packet[offset] == 1 && packet[offset + 1] == 14 &&
-            packet[offset + 2] == subtypes[catalogIndex])
-        {
-            ++catalogIndex;
-            if (catalogIndex == 4)
-            {
-                (void)eventType;
-                (void)connectId;
-                vm_shop_return_forensics_arm_from_catalog(sequence);
-                return;
-            }
-        }
-        else
-        {
-            catalogIndex = packet[offset] == 1 && packet[offset + 1] == 14 &&
-                           packet[offset + 2] == subtypes[0] ? 1 : 0;
-        }
-        offset += objectLen;
-    }
-}
-
-void vm_shop_return_forensics_note_gate_write(uc_engine *uc, uint64_t address,
-                                              uint32_t size, int64_t value)
-{
-    u32 start = (u32)address;
-    u32 end = start + size;
-    u32 pc = 0;
-    u32 lr = 0;
-    FILE *trace;
-
-    if (!g_shopReturnForensicsActive ||
-        g_shopReturnForensicsGateWatchAddress == 0 ||
-        start >= g_shopReturnForensicsGateWatchAddress + sizeof(u8) ||
-        end <= g_shopReturnForensicsGateWatchAddress ||
-        g_shopReturnForensicsGateWriteCount >= 32)
-    {
-        return;
-    }
-    uc_reg_read(uc, UC_ARM_REG_PC, &pc);
-    uc_reg_read(uc, UC_ARM_REG_LR, &lr);
-    ++g_shopReturnForensicsGateWriteCount;
-    trace = fopen("logs/shop-return-input-v2.log", "ab");
-    if (trace == NULL)
-        return;
-    fprintf(trace,
-            "[info][shop-return-v2] gate-write count=%u tick=%u pc=%08x "
-            "lr=%08x last=%08x addr=%08x size=%u value=%llx\n",
-            g_shopReturnForensicsGateWriteCount, g_schedulerTick, pc, lr,
-            lastAddress, start, size, value);
-    fflush(trace);
-    fclose(trace);
-}
-
-static void vm_shop_return_forensics_note_pc(u32 pc)
-{
-    u32 inputA = 0;
-    u32 inputB = 0;
-
-    if (!g_shopReturnForensicsActive || pc != 0x01003d3c)
-        return;
-    uc_reg_read(MTK, UC_ARM_REG_R1, &inputA);
-    uc_reg_read(MTK, UC_ARM_REG_R2, &inputB);
-    vm_shop_return_forensics_log("touch-dispatch", 0, inputA, inputB, 0);
-}
-
-/* The returned mmGame screen has a distinct logic entry from the mall screen.
- * Observe its actual module-relative state read in-flight; this trace never
- * changes the guest registers or memory. */
-static void vm_shop_return_forensics_note_mmgame_input_pc(u32 pc)
-{
-    u32 r9 = 0;
-    u32 r6 = 0;
-    u32 manager = 0;
-    u8 gate = 0xff;
-    int16_t pending = 0;
-    FILE *trace;
-
-    if (!g_shopReturnForensicsActive ||
-        g_shopReturnForensicsReturnLogicEntry == 0 ||
-        g_shopReturnForensicsTraceCount >= 160)
-    {
-        return;
-    }
-
-    if (pc == (g_shopReturnForensicsReturnLogicEntry & ~1u) &&
-        g_shopReturnForensicsReturnLogicEntryHits < 16)
-    {
-        uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
-        ++g_shopReturnForensicsReturnLogicEntryHits;
-        vm_shop_return_forensics_log("mmgame-input-entry", 0, r9,
-                                      g_shopReturnForensicsReturnLogicEntry,
-                                      g_currentScreenModuleBase);
-        return;
-    }
-
-    /* At +8 the observed mmGame logic has materialized r6 = module_global.
-     * Its next instructions read [r6+0x20], then the manager +8/+0xc gates. */
-    if (pc != ((g_shopReturnForensicsReturnLogicEntry & ~1u) + 8u) ||
-        g_shopReturnForensicsReturnLogicGateHits >= 16)
-    {
-        return;
-    }
-
-    uc_reg_read(MTK, UC_ARM_REG_R9, &r9);
-    uc_reg_read(MTK, UC_ARM_REG_R6, &r6);
-    if (r6 != 0)
-    {
-        (void)uc_mem_read(MTK, r6 + 0x20u, &manager, sizeof(manager));
-        if (manager != 0)
-        {
-            (void)uc_mem_read(MTK, manager + 8u, &pending, sizeof(pending));
-            (void)uc_mem_read(MTK, manager + 12u, &gate, sizeof(gate));
-        }
-    }
-    trace = fopen("logs/shop-return-input-v2.log", "ab");
-    if (trace == NULL)
-        return;
-    ++g_shopReturnForensicsReturnLogicGateHits;
-    ++g_shopReturnForensicsTraceCount;
-    fprintf(trace,
-            "[info][shop-return-v2] count=%u tick=%u phase=mmgame-input-gate "
-            "module=mmGameMstarWqvga.cbm pc=%08x local=%08x r9=%08x "
-            "screen_module_r9=%08x r6=%08x manager=%08x pending=%d gate=%u\n",
-            g_shopReturnForensicsTraceCount, g_schedulerTick, pc,
-            r9 >= 0x14000u ? pc - (r9 - 0x14000u) : 0xffffffffu, r9,
-            g_currentScreenModuleBase, r6, manager, pending, gate);
-    fflush(trace);
-    fclose(trace);
-}
-
 static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32 callback, u32 context)
 {
     static u32 s_netQueueObserveCount = 0;
     u32 activeBefore = scheduler_count_active_net_tasks();
-    if (eventType == 5 || eventType == 7 || eventType == 8 || eventType == 9)
-    {
-        vm_shop_return_forensics_log("net-queue-request", eventType, r0,
-                                      callback, context);
-    }
     for (u32 i = 0; i < VM_SCHED_MAX_NET_TASKS; ++i)
     {
         if (g_netTasks[i].active && g_netTasks[i].eventType == eventType && g_netTasks[i].r0 == r0 && g_netTasks[i].r1 == r1 && g_netTasks[i].r2 == r2 && g_netTasks[i].callback == callback && g_netTasks[i].context == context)
         {
-            if (eventType == 5 || eventType == 7 || eventType == 8 ||
-                eventType == 9)
-            {
-                vm_shop_return_forensics_log("net-queue-dedup", eventType,
-                                              r0, callback, context);
-            }
             return;
         }
     }
@@ -2869,8 +2566,26 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
             g_netTasks[i].r2 = r2;
             g_netTasks[i].callback = callback;
             g_netTasks[i].context = context;
+            g_netTasks[i].downloadSnapshotValid = 0;
+            g_netTasks[i].downloadSnapshotState = 0;
+            memset(g_netTasks[i].downloadSnapshot, 0, sizeof(g_netTasks[i].downloadSnapshot));
             memset(&g_netTasks[i].remoteObservation, 0,
                    sizeof(g_netTasks[i].remoteObservation));
+            if (eventType == 7 && Global_R9)
+            {
+                u32 downloadBase = Global_R9 + 0x9584;
+                if (uc_mem_read(MTK, downloadBase, g_netTasks[i].downloadSnapshot, sizeof(g_netTasks[i].downloadSnapshot)) == UC_ERR_OK)
+                {
+                    u32 bufferPtr = 0;
+                    u32 received = 0;
+                    u32 capacity = 0;
+                    g_netTasks[i].downloadSnapshotValid = 1;
+                    g_netTasks[i].downloadSnapshotState = g_netTasks[i].downloadSnapshot[0];
+                    memcpy(&bufferPtr, g_netTasks[i].downloadSnapshot + 0x14, sizeof(bufferPtr));
+                    memcpy(&received, g_netTasks[i].downloadSnapshot + 0x18, sizeof(received));
+                    memcpy(&capacity, g_netTasks[i].downloadSnapshot + 0x28, sizeof(capacity));
+                }
+            }
             DEBUG_PRINT("[probe_net] queue event=%u r0=%x r1=%x r2=%x cb=%x ctx=%x tick=%u last=%x\n", eventType, r0, r1, r2, callback, context, g_schedulerTick, lastAddress);
             if (s_netQueueObserveCount < 100)
             {
@@ -2878,19 +2593,8 @@ static void scheduler_queue_net_event(u32 eventType, u32 r0, u32 r1, u32 r2, u32
                 vm_autotest_note("net_queue event=%u r0=%08x r1=%08x r2=%08x cb=%08x ctx=%08x\n",
                                  eventType, r0, r1, r2, callback, context);
             }
-            if (eventType == 5 || eventType == 7 || eventType == 8 ||
-                eventType == 9)
-            {
-                vm_shop_return_forensics_log("net-queue-accepted", eventType,
-                                              r0, callback, context);
-            }
             return;
         }
-    }
-    if (eventType == 5 || eventType == 7 || eventType == 8 || eventType == 9)
-    {
-        vm_shop_return_forensics_log("net-queue-full", eventType, r0,
-                                      callback, context);
     }
 }
 
@@ -4276,12 +3980,13 @@ static uc_err scheduler_dispatch_net_tasks(void)
                        i, taskEvent, taskR0, taskR1, taskR2,
                        taskCallback, taskContext, g_netTaskDispatchDepth);
             }
-            if (taskEvent == 5 || taskEvent == 7 || taskEvent == 8 ||
-                taskEvent == 9)
+            if (taskEvent == 7)
             {
-                vm_shop_return_forensics_log("net-before-callback", taskEvent,
-                                              taskR0, taskCallback,
-                                              taskContext);
+                if (task->downloadSnapshotValid && task->downloadSnapshotState == 2)
+                {
+                    u32 downloadBase = Global_R9 + 0x9584;
+                    uc_mem_write(MTK, downloadBase, task->downloadSnapshot, sizeof(task->downloadSnapshot));
+                }
             }
             remoteSceneTargetClearSerial = vm_net_mock_apply_remote_observation(
                 &taskRemoteObservation);
@@ -4301,13 +4006,6 @@ static uc_err scheduler_dispatch_net_tasks(void)
                                                     taskCallback);
             vm_autotest_trace_update_guest_callback("callback-end", taskR0,
                                                      taskR1);
-            if (taskEvent == 5 || taskEvent == 7 || taskEvent == 8 ||
-                taskEvent == 9)
-            {
-                vm_shop_return_forensics_log("net-after-callback", taskEvent,
-                                              taskR0, taskCallback,
-                                              taskContext);
-            }
             vm_hangup_protocol_parser_trace_end(&taskRemoteObservation);
             if (g_netDebugReadWindow)
             {
@@ -5731,8 +5429,6 @@ void keyEvent(int type, int key)
     if (skey != -1)
     {
         EnqueueVMEvent(VM_EVENT_KEYBOARD, skey, isPress);
-        vm_shop_return_forensics_log("input-enqueue-key", VM_EVENT_KEYBOARD,
-                                      (u32)skey, (u32)isPress, 0);
     }
 }
 
@@ -5749,8 +5445,6 @@ void mouseEvent(int type, int x, int y)
         y = 399;
 
     EnqueueVMEvent(VM_EVENT_TOUCHSCREEN, type, (y << 16) | x);
-    vm_shop_return_forensics_log("input-enqueue-touch", VM_EVENT_TOUCHSCREEN,
-                                  (u32)type, (u32)((y << 16) | x), 0);
 }
 
 static void windowMouseEvent(int type, int windowX, int windowY)
@@ -12171,9 +11865,6 @@ void RunArmProgram(void *param)
                     vm_event *evt = DequeueVMEvent();
                     if (evt != NULL)
                     {
-                        vm_shop_return_forensics_log("input-dequeue", evt->event,
-                                                      evt->r0, evt->r1,
-                                                      screenThisPtr);
                         if (evt->event == VM_EVENT_INPUT_CHAR || evt->event == VM_EVENT_INPUT_BACKSPACE || evt->event == VM_EVENT_INPUT_DONE)
                         {
                             p = scheduler_dispatch_input_event(evt);
@@ -12222,31 +11913,7 @@ void RunArmProgram(void *param)
                                 uc_reg_write(MTK, UC_ARM_REG_R0, &screenThisPtr);
                                 uc_reg_write(MTK, UC_ARM_REG_R1, &eventType);
                                 uc_reg_write(MTK, UC_ARM_REG_R2, &eventArg);
-                                vm_shop_return_forensics_log("input-logic-before",
-                                                              eventType,
-                                                              evt->r0,
-                                                              screenLogicEntry,
-                                                              screenThisPtr);
-                                if (g_shopReturnForensicsActive &&
-                                    g_shopReturnForensicsActorQuerySeen &&
-                                    g_currentScreenThis != 0 &&
-                                    g_currentScreenThis != g_shopReturnForensicsCatalogScreen &&
-                                    g_shopReturnForensicsReturnLogicEntry == 0 &&
-                                    vm_is_pool_entry(screenLogicEntry))
-                                {
-                                    g_shopReturnForensicsReturnLogicEntry = screenLogicEntry;
-                                    vm_shop_return_forensics_log("returned-logic-arm",
-                                                                  eventType,
-                                                                  evt->r0,
-                                                                  screenLogicEntry,
-                                                                  screenThisPtr);
-                                }
                                 p = vm_emu_start(screenLogicEntry, exitAddr);
-                                vm_shop_return_forensics_log("input-logic-after",
-                                                              eventType,
-                                                              evt->r0,
-                                                              screenLogicEntry,
-                                                              screenThisPtr);
                                 if (evt->event == VM_EVENT_KEYBOARD || evt->event == VM_EVENT_TOUCHSCREEN)
                                     vm_free_var(eventArg);
                                 if (p != UC_ERR_OK)
@@ -16227,11 +15894,9 @@ static bool hook_vm_manager_network_func(u32 address)
         if (tmp4)
             uc_mem_write(MTK, tmp4, &tmp5, 4);
         scheduler_register_net_channel(tmp5, tmp3, tmp4);
+        u8 netState = 1;
+        uc_mem_write(MTK, Global_R9 + 0x9588 + 0x0c, &netState, 1);
         scheduler_queue_net_task(tmp1, tmp2, tmp3, tmp4);
-        /* The platform ABI reports that asynchronous registration was
-         * accepted with a nonzero result.  Do not write the CBE-owned
-         * net-manager state here; its lifecycle is driven by the queued
-         * network event and the normal guest callbacks. */
         vm_set_call_result(1);
     }
     else if (idx == 1)
@@ -18752,7 +18417,6 @@ static bool hook_vm_dl_load_func(u32 address)
     if (idx == 0)
     {
         printf("[call]vlDlSetCurrContextAddress\n");
-        vm_dl_trace_loader_call("set-current-context", idx);
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         if (tmp2)
@@ -18764,7 +18428,6 @@ static bool hook_vm_dl_load_func(u32 address)
     else if (idx == 1)
     {
         printf("[call]vlDlSetContextAddress\n");
-        vm_dl_trace_loader_call("set-context", idx);
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         uc_reg_read(MTK, UC_ARM_REG_R1, &tmp2);
         uc_reg_read(MTK, UC_ARM_REG_R2, &tmp3);
@@ -18777,14 +18440,12 @@ static bool hook_vm_dl_load_func(u32 address)
     else if (idx == 2)
     {
         printf("[call]vlDlUnLoadCurrApp\n");
-        vm_dl_trace_loader_call("unload-current", idx);
         vm_dl_unload_loaded_app(g_vmDlCurrAppId);
         vm_set_call_result(0);
     }
     else if (idx == 3)
     {
         printf("[call]vlDlUnLoadApp\n");
-        vm_dl_trace_loader_call("unload-app", idx);
         uc_reg_read(MTK, UC_ARM_REG_R0, &tmp1);
         vm_dl_unload_loaded_app((u16)tmp1);
         vm_set_call_result(0);
@@ -18792,19 +18453,16 @@ static bool hook_vm_dl_load_func(u32 address)
     else if (idx == 4)
     {
         printf("[call]vmDlParseAndCopy\n");
-        vm_dl_trace_loader_call("parse-and-copy", idx);
         vm_set_call_result(0xffffffffu);
     }
     else if (idx == 5)
     {
         printf("[call]vlDlLoadApp\n");
-        vm_dl_trace_loader_call("load-app", idx);
         vm_set_call_result(0);
     }
     else if (idx == 6)
     {
         printf("[call]vlDlLoadAppEx\n");
-        vm_dl_trace_loader_call("load-app-ex", idx);
         vm_set_call_result(0);
     }
     else if (idx == 7)
@@ -19442,8 +19100,6 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);
-    vm_shop_return_forensics_note_pc((u32)address & ~1u);
-    vm_shop_return_forensics_note_mmgame_input_pc((u32)address & ~1u);
     vm_hangup_protocol_parser_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_state_watch_note_pc((u32)address & ~1u);
     vm_hangup_transition_trace_note_pc((u32)address & ~1u);

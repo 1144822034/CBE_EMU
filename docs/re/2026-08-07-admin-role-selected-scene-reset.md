@@ -21,7 +21,7 @@
 
 账号管理中的角色行现在显示当前位置，提供可搜索的场景输入框和“重置到指定场景”按钮。
 
-当前操作会先断开目标角色的在线会话，再重新加载离线后的角色快照。随后以既有
+操作前会拒绝任何仍有在线会话的账号，防止在线角色的后续位置保存覆盖后台修改。离线操作以既有
 `vm_net_mock_role_db_save_relational(..., full_snapshot=true, ...)` MySQL 事务保存选中角色的精确 `scene/x/y`；完整快照是必要的，因为选中角色不一定是当前角色。成功日志为：
 
 ```text
@@ -38,8 +38,6 @@
 2. 不在服务端资源目录中的 SCE 键会被拒绝，不能获得默认场景。
 
 ```powershell
-make -j2
-gcc -DNETWORK_SUPPORT -g -O2 -std=gnu11 -ffunction-sections -fdata-sections -w scripts/admin-role-selected-scene-reset-regression.c obj/client/gifDecode.o obj/client/cbeParser.o obj/client/mystd.o obj/client/fontEngine.o obj/client/vmMalloc.o obj/client/fileIoEngine.o obj/client/lcd.o obj/client/automation_png.o obj/client/md5.o obj/server/mysql-client.o '-Wl,--gc-sections' -o tmp/admin-role-selected-scene-reset-regression.exe -lpthread -liconv -lm -lmingw32 -lkernel32 -lws2_32 Lib/unicorn-2.1.4/unicorn-import.lib '-LLib/sdl2-2.0.10/lib' -lSDL2main -lSDL2
-$env:PATH = "$PWD\bin;$env:PATH"
-.\tmp\admin-role-selected-scene-reset-regression.exe
+gcc -DNETWORK_SUPPORT -DCBE_SERVER_ONLY -g -O2 -std=gnu11 -ffunction-sections -fdata-sections -w scripts/admin-role-selected-scene-reset-regression.c src/gifDecode.c src/mystd.c src/mysql-client.c src/md5.c '-Wl,--gc-sections' -o obj/server/admin-role-selected-scene-reset-regression.exe -lpthread -liconv -lm -lkernel32 -lws2_32
+obj/server/admin-role-selected-scene-reset-regression.exe
 ```

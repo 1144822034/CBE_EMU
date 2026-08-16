@@ -1876,7 +1876,6 @@ typedef struct vm_mock_service_account_state
     u8 netMockTitleServerSelectConfirmed;
     u32 netMockBackpackGridSeededRoleId;
     u8 netMockShop17ListPending;
-    u8 netMockShopCatalogDeliveredBeforeActorQuery;
     u32 netMockTitleServerListTick;
     u32 netMockTitleServerSelectTick;
     u32 netMockTitleSelectedServerId;
@@ -2450,8 +2449,6 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->netMockTitleServerSelectConfirmed = g_netMockTitleServerSelectConfirmed;
     state->netMockBackpackGridSeededRoleId = g_netMockBackpackGridSeededRoleId;
     state->netMockShop17ListPending = g_netMockShop17ListPending;
-    state->netMockShopCatalogDeliveredBeforeActorQuery =
-        g_netMockShopCatalogDeliveredBeforeActorQuery;
     state->netMockTitleServerListTick = g_netMockTitleServerListTick;
     state->netMockTitleServerSelectTick = g_netMockTitleServerSelectTick;
     state->netMockTitleSelectedServerId = g_netMockTitleSelectedServerId;
@@ -2568,8 +2565,6 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_netMockTitleServerSelectConfirmed = state->netMockTitleServerSelectConfirmed;
     g_netMockBackpackGridSeededRoleId = state->netMockBackpackGridSeededRoleId;
     g_netMockShop17ListPending = state->netMockShop17ListPending;
-    g_netMockShopCatalogDeliveredBeforeActorQuery =
-        state->netMockShopCatalogDeliveredBeforeActorQuery;
     g_netMockTitleServerListTick = state->netMockTitleServerListTick;
     g_netMockTitleServerSelectTick = state->netMockTitleServerSelectTick;
     g_netMockTitleSelectedServerId = state->netMockTitleSelectedServerId;
@@ -5342,28 +5337,6 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
         vm_mock_service_close_account_role_db_for_management(state, true);
         return false;
     }
-    targetRoleId = role->roleId;
-    /* A live role owns the authoritative runtime position. Release this
-     * management snapshot before the normal offline lifecycle, because that
-     * transition can release the account context it references. Reload only
-     * after the selected role is disconnected so no later session save can
-     * overwrite the reset position. */
-    vm_mock_service_close_account_role_db_for_management(state, true);
-    state = NULL;
-    disconnected = vm_mock_service_account_disconnect_role_sessions(
-        accountId, targetRoleId, "admin-role-position-reset");
-    state = vm_mock_service_open_account_role_db_for_management(accountId,
-                                                                  messageOut);
-    if (state == NULL)
-        return false;
-    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
-    if (role == NULL || role->roleId != targetRoleId)
-    {
-        if (messageOut)
-            *messageOut = "角色离线后无法重新读取，未修改位置";
-        vm_mock_service_close_account_role_db_for_management(state, true);
-        return false;
-    }
     snprintf(sourceScene, sizeof(sourceScene), "%s", role->scene);
     if (!vm_net_mock_get_scene_reasonable_spawn_from_sce(
             targetScene, &targetX, &targetY, NULL))
@@ -5384,6 +5357,7 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
     }
 
     before = *role;
+    targetRoleId = role->roleId;
     snprintf(role->scene, sizeof(role->scene), "%s", targetScene);
     role->x = targetX;
     role->y = targetY;
@@ -5406,17 +5380,21 @@ static bool vm_mock_service_account_reset_role_to_scene_spawn(
     }
 
     vm_mock_service_account_capture(state);
-    /* The selected role was already transitioned through the standard offline
-     * lifecycle before this write. Close the management view after commit;
-     * a post-save disconnect would allow a live position snapshot to race the
-     * reset. */
+    /* The relational writer above is the commit boundary.  Only after it
+     * succeeds may the matching live role be invalidated; otherwise a failed
+     * repair must leave its current session untouched.  Close the management
+     * view first: marking its last session offline may release this account
+     * state, so no role-db pointer may be used after that transition. */
     vm_mock_service_close_account_role_db_for_management(state, false);
+    state = NULL;
+    disconnected = vm_mock_service_account_disconnect_role_sessions(
+        accountId, targetRoleId, "admin-role-position-reset");
     printf("[info][mock-admin] role_selected_scene_reset account=%s role=%u source_scene=%s source_pos=(%u,%u) target_scene=%s target_pos=(%u,%u) landing_source=SCE disconnected=%u action=commit\n",
            accountId, targetRoleId, sourceScene, before.x, before.y,
            targetScene, targetX, targetY, disconnected);
     if (messageOut)
         *messageOut = disconnected != 0
-                          ? "已强制断开该角色连接并重置位置，请重新登录"
+                          ? "已重置位置并断开该角色连接，请重新登录"
                           : "已重置到指定场景的安全落点，重新进入游戏后生效";
     return true;
 }
@@ -5502,11 +5480,7 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
     before = role->money;
     after = (0xffffffffu - before < amount) ? 0xffffffffu : before + amount;
     role->money = after;
-    /* The default writer persists only the active role.  Admin money edits
-     * select an arbitrary role by id, so commit the complete account snapshot
-     * or a non-active character silently loses its updated balance. */
-    if (!vm_net_mock_role_db_save_relational("admin-money-add", NULL, NULL,
-                                             0, true, NULL, NULL, NULL))
+    if (!vm_net_mock_role_db_save("admin-money-add"))
     {
         role->money = before;
         vm_mock_service_account_capture(state);
@@ -5529,133 +5503,6 @@ static bool vm_mock_service_account_add_role_money(const char *accountId,
         *afterOut = after;
     vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
-}
-
-/* Role names are stored in the account snapshot but also denormalized into
- * social and guild rows for display.  Keep those values in one transaction so
- * a failed rename cannot leave the same role with two visible names. */
-static bool vm_mock_service_account_set_role_name(const char *accountId,
-                                                  const char *roleSelector,
-                                                  const char *newName,
-                                                  const char **messageOut)
-{
-    vm_mock_service_account_state *state = NULL;
-    vm_net_mock_role_state *role = NULL;
-    char accountHex[127];
-    char nameHex[sizeof(((vm_net_mock_role_state *)0)->name) * 2 + 1];
-    char query[1024];
-    char previousName[sizeof(((vm_net_mock_role_state *)0)->name)];
-    size_t nameLen = 0;
-    u32 roleId = 0;
-    bool transactionStarted = false;
-
-    if (messageOut)
-        *messageOut = "角色名称修改失败";
-    if (accountId == NULL || accountId[0] == 0 || roleSelector == NULL ||
-        roleSelector[0] == 0 || newName == NULL ||
-        !vm_net_mock_request_text_looks_like_role_name(newName))
-    {
-        if (messageOut)
-            *messageOut = "角色名称必须为 2 至 31 个有效字符";
-        return false;
-    }
-    nameLen = strlen(newName);
-    if (nameLen >= sizeof(previousName) ||
-        vm_mysql_hex_encode(accountId, strlen(accountId), accountHex,
-                            sizeof(accountHex)) == 0 ||
-        vm_mysql_hex_encode(newName, nameLen, nameHex, sizeof(nameHex)) == 0)
-    {
-        if (messageOut)
-            *messageOut = "角色名称或账号编码无效";
-        return false;
-    }
-
-    state = vm_mock_service_open_account_role_db_for_management(accountId,
-                                                                  messageOut);
-    if (state == NULL)
-        return false;
-    role = vm_net_mock_find_role_in_db(&g_vm_net_mock_role_db, roleSelector);
-    if (role == NULL)
-    {
-        if (messageOut)
-            *messageOut = "角色不存在";
-        vm_mock_service_close_account_role_db_for_management(state, true);
-        return false;
-    }
-    roleId = role->roleId;
-    for (u32 i = 0; i < g_vm_net_mock_role_db.roleCount; ++i)
-    {
-        if (g_vm_net_mock_role_db.roles[i].roleId != roleId &&
-            strcmp(g_vm_net_mock_role_db.roles[i].name, newName) == 0)
-        {
-            if (messageOut)
-                *messageOut = "该账号中已经有同名角色";
-            vm_mock_service_close_account_role_db_for_management(state, true);
-            return false;
-        }
-    }
-    if (strcmp(role->name, newName) == 0)
-    {
-        if (messageOut)
-            *messageOut = "角色名称没有变化";
-        vm_mock_service_close_account_role_db_for_management(state, true);
-        return true;
-    }
-
-    snprintf(previousName, sizeof(previousName), "%s", role->name);
-    if (!vm_mysql_exec("START TRANSACTION"))
-        goto failed;
-    transactionStarted = true;
-    snprintf(query, sizeof(query),
-             "UPDATE account_roles SET role_name=X'%s' "
-             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
-             nameHex, accountHex, roleId);
-    if (!vm_mysql_exec(query))
-        goto failed;
-    snprintf(query, sizeof(query),
-             "UPDATE friendships SET target_role_name=X'%s' "
-             "WHERE target_account_id=CAST(X'%s' AS CHAR) AND target_role_id=%u",
-             nameHex, accountHex, roleId);
-    if (!vm_mysql_exec(query))
-        goto failed;
-    snprintf(query, sizeof(query),
-             "UPDATE guilds SET leader_role_name=X'%s' "
-             "WHERE leader_account_id=CAST(X'%s' AS CHAR) AND leader_role_id=%u",
-             nameHex, accountHex, roleId);
-    if (!vm_mysql_exec(query))
-        goto failed;
-    snprintf(query, sizeof(query),
-             "UPDATE guild_members SET role_name=X'%s' "
-             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
-             nameHex, accountHex, roleId);
-    if (!vm_mysql_exec(query))
-        goto failed;
-    snprintf(query, sizeof(query),
-             "UPDATE guild_applications SET applicant_role_name=X'%s' "
-             "WHERE applicant_account_id=CAST(X'%s' AS CHAR) AND applicant_role_id=%u",
-             nameHex, accountHex, roleId);
-    if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
-        goto failed;
-    transactionStarted = false;
-    snprintf(role->name, sizeof(role->name), "%s", newName);
-    vm_mock_service_account_capture(state);
-    vm_mock_service_close_account_role_db_for_management(state, false);
-    printf("[info][mock-admin] role_name_set account=%s role=%u old=%s new=%s action=commit\n",
-           accountId, roleId, previousName, newName);
-    if (messageOut)
-        *messageOut = "角色名称已更新";
-    return true;
-
-failed:
-    if (transactionStarted)
-        (void)vm_mysql_exec("ROLLBACK");
-    printf("[error][mock-admin] role_name_set_failed account=%s role=%u error=%s\n",
-           accountId, roleId, vm_mysql_last_error());
-    vm_mock_service_account_capture(state);
-    vm_mock_service_close_account_role_db_for_management(state, false);
-    if (messageOut)
-        *messageOut = "角色名称保存失败，未修改角色数据";
-    return false;
 }
 
 /* The level displayed by the client is derived from cumulative EXP.  Keep the
@@ -5698,7 +5545,6 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
     vm_net_mock_role_state *role = NULL;
     vm_net_mock_role_state before;
     u32 targetExp = 0;
-    u32 disconnected = 0;
 
     if (messageOut)
         *messageOut = "角色等级设置失败";
@@ -5710,11 +5556,12 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
             *messageOut = "角色或等级参数无效";
         return false;
     }
-    /* A live session owns a separate role snapshot and could overwrite this
-     * edit later.  The admin contract is to complete the normal account
-     * offline lifecycle first, then mutate the committed role data. */
-    disconnected = vm_mock_service_account_disconnect_bound_sessions(
-        accountId, "admin-set-role-level");
+    if (vm_mock_service_account_has_live_role_session(accountId))
+    {
+        if (messageOut)
+            *messageOut = "账号角色仍在线，请先返回标题并稍候刷新后再设置等级";
+        return false;
+    }
 
     state = vm_mock_service_open_account_role_db_for_management(accountId,
                                                                   messageOut);
@@ -5753,14 +5600,11 @@ static bool vm_mock_service_account_set_role_level(const char *accountId,
     }
 
     vm_mock_service_account_capture(state);
-    printf("[info][mock-admin] role_level_set account=%s role=%u old_level=%u old_exp=%u new_level=%u new_exp=%u hp=%u/%u mp=%u/%u disconnected=%u action=commit\n",
+    printf("[info][mock-admin] role_level_set account=%s role=%u old_level=%u old_exp=%u new_level=%u new_exp=%u hp=%u/%u mp=%u/%u action=commit\n",
            accountId, role->roleId, before.level, before.exp, role->level,
-           role->exp, role->hp, role->hpMax, role->mp, role->mpMax,
-           disconnected);
+           role->exp, role->hp, role->hpMax, role->mp, role->mpMax);
     if (messageOut)
-        *messageOut = disconnected != 0
-                          ? "已强制断开在线游戏连接；角色等级已更新，经验已重置为该等级起点"
-                          : "角色等级已更新，经验已重置为该等级起点";
+        *messageOut = "角色等级已更新，经验已重置为该等级起点";
     vm_mock_service_close_account_role_db_for_management(state, false);
     return true;
 }

@@ -71,9 +71,6 @@ static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
 static u32 g_netMockBackpackGridSeededRoleId = 0;
 static u8 g_netMockShop17ListPending = 0;
-/* The normal mall initializer already supplied 14/14,14/4,14/5,14/6.  The
- * following 1/1/14 is then an actor-status query, not a second catalog pull. */
-static u8 g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
 static u32 g_netMockTitleServerListTick = 0;
 static u32 g_netMockTitleServerSelectTick = 0;
 static u32 g_netMockTitleSelectedServerId = 0;
@@ -3272,7 +3269,6 @@ static void vm_net_mock_title_login_phase_reset(const char *reason)
     g_netMockTitleServerListPending = 0;
     g_netMockTitleServerSelectConfirmed = 0;
     g_netMockBackpackGridSeededRoleId = 0;
-    g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
     g_netMockTitleServerListTick = 0;
     g_netMockTitleServerSelectTick = 0;
     g_netMockTitleSelectedServerId = 0;
