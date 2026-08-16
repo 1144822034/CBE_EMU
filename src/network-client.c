@@ -961,11 +961,6 @@ static void vm_net_mock_async_drain_completions(void)
                                             completion->responseLen,
                                             completion->eventType,
                                             completion->sequence);
-        vm_shop_return_forensics_note_downlink(completion->response,
-                                               completion->responseLen,
-                                               completion->eventType,
-                                               completion->sequence,
-                                               completion->connectId);
         g_netDownLinkData += completion->responseLen;
         scheduler_queue_net_event(completion->eventType, responsePtr,
                                   completion->responseLen, completion->responseLen,
@@ -1068,7 +1063,6 @@ static void vm_net_mock_on_send(u32 connectId, u32 dataPtr, u32 dataLen)
     readLen = dataLen < sizeof(request) ? dataLen : sizeof(request);
     if (uc_mem_read(MTK, dataPtr, request, readLen) != UC_ERR_OK)
         return;
-    vm_shop_return_forensics_note_uplink(request, readLen, connectId);
     /* Read-only observation for the opt-in scene-hangup reward confirmer.
      * It recognises the client-owned 25/5 emitted after a real input event;
      * request bytes and transport queue remain unchanged. */
