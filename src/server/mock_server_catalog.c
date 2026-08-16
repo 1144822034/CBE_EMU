@@ -3991,15 +3991,19 @@ static bool vm_net_mock_build_backpack_grid_iteminfo_blob(u8 *out, u32 outCap,
         if (!vm_net_mock_seq_put_u32(out, outCap, &pos,
                                      vm_net_mock_backpack_grid_wire_count(item)))
             return false;
-        /* The initial grid instance owns the persisted +4/+8/+12/+16 plan.
-         * A later 29/3 changes only its enhancement level; it cannot replace
-         * this extension array. */
-        if (!vm_net_mock_seq_put_item_common_extra(
-                out, outCap, &pos, item->itemId,
+        /* 30/21 is the bootstrap grid seed consumed by
+         * HandleItemGridResponse(0x01039952).  Its row parser accepts the
+         * compact current/max-enhance + zero-attribute form; the full
+         * persisted +4/+8/+12/+16 plan belongs to the later detailed 17/1
+         * backpack response and 7/7 equipped-item response.  Sending the
+         * expanded form here overflows the client's fixed downlink parse
+         * pool for large inventories and surfaces as the generic unpack
+         * error before business dispatch. */
+        if (!vm_net_mock_seq_put_item_compact_extra(
+                out, outCap, &pos,
                 (u8)SDL_min(item->enhanceLevel,
                             VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL),
-                vm_net_mock_item_common_extra_enhance_cap(item->itemId),
-                &item->enhanceAffixes))
+                vm_net_mock_item_common_extra_enhance_cap(item->itemId)))
             return false;
     }
     *blobLenOut = pos;
