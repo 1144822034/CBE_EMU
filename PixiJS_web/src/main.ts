@@ -38,25 +38,36 @@ import { SystemPanel, type SystemKind } from "./ui/SystemPanel";
 import { EnhancePanel } from "./ui/EnhancePanel";
 import { WashPanel } from "./ui/WashPanel";
 import { SocialPanel } from "./ui/SocialPanel";
+import type {
+  OtherEquipView,
+  PlayerInfoView,
+} from "./net/protocolSocial";
 import { ArenaHud } from "./ui/ArenaHud";
 import { ArenaPanel } from "./ui/ArenaPanel";
 import { WagerPanel } from "./ui/WagerPanel";
 import { AuctionPanel } from "./ui/AuctionPanel";
 import {
+  EntertainmentPanel,
+  type EntertainmentEntry,
+} from "./ui/EntertainmentPanel";
+import { EntertainmentWebLayer } from "./ui/EntertainmentWebLayer";
+import {
   ARENA_NPC_ENTER,
   ARENA_NPC_LEAVE,
   ARENA_NPC_RANK,
   ARENA_NPC_WAGER,
+  arenaClaimFailTip,
   bracketForLevel,
 } from "./net/protocolArena";
 import {
   formatAuctionPrice,
+  formatAuctionClaimTip,
   goldToCopper,
   type AuctionListing,
   type AuctionStatus,
 } from "./net/protocolAuction";
 import { TaskPanel } from "./ui/TaskPanel";
-import { ChatPanel } from "./ui/ChatPanel";
+import { ChatPanel, findArenaKillStreakTitle } from "./ui/ChatPanel";
 import { TradePanel } from "./ui/TradePanel";
 import { GuildPanel } from "./ui/GuildPanel";
 import { MiniMapOverlay } from "./ui/MiniMapOverlay";
@@ -77,10 +88,13 @@ import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
   EquipSellService,
+  DREAM_BADGE_EQUIP_IDS,
   isBattleMedicineOrFlask,
+  isCrystalFragment,
+  isDreamBadge,
 } from "./net/protocolExtras";
 import { isMapHealSkill } from "./resources/skill";
-import { warmItemCatalogs } from "./resources/itemCatalog";
+import { lookupItemSync, warmItemCatalogs } from "./resources/itemCatalog";
 import {
   installBgmGestureUnlock,
   resumeBgmAfterForeground,
@@ -88,6 +102,11 @@ import {
   toggleSoundEnabled,
   unlockAndResumeBgm,
 } from "./audio/GameBgm";
+import {
+  playKillStreakTitle,
+  preloadKillStreakSfx,
+  unlockKillStreakSfx,
+} from "./audio/KillStreakSfx";
 
 /** Cap GPU buffer; HTML softkeys stay native DPI regardless. */
 const LCD_RESOLUTION_CAP = 3;
@@ -144,6 +163,23 @@ function extractArenaResultTip(chatLine: string): string | null {
   return null;
 }
 
+/** Phase tips from server 1/3/3 / [世] — show as floating game tip. */
+function extractArenaPhaseTip(chatLine: string): string | null {
+  const raw = (chatLine || "").trim();
+  if (!raw) return null;
+  const markers = [
+    "比武擂台已开放进场",
+    "比武比赛开始",
+    "比武已结束",
+    "比武领奖",
+  ] as const;
+  for (const m of markers) {
+    const i = raw.indexOf(m);
+    if (i >= 0) return raw.slice(i).replace(/^\]/, "").trim();
+  }
+  return null;
+}
+
 /** Map server auction/wager short codes to Chinese panel tips. */
 function auctionMsgTip(code: string | undefined, okText: string): string {
   const m = (code || "").trim();
@@ -168,20 +204,24 @@ function auctionMsgTip(code: string | undefined, okText: string): string {
     low: "出价过低",
     balance: "余额不足",
     update: "更新失败",
-    conflict: "出价冲突，请重试",
+    conflict: "冲突，请重试",
     tx: "事务失败",
     refund: "退款登记失败",
     "bid-row": "出价写入失败",
     commit: "提交失败",
     "not-owner": "非卖家不能下架",
     "has-bid": "已有出价，无法下架",
-    "bag-full": "背包已满，无法取回",
-    "flask-full": "壶储量已满，无法取回",
+    "bag-full": "背包已满，请清理后再试",
+    "flask-full": "壶储量已满，请清理后再试",
     "buyout-low": "一口价须不低于起拍价",
     "no-buyout": "该拍品无一口价",
     "buyout-gone": "当前价已超一口价",
     payout: "卖家结算失败",
     "winner-item": "物品发放登记失败",
+    nothing: "暂无待领物品",
+    credit: "金钱入账失败",
+    "bad-kind": "待领类型无效",
+    fail: "领取失败",
   };
   return map[m] ?? `失败:${m}`;
 }
@@ -259,7 +299,8 @@ async function main(): Promise<void> {
   /**
    * Size HTML D-pad / softkeys from phone viewport:
    * - width → preferred button cell (larger phones → larger keys)
-   * - leftover height after 240×400 LCD → shrink / slight grow
+   * - reserve a usable chrome floor first; LCD may shrink below full-width
+   *   on short screens (old leftover-only budget crushed keys to ~32px)
    * Driven by viewport, not stage (avoids feedback loops).
    */
   const syncTouchChromeScale = () => {
@@ -269,15 +310,32 @@ async function main(): Promise<void> {
       document.documentElement.classList.contains("ime-open") ||
       imeShellIsActive();
     const appEl = document.getElementById("app");
-    const vh = appEl?.clientHeight || window.innerHeight || 0;
-    const vw = appEl?.clientWidth || window.innerWidth || 0;
-    if (vh < 2 || vw < 2) return;
+    const rawH = appEl?.clientHeight || window.innerHeight || 0;
+    const rawW = appEl?.clientWidth || window.innerWidth || 0;
+    if (rawH < 2 || rawW < 2) return;
+    // #app uses border-box + safe-area padding — budget the content box.
+    let padT = 0;
+    let padB = 0;
+    let padL = 0;
+    let padR = 0;
+    if (appEl) {
+      const cs = getComputedStyle(appEl);
+      padT = Number.parseFloat(cs.paddingTop) || 0;
+      padB = Number.parseFloat(cs.paddingBottom) || 0;
+      padL = Number.parseFloat(cs.paddingLeft) || 0;
+      padR = Number.parseFloat(cs.paddingRight) || 0;
+    }
+    const vh = Math.max(1, rawH - padT - padB);
+    const vw = Math.max(1, rawW - padL - padR);
 
     const clamp = (n: number, lo: number, hi: number) =>
       Math.max(lo, Math.min(hi, n));
     // Design reference: 360px-wide → 56px cells. Scale tracks phone size.
     const REF_CELL = 56;
-    const cellFromW = clamp(vw * (REF_CELL / 360), 40, 76);
+    // ~48px is a usable touch target; never go back to the old 32px floor.
+    const CELL_MIN = 48;
+    const CELL_MAX = 80;
+    const cellFromW = clamp(vw * (REF_CELL / 360), CELL_MIN, CELL_MAX);
     const centerOn = !!touchBar.querySelector("#sk-center.is-on");
     const chromeH = (cell: number, withStatus: boolean) => {
       const gap = cell * (8 / REF_CELL);
@@ -288,13 +346,17 @@ async function main(): Promise<void> {
     };
 
     const lcdByWidth = vw * (LCD_HEIGHT / LCD_WIDTH);
-    const maxPadFrac = 0.4;
-    const padBudget = Math.max(
-      0,
-      Math.min(vh - lcdByWidth, vh * maxPadFrac),
-    );
-    const CELL_MIN = 32;
-    const CELL_MAX = 76;
+    const maxPadFrac = 0.42;
+    const minChrome = chromeH(CELL_MIN, false);
+    const leftover = vh - lcdByWidth;
+    // Prefer leftover after a full-width LCD, but never starve below minChrome
+    // (stage fit will shrink the LCD). Also cap so the bar cannot eat the screen.
+    let padBudget =
+      leftover > 0
+        ? Math.min(Math.max(leftover, minChrome), vh * maxPadFrac)
+        : Math.min(minChrome, vh * maxPadFrac);
+    padBudget = Math.min(padBudget, vh * 0.52);
+    padBudget = Math.max(padBudget, Math.min(minChrome, vh * 0.38));
     let withStatus = true;
     let cell = cellFromW;
     let h = chromeH(cell, true);
@@ -313,7 +375,7 @@ async function main(): Promise<void> {
     } else if (padBudget > 1 && h < padBudget * 0.9) {
       // Tall leftover: grow keys a bit toward the budget (still ≤ CELL_MAX).
       const grown = cellFromW * (padBudget / h);
-      cell = clamp(Math.min(grown, cellFromW * 1.25), CELL_MIN, CELL_MAX);
+      cell = clamp(Math.min(grown, cellFromW * 1.35), CELL_MIN, CELL_MAX);
     }
 
     const scale = cell / REF_CELL;
@@ -478,6 +540,8 @@ async function main(): Promise<void> {
     autoDensity: true,
     width: LCD_WIDTH,
     height: LCD_HEIGHT,
+    // Prefer discrete GPU retention hints on some WebViews (still may lose ctx).
+    powerPreference: "high-performance",
   });
   rendererReady = true;
   wrap.appendChild(app.canvas);
@@ -523,6 +587,8 @@ async function main(): Promise<void> {
   const arenaPanel = new ArenaPanel();
   const wagerPanel = new WagerPanel();
   const auctionPanel = new AuctionPanel();
+  const entertainPanel = new EntertainmentPanel();
+  const entertainWeb = new EntertainmentWebLayer();
   let auctionCache: {
     rows: AuctionListing[];
     mine: AuctionListing[];
@@ -567,6 +633,7 @@ async function main(): Promise<void> {
   arenaPanel.visible = false;
   wagerPanel.visible = false;
   auctionPanel.visible = false;
+  entertainPanel.visible = false;
   taskUi.visible = false;
   chatPanel.visible = false;
   tradeUi.visible = false;
@@ -600,12 +667,22 @@ async function main(): Promise<void> {
     arenaPanel,
     wagerPanel,
     auctionPanel,
+    entertainPanel,
     taskUi,
     chatPanel,
     tradeUi,
     guildUi,
     worldMap,
   );
+  shell.content.sortableChildren = true;
+  arenaHud.zIndex = 40;
+  dialog.zIndex = 45;
+  approach.zIndex = 46;
+  /* World overlays above NPC dialog / approach so taps cannot leak through. */
+  arenaPanel.zIndex = 55;
+  wagerPanel.zIndex = 55;
+  auctionPanel.zIndex = 55;
+  entertainPanel.zIndex = 56;
   await title.mountArt();
   await roles.mountArt();
   await hud.mountArt();
@@ -648,7 +725,11 @@ async function main(): Promise<void> {
   /** World overlays keep phase=world but must freeze map walk (bag uses phase=system). */
   const syncWorldWalkInput = () => {
     const overlayOpen =
-      auctionPanel.visible || arenaPanel.visible || wagerPanel.visible;
+      auctionPanel.visible ||
+      arenaPanel.visible ||
+      wagerPanel.visible ||
+      entertainPanel.visible ||
+      entertainWeb.isExpanded();
     if (phase === "world" && !overlayOpen) {
       view.inputEnabled = true;
     } else {
@@ -658,7 +739,11 @@ async function main(): Promise<void> {
   };
 
   const openWagerPanel = async () => {
+    dialog.hide();
+    closeApproach(false);
     const board = await session.fetchWagerBoard();
+    dialog.hide();
+    closeApproach(false);
     view.setLeiBlink(false);
     wagerPanel.open(board.rows, board.mine, session.selectedRoleId);
     showPhase("world");
@@ -855,9 +940,8 @@ async function main(): Promise<void> {
     if (action === "claim") {
       void session.auctionClaim().then((r) => {
         view.setPaiBlink(!!r?.blink);
-        const tip = r?.claimed
-          ? `已领取${r.claimed}项${r.failed ? ` 失败${r.failed}` : ""}`
-          : `领取失败${r?.failed ? `:${r.failed}` : ""}`;
+        const tip = formatAuctionClaimTip(r, auctionMsgTip);
+        showGameTip(tip);
         void session.openBag().then(() => refresh(tip));
       });
       return;
@@ -936,7 +1020,12 @@ async function main(): Promise<void> {
       bracket && bracket > 0
         ? bracket
         : bracketForLevel(session.level || activeRole?.level || 1);
+    /* Drop NPC dialog hits before/while rank fetch so taps cannot re-fire options. */
+    dialog.hide();
+    closeApproach(false);
     const page = await session.fetchArenaRank(j, b, 0);
+    dialog.hide();
+    closeApproach(false);
     arenaPanel.open(page, j, b);
     showPhase("world");
     syncWorldWalkInput();
@@ -968,8 +1057,9 @@ async function main(): Promise<void> {
       void session.claimArenaReward().then(async (r) => {
         const tip =
           r?.result === 1
-            ? "比武奖励已领取"
-            : `领奖失败(${r?.result ?? "?"})`;
+            ? (r.tip?.trim() || "比武奖励已领取")
+            : (r?.tip?.trim() || arenaClaimFailTip(r?.result));
+        showGameTip(tip);
         await openArenaPanel(arenaPanel.job, arenaPanel.bracket);
         arenaPanel.showTip(tip);
         shell.setSoftkeys(arenaPanel.softkeys());
@@ -1056,6 +1146,20 @@ async function main(): Promise<void> {
       approach.hide();
       if (auctionPanel.visible) auctionPanel.close();
       if (wagerPanel.visible) wagerPanel.close();
+      if (entertainPanel.visible) entertainPanel.close();
+      // Video/music HTML overlay stays up across battle / hangup / auto so
+      // players can keep watching. Tear down only on auth / character screens.
+      if (
+        entertainWeb.isActive() &&
+        (p === "splash" ||
+          p === "login" ||
+          p === "register" ||
+          p === "servers" ||
+          p === "role" ||
+          p === "create-role")
+      ) {
+        entertainWeb.close();
+      }
       // arenaPanel may stay for leave flow; walk still gated below
     }
     if (p === "world") {
@@ -1074,6 +1178,7 @@ async function main(): Promise<void> {
     else if (p === "create-role") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "world") {
       if (approach.open) shell.setSoftkeys({ left: "确定", right: "取消" });
+      else if (entertainPanel.visible) shell.setSoftkeys(entertainPanel.softkeys());
       else shell.setSoftkeys({ left: "菜单", right: "菜单" });
     }
     else if (p === "menu") {
@@ -1101,6 +1206,10 @@ async function main(): Promise<void> {
     else if (p === "trade") shell.setSoftkeys(tradeUi.softkeys());
     else if (p === "guild") shell.setSoftkeys({ left: "确定", right: "返回" });
     else if (p === "map") shell.setSoftkeys({ left: "确定", right: "返回" });
+    // Expanded entertainment stays topmost — softkeys control the player.
+    if (entertainWeb.isExpanded()) {
+      shell.setSoftkeys({ left: "最小化", right: "关闭" });
+    }
   };
 
   const cycleMapUi = () => {
@@ -1219,11 +1328,53 @@ async function main(): Promise<void> {
       });
     }
     if (kind === "status") {
-      system.setLines(["正在拉取服务端属性汇总…"]);
       void session.openCharacterStats().then(() => {
         if (session.characterStats) system.setStats(session.characterStats);
       });
     }
+  };
+
+  /** 「查看玩家信息」= 10/2 资料 + 29/4 装备列表（同屏合并）. */
+  let playerCardCombine = false;
+  let pendingPlayerInfo: PlayerInfoView | null = null;
+  let pendingOtherEquip: OtherEquipView | null = null;
+
+  const flushPlayerCard = () => {
+    if (!pendingPlayerInfo) return;
+    const lines = [...pendingPlayerInfo.lines];
+    lines.push("");
+    lines.push("—— 装备 ——");
+    if (pendingOtherEquip) {
+      if (pendingOtherEquip.items.length) {
+        for (const it of pendingOtherEquip.items) {
+          lines.push(
+            `${it.name}${it.enhance ? `+${it.enhance}` : ""}`,
+          );
+        }
+      } else {
+        lines.push("(无装备)");
+      }
+    } else {
+      lines.push("加载中…");
+    }
+    social.showPlayerInfo({
+      lines,
+      fdegree: pendingPlayerInfo.fdegree,
+    });
+    showPhase("social");
+    if (pendingOtherEquip) playerCardCombine = false;
+  };
+
+  const openPlayerCard = (actorId: number, tipName?: string) => {
+    if (!actorId) return;
+    playerCardCombine = true;
+    pendingPlayerInfo = null;
+    pendingOtherEquip = null;
+    showGameTip(
+      tipName ? `查看玩家信息 · ${tipName}` : "查看玩家信息",
+    );
+    void session.requestPlayerInfo(actorId);
+    void session.requestOtherEquip(actorId);
   };
 
   const session = new GameSession({
@@ -1372,7 +1523,16 @@ async function main(): Promise<void> {
     onPeerMoves: (moves) => view.actors.applyPeerMoves(moves),
     onNearbyPage: (page) => {
       session.nearbyList = page.peers;
-      if (phase === "social") social.openNearby(page.peers);
+      /*
+       * 2/7 list rows share otherinfo with map peers.  Also paint them so
+       * opening「周围玩家」does not wait for the next scene-sync 2/10 baseline
+       * (arena enter used to leave ready pending until this page).
+       */
+      const synced = session.syncMapPeersFromNearbyPage(page.peers);
+      if (synced.peers.length || synced.removed.length)
+        view.actors.applyPeers(synced.peers, synced.removed);
+      if (phase === "social" && social.panelKind === "nearby")
+        social.openNearby(page.peers);
       setChromeStatus(
         page.peers.length
           ? `周围玩家 ×${page.peers.length}（↑↓翻页）`
@@ -1380,7 +1540,8 @@ async function main(): Promise<void> {
       );
     },
     onTeamUpdate: (roster) => {
-      if (phase === "social") social.openTeam(roster.members, roster.leaderId);
+      if (phase === "social" && social.panelKind === "team")
+        social.openTeam(roster.members, roster.leaderId);
       const selfId = session.selectedRoleId >>> 0;
       /* Real party only. Solo/orphan 5/10 (memberCount<2) and self row must
        * never paint the top-left teammate vitals after role switch. */
@@ -1410,7 +1571,7 @@ async function main(): Promise<void> {
       );
     },
     onFriends: (friends) => {
-      if (phase === "social") {
+      if (phase === "social" && social.panelKind === "friends") {
         social.openFriends(friends, session.friendPage, session.friendAllPages, {
           keepHub: true,
         });
@@ -1422,7 +1583,7 @@ async function main(): Promise<void> {
       );
     },
     onEnmity: ({ dir, rows }) => {
-      if (phase === "social") {
+      if (phase === "social" && social.panelKind === "enmity") {
         social.openEnmity(
           rows,
           dir,
@@ -1642,10 +1803,20 @@ async function main(): Promise<void> {
       }
     },
     onPlayerInfo: (info) => {
+      if (playerCardCombine) {
+        pendingPlayerInfo = info;
+        flushPlayerCard();
+        return;
+      }
       social.showPlayerInfo(info);
       showPhase("social");
     },
     onOtherEquip: (eq) => {
+      if (playerCardCombine) {
+        pendingOtherEquip = eq;
+        flushPlayerCard();
+        return;
+      }
       social.showOtherEquip(eq);
       showPhase("social");
     },
@@ -1839,8 +2010,12 @@ async function main(): Promise<void> {
         if (session.hangupActive || session.autoBattleActive) {
           shell.setSoftkeys({ left: "", right: "" });
         }
-        if (session.shouldInBattleAuto()) {
-          armInBattleAuto(session.hangupActive ? "挂机出手…" : "自动出手…");
+        if (session.autoBattleActive) {
+          // Re-arm gateway prefer for this fight (poll synth; hangup=0).
+          void session.setBattleAutoPrefer(true);
+        }
+        if (session.shouldClientDriveInBattleAuto()) {
+          armInBattleAuto("挂机出手…");
         }
       })();
     },
@@ -2018,9 +2193,22 @@ async function main(): Promise<void> {
         /* 比武胜/负/平/轮空：系统条也弹顶 tip（轮空无 4/7 结算面板）。 */
         const arenaTip = extractArenaResultTip(line.text);
         if (arenaTip) showGameTip(arenaTip);
+        const arenaPhaseTip = extractArenaPhaseTip(line.text);
+        if (arenaPhaseTip) showGameTip(arenaPhaseTip);
+        const streakHit = findArenaKillStreakTitle(line.text);
+        if (streakHit) {
+          const i = line.text.indexOf("比武");
+          const tip =
+            i >= 0 ? line.text.slice(i).replace(/^\]/, "").trim() : line.text;
+          if (tip) showGameTip(tip);
+          /* 连杀播报音效：与称号分段对应，不受 BGM/开关声音影响。 */
+          playKillStreakTitle(streakHit.title);
+        }
         hud.pushChat(line.text, line.type, {
           senderRoleId: line.senderRoleId,
           senderName: line.senderName,
+          streakTitle: streakHit?.title,
+          streakColor: streakHit?.color,
         });
       }
       if (phase === "chat") chatPanel.setEntries(hud.getChatEntries());
@@ -2154,6 +2342,108 @@ async function main(): Promise<void> {
     void openWagerPanel();
   };
 
+  const openEntertainmentPanel = () => {
+    dialog.hide();
+    closeApproach(false);
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    entertainPanel.open();
+    // Keep current phase (world or battle) — do not drop out of hangup fight.
+    if (phase === "world") {
+      showPhase("world");
+      syncWorldWalkInput();
+    }
+    shell.setSoftkeys(entertainPanel.softkeys());
+    setChromeStatus("娱乐");
+  };
+
+  const openEntertainmentWeb = (entry: EntertainmentEntry) => {
+    entertainPanel.close();
+    syncWorldWalkInput();
+    entertainWeb.open(entry.url, entry.label, {
+      videoApi: entry.videoApi,
+      videoApiJson: entry.videoApiJson,
+      panel: entry.panel,
+    });
+    syncWorldWalkInput();
+    shell.setSoftkeys({ left: "最小化", right: "关闭" });
+    setChromeStatus(entry.label);
+  };
+
+  const entertainMinimizedStatus = () => "娱乐播放中";
+
+  const applyBattleSoftkeys = () => {
+    shell.setSoftkeys(
+      battle.isAwaitingRound() ||
+        battle.isHangupActive() ||
+        battle.isAutoBattleActive()
+        ? { left: "", right: "" }
+        : {
+            left: battle.softkeyLeftLabel(),
+            right: battle.softkeyRightLabel(),
+          },
+    );
+  };
+
+  entertainPanel.onPick = (entry) => openEntertainmentWeb(entry);
+  entertainPanel.onClose = () => {
+    syncWorldWalkInput();
+    if (phase === "battle") applyBattleSoftkeys();
+    else shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    setChromeStatus(entertainWeb.isMinimized() ? entertainMinimizedStatus() : "");
+  };
+  entertainWeb.onClose = () => {
+    syncWorldWalkInput();
+    if (phase === "battle") {
+      applyBattleSoftkeys();
+      setChromeStatus("");
+    } else if (phase === "world" && !entertainPanel.visible) {
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+    }
+  };
+  entertainWeb.onMinimize = () => {
+    syncWorldWalkInput();
+    if (phase === "battle") {
+      applyBattleSoftkeys();
+      setChromeStatus(entertainMinimizedStatus());
+    } else if (phase === "world" && !entertainPanel.visible) {
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus(entertainMinimizedStatus());
+    }
+  };
+  entertainWeb.onRestore = () => {
+    if (entertainPanel.visible) entertainPanel.close();
+    syncWorldWalkInput();
+    shell.setSoftkeys({ left: "最小化", right: "关闭" });
+    setChromeStatus(entertainWeb.isExpanded() ? "娱乐" : entertainMinimizedStatus());
+  };
+
+  view.onYuTap = () => {
+    if (phase !== "world" && phase !== "battle") return;
+    if (entertainWeb.isExpanded()) {
+      entertainWeb.minimize();
+      return;
+    }
+    if (entertainWeb.isMinimized()) {
+      entertainWeb.restore();
+      return;
+    }
+    if (entertainPanel.visible) {
+      entertainPanel.close();
+      syncWorldWalkInput();
+      if (phase === "battle") applyBattleSoftkeys();
+      else shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus(
+        entertainWeb.isMinimized() ? entertainMinimizedStatus() : "",
+      );
+      return;
+    }
+    openEntertainmentPanel();
+  };
+
   /** Hide map SCE spawn on engage; restore if 4/5 never arrives. */
   const engageSceneMonster = (actorId: number) => {
     if (actorId < 0x70000000) return;
@@ -2231,11 +2521,15 @@ async function main(): Promise<void> {
       });
   };
 
-  /** Client-side in-battle auto 4/2 (挂机 or [自动]); never starts encounters. */
+  /** Client-side in-battle auto 4/2 — hangup-alone only; [自动] uses gateway. */
   const fireInBattleAuto = (tip: string): boolean => {
     // Prefer battle UI phase over session.inBattle — mid-fight scene packets
     // can clear the flag while mmBattle is still showing.
-    if (!session.shouldInBattleAuto() || phase !== "battle" || !battle.visible) {
+    if (
+      !session.shouldClientDriveInBattleAuto() ||
+      phase !== "battle" ||
+      !battle.visible
+    ) {
       return false;
     }
     if (!battle.canSubmitOperate()) return false;
@@ -2258,6 +2552,9 @@ async function main(): Promise<void> {
   /** Bag discard confirm: cancel/close returns to bag. */
   let discardConfirmOpen = false;
   let pendingDiscard: import("./net/protocolExtras").BagItem | null = null;
+  /** Dream badge combine: pick target equip then 29/12. */
+  let dreamBadgeCombineOpen = false;
+  let pendingDreamBadge: import("./net/protocolExtras").BagItem | null = null;
 
   const returnFromSkillForgetDialog = (): void => {
     skillForgetDialogOpen = false;
@@ -2281,6 +2578,45 @@ async function main(): Promise<void> {
       session.characterStats?.backpackCapacity ||
       Math.max(20, session.bagItems.length);
     system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const returnFromDreamBadgeCombine = (): void => {
+    dreamBadgeCombineOpen = false;
+    pendingDreamBadge = null;
+    showPhase("system");
+    system.open("bag");
+    system.setBag(session.bagItems);
+    const cap =
+      session.characterStats?.backpackCapacity ||
+      Math.max(20, session.bagItems.length);
+    system.setBagMeta(session.characterStats?.money ?? session.gold, cap);
+  };
+
+  const openDreamBadgeCombineDialog = (
+    bag: import("./net/protocolExtras").BagItem,
+  ): void => {
+    pendingDreamBadge = bag;
+    dreamBadgeCombineOpen = true;
+    void warmItemCatalogs().then(() => {
+      const options = [
+        ...DREAM_BADGE_EQUIP_IDS.map((id) => ({
+          label: (lookupItemSync(id)?.name || `装备#${id}`).slice(0, 10),
+          action: 290,
+          value: id,
+        })),
+        { label: "取消", action: 291, value: 0 },
+      ];
+      dialog.show({
+        title: "合成梦境装备",
+        body:
+          DREAM_BADGE_EQUIP_IDS.length > 6
+            ? "消耗300徽章，选择装备（↑↓翻页）"
+            : "消耗300梦境徽章，选择要合成的装备",
+        options,
+      });
+      showPhase("dialog");
+      setChromeStatus("选择梦境装备");
+    });
   };
 
   const openHangupSkillDialog = (startAfterPick: boolean): void => {
@@ -2316,7 +2652,7 @@ async function main(): Promise<void> {
       showPhase("dialog");
     })();
   };
-  const armInBattleAuto = (tip = "自动出手…") => {
+  const armInBattleAuto = (tip = "挂机出手…") => {
     if (autoArmTimer != null) {
       window.clearTimeout(autoArmTimer);
       autoArmTimer = null;
@@ -2324,7 +2660,11 @@ async function main(): Promise<void> {
     const started = performance.now();
     const tick = () => {
       autoArmTimer = null;
-      if (!session.shouldInBattleAuto() || phase !== "battle" || !battle.visible) {
+      if (
+        !session.shouldClientDriveInBattleAuto() ||
+        phase !== "battle" ||
+        !battle.visible
+      ) {
         return;
       }
       if (battle.isAwaitingExit() || battle.isAwaitingDeathPrompt()) return;
@@ -3097,9 +3437,15 @@ async function main(): Promise<void> {
         return;
       }
       if (action === "combine") {
+        if (isDreamBadge(bag.itemId)) {
+          openDreamBadgeCombineDialog(bag);
+          return;
+        }
         void (async () => {
           showGameTip(`合成 ${bag.name}…`);
-          const fb = await session.combineCrystal(bag.itemId, bag.seq);
+          const fb = isCrystalFragment(bag.itemId)
+              ? await session.combineCrystalFragment(bag.itemId, bag.seq)
+              : await session.combineCrystal(bag.itemId, bag.seq);
           if (fb.ok) {
             await session.openBag();
             system.setBag(session.bagItems);
@@ -3369,8 +3715,7 @@ async function main(): Promise<void> {
   };
   social.onAction = (kind, action, row) => {
     if (action === "player_info" && row?.id) {
-      void session.requestPlayerInfo(row.id);
-      showGameTip(`查看 ${row.name}`);
+      openPlayerCard(row.id, row.name);
       return;
     }
     if (action === "view_equip" && row?.id) {
@@ -3688,6 +4033,10 @@ async function main(): Promise<void> {
       returnFromDiscardConfirm();
       return;
     }
+    if (dreamBadgeCombineOpen) {
+      returnFromDreamBadgeCombine();
+      return;
+    }
     // Closing approach prompt while still in range keeps latch (no spam).
     showPhase("world");
   };
@@ -3706,6 +4055,11 @@ async function main(): Promise<void> {
       if (skillForgetDialogOpen) {
         dialog.hide();
         returnFromSkillForgetDialog();
+        return;
+      }
+      if (dreamBadgeCombineOpen) {
+        dialog.hide();
+        returnFromDreamBadgeCombine();
         return;
       }
       dialog.hide();
@@ -3802,6 +4156,40 @@ async function main(): Promise<void> {
       hud.pushChat(`[挂]已记录技能 ${tip}，点挂机开始`);
       showGameTip(`挂机技能已记录: ${tip}`);
       showPhase("world");
+      return;
+    }
+    if (action === 290) {
+      dialog.hide();
+      const bag = pendingDreamBadge;
+      dreamBadgeCombineOpen = false;
+      pendingDreamBadge = null;
+      if (!bag) {
+        returnFromDreamBadgeCombine();
+        return;
+      }
+      const destId = value >>> 0;
+      const destName = lookupItemSync(destId)?.name || label || `装备#${destId}`;
+      void (async () => {
+        showGameTip(`合成 ${destName}…`);
+        const fb = await session.combineDreamBadge(bag.itemId, bag.seq, destId);
+        if (fb.ok) await session.openBag();
+        system.setBag(session.bagItems);
+        const cap =
+          session.characterStats?.backpackCapacity ||
+          Math.max(20, session.bagItems.length);
+        system.setBagMeta(
+          session.characterStats?.money ?? session.gold,
+          cap,
+        );
+        showGameTip(fb.message || (fb.ok ? "合成成功" : "合成失败"));
+        showPhase("system");
+        system.open("bag");
+      })();
+      return;
+    }
+    if (action === 291) {
+      dialog.hide();
+      returnFromDreamBadgeCombine();
       return;
     }
     if (action === 261) {
@@ -3956,10 +4344,18 @@ async function main(): Promise<void> {
     }
     if ((value >>> 0) === ARENA_NPC_ENTER || (value >>> 0) === ARENA_NPC_LEAVE) {
       dialog.hide();
-      void session.pickNpcOption(action, value, label).then(() => {
+      void session.pickNpcOption(action, value, label).then(async () => {
         if ((value >>> 0) === ARENA_NPC_LEAVE) arenaPanel.close();
+        /*
+         * Arena NPC enter returns 30/1 like instance enter, but used to skip
+         * post-enter followup.  sceneVisible stayed pending → scene-sync never
+         * pushed 2/10 peers until「周围玩家」2/7 promoted ready (map only self).
+         */
+        if ((value >>> 0) === ARENA_NPC_ENTER) {
+          await session.settleArenaSceneEnter();
+          if (session.isArenaScene()) showGameTip("已进入比武擂台");
+        }
         if (!dialog.visible) showPhase("world");
-        if (session.isArenaScene()) showGameTip("已进入比武擂台");
       });
       return;
     }
@@ -4015,7 +4411,8 @@ dialog.hide();
   };
 
   battle.onAttack = () => {
-    session.noteManualBattleOperate(0);
+    // Manual / timeout 普攻 — may intentionally replace skill memory.
+    session.noteManualBattleOperate(0, "manual");
     const id = battle.targetIndex();
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
@@ -4025,7 +4422,10 @@ dialog.hide();
     });
   };
   battle.onSkill = (operate) => {
-    session.noteManualBattleOperate(operate);
+    // Hangup/[自动] share this path (incl. submitAutoOperate 普攻 → onSkill(0)).
+    // "auto" only blocks Operate=0 from erasing a remembered skill.
+    const fromAuto = session.shouldInBattleAuto();
+    session.noteManualBattleOperate(operate, fromAuto ? "auto" : "manual");
     const id = battle.targetIndex();
     if (battle.isAwaitingRound()) {
       shell.setSoftkeys({ left: "", right: "" });
@@ -4088,13 +4488,16 @@ dialog.hide();
     });
   };
   battle.onAutoToggle = () => {
-    session.autoBattleActive = !session.autoBattleActive;
-    const on = session.autoBattleActive;
+    const on = !session.autoBattleActive;
+    void session.setBattleAutoPrefer(on);
     hud.pushChat(on ? "[战]自动开启" : "[战]自动关闭");
     showGameTip(on ? "自动战斗开启" : "自动战斗关闭");
     if (on) {
-      // Retry until seat is free — covers re-enable after 关闭/手动技能.
-      armInBattleAuto("自动出手…");
+      // Gateway poll synthesizes operates; clear any hangup-alone client arm.
+      if (autoArmTimer != null) {
+        window.clearTimeout(autoArmTimer);
+        autoArmTimer = null;
+      }
     } else {
       if (autoArmTimer != null) {
         window.clearTimeout(autoArmTimer);
@@ -4116,7 +4519,7 @@ dialog.hide();
       autoArmTimer = null;
     }
     if (!session.autoBattleActive) return;
-    session.autoBattleActive = false;
+    void session.setBattleAutoPrefer(false);
     hud.pushChat("[战]自动关闭");
     showGameTip("自动战斗关闭");
     if (phase === "battle") {
@@ -4146,9 +4549,9 @@ dialog.hide();
     hud.setVitals(session.hp, session.hpMax, session.mp, session.mpMax);
   };
   battle.onAutoReady = () => {
-    if (!session.shouldInBattleAuto()) return;
+    if (!session.shouldClientDriveInBattleAuto()) return;
     window.setTimeout(() => {
-      armInBattleAuto(session.hangupActive ? "挂机出手…" : "自动出手…");
+      armInBattleAuto("挂机出手…");
     }, 400);
   };
 
@@ -4160,6 +4563,15 @@ dialog.hide();
     showPhase("chat");
     chatPanel.open(hud.getChatEntries());
     setChromeStatus("聊天 · 点输入框打字 · ←→切换频道");
+  };
+  hud.onPortrait = () => {
+    if (phase !== "world" || session.inBattle) return;
+    openSystem("status");
+  };
+  hud.onPartyMate = (mateId) => {
+    if (phase !== "world" || session.inBattle || !mateId) return;
+    const mate = session.teamMembers.find((m) => m.id === mateId);
+    openPlayerCard(mateId, mate?.name);
   };
   hud.onHangup = () => {
     // Active hangup, or armed resume intent: always stop locally.
@@ -4229,8 +4641,31 @@ dialog.hide();
       if (which === "right") createRole.cancel();
       return;
     }
+    // Entertainment HTML player — topmost across world + hangup/auto battle.
+    if (entertainWeb.isExpanded()) {
+      if (which === "left" || which === "center") {
+        entertainWeb.minimize();
+        return;
+      }
+      if (which === "right") {
+        entertainWeb.close();
+        return;
+      }
+    }
     if (phase === "world") {
-      // Overlays on world (auction/arena/wager) must win over 菜单 softkeys.
+      // Overlays on world (auction/arena/wager/entertain) must win over 菜单 softkeys.
+      if (entertainPanel.visible) {
+        if (which === "left" || which === "center") {
+          entertainPanel.confirm();
+          return;
+        }
+        if (which === "right") {
+          entertainPanel.cancel();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
       if (auctionPanel.visible) {
         if (which === "left" || which === "center") {
           auctionPanel.confirm();
@@ -4369,6 +4804,10 @@ dialog.hide();
   const handleOk = () => {
     if (phase === "map") {
       worldMap.confirm();
+      return;
+    }
+    if (phase === "world" && entertainPanel.visible) {
+      entertainPanel.confirm();
       return;
     }
     if (phase === "world" && auctionPanel.visible) {
@@ -4645,6 +5084,24 @@ dialog.hide();
       if (k === "arrowup" || k === "w") dialog.move(-1);
       if (k === "arrowdown" || k === "s") dialog.move(1);
     }
+    if (entertainPanel.visible) {
+      if (k === "arrowup" || k === "w") {
+        entertainPanel.move(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        entertainPanel.move(1);
+        e.preventDefault();
+      }
+      return;
+    }
+    if (entertainWeb.isExpanded()) {
+      if (k === "escape") {
+        entertainWeb.close();
+        e.preventDefault();
+      }
+      return;
+    }
     if (auctionPanel.visible) {
       if (auctionPanel.isPriceMode()) {
         if (auctionPanel.typePriceKey(k === "backspace" ? "backspace" : e.key)) {
@@ -4788,7 +5245,15 @@ dialog.hide();
     }
     if (k === "q") {
       // Q = left softkey everywhere (确定/瞬移/继续); map used to call cancel and quit early.
-      if (phase === "world" && (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible)) {
+      if (entertainWeb.isExpanded()) {
+        handleSoftkey("left");
+      } else if (
+        phase === "world" &&
+        (auctionPanel.visible ||
+          arenaPanel.visible ||
+          wagerPanel.visible ||
+          entertainPanel.visible)
+      ) {
         handleSoftkey("left");
       } else if (phase === "world" && approach.open) approach.confirm();
       else if (phase === "world") showPhase("menu");
@@ -4802,7 +5267,15 @@ dialog.hide();
       handleOk();
       e.preventDefault();
     } else if (k === "e" || k === "escape") {
-      if (phase === "world" && (auctionPanel.visible || arenaPanel.visible || wagerPanel.visible)) {
+      if (entertainWeb.isExpanded()) {
+        handleSoftkey("right");
+      } else if (
+        phase === "world" &&
+        (auctionPanel.visible ||
+          arenaPanel.visible ||
+          wagerPanel.visible ||
+          entertainPanel.visible)
+      ) {
         handleSoftkey("right");
       } else if (phase === "world" && approach.open) {
         approach.cancel();
@@ -4867,17 +5340,123 @@ dialog.hide();
       return;
     }
     if (
-      session.shouldInBattleAuto() &&
+      session.shouldClientDriveInBattleAuto() &&
       !battle.isAwaitingExit() &&
       !battle.isAwaitingDeathPrompt()
     ) {
-      fireInBattleAuto(session.hangupActive ? "挂机出手…" : "自动出手…");
+      fireInBattleAuto("挂机出手…");
     }
   };
   (window as Window & { __pixiNativeKeepAlive?: () => void }).__pixiNativeKeepAlive =
     () => {
       void session.backgroundKeepAliveTick();
     };
+
+  const isGlContextLost = (): boolean => {
+    try {
+      const ctx = (
+        app.renderer as unknown as {
+          context?: { isLost?: boolean; gl?: WebGLRenderingContext };
+        }
+      ).context;
+      if (ctx?.isLost) return true;
+      const gl =
+        ctx?.gl ??
+        (app.renderer as unknown as { gl?: WebGLRenderingContext }).gl;
+      return !!(
+        gl &&
+        typeof gl.isContextLost === "function" &&
+        gl.isContextLost()
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const tryRestoreGlContext = (): void => {
+    try {
+      const ctx = (
+        app.renderer as unknown as {
+          context?: {
+            isLost?: boolean;
+            extensions?: { loseContext?: { restoreContext: () => void } };
+          };
+        }
+      ).context;
+      if (ctx?.isLost) ctx.extensions?.loseContext?.restoreContext();
+    } catch (e) {
+      console.warn("[gl] restoreContext", e);
+    }
+  };
+
+  /**
+   * Long-running APK (screen on or off): WebGL / layout can die while gateway
+   * keepalive keeps the session online → blank LCD. Re-fit, restore GL,
+   * rebake labels/sprites.
+   */
+  let recoverInFlight = false;
+  let lastRecoverAt = 0;
+  const recoverDisplayAfterForeground = async (why: string): Promise<void> => {
+    if (!rendererReady || recoverInFlight) return;
+    const now = performance.now();
+    // Debounce focus+visibility storms; allow immediate restore after lost.
+    if (why !== "contextrestored" && why !== "ticker-lost" && now - lastRecoverAt < 800) {
+      return;
+    }
+    recoverInFlight = true;
+    lastRecoverAt = now;
+    try {
+      console.info("[gl] recover display", why, "lost=", isGlContextLost());
+      wrap.dataset.fitW = "0";
+      wrap.dataset.fitH = "0";
+      fitPhoneWrap();
+      tryRestoreGlContext();
+      app.ticker.start();
+      await new Promise<void>((r) => {
+        requestAnimationFrame(() => r());
+      });
+      clearUc3TexCache();
+      try {
+        await refreshAllUc3Labels();
+      } catch (e) {
+        console.warn("[gl] uc3 rebake", e);
+      }
+      try {
+        view.nudgeAfterGpuResume();
+      } catch (e) {
+        console.warn("[gl] scene nudge", e);
+      }
+      try {
+        app.render();
+      } catch (e) {
+        console.warn("[gl] render after resume", e);
+      }
+    } finally {
+      recoverInFlight = false;
+    }
+  };
+
+  app.canvas.addEventListener(
+    "webglcontextlost",
+    (ev) => {
+      ev.preventDefault();
+      console.warn("[gl] webglcontextlost");
+      // Screen-on hangup can lose GL without a visibility flip — arm restore.
+      window.setTimeout(() => {
+        void recoverDisplayAfterForeground("contextlost-deferred");
+      }, 50);
+    },
+    false,
+  );
+  app.canvas.addEventListener(
+    "webglcontextrestored",
+    () => {
+      console.warn("[gl] webglcontextrestored");
+      void recoverDisplayAfterForeground("contextrestored");
+    },
+    false,
+  );
+
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState !== "visible") {
       suspendBgm();
@@ -4887,15 +5466,30 @@ dialog.hide();
       return;
     }
     void session.wakeFromBackground();
+    void recoverDisplayAfterForeground("visibility");
     void resumeBgmAfterForeground();
   });
   window.addEventListener("focus", () => {
     void session.wakeFromBackground();
+    void recoverDisplayAfterForeground("focus");
     void unlockAndResumeBgm();
   });
   installBgmGestureUnlock();
+  preloadKillStreakSfx();
+  const unlockSfx = () => unlockKillStreakSfx();
+  document.addEventListener("pointerdown", unlockSfx, { passive: true });
+  document.addEventListener("touchstart", unlockSfx, { passive: true });
+  document.addEventListener("keydown", unlockSfx);
 
+  let glWatchAcc = 0;
   app.ticker.add(() => {
+    glWatchAcc += app.ticker.deltaMS;
+    if (glWatchAcc >= 2000) {
+      glWatchAcc = 0;
+      if (isGlContextLost()) {
+        void recoverDisplayAfterForeground("ticker-lost");
+      }
+    }
     if (phase === "battle") battle.tick(app.ticker.deltaMS);
     if (miniMap.visible && (phase === "world" || phase === "map")) {
       const sz = view.getMapPixelSize();

@@ -82,7 +82,10 @@ export function parseMapPayload(data: Uint8Array, mapName = ""): MapPreview {
  *   - 0xF = all four edges (= solid for cross-cell moves)
  * Crossing a shared edge is blocked if CURRENT exit bit OR DESTINATION entry
  * bit is set. Treating every non-zero as solid over-blocks town roads.
+ * Bridge/bank strips that repeat one edge bit are suppressed — see
+ * mapFringeStripSeam / docs/re/2026-08-13-pixi-bridge-fringe-strip.md.
  */
+/** Bit layout confirmed by 江湖OL.CBE Thumb CheckMapMoveCollision* (lsrs #28). */
 export const MAP_EDGE_N = 0x1;
 export const MAP_EDGE_W = 0x2;
 export const MAP_EDGE_S = 0x4;
@@ -98,6 +101,16 @@ export function mapCellFlags(packed: number): number {
  */
 export function mapCellBlocked(packed: number): boolean {
   return mapCellFlags(packed) === 0xf;
+}
+
+/** Exactly one cardinal edge bit — river-bank / bridge-rail fringe strips. */
+function mapSingleDirFringe(flags: number): boolean {
+  return (
+    flags === MAP_EDGE_N ||
+    flags === MAP_EDGE_W ||
+    flags === MAP_EDGE_S ||
+    flags === MAP_EDGE_E
+  );
 }
 
 function clampPixel(map: MapPreview, x: number, y: number): { px: number; py: number } {
@@ -160,6 +173,38 @@ export function mapBlocksAt(
 }
 
 /**
+ * Official MAP data often paints a whole bridge / river-bank strip with the
+ * same single edge bit (e.g. all W on an E–W bridge in 27深渊沼泽_01). CBE
+ * exit|entry OR then seals every seam inside the strip, so the bridge looks
+ * walkable but cannot be crossed. Suppress that strip artifact only:
+ *   - identical single-dir fringe on both cells, or
+ *   - open ↔ single-dir where the strip continues one cell further.
+ * Real cliffs stay blocked (onesided/twosided exit|entry without strip run).
+ */
+function mapFringeStripSeam(
+  map: MapPreview,
+  gx0: number,
+  gy0: number,
+  gx1: number,
+  gy1: number,
+  fa: number,
+  fb: number,
+): boolean {
+  if (fa === fb && mapSingleDirFringe(fa)) return true;
+  const dx = gx1 - gx0;
+  const dy = gy1 - gy0;
+  if (fa === 0 && mapSingleDirFringe(fb)) {
+    const onward = mapPackedAtGrid(map, gx1 + dx, gy1 + dy);
+    if (onward != null && mapCellFlags(onward) === fb) return true;
+  }
+  if (fb === 0 && mapSingleDirFringe(fa)) {
+    const back = mapPackedAtGrid(map, gx0 - dx, gy0 - dy);
+    if (back != null && mapCellFlags(back) === fa) return true;
+  }
+  return false;
+}
+
+/**
  * One shared edge between adjacent cells: blocked if exit|entry bit set.
  * Bit layout from CBE Thumb: N=1 W=2 S=4 E=8.
  */
@@ -175,19 +220,21 @@ function mapAdjacentEdgeBlocked(
   if (a == null || b == null) return true;
   const fa = mapCellFlags(a);
   const fb = mapCellFlags(b);
+  let raw = false;
   if (gx1 === gx0 + 1 && gy1 === gy0) {
-    return (fa & MAP_EDGE_E) !== 0 || (fb & MAP_EDGE_W) !== 0;
+    raw = (fa & MAP_EDGE_E) !== 0 || (fb & MAP_EDGE_W) !== 0;
+  } else if (gx1 === gx0 - 1 && gy1 === gy0) {
+    raw = (fa & MAP_EDGE_W) !== 0 || (fb & MAP_EDGE_E) !== 0;
+  } else if (gy1 === gy0 + 1 && gx1 === gx0) {
+    raw = (fa & MAP_EDGE_S) !== 0 || (fb & MAP_EDGE_N) !== 0;
+  } else if (gy1 === gy0 - 1 && gx1 === gx0) {
+    raw = (fa & MAP_EDGE_N) !== 0 || (fb & MAP_EDGE_S) !== 0;
+  } else {
+    return false;
   }
-  if (gx1 === gx0 - 1 && gy1 === gy0) {
-    return (fa & MAP_EDGE_W) !== 0 || (fb & MAP_EDGE_E) !== 0;
-  }
-  if (gy1 === gy0 + 1 && gx1 === gx0) {
-    return (fa & MAP_EDGE_S) !== 0 || (fb & MAP_EDGE_N) !== 0;
-  }
-  if (gy1 === gy0 - 1 && gx1 === gx0) {
-    return (fa & MAP_EDGE_N) !== 0 || (fb & MAP_EDGE_S) !== 0;
-  }
-  return false;
+  if (!raw) return false;
+  if (mapFringeStripSeam(map, gx0, gy0, gx1, gy1, fa, fb)) return false;
+  return true;
 }
 
 /**

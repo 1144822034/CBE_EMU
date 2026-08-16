@@ -52,6 +52,8 @@ export type ArenaRankRow = {
   score: number;
   rank: number;
   claimed: boolean;
+  rewardName: string;
+  rewardCount: number;
 };
 
 export type ArenaRankPage = {
@@ -60,6 +62,9 @@ export type ArenaRankPage = {
   myRank: number;
   myScore: number;
   settled: boolean;
+  myClaimed: boolean;
+  myRewardName: string;
+  myRewardCount: number;
   rows: ArenaRankRow[];
 };
 
@@ -161,10 +166,39 @@ export function parseArenaRank(packet: WtPacket): ArenaRankPage | null {
         const score = r.u32();
         const rank = r.u32();
         const claimed = r.u32() !== 0;
-        rows.push({ roleId, name, score, rank, claimed });
+        let rewardName = "";
+        let rewardCount = 0;
+        /* New servers append rewardName/rewardCount; old packets stop here. */
+        if (r.remaining() > 4) {
+          try {
+            rewardName = r.string().replace(/\0+$/g, "");
+            rewardCount = r.u32();
+          } catch {
+            rewardName = "";
+            rewardCount = 0;
+          }
+        }
+        rows.push({
+          roleId,
+          name,
+          score,
+          rank,
+          claimed,
+          rewardName,
+          rewardCount,
+        });
       } catch {
         break;
       }
+    }
+  }
+  let myRewardName = "";
+  const myRewardField = findField(obj, "myRewardName");
+  if (myRewardField) {
+    try {
+      myRewardName = new SeqReader(myRewardField).string().replace(/\0+$/g, "");
+    } catch {
+      myRewardName = "";
     }
   }
   return {
@@ -173,6 +207,9 @@ export function parseArenaRank(packet: WtPacket): ArenaRankPage | null {
     myRank: fieldU32(obj, "myRank"),
     myScore: fieldU32(obj, "myScore"),
     settled: fieldU32(obj, "settled") !== 0,
+    myClaimed: fieldU32(obj, "myClaimed") !== 0,
+    myRewardName,
+    myRewardCount: fieldU32(obj, "myRewardCount"),
     rows,
   };
 }
@@ -181,29 +218,56 @@ export function parseArenaClaim(packet: WtPacket): {
   result: number;
   rank: number;
   claimed: boolean;
+  tip: string;
 } | null {
   const obj = packet.objects.find(
     (o) => o.kind === ARENA_WT_KIND && o.subtype === 3,
   );
   if (!obj) return null;
+  let tip = "";
+  const tipField = findField(obj, "tip");
+  if (tipField) {
+    try {
+      tip = new SeqReader(tipField).string().replace(/\0+$/g, "");
+    } catch {
+      tip = "";
+    }
+  }
   return {
     result: fieldU32(obj, "result"),
     rank: fieldU32(obj, "rank"),
     claimed: fieldU32(obj, "claimed") !== 0,
+    tip,
   };
+}
+
+/** Human tip for claim result when wire tip missing (old server). */
+export function arenaClaimFailTip(result: number | undefined | null): string {
+  switch (result) {
+    case 2:
+      return "比赛尚未结束或未参赛";
+    case 3:
+      return "奖励已领取";
+    case 4:
+      return "未进入前十名";
+    case 5:
+      return "该名次未配置奖励";
+    default:
+      return `领奖失败(${result ?? "?"})`;
+  }
 }
 
 export function parseArenaFromBodies(bodies: Uint8Array[]): {
   status?: ArenaStatus;
   hud?: ArenaHud;
   rank?: ArenaRankPage;
-  claim?: { result: number; rank: number; claimed: boolean };
+  claim?: { result: number; rank: number; claimed: boolean; tip: string };
 } {
   const out: {
     status?: ArenaStatus;
     hud?: ArenaHud;
     rank?: ArenaRankPage;
-    claim?: { result: number; rank: number; claimed: boolean };
+    claim?: { result: number; rank: number; claimed: boolean; tip: string };
     wagerEvent?: WagerEvent;
   } = {};
   for (const body of bodies) {

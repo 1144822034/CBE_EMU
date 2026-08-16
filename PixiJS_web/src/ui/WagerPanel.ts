@@ -1,4 +1,4 @@
-import { Container, Graphics } from "pixi.js";
+import { Container, Graphics, Rectangle } from "pixi.js";
 import {
   CBE,
   LCD_HEIGHT,
@@ -129,6 +129,11 @@ export class WagerPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    this.eventMode = "static";
+    this.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
+    this.on("pointertap", (e) => {
+      e.stopPropagation();
+    });
     this.addChild(this.box);
   }
 

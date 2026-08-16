@@ -1,6 +1,6 @@
 {
   "name": "pixijs-jianghu",
-  "version": "1.0.26",
+  "version": "1.0.39",
   "private": true,
   "description": "PixiJS web client for 江湖 OL — reuses JHOnlineData + mock-server protocol notes",
   "author": "Jianghu OL",
@@ -60,6 +60,7 @@
       "dependencies": {}
     },
     "asar": true,
+    "compression": "normal",
     "win": {
       "target": [
         {

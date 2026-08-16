@@ -16,6 +16,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 超时无出价：下架，卖家待领 **超时退物**。
 - 超时有出价：下架成交；卖家待领 **拍金**，赢家待领 **物品**。
 - 「拍」有待领时闪烁；领取走 claim 幂等（先占位 `claimed=1` 再发货）。
+- 领取失败/部分失败：`42/7` 带 `message` 短码（`bag-full`/`flask-full`/`nothing`/`conflict`/`credit`/`partial:…`），Pixi 翻成中文 tip。
 
 ## 浏览详情 / 一口价（2026-08-10）
 
@@ -27,6 +28,23 @@ Status: implemented (PixiJS_web only; CBE 不做)
 
 - 列表/我的 rows：`enhanceLevel` 后追加与背包相同的 common-extra（含洗练 flag bit7）。
 - Pixi 解析进 `AuctionListing.enhanceAttrs`，详情 `listingAsBagItem` 传入 `buildEquipDetailLines`（洗练行红、物攻/护甲 `+基(+Δ)`）。
+
+## 壶类上架（2026-08-12）
+
+- `802/803` 背包 `item_count` 是 HP/MP **储量**，可见堆叠恒为 1（同交易合同）。
+- Pixi 打开背包：`1/7/23` → `17/1 + 30/21 + 7/11`（壶储量）；客户端解析 7/11 写入 `BagItem.count`。
+- 上架 UI：数量固定 `1(壶)`，不可 ←→ 按储量点数拆卖；协议 `count` 仍传整行储量。
+- 服务端 create：对 reservoir 物品强制 `count = bag->count`（整行移出）。
+- 撤拍/领取回包：壶走 `grant_flask_reservoir_points(item_count)`（原始储量），
+  不得走 `add_backpack` 的「件数×50000」路径（否则假背包满）。
+- 详情/背包选物显示「储量 N」，领取行不写 `x50000`。
+
+## 玄晶堆叠领取（2026-08-14）
+
+见 [`2026-08-14-auction-claim-crystal-stack.md`](./2026-08-14-auction-claim-crystal-stack.md)：
+
+- 领取同包附 `17/1+30/21`；`mergeBag17WithGridSeq` 可堆叠取 max(17/1,30/21)，避免网格错位把 N 盖成 1。
+- `auction_return_item` 日志 `grant` / `bag_before` / `bag_after`。
 
 ## 防刷加固（2026-08-10）
 

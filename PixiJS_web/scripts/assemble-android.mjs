@@ -83,4 +83,45 @@ const r = spawnSync(gradleBat, ["assembleDebug", "--no-daemon"], {
   stdio: "inherit",
   shell: true,
 });
-process.exit(r.status ?? 1);
+if ((r.status ?? 1) !== 0) {
+  process.exit(r.status ?? 1);
+}
+
+/** Canonical release name (Gitee asset: …/download/v1/jh_ol.apk).
+ *  Written under app/release/ so Gradle's debug/ outputs wipe cannot lock it.
+ */
+const srcApk = path.join(
+  androidDir,
+  "app",
+  "build",
+  "outputs",
+  "apk",
+  "debug",
+  "app-debug.apk",
+);
+const releaseDir = path.join(androidDir, "app", "release");
+const dstApk = path.join(releaseDir, "jh_ol.apk");
+if (!fs.existsSync(srcApk)) {
+  console.error("[assemble-android] missing", srcApk);
+  process.exit(1);
+}
+fs.mkdirSync(releaseDir, { recursive: true });
+try {
+  fs.copyFileSync(srcApk, dstApk);
+} catch (e) {
+  const alt = path.join(releaseDir, `jh_ol-${Date.now()}.apk`);
+  console.warn(
+    `[assemble-android] ${dstApk} locked; writing ${alt} (${e instanceof Error ? e.message : e})`,
+  );
+  fs.copyFileSync(srcApk, alt);
+  const st = fs.statSync(alt);
+  console.log(
+    `[assemble-android] → ${alt} (${(st.size / (1024 * 1024)).toFixed(1)} MB)`,
+  );
+  process.exit(0);
+}
+const st = fs.statSync(dstApk);
+console.log(
+  `[assemble-android] → ${dstApk} (${(st.size / (1024 * 1024)).toFixed(1)} MB)`,
+);
+process.exit(0);

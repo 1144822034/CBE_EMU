@@ -1133,6 +1133,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_chest_open_batch_response(request, requestLen,
+                                                             out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-chest-open-batch", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     hookedLen = vm_net_mock_build_timed_special_item_use_response(
         request, requestLen, out, outCap);
     if (hookedLen)
@@ -1183,6 +1192,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     if (hookedLen)
     {
         vm_net_log_handled_packet("builtin-map-heal-skill", request, requestLen,
+                                  hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_skill_forget_response(request, requestLen, out,
+                                                        outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-skill-forget", request, requestLen,
                                   hookedLen);
         return hookedLen;
     }
@@ -1250,6 +1268,24 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
     {
         vm_net_log_handled_packet("builtin-crystal-combine", request, requestLen,
                                   hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_crystal_fragment_combine_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-crystal-fragment-combine", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
+    hookedLen = vm_net_mock_build_dream_badge_combine_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-dream-badge-combine", request,
+                                  requestLen, hookedLen);
         return hookedLen;
     }
 

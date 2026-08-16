@@ -465,11 +465,31 @@ static bool vm_mock_auction_wash_sql_text(const vm_net_mock_enhance_wash_state *
     return true;
 }
 
+static u32 vm_mock_auction_bag_item_total(const vm_net_mock_role_state *role,
+                                          u32 itemId)
+{
+    u32 total = 0;
+    u32 n = 0;
+    u32 i = 0;
+
+    if (role == NULL || itemId == 0)
+        return 0;
+    n = vm_net_mock_role_backpack_count(role);
+    for (i = 0; i < n; ++i)
+    {
+        if (role->backpackItems[i].itemId == itemId)
+            total += role->backpackItems[i].count;
+    }
+    return total;
+}
+
 /*
  * Restore auction item to bag.
  * 802/803: listing/claim item_count is raw HP/MP reservoir (same as warehouse
  * retrieve). add_backpack_item_to_role treats count as flask *units* and would
  * multiply by 50000 again → FLASK_FULL / false bag-full on cancel/claim.
+ * 834/839: item_count is remaining durability on one pass row. add_backpack
+ * treats count as NEW full-pass quantity → durability 50 becomes 50×50.
  */
 static bool vm_mock_auction_return_item_to_bag(
     vm_net_mock_role_state *role, u32 itemId, u32 itemCount, u16 enhanceLevel,
@@ -477,14 +497,22 @@ static bool vm_mock_auction_return_item_to_bag(
 {
     u16 seq = 0;
     bool ok = false;
+    u32 bagBefore = 0;
+    u32 bagAfter = 0;
+    bool durablePass = false;
 
     if (seqOut)
         *seqOut = 0;
     if (role == NULL || itemId == 0 || itemCount == 0)
         return false;
+    durablePass = vm_net_mock_backpack_item_id_is_durable_mall_pass(itemId);
+    bagBefore = vm_mock_auction_bag_item_total(role, itemId);
     if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
         ok = vm_net_mock_role_grant_flask_reservoir_points(role, itemId, itemCount,
                                                            &seq, reason);
+    else if (durablePass)
+        ok = vm_net_mock_role_grant_durable_pass_remaining(role, itemId, itemCount,
+                                                            &seq, reason);
     else
         ok = vm_net_mock_role_add_backpack_item_to_role(role, itemId, itemCount,
                                                         enhanceLevel, &seq, reason);
@@ -497,9 +525,62 @@ static bool vm_mock_auction_return_item_to_bag(
         if (added != NULL)
             vm_net_mock_enhance_wash_copy(&added->enhanceWash, wash);
     }
+    bagAfter = vm_mock_auction_bag_item_total(role, itemId);
+    printf("[info][mock-service] auction_return_item reason=%s role=%u item=%u "
+           "grant=%u bag_before=%u bag_after=%u seq=%u "
+           "evidence=stack-merge-not-set-overwrite\n",
+           reason ? reason : "-", role->roleId, itemId, itemCount, bagBefore,
+           bagAfter, (u32)seq);
+    if (!vm_net_mock_backpack_item_id_uses_reservoir_count(itemId) &&
+        !durablePass &&
+        vm_net_mock_find_equipment_catalog_item(itemId) == NULL &&
+        bagAfter < bagBefore + itemCount)
+    {
+        printf("[warn][mock-service] auction_return_item_short reason=%s role=%u "
+               "item=%u grant=%u bag_before=%u bag_after=%u "
+               "evidence=expected-bag_before+grant\n",
+               reason ? reason : "-", role->roleId, itemId, itemCount, bagBefore,
+               bagAfter);
+    }
+    if (durablePass && bagAfter != bagBefore + itemCount)
+    {
+        printf("[warn][mock-service] auction_return_durable_pass_mismatch "
+               "reason=%s role=%u item=%u grant=%u bag_before=%u bag_after=%u "
+               "evidence=expected-one-row-remaining-sum\n",
+               reason ? reason : "-", role->roleId, itemId, itemCount, bagBefore,
+               bagAfter);
+    }
     if (seqOut)
         *seqOut = seq;
     return true;
+}
+
+/* Pixi claim/cancel: same-packet 17/1+30/21(+7/11) so openBag is not the only
+ * authority path after grant (avoids stale client bag if follow-up fails). */
+static u8 vm_mock_auction_append_pixi_bag_objects(u8 *out, u32 outCap, u32 *pos,
+                                                   u8 objectCount)
+{
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 gridCount = 0;
+    bool appendedReservoir = false;
+
+    if (out == NULL || pos == NULL || role == NULL)
+        return objectCount;
+    if (!vm_net_mock_append_backpack_items_object(out, outCap, pos))
+        return objectCount;
+    objectCount = (u8)(objectCount + 1);
+    gridCount = vm_net_mock_role_backpack_client_grid_count(role);
+    if (gridCount == 0)
+        return objectCount;
+    if (!vm_net_mock_append_backpack_grid_object(out, outCap, pos))
+        return objectCount;
+    objectCount = (u8)(objectCount + 1);
+    if (!vm_net_mock_append_backpack_reservoir_counts_object(out, outCap, pos,
+                                                             &appendedReservoir))
+        return objectCount;
+    if (appendedReservoir)
+        objectCount = (u8)(objectCount + 1);
+    return objectCount;
 }
 
 static bool vm_mock_auction_insert_claim_ex(u32 roleId, const char *accountId, u8 kind,
@@ -1133,6 +1214,12 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
      */
     if (vm_net_mock_backpack_item_id_uses_reservoir_count(itemId))
         count = bag->count;
+    /*
+     * 834/839：item_count 是剩余耐久（打开次数），不是凭证张数。整行上架，
+     * 避免客户端传 count=1 只扣 1 耐久却把整行语义写进 listing。
+     */
+    if (vm_net_mock_backpack_item_id_is_durable_mall_pass(itemId))
+        count = bag->count;
     if (count == 0)
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CREATE,
                                                    4, 0, "bad-args");
@@ -1209,7 +1296,13 @@ static u32 vm_net_mock_build_auction_create_response(const u8 *request, u32 requ
     }
     listingId = 0;
     (void)vm_mysql_query("SELECT LAST_INSERT_ID()", vm_mock_auction_u32_row, &listingId);
-    session->backpackListResyncPending = true;
+    session->backpackListResyncPending = false;
+    session->backpackListResyncPhase = 0;
+    session->backpackListResyncListOnly = false;
+    session->backpackListResyncTick = 0;
+    session->backpackResyncRemoveSeq = 0;
+    session->backpackResyncRemoveItemId = 0;
+    g_netMockBackpackGridSeededRoleId = 0;
     printf("[info][mock-service] auction_list listing=%u role=%u item=%u x%u "
            "price=%u buyout=%u cur=%u fee=%u(%u%%) tier=%u\n",
            listingId, role->roleId, itemId, count, startPrice, buyoutPrice, currency,
@@ -1773,7 +1866,13 @@ static u32 vm_net_mock_build_auction_cancel_response(const u8 *request, u32 requ
         return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL,
                                                    8, listingId, "save");
     }
-    session->backpackListResyncPending = true;
+    session->backpackListResyncPending = false;
+    session->backpackListResyncPhase = 0;
+    session->backpackListResyncListOnly = false;
+    session->backpackListResyncTick = 0;
+    session->backpackResyncRemoveSeq = 0;
+    session->backpackResyncRemoveItemId = 0;
+    g_netMockBackpackGridSeededRoleId = 0;
     return vm_net_mock_build_auction_op_result(out, outCap, VM_MOCK_AUCTION_WT_CANCEL, 1,
                                                listingId, "ok");
 }
@@ -1930,6 +2029,8 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
     u32 pending = 0;
     u32 affected = 0;
     vm_net_mock_role_state before;
+    const char *failCode = NULL;
+    char message[48];
 
     if (out == NULL || outCap < 5 || request == NULL ||
         !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
@@ -1965,6 +2066,8 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         if (!vm_mock_auction_exec_affected(query, &affected) || affected != 1)
         {
             failed += 1;
+            if (failCode == NULL)
+                failCode = "conflict";
             continue;
         }
 
@@ -1976,7 +2079,15 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
                 !vm_mock_auction_return_item_to_bag(
                     role, rows[i].itemId, rows[i].itemCount, rows[i].enhanceLevel,
                     &rows[i].enhanceWash, &seq, "auction-claim-item"))
+            {
                 ok = false;
+                if (failCode == NULL)
+                    failCode =
+                        g_vm_net_mock_backpack_add_fail_kind ==
+                                VM_NET_MOCK_BACKPACK_ADD_FAIL_FLASK_FULL
+                            ? "flask-full"
+                            : "bag-full";
+            }
         }
         else if (rows[i].kind == VM_MOCK_AUCTION_CLAIM_SELLER_PAYOUT ||
                  rows[i].kind == VM_MOCK_AUCTION_CLAIM_BID_REFUND)
@@ -1985,17 +2096,29 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
             {
                 if (!vm_mock_auction_credit(role, VM_MOCK_AUCTION_CUR_COPPER,
                                             rows[i].moneyAmount, "auction-claim-money"))
+                {
                     ok = false;
+                    if (failCode == NULL)
+                        failCode = "credit";
+                }
             }
             if (ok && rows[i].wcoinAmount)
             {
                 if (!vm_mock_auction_credit(role, VM_MOCK_AUCTION_CUR_WCOIN,
                                             rows[i].wcoinAmount, "auction-claim-wcoin"))
+                {
                     ok = false;
+                    if (failCode == NULL)
+                        failCode = "credit";
+                }
             }
         }
         else
+        {
             ok = false;
+            if (failCode == NULL)
+                failCode = "bad-kind";
+        }
 
         if (!ok)
         {
@@ -2023,9 +2146,26 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
     if (claimed)
     {
         (void)vm_net_mock_role_db_save_role("auction-claim", role->roleId);
-        session->backpackListResyncPending = true;
+        /* Inline 17/1+30/21 below; do not leave half-armed poll resync. */
+        session->backpackListResyncPending = false;
+        session->backpackListResyncPhase = 0;
+        session->backpackListResyncListOnly = false;
+        session->backpackListResyncTick = 0;
+        session->backpackResyncRemoveSeq = 0;
+        session->backpackResyncRemoveItemId = 0;
+        g_netMockBackpackGridSeededRoleId = 0;
     }
     pending = vm_mock_auction_pending_claim_count(role->roleId);
+    if (ctx.count == 0)
+        snprintf(message, sizeof(message), "%s", "nothing");
+    else if (claimed > 0 && failed == 0)
+        snprintf(message, sizeof(message), "%s", "ok");
+    else if (claimed > 0 && failed > 0)
+        snprintf(message, sizeof(message), "partial:%s",
+                 failCode ? failCode : "fail");
+    else
+        snprintf(message, sizeof(message), "%s",
+                 failCode ? failCode : "fail");
     if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_AUCTION_WT_KIND,
                                      VM_MOCK_AUCTION_WT_CLAIM, &objectStart) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "result", claimed ? 1 : 2) ||
@@ -2033,10 +2173,17 @@ static u32 vm_net_mock_build_auction_claim_response(const u8 *request, u32 reque
         !vm_net_mock_put_object_u32(out, outCap, &pos, "failed", failed) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "pendingClaims", pending) ||
         !vm_net_mock_put_object_u32(out, outCap, &pos, "blink", pending ? 1 : 0) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "message", message) ||
         !vm_net_mock_put_object_entry(out, outCap, &pos, "rows", blob, (u16)blobLen))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    return vm_mock_auction_finish_packet(out, pos, 1);
+    {
+        u8 objectCount = 1;
+        if (claimed)
+            objectCount = vm_mock_auction_append_pixi_bag_objects(out, outCap, &pos,
+                                                                  objectCount);
+        return vm_mock_auction_finish_packet(out, pos, objectCount);
+    }
 }
 
 static bool vm_net_mock_append_auction_event_object(u8 *out, u32 outCap, u32 *pos)

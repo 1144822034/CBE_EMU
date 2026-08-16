@@ -3,6 +3,7 @@ import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H, drawCbePanel, makePixelText } fr
 import { BitmapLabel, wrapUiText } from "./BitmapLabel";
 import type { NpcDialog } from "../net/protocolExtras";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 /** Visible option rows per page (hangup skill list / long NPC menus). */
 const OPTION_PAGE_SIZE = 7;
@@ -19,24 +20,29 @@ export class DialogPanel extends Container {
   constructor() {
     super();
     this.visible = false;
-    this.addChild(
-      new Graphics()
-        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
-        .fill({ color: 0x000000, alpha: 0.4 }),
-    );
+    this.eventMode = "none";
+    const dim = new Graphics()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H)
+      .fill({ color: 0x000000, alpha: 0.4 });
+    dim.eventMode = "static";
+    dim.on("pointertap", (e) => e.stopPropagation());
+    this.addChild(dim);
     this.addChild(this.box);
+  }
+
+  hide(): void {
+    clearPointerHits(this.rowHits);
+    this.visible = false;
+    this.dialog = null;
+    this.eventMode = "none";
   }
 
   show(dialog: NpcDialog): void {
     this.dialog = dialog;
     this.cursorIndex = 0;
+    this.eventMode = "static";
     this.visible = true;
     void this.redraw();
-  }
-
-  hide(): void {
-    this.visible = false;
-    this.dialog = null;
   }
 
   move(delta: number): void {
@@ -117,11 +123,33 @@ export class DialogPanel extends Container {
     });
 
     if (pages > 1) {
-      const foot = makePixelText("↑↓翻页", 11, CBE.inkTip);
-      foot.anchor.set(0.5, 0);
-      foot.position.set(LCD_WIDTH / 2, y + h - 18);
-      this.addChild(foot);
-      this.labels.push(foot);
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 8,
+        y: y + h - 22,
+        w: w - 16,
+        page: page + 1,
+        pages,
+        addLabel: (t, lx, ly, c) => {
+          const lab = makePixelText(t, 11, c);
+          lab.position.set(lx, ly);
+          this.addChild(lab);
+          this.labels.push(lab);
+        },
+        onPrev: () => {
+          this.cursorIndex = Math.max(0, pageStart - OPTION_PAGE_SIZE);
+          void this.redraw();
+        },
+        onNext: () => {
+          this.cursorIndex = Math.min(
+            opts.length - 1,
+            pageStart + OPTION_PAGE_SIZE,
+          );
+          void this.redraw();
+        },
+      });
     }
   }
 }

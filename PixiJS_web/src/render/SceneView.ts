@@ -4,7 +4,7 @@ import { formatMonsterMapName } from "../resources/monsterLevels";
 import { ActorLayer } from "../game/ActorLayer";
 import { LCD_WIDTH, MAP_VIEW_H, WORLD_TOP_H, ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
 import { BitmapLabel } from "../ui/BitmapLabel";
-import { resolveTitleGif } from "../ui/designation";
+import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import {
   actorResourceForJobSex,
@@ -22,6 +22,12 @@ import {
 import { portalContains, type SceDecoration, type ScePortal } from "../resources/sce";
 import { Plus16Sparkles } from "./Plus16Sparkles";
 import { rgbaToTexture } from "./rgbaTexture";
+import {
+  getOrCreatePoseTexture,
+  poseTextureKey,
+  rebindPoseTextureKey,
+  releasePoseTextureKey,
+} from "./poseTextureCache";
 
 /** CBE map nameplate colors (sampled from reference-shots). */
 const NAME_YELLOW = 0xf8dc00;
@@ -36,7 +42,7 @@ const PORTAL_ACTOR = "n_teleporter.actor";
 const WALK_PX_PER_MS = 1 / (1000 / 60);
 /** Cap one tick so a long hitch cannot teleport past collision samples. */
 const WALK_DT_CLAMP_MS = 50;
-/** Map-corner status strip (修/拍/擂/斗/练). */
+/** Map-corner status strip (修/拍/擂/斗/练/娱). */
 const STATUS_BADGE_SIZE = 17;
 const STATUS_BADGE_PITCH = 20;
 const STATUS_BADGE_X0 = 4;
@@ -56,11 +62,16 @@ export class SceneView {
   private playerSprite: Sprite | null = null;
   private playerFallback: Graphics;
   private playerActor: LoadedActor | null = null;
+  /** Resource leaf used for poseTextureCache keys. */
+  private playerActorRes = "";
   /** CBE dir 1=up 2=right 3=down 4=left */
   private playerDir = 3;
   private playerMoving = false;
   private playerPhase = 0;
   private playerAnimAcc = 0;
+  private playerPoseKey = "";
+  /** Shared-cache key for portal glow frame (do not destroy(true) each tick). */
+  private portalPoseKey = "";
   private mapWidth = 0;
   private mapHeight = 0;
   /** Last composed map identity — Lin'an scenes share 400×400; size≠same map. */
@@ -88,6 +99,8 @@ export class SceneView {
   onPaiTap: (() => void) | null = null;
   /** Top-left「擂」wager badge (right of 拍). */
   onLeiTap: (() => void) | null = null;
+  /** Top-left「娱」entertainment badge (after 练). */
+  onYuTap: (() => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -106,12 +119,14 @@ export class SceneView {
   private clip: Container;
   private lastTick = 0;
   private movePixelAcc = 0;
-  /** Overhead designation GIF (riches_name* / level_name*), not DrawString. */
+  /** Overhead designation GIF or Pixi arena text title. */
   private titleBadge = new Container();
   private titleSpr: Sprite | null = null;
+  private titleTextLabel: BitmapLabel | null = null;
   private nameLabel = new BitmapLabel();
   private lastName = "";
   private lastTitleGif: string | null = null;
+  private lastTitleText = "";
   private lastRedName = false;
   /** One rainbow gem per worn +16 piece (local player). */
   private plus16Sparkles = new Plus16Sparkles();
@@ -122,6 +137,8 @@ export class SceneView {
   private douBadge = new Container();
   /** Training buff 「练」— training.gif, after 斗. */
   private lianBadge = new Container();
+  /** Entertainment 「娱」— after 斗/练 when shown, else right after 擂. */
+  private yuBadge = new Container();
   private paiBlink = false;
   private paiBlinkPhase = 0;
   private leiBlink = false;
@@ -181,7 +198,7 @@ export class SceneView {
     this.world.addChild(this.player);
     this.root.addChild(this.clip);
 
-    // Status strip on map top-left: 修 → 拍 → 擂 → 斗 → 练 (17px cells, pitch 20).
+    // Status strip on map top-left: 修 → 拍 → 擂 → (斗) → (练) → 娱.
     this.mountStatusBadgeSlot(this.xiuBadge, 0);
     this.xiuBadge.on("pointertap", (e) => {
       e.stopPropagation();
@@ -217,6 +234,15 @@ export class SceneView {
     this.lianBadge.eventMode = "none";
     this.root.addChild(this.lianBadge);
     void this.mountGifBadge(this.lianBadge, "training.gif");
+
+    this.mountStatusBadgeSlot(this.yuBadge, 3);
+    this.yuBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onYuTap?.();
+    });
+    this.root.addChild(this.yuBadge);
+    void this.mountYuArt();
+    this.layoutStatusBadges();
 
     window.addEventListener("keydown", (e) => {
       if (!this.inputEnabled) return;
@@ -465,10 +491,11 @@ export class SceneView {
       lab.destroy();
     }
     this.portalLabels = [];
-    if (this.portalTex) {
-      this.portalTex.destroy(true);
-      this.portalTex = null;
+    if (this.portalPoseKey) {
+      releasePoseTextureKey(this.portalPoseKey);
+      this.portalPoseKey = "";
     }
+    this.portalTex = null;
     void this.mountPortalFx(gen);
   }
 
@@ -516,26 +543,42 @@ export class SceneView {
       this.portalPhase % parts,
     );
     if (!composed || composed.width < 2 || composed.height < 2) return;
-    const tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
-    const prev = this.portalTex;
+    const key = poseTextureKey(
+      "n_teleporter",
+      0,
+      false,
+      this.portalPhase % parts,
+      composed.width,
+      composed.height,
+    );
+    rebindPoseTextureKey(this.portalPoseKey, key);
+    this.portalPoseKey = key;
+    const tex = getOrCreatePoseTexture(
+      key,
+      composed.width,
+      composed.height,
+      composed.rgba,
+    );
     this.portalTex = tex;
     for (const spr of this.portalSprites) {
       spr.texture = tex;
       spr.scale.set(ACTOR_DISPLAY_SCALE);
     }
-    if (prev) prev.destroy(true);
   }
 
   async setPlayerActor(jobIndex: number, sex: number): Promise<void> {
     const name = actorResourceForJobSex(jobIndex, sex);
     try {
       this.playerActor = await loadActor(name);
+      this.playerActorRes = name;
       this.playerPhase = 0;
+      rebindPoseTextureKey(this.playerPoseKey, "");
+      this.playerPoseKey = "";
       this.applyPlayerFrame(true);
       if (this.lastName) {
         void this.setPlayerNameplate(
           this.lastName,
-          undefined,
+          this.lastTitleText || undefined,
           this.lastTitleGif ?? undefined,
           this.lastRedName,
         );
@@ -543,6 +586,9 @@ export class SceneView {
     } catch (e) {
       console.warn("[scene] player actor", name, e);
       this.playerActor = null;
+      this.playerActorRes = "";
+      rebindPoseTextureKey(this.playerPoseKey, "");
+      this.playerPoseKey = "";
       this.playerFallback.visible = true;
     }
   }
@@ -564,8 +610,8 @@ export class SceneView {
   }
 
   /**
-   * CBE nameplate: designation GIF (`riches_name*` / `level_name*`) above
-   * yellow system-font role name — never DrawString for the title badge.
+   * CBE nameplate: designation GIF above yellow role name.
+   * Pixi arena text titles (no GIF): draw UC3 title string instead.
    */
   async setPlayerNameplate(
     name: string,
@@ -580,6 +626,11 @@ export class SceneView {
       resolveTitleGif(titleLabel) ||
       null;
     this.lastTitleGif = gif;
+    const textTitle =
+      !gif && (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
+        ? (isArenaTextTitle(titleLabel) ? titleLabel : titleGif || "").trim()
+        : "";
+    this.lastTitleText = textTitle;
 
     // Map scene self nameplate — only place outside ActorLayer that keeps outline.
     await this.nameLabel.setText(this.lastName, redName ? NAME_RED : NAME_YELLOW, {
@@ -591,10 +642,12 @@ export class SceneView {
     this.nameLabel.scale.set(NAMEPLATE_SCALE);
     this.layoutNameplate();
 
+    this.titleBadge.removeChildren().forEach((c) => c.destroy());
+    this.titleSpr = null;
+    this.titleTextLabel = null;
+
     if (gif) {
       const tex = await tryLoadUiTexture(gif);
-      this.titleBadge.removeChildren().forEach((c) => c.destroy());
-      this.titleSpr = null;
       if (tex) {
         this.titleSpr = new Sprite(tex);
         this.titleSpr.anchor.set(0.5, 1);
@@ -604,6 +657,20 @@ export class SceneView {
       } else {
         this.titleBadge.visible = false;
       }
+    } else if (textTitle) {
+      const lab = new BitmapLabel();
+      await lab.setText(textTitle.slice(0, 8), arenaTextTitleColor(textTitle), {
+        uc3: true,
+        smooth: false,
+        outline: true,
+        outlineThin: true,
+      });
+      lab.anchor.set(0.5, 1);
+      lab.scale.set(NAMEPLATE_SCALE);
+      this.titleTextLabel = lab;
+      this.titleBadge.addChild(lab);
+      this.titleBadge.visible = true;
+      this.layoutNameplate();
     } else {
       this.titleBadge.visible = false;
     }
@@ -615,6 +682,9 @@ export class SceneView {
     this.nameLabel.position.set(-Math.floor(this.nameLabel.width / 2), -lift - nameH);
     if (this.titleBadge.visible) {
       this.titleBadge.position.set(0, this.nameLabel.y - 2);
+      if (this.titleTextLabel) {
+        this.titleTextLabel.position.set(0, 0);
+      }
     }
   }
 
@@ -633,16 +703,29 @@ export class SceneView {
       }
       return;
     }
-    const tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
+    const key = poseTextureKey(
+      this.playerActorRes || "player",
+      this.playerDir,
+      this.playerMoving,
+      this.playerPhase,
+      composed.width,
+      composed.height,
+    );
+    rebindPoseTextureKey(this.playerPoseKey, key);
+    this.playerPoseKey = key;
+    const tex = getOrCreatePoseTexture(
+      key,
+      composed.width,
+      composed.height,
+      composed.rgba,
+    );
     if (!this.playerSprite) {
       this.playerSprite = new Sprite(tex);
       this.playerSprite.anchor.set(0.5, 1);
       this.playerSprite.zIndex = 1;
       this.player.addChild(this.playerSprite);
     } else {
-      const old = this.playerSprite.texture;
       this.playerSprite.texture = tex;
-      old.destroy(true);
     }
     this.playerSprite.scale.set(
       composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
@@ -666,6 +749,10 @@ export class SceneView {
     await this.mountTextStatusBadge(this.leiBadge, "擂", 0x281808, 0xe8c8a0);
   }
 
+  private async mountYuArt(): Promise<void> {
+    await this.mountTextStatusBadge(this.yuBadge, "娱", 0x102818, 0xa8e8c0);
+  }
+
   /** Flash「拍」when auction claims / refunds are pending. */
   setPaiBlink(on: boolean): void {
     this.paiBlink = on;
@@ -687,11 +774,28 @@ export class SceneView {
   /** Hangup/auto 「斗」tile after 修/拍/擂. */
   setDouVisible(on: boolean): void {
     this.douBadge.visible = !!on;
+    this.layoutStatusBadges();
   }
 
   /** Training-buff 「练」tile after 斗. */
   setLianVisible(on: boolean): void {
     this.lianBadge.visible = !!on;
+    this.layoutStatusBadges();
+  }
+
+  /**
+   * Compact strip: 修/拍/擂 fixed; 斗/练 only occupy slots while visible;
+   * 娱 always sits in the next free slot (so after 擂 when both are off).
+   */
+  private layoutStatusBadges(): void {
+    let next = 3;
+    if (this.douBadge.visible) {
+      this.mountStatusBadgeSlot(this.douBadge, next++);
+    }
+    if (this.lianBadge.visible) {
+      this.mountStatusBadgeSlot(this.lianBadge, next++);
+    }
+    this.mountStatusBadgeSlot(this.yuBadge, next);
   }
 
   private mountStatusBadgeSlot(host: Container, index: number): void {
@@ -921,6 +1025,27 @@ export class SceneView {
   /** Clear approach latch so walking back to the same NPC can re-prompt. */
   clearNpcApproachLatch(): void {
     this.nearNpcId = 0;
+  }
+
+  /**
+   * Android WebView often drops the WebGL context after long screen-off.
+   * Pixi clears GPU texture slots on restore; nudge CPU sources / rebuild actors.
+   */
+  nudgeAfterGpuResume(): void {
+    try {
+      this.mapSprite?.texture?.source?.update?.();
+    } catch {
+      /* ignore */
+    }
+    for (const spr of this.decorSprites) {
+      try {
+        spr.texture?.source?.update?.();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.applyPlayerFrame(true);
+    this.actors.nudgeAfterGpuResume();
   }
 
   private checkNpcProximity(): void {

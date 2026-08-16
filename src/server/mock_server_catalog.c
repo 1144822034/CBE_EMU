@@ -1066,6 +1066,43 @@ static vm_net_mock_role_service_state *vm_net_mock_role_service_state_get(
 
     if (role == NULL || accountId == NULL || accountId[0] == 0)
         return NULL;
+    /*
+     * Persist durability/skills only for the active account's active role.
+     * Nearby / cross-account role pointers previously wrote foreign role_id
+     * rows under the current account_id (service tables have no FK).
+     */
+    {
+        const vm_net_mock_role_state *active = vm_net_mock_active_role();
+        if (active == NULL || role->roleId != active->roleId)
+        {
+            static u32 s_roleServiceRejectLastMs = 0;
+            static u32 s_roleServiceRejectSuppressed = 0;
+            u32 nowMs = scheduler_get_tick_ms();
+            /* Nearby / multi-role equipment sync hits this path heavily; keep
+             * the reject, but do not flood stdout under the protocol lock. */
+            if (s_roleServiceRejectLastMs != 0 &&
+                nowMs >= s_roleServiceRejectLastMs &&
+                (nowMs - s_roleServiceRejectLastMs) < 2000u)
+            {
+                s_roleServiceRejectSuppressed++;
+                return NULL;
+            }
+            if (s_roleServiceRejectSuppressed > 0)
+            {
+                printf("[warn][network] mock_role_service_reject_suppressed count=%u "
+                       "window_ms=2000 evidence=role-not-active\n",
+                       s_roleServiceRejectSuppressed);
+                s_roleServiceRejectSuppressed = 0;
+            }
+            s_roleServiceRejectLastMs = nowMs;
+            printf("[error][network] mock_role_service_reject role=%u active=%u "
+                   "account=%s evidence=role-not-active\n",
+                   role->roleId,
+                   active ? active->roleId : 0,
+                   accountId);
+            return NULL;
+        }
+    }
     for (u32 i = 0; i < VM_NET_MOCK_ROLE_SERVICE_CACHE_MAX; ++i)
     {
         if (g_vm_net_mock_role_service_states[i].used &&

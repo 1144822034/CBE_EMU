@@ -6171,6 +6171,8 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
     session->instanceChallengePending = !leaderBlocked;
     session->instanceChallengeBattlePending = false;
     session->instanceChallengeBattleWireCount = 0;
+    session->instanceChallengeHangupStyleArm = false;
+    session->instanceChallengeHangupStyleTick = 0;
     session->instanceChallengeActorId = !leaderBlocked ? seed->actorId : 0;
     session->instanceChallengeEnemyId =
         !leaderBlocked ? seed->challengeEnemyId : 0;
@@ -6181,10 +6183,18 @@ static u32 vm_net_mock_build_instance_challenge_prompt_response(
     {
         snprintf(session->instanceChallengeScene,
                  sizeof(session->instanceChallengeScene), "%s", scene);
+        if (seed->instanceScene[0] != 0)
+            snprintf(session->instanceChallengeQuotaScene,
+                     sizeof(session->instanceChallengeQuotaScene), "%s",
+                     seed->instanceScene);
+        else
+            snprintf(session->instanceChallengeQuotaScene,
+                     sizeof(session->instanceChallengeQuotaScene), "%s", scene);
     }
     else
     {
         session->instanceChallengeScene[0] = 0;
+        session->instanceChallengeQuotaScene[0] = 0;
     }
     printf("[info][network] mock_npc_instance_challenge_prompt client=%08x actor=%u enemy=%u scene=%s pos=(%u,%u) blocked=%u response=26/0+30/9 resp=%u evidence=JianghuOL.CBE:0x01039C28+0x010395AA\n",
            session->clientId, seed->actorId, seed->challengeEnemyId, scene,
@@ -6265,19 +6275,49 @@ static u32 vm_net_mock_build_instance_challenge_confirm_response(
     session->instanceChallengePending = false;
     if (agree == 0)
     {
-        /* Pixi cancel / clear-pending before hangup-style 4/1 — no 4/10 arm. */
+        /*
+         * agree=0: cancel, or legacy Pixi clear-before-hangup-4/1.
+         * Arm a short hangup-style window so old clients still hit
+         * challenge_daily_limit on the immediate 4/1; real cancel with no
+         * follow-up 4/1 expires without charge.
+         */
+        bool armHangup =
+            session->instanceChallengeEnemyId != 0 &&
+            (session->instanceChallengeQuotaScene[0] != 0 ||
+             session->instanceChallengeScene[0] != 0);
+
         session->instanceChallengeBattlePending = false;
         session->instanceChallengeBattleWireCount = 0;
         session->instanceChallengeActorId = 0;
-        session->instanceChallengeEnemyId = 0;
         session->instanceChallengeX = 0;
         session->instanceChallengeY = 0;
         session->instanceChallengeTick = 0;
-        session->instanceChallengeScene[0] = 0;
-        printf("[info][network] mock_npc_instance_challenge_confirm_cancel client=%08x age_ticks=%u request=30/10{agree=0} response=30/10{result=0} battle_delivery=none resp=%u\n",
-               session->clientId, ageTicks, pos);
+        if (armHangup)
+        {
+            session->instanceChallengeHangupStyleArm = true;
+            session->instanceChallengeHangupStyleTick = g_schedulerTick;
+            printf("[info][network] mock_npc_instance_challenge_confirm_hangup_arm client=%08x enemy=%u age_ticks=%u quota=%s request=30/10{agree=0} battle_delivery=hangup-4/1-window resp=%u\n",
+                   session->clientId, session->instanceChallengeEnemyId,
+                   ageTicks,
+                   session->instanceChallengeQuotaScene[0]
+                       ? session->instanceChallengeQuotaScene
+                       : session->instanceChallengeScene,
+                   pos);
+        }
+        else
+        {
+            session->instanceChallengeHangupStyleArm = false;
+            session->instanceChallengeHangupStyleTick = 0;
+            session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeScene[0] = 0;
+            session->instanceChallengeQuotaScene[0] = 0;
+            printf("[info][network] mock_npc_instance_challenge_confirm_cancel client=%08x age_ticks=%u request=30/10{agree=0} response=30/10{result=0} battle_delivery=none resp=%u\n",
+                   session->clientId, ageTicks, pos);
+        }
         return pos;
     }
+    session->instanceChallengeHangupStyleArm = false;
+    session->instanceChallengeHangupStyleTick = 0;
     session->instanceChallengeBattlePending = true;
     session->instanceChallengeBattleWireCount = 0;
     session->instanceChallengeTick = g_schedulerTick;
@@ -6315,12 +6355,15 @@ static void vm_net_mock_clear_instance_challenge_battle_pending(
            reason != NULL ? reason : "-");
     session->instanceChallengeBattlePending = false;
     session->instanceChallengeBattleWireCount = 0;
+    session->instanceChallengeHangupStyleArm = false;
+    session->instanceChallengeHangupStyleTick = 0;
     session->instanceChallengeActorId = 0;
     session->instanceChallengeEnemyId = 0;
     session->instanceChallengeX = 0;
     session->instanceChallengeY = 0;
     session->instanceChallengeTick = 0;
     session->instanceChallengeScene[0] = 0;
+    session->instanceChallengeQuotaScene[0] = 0;
 }
 
 static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
@@ -6329,6 +6372,9 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
     u32 responseLen = 0;
     u32 ageTicks = 0;
     u8 priorWireCount = 0;
+    bool didConsume = false;
+    const char *costTip = NULL;
+    vm_net_mock_role_state *role = NULL;
 
     if (out == NULL || session == NULL ||
         !session->instanceChallengeBattlePending)
@@ -6361,6 +6407,32 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
     if (session->instanceChallengeBattleWireCount >= 1 && ageTicks < 1)
         return 0;
 
+    /* First wire only: charge admin challenge_daily_limit against quota scene. */
+    if (session->instanceChallengeBattleWireCount == 0)
+    {
+        role = vm_net_mock_active_role();
+        costTip = vm_net_mock_instance_challenge_try_consume(
+            session, role,
+            session->instanceChallengeQuotaScene[0]
+                ? session->instanceChallengeQuotaScene
+                : session->instanceChallengeScene,
+            &didConsume);
+        if (costTip != NULL)
+        {
+            (void)vm_mock_service_session_enqueue_system_message(session,
+                                                                 costTip);
+            printf("[info][network] mock_npc_instance_challenge_cost_refuse "
+                   "client=%08x scene=%s tip=set evidence=challenge-daily-limit\n",
+                   session->clientId,
+                   session->instanceChallengeQuotaScene[0]
+                       ? session->instanceChallengeQuotaScene
+                       : session->instanceChallengeScene);
+            vm_net_mock_clear_instance_challenge_battle_pending(
+                session, "challenge-daily-limit");
+            return 0;
+        }
+    }
+
     responseLen = vm_net_mock_build_instance_challenge_battle_response(
         session->instanceChallengeActorId,
         session->instanceChallengeEnemyId,
@@ -6369,6 +6441,14 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
         out, outCap);
     if (responseLen == 0)
     {
+        if (didConsume)
+        {
+            vm_net_mock_instance_challenge_rollback_consume(
+                session, role,
+                session->instanceChallengeQuotaScene[0]
+                    ? session->instanceChallengeQuotaScene
+                    : session->instanceChallengeScene);
+        }
         printf("[warn][network] mock_npc_instance_challenge_battle_wire_empty "
                "client=%08x actor=%u enemy=%u pos=(%u,%u) scene=%s age_ticks=%u "
                "wire_count=%u pending_kept=1 evidence=builder-0\n",
@@ -6418,6 +6498,7 @@ static u32 vm_net_mock_take_instance_challenge_battle_wire_followup(
         session->instanceChallengeY = 0;
         session->instanceChallengeTick = 0;
         session->instanceChallengeScene[0] = 0;
+        session->instanceChallengeQuotaScene[0] = 0;
     }
     /* First delivery keeps pending + tick so age_ticks advances for retry. */
     return responseLen;
@@ -9906,6 +9987,8 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         session->instanceChallengePending = false;
         session->instanceChallengeBattlePending = false;
         session->instanceChallengeBattleWireCount = 0;
+        session->instanceChallengeHangupStyleArm = false;
+        session->instanceChallengeHangupStyleTick = 0;
         session->instanceChallengeActorId = instanceSeed->actorId;
         session->instanceChallengeEnemyId = instanceSeed->challengeEnemyId;
         session->instanceChallengeX = instanceSeed->instanceX != 0
@@ -9918,6 +10001,14 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         snprintf(session->instanceChallengeScene,
                  sizeof(session->instanceChallengeScene), "%s",
                  vm_net_mock_scene_name_is_safe(scene) ? scene : "");
+        if (instanceSeed->instanceScene[0] != 0)
+            snprintf(session->instanceChallengeQuotaScene,
+                     sizeof(session->instanceChallengeQuotaScene), "%s",
+                     instanceSeed->instanceScene);
+        else
+            snprintf(session->instanceChallengeQuotaScene,
+                     sizeof(session->instanceChallengeQuotaScene), "%s",
+                     session->instanceChallengeScene);
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     printf("[info][network] mock_npc_service action=%s opcode=%08x value=%u role=%u job=%u level=%u result=%u options=%u money=%u skill_eligible=%u skill_learned=%u skill_level_locked=%u next_skill=%u next_level=%u next_price=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x010492B0(action1)+0x010380E8+skill.dsh\n",

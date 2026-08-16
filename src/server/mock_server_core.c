@@ -82,7 +82,21 @@ typedef struct
     u8 silenceRounds;
     u8 dotRounds;
     u32 dotDamagePerRound;
+    /* skill.dsh effectIndex for later DoT type-1 playback (毒入膏肓). */
+    u32 dotEffectIndex;
 } vm_net_mock_battle_enemy_ailment;
+
+/* One round of silent→visible DoT ticks collected during actioninfo build. */
+typedef struct
+{
+    u8 wireSlots[3];
+    u32 damages[3];
+    u32 effectIndices[3];
+    u8 childFlags[3];
+    u8 count;
+    u8 deathWireSlots[3];
+    u8 deathCount;
+} vm_net_mock_battle_dot_tick_batch;
 
 static u8 g_netMockTitleServerListPending = 0;
 static u8 g_netMockTitleServerSelectConfirmed = 0;
@@ -151,12 +165,28 @@ static u8 g_vm_net_mock_battle_mp_increase_allowed = 0;
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_active_modifier_current;
 static vm_net_mock_battle_stat_modifier g_vm_net_mock_battle_solo_modifier;
 static vm_net_mock_battle_enemy_ailment g_mockBattleEnemyAilments[3];
+/*
+ * Seats that received a timed effect during the current action.  Round-age
+ * skips them so skill.dsh `时效` survives the cast turn (same contract as
+ * team-battle fresh modifier / duel freshModifierMask).
+ */
+static u8 g_vm_net_mock_battle_enemy_ailments_applied_mask = 0;
+/* Set when ailments were aged while packing 4/6 so the trailing age is skipped. */
+static u8 g_vm_net_mock_battle_enemy_ailments_aged_this_action = 0;
+static u8 g_vm_net_mock_battle_solo_modifier_applied = 0;
 /* Index of the enemy slot currently feeding damage formulas (0..2), or 0xff. */
 static u8 g_vm_net_mock_battle_formula_enemy_index = 0xff;
 /* The ordinary solo builder bundles monster actions with every offensive
  * operation.  During a synchronized party battle this flag is armed only for
  * the last still-alive member that has not acted in the current round. */
 static u8 g_vm_net_mock_team_battle_resolve_monsters_current = 0;
+/*
+ * While packing a resolve-seat 4/6, bytes/actions before monster counters+DoT.
+ * Merge reorders player seats by roster (leader=0 first) then appends this
+ * suffix so 队长先手 stays fixed regardless of who clicked last.
+ */
+static u32 g_vm_net_mock_team_battle_resolve_player_action_info_len = 0;
+static u8 g_vm_net_mock_team_battle_resolve_player_action_count = 0;
 
 #define VM_MOCK_SERVICE_FRAME_SIZE 20
 #define VM_MOCK_SERVICE_REQUEST_FLAG_PING 0x1u
@@ -4680,10 +4710,17 @@ enum
     VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
     VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION = 4,
     VM_NET_MOCK_ROLE_DB_VERSION = 5,
-    VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 23,
+    /* Money 0–9, level 10–22, arena 30–40, special equip/time 41–45. */
+    VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 46,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST = 901,
     VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_LAST = 916,
+    /* item.dsh 900 玄晶碎片 → 合成一级玄晶(901)；PixiJS 29/11. */
+    VM_NET_MOCK_CRYSTAL_FRAGMENT_ITEM_ID = 900,
+    VM_NET_MOCK_CRYSTAL_FRAGMENT_COMBINE_COST = 10,
+    /* item.dsh 840 梦境徽章 → 300 合成 1×梦境装备(40065..40088)；PixiJS 29/12. */
+    VM_NET_MOCK_DREAM_BADGE_ITEM_ID = 840,
+    VM_NET_MOCK_DREAM_BADGE_COMBINE_COST = 300,
     /* Role level curve anchors (see docs/re/2026-07-25-role-level-exp-curve.md):
      * 1->2 = 200, 49->50 = 2_000_000, total 1..70 = 120_000_000.
      * Stages 1-2 are one geometric run (~+21%/level); stage 3 is arithmetic. */
@@ -4823,7 +4860,7 @@ enum
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_WAREHOUSE_PASS_ITEM_ID        834u
 #define VM_NET_MOCK_WAREHOUSE_PASS_DURABILITY     50u
-#define VM_NET_MOCK_WAREHOUSE_MAX_ITEMS           64u
+#define VM_NET_MOCK_WAREHOUSE_MAX_ITEMS           256u
 #define VM_NET_MOCK_WAREHOUSE_PAGE_ITEMS          5u
 #define VM_NET_MOCK_EQUIP_SELL_PASS_ITEM_ID       839u
 #define VM_NET_MOCK_EQUIP_SELL_PASS_DURABILITY    50u
@@ -5033,6 +5070,12 @@ typedef struct
     u8 designationId;
     u8 reservedBagMeta;
     u16 nextBackpackSeq;
+    /* Pixi 比武连杀文字称号 id30–40；bit0=敌将讨伐 … bit10=天下无敌。 */
+    u32 arenaDesignationMask;
+    /* 特殊永久称号 id41–45；bit0=圣诞骑士 … bit4=勇者王；只置位不清除。 */
+    u32 specialDesignationMask;
+    /* account_roles.created_at → UNIX_TIMESTAMP；0=未知（不授资深类）。 */
+    u32 createdAtUnix;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
     u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];

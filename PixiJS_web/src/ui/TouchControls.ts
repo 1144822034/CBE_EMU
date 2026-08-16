@@ -18,6 +18,8 @@ export class TouchControls {
   /** D-pad center OK — keyboard F, not left softkey (Q). */
   onOk: (() => void) | null = null;
   onDir: ((dir: TouchDir, down: boolean) => void) | null = null;
+  /** Center softkey row toggled — parent should re-fit chrome height. */
+  onLayout: (() => void) | null = null;
 
   constructor() {
     this.left = el("sk-left");
@@ -70,10 +72,12 @@ export class TouchControls {
     setBtn(this.left, labels.left);
     setBtn(this.right, labels.right);
     const c = labels.center?.trim();
+    const wasOn = this.center.classList.contains("is-on");
     // Only expand center row when labeled — frees stage space otherwise.
     this.center.classList.toggle("is-on", !!c);
     this.center.style.pointerEvents = c ? "auto" : "none";
     setBtn(this.center, c || undefined);
+    if (wasOn !== !!c) this.onLayout?.();
   }
 
   setStatus(text: string, error = false): void {

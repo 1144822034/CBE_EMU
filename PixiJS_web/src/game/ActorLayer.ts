@@ -3,7 +3,7 @@ import type { NpcActor, PeerActor } from "../net/protocol";
 import { isRedNamePk } from "../net/protocol";
 import { BitmapLabel } from "../ui/BitmapLabel";
 import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
-import { resolveTitleGif } from "../ui/designation";
+import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import type { NpcTaskPromptType } from "../net/protocolExtras";
 import {
@@ -22,6 +22,12 @@ import {
 import { formatMonsterMapName } from "../resources/monsterLevels";
 import { Plus16Sparkles } from "../render/Plus16Sparkles";
 import { rgbaToTexture } from "../render/rgbaTexture";
+import {
+  getOrCreatePoseTexture,
+  poseTextureKey,
+  rebindPoseTextureKey,
+  releasePoseTextureKey,
+} from "../render/poseTextureCache";
 
 const NPC_CYAN = 0x80e8ff;
 const PEER_GREEN = 0xa8e6a1;
@@ -91,7 +97,9 @@ type Marker = {
   /** Peer designation GIF badge above name (riches_name* / level_name*). */
   titleBadge: Container;
   titleSpr: Sprite | null;
+  titleTextLabel: BitmapLabel | null;
   titleGifKey: string;
+  titleTextKey: string;
   /** NPC quest mark from fuhao.actor (submit/accept/incomplete). */
   questMark: Sprite | null;
   questPrompt: NpcTaskPromptType | 0;
@@ -104,6 +112,8 @@ type Marker = {
   /** CBE dir 1..4 */
   dir: number;
   phase: number;
+  /** Key into shared poseTextureCache (do not destroy on replace). */
+  poseKey: string;
   animate: boolean;
   source: "catalog" | "sce" | "peer";
   /** True while walking (map walk pose); flap-only idle uses false. */
@@ -191,10 +201,18 @@ export class ActorLayer {
     this.mapPreview = map;
   }
 
+  private destroyMarker(m: Marker): void {
+    if (m.poseKey) {
+      releasePoseTextureKey(m.poseKey);
+      m.poseKey = "";
+    }
+    m.root.destroy({ children: true });
+  }
+
   clear(): void {
     for (const m of this.markers.values()) {
       this.root.removeChild(m.root);
-      m.root.destroy({ children: true });
+      this.destroyMarker(m);
     }
     this.markers.clear();
     this.catalogNpcs = [];
@@ -231,7 +249,7 @@ export class ActorLayer {
     }
     this.suppressedScene.set(actorId, { seed: snap, respawnAt: null });
     if (m) {
-      m.root.destroy({ children: true });
+      this.destroyMarker(m);
       this.markers.delete(actorId);
     }
     return true;
@@ -259,7 +277,7 @@ export class ActorLayer {
   clearPeers(): void {
     for (const [id, m] of this.markers) {
       if (m.kind !== "peer") continue;
-      m.root.destroy({ children: true });
+      this.destroyMarker(m);
       this.markers.delete(id);
     }
   }
@@ -378,7 +396,7 @@ export class ActorLayer {
       const m = this.markers.get(id);
       if (m?.kind === "peer") {
         m.plus16Sparkles = null;
-        m.root.destroy({ children: true });
+        this.destroyMarker(m);
         this.markers.delete(id);
       }
     }
@@ -688,7 +706,7 @@ export class ActorLayer {
     for (const [id, m] of this.markers) {
       if (m.kind === "peer") continue;
       if (!keep.has(id)) {
-        m.root.destroy({ children: true });
+        this.destroyMarker(m);
         this.markers.delete(id);
       }
     }
@@ -741,7 +759,9 @@ export class ActorLayer {
         label: text,
         titleBadge,
         titleSpr: null,
+        titleTextLabel: null,
         titleGifKey: "",
+        titleTextKey: "",
         questMark: null,
         questPrompt: 0,
         questMarkGen: 0,
@@ -751,6 +771,7 @@ export class ActorLayer {
         loaded: null,
         dir: 1 + ((Math.random() * 4) | 0),
         phase: 0,
+        poseKey: "",
         animate,
         source,
         moving: false,
@@ -803,6 +824,10 @@ export class ActorLayer {
       outline: nameOutline,
       outlineThin: true,
     });
+    // Scene/catalog sync can destroy this marker while UC3 nameplate awaits.
+    if (this.markers.get(id) !== m || m.label.destroyed || m.root.destroyed) {
+      return;
+    }
     m.label.scale.set(NAMEPLATE_SCALE);
     this.layoutNameplate(m);
 
@@ -902,35 +927,70 @@ export class ActorLayer {
   ): Promise<void> {
     const gif =
       resolveTitleGif(titleGif) || resolveTitleGif(titleLabel) || null;
-    const key = gif || "";
-    if (key === m.titleGifKey && (key ? m.titleBadge.visible : !m.titleBadge.visible)) {
+    const textTitle =
+      !gif && (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
+        ? (isArenaTextTitle(titleLabel) ? titleLabel : titleGif).trim()
+        : "";
+    const key = gif || (textTitle ? `text:${textTitle}` : "");
+    if (
+      key === m.titleGifKey &&
+      (key ? m.titleBadge.visible : !m.titleBadge.visible)
+    ) {
       this.layoutNameplate(m);
       return;
     }
     m.titleGifKey = key;
+    m.titleTextKey = textTitle;
     m.titleBadge.removeChildren().forEach((c) => c.destroy());
     m.titleSpr = null;
-    if (!gif) {
+    m.titleTextLabel = null;
+    if (!gif && !textTitle) {
       m.titleBadge.visible = false;
       this.layoutNameplate(m);
       return;
     }
-    const tex = await tryLoadUiTexture(gif);
-    if (this.markers.get(m.id) !== m) return;
-    if (m.titleGifKey !== key) return;
-    if (!tex) {
-      m.titleBadge.visible = false;
+    if (gif) {
+      const tex = await tryLoadUiTexture(gif);
+      if (this.markers.get(m.id) !== m) return;
+      if (m.titleGifKey !== key) return;
+      if (!tex) {
+        m.titleBadge.visible = false;
+        this.layoutNameplate(m);
+        return;
+      }
+      m.titleSpr = new Sprite(tex);
+      m.titleSpr.anchor.set(0.5, 1);
+      m.titleBadge.addChild(m.titleSpr);
+      m.titleBadge.visible = true;
       this.layoutNameplate(m);
       return;
     }
-    m.titleSpr = new Sprite(tex);
-    m.titleSpr.anchor.set(0.5, 1);
-    m.titleBadge.addChild(m.titleSpr);
+    const lab = new BitmapLabel();
+    await lab.setText(textTitle.slice(0, 8), arenaTextTitleColor(textTitle), {
+      uc3: true,
+      smooth: false,
+      outline: true,
+      outlineThin: true,
+    });
+    if (this.markers.get(m.id) !== m || m.root.destroyed) {
+      lab.destroy();
+      return;
+    }
+    if (m.titleGifKey !== key) {
+      lab.destroy();
+      return;
+    }
+    if (lab.destroyed) return;
+    lab.anchor.set(0.5, 1);
+    lab.scale.set(NAMEPLATE_SCALE);
+    m.titleTextLabel = lab;
+    m.titleBadge.addChild(lab);
     m.titleBadge.visible = true;
     this.layoutNameplate(m);
   }
 
   private layoutNameplate(m: Marker): void {
+    if (m.root.destroyed || m.label.destroyed) return;
     const bodyH = m.sprite
       ? Math.round(m.sprite.height)
       : 16;
@@ -943,7 +1003,9 @@ export class ActorLayer {
     let topY = m.label.y;
     if (m.titleBadge.visible) {
       m.titleBadge.position.set(0, m.label.y - 2);
-      topY = m.titleBadge.y - (m.titleSpr?.height || 12);
+      topY =
+        m.titleBadge.y -
+        (m.titleSpr?.height || m.titleTextLabel?.height || 12);
     }
     if (m.questMark) {
       m.questMark.position.set(0, topY - 1);
@@ -964,7 +1026,24 @@ export class ActorLayer {
           : false;
     const composed = composeMapActor(m.loaded, m.dir, moving, m.phase);
     if (!composed) return;
-    const tex = rgbaToTexture(composed.width, composed.height, composed.rgba);
+    const key = poseTextureKey(
+      m.actorName || m.nameLabel || String(m.id),
+      m.dir,
+      moving,
+      m.phase,
+      composed.width,
+      composed.height,
+    );
+    // Retain before create/evict so SceneView's player poses stay alive too
+    // (shared cache; local inUse alone used to miss the other side).
+    rebindPoseTextureKey(m.poseKey, key);
+    m.poseKey = key;
+    const tex = getOrCreatePoseTexture(
+      key,
+      composed.width,
+      composed.height,
+      composed.rgba,
+    );
     if (!m.sprite) {
       /* Drop placeholder Graphics only — keep plus16 sparkles / title / label. */
       for (const child of [...m.root.children]) {
@@ -979,14 +1058,30 @@ export class ActorLayer {
       m.sprite.zIndex = 1;
       m.root.addChild(m.sprite);
     } else {
-      const old = m.sprite.texture;
       m.sprite.texture = tex;
-      old.destroy(true);
     }
     m.sprite.scale.set(
       composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
       ACTOR_DISPLAY_SCALE,
     );
     this.layoutNameplate(m);
+  }
+
+  /**
+   * After WebGL context restore (Android screen-off): rebuild sprites from
+   * CPU RGBA so GPU uploads are fresh. Nameplates rebake via BitmapLabel.
+   */
+  nudgeAfterGpuResume(): void {
+    for (const m of this.markers.values()) {
+      if (m.root.destroyed) continue;
+      if (m.loaded) this.applyFrame(m);
+      else if (m.sprite?.texture?.source) {
+        try {
+          m.sprite.texture.source.update();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 }

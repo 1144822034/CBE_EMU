@@ -10,6 +10,11 @@ typedef struct
     u32 panelDefenseEnduranceDiv;   /* endurance / div; default 2; min 1 */
     u32 panelHitBase;               /* hit = base + equip.hit; default 101 */
 
+    /* Panel/battle attack: attack = jobPrimary * coeff% / 100 + equip.attack */
+    u32 primaryAttackCoeffTianjiPercent;   /* job 1; default 100 */
+    u32 primaryAttackCoeffHuanjianPercent; /* job 2; default 100 */
+    u32 primaryAttackCoeffGuidaoPercent;   /* job 3; default 100 */
+
     /* Soft armor NA mitigation: damage=(atk*K+def/2)/(K+def) */
     u32 softArmorK;                 /* default 2000 */
     u32 equipArmorDivisor;          /* mitigation uses equip.armor/div; default 5 */
@@ -53,6 +58,9 @@ static void vm_net_mock_combat_formula_config_set_defaults(
     cfg->panelDefenseLevelCoeff = 1;
     cfg->panelDefenseEnduranceDiv = 2;
     cfg->panelHitBase = 101;
+    cfg->primaryAttackCoeffTianjiPercent = 100;
+    cfg->primaryAttackCoeffHuanjianPercent = 100;
+    cfg->primaryAttackCoeffGuidaoPercent = 100;
     cfg->softArmorK = 2000;
     cfg->equipArmorDivisor = 5;
     cfg->hitChanceMin = 5;
@@ -81,6 +89,12 @@ static void vm_net_mock_combat_formula_config_sanitize(
         return;
     if (cfg->panelDefenseEnduranceDiv == 0)
         cfg->panelDefenseEnduranceDiv = 1;
+    if (cfg->primaryAttackCoeffTianjiPercent > 1000u)
+        cfg->primaryAttackCoeffTianjiPercent = 1000u;
+    if (cfg->primaryAttackCoeffHuanjianPercent > 1000u)
+        cfg->primaryAttackCoeffHuanjianPercent = 1000u;
+    if (cfg->primaryAttackCoeffGuidaoPercent > 1000u)
+        cfg->primaryAttackCoeffGuidaoPercent = 1000u;
     if (cfg->softArmorK == 0)
         cfg->softArmorK = 1;
     if (cfg->equipArmorDivisor == 0)
@@ -131,6 +145,69 @@ static void vm_net_mock_combat_formula_config_sanitize(
         cfg->bossSkillDamagePercent = 1000u;
 }
 
+typedef struct
+{
+    u32 count;
+    bool found;
+    bool invalid;
+} vm_net_mock_combat_formula_column_ctx;
+
+static bool vm_net_mock_combat_formula_column_count_row(void *contextValue,
+                                                       unsigned int columnCount,
+                                                       const char *const *values,
+                                                       const size_t *lengths)
+{
+    vm_net_mock_combat_formula_column_ctx *ctx =
+        (vm_net_mock_combat_formula_column_ctx *)contextValue;
+
+    if (ctx == NULL || columnCount < 1 || values == NULL || values[0] == NULL ||
+        lengths == NULL ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &ctx->count))
+    {
+        if (ctx != NULL)
+            ctx->invalid = true;
+        return true;
+    }
+    ctx->found = true;
+    return true;
+}
+
+static bool vm_net_mock_combat_formula_ensure_column(const char *columnName,
+                                                    const char *alterSql)
+{
+    vm_net_mock_combat_formula_column_ctx ctx;
+    char probe[320];
+
+    if (columnName == NULL || alterSql == NULL)
+        return false;
+    memset(&ctx, 0, sizeof(ctx));
+    snprintf(probe, sizeof(probe),
+             "SELECT COUNT(*) FROM information_schema.COLUMNS "
+             "WHERE TABLE_SCHEMA=DATABASE() AND "
+             "TABLE_NAME='server_combat_formula_config' AND COLUMN_NAME='%s'",
+             columnName);
+    if (!vm_mysql_query(probe, vm_net_mock_combat_formula_column_count_row, &ctx) ||
+        ctx.invalid || !ctx.found)
+    {
+        printf("[error][mock-service] combat_formula column probe %s error=%s\n",
+               columnName, vm_mysql_last_error());
+        return false;
+    }
+    if (ctx.count == 0)
+    {
+        if (!vm_mysql_exec(alterSql))
+        {
+            printf("[error][mock-service] combat_formula add column %s "
+                   "error=%s\n",
+                   columnName, vm_mysql_last_error());
+            return false;
+        }
+        printf("[info][mock-service] combat_formula added column %s\n",
+               columnName);
+    }
+    return true;
+}
+
 static bool vm_net_mock_combat_formula_ensure_table(void)
 {
     static bool ready = false;
@@ -143,6 +220,12 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
             "panel_defense_level_coeff INT UNSIGNED NOT NULL DEFAULT 1,"
             "panel_defense_endurance_div INT UNSIGNED NOT NULL DEFAULT 2,"
             "panel_hit_base INT UNSIGNED NOT NULL DEFAULT 101,"
+            "primary_attack_coeff_tianji_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100,"
+            "primary_attack_coeff_huanjian_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100,"
+            "primary_attack_coeff_guidao_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100,"
             "soft_armor_k INT UNSIGNED NOT NULL DEFAULT 2000,"
             "equip_armor_divisor INT UNSIGNED NOT NULL DEFAULT 5,"
             "hit_chance_min INT UNSIGNED NOT NULL DEFAULT 5,"
@@ -172,6 +255,25 @@ static bool vm_net_mock_combat_formula_ensure_table(void)
                vm_mysql_last_error());
         return false;
     }
+    /* Existing DBs created before these columns: ADD with default 100. */
+    if (!vm_net_mock_combat_formula_ensure_column(
+            "primary_attack_coeff_tianji_percent",
+            "ALTER TABLE server_combat_formula_config ADD COLUMN "
+            "primary_attack_coeff_tianji_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100 AFTER panel_hit_base") ||
+        !vm_net_mock_combat_formula_ensure_column(
+            "primary_attack_coeff_huanjian_percent",
+            "ALTER TABLE server_combat_formula_config ADD COLUMN "
+            "primary_attack_coeff_huanjian_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100 AFTER primary_attack_coeff_tianji_percent") ||
+        !vm_net_mock_combat_formula_ensure_column(
+            "primary_attack_coeff_guidao_percent",
+            "ALTER TABLE server_combat_formula_config ADD COLUMN "
+            "primary_attack_coeff_guidao_percent INT UNSIGNED NOT NULL "
+            "DEFAULT 100 AFTER primary_attack_coeff_huanjian_percent"))
+    {
+        return false;
+    }
     ready = true;
     return true;
 }
@@ -190,13 +292,13 @@ static bool vm_net_mock_combat_formula_config_row_ctx(void *contextValue,
     vm_net_mock_combat_formula_load_ctx *ctx =
         (vm_net_mock_combat_formula_load_ctx *)contextValue;
     vm_net_mock_combat_formula_config *cfg;
-    u32 fields[23];
+    u32 fields[26];
     u32 i;
 
-    if (ctx == NULL || ctx->cfg == NULL || columnCount < 23)
+    if (ctx == NULL || ctx->cfg == NULL || columnCount < 26)
         return true;
     cfg = ctx->cfg;
-    for (i = 0; i < 23; ++i)
+    for (i = 0; i < 26; ++i)
     {
         if (!vm_mock_mysql_parse_u32(values[i], lengths[i], &fields[i]))
             return true;
@@ -205,25 +307,28 @@ static bool vm_net_mock_combat_formula_config_row_ctx(void *contextValue,
     cfg->panelDefenseLevelCoeff = fields[1];
     cfg->panelDefenseEnduranceDiv = fields[2];
     cfg->panelHitBase = fields[3];
-    cfg->softArmorK = fields[4];
-    cfg->equipArmorDivisor = fields[5];
-    cfg->hitChanceMin = fields[6];
-    cfg->hitChanceMax = fields[7];
-    cfg->critDamagePercent = fields[8];
-    cfg->resistCapPercent = fields[9];
-    cfg->jobSkillAttackBonusPercent = fields[10];
-    cfg->naVariancePercent = fields[11];
-    cfg->skillVariancePercent = fields[12];
-    cfg->duelJobBonusTianjiPercent = fields[13];
-    cfg->duelJobBonusHuanjianPercent = fields[14];
-    cfg->duelJobBonusGuidaoPercent = fields[15];
-    cfg->skillVsNaFloorPercent = fields[16];
-    cfg->monsterHitDefault = fields[17];
-    cfg->monsterDodgeDefault = fields[18];
-    cfg->monsterCritDefault = fields[19];
-    cfg->monsterResistDefault = fields[20];
-    cfg->bossSkillChancePercent = fields[21];
-    cfg->bossSkillDamagePercent = fields[22];
+    cfg->primaryAttackCoeffTianjiPercent = fields[4];
+    cfg->primaryAttackCoeffHuanjianPercent = fields[5];
+    cfg->primaryAttackCoeffGuidaoPercent = fields[6];
+    cfg->softArmorK = fields[7];
+    cfg->equipArmorDivisor = fields[8];
+    cfg->hitChanceMin = fields[9];
+    cfg->hitChanceMax = fields[10];
+    cfg->critDamagePercent = fields[11];
+    cfg->resistCapPercent = fields[12];
+    cfg->jobSkillAttackBonusPercent = fields[13];
+    cfg->naVariancePercent = fields[14];
+    cfg->skillVariancePercent = fields[15];
+    cfg->duelJobBonusTianjiPercent = fields[16];
+    cfg->duelJobBonusHuanjianPercent = fields[17];
+    cfg->duelJobBonusGuidaoPercent = fields[18];
+    cfg->skillVsNaFloorPercent = fields[19];
+    cfg->monsterHitDefault = fields[20];
+    cfg->monsterDodgeDefault = fields[21];
+    cfg->monsterCritDefault = fields[22];
+    cfg->monsterResistDefault = fields[23];
+    cfg->bossSkillChancePercent = fields[24];
+    cfg->bossSkillDamagePercent = fields[25];
     vm_net_mock_combat_formula_config_sanitize(cfg);
     ctx->loaded = 1;
     return true;
@@ -231,7 +336,7 @@ static bool vm_net_mock_combat_formula_config_row_ctx(void *contextValue,
 
 static bool vm_net_mock_combat_formula_config_seed_if_empty(void)
 {
-    char query[1536];
+    char query[1792];
     int written;
     vm_net_mock_combat_formula_config def;
 
@@ -240,7 +345,11 @@ static bool vm_net_mock_combat_formula_config_seed_if_empty(void)
         query, sizeof(query),
         "INSERT IGNORE INTO server_combat_formula_config ("
         "id,panel_defense_base,panel_defense_level_coeff,"
-        "panel_defense_endurance_div,panel_hit_base,soft_armor_k,"
+        "panel_defense_endurance_div,panel_hit_base,"
+        "primary_attack_coeff_tianji_percent,"
+        "primary_attack_coeff_huanjian_percent,"
+        "primary_attack_coeff_guidao_percent,"
+        "soft_armor_k,"
         "equip_armor_divisor,hit_chance_min,hit_chance_max,crit_damage_percent,"
         "resist_cap_percent,job_skill_attack_bonus_percent,na_variance_percent,"
         "skill_variance_percent,duel_job_bonus_tianji_percent,"
@@ -248,9 +357,13 @@ static bool vm_net_mock_combat_formula_config_seed_if_empty(void)
         "skill_vs_na_floor_percent,monster_hit_default,monster_dodge_default,"
         "monster_crit_default,monster_resist_default,boss_skill_chance_percent,"
         "boss_skill_damage_percent) VALUES ("
-        "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u)",
+        "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+        "%u,%u,%u)",
         def.panelDefenseBase, def.panelDefenseLevelCoeff,
-        def.panelDefenseEnduranceDiv, def.panelHitBase, def.softArmorK,
+        def.panelDefenseEnduranceDiv, def.panelHitBase,
+        def.primaryAttackCoeffTianjiPercent,
+        def.primaryAttackCoeffHuanjianPercent,
+        def.primaryAttackCoeffGuidaoPercent, def.softArmorK,
         def.equipArmorDivisor, def.hitChanceMin, def.hitChanceMax,
         def.critDamagePercent, def.resistCapPercent,
         def.jobSkillAttackBonusPercent, def.naVariancePercent,
@@ -283,7 +396,11 @@ static bool vm_net_mock_combat_formula_config_load(bool force)
     ctx.cfg = &g_vm_net_mock_combat_formula_config;
     if (!vm_mysql_query(
             "SELECT panel_defense_base,panel_defense_level_coeff,"
-            "panel_defense_endurance_div,panel_hit_base,soft_armor_k,"
+            "panel_defense_endurance_div,panel_hit_base,"
+            "primary_attack_coeff_tianji_percent,"
+            "primary_attack_coeff_huanjian_percent,"
+            "primary_attack_coeff_guidao_percent,"
+            "soft_armor_k,"
             "equip_armor_divisor,hit_chance_min,hit_chance_max,"
             "crit_damage_percent,resist_cap_percent,"
             "job_skill_attack_bonus_percent,na_variance_percent,"
@@ -307,13 +424,17 @@ static bool vm_net_mock_combat_formula_config_load(bool force)
         &g_vm_net_mock_combat_formula_config);
     g_vm_net_mock_combat_formula_config_loaded = true;
     printf("[info][mock-service] combat_formula_config_load soft_k=%u "
-           "armor_div=%u crit%%=%u resist_cap=%u hit=%u..%u\n",
+           "armor_div=%u crit%%=%u resist_cap=%u hit=%u..%u "
+           "primary_atk_coeff=%u/%u/%u\n",
            g_vm_net_mock_combat_formula_config.softArmorK,
            g_vm_net_mock_combat_formula_config.equipArmorDivisor,
            g_vm_net_mock_combat_formula_config.critDamagePercent,
            g_vm_net_mock_combat_formula_config.resistCapPercent,
            g_vm_net_mock_combat_formula_config.hitChanceMin,
-           g_vm_net_mock_combat_formula_config.hitChanceMax);
+           g_vm_net_mock_combat_formula_config.hitChanceMax,
+           g_vm_net_mock_combat_formula_config.primaryAttackCoeffTianjiPercent,
+           g_vm_net_mock_combat_formula_config.primaryAttackCoeffHuanjianPercent,
+           g_vm_net_mock_combat_formula_config.primaryAttackCoeffGuidaoPercent);
     return true;
 }
 
@@ -328,7 +449,7 @@ static bool vm_net_mock_combat_formula_admin_save(
     const vm_net_mock_combat_formula_config *src)
 {
     vm_net_mock_combat_formula_config cfg;
-    char query[2048];
+    char query[3072];
     int written;
 
     if (src == NULL)
@@ -341,7 +462,11 @@ static bool vm_net_mock_combat_formula_admin_save(
         query, sizeof(query),
         "INSERT INTO server_combat_formula_config ("
         "id,panel_defense_base,panel_defense_level_coeff,"
-        "panel_defense_endurance_div,panel_hit_base,soft_armor_k,"
+        "panel_defense_endurance_div,panel_hit_base,"
+        "primary_attack_coeff_tianji_percent,"
+        "primary_attack_coeff_huanjian_percent,"
+        "primary_attack_coeff_guidao_percent,"
+        "soft_armor_k,"
         "equip_armor_divisor,hit_chance_min,hit_chance_max,crit_damage_percent,"
         "resist_cap_percent,job_skill_attack_bonus_percent,na_variance_percent,"
         "skill_variance_percent,duel_job_bonus_tianji_percent,"
@@ -349,12 +474,19 @@ static bool vm_net_mock_combat_formula_admin_save(
         "skill_vs_na_floor_percent,monster_hit_default,monster_dodge_default,"
         "monster_crit_default,monster_resist_default,boss_skill_chance_percent,"
         "boss_skill_damage_percent) VALUES ("
-        "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u) "
+        "1,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+        "%u,%u,%u) "
         "ON DUPLICATE KEY UPDATE "
         "panel_defense_base=VALUES(panel_defense_base),"
         "panel_defense_level_coeff=VALUES(panel_defense_level_coeff),"
         "panel_defense_endurance_div=VALUES(panel_defense_endurance_div),"
         "panel_hit_base=VALUES(panel_hit_base),"
+        "primary_attack_coeff_tianji_percent="
+        "VALUES(primary_attack_coeff_tianji_percent),"
+        "primary_attack_coeff_huanjian_percent="
+        "VALUES(primary_attack_coeff_huanjian_percent),"
+        "primary_attack_coeff_guidao_percent="
+        "VALUES(primary_attack_coeff_guidao_percent),"
         "soft_armor_k=VALUES(soft_armor_k),"
         "equip_armor_divisor=VALUES(equip_armor_divisor),"
         "hit_chance_min=VALUES(hit_chance_min),"
@@ -375,7 +507,10 @@ static bool vm_net_mock_combat_formula_admin_save(
         "boss_skill_chance_percent=VALUES(boss_skill_chance_percent),"
         "boss_skill_damage_percent=VALUES(boss_skill_damage_percent)",
         cfg.panelDefenseBase, cfg.panelDefenseLevelCoeff,
-        cfg.panelDefenseEnduranceDiv, cfg.panelHitBase, cfg.softArmorK,
+        cfg.panelDefenseEnduranceDiv, cfg.panelHitBase,
+        cfg.primaryAttackCoeffTianjiPercent,
+        cfg.primaryAttackCoeffHuanjianPercent,
+        cfg.primaryAttackCoeffGuidaoPercent, cfg.softArmorK,
         cfg.equipArmorDivisor, cfg.hitChanceMin, cfg.hitChanceMax,
         cfg.critDamagePercent, cfg.resistCapPercent,
         cfg.jobSkillAttackBonusPercent, cfg.naVariancePercent,

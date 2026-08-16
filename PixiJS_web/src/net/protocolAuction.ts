@@ -106,6 +106,8 @@ export type AuctionClaimResult = {
   failed: number;
   pendingClaims: number;
   blink: boolean;
+  /** Short reason code: ok / nothing / bag-full / flask-full / partial:bag-full … */
+  message: string;
 };
 
 export type AuctionEvent = {
@@ -359,7 +361,24 @@ export function parseAuctionClaim(packet: WtPacket): AuctionClaimResult | null {
     failed: fieldU32(obj, "failed"),
     pendingClaims: fieldU32(obj, "pendingClaims"),
     blink: fieldU32(obj, "blink") !== 0,
+    message: fieldStr(obj, "message"),
   };
+}
+
+/** Panel tip for one-click claim (42/7). */
+export function formatAuctionClaimTip(
+  r: AuctionClaimResult | null | undefined,
+  mapCode: (code: string | undefined, okText: string) => string,
+): string {
+  if (!r) return "领取失败";
+  const raw = (r.message || "").trim();
+  const code = raw.startsWith("partial:") ? raw.slice("partial:".length) : raw;
+  if (r.claimed > 0 && r.failed === 0) return `已领取${r.claimed}项`;
+  if (r.claimed === 0 && r.failed === 0)
+    return mapCode(code || "nothing", "暂无待领物品");
+  if (r.claimed === 0) return mapCode(code || "fail", "领取失败");
+  const why = mapCode(code || "fail", "部分失败");
+  return `已领取${r.claimed}项，失败${r.failed}项：${why}`;
 }
 
 export function parseAuctionEvent(packet: WtPacket): AuctionEvent | null {
@@ -446,7 +465,11 @@ export function formatAuctionClaimRow(row: AuctionClaimRow): string {
     const en = row.enhanceLevel > 0 ? `+${row.enhanceLevel}` : "";
     // 802/803：itemCount 是储量，可见件数恒 1
     if (row.itemId === 802 || row.itemId === 803) {
-      return `${tag} ${name}${en}`;
+      return `${tag} ${name}${en}储${row.itemCount}`;
+    }
+    // 834/839：itemCount 是剩余耐久，不是张数
+    if (row.itemId === 834 || row.itemId === 839) {
+      return `${tag} ${name}${en}耐${row.itemCount}`;
     }
     return `${tag} ${name}${en}x${row.itemCount}`;
   }

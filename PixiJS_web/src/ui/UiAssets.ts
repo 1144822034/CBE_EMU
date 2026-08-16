@@ -106,7 +106,8 @@ export function uiSprite(tex: Texture, w?: number, h?: number): Sprite {
 export class DigitStrip {
   readonly root = new Container();
   private readonly glyphs = new Map<string, Texture>();
-  private readonly cellW: number;
+  /** Glyph advance used by battle float layout / edge clamp. */
+  readonly cellW: number;
   private readonly cellH: number;
 
   private constructor(sheet: Texture, cellW: number, cellH: number, order: string[]) {

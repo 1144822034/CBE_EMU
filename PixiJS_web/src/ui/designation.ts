@@ -1,4 +1,5 @@
-/** Designation overhead GIFs — same catalog as mock_server_role.c / docs/re/2026-07-02. */
+/** Designation overhead — GIF catalog + Pixi text titles (arena kill-streak). */
+
 const BY_NAME: Record<string, string> = {
   一贫如洗: "riches_name0.gif",
   衣食无忧: "riches_name1.gif",
@@ -23,13 +24,53 @@ const BY_NAME: Record<string, string> = {
   登峰造极: "level_name10.gif",
   超越极限: "level_name11.gif",
   开山鼻祖: "level_name12.gif",
+  圣诞骑士: "sdqs0.gif",
+  武林传奇: "wlcq0.gif",
+  资深老友勇者王: "zsly.gif",
+  资深老友: "zsly0.gif",
+  勇者王: "zsly1.gif",
 };
+
+/** Pixi-only：比武连杀文字称号（服务端 id 30–40，overhead 空）。
+ * 颜色与世界频道连杀播报称号着色一致（ChatPanel 共用本表）。 */
+export const ARENA_TEXT_TITLE_COLORS: { title: string; color: number }[] = [
+  { title: "敌将讨伐", color: 0xfff0c0 },
+  { title: "双杀", color: 0xffc060 },
+  { title: "大杀特杀", color: 0xffa040 },
+  { title: "所向披靡", color: 0xffe040 },
+  { title: "浑身是胆", color: 0x80ff40 },
+  { title: "势如破竹", color: 0x40ffb0 },
+  { title: "勇冠三军", color: 0x40e8ff },
+  { title: "一骑当千", color: 0x6080ff },
+  { title: "万夫莫敌", color: 0xc080ff },
+  { title: "举世无双", color: 0xff60c8 },
+  { title: "天下无敌", color: 0xff2020 },
+];
+
+const ARENA_TEXT_TITLE_SET = new Set(
+  ARENA_TEXT_TITLE_COLORS.map((r) => r.title),
+);
 
 /** Resolve actor overhead badge resource from wire shortLabel / previewImage. */
 export function resolveTitleGif(labelOrGif: string | undefined | null): string | null {
   if (!labelOrGif) return null;
   const s = labelOrGif.trim();
   if (!s) return null;
+  if (ARENA_TEXT_TITLE_SET.has(s)) return null;
   if (/\.gif$/i.test(s)) return s;
   return BY_NAME[s] ?? null;
+}
+
+export function isArenaTextTitle(label: string | undefined | null): boolean {
+  if (!label) return false;
+  return ARENA_TEXT_TITLE_SET.has(label.trim());
+}
+
+export function arenaTextTitleColor(label: string | undefined | null): number {
+  const s = (label || "").trim();
+  for (let i = ARENA_TEXT_TITLE_COLORS.length - 1; i >= 0; i--) {
+    const row = ARENA_TEXT_TITLE_COLORS[i]!;
+    if (row.title === s) return row.color;
+  }
+  return 0xffe080;
 }

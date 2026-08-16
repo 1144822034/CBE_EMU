@@ -39,6 +39,7 @@ import {
 } from "./UiAssets";
 import { BattlePartyHud, BATTLE_PARTY_HUD_H } from "./BattlePartyHud";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 /** Eidolon frames can be 170px+; clamp so FX cannot dominate the 240× stage. */
 const FX_MAX_W = 96;
@@ -726,7 +727,10 @@ export class BattleScreen extends Container {
       this.selectedTargetWire =
         wires[0] ?? battleTargetWire(this.state);
       this.noteOperateSubmitted(tip);
-      this.onAttack?.();
+      // Prefer onSkill(0) so main.ts can tag the note as auto (does not
+      // erase a remembered skill). Fall back to onAttack for older wires.
+      if (this.onSkill) this.onSkill(0);
+      else this.onAttack?.();
       return true;
     }
     const sk = this.skills.find((s) => s.id + 2 === op);
@@ -1782,7 +1786,18 @@ export class BattleScreen extends Container {
     // Melee still faces the foe for the dash/swing.
     if (pose === "cast") {
       actor.facingRight = actor.homeX < (UNIT_LEFT_X + UNIT_RIGHT_X) / 2;
-      this.paintUnitSprite(actor);
+      // Play anim6/7 cast strip once in place (no dash). Previously early-return
+      // left the caster on idle while only eidolon FX ran.
+      const frameMs = UNIT_FRAME_MS;
+      const cycleMs = this.attackStripParts(actor) * frameMs;
+      const hold = cycleMs + 120;
+      this.setUnitPose(actor, "cast", hold);
+      await sleep(Math.max(400, cycleMs));
+      if (actor.pose !== "death") {
+        actor.pose = "idle";
+        actor.poseUntil = 0;
+        this.paintUnitSprite(actor);
+      }
       return;
     }
     if (target) {
@@ -2048,13 +2063,21 @@ export class BattleScreen extends Container {
       this.menuMode === "skill" || this.menuMode === "item"
         ? listPageRows
         : rootItems.length;
-    const showPageHint =
+    const showPageNav =
       (this.menuMode === "skill" && skillPages > 1) ||
       (this.menuMode === "item" && itemPages > 1);
-    const h = 28 + rows * 16 + (showPageHint ? 14 : 0);
-    // 仙术行带「耗蓝N」，比根菜单略宽；物品名更长用 120
+    const h = 28 + rows * 16 + (showPageNav ? 22 : 0);
+    // 仙术行带「耗蓝N」，比根菜单略宽；物品名更长用 120；翻页按钮再加宽
     const w =
-      this.menuMode === "skill" ? 128 : this.menuMode === "item" ? 120 : 100;
+      this.menuMode === "skill"
+        ? showPageNav
+          ? 148
+          : 128
+        : this.menuMode === "item"
+          ? showPageNav
+            ? 140
+            : 120
+          : 100;
     const x = (LCD_WIDTH - w) / 2;
     const y = STAGE_TOP + 40;
 
@@ -2126,12 +2149,39 @@ export class BattleScreen extends Container {
           }),
         );
       });
-      if (showPageHint) {
-        const foot = new BitmapLabel();
-        foot.eventMode = "none";
-        foot.position.set(x + 22, y + 22 + pageSkills.length * 16);
-        void foot.setText("↑↓翻页", 0x404040);
-        this.menuHost.addChild(foot);
+      if (showPageNav) {
+        const navGfx = new Graphics();
+        navGfx.eventMode = "none";
+        this.menuHost.addChild(navGfx);
+        attachPageNavButtons({
+          host: this.menuHost,
+          hits: this.rowHits,
+          box: navGfx,
+          x: x + 4,
+          y: y + 22 + pageSkills.length * 16,
+          w: w - 8,
+          page: skillPage + 1,
+          pages: skillPages,
+          h: 16,
+          addLabel: (t, lx, ly, c) => {
+            const lab = new BitmapLabel();
+            lab.eventMode = "none";
+            lab.position.set(lx, ly);
+            void lab.setText(t, c, { outline: false });
+            this.menuHost.addChild(lab);
+          },
+          onPrev: () => {
+            this.skillCursor = Math.max(0, skillPageStart - SKILL_PAGE_SIZE);
+            this.redrawMenu();
+          },
+          onNext: () => {
+            this.skillCursor = Math.min(
+              this.skills.length - 1,
+              skillPageStart + SKILL_PAGE_SIZE,
+            );
+            this.redrawMenu();
+          },
+        });
       }
       return;
     }
@@ -2177,12 +2227,39 @@ export class BattleScreen extends Container {
           }),
         );
       });
-      if (showPageHint) {
-        const foot = new BitmapLabel();
-        foot.eventMode = "none";
-        foot.position.set(x + 28, y + 22 + pageItems.length * 16);
-        void foot.setText("↑↓翻页", 0x404040);
-        this.menuHost.addChild(foot);
+      if (showPageNav) {
+        const navGfx = new Graphics();
+        navGfx.eventMode = "none";
+        this.menuHost.addChild(navGfx);
+        attachPageNavButtons({
+          host: this.menuHost,
+          hits: this.rowHits,
+          box: navGfx,
+          x: x + 4,
+          y: y + 22 + pageItems.length * 16,
+          w: w - 8,
+          page: itemPage + 1,
+          pages: itemPages,
+          h: 16,
+          addLabel: (t, lx, ly, c) => {
+            const lab = new BitmapLabel();
+            lab.eventMode = "none";
+            lab.position.set(lx, ly);
+            void lab.setText(t, c, { outline: false });
+            this.menuHost.addChild(lab);
+          },
+          onPrev: () => {
+            this.itemCursor = Math.max(0, itemPageStart - ITEM_PAGE_SIZE);
+            this.redrawMenu();
+          },
+          onNext: () => {
+            this.itemCursor = Math.min(
+              this.items.length - 1,
+              itemPageStart + ITEM_PAGE_SIZE,
+            );
+            this.redrawMenu();
+          },
+        });
       }
       return;
     }
@@ -2436,13 +2513,36 @@ export class BattleScreen extends Container {
     this.spawnTextFloat(label, x, yBody, CBE.inkTip);
   }
 
+  /**
+   * Keep centered floats inside the 240 LCD. Left/right units sit near x=22/218;
+   * pad sized so a 5-digit -num/+num row (~55px) stays fully visible.
+   */
+  private clampFloatX(x: number, halfW: number): number {
+    const pad = 10;
+    const minX = halfW + pad;
+    const maxX = LCD_WIDTH - halfW - pad;
+    if (minX >= maxX) return LCD_WIDTH / 2;
+    return Math.max(minX, Math.min(maxX, x));
+  }
+
+  /** Pull left/right column floats toward stage center before edge clamp. */
+  private inwardFloatX(x: number): number {
+    const mid = LCD_WIDTH / 2;
+    const pull = 16;
+    if (x < mid) return x + pull;
+    if (x > mid) return x - pull;
+    return x;
+  }
+
   private spawnDigitFloat(delta: number, x: number, y: number): void {
     const strip = delta > 0 ? this.healDigits : this.hurtDigits;
     const digits = String(Math.abs(delta | 0));
     if (strip) {
       const row = strip.buildRow(digits);
-      row.pivot.set(row.width / 2, 0);
-      row.position.set(x, y);
+      // Prefer cellW×len over row.width so clamp works before layout settles.
+      const halfW = Math.max(row.width, digits.length * strip.cellW) / 2;
+      row.pivot.set(halfW, 0);
+      row.position.set(this.clampFloatX(this.inwardFloatX(x), halfW), y);
       this.floatHost.addChild(row);
       this.animateFloatNode(row, y, 1500, 0.032);
       return;
@@ -2461,7 +2561,9 @@ export class BattleScreen extends Container {
   ): void {
     const lab = new BitmapLabel();
     lab.anchor.set(0.5, 0.5);
-    lab.position.set(x, y);
+    // Estimate half-width before async glyph layout (UC3 ~14px/glyph).
+    const halfW = Math.min(40, (text.length * 14) / 2);
+    lab.position.set(this.clampFloatX(this.inwardFloatX(x), halfW), y);
     this.floatHost.addChild(lab);
     void lab.setText(text, color, {
       outline: withOutline,
@@ -2585,7 +2687,8 @@ export class BattleScreen extends Container {
 
     const rows: SettleRow[] = [];
     if (arenaFdata) {
-      rows.push({ kind: "text", text: s.fdata.slice(0, 22), color: CBE.inkBody });
+      /* Keep 积分 + n胜/n负/n平 on one settle line. */
+      rows.push({ kind: "text", text: s.fdata.slice(0, 48), color: CBE.inkBody });
     } else {
       rows.push({ kind: "stat", label: "exp", value: formatSettleDelta(s.expGain) });
       rows.push({ kind: "stat", label: "gold", value: formatSettleDelta(s.goldGain) });

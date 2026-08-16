@@ -9,16 +9,25 @@ Status: implemented (PixiJS_web only; CBE 不做)
 1. 排行榜 / 结算排名：`score==0` 不计入。
 2. 切磋/比武 `4/3` 用药：纳入 duel 回合提交屏障（双方用药可推进），不再空 ack 卡死。
 3. 战后 `4/7` fdata + 地图 tip：`比武胜利/失败/平局 积分+N 当前积分M n胜/n负/n平/n轮空`。
-4. 比赛区间连胜（胜且未死；平/轮空/负不计，负清零）：1 敌将讨伐 … 2 双杀 … 6 势如破竹 … 11 天下无敌。**本场 LIVE 每档仅全场首个达成者**世界频道播报+音效（避免刷屏）；进 LIVE / 新 session / SETTLED 重开时清零档位掩码。Pixi **仅称号**按档着色（天下无敌红）。音效：`JHOnlineData/arena_kill_sfx/arena_kill_1..11.mp3`（切点见 `arena_kill_sfx/killstreak_segments.json`；**不受** BGM/「开关声音」影响）。
+4. 比赛区间连胜（胜且未死；平/轮空/负不计，负清零）：1 敌将讨伐 … 2 双杀 … 6 势如破竹 … 11 天下无敌。**本场 LIVE 每档仅全场首个达成者**世界频道播报+音效，并解锁对应 **文字称号**（id30–40）入列表；下次 LIVE 前可配戴，进 LIVE 清空。进 LIVE / SETTLED 重开进 LIVE 时清零档位掩码。Pixi 头顶/聊天 **仅称号**同色表着色（天下无敌红）。音效：Vite 打包 `assets/arena_kill_sfx/arena_kill_1..11.mp3`（`KillStreakSfx` `?url` 导入；勿只靠 `public/JHOnlineData/…`——dev 中间件曾拒绝子目录导致 400）。Web Audio + HTMLAudio 兜底，**不受** BGM/「开关声音」影响。
 4. 进场/比赛期间擂台内禁组队；进场与 scene_ready 自动解散；离线再上线重绑 `clientId`/`inArenaScene`（仍留在场地）。
 5. 进场/比赛期间同图仅同职业×同段位互见（含周围列表）；结算后恢复。
 
 ## 2026-08-15 连杀播报时机
 
-- 比赛开始后：全场**第一个**击杀（连胜1）→ `敌将讨伐`
+- 比赛开始后：全场**第一个**击杀（连胜1）→ `敌将讨伐`（播报+解锁称号）
 - 之后全场**第一个**连胜2 → `双杀`；3 → `大杀特杀` … 11+ → `天下无敌`
-- 同一档位后续达成者不再世界播报/播音效（个人连胜计数仍照常增减）
-- **仅 70 阶段**播报；10/20/…/50 段位只计连胜、不发世界条/音效
+- 同一档位后续达成者不再世界播报/解锁（个人连胜计数仍照常增减）
+- **仅 70 阶段**；10/20/…/50 段位只计连胜、不播报不解锁
+
+## 2026-08-15 比武连杀文字称号（Pixi only）
+
+- Catalog：称号 id **30–40**（敌将讨伐…天下无敌），`overheadResource=""`，Pixi 头顶 **画字**（颜色同连杀播报）。
+- 获得：70 段且**被世界播报**的首个达成者置 `arena_designation_mask` 对应 bit，立刻出现在 `1/23/1` 列表，可 `1/23/3` 配戴。
+- 清场：进入下一场 **LIVE** 时清全服 mask；若正配戴 30–40 则回退财富/等级称号并刷新 `onlineRoleTitle`。SETTLED→下次 LIVE 前可继续配戴。
+- 头顶文字色与世界播报称号色共用 `ARENA_TEXT_TITLE_COLORS`。
+- 结算冠亚季（`server_arena_titles`）不混入 designation。
+- **2026-08-15 修复**：配戴 30–40 后头顶要到重登才变——`applySelfDesignation` 曾 `if (gif)` 不写空串，旧财富/等级 GIF 残留，文字称号路径被挡住；现始终覆盖 `roleTitleGif`（含清空）。
 
 ## 2026-08-14 修复：仍能看见不同段位玩家
 
@@ -121,6 +130,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 - 计分：胜 +20、负 0、轮空 +20；对局超时 4 分钟平局双方 +10
 - 场次：5 分钟一轮；HUD 推送场次/倒计时/积分
 - 结算：每场活动独立排行；前 1–3 名冠军/亚军/季军（同职业同段覆盖）；1–10 可领后台配置奖励
+- 排行 UI：单行列表（名次/玩家/积分/奖励）；整行最多约 19 字（较旧 14 多约 5）；服务端 `rewardName` 为经验/铜币/酷宝/物品/装备汇总
 赏金擂台：见下文专节。
 
 ## 协议（Pixi WT kind=41）
@@ -129,7 +139,7 @@ Status: implemented (PixiJS_web only; CBE 不做)
 |--------|------|------|
 | 1 | req/resp | status |
 | 2 | req/resp | rank（job/bracket/page；rows 含 rewardName/Count；myReward*） |
-| 3 | req/resp | claim（成功时 `tip` GBK 明细 + 系统 `1/3/3` 同文案） |
+| 3 | req/resp | claim（`result`+`tip`：成功明细或失败原因；成功另推系统 `1/3/3`） |
 | 4 | req | leave → 30/1 回原场景 |
 | 5 | push | HUD（挂在 scene-sync poll） |
 

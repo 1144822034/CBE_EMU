@@ -520,6 +520,44 @@ static int vm_mock_service_connect(const char *host, u16 port, vm_mock_service_s
 static pthread_mutex_t g_vm_mock_service_protocol_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_vm_mock_persist_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Best-effort holder label for admin protocol_lock_timeout forensics.
+ * Updated only by the thread that currently owns the mutex. */
+static char g_vm_mock_protocol_lock_holder[96];
+static u32 g_vm_mock_protocol_lock_since_ms;
+
+static void vm_mock_protocol_lock_note(const char *who)
+{
+    if (who != NULL && who[0] != 0)
+        snprintf(g_vm_mock_protocol_lock_holder,
+                 sizeof(g_vm_mock_protocol_lock_holder),
+                 "%s",
+                 who);
+    else
+        g_vm_mock_protocol_lock_holder[0] = 0;
+    g_vm_mock_protocol_lock_since_ms = scheduler_get_tick_ms();
+}
+
+static void vm_mock_protocol_lock_clear(void)
+{
+    g_vm_mock_protocol_lock_holder[0] = 0;
+    g_vm_mock_protocol_lock_since_ms = 0;
+}
+
+static void vm_mock_protocol_lock_dump_holder(const char *reason)
+{
+    u32 nowMs = scheduler_get_tick_ms();
+    u32 holdMs = 0;
+    if (g_vm_mock_protocol_lock_since_ms != 0 &&
+        nowMs >= g_vm_mock_protocol_lock_since_ms)
+        holdMs = nowMs - g_vm_mock_protocol_lock_since_ms;
+    printf("[warn][mock-admin] protocol_lock_holder reason=%s holder=%s hold_ms=%u "
+           "evidence=shared-protocol-mutex\n",
+           reason ? reason : "-",
+           g_vm_mock_protocol_lock_holder[0] ? g_vm_mock_protocol_lock_holder : "-",
+           holdMs);
+    fflush(stdout);
+}
+
 /* HTTP management implementation depends on the shared helpers above. */
 #include "../web_admin_server.c"
 
@@ -1004,6 +1042,7 @@ static void *vm_mock_persist_worker_main(void *opaque)
 
         pthread_mutex_lock(&g_vm_mock_persist_write_mutex);
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        vm_mock_protocol_lock_note("persist-check");
         accountState = vm_mock_service_account_find(job->accountId);
         if (accountState == NULL ||
             accountState->persistGeneration != job->persistGeneration)
@@ -1020,6 +1059,7 @@ static void *vm_mock_persist_worker_main(void *opaque)
                        accountState->persistGeneration);
             }
         }
+        vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 
         if (!superseded)
@@ -1042,6 +1082,7 @@ static void *vm_mock_persist_worker_main(void *opaque)
 
         flushEndMs = scheduler_get_tick_ms();
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        vm_mock_protocol_lock_note("persist-complete");
         accountState = vm_mock_service_account_find(job->accountId);
         if (accountState != NULL)
         {
@@ -1078,6 +1119,7 @@ static void *vm_mock_persist_worker_main(void *opaque)
                     accountState, job->accountId);
             }
         }
+        vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 
         if (didFlush)
@@ -1194,6 +1236,7 @@ static void vm_mock_service_persist_try_enqueue_account(
         u32 flushStartMs = scheduler_get_tick_ms();
 
         accountState->persistFlushBusy = false;
+        vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
         pthread_mutex_lock(&g_vm_mock_persist_write_mutex);
         didFlush = vm_net_mock_role_db_save_relational_ex(
@@ -1211,6 +1254,7 @@ static void vm_mock_service_persist_try_enqueue_account(
             NULL);
         pthread_mutex_unlock(&g_vm_mock_persist_write_mutex);
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        vm_mock_protocol_lock_note("persist-sync-fallback");
         if (didFlush &&
             accountState->persistGeneration == job->persistGeneration &&
             accountState->persistDirtySerial == job->persistDirtySerial)
@@ -1254,7 +1298,9 @@ static void vm_mock_service_flush_deferred_role_db(
         return;
 
     pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+    vm_mock_protocol_lock_note("persist-enqueue");
     vm_mock_service_persist_try_enqueue_account(accountState, logAccountId);
+    vm_mock_protocol_lock_clear();
     pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
 }
 
@@ -1334,6 +1380,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
     protocolWaitStartMs = scheduler_get_tick_ms();
     pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
     protocolLocked = true;
+    vm_mock_protocol_lock_note("game-handle");
     protocolLockMs = scheduler_get_tick_ms();
     protocolWaitMs = protocolLockMs >= protocolWaitStartMs ?
                          protocolLockMs - protocolWaitStartMs : 0;
@@ -1347,6 +1394,7 @@ static int vm_net_mock_service_handle_client(vm_mock_service_socket client,
             protocolHoldMs = protocolUnlockMs >= protocolLockMs ?              \
                                  protocolUnlockMs - protocolLockMs : 0;         \
             protocolLocked = false;                                            \
+            vm_mock_protocol_lock_clear();                                     \
             pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);           \
         }                                                                      \
     } while (0)

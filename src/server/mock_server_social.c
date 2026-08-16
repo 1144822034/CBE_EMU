@@ -4968,6 +4968,11 @@ static bool vm_net_mock_scene_role_seeds_contain_client(const vm_net_mock_scene_
  * set.  Must run on both baseline and delta polls: the baseline path used to
  * early-return after 1/2/10, leaving peerSync[].visible stuck for players who
  * already left to another map — the client kept rendering them with no 1/2/6.
+ *
+ * Also runs after arena nearby invalidate: that path clears visible=false
+ * without emitting 1/2/6, so requiring visible==true left cross-bracket
+ * ghosts on the Pixi map forever.  Any peerSync with a known actorId that is
+ * not in the current seed set must be removed on the wire.
  */
 static int vm_net_mock_append_stale_peer_remove6_objects(
     u8 *out,
@@ -4984,7 +4989,7 @@ static int vm_net_mock_append_stale_peer_remove6_objects(
     for (u32 i = 0; i < VM_MOCK_SERVICE_PEER_SYNC_MAX; ++i)
     {
         vm_mock_service_peer_sync *peerSync = &observer->peerSync[i];
-        if (!peerSync->visible || peerSync->sourceClientId == 0 ||
+        if (peerSync->sourceClientId == 0 ||
             vm_net_mock_scene_role_seeds_contain_client(seeds, roleCount,
                                                         peerSync->sourceClientId))
         {
@@ -4999,7 +5004,7 @@ static int vm_net_mock_append_stale_peer_remove6_objects(
             }
             ++appended;
         }
-        peerSync->visible = false;
+        memset(peerSync, 0, sizeof(*peerSync));
     }
     return appended;
 }
@@ -7402,12 +7407,23 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
      * work → skip seed walk + peerSync scans.  Solo hangup maps spend most
      * polls here; multiplayer maps with other visible players still fall
      * through to the baseline/delta builders below.
+     *
+     * Must NOT skip while chestAnnounce* is pending: rare 7/15 coalesce arms
+     * a 500ms deferred [世] flush inside append_scene_sync_chat_objects.  Solo
+     * idle used to return 0 here forever, so the pending crystal stuck until a
+     * later different rare open flushed it — world announced the old crystal
+     * on an open that did not roll it (2026-08-14).
+     *
+     * Must NOT skip arena HUD either: bracket isolation / empty venue makes
+     * hasOtherPlayers false, and the old return starved 41/5 so the top
+     * 「比武 进场/比赛」strip never refreshed (2026-08-14).
      */
     if (objectCount == 0 &&
         !npcCatalogAppended &&
         !taskPromptRefreshAppended &&
         !observer->sparResultMessageArmed &&
         observer->chatNoticeCount == 0 &&
+        observer->chestAnnounceCount == 0 &&
         !observer->systemWelcomeQueued &&
         !observer->worldChatHistoryQueued)
     {
@@ -7460,7 +7476,31 @@ static u32 vm_net_mock_build_scene_sync_poll_response(u8 *out, u32 outCap)
             peer = peer->next;
         }
         if (!hasSocial && !hasPeerVisible && !hasOtherPlayers && !hasTrade)
+        {
+            /*
+             * Solo / filtered venue: emit a HUD-only WT so 41/5 still reaches
+             * Pixi.  Falling through to the full seed walk is unnecessary and
+             * used to race with other early returns that starved the strip.
+             */
+            if (vm_mock_arena_poll_needs_body(observer))
+            {
+                if (vm_net_mock_append_arena_hud_object(out, outCap, &pos))
+                {
+                    objectCount = 1;
+                    if (vm_net_mock_append_wager_event_object(out, outCap, &pos))
+                        objectCount = (u8)(objectCount + 1u);
+                    if (vm_net_mock_append_auction_event_object(out, outCap, &pos))
+                        objectCount = (u8)(objectCount + 1u);
+                    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+                    printf("[info][mock-service] scene_sync_poll arena_hud_only "
+                           "observer=%08x scene=%s objects=%u resp=%u "
+                           "evidence=idle-venue-hud\n",
+                           observer->clientId, scene, objectCount, pos);
+                    return pos;
+                }
+            }
             return 0;
+        }
     }
 
     roleCount = vm_net_mock_build_scene_role_seeds(scene,

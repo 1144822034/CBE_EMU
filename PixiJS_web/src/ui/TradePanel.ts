@@ -18,6 +18,7 @@ import type { BagItem } from "../net/protocolExtras";
 import type { TradeOfferItem, TradeOfferView } from "../net/protocolSocial";
 import { isTradeableItem, qualityColor } from "../resources/itemCatalog";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type TradeAction =
   | "pick_item"
@@ -680,16 +681,41 @@ export class TradePanel extends Container {
         }),
       );
     });
-    if (this.bagScroll > 0) {
-      this.addLabel("▲", x + w - 18, midY + 34, CBE.inkMint);
-    }
-    if (this.bagScroll + BAG_PAGE_SIZE < this.bag.length) {
-      this.addLabel(
-        "▼",
-        x + w - 18,
-        midY + 18 + Math.min(BAG_PAGE_SIZE, this.bag.length) * 16,
-        CBE.inkMint,
-      );
+    if (this.bag.length > BAG_PAGE_SIZE) {
+      const pages = Math.max(1, Math.ceil(this.bag.length / BAG_PAGE_SIZE));
+      const page = Math.floor(this.bagScroll / BAG_PAGE_SIZE) + 1;
+      const navY = midY + 18 + (1 + Math.min(BAG_PAGE_SIZE, this.bag.length)) * 16;
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 8,
+        y: navY,
+        w: w - 16,
+        page,
+        pages,
+        addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+        onPrev: () => {
+          this.bagScroll = Math.max(0, this.bagScroll - BAG_PAGE_SIZE);
+          const row = this.configRowAt(this.listCursor);
+          if (row?.kind === "bag" && row.index >= this.bagScroll + BAG_PAGE_SIZE) {
+            this.listCursor = this.bagScroll + 1;
+          }
+          if (row?.kind === "bag" && row.index < this.bagScroll) {
+            this.listCursor = this.bagScroll + 1;
+          }
+          this.redraw();
+        },
+        onNext: () => {
+          const maxScroll = Math.max(0, this.bag.length - BAG_PAGE_SIZE);
+          this.bagScroll = Math.min(maxScroll, this.bagScroll + BAG_PAGE_SIZE);
+          const row = this.configRowAt(this.listCursor);
+          if (row?.kind === "bag" && row.index < this.bagScroll) {
+            this.listCursor = this.bagScroll + 1;
+          }
+          this.redraw();
+        },
+      });
     }
   }
 

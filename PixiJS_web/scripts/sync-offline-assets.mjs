@@ -105,6 +105,18 @@ console.log(`[sync-offline-assets] JHOnlineData ← ${dataSrc}`);
 rmrf(dataDest);
 copyDir(dataSrc, dataDest);
 
+/* Pixi arena kill-streak VO: kept outside wiped JHOnlineData tree. */
+const arenaSfxSrc = path.join(pixiRoot, "assets", "arena_kill_sfx");
+const arenaSfxDest = path.join(dataDest, "arena_kill_sfx");
+if (fs.existsSync(arenaSfxSrc)) {
+  copyDir(arenaSfxSrc, arenaSfxDest);
+  console.log(`[sync-offline-assets] arena_kill_sfx ← ${arenaSfxSrc}`);
+} else {
+  console.warn(
+    "[sync-offline-assets] missing assets/arena_kill_sfx (kill-streak VO skipped)",
+  );
+}
+
 const skySrc = resolveFont16Sky();
 if (!skySrc) {
   console.error("[sync-offline-assets] missing font_16_sky.uc3");

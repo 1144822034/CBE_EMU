@@ -7,8 +7,6 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
-  drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { TaskCandidateRow, TaskListRow } from "../net/protocolExtras";
@@ -22,6 +20,13 @@ import {
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
+import {
+  listShellBounds,
+  listShellStepPage,
+  paintListShellBody,
+  paintListShellChrome,
+  type ListShellCtx,
+} from "./listPanelShell";
 
 export type TaskTab = "accepted" | "candidates";
 export type TaskAction = "detail" | "abandon" | "accept" | "refresh";
@@ -225,10 +230,13 @@ export class TaskPanel extends Container {
     return ["详情", "接取", "返回"];
   }
 
-  private listPageStart(): number {
-    const rows = this.currentRows();
-    if (!rows.length) return 0;
-    return Math.floor(this.listCursor / LIST_PAGE_SIZE) * LIST_PAGE_SIZE;
+  private shellCtx(): ListShellCtx {
+    return {
+      host: this,
+      box: this.box,
+      hits: this.rowHits,
+      addLabel: (t, x, y, c) => this.addLabel(t, x, y, c),
+    };
   }
 
   private addLabel(text: string, px: number, py: number, color: number): void {
@@ -244,15 +252,10 @@ export class TaskPanel extends Container {
     this.labels = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
-    const x = 8;
-    const y = 28;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - 40;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
-    const title = "任务列表";
-    const pillW = Math.min(100, title.length * 12 + 24);
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, 20);
-    this.addLabel(title, LCD_WIDTH / 2 - pillW / 2 + 8, y + 9, CBE.ink);
+    const bounds = listShellBounds();
+    const { x, y, w, h } = bounds;
+    const ctx = this.shellCtx();
+    paintListShellChrome(ctx, "任务列表", CBE.bgDeep, bounds);
 
     const tabY = y + 30;
     this.addLabel(
@@ -319,7 +322,9 @@ export class TaskPanel extends Container {
           });
         }
         this.rowHits.push(
-          attachRowPointerHit(this, x + 6, tabY + 16, w - 12, h - 70, () => this.confirm()),
+          attachRowPointerHit(this, x + 6, tabY + 16, w - 12, h - 70, () =>
+            this.confirm(),
+          ),
         );
         return;
       }
@@ -350,71 +355,66 @@ export class TaskPanel extends Container {
       }
 
       const rows = this.currentRows();
-      const start = this.listPageStart();
-      const pageRows = rows.slice(start, start + LIST_PAGE_SIZE);
-      let ly = tabY + 18;
-      if (!pageRows.length) {
+      if (!rows.length) {
         this.addLabel(
           this.tab === "accepted" ? "(无已接任务)" : "(无可接任务)",
           x + 10,
-          ly,
+          tabY + 18,
           CBE.inkLabel,
         );
-        this.addLabel("确定·刷新", x + 10, ly + 18, CBE.inkLabel);
+        this.addLabel("确定·刷新", x + 10, tabY + 36, CBE.inkLabel);
         this.rowHits.push(
-          attachRowPointerHit(this, x + 6, ly - 1, w - 12, 40, () => this.confirm()),
+          attachRowPointerHit(this, x + 6, tabY + 17, w - 12, 40, () =>
+            this.confirm(),
+          ),
         );
       } else {
-        pageRows.forEach((row, i) => {
-          const idx = start + i;
-          const sel = idx === this.listCursor;
-          if (sel) {
-            this.box.rect(x + 6, ly - 1, w - 12, 26).fill({ color: CBE.select });
-          }
-          this.addLabel(row.name.slice(0, 16), x + 10, ly, sel ? CBE.ink : CBE.inkMint);
-          this.addLabel(row.subtitle.slice(0, 18), x + 12, ly + 12, CBE.inkLabel);
-          const hitY = ly;
-          this.rowHits.push(
-            attachRowPointerHit(this, x + 6, hitY - 1, w - 12, 26, () => {
-              this.listCursor = idx;
-              this.redraw();
-              this.confirm();
-            }),
-          );
-          ly += 28;
-        });
-      }
-      const pages = Math.max(1, Math.ceil(Math.max(1, rows.length) / LIST_PAGE_SIZE));
-      const page = Math.floor(this.listCursor / LIST_PAGE_SIZE) + 1;
-      this.addLabel(
-        `${this.tab === "accepted" ? "已接" : "可接"} ${page}/${pages}`,
-        x + 10,
-        y + h - 18,
-        CBE.inkLabel,
-      );
-      if (pages > 1) {
-        attachPageNavButtons({
-          host: this,
-          hits: this.rowHits,
-          box: this.box,
-          x: x + 8,
-          y: y + h - 40,
-          w: w - 16,
-          page,
-          pages,
-          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
-          onPrev: () => {
-            this.listCursor = Math.max(0, start - LIST_PAGE_SIZE);
+        paintListShellBody({
+          ctx,
+          x,
+          listTop: tabY + 18,
+          w,
+          footY: y + h - 36,
+          rows: rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
+          cursor: this.listCursor,
+          pageSize: LIST_PAGE_SIZE,
+          dualLine: true,
+          paging: "local",
+          onRow: (abs) => {
+            this.listCursor = abs;
+            this.redraw();
+            this.confirm();
+          },
+          onPrevPage: () => {
+            this.listCursor = listShellStepPage(
+              this.listCursor,
+              rows.length,
+              LIST_PAGE_SIZE,
+              -1,
+            );
             this.redraw();
           },
-          onNext: () => {
-            this.listCursor = Math.min(
-              Math.max(0, rows.length - 1),
-              start + LIST_PAGE_SIZE,
+          onNextPage: () => {
+            this.listCursor = listShellStepPage(
+              this.listCursor,
+              rows.length,
+              LIST_PAGE_SIZE,
+              1,
             );
             this.redraw();
           },
         });
+        const infoPage = Math.floor(this.listCursor / LIST_PAGE_SIZE) + 1;
+        const infoPages = Math.max(
+          1,
+          Math.ceil(rows.length / LIST_PAGE_SIZE),
+        );
+        this.addLabel(
+          `${this.tab === "accepted" ? "已接" : "可接"} ${infoPage}/${infoPages}`,
+          x + 10,
+          y + h - 18,
+          CBE.inkLabel,
+        );
       }
     } finally {
       drawPanelTipOverlay(this, this.toast);

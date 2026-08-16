@@ -1,40 +1,43 @@
 # PixiJS 战内[自动]与挂机开关分离
 
-日期：2026-08-08
+日期：2026-08-08（2026-08-16 对齐 gateway prefer）
 
 ## 需求
 
 1. 战斗菜单 `[自动]` 单独开关，与世界 HUD / 菜单「挂机」分离。
-2. `[自动]` **不**自动遇怪：仅在玩家已进战后，按挂机技能设置或上一手玩家操作自动提交 `4/2`。
+2. `[自动]` **不**自动遇怪：仅在玩家已进战后自动出手。
 3. 菜单「挂机战斗」选技能时**只记录** `hangupSkillOperate`，不调用 `startHangup`。
 4. 未挂机时点 HUD 挂机按钮：先弹技能菜单，确认后本地 `startHangup()`（客户端 `4/1` 遇怪环）；已挂机再点则本地 `stopHangup()`。
+5. `[自动]` 出手与经典 CBE 对齐：gateway 记技能 + poll 合成；客户端点「关闭」或手动操作后再停。
 
 ## 契约
 
 | 开关 | 状态 | 遇怪 | 战内出手 |
 |------|------|------|----------|
-| `[自动]` | `autoBattleActive` | 否（玩家碰撞/挑战等） | `lastBattleOperate ?? hangupSkillOperate` |
-| 挂机 | `hangupActive`（客户端遇怪环） | 是（本地定时 `4/1`） | `hangupSkillOperate` |
+| `[自动]` | `autoBattleActive` + gateway `prefer` | 否 | poll `auto_choose_operate`（`LastOperate`） |
+| 挂机 | `hangupActive`（客户端遇怪环） | 是（本地定时 `4/1`） | 仅挂机、未开自动时客户端 `4/2` |
+| 二者同时 | 均可为真 | 挂机环仍遇怪 | 以 gateway prefer 为准（不开客户端 `4/2`） |
 
-二者均可同时为真；出手路径共用 `shouldInBattleAuto()` / `fireInBattleAuto`。
+### Gateway `1/4/11`
+
+| 方向 | 字段 | 含义 |
+|------|------|------|
+| 开 | `type=1` + `Operate` + `hangup=0` | prefer + HangupStyleFlagOk + arm pending；种 `LastOperate`；**不**武装 HangupLoop |
+| 关 | `type=0` | prefer=0，停 poll 合成；清 PreferNoHangup |
+| CBE | 仅 `type` | 省略 `hangup` → 组队仍可按原逻辑武装 HangupLoop |
+
+服务端标志 `g_mockBattleAutoPreferNoHangup`：Pixi `hangup=0` 置位，避免跨场 / 组队把 `[自动]` 变成挂机遇怪。
 
 ## 修改点
 
-- `GameSession`：`autoBattleActive`、`lastBattleOperate`、`shouldInBattleAuto`、`inBattleAutoOperate`、`noteManualBattleOperate`
-- `BattleScreen.runMenu("自动")` → `onAutoToggle`
-- `main.ts`：进战 / 回合更新走 `fireInBattleAuto`；action `260` 只记技能；攻击/仙术写入 `lastBattleOperate`
-- 战内右上角条：`自动战斗中` + `关闭`（`setAutoBattleActive` / `closeAutoBattle`）；手动攻击/仙术/物品/逃跑或点关闭 → `onAutoCancel` 清开关并恢复卷轴菜单
-- 挂机进战时同位置条：`挂机战斗中` + `关闭`（`setHangupActive` / `closeHangup` → 本地清条 + `stopHangup()`）；本场可打完，不再续挂（无服端「下一场完成后挂机停止」）
-- 再开自动不动作：出手不再依赖 `session.inBattle`（战中场景包可能清掉）；`armInBattleAuto` 在座位可操作前重试；`onAutoReady` 在回合播完后补射
-
-## 未接
-
-- 真包 `1/4/11` 旗标与菜单隐藏仍 unresolved；当前为客户端等效行为。
+- `protocolExtras.buildBattleAutoFlagRequest`
+- `GameSession.setBattleAutoPrefer` / `shouldClientDriveInBattleAuto`
+- `main.ts`：开/关自动走 `4/11`；`fireInBattleAuto` / `armInBattleAuto` 仅挂机单开
+- `mock_server_battle.c`：解析 `Operate` / `hangup`；team prepare / hangup start 尊重 PreferNoHangup
 
 ## 验证
 
-1. 菜单挂机战斗选技能 → 聊天「已记录技能…」且**不**出现「已开始挂机」
-2. 未挂机点 HUD 挂机 → 技能菜单 → 选技能后开战 + 用所选技能出手；战内右上角见「挂机战斗中」+「关闭」
-3. 挂机中再点 HUD 挂机 / 战内关闭 → 「已停止挂机」；本场后不再续挂
-4. 手动遇怪 → 菜单开 `[自动]` → 用上一手或挂机技能连打；关自动后恢复手动菜单
-5. 仅开自动、不开挂机 → 打完一局后**不会**自动再遇怪；条为「自动战斗中」
+1. 手动遇怪 → 菜单开 `[自动]` → 日志 `auto11_seed_operate` + `hangup-style-arm`，随后 `auto-poll` 放同一技能；关自动 / 点关闭 → `type=0 prefer=0`，恢复手动菜单
+2. 仅开自动、不开挂机 → 打完一局**不会**自动再遇怪；再遇怪若仍开自动则开战时重发 `4/11 hangup=0` 续 prefer
+3. 挂机 alone → 仍客户端 `4/2`；挂机 + 自动 → 出手走 poll，遇怪仍本地 `4/1`
+4. CBE 中途按 1（无 hangup 字段）行为不变

@@ -41,6 +41,7 @@ import {
   buildBattleEscapeRequest,
   buildBattleItemUseRequest,
   buildBattleOperateRequest,
+  buildBattleAutoFlagRequest,
   buildBagOpenRequest,
   buildChallengeConfirmRequest,
   buildChatRequest,
@@ -55,6 +56,8 @@ import {
   buildEnhanceWashOpenRequest,
   buildEnhanceWashMaterialRequest,
   buildCrystalCombineRequest,
+  buildCrystalFragmentCombineRequest,
+  buildDreamBadgeCombineRequest,
   parseEnhanceOpenResult,
   parseEnhancePreviewResult,
   parseEnhanceConfirmResult,
@@ -64,10 +67,20 @@ import {
   parseEnhanceWashPreviewResult,
   parseEnhanceWashConfirmResult,
   parseCrystalCombineResult,
+  parseCrystalFragmentCombineResult,
+  parseDreamBadgeCombineResult,
   buildSkillForgetRequest,
   parseSkillForgetResult,
   SKILL_FORGET_COST_COPPER,
+  canCombineCrystalFragment,
+  canCombineDreamBadge,
   canCombineEnhanceCrystal,
+  CRYSTAL_FRAGMENT_COMBINE_COST,
+  DREAM_BADGE_COMBINE_COST,
+  ENHANCE_CRYSTAL_FIRST,
+  isCrystalFragment,
+  isDreamBadge,
+  isDreamBadgeEquipId,
   isEnhanceCrystal,
   type EnhanceOpenResult,
   type EnhancePreviewResult,
@@ -313,6 +326,7 @@ import {
 } from "../resources/skill";
 import { lookupItemSync, warmItemCatalogs, BACKPACK_EXPAND_ITEM_ID, BACKPACK_EXPAND_MAX_CAPACITY } from "../resources/itemCatalog";
 import { monsterActorForEnemyId } from "../resources/monsterLevels";
+import { setResourceExchange } from "../resources/loader";
 
 export type SessionStatus = {
   mode: string;
@@ -514,8 +528,8 @@ export class GameSession {
    */
   onBackgroundGameplayTick: (() => void) | null = null;
   /**
-   * In-battle [自动] switch (client-side 4/11). No auto-encounter — only
-   * auto-operates after the player is already in battle.
+   * In-battle [自动] switch. Gateway 4/11 prefer + poll synth (no client 4/2).
+   * hangup=0 so it does not arm map HangupLoop / auto-encounter.
    */
   autoBattleActive = false;
   /**
@@ -647,6 +661,7 @@ export class GameSession {
     this.codeVersion = await loadClientCodeVersion();
     this.transport = await connectLiveTransport();
     this.bindTransportPush(this.transport);
+    setResourceExchange((flags, wt) => this.transport!.exchange(flags, wt));
     this.setPhase("connected", `${this.transport.mode} · codeVersion=${this.codeVersion}`);
     await this.fetchServerList();
   }
@@ -668,6 +683,7 @@ export class GameSession {
     this.stopTitleKeepalive();
     this.transport?.close();
     this.transport = null;
+    setResourceExchange(null);
     this.inBattle = false;
     this.hangupActive = false;
     this.autoBattleActive = false;
@@ -696,6 +712,7 @@ export class GameSession {
     this.stopTitleKeepalive();
     this.transport?.close();
     this.transport = null;
+    setResourceExchange(null);
 
     this.servers = [];
     this.roles = [];
@@ -816,6 +833,7 @@ export class GameSession {
     this.stopTitleKeepalive();
     this.transport?.close();
     this.transport = null;
+    setResourceExchange(null);
     this.inBattle = false;
     this.roleSelectInFlight = false;
     this.setPhase("account-kicked", reason);
@@ -1027,6 +1045,11 @@ export class GameSession {
       // Live title path: 1/6+1/15 with actorinfo scene — not immediate 30/1.
       if (!this.scene) {
         throw new Error("选角后未解析到场景（1/6 actorinfo.scene），检查角色数据");
+      }
+      if ((this.selectedRoleId >>> 0) !== (roleId >>> 0)) {
+        throw new Error(
+          `选角串号：请求角色 ${roleId}，应答角色 ${this.selectedRoleId}`,
+        );
       }
       // Pin actorinfo scene for the rest of selectRole (follow-up soft 30/2 must match).
       this.roleEnterSceneLock = this.scene;
@@ -1635,24 +1658,82 @@ export class GameSession {
   }
 
   /**
-   * Client-side 4/2 auto for map [自动] and Pixi hangup (same as collide fight).
+   * UI: hangup or [自动] hides operate menu / shows banner.
    */
   shouldInBattleAuto(): boolean {
     return this.autoBattleActive || this.hangupActive;
   }
 
   /**
-   * Hangup always uses the configured hangup skill; [自动] prefers last manual.
+   * Client still drives 4/2 only for Pixi hangup-alone.
+   * [自动] (with or without hangup) uses gateway prefer + poll synth.
+   */
+  shouldClientDriveInBattleAuto(): boolean {
+    return this.hangupActive && !this.autoBattleActive;
+  }
+
+  /**
+   * Hangup prefers configured hangup skill; if unset (0) fall back to last
+   * manual / [自动] memory so screen-off hangup alone does not lock 普攻.
+   * [自动] prefers last manual, then hangup skill.
    */
   inBattleAutoOperate(): number {
-    if (this.hangupActive) return this.hangupSkillOperate | 0;
+    if (this.hangupActive && !this.autoBattleActive) {
+      if ((this.hangupSkillOperate | 0) !== 0) return this.hangupSkillOperate | 0;
+      if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
+      return 0;
+    }
     if (this.lastBattleOperate != null) return this.lastBattleOperate | 0;
     return this.hangupSkillOperate | 0;
   }
 
-  /** Record a player-chosen battle operate for subsequent [自动] rounds. */
-  noteManualBattleOperate(operate: number): void {
-    this.lastBattleOperate = operate | 0;
+  /**
+   * Record a battle operate for subsequent [自动] / hangup fallback.
+   * `source: "auto"` — hangup/[自动] 普攻 must not erase a remembered skill
+   * (mirrors server remember_last_operate synth guard).
+   */
+  noteManualBattleOperate(
+    operate: number,
+    source: "manual" | "auto" = "manual",
+  ): void {
+    const op = operate | 0;
+    if (
+      source === "auto" &&
+      op === 0 &&
+      this.lastBattleOperate != null &&
+      (this.lastBattleOperate | 0) !== 0
+    ) {
+      return;
+    }
+    this.lastBattleOperate = op;
+  }
+
+  /**
+   * Open/close gateway in-battle auto (1/4/11).
+   * On: seed Operate + hangup=0; Off: type=0 stops poll synth.
+   * Omit Operate when unset — seeding Operate=0 wipes server LastOperate and
+   * locks later poll synth to 普攻 (screen-off cross-fight re-arm).
+   */
+  async setBattleAutoPrefer(on: boolean): Promise<void> {
+    if (!this.transport) {
+      this.autoBattleActive = on;
+      return;
+    }
+    this.autoBattleActive = on;
+    const seedOpts: { operate?: number; hangup: number } = { hangup: 0 };
+    if (this.lastBattleOperate != null) {
+      // Explicit memory including intentional 普攻 (0).
+      seedOpts.operate = this.lastBattleOperate | 0;
+    } else if ((this.hangupSkillOperate | 0) !== 0) {
+      seedOpts.operate = this.hangupSkillOperate | 0;
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      on
+        ? buildBattleAutoFlagRequest(1, seedOpts)
+        : buildBattleAutoFlagRequest(0),
+    );
+    this.handleBodies(bodies);
   }
 
   /** Battle medicine/flask: WT 1/4/3 { index=ally/self wire, seq }. */
@@ -4172,6 +4253,120 @@ export class GameSession {
     return fail("合成无响应");
   }
 
+  /**
+   * PixiJS-only: 10×玄晶碎片(900) → 1×一级玄晶(901).
+   * Pre-checks count/space; server 29/11 is authoritative.
+   */
+  async combineCrystalFragment(
+    itemId: number,
+    seq: number,
+  ): Promise<CrystalCombineResult> {
+    const fail = (message: string, result = 0): CrystalCombineResult => ({
+      result,
+      ok: false,
+      message,
+      srcItemId: itemId,
+      destItemId: ENHANCE_CRYSTAL_FIRST,
+      remaining: 0,
+      destCount: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(seq > 0) || !isCrystalFragment(itemId)) {
+      return fail("不是玄晶碎片", 2);
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    const count = row?.count ?? 0;
+    if (!canCombineCrystalFragment(itemId, count)) {
+      return fail("碎片不足10个", 4);
+    }
+    const destId = ENHANCE_CRYSTAL_FIRST;
+    const destExists = this.bagItems.some(
+      (it) => it.itemId === destId && it.count > 0,
+    );
+    if (!destExists) {
+      const cap =
+        this.characterStats?.backpackCapacity ||
+        Math.max(20, this.bagItems.length);
+      const empty = Math.max(0, (cap | 0) - this.bagItems.length);
+      const freesSlot = count === CRYSTAL_FRAGMENT_COMBINE_COST;
+      if (empty < 1 && !freesSlot) {
+        return fail("背包空间不足", 3);
+      }
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildCrystalFragmentCombineRequest(seq),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseCrystalFragmentCombineResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("合成无响应");
+  }
+
+  /**
+   * PixiJS-only: 300×梦境徽章(840) → 1×自选梦境装备(40065..40088).
+   * Pre-checks count/space; server 29/12 is authoritative.
+   */
+  async combineDreamBadge(
+    itemId: number,
+    seq: number,
+    destItemId: number,
+  ): Promise<CrystalCombineResult> {
+    const fail = (message: string, result = 0): CrystalCombineResult => ({
+      result,
+      ok: false,
+      message,
+      srcItemId: itemId,
+      destItemId: destItemId | 0,
+      remaining: 0,
+      destCount: 0,
+    });
+    if (!this.transport) return fail("未连接");
+    if (!(seq > 0) || !isDreamBadge(itemId)) {
+      return fail("不是梦境徽章", 2);
+    }
+    if (!isDreamBadgeEquipId(destItemId)) {
+      return fail("请选择梦境装备", 6);
+    }
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    const count = row?.count ?? 0;
+    if (!canCombineDreamBadge(itemId, count)) {
+      return fail("徽章不足300个", 4);
+    }
+    const cap =
+      this.characterStats?.backpackCapacity ||
+      Math.max(20, this.bagItems.length);
+    const empty = Math.max(0, (cap | 0) - this.bagItems.length);
+    const freesSlot = count === DREAM_BADGE_COMBINE_COST;
+    if (empty < 1 && !freesSlot) {
+      return fail("背包空间不足", 3);
+    }
+    const bodies = await this.transport.exchange(
+      0,
+      buildDreamBadgeCombineRequest(seq, destItemId),
+    );
+    this.handleBodies(bodies);
+    for (const body of bodies) {
+      try {
+        const packet = ingestPacket(body);
+        if (!packet) continue;
+        const parsed = parseDreamBadgeCombineResult(packet);
+        if (parsed) return parsed;
+      } catch {
+        /* skip */
+      }
+    }
+    return fail("合成无响应");
+  }
+
   async teamInvite(actorId: number): Promise<void> {
     if (!this.transport) return;
     const bodies = await this.transport.exchange(0, buildTeamInviteRequest(actorId));
@@ -4815,8 +5010,19 @@ export class GameSession {
       // Title 1/6.actorinfo is the role-select authority. Prefer it over a
       // concurrent deferred 30/1 — otherwise multi-role switch loads the prior map.
       const hardEnter = parseSceneEnter(packet);
-      const enter = roleEnter ?? hardEnter;
-      if (roleEnter) {
+      const roleEnterMismatch =
+        !!roleEnter &&
+        this.roleSelectInFlight &&
+        !!this.selectedRoleId &&
+        (roleEnter.roleId >>> 0) !== (this.selectedRoleId >>> 0);
+      if (roleEnterMismatch) {
+        console.error(
+          `[session] ignore 1/6 role mismatch want=${this.selectedRoleId} got=${roleEnter!.roleId} name=${roleEnter!.name}`,
+        );
+      }
+      const enter = roleEnterMismatch ? null : roleEnter ?? hardEnter;
+      if (roleEnter && !roleEnterMismatch) {
+        this.selectedRoleId = roleEnter.roleId >>> 0;
         this.hp = roleEnter.hp;
         // Title actorinfo hpMax is bare (pre wear-apply); current can exceed it.
         this.hpMax = Math.max(roleEnter.hpMax, roleEnter.hp, 1);

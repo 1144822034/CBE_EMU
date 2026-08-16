@@ -8,10 +8,15 @@ import {
   drawLocBanner,
   makePixelText,
 } from "./constants";
-import { BitmapLabel, UC3_CELL, wrapUiText } from "./BitmapLabel";
+import { BitmapLabel, UC3_CELL, measureUiTextWidth, wrapUiText } from "./BitmapLabel";
 import { DigitStrip, tryLoadUiTexture, uiSprite } from "./UiAssets";
 import { SLOT_FRAME_SIZE } from "./ItemArt";
-import { colorForChatType, type ChatEntry } from "./ChatPanel";
+import {
+  colorForChatEntry,
+  findArenaKillStreakTitle,
+  chatLineColorRuns,
+  type ChatEntry,
+} from "./ChatPanel";
 import {
   composeActorFrameIndex,
   loadActor,
@@ -90,8 +95,13 @@ const SOFT_H = 22;
 const CHAT_WRAP_CHARS = 14;
 const CHAT_VISIBLE_ROWS = 2;
 const CHAT_LINE_H = UC3_CELL;
-/** Party mates overlay map, stacked under EXP strip. */
-const PARTY_Y0 = WORLD_TOP_H + 1;
+/**
+ * Party mates under the HUD chrome, left of the map.
+ * Must clear SceneView map-corner status strip (修/拍/擂/[斗]/[练]/娱 @ y=4, 17px).
+ * Evidence: partyHost previously at WORLD_TOP_H+1 covered those badges (HUD above map).
+ */
+const MAP_STATUS_STRIP_BOTTOM = 4 + 17;
+const PARTY_Y0 = WORLD_TOP_H + MAP_STATUS_STRIP_BOTTOM + 2;
 const PARTY_SLOT_H = 30;
 const PARTY_FACE = PORTRAIT_INNER;
 const PARTY_MAX = 3;
@@ -115,6 +125,10 @@ export class WorldHud extends Container {
   /** Tap bottom chat strip → open ChatPanel. */
   onChat: (() => void) | null = null;
   onIcon: ((action: HudIconAction) => void) | null = null;
+  /** Tap self portrait → character status panel. */
+  onPortrait: (() => void) | null = null;
+  /** Tap party-strip mate portrait → that player's info. */
+  onPartyMate: ((mateId: number) => void) | null = null;
 
   private locText: BitmapLabel;
   private portraitHost = new Container();
@@ -128,6 +142,7 @@ export class WorldHud extends Container {
   private expDigits: DigitStrip | null = null;
   private hangLabel: BitmapLabel;
   private chatLines: BitmapLabel[] = [];
+  private chatStripHost = new Container();
   private chatLog: string[] = [];
   /** Longer history for ChatPanel (HUD still shows 2 lines). */
   private chatEntries: ChatEntry[] = [];
@@ -198,6 +213,15 @@ export class WorldHud extends Container {
     this.top.addChild(this.portraitFrameHost);
     this.portraitHost.position.set(PORTRAIT_X, PORTRAIT_Y);
     this.top.addChild(this.portraitHost);
+    // Hit covers frame (not only inner face) so empty/loading portrait still taps.
+    const portraitHit = hitArea(
+      PORTRAIT_FRAME_X,
+      PORTRAIT_FRAME_Y,
+      SLOT_FRAME_SIZE,
+      SLOT_FRAME_SIZE,
+    );
+    portraitHit.on("pointertap", () => this.onPortrait?.());
+    this.top.addChild(portraitHit);
 
     this.tiaoHost.position.set(TIAO_X, TIAO_Y);
     this.tiaoHost.addChild(this.hpFill, this.spFill);
@@ -247,9 +271,10 @@ export class WorldHud extends Container {
     for (let i = 0; i < CHAT_VISIBLE_ROWS; i++) {
       const line = new BitmapLabel();
       line.position.set(4, SOFT_H + 2 + i * CHAT_LINE_H);
-      this.bottom.addChild(line);
+      this.chatStripHost.addChild(line);
       this.chatLines.push(line);
     }
+    this.bottom.addChild(this.chatStripHost);
 
     this.menuHit = hitArea(2, 2, 26, 18);
     this.hangHit = hitArea(HANG_BTN_X, 0, HANG_BTN_W, SOFT_H);
@@ -558,8 +583,28 @@ export class WorldHud extends Container {
     tiaoHost.addChild(hpFill, spFill);
     root.addChild(tiaoHost);
 
+    const slot: PartySlot = {
+      root,
+      portrait,
+      crown,
+      hpFill,
+      spFill,
+      mateId: 0,
+    };
+    // Portrait frame hit only — bars stay non-interactive walk-through.
+    const faceHit = hitArea(
+      PORTRAIT_FRAME_X,
+      0,
+      SLOT_FRAME_SIZE,
+      SLOT_FRAME_SIZE,
+    );
+    faceHit.on("pointertap", () => {
+      if (slot.mateId) this.onPartyMate?.(slot.mateId);
+    });
+    root.addChild(faceHit);
+
     this.partyHost.addChild(root);
-    return { root, portrait, crown, hpFill, spFill, mateId: 0 };
+    return slot;
   }
 
   private paintPartyBars(
@@ -640,7 +685,13 @@ export class WorldHud extends Container {
   pushChat(
     line: string,
     type?: number,
-    meta?: { senderRoleId?: number; senderName?: string },
+    meta?: {
+      senderRoleId?: number;
+      senderName?: string;
+      color?: number;
+      streakTitle?: string;
+      streakColor?: number;
+    },
   ): void {
     const t =
       type ??
@@ -655,11 +706,22 @@ export class WorldHud extends Container {
               : line.startsWith("[私]")
                 ? 7
                 : 5);
+    const streak =
+      meta?.streakTitle && meta.streakColor != null
+        ? { streakTitle: meta.streakTitle, streakColor: meta.streakColor }
+        : (() => {
+            const hit = findArenaKillStreakTitle(line);
+            return hit
+              ? { streakTitle: hit.title, streakColor: hit.color }
+              : {};
+          })();
     this.chatEntries.unshift({
       type: t,
       text: line,
       senderRoleId: meta?.senderRoleId,
       senderName: meta?.senderName,
+      color: meta?.color,
+      ...streak,
     });
     this.chatEntries = this.chatEntries.slice(0, 80);
     this.chatHistory.unshift(line);
@@ -671,23 +733,43 @@ export class WorldHud extends Container {
   /** Newest messages → wrap ~14 CJK/line → paint first {@link CHAT_VISIBLE_ROWS} rows. */
   private refreshChatStrip(): void {
     const maxW = CHAT_WRAP_CHARS * UC3_CELL;
-    const rows: { text: string; color: number }[] = [];
+    type Row = { text: string; baseColor: number; entry: ChatEntry };
+    const rows: Row[] = [];
     for (const entry of this.chatEntries) {
       const raw = (entry.text ?? "").replace(/\s*\n\s*/g, " ").trim();
       if (!raw) continue;
-      const color = colorForChatType(entry.type);
+      const baseColor = colorForChatEntry(entry);
       for (const part of wrapUiText(raw, maxW, UC3_CELL)) {
-        rows.push({ text: part, color });
+        rows.push({ text: part, baseColor, entry });
         if (rows.length >= CHAT_VISIBLE_ROWS) break;
       }
       if (rows.length >= CHAT_VISIBLE_ROWS) break;
     }
+    /* Rebuild labels so streak title can use a second color on the same row. */
+    this.chatStripHost.removeChildren().forEach((c) => c.destroy());
+    this.chatLines = [];
     for (let i = 0; i < CHAT_VISIBLE_ROWS; i++) {
       const row = rows[i];
-      void this.chatLines[i]!.setText(row?.text ?? "", row?.color ?? CBE.inkChat, {
-        outline: false,
-        wordWrap: false,
-      });
+      const y = SOFT_H + 2 + i * CHAT_LINE_H;
+      if (!row) {
+        const empty = new BitmapLabel();
+        empty.position.set(4, y);
+        void empty.setText("", CBE.inkChat, { outline: false, wordWrap: false });
+        this.chatStripHost.addChild(empty);
+        this.chatLines.push(empty);
+        continue;
+      }
+      let x = 4;
+      const runs = chatLineColorRuns(row.text, row.baseColor, row.entry);
+      for (const run of runs) {
+        if (!run.text) continue;
+        const lab = new BitmapLabel();
+        lab.position.set(x, y);
+        void lab.setText(run.text, run.color, { outline: false, wordWrap: false });
+        this.chatStripHost.addChild(lab);
+        this.chatLines.push(lab);
+        x += measureUiTextWidth(run.text, UC3_CELL);
+      }
     }
   }
 

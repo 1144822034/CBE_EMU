@@ -1,5 +1,5 @@
 import { Container, Graphics } from "pixi.js";
-import { CBE, LCD_WIDTH, makePixelText } from "./constants";
+import { CBE, LCD_WIDTH, WORLD_TOP_H, makePixelText } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import type { ArenaHud as ArenaHudState } from "../net/protocolArena";
 
@@ -10,7 +10,7 @@ function fmtSec(sec: number): string {
   return `${m}:${r.toString().padStart(2, "0")}`;
 }
 
-/** Compact top strip while inside 比武擂台. */
+/** Compact strip under WorldHud chrome while inside 比武擂台. */
 export class ArenaHud extends Container {
   private bg = new Graphics();
   private line: BitmapLabel;
@@ -19,6 +19,9 @@ export class ArenaHud extends Container {
   constructor() {
     super();
     this.visible = false;
+    /* Below olive status (y72) so it is not covered by location/status art. */
+    this.y = WORLD_TOP_H;
+    this.zIndex = 40;
     this.addChild(this.bg);
     this.line = makePixelText("", 12, CBE.inkTip);
     this.line.x = 4;
@@ -46,6 +49,6 @@ export class ArenaHud extends Container {
     const text = `比武 ${phase} 第${state.round || 0}场 ${fmtSec(state.roundRemain)} 余${fmtSec(state.eventRemain)} 分${state.score}`;
     this.line.text = text;
     this.bg.clear();
-    this.bg.rect(0, 0, LCD_WIDTH, 16).fill({ color: CBE.bgDeep, alpha: 0.72 });
+    this.bg.rect(0, 0, LCD_WIDTH, 16).fill({ color: CBE.bgDeep, alpha: 0.82 });
   }
 }

@@ -10,6 +10,7 @@
 | 地图显示名 | 场景设计页可改：MySQL `server_scene_display_names` + 回写 SCE 具名传送 `0x16` 名牌并发布 |
 | 怪物显示名 | 怪物管理保存可改 `display_name`（目录表） |
 | 每日进入 | 场景设计页配置 `daily_limit` / `gold_cost`(金) / `kubao_cost`；`build_instance_enter_response` 发 30/1 前调用 `instance_enter_try_consume` 扣次+扣费，不足拒绝（对话 + 系统消息）；组包失败回滚 |
+| 每日挑战 | 同页 `challenge_daily_limit`（0=不限）；向导「挑战守关怪」首包 `4/10` 开战前 `instance_challenge_try_consume`；不足系统提示并取消开战 |
 | 商城 | 梦境内**允许**打开商城（原禁商城已取消） |
 | 禁仓库 | 梦境内不可用仓库：834 凭证使用拒绝（**`7/1 result=0` + `16/2` 提示**，避免只回 tip 卡 loading）；26/1 存取/菜单拒绝；pending 对话框丢弃；提示 `梦境副本禁止使用仓库。` |
 

@@ -18,14 +18,30 @@ import {
 import { composeMapRgba, parseMapPayload, type MapPreview } from "./map";
 import { sceneAssetCandidates } from "../net/protocol";
 import { jhOnlineDataUrl, publicAssetUrl } from "./publicUrl";
+import {
+  downloadNamedResourceViaWt,
+  namedResourceContentVersion,
+  resourceWireName,
+  wantsLiveResourceSync,
+  type ResourceExchange,
+} from "./wtUpdate";
 
 type CacheEntry = {
   buf: ArrayBuffer;
   /** Server `X-JH-Resource-Stamp` / ETag when known. */
   stamp: string | null;
+  /** WT18/7 content-version when installed from live. */
+  wtVersion: number | null;
 };
 
 const cache = new Map<string, CacheEntry>();
+
+/** Live CBMS exchange for WT18/7 (set from GameSession after connect). */
+let resourceExchange: ResourceExchange | null = null;
+
+export function setResourceExchange(exchange: ResourceExchange | null): void {
+  resourceExchange = exchange;
+}
 
 export type FetchResourceOpts = {
   /**
@@ -33,6 +49,8 @@ export type FetchResourceOpts = {
    * Default: auto for scene maps / e_* combat assets (CBE should_version_check).
    */
   revalidate?: boolean;
+  /** Skip WT18/7 even when a live exchange is armed. */
+  skipLiveSync?: boolean;
 };
 
 /**
@@ -108,6 +126,105 @@ export function invalidateResourceCache(name?: string): void {
   else cache.clear();
 }
 
+function cachePut(
+  name: string,
+  bytes: Uint8Array,
+  stamp: string | null,
+  wtVersion: number | null,
+): void {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  cache.set(name, {
+    buf: copy.buffer,
+    stamp,
+    wtVersion,
+  });
+}
+
+function looksLikeResourceEnvelope(bytes: Uint8Array): boolean {
+  if (bytes.length < 5) return false;
+  // LE u32 block_len + type, or bare type 1/2 LZSS — same as unwrapResource.
+  const b0 = bytes[0]!;
+  if (b0 === 1 || b0 === 2) return true;
+  const blockLen =
+    bytes[0]! | (bytes[1]! << 8) | (bytes[2]! << 16) | (bytes[3]! << 24);
+  if (blockLen === bytes.length - 4 && blockLen >= 1) {
+    const type = bytes[4]!;
+    return type === 1 || type === 2;
+  }
+  return bytes.length > 64;
+}
+
+async function fetchBundledBytes(
+  name: string,
+): Promise<{ bytes: Uint8Array; stamp: string | null } | null> {
+  try {
+    const res = await fetch(resourceUrl(name), { cache: "no-store" });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    return {
+      bytes: new Uint8Array(buf),
+      stamp: stampFromHeaders(res.headers),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Prefer live WT18/7 for scene shells (APK/Electron have no Vite stamp path).
+ * Falls back to bundled/HTTP bytes when offline or server has no leaf.
+ */
+async function syncLiveResource(
+  name: string,
+  local: Uint8Array | null,
+): Promise<Uint8Array | null> {
+  if (!resourceExchange || !wantsLiveResourceSync(name)) return null;
+  const wire = resourceWireName(name);
+  const localVer = local
+    ? namedResourceContentVersion(wire, local)
+    : 1;
+  try {
+    const result = await downloadNamedResourceViaWt(
+      resourceExchange,
+      wire,
+      localVer,
+    );
+    if (result.kind === "uptodate") {
+      if (local) {
+        cachePut(name, local, null, result.version);
+        return local;
+      }
+      return null;
+    }
+    if (result.kind === "payload") {
+      if (!looksLikeResourceEnvelope(result.bytes)) {
+        console.warn(
+          `[resource] wt18/7 reject ${name} wire=${wire} bytes=${result.bytes.length} reason=bad-envelope`,
+        );
+        return local;
+      }
+      try {
+        unwrapResource(result.bytes);
+      } catch (e) {
+        console.warn(
+          `[resource] wt18/7 reject ${name} wire=${wire} reason=unwrap-fail`,
+          e,
+        );
+        return local;
+      }
+      console.info(
+        `[resource] wt18/7 install ${name} wire=${wire} bytes=${result.bytes.length} ver=${result.version}`,
+      );
+      cachePut(name, result.bytes, `wt:${result.version}`, result.version);
+      return result.bytes;
+    }
+  } catch (e) {
+    console.warn(`[resource] wt18/7 failed ${name}`, e);
+  }
+  return null;
+}
+
 export async function fetchResourceBytes(
   name: string,
   opts?: FetchResourceOpts,
@@ -116,6 +233,17 @@ export async function fetchResourceBytes(
   const revalidate =
     opts?.revalidate ?? shouldVersionCheckResource(name);
   const hit = cache.get(key);
+  const useLive =
+    !opts?.skipLiveSync &&
+    !!resourceExchange &&
+    wantsLiveResourceSync(name);
+
+  if (hit && useLive && (revalidate || isPackagedNativeApp())) {
+    const local = new Uint8Array(hit.buf);
+    const synced = await syncLiveResource(name, local);
+    if (synced) return synced;
+    return local;
+  }
 
   if (hit && revalidate) {
     const remote = await probeResourceStamp(name);
@@ -140,12 +268,16 @@ export async function fetchResourceBytes(
     return new Uint8Array(hit.buf);
   }
 
-  const res = await fetch(resourceUrl(name), { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetch ${name}: HTTP ${res.status}`);
-  const buf = await res.arrayBuffer();
-  const stamp = stampFromHeaders(res.headers);
-  cache.set(key, { buf, stamp });
-  return new Uint8Array(buf);
+  const bundled = await fetchBundledBytes(name);
+  if (useLive) {
+    const synced = await syncLiveResource(name, bundled?.bytes ?? null);
+    if (synced) return synced;
+  }
+  if (bundled) {
+    cachePut(name, bundled.bytes, bundled.stamp, null);
+    return bundled.bytes;
+  }
+  throw new Error(`fetch ${name}: HTTP miss and no WT18/7 payload`);
 }
 
 export async function resourceExists(name: string): Promise<boolean> {

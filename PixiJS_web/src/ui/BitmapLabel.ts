@@ -93,7 +93,19 @@ const OUTLINE_8: ReadonlyArray<readonly [number, number]> = [
 
 const uc3TexCache = new Map<string, Texture>();
 const crispTexCache = new Map<string, Texture>();
-type Uc3LabelHost = { rebake(): Promise<void>; destroyed: boolean };
+/** Soft / hard caps — chat + nameplates otherwise grow without bound on APK. */
+const UC3_CACHE_SOFT = 160;
+const UC3_CACHE_HARD = 220;
+const CRISP_CACHE_SOFT = 64;
+const CRISP_CACHE_HARD = 96;
+type Uc3LabelHost = {
+  rebake(): Promise<void>;
+  destroyed: boolean;
+  /** Last UC3 cache key while this label shows a sprite. */
+  uc3CacheKey?: string;
+  /** Last crisp-bake cache key (same live-protect contract as UC3). */
+  crispCacheKey?: string;
+};
 const liveLabels = new Set<Uc3LabelHost>();
 
 function uc3CacheKey(
@@ -106,6 +118,47 @@ function uc3CacheKey(
   maxWidth?: number,
 ): string {
   return `${activeUc3FontUrl()}\0${UC3_CELL}\0${text}\0${color.toString(16)}\0${outline ? 1 : 0}\0${outlineColor.toString(16)}\0${outlineThin ? 1 : 0}\0${smooth ? 1 : 0}\0${maxWidth ?? ""}`;
+}
+
+function rememberUc3Cache(key: string, tex: Texture): void {
+  // LRU: re-insert so eviction drops oldest idle keys first.
+  if (uc3TexCache.has(key)) uc3TexCache.delete(key);
+  uc3TexCache.set(key, tex);
+  if (uc3TexCache.size <= UC3_CACHE_HARD) return;
+  const live = new Set<string>();
+  for (const lab of liveLabels) {
+    if (lab.uc3CacheKey) live.add(lab.uc3CacheKey);
+  }
+  for (const [k, t] of uc3TexCache) {
+    if (uc3TexCache.size <= UC3_CACHE_SOFT) break;
+    if (live.has(k)) continue;
+    try {
+      t.destroy(true);
+    } catch {
+      /* ignore */
+    }
+    uc3TexCache.delete(k);
+  }
+}
+
+function rememberCrispCache(key: string, tex: Texture): void {
+  if (crispTexCache.has(key)) crispTexCache.delete(key);
+  crispTexCache.set(key, tex);
+  if (crispTexCache.size <= CRISP_CACHE_HARD) return;
+  const live = new Set<string>();
+  for (const lab of liveLabels) {
+    if (lab.crispCacheKey) live.add(lab.crispCacheKey);
+  }
+  for (const [k, t] of crispTexCache) {
+    if (crispTexCache.size <= CRISP_CACHE_SOFT) break;
+    if (live.has(k)) continue;
+    try {
+      t.destroy(true);
+    } catch {
+      /* ignore */
+    }
+    crispTexCache.delete(k);
+  }
 }
 
 /** Drop baked UC3 textures after a font pack switch. */
@@ -263,6 +316,10 @@ export class BitmapLabel extends Container {
   private _bakeSs = 1;
   private _ax = 0;
   private _ay = 0;
+  /** Last UC3 cache key (for eviction — keep live label textures). */
+  uc3CacheKey?: string;
+  /** Last crisp-bake cache key (same live-protect contract as UC3). */
+  crispCacheKey?: string;
 
   readonly anchor = {
     set: (x: number, y: number): void => {
@@ -281,7 +338,7 @@ export class BitmapLabel extends Container {
 
   /** Force UC3 re-bake with current text/style (font pack switch). */
   async rebake(): Promise<void> {
-    if (!this._uc3 || !this._text) return;
+    if (this.destroyed || !this._uc3 || !this._text) return;
     await this.rerender();
   }
 
@@ -345,6 +402,7 @@ export class BitmapLabel extends Container {
   }
 
   private applySpriteAnchor(): void {
+    if (this.destroyed) return;
     if (!this.spr) {
       if (!this.pixiText) this.pivot.set(0, 0);
       return;
@@ -361,11 +419,13 @@ export class BitmapLabel extends Container {
   }
 
   private hideSprite(): void {
+    if (this.destroyed) return;
     if (this.spr) this.spr.visible = false;
     this.pivot.set(0, 0);
   }
 
   private showSprite(tex: Texture, ss = 1): void {
+    if (this.destroyed) return;
     this._bakeSs = Math.max(1, ss);
     if (!this.spr) {
       this.spr = new Sprite(tex);
@@ -380,6 +440,7 @@ export class BitmapLabel extends Container {
   }
 
   private async rerender(): Promise<void> {
+    if (this.destroyed) return;
     if (!this._text) {
       this.hideSystemText();
       this.hideSprite();
@@ -426,8 +487,11 @@ export class BitmapLabel extends Container {
         wrap,
         ss,
       );
-      crispTexCache.set(key, tex);
+      rememberCrispCache(key, tex);
+    } else {
+      rememberCrispCache(key, tex);
     }
+    this.crispCacheKey = key;
     this.showSprite(tex, ss);
   }
 
@@ -483,6 +547,8 @@ export class BitmapLabel extends Container {
     let tex = uc3TexCache.get(key);
     if (!tex) {
       const font = await loadUc3Font();
+      // Label may be destroyed while the font load / first bake awaits.
+      if (this.destroyed) return;
       // maxWidth is in LCD/display px; bake uses native 16px advances.
       const maxNative =
         this._maxWidth != null
@@ -497,8 +563,10 @@ export class BitmapLabel extends Container {
         maxWidth: maxNative,
       });
       tex = rgbaToTexture(width, height, rgba, this._smooth ? "linear" : "nearest");
-      uc3TexCache.set(key, tex);
     }
+    if (this.destroyed) return;
+    rememberUc3Cache(key, tex);
+    this.uc3CacheKey = key;
     // 16→14: showSprite(ss) sets scale = 1/ss.
     this.showSprite(tex, UC3_NATIVE_CELL / UC3_CELL);
   }

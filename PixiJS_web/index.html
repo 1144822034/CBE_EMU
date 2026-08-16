@@ -8,6 +8,15 @@
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
+    <!--
+      Allow nested entertainment iframes (qqmp3 / arcade) to call
+      navigator.wakeLock.request — iframe allow= alone is not enough if the
+      top document does not enable the feature for cross-origin frames.
+    -->
+    <meta
+      http-equiv="Permissions-Policy"
+      content="screen-wake-lock=*, autoplay=*, fullscreen=*, encrypted-media=*, picture-in-picture=*"
+    />
     <title>江湖 OL</title>
     <style>
       :root {
@@ -35,6 +44,23 @@
         touch-action: none;
         user-select: none;
         -webkit-user-select: none;
+      }
+      /*
+       * html/body touch-action:none remaps iframe hit-tests on Chrome/WebView.
+       * Entertainment layer is position:fixed on body; restore while open.
+       */
+      html.ent-web-open,
+      html.ent-web-open body {
+        touch-action: manipulation;
+      }
+      html.ent-web-open #ent-web-layer,
+      html.ent-web-open #ent-web-layer iframe,
+      html.ent-web-open #ent-web-layer video,
+      html.ent-web-open #ent-web-chip {
+        touch-action: manipulation !important;
+      }
+      html.ent-web-open #phone-wrap canvas {
+        pointer-events: none !important;
       }
       #app {
         display: flex;
@@ -183,8 +209,8 @@
       }
       /*
        * L softkey | D-pad | R softkey — softkeys top-aligned with ▲ (up).
-       * --pad-scale is set by syncTouchChromeScale() so short phones
-       * shrink chrome instead of squeezing the LCD above.
+       * --pad-scale / --sk-col-* from syncTouchChromeScale(): follow phone
+       * width; keep a usable D-pad floor, then give leftover height to LCD.
        */
       #touch-bar {
         --pad-scale: 1;
@@ -192,6 +218,8 @@
         --pad-gap-base: 8px;
         --sk-h-base: 56px;
         --sk-center-h-base: 32px;
+        --sk-col-min: 64px;
+        --sk-col-max: 80px;
         --pad-cell: calc(var(--pad-cell-base) * var(--pad-scale));
         --pad-gap: calc(var(--pad-gap-base) * var(--pad-scale));
         --sk-h: calc(var(--sk-h-base) * var(--pad-scale));
@@ -202,7 +230,10 @@
         max-width: 100%;
         box-sizing: border-box;
         display: grid;
-        grid-template-columns: minmax(calc(64px * var(--pad-scale)), calc(80px * var(--pad-scale))) minmax(0, 1fr) minmax(calc(64px * var(--pad-scale)), calc(80px * var(--pad-scale)));
+        grid-template-columns:
+          minmax(var(--sk-col-min), var(--sk-col-max))
+          minmax(0, 1fr)
+          minmax(var(--sk-col-min), var(--sk-col-max));
         grid-template-rows: auto auto auto;
         gap: calc(6px * var(--pad-scale)) calc(10px * var(--pad-scale));
         align-items: start;
@@ -338,14 +369,7 @@
       #touch-bar.pad-compact #touch-status {
         display: none;
       }
-      @media (min-width: 720px) {
-        #touch-bar {
-          --pad-cell-base: 72px;
-          --pad-gap-base: 12px;
-          --sk-h-base: 64px;
-          grid-template-columns: minmax(calc(80px * var(--pad-scale)), calc(96px * var(--pad-scale))) minmax(0, 1fr) minmax(calc(80px * var(--pad-scale)), calc(96px * var(--pad-scale)));
-        }
-      }
+      /* Cell size is fully driven by syncTouchChromeScale() — no width breakpoint. */
       /*
        * Soft keyboard open: pin layout height so 100dvh / adjustResize cannot
        * shrink #stage; D-pad collapses via shared compact-chrome rules above

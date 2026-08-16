@@ -290,14 +290,44 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
     for (i = 0; i < rewardCount; ++i)
     {
         const vm_mock_arena_reward *r = vm_net_mock_arena_reward_admin_at(i);
+        char itemCell[96];
+        char equipCell[96];
+        char nameUtf8[64];
+        const vm_net_mock_shop_catalog_item *shop;
+
         if (r == NULL)
             continue;
+        snprintf(itemCell, sizeof(itemCell), "-");
+        snprintf(equipCell, sizeof(equipCell), "-");
+        if (r->itemId != 0 && r->itemCount != 0)
+        {
+            nameUtf8[0] = 0;
+            shop = vm_net_mock_find_shop_catalog_item(r->itemId);
+            if (shop != NULL && shop->name[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(shop->name, nameUtf8,
+                                              sizeof(nameUtf8));
+            if (nameUtf8[0] == 0)
+                snprintf(nameUtf8, sizeof(nameUtf8), "#%u", r->itemId);
+            snprintf(itemCell, sizeof(itemCell), "%s×%u", nameUtf8,
+                     r->itemCount);
+        }
+        if (r->equipId != 0)
+        {
+            nameUtf8[0] = 0;
+            shop = vm_net_mock_find_shop_catalog_item(r->equipId);
+            if (shop != NULL && shop->name[0] != 0)
+                vm_net_mock_gbk_label_to_utf8(shop->name, nameUtf8,
+                                              sizeof(nameUtf8));
+            if (nameUtf8[0] == 0)
+                snprintf(nameUtf8, sizeof(nameUtf8), "#%u", r->equipId);
+            snprintf(equipCell, sizeof(equipCell), "%s×1", nameUtf8);
+        }
         vm_mock_admin_text_appendf(
             &page,
             "<tr><td>%u</td><td>%u</td><td>%u</td><td>%u</td><td>%u</td>"
-            "<td>%u</td><td>%u×%u</td><td>%u</td></tr>",
+            "<td>%u</td><td>%s</td><td>%s</td></tr>",
             r->job, r->bracket, r->rankPos, r->rewardExp, r->rewardMoney,
-            r->rewardWcoin, r->itemId, r->itemCount, r->equipId);
+            r->rewardWcoin, itemCell, equipCell);
     }
     if (rewardCount == 0)
         vm_mock_admin_text_appendf(&page,

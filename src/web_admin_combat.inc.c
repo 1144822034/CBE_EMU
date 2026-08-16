@@ -71,7 +71,7 @@ static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
         "code{background:#f2f4f7;padding:1px 4px;border-radius:4px;font-size:12px}"
         "</style></head><body><main class=\"wrap\">"
         "<header><h1>战斗公式</h1>"
-        "<p class=\"sub\">配置普攻软护甲、命中/闪躲、暴击、抗性、技能加成、决斗浮动与 Boss 技能倍率。"
+        "<p class=\"sub\">配置主属性物攻系数、普攻软护甲、命中/闪躲、暴击、抗性、技能加成、决斗浮动与 Boss 技能倍率。"
         "保存后立即影响服务端结算；环境变量 <code>CBE_BATTLE_*</code> 仍可覆盖调试项。</p></header>"
         "<nav class=\"tabs\">"
         "<a class=\"tab\" href=\"/?tab=accounts\">账号管理</a>"
@@ -114,6 +114,23 @@ static void vm_mock_admin_render_combat_page(char *response, size_t responseCap,
     vm_mock_admin_combat_field(
         &page, "命中基础值", "panel_hit_base",
         cfg ? cfg->panelHitBase : 101, "hit = 基础 + 装备命中");
+    vm_mock_admin_text_appendf(&page, "</div></section>");
+
+    vm_mock_admin_text_appendf(
+        &page,
+        "<section class=\"card\"><h2>主属性物攻加成系数</h2><div class=\"grid2\">");
+    vm_mock_admin_combat_field(
+        &page, "天机主属性→物攻%%", "primary_attack_coeff_tianji_percent",
+        cfg ? cfg->primaryAttackCoeffTianjiPercent : 100,
+        "attack = 力量×此%%/100 + 装备物攻；100=全额");
+    vm_mock_admin_combat_field(
+        &page, "幻剑主属性→物攻%%", "primary_attack_coeff_huanjian_percent",
+        cfg ? cfg->primaryAttackCoeffHuanjianPercent : 100,
+        "attack = 敏捷×此%%/100 + 装备物攻；100=全额");
+    vm_mock_admin_combat_field(
+        &page, "鬼道主属性→物攻%%", "primary_attack_coeff_guidao_percent",
+        cfg ? cfg->primaryAttackCoeffGuidaoPercent : 100,
+        "attack = 智慧×此%%/100 + 装备物攻；100=全额");
     vm_mock_admin_text_appendf(&page, "</div></section>");
 
     vm_mock_admin_text_appendf(
@@ -233,6 +250,12 @@ static void vm_mock_admin_handle_combat_action(vm_mock_service_socket client,
                                  &cfg.panelDefenseEnduranceDiv);
     (void)vm_mock_admin_form_u32(body, "panel_hit_base", 100000u,
                                  &cfg.panelHitBase);
+    (void)vm_mock_admin_form_u32(body, "primary_attack_coeff_tianji_percent",
+                                 1000u, &cfg.primaryAttackCoeffTianjiPercent);
+    (void)vm_mock_admin_form_u32(body, "primary_attack_coeff_huanjian_percent",
+                                 1000u, &cfg.primaryAttackCoeffHuanjianPercent);
+    (void)vm_mock_admin_form_u32(body, "primary_attack_coeff_guidao_percent",
+                                 1000u, &cfg.primaryAttackCoeffGuidaoPercent);
     (void)vm_mock_admin_form_u32(body, "soft_armor_k", 1000000u, &cfg.softArmorK);
     (void)vm_mock_admin_form_u32(body, "equip_armor_divisor", 1000u,
                                  &cfg.equipArmorDivisor);

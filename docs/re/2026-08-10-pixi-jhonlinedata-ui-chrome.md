@@ -38,6 +38,8 @@
 | 修 | 深褐底 + 米描边 + UC3「修」 | **不用** `UIRed.gif` 亮红底 |
 | 拍 | 深蓝底 + 青描边 + UC3「拍」 | 同上风格 |
 | 斗 | `vip_effect.gif` | 挂机时显示 |
+
+组队左上角队友条：`WorldHud.partyHost` 须从 `WORLD_TOP_H + (4+17) + 2` 起画，避开状态条（HUD 叠在 map 之上，贴 `WORLD_TOP_H+1` 会挡住图标）。
 | 练 | `training.gif` | 预留，待训练 buff 接线 |
 
 证据：`vip_effect`/`training` 为自带字的完整状态格；亮红 `UIRed` 作底板会盖住字形。

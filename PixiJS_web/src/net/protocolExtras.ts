@@ -186,6 +186,26 @@ export function buildBattleOperateRequest(index: number, operate: number): Uint8
 }
 
 /**
+ * In-battle auto flag: WT 1/4/11 { type }.
+ * type=1 prefer + poll synth; type=0 clear prefer.
+ * Optional Operate seeds LastOperate (Pixi [自动] has no prior 4/2).
+ * Omit Operate when unset — seeding 0 wipes server skill memory
+ * (docs/re/2026-08-16-pixi-background-auto-skill-to-na.md).
+ * Optional hangup=0: prefer without HangupLoop / auto-encounter (Pixi only;
+ * classic CBE omits the field and may arm team hangup).
+ */
+export function buildBattleAutoFlagRequest(
+  type: 0 | 1,
+  opts?: { operate?: number; hangup?: number },
+): Uint8Array {
+  const b = new WtBuilder();
+  const o = b.object(1, 4, 11).u32("type", type);
+  if (opts?.operate != null) o.u32("Operate", opts.operate >>> 0);
+  if (opts?.hangup != null) o.u32("hangup", opts.hangup >>> 0);
+  return b.finish();
+}
+
+/**
  * Battle item use: WT 1/4/3 { index, seq }.
  * `index` = actioninfo wire (ally/self only); `seq` = backpack row.
  * Distinct from scene bag use `7/1`.
@@ -646,6 +666,24 @@ export function buildChestOpenRequest(boxSeq: number, keySeq: number): Uint8Arra
   return b.finish();
 }
 
+/**
+ * PixiJS-only ten-pull: 1/7/24 { box:u16, key:u16, times:u8 }.
+ * Server rolls/consumes/grants in one request; world rare lines use total count.
+ */
+export function buildChestOpenBatchRequest(
+  boxSeq: number,
+  keySeq: number,
+  times: number,
+): Uint8Array {
+  const n = Math.max(1, Math.min(10, times | 0));
+  const b = new WtBuilder();
+  b.object(1, 7, 24)
+    .u16("box", boxSeq & 0xffff)
+    .u16("key", keySeq & 0xffff)
+    .u8("times", n);
+  return b.finish();
+}
+
 export type ItemUseFeedback = {
   ok: boolean;
   /** Short UI line (success / fail / 获得N个…). */
@@ -741,6 +779,63 @@ export function parseChestOpenResult(packet: WtPacket): ItemUseFeedback | null {
 }
 
 /**
+ * PixiJS-only 7/24 ten-pull. result=1 + opened + total + iteminfo (aggregated).
+ */
+export function parseChestOpenBatchResult(
+  packet: WtPacket,
+): (ItemUseFeedback & { opened?: number }) | null {
+  const obj = packet.objects.find((o) => o.kind === 7 && o.subtype === 24);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const opened = fieldU32(obj, "opened") >>> 0;
+  if (result !== 1 || opened <= 0) {
+    return {
+      ok: false,
+      message: chestFailMessage(result || 6),
+      opened,
+    };
+  }
+  const total = Math.max(0, fieldU32(obj, "total") || 0);
+  const raw = findField(obj, "iteminfo");
+  const rewards: NonNullable<ItemUseFeedback["rewards"]> = [];
+  if (raw) {
+    const r = new SeqReader(raw);
+    for (let i = 0; i < total && r.remaining() > 4; i++) {
+      try {
+        const itemId = r.u32();
+        const seq = r.i16();
+        const count = r.u32();
+        readItemCommonExtra(r);
+        const cat = lookupItemSync(itemId);
+        rewards.push({
+          itemId,
+          seq,
+          count: Math.max(1, count),
+          name: cat?.name ?? `#${itemId}`,
+        });
+      } catch {
+        break;
+      }
+    }
+  }
+  const parts = rewards.map((rw) =>
+    rw.count > 1 ? `${rw.count}个${rw.name}` : rw.name,
+  );
+  const joined = parts.join("，");
+  const detail =
+    joined.length > 72 ? `${joined.slice(0, 71)}…` : joined;
+  return {
+    ok: true,
+    opened,
+    message:
+      opened < 10 && !detail
+        ? `连开${opened}次：开启成功`
+        : `连开${opened}次：${detail || "开启成功"}`,
+    rewards,
+  };
+}
+
+/**
  * Special timed-item responses: 7/30 exp card / 22/3 combat pill / 25/6 insight.
  * Success/fail text lives in string field `iteminfo` (not a binary blob).
  */
@@ -767,9 +862,10 @@ export function parseSpecialTimedItemUseResult(
   return null;
 }
 
-/** Prefer chest → special timed → item-use → lone 16/2 hint. */
+/** Prefer chest batch → chest → special timed → item-use → lone 16/2 hint. */
 export function parseItemUseFeedback(packet: WtPacket): ItemUseFeedback | null {
   return (
+    parseChestOpenBatchResult(packet) ||
     parseChestOpenResult(packet) ||
     parseSpecialTimedItemUseResult(packet) ||
     parseItemUseResult(packet) ||
@@ -1396,6 +1492,164 @@ export function parseCrystalCombineResult(
     result,
     ok: false,
     message: crystalCombineFailMessage(result),
+    srcItemId,
+    destItemId,
+    remaining,
+    destCount,
+  };
+}
+
+/** item.dsh 900 玄晶碎片 → 10 合成 1×一级玄晶(901). PixiJS-only 29/11. */
+export const CRYSTAL_FRAGMENT_ITEM_ID = 900;
+export const CRYSTAL_FRAGMENT_COMBINE_COST = 10;
+
+export function isCrystalFragment(itemId: number): boolean {
+  return (itemId | 0) === CRYSTAL_FRAGMENT_ITEM_ID;
+}
+
+/** True when bag detail should show 合成 for 玄晶碎片. */
+export function canCombineCrystalFragment(
+  itemId: number,
+  count: number,
+): boolean {
+  return isCrystalFragment(itemId) && (count | 0) >= CRYSTAL_FRAGMENT_COMBINE_COST;
+}
+
+export function buildCrystalFragmentCombineRequest(seq: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 11).u32("seq", seq);
+  return b.finish();
+}
+
+function crystalFragmentCombineFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "不是玄晶碎片";
+    case 3:
+      return "背包空间不足";
+    case 4:
+      return "碎片不足10个";
+    default:
+      return "合成失败";
+  }
+}
+
+export function parseCrystalFragmentCombineResult(
+  packet: WtPacket,
+): CrystalCombineResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 11);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const srcItemId = fieldU32(obj, "itemid");
+  const destItemId = fieldU32(obj, "destid");
+  const remaining = fieldU32(obj, "remaining");
+  const destCount = fieldU32(obj, "destcount");
+  if (result === 1) {
+    const name = enhanceCrystalName(
+      destItemId || ENHANCE_CRYSTAL_FIRST,
+    );
+    return {
+      result,
+      ok: true,
+      message: `合成成功：获得${name}`,
+      srcItemId,
+      destItemId,
+      remaining,
+      destCount,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: crystalFragmentCombineFailMessage(result),
+    srcItemId,
+    destItemId,
+    remaining,
+    destCount,
+  };
+}
+
+/** item.dsh 840 梦境徽章 → 300 合成 1×自选梦境装备(40065..40088). PixiJS-only 29/12. */
+export const DREAM_BADGE_ITEM_ID = 840;
+export const DREAM_BADGE_COMBINE_COST = 300;
+
+/** Dream equip pool for badge combine (equip.dsh). */
+export const DREAM_BADGE_EQUIP_IDS = [
+  40065, 40066, 40067, 40068, 40069, 40070, 40071, 40072, 40073, 40074,
+  40075, 40076, 40077, 40078, 40079, 40080, 40081, 40082, 40083, 40084,
+  40085, 40086, 40087, 40088,
+] as const;
+
+export function isDreamBadge(itemId: number): boolean {
+  return (itemId | 0) === DREAM_BADGE_ITEM_ID;
+}
+
+export function isDreamBadgeEquipId(itemId: number): boolean {
+  const id = itemId | 0;
+  return (DREAM_BADGE_EQUIP_IDS as readonly number[]).includes(id);
+}
+
+/** True when bag detail should show 合成 for 梦境徽章. */
+export function canCombineDreamBadge(itemId: number, count: number): boolean {
+  return isDreamBadge(itemId) && (count | 0) >= DREAM_BADGE_COMBINE_COST;
+}
+
+export function buildDreamBadgeCombineRequest(
+  seq: number,
+  destItemId: number,
+): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 29, 12)
+    .u32("seq", seq)
+    .u32("destid", destItemId >>> 0);
+  return b.finish();
+}
+
+function dreamBadgeCombineFailMessage(result: number): string {
+  switch (result) {
+    case 2:
+      return "不是梦境徽章";
+    case 3:
+      return "背包空间不足";
+    case 4:
+      return "徽章不足300个";
+    case 5:
+      return "装备目录缺失";
+    case 6:
+      return "请选择梦境装备";
+    default:
+      return "合成失败";
+  }
+}
+
+export function parseDreamBadgeCombineResult(
+  packet: WtPacket,
+): CrystalCombineResult | null {
+  const obj = packet.objects.find((o) => o.kind === 29 && o.subtype === 12);
+  if (!obj) return null;
+  const result = fieldU32(obj, "result");
+  const srcItemId = fieldU32(obj, "itemid");
+  const destItemId = fieldU32(obj, "destid");
+  const remaining = fieldU32(obj, "remaining");
+  const destCount = fieldU32(obj, "destcount");
+  if (result === 1) {
+    const name =
+      lookupItemSync(destItemId)?.name ||
+      (destItemId ? `装备#${destItemId}` : "梦境装备");
+    return {
+      result,
+      ok: true,
+      message: `合成成功：获得${name}`,
+      srcItemId,
+      destItemId,
+      remaining,
+      destCount,
+    };
+  }
+  return {
+    result,
+    ok: false,
+    message: dreamBadgeCombineFailMessage(result),
     srcItemId,
     destItemId,
     remaining,
@@ -2513,9 +2767,19 @@ export function isReservoirFlaskItemId(itemId: number): boolean {
   return itemId === 802 || itemId === 803;
 }
 
+/** 商城仓库/出售凭证：bag.count = 剩余耐久（打开次数），非堆叠张数。 */
+export function isDurableMallPassItemId(itemId: number): boolean {
+  return itemId === 834 || itemId === 839;
+}
+
 /** Visible stack for UI qty pickers — flasks/equip are atomic (1). */
 export function bagVisibleStackCount(it: BagItem): number {
-  if (it.kind === "equip" || isReservoirFlaskItemId(it.itemId)) return 1;
+  if (
+    it.kind === "equip" ||
+    isReservoirFlaskItemId(it.itemId) ||
+    isDurableMallPassItemId(it.itemId)
+  )
+    return 1;
   return Math.max(0, it.count >>> 0);
 }
 
@@ -2770,7 +3034,14 @@ export function preserveFlaskReservoirAcrossBagRefresh(
   return next;
 }
 
-/** Overlay 30/21 seq/count onto 17/1 rows (same itemId order / multiset). */
+/**
+ * Overlay 30/21 seq/count onto 17/1 rows (same itemId order / multiset).
+ * Stackable quantity: take max(17/1 stackHint, 30/21 u32). When 30/21 is
+ * truncated/desynced (login overflow docs), a bogus grid count=1 used to
+ * clobber a correct 17/1 stack of N — auction claim / chest openBag then
+ * looked like「领了N个玄晶背包只有1」(same class as warehouse SET overwrite).
+ * Equip / flask keep grid wire (instance=1 / visible stack=1).
+ */
 function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[] {
   const pools = new Map<number, BagItem[]>();
   for (const g of fromGrid) {
@@ -2783,10 +3054,20 @@ function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[
     const hit = arr?.shift();
     if (!hit) return it;
     const attrs = preferEnhanceAttrs(it.enhanceAttrs, hit.enhanceAttrs);
+    const stackable =
+      it.kind !== "equip" &&
+      hit.kind !== "equip" &&
+      !isReservoirFlaskItemId(it.itemId) &&
+      !isReservoirFlaskItemId(hit.itemId);
+    const count = stackable
+      ? Math.max(it.count >>> 0, hit.count >>> 0)
+      : hit.count > 0
+        ? hit.count
+        : it.count;
     return {
       ...it,
       seq: hit.seq > 0 ? hit.seq : it.seq,
-      count: hit.count > 0 ? hit.count : it.count,
+      count,
       enhance: hit.enhance || it.enhance,
       ...(attrs && attrs.length ? { enhanceAttrs: attrs } : {}),
     };

@@ -140,9 +140,14 @@ function jhOnlineDataPlugin(): Plugin {
       res.end("bad encoding");
       return;
     }
-    if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) {
+    if (!name || name.includes("..")) {
       res.statusCode = 400;
       res.end("bad name");
+      return;
+    }
+    /* Nested paths (e.g. arena_kill_sfx/*.mp3) live under public/; let Vite serve them. */
+    if (name.includes("/") || name.includes("\\")) {
+      next();
       return;
     }
     const filePath = resolveDataFile(name);

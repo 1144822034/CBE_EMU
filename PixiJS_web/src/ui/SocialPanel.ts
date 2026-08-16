@@ -7,8 +7,6 @@ import {
   LCD_HEIGHT,
   LCD_WIDTH,
   SOFTKEY_H,
-  drawCbePanel,
-  drawCbeTitlePill,
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { tryLoadUiTexture, uiSprite } from "./UiAssets";
@@ -29,6 +27,13 @@ import {
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 import { attachPageNavButtons } from "./pageNav";
+import {
+  listShellPageInfo,
+  listShellStepPage,
+  paintListShellBody,
+  paintListShellChrome,
+  type ListShellCtx,
+} from "./listPanelShell";
 
 const RANK_TAB_BG = 0x375946;
 const RANK_DEFAULT_TABS = ["等级榜", "财富榜", "PK榜"];
@@ -127,6 +132,11 @@ export class SocialPanel extends Container {
   onAction: ((kind: SocialKind, action: SocialAction, row?: SocialRow) => void) | null =
     null;
   onClose: (() => void) | null = null;
+
+  /** Active sheet kind — list refresh must not overwrite info/equip text. */
+  get panelKind(): SocialKind {
+    return this.kind;
+  }
 
   constructor() {
     super();
@@ -350,7 +360,7 @@ export class SocialPanel extends Container {
 
   showPlayerInfo(info: PlayerInfoView): void {
     this.kind = "info";
-    this.title = "玩家信息";
+    this.title = "查看玩家信息";
     this.textLines = info.lines.length ? info.lines : ["(无信息)"];
     this.textPage = 0;
     this.mode = "text";
@@ -424,10 +434,21 @@ export class SocialPanel extends Container {
     }
   }
 
+  private shellCtx(): ListShellCtx {
+    return {
+      host: this,
+      box: this.box,
+      hits: this.rowHits,
+      addLabel: (t, x, y, c) => this.addLabel(t, x, y, c),
+      addLabelCentered: (t, cx, cy, c) => this.addLabelCentered(t, cx, cy, c),
+    };
+  }
+
   private listPageStart(): number {
     if (!this.rows.length) return 0;
     const pageSize = this.kind === "rank" ? RANK_PAGE_SIZE : LIST_PAGE_SIZE;
-    return Math.floor(this.listCursor / pageSize) * pageSize;
+    return listShellPageInfo(this.rows.length, this.listCursor, pageSize)
+      .pageStart;
   }
 
   private textPageSize(): number {
@@ -621,15 +642,10 @@ export class SocialPanel extends Container {
     this.uiSprites = [];
     clearPointerHits(this.rowHits);
     this.box.clear();
-    const x = 8;
-    const y = 28;
-    const w = LCD_WIDTH - 16;
-    const h = LCD_HEIGHT - SOFTKEY_H - 40;
-    drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
-    const pillW = Math.min(100, this.title.length * 12 + 24);
-    const pillH = 20;
-    drawCbeTitlePill(this.box, LCD_WIDTH / 2, y + 6, pillW, pillH);
-    this.addLabel(this.title, LCD_WIDTH / 2 - pillW / 2 + 8, y + 9, CBE.ink);
+    const bounds = { x: 8, y: 28, w: LCD_WIDTH - 16, h: LCD_HEIGHT - SOFTKEY_H - 40 };
+    const { x, y, w, h } = bounds;
+    const ctx = this.shellCtx();
+    paintListShellChrome(ctx, this.title, CBE.bgDeep, bounds);
 
     try {
       if (this.mode === "text") {
@@ -703,73 +719,41 @@ export class SocialPanel extends Container {
         return;
       }
 
-      if (!this.rows.length) {
-        this.addLabel("(空)", x + 10, y + 40, CBE.inkMint);
-        return;
-      }
-
-      const total = this.rows.length;
-      const pages = Math.max(1, Math.ceil(total / LIST_PAGE_SIZE));
-      const pageStart = this.listPageStart();
-      const page = Math.floor(pageStart / LIST_PAGE_SIZE) + 1;
-      const localCursor = this.listCursor - pageStart;
-      const shown = this.rows.slice(pageStart, pageStart + LIST_PAGE_SIZE);
-
-      shown.forEach((row, i) => {
-        const hi = i === localCursor;
-        if (hi) {
-          this.box
-            .rect(x + 6, y + 36 + i * 20, w - 12, 18)
-            .fill({ color: CBE.select });
-        }
-        this.addLabel(
-          row.name.slice(0, 14),
-          x + 10,
-          y + 38 + i * 20,
-          hi ? CBE.ink : CBE.inkMint,
-        );
-        if (row.subtitle) {
-          this.addLabel(
-            row.subtitle.slice(0, 16),
-            x + 100,
-            y + 38 + i * 20,
-            CBE.inkLabel,
+      paintListShellBody({
+        ctx,
+        x,
+        listTop: y + 36,
+        w,
+        footY: y + h - 18,
+        rows: this.rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
+        cursor: this.listCursor,
+        pageSize: LIST_PAGE_SIZE,
+        emptyText: "(空)",
+        paging: "local",
+        onRow: (abs) => {
+          this.listCursor = abs;
+          this.redraw();
+          this.confirm();
+        },
+        onPrevPage: () => {
+          this.listCursor = listShellStepPage(
+            this.listCursor,
+            this.rows.length,
+            LIST_PAGE_SIZE,
+            -1,
           );
-        }
-        const abs = pageStart + i;
-        this.rowHits.push(
-          attachRowPointerHit(this, x + 6, y + 36 + i * 20, w - 12, 18, () => {
-            this.listCursor = abs;
-            this.redraw();
-            this.confirm();
-          }),
-        );
+          this.redraw();
+        },
+        onNextPage: () => {
+          this.listCursor = listShellStepPage(
+            this.listCursor,
+            this.rows.length,
+            LIST_PAGE_SIZE,
+            1,
+          );
+          this.redraw();
+        },
       });
-
-      if (pages > 1) {
-        attachPageNavButtons({
-          host: this,
-          hits: this.rowHits,
-          box: this.box,
-          x: x + 8,
-          y: y + h - 22,
-          w: w - 16,
-          page,
-          pages,
-          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
-          onPrev: () => {
-            this.listCursor = Math.max(0, pageStart - LIST_PAGE_SIZE);
-            this.redraw();
-          },
-          onNext: () => {
-            this.listCursor = Math.min(
-              total - 1,
-              pageStart + LIST_PAGE_SIZE,
-            );
-            this.redraw();
-          },
-        });
-      }
     } finally {
       drawPanelTipOverlay(this, this.toast);
     }
@@ -819,82 +803,49 @@ export class SocialPanel extends Container {
     }
 
     const footY = y + h - 18;
-    if (!this.rows.length) {
-      this.addLabel(
-        this.kind === "enmity" ? "(暂无恩怨)" : "(暂无好友)",
-        x + 10,
-        listTop + 8,
-        CBE.inkMint,
-      );
-    } else {
-      /* 一屏 = 一服务端页，不再二次本地切片. */
-      const total = this.rows.length;
-      const localCursor = Math.min(this.listCursor, total - 1);
-      this.listCursor = localCursor;
-      this.rows.forEach((row, i) => {
-        const hi = i === localCursor;
-        const ry = listTop + i * 20;
-        if (hi) {
-          this.box.rect(x + 6, ry, w - 12, 18).fill({ color: CBE.select });
-        }
-        this.addLabel(
-          row.name.slice(0, 12),
-          x + 10,
-          ry + 2,
-          hi ? CBE.ink : CBE.inkMint,
-        );
-        if (row.subtitle) {
-          this.addLabel(
-            row.subtitle.slice(0, 14),
-            x + 100,
-            ry + 2,
-            CBE.inkLabel,
-          );
-        }
-        this.rowHits.push(
-          attachRowPointerHit(this, x + 6, ry, w - 12, 18, () => {
-            this.listCursor = i;
-            this.redraw();
-            this.confirm();
-          }),
-        );
-      });
+    if (this.rows.length) {
+      this.listCursor = Math.min(this.listCursor, this.rows.length - 1);
     }
     const pageHint =
       this.listPages > 1
-        ? ""
+        ? undefined
         : this.rows.length
           ? `↑↓ ${this.listCursor + 1}/${this.rows.length}`
-          : "";
-    if (this.listPages > 1) {
-      attachPageNavButtons({
-        host: this,
-        hits: this.rowHits,
-        box: this.box,
-        x: x + 8,
-        y: footY - 22,
-        w: w - 16,
-        page: this.listPage,
-        pages: this.listPages,
-        addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
-        onPrev: () => {
-          if (this.listPage <= 1) return;
-          this.onAction?.(this.kind, "list_page", {
-            id: this.listPage - 1,
-            name: "prev",
-          });
-        },
-        onNext: () => {
-          if (this.listPage >= this.listPages) return;
-          this.onAction?.(this.kind, "list_page", {
-            id: this.listPage + 1,
-            name: "next",
-          });
-        },
-      });
-    } else if (pageHint) {
-      this.addLabel(pageHint, x + 10, footY - 14, CBE.inkLabel);
-    }
+          : undefined;
+    paintListShellBody({
+      ctx: this.shellCtx(),
+      x,
+      listTop,
+      w,
+      footY: footY - 14,
+      rows: this.rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
+      cursor: this.listCursor,
+      pageSize: LIST_PAGE_SIZE,
+      emptyText: this.kind === "enmity" ? "(暂无恩怨)" : "(暂无好友)",
+      paging: "server",
+      serverPage: this.listPage,
+      serverPages: this.listPages,
+      footerHint: pageHint,
+      onRow: (i) => {
+        this.listCursor = i;
+        this.redraw();
+        this.confirm();
+      },
+      onPrevPage: () => {
+        if (this.listPage <= 1) return;
+        this.onAction?.(this.kind, "list_page", {
+          id: this.listPage - 1,
+          name: "prev",
+        });
+      },
+      onNextPage: () => {
+        if (this.listPage >= this.listPages) return;
+        this.onAction?.(this.kind, "list_page", {
+          id: this.listPage + 1,
+          name: "next",
+        });
+      },
+    });
     const hint = this.huntPickSeq
       ? "确定=使用追杀令"
       : this.kind === "enmity"
@@ -948,72 +899,108 @@ export class SocialPanel extends Container {
 
     const listTop = tabY + tabH + 6;
     const footY = y + h - 34;
-    if (!this.rows.length) {
-      this.addLabel("(暂无排名)", x + 10, listTop + 8, CBE.inkMint);
-    } else {
-      const total = this.rows.length;
-      const pages = Math.max(1, Math.ceil(total / RANK_PAGE_SIZE));
-      const pageStart = this.listPageStart();
-      const page = Math.floor(pageStart / RANK_PAGE_SIZE) + 1;
-      const localCursor = this.listCursor - pageStart;
-      const shown = this.rows.slice(pageStart, pageStart + RANK_PAGE_SIZE);
-      const wealth = this.rankType === 1;
-
-      shown.forEach((row, i) => {
-        const hi = i === localCursor;
-        const ry = listTop + i * 20;
-        if (hi) {
-          this.box.rect(x + 6, ry, w - 12, 18).fill({ color: CBE.select });
-        }
-        this.addLabel(
-          row.name.slice(0, 12),
-          x + 10,
-          ry + 2,
-          hi ? CBE.ink : CBE.inkMint,
+    const wealth = this.rankType === 1;
+    /* 财富榜右侧为金元宝图标，仍走自定义副列；其它榜用 shell 行. */
+    if (wealth) {
+      if (!this.rows.length) {
+        this.addLabel("(暂无排名)", x + 10, listTop + 8, CBE.inkMint);
+      } else {
+        const total = this.rows.length;
+        const { page, pages, pageStart } = listShellPageInfo(
+          total,
+          this.listCursor,
+          RANK_PAGE_SIZE,
         );
-        if (wealth) {
-          this.drawWealthScore(row.subtitle || "0", x + w - 10, ry + 2);
-        } else if (row.subtitle) {
-          this.addLabelRight(
-            row.subtitle.slice(0, 10),
-            x + w - 10,
+        const localCursor = this.listCursor - pageStart;
+        const shown = this.rows.slice(pageStart, pageStart + RANK_PAGE_SIZE);
+        shown.forEach((row, i) => {
+          const hi = i === localCursor;
+          const ry = listTop + i * 20;
+          if (hi) {
+            this.box.rect(x + 6, ry, w - 12, 18).fill({ color: CBE.select });
+          }
+          this.addLabel(
+            row.name.slice(0, 12),
+            x + 10,
             ry + 2,
-            CBE.inkLabel,
+            hi ? CBE.ink : CBE.inkMint,
           );
-        }
-        const abs = pageStart + i;
-        this.rowHits.push(
-          attachRowPointerHit(this, x + 6, ry, w - 12, 18, () => {
-            this.listCursor = abs;
-            this.redraw();
-          }),
-        );
-      });
-
-      if (pages > 1) {
-        attachPageNavButtons({
-          host: this,
-          hits: this.rowHits,
-          box: this.box,
-          x: x + 8,
-          y: footY - 4,
-          w: w - 16,
-          page,
-          pages,
-          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
-          onPrev: () => {
-            this.listCursor = Math.max(0, pageStart - RANK_PAGE_SIZE);
-            this.redraw();
-          },
-          onNext: () => {
-            this.listCursor = Math.min(
-              total - 1,
-              pageStart + RANK_PAGE_SIZE,
-            );
-            this.redraw();
-          },
+          this.drawWealthScore(row.subtitle || "0", x + w - 10, ry + 2);
+          const abs = pageStart + i;
+          this.rowHits.push(
+            attachRowPointerHit(this, x + 6, ry, w - 12, 18, () => {
+              this.listCursor = abs;
+              this.redraw();
+            }),
+          );
         });
+        if (pages > 1) {
+          attachPageNavButtons({
+            host: this,
+            hits: this.rowHits,
+            box: this.box,
+            x: x + 8,
+            y: footY - 4,
+            w: w - 16,
+            page,
+            pages,
+            addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+            onPrev: () => {
+              this.listCursor = listShellStepPage(
+                this.listCursor,
+                total,
+                RANK_PAGE_SIZE,
+                -1,
+              );
+              this.redraw();
+            },
+            onNext: () => {
+              this.listCursor = listShellStepPage(
+                this.listCursor,
+                total,
+                RANK_PAGE_SIZE,
+                1,
+              );
+              this.redraw();
+            },
+          });
+        }
       }
+    } else {
+      paintListShellBody({
+        ctx: this.shellCtx(),
+        x,
+        listTop,
+        w,
+        footY: footY - 4,
+        rows: this.rows.map((r) => ({ name: r.name, subtitle: r.subtitle })),
+        cursor: this.listCursor,
+        pageSize: RANK_PAGE_SIZE,
+        emptyText: "(暂无排名)",
+        paging: "local",
+        onRow: (abs) => {
+          this.listCursor = abs;
+          this.redraw();
+        },
+        onPrevPage: () => {
+          this.listCursor = listShellStepPage(
+            this.listCursor,
+            this.rows.length,
+            RANK_PAGE_SIZE,
+            -1,
+          );
+          this.redraw();
+        },
+        onNextPage: () => {
+          this.listCursor = listShellStepPage(
+            this.listCursor,
+            this.rows.length,
+            RANK_PAGE_SIZE,
+            1,
+          );
+          this.redraw();
+        },
+      });
     }
 
     const my =

@@ -2538,6 +2538,11 @@ static const vm_mock_arena_reward *vm_mock_arena_find_reward(u8 job, u16 bracket
 static void vm_mock_arena_reward_primary_item(const vm_mock_arena_reward *reward,
                                               char *nameOut, u32 nameCap,
                                               u32 *countOut);
+/* Rank UI line: 经验/铜币/酷宝/物品/装备汇总（无领奖前缀）。 */
+static void vm_mock_arena_format_reward_summary(const vm_mock_arena_reward *reward,
+                                                char *out, u32 outCap);
+static bool vm_mock_arena_claim_tip_append(char *out, u32 outCap, u32 *used,
+                                           const char *frag);
 
 static u32 vm_net_mock_build_arena_rank_response(const u8 *request, u32 requestLen,
                                                   u8 *out, u32 outCap)
@@ -2606,11 +2611,13 @@ static u32 vm_net_mock_build_arena_rank_response(const u8 *request, u32 requestL
     {
         const vm_mock_arena_reward *rowReward =
             vm_mock_arena_find_reward((u8)job, (u16)bracket, (u8)(i + 1));
-        char rewardName[32];
+        char rewardName[96];
         u32 rewardCount = 0;
 
-        vm_mock_arena_reward_primary_item(rowReward, rewardName,
-                                          sizeof(rewardName), &rewardCount);
+        /* Summary for UI; rewardCount kept as primary item qty for old clients. */
+        vm_mock_arena_format_reward_summary(rowReward, rewardName,
+                                            sizeof(rewardName));
+        vm_mock_arena_reward_primary_item(rowReward, NULL, 0, &rewardCount);
         if (!vm_net_mock_seq_put_u32(blob, sizeof(blob), &blobLen, sorted[i].roleId) ||
             !vm_net_mock_seq_put_string(blob, sizeof(blob), &blobLen,
                                        sorted[i].roleName) ||
@@ -2629,7 +2636,7 @@ static u32 vm_net_mock_build_arena_rank_response(const u8 *request, u32 requestL
             (myRank >= 1 && myRank <= 10)
                 ? vm_mock_arena_find_reward((u8)job, (u16)bracket, (u8)myRank)
                 : NULL;
-        char myRewardName[32];
+        char myRewardName[96];
         u32 myRewardCount = 0;
         u32 myClaimed = 0;
 
@@ -2637,8 +2644,9 @@ static u32 vm_net_mock_build_arena_rank_response(const u8 *request, u32 requestL
         if (selfPart != NULL && selfPart->claimed &&
             selfPart->job == (u8)job && selfPart->bracket == (u16)bracket)
             myClaimed = 1;
-        vm_mock_arena_reward_primary_item(myReward, myRewardName,
-                                          sizeof(myRewardName), &myRewardCount);
+        vm_mock_arena_format_reward_summary(myReward, myRewardName,
+                                            sizeof(myRewardName));
+        vm_mock_arena_reward_primary_item(myReward, NULL, 0, &myRewardCount);
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, VM_MOCK_ARENA_WT_KIND,
                                          VM_MOCK_ARENA_WT_RANK, &objectStart) ||
             !vm_net_mock_put_object_u32(out, outCap, &pos, "result", 1) ||
@@ -2721,6 +2729,79 @@ static void vm_mock_arena_reward_primary_item(const vm_mock_arena_reward *reward
         snprintf(nameOut, nameCap, "%s", shop->name);
     else
         snprintf(nameOut, nameCap, "#%u", itemId);
+}
+
+/* Rank / self preview: all configured parts, no claim-success prefix. */
+static void vm_mock_arena_format_reward_summary(const vm_mock_arena_reward *reward,
+                                                char *out, u32 outCap)
+{
+    static const char sepGbk[] = "\xa1\xa2"; /* 、 */
+    char part[64];
+    u32 used = 0;
+    u32 parts = 0;
+    const vm_net_mock_shop_catalog_item *shop;
+
+    if (out == NULL || outCap == 0)
+        return;
+    out[0] = 0;
+    if (reward == NULL)
+        return;
+    if (reward->rewardExp)
+    {
+        snprintf(part, sizeof(part), "\xbe\xad\xd1\xe9%u", reward->rewardExp);
+        if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
+            ++parts;
+    }
+    if (reward->rewardMoney)
+    {
+        if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
+            return;
+        snprintf(part, sizeof(part), "\xbd\xf0\xc7\xae%u", reward->rewardMoney);
+        if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
+            ++parts;
+    }
+    if (reward->rewardWcoin)
+    {
+        if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
+            return;
+        snprintf(part, sizeof(part), "\xbf\xe1\xb1\xa6%u", reward->rewardWcoin);
+        if (vm_mock_arena_claim_tip_append(out, outCap, &used, part))
+            ++parts;
+    }
+    if (reward->itemId && reward->itemCount)
+    {
+        if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
+            return;
+        shop = vm_net_mock_find_shop_catalog_item(reward->itemId);
+        if (shop != NULL && shop->name[0] != 0)
+            snprintf(part, sizeof(part), "%sx%u", shop->name, reward->itemCount);
+        else
+            snprintf(part, sizeof(part), "#%ux%u", reward->itemId,
+                     reward->itemCount);
+        if (!vm_mock_arena_claim_tip_append(out, outCap, &used, part))
+        {
+            snprintf(part, sizeof(part), "#%ux%u", reward->itemId,
+                     reward->itemCount);
+            (void)vm_mock_arena_claim_tip_append(out, outCap, &used, part);
+        }
+        else
+            ++parts;
+    }
+    if (reward->equipId)
+    {
+        if (parts && !vm_mock_arena_claim_tip_append(out, outCap, &used, sepGbk))
+            return;
+        shop = vm_net_mock_find_shop_catalog_item(reward->equipId);
+        if (shop != NULL && shop->name[0] != 0)
+            snprintf(part, sizeof(part), "%s", shop->name);
+        else
+            snprintf(part, sizeof(part), "#%u", reward->equipId);
+        if (!vm_mock_arena_claim_tip_append(out, outCap, &used, part))
+        {
+            snprintf(part, sizeof(part), "#%u", reward->equipId);
+            (void)vm_mock_arena_claim_tip_append(out, outCap, &used, part);
+        }
+    }
 }
 
 /* GBK chat/wire tip ≤81 bytes: 比武领奖成功：经验N、金钱N、酷宝N、物品… */
@@ -2850,17 +2931,44 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
         object.subtype != VM_MOCK_ARENA_WT_CLAIM)
         return 0;
     p = vm_mock_arena_find_part(role->roleId);
-    if (p == NULL || g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_SETTLED)
+    if (p == NULL)
+    {
         result = 2;
+        /* 未参赛，无法领奖 */
+        snprintf(tipGbk, sizeof(tipGbk),
+                 "\xce\xb4\xb2\xce\xc8\xfc\xa3\xac\xce\xde\xb7\xa8\xc1\xec\xbd\xb1");
+    }
+    else if (g_vm_mock_arena_rt.status != VM_MOCK_ARENA_STATUS_SETTLED)
+    {
+        result = 2;
+        /* 比赛尚未结束 */
+        snprintf(tipGbk, sizeof(tipGbk),
+                 "\xb1\xc8\xc8\xfc\xc9\xd0\xce\xb4\xbd\xe1\xca\xf8");
+    }
     else if (p->claimed)
+    {
         result = 3;
+        /* 奖励已领取 */
+        snprintf(tipGbk, sizeof(tipGbk),
+                 "\xbd\xb1\xc0\xf8\xd2\xd1\xc1\xec\xc8\xa1");
+    }
     else if (p->rankPos == 0 || p->rankPos > 10)
+    {
         result = 4;
+        /* 未进入前十名 */
+        snprintf(tipGbk, sizeof(tipGbk),
+                 "\xce\xb4\xbd\xf8\xc8\xeb\xc7\xb0\xca\xae\xc3\xfb");
+    }
     else
     {
         reward = vm_mock_arena_find_reward(p->job, p->bracket, (u8)p->rankPos);
         if (reward == NULL)
+        {
             result = 5;
+            /* 该名次未配置奖励 */
+            snprintf(tipGbk, sizeof(tipGbk),
+                     "\xb8\xc3\xc3\xfb\xb4\xce\xce\xb4\xc5\xe4\xd6\xc3\xbd\xb1\xc0\xf8");
+        }
         else
         {
             if (reward->rewardExp)
@@ -2904,7 +3012,7 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
         !vm_net_mock_put_object_u32(out, outCap, &pos, "claimed",
                                     p && p->claimed ? 1 : 0))
         return 0;
-    if (result == 1 && tipGbk[0] != 0 &&
+    if (tipGbk[0] != 0 &&
         !vm_net_mock_put_object_string(out, outCap, &pos, "tip", tipGbk))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);

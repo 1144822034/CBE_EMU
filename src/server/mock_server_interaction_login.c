@@ -21,18 +21,53 @@ static u32 vm_net_mock_build_challenge_interaction_response(
         session->instanceChallengeDirectPending = false;
         if (valid)
         {
-            u32 responseLen = vm_net_mock_build_challenge_interaction_response_ex(
-                request, requestLen, out, outCap, true);
-            printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) response=4/10 resp=%u evidence=JianghuOL.CBE:0x010492B0(case13)->0x01037ED4+mmBattle:0x67AC\n",
-                   session->clientId, session->instanceChallengeActorId,
-                   requestedEnemyId, ageTicks, scene, responseLen);
-            session->instanceChallengeActorId = 0;
-            session->instanceChallengeEnemyId = 0;
-            session->instanceChallengeX = 0;
-            session->instanceChallengeY = 0;
-            session->instanceChallengeTick = 0;
-            session->instanceChallengeScene[0] = 0;
-            return responseLen;
+            bool didConsume = false;
+            const char *costTip = NULL;
+            vm_net_mock_role_state *role = vm_net_mock_active_role();
+            const char *quotaScene =
+                session->instanceChallengeQuotaScene[0]
+                    ? session->instanceChallengeQuotaScene
+                    : session->instanceChallengeScene;
+
+            costTip = vm_net_mock_instance_challenge_try_consume(
+                session, role, quotaScene, &didConsume);
+            if (costTip != NULL)
+            {
+                (void)vm_mock_service_session_enqueue_system_message(session,
+                                                                     costTip);
+                printf("[info][network] mock_npc_instance_challenge_native_cost_refuse "
+                       "client=%08x scene=%s tip=set evidence=challenge-daily-limit\n",
+                       session->clientId, quotaScene ? quotaScene : "-");
+                session->instanceChallengeActorId = 0;
+                session->instanceChallengeEnemyId = 0;
+                session->instanceChallengeX = 0;
+                session->instanceChallengeY = 0;
+                session->instanceChallengeTick = 0;
+                session->instanceChallengeScene[0] = 0;
+                session->instanceChallengeQuotaScene[0] = 0;
+                return 0;
+            }
+            {
+                u32 responseLen =
+                    vm_net_mock_build_challenge_interaction_response_ex(
+                        request, requestLen, out, outCap, true);
+                if (responseLen == 0 && didConsume)
+                {
+                    vm_net_mock_instance_challenge_rollback_consume(
+                        session, role, quotaScene);
+                }
+                printf("[info][network] mock_npc_instance_challenge_native client=%08x actor=%u enemy=%u age_ticks=%u scene=%s request=4/1(action13) response=4/10 resp=%u evidence=JianghuOL.CBE:0x010492B0(case13)->0x01037ED4+mmBattle:0x67AC\n",
+                       session->clientId, session->instanceChallengeActorId,
+                       requestedEnemyId, ageTicks, scene, responseLen);
+                session->instanceChallengeActorId = 0;
+                session->instanceChallengeEnemyId = 0;
+                session->instanceChallengeX = 0;
+                session->instanceChallengeY = 0;
+                session->instanceChallengeTick = 0;
+                session->instanceChallengeScene[0] = 0;
+                session->instanceChallengeQuotaScene[0] = 0;
+                return responseLen;
+            }
         }
         printf("[warn][network] mock_npc_instance_challenge_native_drop client=%08x actor=%u expected_enemy=%u requested_enemy=%u age_ticks=%u current_scene=%s pending_scene=%s reason=stale-or-mismatch\n",
                session->clientId, session->instanceChallengeActorId,
@@ -118,6 +153,75 @@ static u32 vm_net_mock_build_challenge_interaction_response(
                    session->clientId, battleScene, wireId, enemyId, index,
                    posx, posy, objectCount);
             return pos;
+        }
+    }
+    /*
+     * Legacy Pixi: 30/10{agree=0} then hangup-style 4/1.  Charge quota on that
+     * first matching 4/1 within a short arm (see confirm agree=0).
+     */
+    if (session != NULL && session->instanceChallengeHangupStyleArm &&
+        vm_net_mock_is_challenge_interaction_request(request, requestLen))
+    {
+        u32 hangupEnemyId = 0;
+        u32 armAge = g_schedulerTick - session->instanceChallengeHangupStyleTick;
+        const u32 armMaxTicks = (2u * 1000u / VM_SCHED_FRAME_MS);
+
+        if (armAge > armMaxTicks)
+        {
+            session->instanceChallengeHangupStyleArm = false;
+            session->instanceChallengeHangupStyleTick = 0;
+            session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeScene[0] = 0;
+            session->instanceChallengeQuotaScene[0] = 0;
+        }
+        else if (vm_net_mock_get_object_u32_field(request, requestLen, "id",
+                                                   &hangupEnemyId) &&
+                 hangupEnemyId != 0 &&
+                 hangupEnemyId == session->instanceChallengeEnemyId &&
+                 vm_net_mock_scene_name_is_safe(scene) &&
+                 vm_net_mock_scene_names_equal_loose(
+                     scene, session->instanceChallengeScene))
+        {
+            bool didConsume = false;
+            const char *costTip = NULL;
+            vm_net_mock_role_state *role = vm_net_mock_active_role();
+            const char *quotaScene =
+                session->instanceChallengeQuotaScene[0]
+                    ? session->instanceChallengeQuotaScene
+                    : session->instanceChallengeScene;
+
+            costTip = vm_net_mock_instance_challenge_try_consume(
+                session, role, quotaScene, &didConsume);
+            session->instanceChallengeHangupStyleArm = false;
+            session->instanceChallengeHangupStyleTick = 0;
+            session->instanceChallengeEnemyId = 0;
+            session->instanceChallengeScene[0] = 0;
+            session->instanceChallengeQuotaScene[0] = 0;
+            if (costTip != NULL)
+            {
+                (void)vm_mock_service_session_enqueue_system_message(session,
+                                                                     costTip);
+                printf("[info][network] mock_npc_instance_challenge_hangup_cost_refuse "
+                       "client=%08x scene=%s tip=set evidence=challenge-daily-limit\n",
+                       session->clientId, quotaScene ? quotaScene : "-");
+                return 0;
+            }
+            {
+                u32 responseLen =
+                    vm_net_mock_build_challenge_interaction_response_ex(
+                        request, requestLen, out, outCap, false);
+                if (responseLen == 0 && didConsume)
+                {
+                    vm_net_mock_instance_challenge_rollback_consume(
+                        session, role, quotaScene);
+                }
+                printf("[info][network] mock_npc_instance_challenge_hangup_style "
+                       "client=%08x enemy=%u age_ticks=%u scene=%s request=4/1 "
+                       "resp=%u evidence=legacy-agree0-then-4/1+challenge-daily-limit\n",
+                       session->clientId, hangupEnemyId, armAge,
+                       scene ? scene : "-", responseLen);
+                return responseLen;
+            }
         }
     }
     return vm_net_mock_build_challenge_interaction_response_ex(
@@ -4754,6 +4858,60 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
     selected = vm_net_mock_select_active_role(actorId);
     role = vm_net_mock_active_role();
     activeActorId = role ? role->roleId : 0;
+    /*
+     * Heap roleDb can be polluted by a prior sticky capture.  If the requested
+     * actor is missing, invalidate and reload from MySQL once before failing.
+     */
+    if ((!selected || role == NULL || activeActorId != actorId) &&
+        g_vm_mock_service_active_account_id != NULL)
+    {
+        vm_mock_service_account_state *account =
+            vm_mock_service_account_find(g_vm_mock_service_active_account_id);
+        printf("[warn][network] mock_title_role_select reload account=%s "
+               "requested=%u active=%u selected=%u evidence=roledb-mismatch\n",
+               g_vm_mock_service_active_account_id,
+               actorId,
+               activeActorId,
+               selected ? 1u : 0u);
+        if (account != NULL)
+        {
+            if (g_vm_mock_service_globals_account == account)
+                g_vm_mock_service_globals_account = NULL;
+            account->roleDbLoaded = false;
+            account->roleDbValid = false;
+        }
+        g_vm_net_mock_role_db_loaded = false;
+        vm_net_mock_role_db_load();
+        if (account != NULL && g_vm_net_mock_role_db_valid)
+        {
+            account->roleDb = g_vm_net_mock_role_db;
+            account->roleDbLoaded = true;
+            account->roleDbValid = true;
+            g_vm_mock_service_globals_account = account;
+        }
+        selected = vm_net_mock_select_active_role(actorId);
+        role = vm_net_mock_active_role();
+        activeActorId = role ? role->roleId : 0;
+    }
+    if (!selected || role == NULL || activeActorId != actorId)
+    {
+        u32 objectStart = 0;
+
+        printf("[error][network] mock_title_role_select rejected requested=%u "
+               "selected=%u active=%u account=%s evidence=fail-closed\n",
+               actorId,
+               selected ? 1u : 0u,
+               activeActorId,
+               g_vm_mock_service_active_account_id
+                   ? g_vm_mock_service_active_account_id
+                   : "-");
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 1, 6, &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 0))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        vm_net_mock_finish_wt_packet(out, pos, 1);
+        return pos;
+    }
 
     if (selected && role != NULL)
     {

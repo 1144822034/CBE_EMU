@@ -40,6 +40,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type EnhanceAction =
   | "submit"
@@ -409,11 +410,14 @@ export class EnhancePanel extends Container {
   }
 
   private ensureListVisible(len: number, visible: number): void {
-    if (this.listCursor < this.listScroll) this.listScroll = this.listCursor;
-    if (this.listCursor >= this.listScroll + visible) {
-      this.listScroll = this.listCursor - visible + 1;
+    const vs = Math.max(1, visible);
+    if (this.listCursor < this.listScroll) {
+      this.listScroll = Math.floor(this.listCursor / vs) * vs;
     }
-    const maxScroll = Math.max(0, len - visible);
+    if (this.listCursor >= this.listScroll + vs) {
+      this.listScroll = Math.floor(this.listCursor / vs) * vs;
+    }
+    const maxScroll = Math.max(0, len - vs);
     this.listScroll = Math.max(0, Math.min(this.listScroll, maxScroll));
   }
 
@@ -548,12 +552,16 @@ export class EnhancePanel extends Container {
     const visible = 7;
     this.ensureListVisible(rows.length, visible);
     const listTop = bodyTop + 36;
+    const pages = Math.max(1, Math.ceil(Math.max(rows.length, 1) / visible));
+    const pageStart = this.listScroll;
+    const page = rows.length ? Math.floor(pageStart / visible) + 1 : 1;
+    const navH = pages > 1 ? 22 : 0;
     this.box
       .rect(x + 8, listTop - 2, w - 16, visible * 16 + 4)
       .stroke({ width: 1, color: CBE.borderDim });
 
     for (let i = 0; i < visible; i++) {
-      const idx = this.listScroll + i;
+      const idx = pageStart + i;
       const row = rows[idx];
       if (!row) break;
       const sy = listTop + i * 16;
@@ -569,14 +577,43 @@ export class EnhancePanel extends Container {
         }),
       );
     }
-    if (this.listScroll + visible < rows.length) {
-      this.drawScrollArrow(x + w - 18, listTop + visible * 16 - 2, false, true);
+    if (pages > 1) {
+      attachPageNavButtons({
+        host: this,
+        hits: this.rowHits,
+        box: this.box,
+        x: x + 10,
+        y: listTop + visible * 16 + 4,
+        w: w - 20,
+        page,
+        pages,
+        addLabel: (t, lx, ly, c) => this.addAttr(t, lx, ly, c),
+        onPrev: () => {
+          this.listScroll = Math.max(0, pageStart - visible);
+          this.listCursor = Math.min(
+            this.listCursor,
+            this.listScroll + visible - 1,
+          );
+          this.listCursor = Math.max(this.listScroll, this.listCursor);
+          this.redraw();
+        },
+        onNext: () => {
+          const maxScroll = Math.max(0, rows.length - visible);
+          this.listScroll = Math.min(maxScroll, pageStart + visible);
+          this.listCursor = Math.max(this.listCursor, this.listScroll);
+          this.listCursor = Math.min(
+            rows.length - 1,
+            this.listScroll + visible - 1,
+          );
+          this.redraw();
+        },
+      });
     }
 
     this.addAttr(
       "每次可放入一颗玄晶，最多可放入五颗。",
       x + 10,
-      y + h - 34,
+      y + h - 34 - navH,
       CBE.inkMint,
     );
   }
@@ -649,7 +686,7 @@ export class EnhancePanel extends Container {
     );
 
     const listTop = Math.max(bodyTop + 56, instructBottom + 6);
-    const listBottom = y + h - 12;
+    const listBottom = y + h - 36;
     const visible = Math.max(3, Math.floor((listBottom - listTop) / 16));
     this.box
       .rect(x + 8, listTop - 2, w - 16, visible * 16 + 4)
@@ -659,8 +696,14 @@ export class EnhancePanel extends Container {
       this.addAttr("(无符合条件的同类装备)", x + 14, listTop + 4, CBE.inkMint);
     } else {
       this.ensureListVisible(this.destCandidates.length, visible);
+      const pageStart = this.listScroll;
+      const pageCount = Math.max(
+        1,
+        Math.ceil(this.destCandidates.length / visible),
+      );
+      const page = Math.floor(pageStart / visible) + 1;
       for (let i = 0; i < visible; i++) {
-        const idx = this.listScroll + i;
+        const idx = pageStart + i;
         const row = this.destCandidates[idx];
         if (!row) break;
         const sy = listTop + i * 16;
@@ -680,6 +723,41 @@ export class EnhancePanel extends Container {
             this.confirm();
           }),
         );
+      }
+      if (pageCount > 1) {
+        attachPageNavButtons({
+          host: this,
+          hits: this.rowHits,
+          box: this.box,
+          x: x + 10,
+          y: Math.min(listTop + visible * 16 + 4, y + h - 24),
+          w: w - 20,
+          page,
+          pages: pageCount,
+          addLabel: (t, lx, ly, c) => this.addAttr(t, lx, ly, c),
+          onPrev: () => {
+            this.listScroll = Math.max(0, pageStart - visible);
+            this.listCursor = Math.min(
+              this.listCursor,
+              this.listScroll + visible - 1,
+            );
+            this.listCursor = Math.max(this.listScroll, this.listCursor);
+            this.redraw();
+          },
+          onNext: () => {
+            const maxScroll = Math.max(
+              0,
+              this.destCandidates.length - visible,
+            );
+            this.listScroll = Math.min(maxScroll, pageStart + visible);
+            this.listCursor = Math.max(this.listCursor, this.listScroll);
+            this.listCursor = Math.min(
+              this.destCandidates.length - 1,
+              this.listScroll + visible - 1,
+            );
+            this.redraw();
+          },
+        });
       }
     }
   }

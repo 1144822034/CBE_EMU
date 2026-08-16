@@ -26,6 +26,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type GuildAction =
   | "open_list"
@@ -217,19 +218,19 @@ export class GuildPanel extends Container {
       return;
     }
     if (this.mode === "list") {
-      const n = Math.max(1, this.listRows.length + 2);
+      const n = Math.max(1, this.listRows.length);
       this.listCursor = (this.listCursor + delta + n) % n;
       this.redraw();
       return;
     }
     if (this.mode === "members") {
-      const n = Math.max(1, this.memberRows.length + 2);
+      const n = Math.max(1, this.memberRows.length);
       this.listCursor = (this.listCursor + delta + n) % n;
       this.redraw();
       return;
     }
     if (this.mode === "apps") {
-      const n = Math.max(1, this.appRows.length + 2);
+      const n = Math.max(1, this.appRows.length);
       this.listCursor = (this.listCursor + delta + n) % n;
       this.redraw();
     }
@@ -287,15 +288,6 @@ export class GuildPanel extends Container {
       return;
     }
     if (this.mode === "list") {
-      const extra = this.listRows.length;
-      if (this.listCursor === extra) {
-        this.onAction?.("prev_page");
-        return;
-      }
-      if (this.listCursor === extra + 1) {
-        this.onAction?.("next_page");
-        return;
-      }
       const row = this.listRows[this.listCursor];
       if (!row) return;
       this.selectedGuild = row;
@@ -309,21 +301,9 @@ export class GuildPanel extends Container {
       return;
     }
     if (this.mode === "members") {
-      const extra = this.memberRows.length;
-      if (this.listCursor === extra) this.onAction?.("prev_page");
-      else if (this.listCursor === extra + 1) this.onAction?.("next_page");
       return;
     }
     if (this.mode === "apps") {
-      const extra = this.appRows.length;
-      if (this.listCursor === extra) {
-        this.onAction?.("prev_page");
-        return;
-      }
-      if (this.listCursor === extra + 1) {
-        this.onAction?.("next_page");
-        return;
-      }
       const row = this.appRows[this.listCursor];
       if (!row) return;
       this.selectedApp = row;
@@ -565,22 +545,20 @@ export class GuildPanel extends Container {
     page: number,
     pages: number,
   ): void {
+    if (pages <= 1) return;
     const base = y + 34 + Math.min(rowCount, 10) * 18;
-    const items = [`上一页(${page}/${pages})`, "下一页"];
-    items.forEach((lab, i) => {
-      const idx = rowCount + i;
-      const hi = idx === this.listCursor;
-      if (hi) {
-        this.box.rect(x + 6, base + i * 18, w - 12, 16).fill({ color: CBE.select });
-      }
-      this.addLabel(lab, x + 12, base + 2 + i * 18, hi ? CBE.ink : CBE.inkMint);
-      this.rowHits.push(
-        attachRowPointerHit(this, x + 6, base + i * 18, w - 12, 16, () => {
-          this.listCursor = idx;
-          this.redraw();
-          this.confirm();
-        }),
-      );
+    attachPageNavButtons({
+      host: this,
+      hits: this.rowHits,
+      box: this.box,
+      x: x + 8,
+      y: base,
+      w: w - 16,
+      page,
+      pages,
+      addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+      onPrev: () => this.onAction?.("prev_page"),
+      onNext: () => this.onAction?.("next_page"),
     });
   }
 

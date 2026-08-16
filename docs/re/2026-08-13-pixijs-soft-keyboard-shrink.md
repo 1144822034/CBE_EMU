@@ -33,9 +33,32 @@
 
 固定 `max-height` 媒体查询不够细。改为 `syncTouchChromeScale()`：
 
-- 按视口宽算出「铺满宽度」的 LCD 高度 `vw * 400/240`
-- 剩余高度作为底栏预算，写入 `#touch-bar { --pad-scale }`
-- 下限 0.55；且底栏不超过视口 40%
-- `pad-compact` 时隐藏 `#touch-status` 再省一行
+- 按视口**宽度**定首选键位：`cell ≈ vw * 56/360`，大屏键大、小屏键小
+- 再按「铺满宽度」的 LCD 高度 `vw * 400/240` 算剩余高度预算；底栏不超过视口约 42%
+- 预算不够则缩小 `--pad-scale`，过挤时隐藏 `#touch-status`
+- 预算充裕时可略放大；软键侧栏 `--sk-col-min/max` 同样跟宽度走
 
-CSS 全部用 `calc(base * var(--pad-scale))`，不再靠 720/600 断点硬砍。
+CSS 用 `calc(base * var(--pad-scale))`，不再靠 720px 断点硬砍。
+
+## 矮屏键位过小（2026-08-14）
+
+### 现象
+
+部分机型（约 360×640–720、iPhone SE、宽矮安卓）方向键仍约 32px，难点。
+
+### 根因
+
+旧公式 `padBudget = min(vh - lcdByWidth, vh*0.4)`：**先按 LCD 铺满宽度占高**，剩余不足时把 `--pad-scale` 压到 `CELL_MIN=32`。矮屏 leftover 常只有 40–120px，三行 D-pad 必然缩到下限。`padBudget≈0` 时甚至不缩放，宽屏/平板反而异常。
+
+### 修复
+
+- 预算改用 `#app` **内容盒**（扣除 safe-area padding）
+- `CELL_MIN` 48、`CELL_MAX` 80；宽度首选也不低于 48
+- **先保证** `minChrome = chromeH(48, false)`，不够则让 LCD 在 stage 内略缩（`fitPhoneWrap` 本就会按 stage 等比缩放）
+- 底栏仍封顶约 42% / 不超过 52% 视口，避免吃掉画面
+
+### 验证
+
+- 360×640 / 360×720 / iPhone SE：单键 ≥48px，LCD 仍可读（宽度略小于全宽属预期）
+- 360×800+ 高屏：行为与改前接近，键随宽度走
+- 隐藏方向键 / IME compact 行：仍为半高软键条

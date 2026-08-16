@@ -25,9 +25,15 @@ static bool vm_net_mock_is_scene_runtime_position_ack_16_3_object(
 
 /* Chest rare-loot world announce lives with chat delivery in
  * mock_server_equipment_npc.c; the open handler in catalog.c calls it.
- * Same-player rapid opens (Pixi 十连) coalesce count into one [世] line. */
+ * Same-player rapid opens (Pixi 十连) coalesce count into one [世] line.
+ * Server-side batch 7/24 flushes one line per rare itemId with total count. */
 static void vm_net_mock_gold_chest_maybe_announce_rare_reward(u32 chestItemId,
                                                              u32 rewardItemId);
+static void vm_net_mock_gold_chest_announce_rare_reward_count(u32 chestItemId,
+                                                             u32 rewardItemId,
+                                                             u32 count);
+/* Flush overdue 7/15 coalesce pending (also after non-rare opens). */
+static void vm_net_mock_gold_chest_announce_flush_if_due(void);
 
 /* Flask reservoir tip: enqueue 1/3/3 system chat from equipment_npc.c. */
 static void vm_net_mock_notify_flask_reservoir_system_tip(u32 itemId,
@@ -85,6 +91,10 @@ static bool vm_mock_arena_team_forbidden_for_session(
 static void vm_mock_arena_rebind_session_if_needed(
     struct vm_mock_service_client_session *session,
     vm_net_mock_role_state *role);
+static void vm_mock_arena_on_session_offline(
+    struct vm_mock_service_client_session *session);
+static void vm_mock_arena_restore_venue_scene_if_needed(
+    vm_net_mock_role_state *role);
 
 #include "mock_server_equipment_npc.c"
 #include "mock_server_recovered_helpers.inc"
@@ -93,6 +103,7 @@ static void vm_mock_arena_rebind_session_if_needed(
 /* Pixi arena (defined in mock_server_arena.c after guild). */
 static bool vm_mock_arena_npc_offers_entry(const char *npcName);
 static bool vm_mock_arena_wager_npc_offers(const char *npcName);
+static bool vm_mock_arena_is_arena_scene(const char *scene);
 static bool vm_mock_arena_peer_visible(
     const vm_mock_service_client_session *observer,
     const vm_mock_service_client_session *peer);
@@ -104,6 +115,8 @@ static void vm_mock_arena_on_duel_finished(vm_mock_service_duel *duel);
 static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);
 static bool vm_net_mock_append_wager_event_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_arena_hud_object(u8 *out, u32 outCap, u32 *pos);
+/* Solo venue polls still need 41/5 (and settle clear) — see idle fast-path. */
+static bool vm_mock_arena_poll_needs_body(vm_mock_service_client_session *session);
 static u32 vm_net_mock_build_arena_enter_response(u8 *out, u32 outCap);
 static u32 vm_net_mock_build_arena_leave_response(u8 *out, u32 outCap);
 static u32 vm_net_mock_build_arena_protocol_response(const u8 *request,

@@ -48,7 +48,7 @@ JHOnlineData 中战斗地图为 **`b_` + 场景名 `.sce`**，与野外 SCE 配�
 - **选角地图/组队条（2026-08-08）**：`onRoleSwitch`+`invalidateMap` 丢弃上一角色地图壳，进图只认 `1/6.actorinfo` 服务端 scene（不再 fallback 默认图）；`5/10` `memberCount<2` 视为非组队，左上角队友血蓝强制清空
 - **选角又进旧图（2026-08-08）**：同包/`follow-up` 里 deferred `30/1|30/2` 曾优先于或覆盖 `1/6.actorinfo`。现优先 actorinfo；`roleEnterSceneLock` 锁住选角场景；`enterSceneGen` 防止被取代的异步 showScene 回写 `loadedScene`
 - **离开游戏清本地 session（2026-08-08）**：`logout` → `resetLocalSession` 断联并清空场景/技能/背包/队伍等全部运行时状态（仅保留账号口令供再登录）；UI 同步清空技能/背包/地图壳，避免切角色残留
-- **单位动作**：待机循环 `composeBattlePose`；玩家普攻闪现到怪侧再劈砍（面向目标）；施法**不再 hold 身体 cast 条**（caster 保持 idle，eidolon 特效仍叠播）；施法/回血**不**朝友方改朝向（曾把左侧怪拧成背对玩家）；受击闪红；怪物普攻闪现到玩家侧；type3 怪播 `f_death.actor`（siwang1 水花）后淡出、玩家 death.gif
+- **单位动作**：待机循环 `composeBattlePose`；玩家普攻闪现到怪侧再劈砍（面向目标）；施法原地播 anim6/7 cast 条一次（与 eidolon 叠播），施法/回血**不**朝友方改朝向（曾把左侧怪拧成背对玩家）；受击闪红；怪物普攻闪现到玩家侧；type3 怪播 `f_death.actor`（siwang1 水花）后淡出、玩家 death.gif
 - **怪物待行动动画（2026-08-10）**：CBE 掘地鼠口径统一——待机只动细节、身子不动。(1) `standAnim` 末层扇动（鼠尾/石怪）；(2) dirFlap×8 人形呼吸：`standAnim` 两组 pad（p0..3↔p4..7）同 rect 只挪 offset（教徒/士兵上身 1px）；(3) 同 part、同 rect、只改 offset 的 anim 双生扇动（蜂翅 @part2）。**禁止** remapping rect 的 anim0↔anim1 walk（麒麟等整身切姿）。`anim1` 改头/`wuqi1` 只给 attack。待机帧间隔 `BATTLE_IDLE_FRAME_MS=360`（玩家+全体怪物；地图 idle 同 360，走 140）。dirFlap×8 两组 stand 姿交替；蜂类含去 ying 的 body offset 双生。IDA 选帧计时仍 unresolved
 - **天机待机武器（2026-08-08）**：raw job0=天机→`h_*warrior`+`jian.gif`。战斗待机曾套用地图用 `SIDE_MAP_SKIP(/jian|guang|)` 把剑层剥掉，而幻剑 `bishou`/鬼道 `zhang` 不受影响。现战斗 idle/hit 仅跳过 `guang|death`，保留武器层；地图侧仍用 `SIDE_MAP_SKIP`。
 - **飘字**：伤害/回血用 CBE `-num.gif` / `+num.gif`；锚在目标躯干中心。「闪躲」黑字+细绿描边；「暴击」黑字+细青蓝描边并叠伤害数字

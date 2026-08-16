@@ -19,6 +19,12 @@ const config: CapacitorConfig = {
      */
     minWebViewVersion: 60,
   },
+  plugins: {
+    /** Native HTTP so entertainment video resolve can follow redirects without CORS. */
+    CapacitorHttp: {
+      enabled: true,
+    },
+  },
 };
 
 export default config;

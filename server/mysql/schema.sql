@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS `account_roles` (
   `pos_y` SMALLINT UNSIGNED NOT NULL,
   `backpack_item_count` SMALLINT UNSIGNED NOT NULL,
   `designation_id` TINYINT UNSIGNED NOT NULL,
+  `arena_designation_mask` INT UNSIGNED NOT NULL DEFAULT 0,
   `next_backpack_seq` SMALLINT UNSIGNED NOT NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -262,6 +263,21 @@ CREATE TABLE IF NOT EXISTS `account_role_warehouse` (
   PRIMARY KEY (`account_id`, `role_id`, `slot_index`),
   KEY `idx_account_role_warehouse_item` (`account_id`, `role_id`, `item_id`, `item_seq`),
   CONSTRAINT `fk_account_role_warehouse_role`
+    FOREIGN KEY (`account_id`, `role_id`)
+    REFERENCES `account_roles` (`account_id`, `role_id`)
+    ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Warehouse gold bank (copper; UI unit is 金=10000铜). Separate from item slots
+-- so empty warehouses still keep stored money across item DELETE/INSERT.
+CREATE TABLE IF NOT EXISTS `account_role_warehouse_bank` (
+  `account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `role_id` INT UNSIGNED NOT NULL,
+  `money` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`account_id`, `role_id`),
+  CONSTRAINT `fk_account_role_warehouse_bank_role`
     FOREIGN KEY (`account_id`, `role_id`)
     REFERENCES `account_roles` (`account_id`, `role_id`)
     ON DELETE CASCADE
@@ -801,6 +817,9 @@ CREATE TABLE IF NOT EXISTS `server_combat_formula_config` (
   `panel_defense_level_coeff` INT UNSIGNED NOT NULL DEFAULT 1,
   `panel_defense_endurance_div` INT UNSIGNED NOT NULL DEFAULT 2,
   `panel_hit_base` INT UNSIGNED NOT NULL DEFAULT 101,
+  `primary_attack_coeff_tianji_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `primary_attack_coeff_huanjian_percent` INT UNSIGNED NOT NULL DEFAULT 100,
+  `primary_attack_coeff_guidao_percent` INT UNSIGNED NOT NULL DEFAULT 100,
   `soft_armor_k` INT UNSIGNED NOT NULL DEFAULT 2000,
   `equip_armor_divisor` INT UNSIGNED NOT NULL DEFAULT 5,
   `hit_chance_min` INT UNSIGNED NOT NULL DEFAULT 5,

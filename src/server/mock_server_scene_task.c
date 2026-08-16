@@ -3052,6 +3052,26 @@ static bool vm_net_mock_dynamic_npc_admin_save(
     }
     normalized = *seed;
     vm_net_mock_npc_normalize_service_fields(&normalized);
+    /*
+     * Admin save-npc only fills legacy primary taskId / repeatable / daily.
+     * Persist path writes server_dynamic_npc_tasks from boundTasks[] after a
+     * full DELETE — leaving boundTaskCount=0 silently wiped「可接取任务」.
+     * Mirror primary → boundTasks before MySQL (or clear when unbound).
+     */
+    if (normalized.taskId == 0)
+    {
+        normalized.boundTaskCount = 0;
+        memset(normalized.boundTasks, 0, sizeof(normalized.boundTasks));
+        vm_net_mock_seed_sync_primary_bound_task(&normalized);
+    }
+    else if (!vm_net_mock_seed_add_bound_task(
+                 &normalized, normalized.taskId, normalized.taskRepeatable,
+                 normalized.taskDailyAcceptLimit))
+    {
+        if (errorOut)
+            *errorOut = "NPC 可接取任务绑定失败";
+        return false;
+    }
     seed = &normalized;
     if (!vm_net_mock_scene_name_is_safe(scene) ||
         seed->actorId == 0 || seed->x == 0 || seed->y == 0 ||
@@ -3261,6 +3281,7 @@ typedef struct
 {
     char scene[64];
     u32 dailyLimit;
+    u32 challengeDailyLimit;
     u32 goldCost;
     u32 kubaoCost;
     bool found;
@@ -3268,33 +3289,52 @@ typedef struct
 
 static bool vm_net_mock_instance_enter_rules_ensure_tables(void)
 {
-    return vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_instance_enter_rules ("
-               "scene VARBINARY(64) NOT NULL,"
-               "daily_limit INT UNSIGNED NOT NULL DEFAULT 0,"
-               "gold_cost INT UNSIGNED NOT NULL DEFAULT 0,"
-               "kubao_cost INT UNSIGNED NOT NULL DEFAULT 0,"
-               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
-               "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB") &&
-           vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_instance_enter_daily ("
-               "account_id VARBINARY(64) NOT NULL,"
-               "role_id INT UNSIGNED NOT NULL,"
-               "scene VARBINARY(64) NOT NULL,"
-               "day_ymd INT UNSIGNED NOT NULL,"
-               "enter_count INT UNSIGNED NOT NULL DEFAULT 0,"
-               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
-               "ON UPDATE CURRENT_TIMESTAMP,"
-               "PRIMARY KEY(account_id,role_id,scene,day_ymd)) ENGINE=InnoDB") &&
-           vm_mysql_exec(
-               "CREATE TABLE IF NOT EXISTS server_scene_display_names ("
-               "scene VARBINARY(64) NOT NULL,"
-               "display_name VARBINARY(32) NOT NULL,"
-               "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-               "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
-               "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB");
+    static bool ready = false;
+    if (ready)
+        return true;
+    if (!(vm_mysql_exec(
+              "CREATE TABLE IF NOT EXISTS server_instance_enter_rules ("
+              "scene VARBINARY(64) NOT NULL,"
+              "daily_limit INT UNSIGNED NOT NULL DEFAULT 0,"
+              "challenge_daily_limit INT UNSIGNED NOT NULL DEFAULT 0,"
+              "gold_cost INT UNSIGNED NOT NULL DEFAULT 0,"
+              "kubao_cost INT UNSIGNED NOT NULL DEFAULT 0,"
+              "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+              "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+              "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB") &&
+          vm_mysql_exec(
+              "CREATE TABLE IF NOT EXISTS server_instance_enter_daily ("
+              "account_id VARBINARY(64) NOT NULL,"
+              "role_id INT UNSIGNED NOT NULL,"
+              "scene VARBINARY(64) NOT NULL,"
+              "day_ymd INT UNSIGNED NOT NULL,"
+              "enter_count INT UNSIGNED NOT NULL DEFAULT 0,"
+              "challenge_count INT UNSIGNED NOT NULL DEFAULT 0,"
+              "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+              "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+              "ON UPDATE CURRENT_TIMESTAMP,"
+              "PRIMARY KEY(account_id,role_id,scene,day_ymd)) ENGINE=InnoDB") &&
+          vm_mysql_exec(
+              "CREATE TABLE IF NOT EXISTS server_scene_display_names ("
+              "scene VARBINARY(64) NOT NULL,"
+              "display_name VARBINARY(32) NOT NULL,"
+              "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+              "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP "
+              "ON UPDATE CURRENT_TIMESTAMP,PRIMARY KEY(scene)) ENGINE=InnoDB")))
+    {
+        return false;
+    }
+    /* Existing DBs created before challenge columns: ADD (ignore if present). */
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_instance_enter_rules ADD COLUMN "
+        "challenge_daily_limit INT UNSIGNED NOT NULL DEFAULT 0 "
+        "AFTER daily_limit");
+    (void)vm_mysql_exec(
+        "ALTER TABLE server_instance_enter_daily ADD COLUMN "
+        "challenge_count INT UNSIGNED NOT NULL DEFAULT 0 "
+        "AFTER enter_count");
+    ready = true;
+    return true;
 }
 
 static u32 vm_net_mock_local_day_ymd(void)
@@ -3468,18 +3508,22 @@ static bool vm_net_mock_instance_enter_rule_row(void *contextValue,
     vm_net_mock_instance_enter_rule *rule =
         (vm_net_mock_instance_enter_rule *)contextValue;
     u32 daily = 0;
+    u32 challengeDaily = 0;
     u32 gold = 0;
     u32 kubao = 0;
 
     /* MySQL text protocol values are length-prefixed, NOT NUL-terminated.
      * Never use strlen/strtoul on values[] — always use lengths[] parsers. */
-    if (rule == NULL || values == NULL || lengths == NULL || columnCount < 3 ||
+    if (rule == NULL || values == NULL || lengths == NULL || columnCount < 4 ||
         values[0] == NULL || values[1] == NULL || values[2] == NULL ||
+        values[3] == NULL ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &daily) ||
-        !vm_mock_mysql_parse_u32(values[1], lengths[1], &gold) ||
-        !vm_mock_mysql_parse_u32(values[2], lengths[2], &kubao))
+        !vm_mock_mysql_parse_u32(values[1], lengths[1], &challengeDaily) ||
+        !vm_mock_mysql_parse_u32(values[2], lengths[2], &gold) ||
+        !vm_mock_mysql_parse_u32(values[3], lengths[3], &kubao))
         return false;
     rule->dailyLimit = daily;
+    rule->challengeDailyLimit = challengeDaily;
     rule->goldCost = gold;
     rule->kubaoCost = kubao;
     rule->found = true;
@@ -3491,7 +3535,6 @@ static bool vm_net_mock_instance_enter_rule_load(const char *scene,
 {
     char sceneHex[192];
     char query[384];
-    char dbg[256];
 
     if (ruleOut == NULL)
         return false;
@@ -3507,7 +3550,7 @@ static bool vm_net_mock_instance_enter_rule_load(const char *scene,
     }
     snprintf(ruleOut->scene, sizeof(ruleOut->scene), "%s", scene);
     snprintf(query, sizeof(query),
-             "SELECT daily_limit,gold_cost,kubao_cost "
+             "SELECT daily_limit,challenge_daily_limit,gold_cost,kubao_cost "
              "FROM server_instance_enter_rules WHERE scene=UNHEX('%s') LIMIT 1",
              sceneHex);
     if (!vm_mysql_query(query, vm_net_mock_instance_enter_rule_row, ruleOut))
@@ -3518,9 +3561,9 @@ static bool vm_net_mock_instance_enter_rule_load(const char *scene,
         return false;
     }
     printf("[info][mock-admin] instance_enter_rule_load scene=%s found=%u "
-           "daily=%u gold=%u kubao=%u\n",
-           scene, ruleOut->found ? 1u : 0u, ruleOut->dailyLimit, ruleOut->goldCost,
-           ruleOut->kubaoCost);
+           "daily=%u challenge_daily=%u gold=%u kubao=%u\n",
+           scene, ruleOut->found ? 1u : 0u, ruleOut->dailyLimit,
+           ruleOut->challengeDailyLimit, ruleOut->goldCost, ruleOut->kubaoCost);
     return true;
 }
 
@@ -3690,15 +3733,126 @@ static const char *vm_net_mock_instance_enter_try_consume(
     return NULL;
 }
 
+/*
+ * Guide「挑战守关怪」daily quota (admin challenge_daily_limit on target scene).
+ * 0 / no rule ⇒ unlimited. Returns static GBK tip on refuse; NULL on allow.
+ * When *didConsumeOut is set, caller may rollback if battle start fails.
+ */
+static const char *vm_net_mock_instance_challenge_try_consume(
+    vm_mock_service_client_session *session, vm_net_mock_role_state *role,
+    const char *quotaScene, bool *didConsumeOut)
+{
+    vm_net_mock_instance_enter_rule rule;
+    char accountHex[160];
+    char sceneHex[160];
+    char query[640];
+    u32 dayYmd = 0;
+    u32 used = 0;
+    static const char tipQuota[] =
+        "\xcc\xf4\xd5\xbd\xb4\xce\xca\xfd\xb2\xbb\xd7\xe3\xa3\xac\xce\xde\xb7\xa8"
+        "\xb7\xa2\xc6\xf0\xb8\xb1\xb1\xbe\xcc\xf4\xd5\xbd\xa1\xa3"; /* 挑战次数不足，无法发起副本挑战。 */
+
+    if (didConsumeOut)
+        *didConsumeOut = false;
+    if (session == NULL || role == NULL || quotaScene == NULL ||
+        quotaScene[0] == 0 || session->accountId[0] == 0)
+        return NULL;
+    if (!vm_net_mock_instance_enter_rule_load(quotaScene, &rule) || !rule.found)
+        return NULL;
+    if (rule.challengeDailyLimit == 0)
+        return NULL;
+
+    dayYmd = vm_net_mock_local_day_ymd();
+    if (dayYmd == 0)
+        return tipQuota;
+    if (vm_mysql_hex_encode(session->accountId, strlen(session->accountId),
+                            accountHex, sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(quotaScene, strlen(quotaScene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+        return tipQuota;
+
+    snprintf(query, sizeof(query),
+             "SELECT challenge_count FROM server_instance_enter_daily "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND "
+             "scene=UNHEX('%s') AND day_ymd=%u LIMIT 1",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    used = 0;
+    (void)vm_mysql_query(query, vm_net_mock_instance_enter_daily_count_row,
+                         &used);
+    if (used >= rule.challengeDailyLimit)
+        return tipQuota;
+
+    snprintf(query, sizeof(query),
+             "INSERT INTO server_instance_enter_daily("
+             "account_id,role_id,scene,day_ymd,enter_count,challenge_count) "
+             "VALUES(UNHEX('%s'),%u,UNHEX('%s'),%u,0,1) "
+             "ON DUPLICATE KEY UPDATE challenge_count=challenge_count+1",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[error][network] instance_challenge_daily_fail role=%u "
+               "scene=%s error=%s\n",
+               role->roleId, quotaScene, vm_mysql_last_error());
+        return tipQuota;
+    }
+    if (didConsumeOut)
+        *didConsumeOut = true;
+    printf("[info][network] instance_challenge_consume role=%u scene=%s "
+           "day=%u used=%u/%u\n",
+           role->roleId, quotaScene, dayYmd, used + 1u,
+           rule.challengeDailyLimit);
+    return NULL;
+}
+
+static void vm_net_mock_instance_challenge_rollback_consume(
+    vm_mock_service_client_session *session, vm_net_mock_role_state *role,
+    const char *quotaScene)
+{
+    char accountHex[160];
+    char sceneHex[160];
+    char query[640];
+    u32 dayYmd = 0;
+
+    if (session == NULL || role == NULL || quotaScene == NULL ||
+        quotaScene[0] == 0 || session->accountId[0] == 0)
+        return;
+    dayYmd = vm_net_mock_local_day_ymd();
+    if (dayYmd == 0 ||
+        vm_mysql_hex_encode(session->accountId, strlen(session->accountId),
+                            accountHex, sizeof(accountHex)) == 0 ||
+        vm_mysql_hex_encode(quotaScene, strlen(quotaScene), sceneHex,
+                            sizeof(sceneHex)) == 0)
+    {
+        return;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE server_instance_enter_daily "
+             "SET challenge_count=IF(challenge_count>0,challenge_count-1,0) "
+             "WHERE account_id=UNHEX('%s') AND role_id=%u AND "
+             "scene=UNHEX('%s') AND day_ymd=%u",
+             accountHex, role->roleId, sceneHex, dayYmd);
+    if (!vm_mysql_exec(query))
+    {
+        printf("[warn][network] instance_challenge_rollback_fail role=%u "
+               "scene=%s error=%s\n",
+               role->roleId, quotaScene, vm_mysql_last_error());
+    }
+    else
+    {
+        printf("[info][network] instance_challenge_rollback role=%u scene=%s\n",
+               role->roleId, quotaScene);
+    }
+}
+
 static bool vm_net_mock_instance_enter_rule_admin_save(const char *scene,
                                                        u32 dailyLimit,
+                                                       u32 challengeDailyLimit,
                                                        u32 goldCost,
                                                        u32 kubaoCost,
                                                        const char **errorOut)
 {
     char sceneHex[192];
-    char query[512];
-    char dbg[256];
+    char query[640];
 
     if (errorOut)
         *errorOut = "保存失败";
@@ -3709,11 +3863,13 @@ static bool vm_net_mock_instance_enter_rule_admin_save(const char *scene,
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_instance_enter_rules("
-             "scene,daily_limit,gold_cost,kubao_cost) "
-             "VALUES(UNHEX('%s'),%u,%u,%u) ON DUPLICATE KEY UPDATE "
-             "daily_limit=VALUES(daily_limit),gold_cost=VALUES(gold_cost),"
+             "scene,daily_limit,challenge_daily_limit,gold_cost,kubao_cost) "
+             "VALUES(UNHEX('%s'),%u,%u,%u,%u) ON DUPLICATE KEY UPDATE "
+             "daily_limit=VALUES(daily_limit),"
+             "challenge_daily_limit=VALUES(challenge_daily_limit),"
+             "gold_cost=VALUES(gold_cost),"
              "kubao_cost=VALUES(kubao_cost)",
-             sceneHex, dailyLimit, goldCost, kubaoCost);
+             sceneHex, dailyLimit, challengeDailyLimit, goldCost, kubaoCost);
     if (!vm_mysql_exec(query))
     {
         if (errorOut)
@@ -3723,8 +3879,8 @@ static bool vm_net_mock_instance_enter_rule_admin_save(const char *scene,
     if (errorOut)
         *errorOut = "ok";
     printf("[info][mock-admin] instance_enter_rule_save scene=%s daily=%u "
-           "gold=%u kubao=%u\n",
-           scene, dailyLimit, goldCost, kubaoCost);
+           "challenge_daily=%u gold=%u kubao=%u\n",
+           scene, dailyLimit, challengeDailyLimit, goldCost, kubaoCost);
     return true;
 }
 
@@ -9977,7 +10133,7 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
     u32 designationInfoLen = 0;
     vm_net_mock_role_state *role = vm_net_mock_active_role();
     u32 roleId = role ? role->roleId : VM_NET_MOCK_ROLE_DEFAULT_ID;
-    const vm_net_mock_designation_entry *activeDesignation = vm_net_mock_role_designation(role);
+    const vm_net_mock_designation_entry *activeDesignation;
     u32 roleMoney = role ? role->money : VM_NET_MOCK_ROLE_DEFAULT_MONEY;
     u32 roleLevel = role ? role->level : 1;
     u8 requestIndex = 0xff;
@@ -9995,6 +10151,9 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
 
     if (outCap < pos || !vm_net_mock_is_role_designation23_request(request, requestLen, &requestSubtype))
         return 0;
+    if (role != NULL)
+        (void)vm_net_mock_role_refresh_special_designations(role);
+    activeDesignation = vm_net_mock_role_designation(role);
     requestPayloadHex[0] = 0;
     (void)vm_net_mock_parse_role_designation23_request_fields(request,
                                                               requestLen,
@@ -10052,6 +10211,21 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
             role->designationId = selectedDesignation->id;
             vm_net_mock_role_mark_inventory_dirty("role-designation-select");
             activeDesignation = selectedDesignation;
+            {
+                vm_mock_service_client_session *session =
+                    vm_mock_service_get_active_client_session();
+                if (session != NULL)
+                {
+                    snprintf(session->onlineRoleTitle,
+                             sizeof(session->onlineRoleTitle), "%s",
+                             selectedDesignation->name);
+                    snprintf(session->onlineRoleTitleBadge,
+                             sizeof(session->onlineRoleTitleBadge), "%s",
+                             selectedDesignation->overheadResource
+                                 ? selectedDesignation->overheadResource
+                                 : "");
+                }
+            }
         }
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 0x17, 3, &objectStart))
             return 0;
@@ -10107,6 +10281,9 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
         ++unlockedCount;
         if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_LEVEL)
             ++unlockedLevelCount;
+        else if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_ARENA ||
+                 entry->kind == VM_NET_MOCK_DESIGNATION_KIND_SPECIAL)
+            ; /* arena/special counted in unlockedCount only */
         else
             ++unlockedMoneyCount;
     }

@@ -112,6 +112,7 @@ static bool vm_net_mock_role_swap_equipped_backpack_item(
     }
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-equip-swap");
+    (void)vm_net_mock_role_refresh_special_designations(role);
 
     if (equippedItemIdOut)
         *equippedItemIdOut = newItemId;
@@ -254,6 +255,7 @@ static bool vm_net_mock_role_unequip_item(vm_net_mock_role_state *role,
     vm_net_mock_enhance_wash_clear(&role->equippedEnhanceWash[slot]);
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-unequip");
+    (void)vm_net_mock_role_refresh_special_designations(role);
 
     if (unequippedItemIdOut)
         *unequippedItemIdOut = itemId;
@@ -2058,6 +2060,331 @@ static u32 vm_net_mock_build_crystal_combine_response(const u8 *request,
     return pos;
 }
 
+/*
+ * PixiJS-only 玄晶碎片合成: 1/29/11 { seq }.
+ * Consume 10× item 900 → grant 1× 一级玄晶(901).
+ * If 901 already in bag, stack +1; else need a free slot (consuming a full
+ * stack of exactly 10 frees one slot before grant).
+ * result: 1=ok, 2=bad item, 3=bag full, 4=count<10.
+ */
+static u32 vm_net_mock_build_crystal_fragment_combine_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    u32 seqValue = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u32 srcItemId = 0;
+    u32 destItemId = (u32)VM_NET_MOCK_EQUIP_ENHANCE_CRYSTAL_FIRST;
+    u16 srcSeq = 0;
+    u16 destSeq = 0;
+    u32 srcRemaining = 0;
+    u32 destCount = 0;
+    const u32 cost = (u32)VM_NET_MOCK_CRYSTAL_FRAGMENT_COMBINE_COST;
+    const char *reason = "ok";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *src = NULL;
+    vm_net_mock_backpack_item_state *dest = NULL;
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 11 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seq", &seqValue) ||
+        seqValue == 0 || seqValue > 0xffffu)
+    {
+        return 0;
+    }
+    srcSeq = (u16)seqValue;
+
+    role = vm_net_mock_active_role();
+    if (role == NULL)
+    {
+        result = 2;
+        reason = "no-role";
+    }
+    else
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        src = vm_net_mock_role_find_backpack_item(role, 0, srcSeq);
+        if (src == NULL || src->count == 0)
+        {
+            result = 2;
+            reason = "fragment-not-found";
+        }
+        else
+        {
+            srcItemId = src->itemId;
+            if (srcItemId != (u32)VM_NET_MOCK_CRYSTAL_FRAGMENT_ITEM_ID)
+            {
+                result = 2;
+                reason = "not-fragment";
+            }
+            else if (src->count < cost)
+            {
+                result = 4;
+                reason = "count-lt-10";
+            }
+            else
+            {
+                u32 itemCount = vm_net_mock_role_backpack_count(role);
+                u32 freeSlots = role->backpackCapacity > itemCount
+                                    ? (u32)role->backpackCapacity - itemCount
+                                    : 0;
+                bool freesSlot = (src->count == cost);
+                dest = vm_net_mock_role_find_backpack_item(role, destItemId, 0);
+                if (dest == NULL && freeSlots == 0 && !freesSlot)
+                {
+                    result = 3;
+                    reason = "bag-full";
+                }
+            }
+        }
+    }
+
+    if (result == 1 && role != NULL && src != NULL)
+    {
+        if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq,
+                                                     cost, &srcRemaining))
+        {
+            result = 4;
+            reason = "consume-failed";
+        }
+        else if (!vm_net_mock_role_add_backpack_item_to_role(
+                     role, destItemId, 1, 0, &destSeq,
+                     "crystal-fragment-combine"))
+        {
+            (void)vm_net_mock_role_add_backpack_item_to_role(
+                role, srcItemId, cost, 0, NULL,
+                "crystal-fragment-combine-rollback");
+            result = 3;
+            reason = "grant-failed";
+            srcRemaining = srcRemaining + cost;
+        }
+        else
+        {
+            dest = vm_net_mock_role_find_backpack_item(role, destItemId, destSeq);
+            destCount = dest ? dest->count : 1;
+            reason = "fragment-combine-ok";
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 11,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "seq", srcSeq) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "itemid", srcItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destid", destItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
+                                    srcRemaining) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_crystal_fragment_combine seq=%u src=%u "
+           "dest=%u src_remain=%u dest_count=%u result=%u reason=%s "
+           "resp=29/11\n",
+           srcSeq, srcItemId, destItemId, srcRemaining, destCount, result,
+           reason);
+    vm_autotest_note(
+        "mock_crystal_fragment_combine seq=%u src=%u dest=%u result=%u "
+        "reason=%s evidence=pixijs-only-29/11\n",
+        srcSeq, srcItemId, destItemId, result, reason);
+    return pos;
+}
+
+/*
+ * PixiJS-only 梦境徽章合成: 1/29/12 { seq, destid }.
+ * Consume 300× item 840 → grant 1× player-chosen dream equip (40065..40088).
+ * Equipment never stacks — need a free bag slot (exact-300 consume frees one).
+ * result: 1=ok, 2=bad item, 3=bag full, 4=count<300, 5=unknown dest,
+ *         6=dest not in pool / missing destid.
+ */
+static bool vm_net_mock_dream_badge_equip_allowed(u32 itemId)
+{
+    static const u32 kDreamEquips[] = {
+        40066u, 40067u, 40068u, 40069u, 40070u, 40071u, 40072u, 40073u,
+        40074u, 40075u, 40076u, 40077u, 40078u, 40079u, 40080u, 40081u,
+        40082u, 40083u, 40084u, 40085u, 40086u, 40087u, 40088u, 40065u,
+    };
+    const u32 n = (u32)(sizeof(kDreamEquips) / sizeof(kDreamEquips[0]));
+    u32 i = 0;
+
+    for (i = 0; i < n; ++i)
+    {
+        if (kDreamEquips[i] == itemId)
+            return true;
+    }
+    return false;
+}
+
+static u32 vm_net_mock_build_dream_badge_combine_response(
+    const u8 *request, u32 requestLen, u8 *out, u32 outCap)
+{
+    u32 offset = 4;
+    u32 seqValue = 0;
+    u32 destReq = 0;
+    u32 objectStart = 0;
+    u32 pos = 5;
+    u8 objectCount = 1;
+    u8 result = 1;
+    u32 srcItemId = 0;
+    u32 destItemId = 0;
+    u16 srcSeq = 0;
+    u16 destSeq = 0;
+    u32 srcRemaining = 0;
+    u32 destCount = 0;
+    const u32 cost = (u32)VM_NET_MOCK_DREAM_BADGE_COMBINE_COST;
+    const char *reason = "ok";
+    vm_net_mock_request_object object;
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_backpack_item_state *src = NULL;
+
+    if (out == NULL || outCap < pos || request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset,
+                                          &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        object.subtype != 12 || object.payloadLen == 0)
+    {
+        return 0;
+    }
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "seq", &seqValue) ||
+        seqValue == 0 || seqValue > 0xffffu)
+    {
+        return 0;
+    }
+    srcSeq = (u16)seqValue;
+    if (!vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
+                                              "destid", &destReq) ||
+        destReq == 0)
+    {
+        /* Still ACK so the client can show a tip; do not consume badges. */
+        result = 6;
+        reason = "missing-destid";
+    }
+    else if (!vm_net_mock_dream_badge_equip_allowed(destReq))
+    {
+        result = 6;
+        reason = "dest-not-in-pool";
+        destItemId = destReq;
+    }
+    else
+        destItemId = destReq;
+
+    role = vm_net_mock_active_role();
+    if (result == 1 && role == NULL)
+    {
+        result = 2;
+        reason = "no-role";
+    }
+    else if (result == 1)
+    {
+        vm_net_mock_role_normalize_backpack(role);
+        src = vm_net_mock_role_find_backpack_item(role, 0, srcSeq);
+        if (src == NULL || src->count == 0)
+        {
+            result = 2;
+            reason = "badge-not-found";
+        }
+        else
+        {
+            srcItemId = src->itemId;
+            if (srcItemId != (u32)VM_NET_MOCK_DREAM_BADGE_ITEM_ID)
+            {
+                result = 2;
+                reason = "not-dream-badge";
+            }
+            else if (src->count < cost)
+            {
+                result = 4;
+                reason = "count-lt-300";
+            }
+            else
+            {
+                u32 itemCount = vm_net_mock_role_backpack_count(role);
+                u32 freeSlots = role->backpackCapacity > itemCount
+                                    ? (u32)role->backpackCapacity - itemCount
+                                    : 0;
+                bool freesSlot = (src->count == cost);
+                if (vm_net_mock_find_equipment_catalog_item(destItemId) == NULL)
+                {
+                    result = 5;
+                    reason = "dest-not-in-equip-dsh";
+                }
+                else if (freeSlots == 0 && !freesSlot)
+                {
+                    result = 3;
+                    reason = "bag-full";
+                }
+            }
+        }
+    }
+
+    if (result == 1 && role != NULL && src != NULL && destItemId != 0)
+    {
+        if (!vm_net_mock_role_consume_backpack_item(role, srcItemId, srcSeq,
+                                                     cost, &srcRemaining))
+        {
+            result = 4;
+            reason = "consume-failed";
+        }
+        else if (!vm_net_mock_role_add_backpack_item_to_role(
+                     role, destItemId, 1, 0, &destSeq,
+                     "dream-badge-combine"))
+        {
+            (void)vm_net_mock_role_add_backpack_item_to_role(
+                role, srcItemId, cost, 0, NULL,
+                "dream-badge-combine-rollback");
+            result = 3;
+            reason = "grant-failed";
+            srcRemaining = srcRemaining + cost;
+        }
+        else
+        {
+            destCount = 1;
+            reason = "dream-badge-combine-ok";
+        }
+    }
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29, 12,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", result) ||
+        !vm_net_mock_put_object_u16(out, outCap, &pos, "seq", srcSeq) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "itemid", srcItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destid", destItemId) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "remaining",
+                                    srcRemaining) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "destcount", destCount))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, objectCount);
+    printf("[info][network] mock_dream_badge_combine seq=%u src=%u "
+           "dest=%u src_remain=%u dest_count=%u result=%u reason=%s "
+           "resp=29/12\n",
+           srcSeq, srcItemId, destItemId, srcRemaining, destCount, result,
+           reason);
+    vm_autotest_note(
+        "mock_dream_badge_combine seq=%u src=%u dest=%u result=%u "
+        "reason=%s evidence=pixijs-only-29/12-player-pick\n",
+        srcSeq, srcItemId, destItemId, result, reason);
+    return pos;
+}
+
 static u32 vm_net_mock_battle_reward_rand(void)
 {
     if (g_vm_net_mock_battle_reward_rng == 0)
@@ -3387,6 +3714,7 @@ typedef struct vm_mock_service_account_state
     u32 mockBattleLastOperate;
     u32 mockBattleLastIndex;
     u8 mockBattleAutoPrefer;
+    u8 mockBattleAutoPreferNoHangup;
     u8 mockBattleAutoPendingArmed;
     u32 mockBattleAutoPendingNotBeforeTick;
     u32 mockBattleAutoNextActNotBeforeMs;
@@ -4008,6 +4336,14 @@ typedef struct vm_mock_service_client_session
     u16 instanceChallengeY;
     u32 instanceChallengeTick;
     char instanceChallengeScene[64];
+    /* Quota key for challenge_daily_limit (target instance scene, else outdoor). */
+    char instanceChallengeQuotaScene[64];
+    /*
+     * Pixi historically cleared 30/9 with agree=0 then sent hangup-style 4/1.
+     * Keep a short arm so that path still charges challenge_daily_limit.
+     */
+    bool instanceChallengeHangupStyleArm;
+    u32 instanceChallengeHangupStyleTick;
     /*
      * Instance-guide enter binds challenge_enemy_id to the target scene so
      * hangup / auto battle inside empty SCE stubs (e.g. 29梦境空间_01) can
@@ -4198,6 +4534,7 @@ typedef struct vm_mock_service_client_session
      */
     bool battleAutoTimersSeeded;
     u8 mockBattleAutoPrefer;
+    u8 mockBattleAutoPreferNoHangup;
     u8 mockBattleAutoPendingArmed;
     u32 mockBattleAutoPendingNotBeforeTick;
     u32 mockBattleAutoNextActNotBeforeMs;
@@ -4303,6 +4640,9 @@ typedef struct
     u32 battleMemberMpMax[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
     vm_net_mock_battle_stat_modifier
         battleMemberModifiers[VM_MOCK_SERVICE_TEAM_MEMBER_MAX];
+    /* Shared enemy DoT / silence / debuff — must not live only in per-account
+     * globals or each seat gets a private “先手” copy of 毒/沉默/破甲. */
+    vm_net_mock_battle_enemy_ailment battleEnemyAilments[3];
     u8 battleRoundActedMask;
     /* Members who successfully fled (or otherwise left) while the party fight
      * continues.  They stay in the frozen battleMember* roster for teaminfo
@@ -4411,6 +4751,7 @@ static void vm_mock_service_account_clear_auto_timers(vm_mock_service_account_st
     if (state == NULL)
         return;
     state->mockBattleAutoPrefer = 0;
+    state->mockBattleAutoPreferNoHangup = 0;
     state->mockBattleAutoPendingArmed = 0;
     state->mockBattleAutoPendingNotBeforeTick = 0;
     state->mockBattleAutoNextActNotBeforeMs = 0;
@@ -4435,6 +4776,7 @@ static void vm_mock_service_session_clear_auto_timers(vm_mock_service_client_ses
         return;
     session->battleAutoTimersSeeded = true;
     session->mockBattleAutoPrefer = 0;
+    session->mockBattleAutoPreferNoHangup = 0;
     session->mockBattleAutoPendingArmed = 0;
     session->mockBattleAutoPendingNotBeforeTick = 0;
     session->mockBattleAutoNextActNotBeforeMs = 0;
@@ -4458,6 +4800,7 @@ static void vm_mock_service_session_store_auto_timers(vm_mock_service_client_ses
         return;
     session->battleAutoTimersSeeded = true;
     session->mockBattleAutoPrefer = g_mockBattleAutoPrefer;
+    session->mockBattleAutoPreferNoHangup = g_mockBattleAutoPreferNoHangup;
     session->mockBattleAutoPendingArmed = g_mockBattleAutoPendingArmed;
     session->mockBattleAutoPendingNotBeforeTick = g_mockBattleAutoPendingNotBeforeTick;
     session->mockBattleAutoNextActNotBeforeMs = g_mockBattleAutoNextActNotBeforeMs;
@@ -4487,6 +4830,7 @@ static void vm_mock_service_session_load_auto_timers(
         if (legacyAccount == NULL)
             return;
         g_mockBattleAutoPrefer = legacyAccount->mockBattleAutoPrefer;
+        g_mockBattleAutoPreferNoHangup = legacyAccount->mockBattleAutoPreferNoHangup;
         g_mockBattleAutoPendingArmed = legacyAccount->mockBattleAutoPendingArmed;
         g_mockBattleAutoPendingNotBeforeTick =
             legacyAccount->mockBattleAutoPendingNotBeforeTick;
@@ -4516,6 +4860,8 @@ static void vm_mock_service_session_load_auto_timers(
     if (!session->battleAutoTimersSeeded && legacyAccount != NULL)
     {
         session->mockBattleAutoPrefer = legacyAccount->mockBattleAutoPrefer;
+        session->mockBattleAutoPreferNoHangup =
+            legacyAccount->mockBattleAutoPreferNoHangup;
         session->mockBattleAutoPendingArmed = legacyAccount->mockBattleAutoPendingArmed;
         session->mockBattleAutoPendingNotBeforeTick =
             legacyAccount->mockBattleAutoPendingNotBeforeTick;
@@ -4552,6 +4898,7 @@ static void vm_mock_service_session_load_auto_timers(
     }
 
     g_mockBattleAutoPrefer = session->mockBattleAutoPrefer;
+    g_mockBattleAutoPreferNoHangup = session->mockBattleAutoPreferNoHangup;
     g_mockBattleAutoPendingArmed = session->mockBattleAutoPendingArmed;
     g_mockBattleAutoPendingNotBeforeTick = session->mockBattleAutoPendingNotBeforeTick;
     g_mockBattleAutoNextActNotBeforeMs = session->mockBattleAutoNextActNotBeforeMs;
@@ -4587,13 +4934,37 @@ static void vm_mock_service_session_load_auto_timers(
     }
 }
 
+/*
+ * Globals mirror this account only when both the sticky pointer and the
+ * active account id string agree.  Request teardown NULLs active_account_id
+ * while leaving globals_account set for sticky reuse; temporary account
+ * switches must never capture roleDb into the wrong account_state.
+ */
+static bool vm_mock_service_account_globals_mirror(
+    const vm_mock_service_account_state *state)
+{
+    if (state == NULL || state->accountId[0] == 0)
+        return false;
+    if (g_vm_mock_service_globals_account != state)
+        return false;
+    if (g_vm_mock_service_active_account_id == NULL ||
+        g_vm_mock_service_active_account_id[0] == 0 ||
+        strcmp(g_vm_mock_service_active_account_id, state->accountId) != 0)
+    {
+        return false;
+    }
+    return true;
+}
+
 static void vm_mock_service_account_capture(vm_mock_service_account_state *state)
 {
     vm_mock_service_client_session *session = NULL;
     int agentRoleDbSkip = 0;
+    bool globalsMirror = false;
 
     if (state == NULL)
         return;
+    globalsMirror = vm_mock_service_account_globals_mirror(state);
 
     state->netMockSplitProbe = g_netMockSplitProbe;
     state->netMockUpdateDelivered = g_netMockUpdateDelivered;
@@ -4646,6 +5017,7 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     else
     {
         state->mockBattleAutoPrefer = g_mockBattleAutoPrefer;
+        state->mockBattleAutoPreferNoHangup = g_mockBattleAutoPreferNoHangup;
         state->mockBattleAutoPendingArmed = g_mockBattleAutoPendingArmed;
         state->mockBattleAutoPendingNotBeforeTick = g_mockBattleAutoPendingNotBeforeTick;
         state->mockBattleAutoNextActNotBeforeMs = g_mockBattleAutoNextActNotBeforeMs;
@@ -4691,15 +5063,30 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->rolePositionDirty = g_vm_net_mock_role_position_dirty;
     state->roleInventoryDirty = g_vm_net_mock_role_inventory_dirty;
     /*
-     * Skip only when globals still mirror this account and no dirty bit is
-     * set.  Sync MySQL paths call note_durable_role_write first so account
-     * roleDb already matches the committed authority; skipping then is safe.
-     * Skipping without that mirror left teleport/trade coordinates and bags
-     * stuck at the pre-write snapshot (shop-return / relogin regression).
+     * roleDb ownership: never copy globals into account_state unless the
+     * process mirror is this account (pointer + active id).  Cross-account
+     * temporary restore that forgot to switch back used to seal another
+     * player's roles into this heap cache (admin/client then showed the
+     * wrong roleId until process restart; MySQL account_roles stayed correct).
+     *
+     * Skip memcpy only when globals still mirror this account and no dirty
+     * bit is set.  Sync MySQL paths call note_durable_role_write first so
+     * account roleDb already matches the committed authority.
      */
-    if (state->rolePositionDirty || state->roleInventoryDirty ||
-        state != g_vm_mock_service_globals_account ||
-        !state->roleDbLoaded || !g_vm_net_mock_role_db_loaded)
+    if (!globalsMirror)
+    {
+        printf("[error][mock-service] role_db_capture rejected account=%s "
+               "globals=%s active_id=%s evidence=cross-account-roledb-guard\n",
+               state->accountId[0] ? state->accountId : "-",
+               g_vm_mock_service_globals_account
+                   ? g_vm_mock_service_globals_account->accountId
+                   : "-",
+               g_vm_mock_service_active_account_id
+                   ? g_vm_mock_service_active_account_id
+                   : "-");
+    }
+    else if (state->rolePositionDirty || state->roleInventoryDirty ||
+             !state->roleDbLoaded || !g_vm_net_mock_role_db_loaded)
     {
         state->roleDb = g_vm_net_mock_role_db;
         state->roleDbLoaded = g_vm_net_mock_role_db_loaded;
@@ -4814,7 +5201,16 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
         return;
     }
 
-    if (state == g_vm_mock_service_globals_account)
+    /*
+     * Sticky skip only when globals already mirror this account AND the heap
+     * roleDb is loaded.  Otherwise fall through and re-hydrate from state /
+     * MySQL so a polluted in-place roleDb cannot stick across requests.
+     */
+    if (state == g_vm_mock_service_globals_account &&
+        state->roleDbLoaded &&
+        g_vm_net_mock_role_db_loaded &&
+        g_vm_mock_service_active_account_id != NULL &&
+        strcmp(g_vm_mock_service_active_account_id, state->accountId) == 0)
     {
         vm_mock_service_client_session *autoSession =
             vm_mock_service_get_active_client_session();
@@ -4830,6 +5226,14 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
                g_mockBattleAutoPrefer ? 1u : 0u,
                g_mockHangupLoopActive ? 1u : 0u);
         return;
+    }
+    if (state == g_vm_mock_service_globals_account)
+    {
+        printf("[warn][mock-service] sticky_restore forced_full account=%s "
+               "roleDbLoaded=%u globals_loaded=%u evidence=roledb-ownership-reload\n",
+               state->accountId[0] ? state->accountId : "-",
+               state->roleDbLoaded ? 1u : 0u,
+               g_vm_net_mock_role_db_loaded ? 1u : 0u);
     }
 
     g_netMockSplitProbe = state->netMockSplitProbe;
@@ -5039,9 +5443,29 @@ static void vm_mock_service_account_note_durable_role_write(
 
     if (db != NULL && dbValid)
     {
-        account->roleDb = *db;
-        account->roleDbLoaded = true;
-        account->roleDbValid = true;
+        /*
+         * Refuse to seal a process roleDb into account_state when the caller
+         * account id does not own the active globals mirror.  Deferred jobs
+         * pass their own snapshot+accountId pair and are unaffected.
+         */
+        if (db == &g_vm_net_mock_role_db &&
+            (g_vm_mock_service_active_account_id == NULL ||
+             strcmp(g_vm_mock_service_active_account_id, account->accountId) != 0))
+        {
+            printf("[error][mock-service] durable_role_write rejected account=%s "
+                   "active_id=%s reason=%s evidence=cross-account-roledb-guard\n",
+                   account->accountId[0] ? account->accountId : "-",
+                   g_vm_mock_service_active_account_id
+                       ? g_vm_mock_service_active_account_id
+                       : "-",
+                   reason ? reason : "-");
+        }
+        else
+        {
+            account->roleDb = *db;
+            account->roleDbLoaded = true;
+            account->roleDbValid = true;
+        }
     }
     if (warehouse != NULL && warehouse->loaded &&
         warehouse->accountId[0] != 0 &&
@@ -9406,6 +9830,9 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->instanceChallengeY = 0;
     session->instanceChallengeTick = 0;
     session->instanceChallengeScene[0] = 0;
+    session->instanceChallengeQuotaScene[0] = 0;
+    session->instanceChallengeHangupStyleArm = false;
+    session->instanceChallengeHangupStyleTick = 0;
     session->instanceHangupEnemyValid = false;
     session->instanceHangupEnemyId = 0;
     session->instanceHangupActorId = 0;
@@ -11105,6 +11532,7 @@ static u8 vm_mock_service_team_begin_battle(vm_mock_service_team *team,
     /* Timed skill effects are scoped to this battle instance.  A new battle
      * must never inherit a previous encounter's modifier rows. */
     memset(team->battleMemberModifiers, 0, sizeof(team->battleMemberModifiers));
+    memset(team->battleEnemyAilments, 0, sizeof(team->battleEnemyAilments));
     for (u8 i = 0; i < participantCount; ++i)
     {
         vm_mock_service_client_session *member =
@@ -11203,6 +11631,16 @@ static vm_mock_service_account_state *vm_mock_service_open_account_role_db_for_m
     }
     ++state->pinCount;
     g_vm_mock_service_active_client_id = 0;
+    /*
+     * Admin / account-center must not trust sticky heap roleDb.  Break the
+     * sticky pointer and force a relational reload so a cross-account
+     * pollution cannot be shown as this account's roles.
+     */
+    if (g_vm_mock_service_globals_account == state)
+        g_vm_mock_service_globals_account = NULL;
+    state->roleDbLoaded = false;
+    state->roleDbValid = false;
+    g_vm_net_mock_role_db_loaded = false;
     vm_mock_service_account_restore(state);
     vm_net_mock_role_db_load();
     if (!g_vm_net_mock_role_db_valid)

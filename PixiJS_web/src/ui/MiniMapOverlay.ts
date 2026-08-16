@@ -4,14 +4,14 @@ import { mapBlocksAt, type MapPreview } from "../resources/map";
 
 /**
  * Top-right local minimap (CBE: red frame, walkable green / blocked dark).
- * Compact horizontal strip under HUD.
+ * Compact near-square thumb under HUD.
  */
 export class MiniMapOverlay extends Container {
   private frame = new Graphics();
   private mapSpr: Sprite | null = null;
   private dots = new Graphics();
-  /** Wider than tall — small landscape thumb (was 72×88). */
-  private mapW = 88;
+  /** Near-square thumb: half prior width (was 88×48). */
+  private mapW = 44;
   private mapH = 48;
   private tex: Texture | null = null;
   private lastKey = "";
@@ -25,8 +25,8 @@ export class MiniMapOverlay extends Container {
   }
 
   private layoutChrome(): void {
-    const x = LCD_WIDTH - this.mapW - 6;
-    const y = WORLD_TOP_H + 2;
+    const x = LCD_WIDTH - this.mapW;
+    const y = WORLD_TOP_H;
     this.position.set(x, y);
     this.frame.clear();
     this.frame.rect(0, 0, this.mapW, this.mapH).stroke({ width: 2, color: 0xe02020 });

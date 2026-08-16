@@ -43,13 +43,19 @@ static __thread int g_vm_mock_admin_protocol_lock_depth;
 static void vm_mock_admin_protocol_io_pause(void)
 {
     if (g_vm_mock_admin_protocol_lock_depth > 0)
+    {
+        vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
+    }
 }
 
 static void vm_mock_admin_protocol_io_resume(void)
 {
     if (g_vm_mock_admin_protocol_lock_depth > 0)
+    {
         pthread_mutex_lock(&g_vm_mock_service_protocol_mutex);
+        vm_mock_protocol_lock_note("admin-dispatch");
+    }
 }
 
 static int vm_mock_admin_protocol_lock_wait(u32 *waitMsOut)
@@ -4856,11 +4862,11 @@ static void vm_mock_admin_render_content_page(char *response,
         vm_mock_admin_text_appendf(
             &page,
             "<div class=\"preview\" style=\"margin-bottom:16px\">"
-            "<div class=\"preview-head\"><strong>每日进入副本规则</strong>"
+            "<div class=\"preview-head\"><strong>每日进入／挑战规则</strong>"
             "<span class=\"badge\">按目标场景</span></div>"
             "<p class=\"foot\" style=\"margin:0 0 8px\">"
-            "次数/金币(金)/酷宝 在进入时扣除；次数=0 且费用=0 表示不限制。"
-            "金币按 1金=10000铜 从角色 money 扣除。</p>"
+            "传送：次数/金币(金)/酷宝 在进入时扣除；挑战：向导「挑战守关怪」开战时扣次。"
+            "次数=0 表示该项不限制。金币按 1金=10000铜 从角色 money 扣除。</p>"
             "<form method=\"post\" action=\"/action\">"
             "<input type=\"hidden\" name=\"action\" value=\"save-instance-enter-rule\">"
             "<input type=\"hidden\" name=\"scene\" value=\"");
@@ -4870,12 +4876,15 @@ static void vm_mock_admin_render_content_page(char *response,
             "\"><div class=\"fields\">"
             "<label class=\"field\"><span>每日可进次数</span>"
             "<input type=\"number\" name=\"daily_limit\" min=\"0\" max=\"9999\" value=\"%u\"></label>"
+            "<label class=\"field\"><span>每日可挑战次数</span>"
+            "<input type=\"number\" name=\"challenge_daily_limit\" min=\"0\" max=\"9999\" value=\"%u\"></label>"
             "<label class=\"field\"><span>每次消耗金币</span>"
             "<input type=\"number\" name=\"gold_cost\" min=\"0\" max=\"999999\" value=\"%u\"></label>"
             "<label class=\"field\"><span>每次消耗酷宝</span>"
             "<input type=\"number\" name=\"kubao_cost\" min=\"0\" max=\"999999\" value=\"%u\"></label>"
-            "</div><div class=\"actions\"><button type=\"submit\">保存进入规则</button></div></form></div>",
+            "</div><div class=\"actions\"><button type=\"submit\">保存进入／挑战规则</button></div></form></div>",
             enterRule.found ? enterRule.dailyLimit : 0u,
+            enterRule.found ? enterRule.challengeDailyLimit : 0u,
             enterRule.found ? enterRule.goldCost : 0u,
             enterRule.found ? enterRule.kubaoCost : 0u);
     }
@@ -7835,6 +7844,7 @@ static void vm_mock_admin_handle_instance_enter_rule_action(
     char sceneUtf8[192];
     char runtimeScene[64];
     u32 dailyLimit = 0;
+    u32 challengeDailyLimit = 0;
     u32 goldCost = 0;
     u32 kubaoCost = 0;
     const char *error = NULL;
@@ -7848,6 +7858,8 @@ static void vm_mock_admin_handle_instance_enter_rule_action(
         return;
     }
     if (!vm_mock_admin_form_u32(body, "daily_limit", 9999u, &dailyLimit) ||
+        !vm_mock_admin_form_u32(body, "challenge_daily_limit", 9999u,
+                                &challengeDailyLimit) ||
         !vm_mock_admin_form_u32(body, "gold_cost", 999999u, &goldCost) ||
         !vm_mock_admin_form_u32(body, "kubao_cost", 999999u, &kubaoCost))
     {
@@ -7855,8 +7867,9 @@ static void vm_mock_admin_handle_instance_enter_rule_action(
                                        "进入规则表单字段无效");
         return;
     }
-    if (!vm_net_mock_instance_enter_rule_admin_save(runtimeScene, dailyLimit,
-                                                    goldCost, kubaoCost, &error))
+    if (!vm_net_mock_instance_enter_rule_admin_save(
+            runtimeScene, dailyLimit, challengeDailyLimit, goldCost, kubaoCost,
+            &error))
     {
         vm_mock_admin_redirect_content(
             client, sceneUtf8, "error",
@@ -7864,7 +7877,7 @@ static void vm_mock_admin_handle_instance_enter_rule_action(
         return;
     }
     vm_mock_admin_redirect_content(client, sceneUtf8, "ok",
-                                   "每日进入副本规则已保存");
+                                   "每日进入／挑战规则已保存");
 }
 
 static void vm_mock_admin_handle_scene_combat_spawn_action(
@@ -10789,6 +10802,7 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
         {
             printf("[warn][mock-admin] protocol_lock_timeout method=%s target=%s wait_ms=%u\n",
                    method, target, (u32)VM_MOCK_ADMIN_PROTOCOL_LOCK_WAIT_MS);
+            vm_mock_protocol_lock_dump_holder("admin-timeout");
             vm_mock_admin_send_response(
                 client, "503 Service Unavailable", NULL, NULL,
                 "游戏服务繁忙，管理操作请稍后重试。\n");
@@ -10801,9 +10815,11 @@ static int vm_mock_admin_handle_client(vm_mock_service_socket client)
                    method, target, lockWaitMs);
         }
         g_vm_mock_admin_protocol_lock_depth = 1;
+        vm_mock_protocol_lock_note("admin-dispatch");
         result = vm_mock_admin_dispatch_client(client, request, headerLen,
                                               method, target, query, body);
         g_vm_mock_admin_protocol_lock_depth = 0;
+        vm_mock_protocol_lock_clear();
         pthread_mutex_unlock(&g_vm_mock_service_protocol_mutex);
     }
     free(request);

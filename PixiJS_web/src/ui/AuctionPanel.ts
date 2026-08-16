@@ -12,6 +12,7 @@ import { BitmapLabel, wrapUiText } from "./BitmapLabel";
 import { ChatIme } from "./ChatIme";
 import {
   bagVisibleStackCount,
+  isDurableMallPassItemId,
   isReservoirFlaskItemId,
   type BagItem,
 } from "../net/protocolExtras";
@@ -43,6 +44,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { attachPageNavButtons } from "./pageNav";
 
 export type AuctionPanelAction =
   | "bid"
@@ -148,6 +150,8 @@ export class AuctionPanel extends Container {
 
   onAction: ((action: AuctionPanelAction, listingId?: number) => void) | null =
     null;
+  /** Softkey labels may change after tab switch (esp. tap). */
+  onSoftkeys: (() => void) | null = null;
 
   constructor() {
     super();
@@ -289,7 +293,9 @@ export class AuctionPanel extends Container {
     this.menuCursor = this.listQtyFixed(item) ? 2 : 1; // 起拍 / 数量
     this.tip = isReservoirFlaskItemId(item.itemId)
       ? `已选 ${item.name}（整壶·储量${item.count}）`
-      : `已选 ${item.name}`;
+      : isDurableMallPassItemId(item.itemId)
+        ? `已选 ${item.name}（整张·耐久${item.count}）`
+        : `已选 ${item.name}`;
     if (this.visible) this.redraw();
   }
 
@@ -332,6 +338,22 @@ export class AuctionPanel extends Container {
     this.menuCursor = 0;
     this.tip = "";
     this.redraw();
+    this.onSoftkeys?.();
+  }
+
+  /** Tap a top tab (absolute index). */
+  selectTab(index: number): void {
+    if (!this.visible) return;
+    if (this.detailListing) return;
+    if (index < 0 || index >= TABS.length || index === this.activeTab) return;
+    this.releaseIme();
+    this.listMode = "menu";
+    this.activeTab = index;
+    this.listCursor = 0;
+    this.menuCursor = 0;
+    this.tip = "";
+    this.redraw();
+    this.onSoftkeys?.();
   }
 
   move(dir: -1 | 1): void {
@@ -491,11 +513,13 @@ export class AuctionPanel extends Container {
     if (buyout > 0 && buyout < start) buyout = 0;
     /*
      * 装备 count=1；壶类 wire count=整行储量（可见堆叠恒 1）；
+     * 834/839 凭证 wire count=剩余耐久，整行上架；
      * 普通道具才按 listCount 部分上架。
      */
     let count: number;
     if (item.kind === "equip") count = 1;
     else if (isReservoirFlaskItemId(item.itemId)) count = Math.max(1, item.count);
+    else if (isDurableMallPassItemId(item.itemId)) count = Math.max(1, item.count);
     else {
       const max = Math.max(1, item.count);
       count = Math.max(1, Math.min(this.listCount, max));
@@ -595,7 +619,9 @@ export class AuctionPanel extends Container {
       this.menuCursor = this.listQtyFixed(it) ? 2 : 1; // 起拍 / 数量
       this.tip = isReservoirFlaskItemId(it.itemId)
         ? `已选 ${it.name}（整壶·储量${it.count}）`
-        : `已选 ${it.name} ×${this.listCount}`;
+        : isDurableMallPassItemId(it.itemId)
+          ? `已选 ${it.name}（整张·耐久${it.count}）`
+          : `已选 ${it.name} ×${this.listCount}`;
       this.redraw();
       return;
     }
@@ -688,7 +714,9 @@ export class AuctionPanel extends Container {
           ? "1(装备)"
           : isReservoirFlaskItemId(this.selected.itemId)
             ? `1(壶·储${this.selected.count})`
-            : `${this.listCount}/${max} ←→`;
+            : isDurableMallPassItemId(this.selected.itemId)
+              ? `1(凭证·耐久${this.selected.count})`
+              : `${this.listCount}/${max} ←→`;
     return [
       { id: "pick", label: `选择物品  ${sel}` },
       { id: "count", label: `上架数量  ${countLabel}` },
@@ -791,10 +819,14 @@ export class AuctionPanel extends Container {
     );
   }
 
-  /** 装备与壶类不可调数量（壶按整行储量上架）. */
+  /** 装备 / 壶 / 商城凭证不可调数量（整行上架）. */
   private listQtyFixed(item: BagItem | null): boolean {
     if (!item) return true;
-    return item.kind === "equip" || isReservoirFlaskItemId(item.itemId);
+    return (
+      item.kind === "equip" ||
+      isReservoirFlaskItemId(item.itemId) ||
+      isDurableMallPassItemId(item.itemId)
+    );
   }
 
   private defaultListCount(item: BagItem): number {
@@ -827,6 +859,12 @@ export class AuctionPanel extends Container {
     if (isReservoirFlaskItemId(this.selected.itemId)) {
       this.listCount = 1;
       this.tip = `壶整件上架（储量${this.selected.count}）`;
+      this.redraw();
+      return;
+    }
+    if (isDurableMallPassItemId(this.selected.itemId)) {
+      this.listCount = 1;
+      this.tip = `凭证整张上架（耐久${this.selected.count}）`;
       this.redraw();
       return;
     }
@@ -974,6 +1012,10 @@ export class AuctionPanel extends Container {
       const label = active ? tab.label : tab.short;
       const color = claimMark && !active ? 0xffe080 : active ? CBE.ink : CBE.inkMint;
       this.addLabelCentered(label, tx + tw / 2, y + h / 2, color);
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, tx, y, tw, h, () => this.selectTab(idx)),
+      );
     }
   }
 
@@ -1065,7 +1107,9 @@ export class AuctionPanel extends Container {
         (item.desc && item.desc !== "-" ? item.desc : "") ||
         (isReservoirFlaskItemId(item.itemId)
           ? `储量 ${item.count}`
-          : `数量 ${item.count}`);
+          : isDurableMallPassItemId(item.itemId)
+            ? `耐久 ${item.count}`
+            : `数量 ${item.count}`);
       for (const line of wrapUiText(desc, w - 28, 12)) {
         lines.push({ kind: "text", text: line, color: CBE.ink });
       }
@@ -1073,7 +1117,9 @@ export class AuctionPanel extends Container {
         kind: "text",
         text: isReservoirFlaskItemId(item.itemId)
           ? `储量 ${item.count}`
-          : `数量 ${item.count}`,
+          : isDurableMallPassItemId(item.itemId)
+            ? `耐久 ${item.count}`
+            : `数量 ${item.count}`,
         color: CBE.inkLabel,
       });
     }
@@ -1180,10 +1226,12 @@ export class AuctionPanel extends Container {
         } else {
           tag = formatRemain(r.remainSec);
         }
-        const qty =
-          isReservoirFlaskItemId(r.itemId) ? "" : `x${r.itemCount}`;
+        let qtyTag = "";
+        if (isReservoirFlaskItemId(r.itemId)) qtyTag = `储${r.itemCount}`;
+        else if (isDurableMallPassItemId(r.itemId)) qtyTag = `耐${r.itemCount}`;
+        else qtyTag = `x${r.itemCount}`;
         label =
-          `${r.itemName}${en}${qty} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
+          `${r.itemName}${en}${qtyTag} ${formatAuctionPrice(r.currentPrice, r.currency)} ${buy} ${tag}`.trim();
       }
       this.addLabel(label.slice(0, 26), x + 10, ry + 1, hi ? CBE.menuHi : CBE.ink);
       const hitIdx = idx;
@@ -1225,7 +1273,9 @@ export class AuctionPanel extends Container {
           const en = it.enhance ? `+${it.enhance}` : "";
           const qty = isReservoirFlaskItemId(it.itemId)
             ? `储${it.count}`
-            : `×${it.count}`;
+            : isDurableMallPassItemId(it.itemId)
+              ? `耐${it.count}`
+              : `×${it.count}`;
           this.addLabel(
             `${it.name}${en} ${qty}`.slice(0, 22),
             x + 10,
@@ -1241,6 +1291,40 @@ export class AuctionPanel extends Container {
             }),
           );
         });
+        const pages = Math.max(1, Math.ceil(this.bag.length / BAG_PAGE_SIZE));
+        if (pages > 1) {
+          const page = Math.floor(this.bagScroll / BAG_PAGE_SIZE) + 1;
+          attachPageNavButtons({
+            host: this,
+            hits: this.rowHits,
+            box: this.box,
+            x: x + 8,
+            y: tipY - 22,
+            w: w - 16,
+            page,
+            pages,
+            addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+            onPrev: () => {
+              this.bagScroll = Math.max(0, this.bagScroll - BAG_PAGE_SIZE);
+              this.bagCursor = Math.min(
+                this.bagCursor,
+                this.bagScroll + BAG_PAGE_SIZE - 1,
+              );
+              this.bagCursor = Math.max(this.bagScroll, this.bagCursor);
+              this.redraw();
+            },
+            onNext: () => {
+              const maxScroll = Math.max(0, this.bag.length - BAG_PAGE_SIZE);
+              this.bagScroll = Math.min(maxScroll, this.bagScroll + BAG_PAGE_SIZE);
+              this.bagCursor = Math.max(this.bagCursor, this.bagScroll);
+              this.bagCursor = Math.min(
+                this.bag.length - 1,
+                this.bagScroll + BAG_PAGE_SIZE - 1,
+              );
+              this.redraw();
+            },
+          });
+        }
       }
       this.addLabel(this.tip || "返回菜单", x + 10, tipY, CBE.inkMint);
       return;

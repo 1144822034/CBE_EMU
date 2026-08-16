@@ -212,46 +212,62 @@ static u8 vm_net_mock_build_scene_role_seeds(const char *scene,
     if (!vm_net_mock_scene_name_is_safe(scene))
         return 0;
 
-    session = g_vm_mock_service_client_sessions;
-    while (session != NULL && count < seedCap)
     {
-        if (session->clientId != 0 &&
-            session->clientId != g_vm_mock_service_active_client_id &&
-            vm_mock_service_session_scene_is_visible(session, scene))
+        vm_mock_service_client_session *observer =
+            vm_mock_service_find_client_session(g_vm_mock_service_active_client_id);
+
+        session = g_vm_mock_service_client_sessions;
+        while (session != NULL && count < seedCap)
         {
-            vm_mock_service_client_session *observer =
-                vm_mock_service_find_client_session(
-                    g_vm_mock_service_active_client_id);
-            u8 oi = offsetCount ? (u8)(count % offsetCount) : 0;
-            if (observer != NULL &&
-                !vm_mock_arena_peer_visible(observer, session))
+            if (session->clientId != 0 &&
+                session->clientId != g_vm_mock_service_active_client_id &&
+                vm_mock_service_session_scene_is_visible(session, scene))
             {
-                session = session->next;
-                continue;
+                u8 oi = offsetCount ? (u8)(count % offsetCount) : 0;
+                /*
+                 * Arena isolation: when seeding the venue during ENTRY/LIVE,
+                 * require an observer and peer_visible.  Missing observer used
+                 * to skip the filter and leak every bracket onto the map.
+                 */
+                if (vm_mock_arena_is_arena_scene(scene))
+                {
+                    if (observer == NULL ||
+                        !vm_mock_arena_peer_visible(observer, session))
+                    {
+                        session = session->next;
+                        continue;
+                    }
+                }
+                else if (observer != NULL &&
+                         !vm_mock_arena_peer_visible(observer, session))
+                {
+                    session = session->next;
+                    continue;
+                }
+                seeds[count].actorId = vm_net_mock_scene_role_actor_id_for_session(session,
+                                                                                   seeds,
+                                                                                   count,
+                                                                                   activeRole);
+                seeds[count].x = session->sceneVisibleX ? session->sceneVisibleX :
+                                 vm_net_mock_offset_coord(baseX, offsets[oi].dx);
+                seeds[count].y = session->sceneVisibleY ? session->sceneVisibleY :
+                                 vm_net_mock_offset_coord(baseY, offsets[oi].dy);
+                seeds[count].job = session->onlineJob ? session->onlineJob : 1;
+                seeds[count].sex = session->onlineSex <= 1 ? session->onlineSex : 0;
+                seeds[count].level = session->onlineLevel ? session->onlineLevel : 1;
+                seeds[count].hp = session->onlineHp;
+                seeds[count].hpMax = session->onlineHpMax;
+                seeds[count].mp = session->onlineMp;
+                seeds[count].mpMax = session->onlineMpMax;
+                seeds[count].roleName = session->onlineRoleName[0] ? session->onlineRoleName : "Player";
+                seeds[count].titleText = session->onlineRoleTitle[0] ? session->onlineRoleTitle : "";
+                seeds[count].titleBadge = session->onlineRoleTitleBadge[0] ? session->onlineRoleTitleBadge : "";
+                seeds[count].stateText = "Online";
+                seeds[count].session = session;
+                ++count;
             }
-            seeds[count].actorId = vm_net_mock_scene_role_actor_id_for_session(session,
-                                                                               seeds,
-                                                                               count,
-                                                                               activeRole);
-            seeds[count].x = session->sceneVisibleX ? session->sceneVisibleX :
-                             vm_net_mock_offset_coord(baseX, offsets[oi].dx);
-            seeds[count].y = session->sceneVisibleY ? session->sceneVisibleY :
-                             vm_net_mock_offset_coord(baseY, offsets[oi].dy);
-            seeds[count].job = session->onlineJob ? session->onlineJob : 1;
-            seeds[count].sex = session->onlineSex <= 1 ? session->onlineSex : 0;
-            seeds[count].level = session->onlineLevel ? session->onlineLevel : 1;
-            seeds[count].hp = session->onlineHp;
-            seeds[count].hpMax = session->onlineHpMax;
-            seeds[count].mp = session->onlineMp;
-            seeds[count].mpMax = session->onlineMpMax;
-            seeds[count].roleName = session->onlineRoleName[0] ? session->onlineRoleName : "Player";
-            seeds[count].titleText = session->onlineRoleTitle[0] ? session->onlineRoleTitle : "";
-            seeds[count].titleBadge = session->onlineRoleTitleBadge[0] ? session->onlineRoleTitleBadge : "";
-            seeds[count].stateText = "Online";
-            seeds[count].session = session;
-            ++count;
+            session = session->next;
         }
-        session = session->next;
     }
     return count;
 }
@@ -1635,13 +1651,37 @@ static vm_mock_service_duel *vm_mock_service_duel_begin(
     if (inviter == NULL || responder == NULL || inviter == responder ||
         inviter->clientId == 0 || responder->clientId == 0 ||
         !inviter->roleOnline || !responder->roleOnline ||
-        inviter->onlineRoleId == 0 || responder->onlineRoleId == 0 ||
-        !inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
-        inviter->sceneVisiblePending || responder->sceneVisiblePending ||
-        !vm_mock_service_session_scene_is_visible(responder,
-                                                  inviter->sceneVisibleScene))
+        inviter->onlineRoleId == 0 || responder->onlineRoleId == 0)
     {
         return NULL;
+    }
+    /*
+     * Arena auto-match must not wait on sceneVisibleReady: 30/1 settle after
+     * NPC enter can lag past the LIVE second, and duel_begin used to return
+     * NULL forever while tips already said「比武比赛开始」(2026-08-14).
+     */
+    {
+        bool bothOnArena =
+            vm_mock_arena_is_arena_scene(inviter->sceneVisibleScene) &&
+            vm_mock_arena_is_arena_scene(responder->sceneVisibleScene);
+        if (!bothOnArena)
+        {
+            if (!inviter->sceneVisibleReady || !responder->sceneVisibleReady ||
+                inviter->sceneVisiblePending || responder->sceneVisiblePending ||
+                !vm_mock_service_session_scene_is_visible(
+                    responder, inviter->sceneVisibleScene))
+                return NULL;
+        }
+        else if (inviter->sceneVisibleScene[0] == 0 ||
+                 responder->sceneVisibleScene[0] == 0 ||
+                 !vm_net_mock_scene_names_equal_loose(inviter->sceneVisibleScene,
+                                                     responder->sceneVisibleScene))
+        {
+            /* Fallback: onlineScene when visible scene still empty mid-teleport. */
+            if (!vm_mock_arena_is_arena_scene(inviter->onlineScene) ||
+                !vm_mock_arena_is_arena_scene(responder->onlineScene))
+                return NULL;
+        }
     }
     /* Rematch while prior duel is finished-hold-only must reclaim the slot. */
     vm_mock_service_duel_clear_finished_hold_for_client(inviter->clientId,

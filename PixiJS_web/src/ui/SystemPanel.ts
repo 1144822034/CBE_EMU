@@ -19,8 +19,12 @@ import {
   warmEquipArt,
 } from "./ItemArt";
 import {
+  canCombineCrystalFragment,
+  canCombineDreamBadge,
   canCombineEnhanceCrystal,
   isChestBoxItem,
+  isCrystalFragment,
+  isDreamBadge,
   isEnhanceCrystal,
   type BagItem,
   type CharacterStats,
@@ -519,6 +523,16 @@ export class SystemPanel extends Container {
     this.redraw();
   }
 
+  /** Tap a category tab (bag / mall / enhance). */
+  selectCategory(index: number): void {
+    if (this.mode !== "list" || !this.usesCategoryTabs()) return;
+    const tabs = this.categoryTabs();
+    if (index < 0 || index >= tabs.length || index === this.categoryIndex) return;
+    this.categoryIndex = index;
+    this.cursorIndex = 0;
+    this.redraw();
+  }
+
   private adjustBuyQty(delta: number): void {
     if (!this.selected || !isGoods(this.selected)) return;
     const max = this.maxBuyQty(this.selected);
@@ -780,7 +794,7 @@ export class SystemPanel extends Container {
     return this.kind === "bag" || this.kind === "enhance" || this.kind === "mall";
   }
 
-  private categoryTabs(): { id: string; label: string }[] {
+  private categoryTabs(): { id: string; label: string; short?: string }[] {
     if (this.kind === "mall") return MALL_TABS;
     if (this.kind === "bag" || this.kind === "enhance") return BAG_TABS;
     return [];
@@ -885,6 +899,12 @@ export class SystemPanel extends Container {
       } else if (isEnhanceCrystal(it.itemId)) {
         // 玄晶：≥3 且非十六级 →「合成」代替「使用」
         if (canCombineEnhanceCrystal(it.itemId, it.count)) acts.push("合成");
+      } else if (isCrystalFragment(it.itemId)) {
+        // 玄晶碎片：≥10 →「合成」一级玄晶
+        if (canCombineCrystalFragment(it.itemId, it.count)) acts.push("合成");
+      } else if (isDreamBadge(it.itemId)) {
+        // 梦境徽章：≥300 →「合成」随机梦境装备
+        if (canCombineDreamBadge(it.itemId, it.count)) acts.push("合成");
       } else {
         // 非装备一律提供使用（道具/任务/材料/杂物/秘宝）
         acts.push("使用");
@@ -1028,7 +1048,21 @@ export class SystemPanel extends Container {
       drawCbePanel(this.box, x, y, w, h, CBE.bgDeep);
 
       this.addLabel(titleOf(this.kind), x + 10, y + 8, CBE.ink);
-      this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
+      const showCatTabs = this.mode === "list" && this.usesCategoryTabs();
+      const tabH = 20;
+      const tabY = y + 26;
+      if (showCatTabs) {
+        this.drawCategoryTabStrip(
+          x + 6,
+          tabY,
+          w - 12,
+          tabH,
+          this.categoryTabs(),
+        );
+        this.addLabel(this.listHint(), x + 10, tabY + tabH + 4, CBE.inkLabel);
+      } else {
+        this.addLabel(this.listHint(), x + 10, y + 26, CBE.inkLabel);
+      }
 
       if (this.mode === "recharge_pay") {
         this.addLabel(`赞助 ${this.rechargeYuan} 元`, x + 10, y + 46, CBE.inkTipGreen);
@@ -1052,7 +1086,8 @@ export class SystemPanel extends Container {
       } else if (this.mode === "detail") {
         this.drawDetail(x, y, w);
       } else {
-        this.drawList(x, y, w);
+        const listTop = showCatTabs ? tabY + tabH + 20 : y + 44;
+        this.drawList(x, y, w, listTop);
       }
     }
     drawPanelTipOverlay(this, this.toast);
@@ -1459,22 +1494,48 @@ export class SystemPanel extends Container {
   }
 
   private drawBagTabs(x: number, y: number, w: number, h: number): void {
-    const n = BAG_TABS.length;
+    this.drawCategoryTabStrip(
+      x,
+      y,
+      w,
+      h,
+      BAG_TABS.map((t) => ({ label: t.label, short: t.short })),
+    );
+  }
+
+  /** Equal-width category tabs; tap switches (same as ←→). */
+  private drawCategoryTabStrip(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    tabs: { label: string; short?: string }[],
+  ): void {
+    const n = tabs.length;
+    if (n <= 0) return;
     const gap = 2;
     const tw = Math.floor((w - gap * (n - 1)) / n);
     for (let i = 0; i < n; i++) {
-      const tab = BAG_TABS[i]!;
+      const tab = tabs[i]!;
       const tx = x + i * (tw + gap);
       const active = i === this.categoryIndex;
       this.box
         .roundRect(tx, y, tw, h, 2)
         .fill({ color: active ? CBE.bgPanelDark : BAG_TAB_BG })
         .stroke({ width: 1, color: active ? CBE.borderBright : CBE.borderDim });
-      if (active) {
-        this.addLabelCentered(tab.label, tx + tw / 2, y + h / 2, CBE.ink);
-      } else {
-        this.addLabelCentered(tab.short, tx + tw / 2, y + h / 2, CBE.inkMint);
-      }
+      const text = active
+        ? tab.label.slice(0, 4)
+        : (tab.short ?? tab.label.slice(0, 1));
+      this.addLabelCentered(
+        text,
+        tx + tw / 2,
+        y + h / 2,
+        active ? CBE.ink : CBE.inkMint,
+      );
+      const idx = i;
+      this.rowHits.push(
+        attachRowPointerHit(this, tx, y, tw, h, () => this.selectCategory(idx)),
+      );
     }
   }
 
@@ -2093,7 +2154,7 @@ export class SystemPanel extends Container {
     return hintOf(this.kind);
   }
 
-  private drawList(x: number, y: number, w: number): void {
+  private drawList(x: number, y: number, w: number, listTop = y + 44): void {
     const lines = this.listLines();
     const pageStart =
       this.usesCategoryTabs() && lines.length
@@ -2108,10 +2169,10 @@ export class SystemPanel extends Container {
 
     for (let i = 0; i < pageLines.length; i++) {
       const hi = i === localCursor;
-      if (hi) this.box.rect(x + 4, y + 44 + i * 16, w - 8, 15).fill({ color: CBE.select });
+      if (hi) this.box.rect(x + 4, listTop + i * 16, w - 8, 15).fill({ color: CBE.select });
       const row = pageLines[i]!;
       const ink = hi ? CBE.ink : row.color;
-      const ty = y + 45 + i * 16;
+      const ty = listTop + 1 + i * 16;
       if (row.right) {
         this.addAttrText(row.text.slice(0, 14), x + 8, ty, ink);
         this.addAttrTextRight(row.right, x + w - 8, ty, ink, 80);
@@ -2120,7 +2181,7 @@ export class SystemPanel extends Container {
       }
       const absIdx = pageStart + i;
       this.rowHits.push(
-        attachRowPointerHit(this, x + 4, y + 44 + i * 16, w - 8, 15, () => {
+        attachRowPointerHit(this, x + 4, listTop + i * 16, w - 8, 15, () => {
           this.cursorIndex = absIdx;
           this.redraw();
           this.confirm();

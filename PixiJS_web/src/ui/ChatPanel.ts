@@ -22,6 +22,7 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
+import { ARENA_TEXT_TITLE_COLORS } from "./designation";
 
 /** Wire 1/3/3 type → display. */
 export type ChatEntry = {
@@ -103,23 +104,11 @@ export function colorForChatType(type: number): number {
 }
 
 /**
- * 比武连杀：仅「称号」着色；1…10 各色，11+ 天下无敌红色。
+ * 比武连杀：仅「称号」着色；与头顶文字称号同色表（designation.ts）。
  * Wire: `{玩家} 比武 {阶段} 连胜N人,已经{称号} !`
- * 服务端：本场 LIVE 每档仅全场首个达成者播报。
+ * 服务端：本场 LIVE 每档仅全场首个达成者播报并解锁。
  */
-const ARENA_KILL_STREAK_COLORS: { title: string; color: number }[] = [
-  { title: "敌将讨伐", color: 0xfff0c0 },
-  { title: "双杀", color: 0xffc060 },
-  { title: "大杀特杀", color: 0xffa040 },
-  { title: "所向披靡", color: 0xffe040 },
-  { title: "浑身是胆", color: 0x80ff40 },
-  { title: "势如破竹", color: 0x40ffb0 },
-  { title: "勇冠三军", color: 0x40e8ff },
-  { title: "一骑当千", color: 0x6080ff },
-  { title: "万夫莫敌", color: 0xc080ff },
-  { title: "举世无双", color: 0xff60c8 },
-  { title: "天下无敌", color: 0xff2020 },
-];
+const ARENA_KILL_STREAK_COLORS = ARENA_TEXT_TITLE_COLORS;
 
 export function findArenaKillStreakTitle(
   text: string,

@@ -611,6 +611,7 @@ export function parseSceneEnter(packet: WtPacket): { scene: string; x: number; y
  * mock_server_interaction_login.c title-role-select → 1/1/6+1/1/15.
  */
 export type RoleSelectEnter = {
+  roleId: number;
   scene: string;
   x: number;
   y: number;
@@ -722,7 +723,7 @@ export function parseRoleSelectEnter(packet: WtPacket): RoleSelectEnter | null {
   if (!raw || raw.length < 32) return null;
   try {
     const r = new SeqReader(raw);
-    r.u32(); // roleId
+    const roleId = r.u32();
     r.u8(); // visualVariant
     r.u8(); // visualGroup
     const name = r.string().replace(/\0+$/g, "");
@@ -758,6 +759,7 @@ export function parseRoleSelectEnter(packet: WtPacket): RoleSelectEnter | null {
     if (!scene) return null;
     scene = ensureSceneFile(scene);
     return {
+      roleId: roleId >>> 0,
       scene,
       x,
       y,

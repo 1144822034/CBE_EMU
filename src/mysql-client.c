@@ -3,8 +3,11 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -54,6 +57,8 @@ typedef struct
  * worker therefore owns and reuses its own connection and error buffer. */
 static VM_MYSQL_THREAD_LOCAL SOCKET g_vm_mysql_socket = INVALID_SOCKET;
 static VM_MYSQL_THREAD_LOCAL char g_vm_mysql_error[512];
+/* Set when a query fails before any row callback ran — safe to replay once. */
+static VM_MYSQL_THREAD_LOCAL int g_vm_mysql_transport_retry_ok;
 #ifdef _WIN32
 static pthread_once_t g_vm_mysql_wsa_once = PTHREAD_ONCE_INIT;
 static int g_vm_mysql_wsa_ready = 0;
@@ -224,6 +229,180 @@ static const char *vm_mysql_config(const char *name, const char *fallback)
     return value != NULL && value[0] != '\0' ? value : fallback;
 }
 
+static unsigned long vm_mysql_io_timeout_ms(void)
+{
+    const char *timeoutText = vm_mysql_config("CBE_MYSQL_TIMEOUT_MS", "1000");
+    unsigned long timeoutMs = strtoul(timeoutText ? timeoutText : "1000", NULL, 10);
+    if (timeoutMs < 200ul)
+        timeoutMs = 200ul;
+    if (timeoutMs > 5000ul)
+        timeoutMs = 5000ul;
+    return timeoutMs;
+}
+
+static bool vm_mysql_apply_socket_timeouts(SOCKET socket_value)
+{
+    unsigned long timeoutMs = vm_mysql_io_timeout_ms();
+#ifdef _WIN32
+    DWORD timeout_ms = (DWORD)timeoutMs;
+    if (setsockopt(socket_value, SOL_SOCKET, SO_RCVTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms)) != 0 ||
+        setsockopt(socket_value, SOL_SOCKET, SO_SNDTIMEO,
+                   (const char *)&timeout_ms, sizeof(timeout_ms)) != 0)
+    {
+        vm_mysql_set_error("Could not set MySQL socket timeouts");
+        return false;
+    }
+#else
+    struct timeval timeout_value;
+    timeout_value.tv_sec = (time_t)(timeoutMs / 1000ul);
+    timeout_value.tv_usec = (suseconds_t)((timeoutMs % 1000ul) * 1000ul);
+    if (setsockopt(socket_value, SOL_SOCKET, SO_RCVTIMEO,
+                   &timeout_value, sizeof(timeout_value)) != 0 ||
+        setsockopt(socket_value, SOL_SOCKET, SO_SNDTIMEO,
+                   &timeout_value, sizeof(timeout_value)) != 0)
+    {
+        vm_mysql_set_error("Could not set MySQL socket timeouts");
+        return false;
+    }
+#endif
+    return true;
+}
+
+static bool vm_mysql_set_blocking(SOCKET socket_value, int blocking)
+{
+#ifdef _WIN32
+    u_long mode = blocking ? 0ul : 1ul;
+    return ioctlsocket(socket_value, FIONBIO, &mode) == 0;
+#else
+    int flags = fcntl(socket_value, F_GETFL, 0);
+    if (flags < 0)
+        return false;
+    if (blocking)
+        flags &= ~O_NONBLOCK;
+    else
+        flags |= O_NONBLOCK;
+    return fcntl(socket_value, F_SETFL, flags) == 0;
+#endif
+}
+
+/*
+ * Blocking connect() has no SO_SNDTIMEO on many stacks and can stall for
+ * minutes while holding the game protocol mutex.  Bound the handshake with
+ * non-blocking connect + select/poll using CBE_MYSQL_TIMEOUT_MS.
+ */
+static bool vm_mysql_connect_socket(SOCKET socket_value,
+                                   const struct sockaddr *address,
+                                   int address_len,
+                                   unsigned long timeoutMs)
+{
+#ifdef _WIN32
+    fd_set writeSet;
+    fd_set exceptSet;
+    struct timeval timeout_value;
+    int selectResult;
+    int soError = 0;
+    int soErrorLen = (int)sizeof(soError);
+
+    if (!vm_mysql_set_blocking(socket_value, 0))
+    {
+        vm_mysql_set_error("Could not set MySQL socket non-blocking");
+        return false;
+    }
+    if (connect(socket_value, address, address_len) == 0)
+    {
+        if (!vm_mysql_set_blocking(socket_value, 1))
+        {
+            vm_mysql_set_error("Could not restore MySQL socket blocking mode");
+            return false;
+        }
+        return true;
+    }
+    if (WSAGetLastError() != WSAEWOULDBLOCK &&
+        WSAGetLastError() != WSAEINPROGRESS)
+    {
+        vm_mysql_set_error("Could not connect to MySQL server");
+        return false;
+    }
+    FD_ZERO(&writeSet);
+    FD_ZERO(&exceptSet);
+    FD_SET(socket_value, &writeSet);
+    FD_SET(socket_value, &exceptSet);
+    timeout_value.tv_sec = (long)(timeoutMs / 1000ul);
+    timeout_value.tv_usec = (long)((timeoutMs % 1000ul) * 1000ul);
+    selectResult = select(0, NULL, &writeSet, &exceptSet, &timeout_value);
+    if (selectResult <= 0)
+    {
+        vm_mysql_set_error(selectResult == 0 ?
+                               "MySQL connect timed out" :
+                               "MySQL connect select failed");
+        return false;
+    }
+    if (getsockopt(socket_value, SOL_SOCKET, SO_ERROR,
+                   (char *)&soError, &soErrorLen) != 0 ||
+        soError != 0)
+    {
+        vm_mysql_set_error("Could not connect to MySQL server");
+        return false;
+    }
+    if (!vm_mysql_set_blocking(socket_value, 1))
+    {
+        vm_mysql_set_error("Could not restore MySQL socket blocking mode");
+        return false;
+    }
+    return true;
+#else
+    struct pollfd pollFd;
+    int connectResult;
+    int soError = 0;
+    socklen_t soErrorLen = (socklen_t)sizeof(soError);
+
+    if (!vm_mysql_set_blocking(socket_value, 0))
+    {
+        vm_mysql_set_error("Could not set MySQL socket non-blocking");
+        return false;
+    }
+    connectResult = connect(socket_value, address, (socklen_t)address_len);
+    if (connectResult == 0)
+    {
+        if (!vm_mysql_set_blocking(socket_value, 1))
+        {
+            vm_mysql_set_error("Could not restore MySQL socket blocking mode");
+            return false;
+        }
+        return true;
+    }
+    if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK)
+    {
+        vm_mysql_set_error("Could not connect to MySQL server");
+        return false;
+    }
+    memset(&pollFd, 0, sizeof(pollFd));
+    pollFd.fd = socket_value;
+    pollFd.events = POLLOUT;
+    connectResult = poll(&pollFd, 1, (int)timeoutMs);
+    if (connectResult <= 0)
+    {
+        vm_mysql_set_error(connectResult == 0 ?
+                               "MySQL connect timed out" :
+                               "MySQL connect poll failed");
+        return false;
+    }
+    if (getsockopt(socket_value, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen) != 0 ||
+        soError != 0)
+    {
+        vm_mysql_set_error("Could not connect to MySQL server");
+        return false;
+    }
+    if (!vm_mysql_set_blocking(socket_value, 1))
+    {
+        vm_mysql_set_error("Could not restore MySQL socket blocking mode");
+        return false;
+    }
+    return true;
+#endif
+}
+
 static bool vm_mysql_send_all(const uint8_t *data, size_t data_len)
 {
     while (data_len > 0)
@@ -356,19 +535,37 @@ static bool vm_mysql_connect(void)
     for (struct addrinfo *address = addresses; address != NULL; address = address->ai_next)
     {
         SOCKET socket_value = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        int keepAlive = 1;
         if (socket_value == INVALID_SOCKET)
             continue;
-        if (connect(socket_value, address->ai_addr, (int)address->ai_addrlen) == 0)
+        if (!vm_mysql_connect_socket(socket_value,
+                                     address->ai_addr,
+                                     (int)address->ai_addrlen,
+                                     vm_mysql_io_timeout_ms()))
         {
-            g_vm_mysql_socket = socket_value;
-            break;
+            closesocket(socket_value);
+            continue;
         }
-        closesocket(socket_value);
+#ifdef _WIN32
+        setsockopt(socket_value, SOL_SOCKET, SO_KEEPALIVE,
+                   (const char *)&keepAlive, sizeof(keepAlive));
+#else
+        setsockopt(socket_value, SOL_SOCKET, SO_KEEPALIVE,
+                   &keepAlive, sizeof(keepAlive));
+#endif
+        if (!vm_mysql_apply_socket_timeouts(socket_value))
+        {
+            closesocket(socket_value);
+            continue;
+        }
+        g_vm_mysql_socket = socket_value;
+        break;
     }
     freeaddrinfo(addresses);
     if (g_vm_mysql_socket == INVALID_SOCKET)
     {
-        vm_mysql_set_error("Could not connect to MySQL server");
+        if (g_vm_mysql_error[0] == '\0')
+            vm_mysql_set_error("Could not connect to MySQL server");
         return false;
     }
 
@@ -385,36 +582,6 @@ static bool vm_mysql_connect(void)
 #else
         setsockopt(g_vm_mysql_socket, IPPROTO_TCP, TCP_NODELAY,
                    &noDelay, sizeof(noDelay));
-#endif
-    }
-
-    /*
-     * Keep MySQL I/O well under the game-client request window
-     * (VM_MOCK_SERVICE_SOCKET_TIMEOUT_MS=5000).  A single hung admin SELECT
-     * must not consume the whole battle-start budget; base monster/shop
-     * catalogs remain usable when overrides fail fast.
-     */
-    {
-        const char *timeoutText = vm_mysql_config("CBE_MYSQL_TIMEOUT_MS", "1000");
-        unsigned long timeoutMs = strtoul(timeoutText ? timeoutText : "1000", NULL, 10);
-        if (timeoutMs < 200ul)
-            timeoutMs = 200ul;
-        if (timeoutMs > 5000ul)
-            timeoutMs = 5000ul;
-#ifdef _WIN32
-        DWORD timeout_ms = (DWORD)timeoutMs;
-        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO,
-                   (const char *)&timeout_ms, sizeof(timeout_ms));
-        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO,
-                   (const char *)&timeout_ms, sizeof(timeout_ms));
-#else
-        struct timeval timeout_value;
-        timeout_value.tv_sec = (time_t)(timeoutMs / 1000ul);
-        timeout_value.tv_usec = (suseconds_t)((timeoutMs % 1000ul) * 1000ul);
-        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_RCVTIMEO,
-                   &timeout_value, sizeof(timeout_value));
-        setsockopt(g_vm_mysql_socket, SOL_SOCKET, SO_SNDTIMEO,
-                   &timeout_value, sizeof(timeout_value));
 #endif
     }
 
@@ -595,8 +762,15 @@ static bool vm_mysql_packet_is_eof(const uint8_t *packet, size_t packet_len)
 
 static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, void *context)
 {
-    if (sql == NULL || !vm_mysql_connect())
+    g_vm_mysql_transport_retry_ok = 0;
+    if (sql == NULL)
         return false;
+    if (!vm_mysql_connect())
+    {
+        /* Fresh TCP+auth can fail after wait_timeout kill; allow one replay. */
+        g_vm_mysql_transport_retry_ok = 1;
+        return false;
+    }
     size_t sql_len = strlen(sql);
     uint8_t *request = (uint8_t *)malloc(sql_len + 1);
     uint8_t *packet = (uint8_t *)malloc(VM_MYSQL_PACKET_CAPACITY);
@@ -609,6 +783,8 @@ static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, 
     }
     request[0] = 0x03;
     memcpy(request + 1, sql, sql_len);
+    /* Failures before the first server packet have no row side effects. */
+    g_vm_mysql_transport_retry_ok = 1;
     if (!vm_mysql_send_packet(request, sql_len + 1, 0))
         goto connection_failed;
     free(request);
@@ -618,6 +794,7 @@ static bool vm_mysql_run_query(const char *sql, vm_mysql_row_callback callback, 
     uint8_t sequence = 0;
     if (!vm_mysql_recv_packet(packet, VM_MYSQL_PACKET_CAPACITY, &packet_len, &sequence))
         goto connection_failed;
+    g_vm_mysql_transport_retry_ok = 0;
     if (vm_mysql_is_error(packet, packet_len))
         goto query_failed;
     if (packet_len > 0 && packet[0] == 0x00)
@@ -705,11 +882,23 @@ query_failed:
 
 bool vm_mysql_exec(const char *sql)
 {
+    if (vm_mysql_run_query(sql, NULL, NULL))
+        return true;
+    if (!g_vm_mysql_transport_retry_ok)
+        return false;
+    printf("[warn][mysql] exec_reconnect_retry error=%s\n", vm_mysql_last_error());
+    fflush(stdout);
     return vm_mysql_run_query(sql, NULL, NULL);
 }
 
 bool vm_mysql_query(const char *sql, vm_mysql_row_callback callback, void *context)
 {
+    if (vm_mysql_run_query(sql, callback, context))
+        return true;
+    if (!g_vm_mysql_transport_retry_ok)
+        return false;
+    printf("[warn][mysql] query_reconnect_retry error=%s\n", vm_mysql_last_error());
+    fflush(stdout);
     return vm_mysql_run_query(sql, callback, context);
 }
 

@@ -2403,7 +2403,20 @@ typedef enum
     VM_NET_MOCK_DESIGNATION_KIND_LEVEL = 1,
     /* Pixi-only：比武连杀文字称号（overhead 空串，客户端画字）。 */
     VM_NET_MOCK_DESIGNATION_KIND_ARENA = 2,
+    /* 装备套装 / 创建时间永久称号（specialDesignationMask）。 */
+    VM_NET_MOCK_DESIGNATION_KIND_SPECIAL = 3,
 } vm_net_mock_designation_kind;
+
+/* 资深老友门槛：角色 created_at < 2026-08-16 00:00:00 Asia/Shanghai。 */
+enum
+{
+    VM_NET_MOCK_SENIOR_FRIEND_CUTOFF_UNIX = 1786809600u,
+    VM_NET_MOCK_DESIGNATION_ID_CHRISTMAS_KNIGHT = 41,
+    VM_NET_MOCK_DESIGNATION_ID_WULIN_LEGEND = 42,
+    VM_NET_MOCK_DESIGNATION_ID_SENIOR_HERO = 43,
+    VM_NET_MOCK_DESIGNATION_ID_SENIOR_FRIEND = 44,
+    VM_NET_MOCK_DESIGNATION_ID_HERO_KING = 45,
+};
 
 typedef struct
 {
@@ -2728,6 +2741,43 @@ static const vm_net_mock_designation_entry g_vm_net_mock_designation_entries[] =
         "\xb1\xc8\xce\xe4\xc1\xac\xca\xa4\xb3\xc6\xba\xc5",
         "",
     },
+    /*
+     * Special permanent titles (id 41–45): unlock once via equipment / create
+     * time, then stay unlocked even after unequip (specialDesignationMask).
+     */
+    {
+        41, 0, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL, 0, 0,
+        "\xca\xa5\xb5\xae\xc6\xef\xca\xbf", /* 圣诞骑士 */
+        "\xb4\xa9\xb4\xf7\xc8\xab\xcc\xd7\xca\xa5\xb5\xae\xd7\xb0\xb1\xb8\xd3\xc0\xbe\xc3\xbc\xa4\xbb\xee",
+        "sdqs0.gif",
+    },
+    {
+        42, 0, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL, 0, 0,
+        "\xce\xe4\xc1\xd6\xb4\xab\xc6\xe6", /* 武林传奇 */
+        "\xb4\xa9\xb4\xf7\xc8\xab\xcc\xd7\xce\xe4\xc1\xd6\xd7\xb0\xb1\xb8\xd3\xc0\xbe\xc3\xbc\xa4\xbb\xee",
+        "wlcq0.gif",
+    },
+    {
+        43, 0, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL, 0, 0,
+        "\xd7\xca\xc9\xee\xc0\xcf\xd3\xd1\xd3\xc2\xd5\xdf\xcd\xf5", /* 资深老友勇者王 */
+        "\xb4\xa9\xb4\xf7\xc3\xce\xbe\xb3\xce\xe4\xc6\xf7\xb2\xa2\xc7\xd2\xb4\xb4\xbd\xa8\xbd\xc7\xc9\xab"
+        "\xca\xb1\xbc\xe4\xd4\xda\x32\x30\x32\x36\x2d\x30\x38\x2d\x31\x36\xd6\xae\xc7\xb0"
+        "\xd3\xc0\xbe\xc3\xbc\xa4\xbb\xee",
+        "zsly.gif",
+    },
+    {
+        44, 0, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL, 0, 0,
+        "\xd7\xca\xc9\xee\xc0\xcf\xd3\xd1", /* 资深老友（需求原文「姿深」按笔误修正） */
+        "\xb4\xb4\xbd\xa8\xbd\xc7\xc9\xab\xca\xb1\xbc\xe4\xd4\xda\x32\x30\x32\x36\x2d\x30\x38\x2d\x31\x36"
+        "\xd6\xae\xc7\xb0\xd3\xc0\xbe\xc3\xbc\xa4\xbb\xee",
+        "zsly0.gif",
+    },
+    {
+        45, 0, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL, 0, 0,
+        "\xd3\xc2\xd5\xdf\xcd\xf5", /* 勇者王 */
+        "\xb4\xa9\xb4\xf7\xc3\xce\xbe\xb3\xce\xe4\xc6\xf7\xd3\xc0\xbe\xc3\xbc\xa4\xbb\xee",
+        "zsly1.gif",
+    },
 
 };
 
@@ -2753,6 +2803,12 @@ static bool vm_net_mock_designation_is_arena_id(u8 id)
     return id >= 30 && id <= 40;
 }
 
+static bool vm_net_mock_designation_is_special_id(u8 id)
+{
+    return id >= (u8)VM_NET_MOCK_DESIGNATION_ID_CHRISTMAS_KNIGHT &&
+           id <= (u8)VM_NET_MOCK_DESIGNATION_ID_HERO_KING;
+}
+
 static u8 vm_net_mock_arena_designation_id_for_streak(u32 streak)
 {
     if (streak == 0)
@@ -2769,6 +2825,186 @@ static u32 vm_net_mock_arena_designation_mask_bit(u8 id)
     return 1u << (id - 30u);
 }
 
+static u32 vm_net_mock_special_designation_mask_bit(u8 id)
+{
+    if (!vm_net_mock_designation_is_special_id(id))
+        return 0;
+    return 1u << (id - (u8)VM_NET_MOCK_DESIGNATION_ID_CHRISTMAS_KNIGHT);
+}
+
+static bool vm_net_mock_role_wearing_item_id(const vm_net_mock_role_state *role,
+                                             u32 itemId)
+{
+    if (role == NULL || itemId == 0)
+        return false;
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (role->equippedItemIds[slot] == itemId)
+            return true;
+    }
+    return false;
+}
+
+static bool vm_net_mock_item_id_in_list(u32 itemId, const u32 *ids, u32 count)
+{
+    if (itemId == 0 || ids == NULL)
+        return false;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (ids[i] == itemId)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * 全套：防具类别 1–6 每类穿同套任意一件（同类别可有多件变体）+
+ * 武器类别 7/8/9 任意一件。
+ * weaponMustBeFromSet=true 时武器也必须属于套装 ID 表；
+ * false 时任意已穿戴的 7/8/9 武器即可（传奇套无专属武器）。
+ */
+static bool vm_net_mock_role_wearing_themed_full_set(
+    const vm_net_mock_role_state *role,
+    const u32 *setIds,
+    u32 setCount,
+    bool weaponMustBeFromSet)
+{
+    bool armorCatCovered[7];
+    bool hasSetWeapon = false;
+    bool hasAnyWeapon = false;
+
+    if (role == NULL || setIds == NULL || setCount == 0)
+        return false;
+    memset(armorCatCovered, 0, sizeof(armorCatCovered));
+
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        u32 itemId = role->equippedItemIds[slot];
+        const vm_net_mock_equipment_catalog_item *equip;
+        u8 category;
+        bool inSet;
+
+        if (itemId == 0)
+            continue;
+        equip = vm_net_mock_find_equipment_catalog_item(itemId);
+        if (equip == NULL)
+            continue;
+        category = equip->category;
+        inSet = vm_net_mock_item_id_in_list(itemId, setIds, setCount);
+        if (category >= 1u && category <= 6u)
+        {
+            if (inSet)
+                armorCatCovered[category] = true;
+        }
+        else if (category >= 7u && category <= 9u)
+        {
+            hasAnyWeapon = true;
+            if (inSet)
+                hasSetWeapon = true;
+        }
+    }
+
+    for (u8 cat = 1; cat <= 6; ++cat)
+    {
+        if (!armorCatCovered[cat])
+            return false;
+    }
+    if (weaponMustBeFromSet)
+        return hasSetWeapon;
+    return hasAnyWeapon;
+}
+
+static bool vm_net_mock_role_wearing_christmas_full_set(const vm_net_mock_role_state *role)
+{
+    static const u32 kChristmasIds[] = {
+        40020u, 40021u, 40022u, 40023u, 40024u, 40025u, 40026u, 40027u, 40028u,
+        40029u,
+    };
+    return vm_net_mock_role_wearing_themed_full_set(
+        role, kChristmasIds,
+        (u32)(sizeof(kChristmasIds) / sizeof(kChristmasIds[0])), true);
+}
+
+static bool vm_net_mock_role_wearing_wulin_full_set(const vm_net_mock_role_state *role)
+{
+    /* 武林套 40150–40159：防具 1–6 + 武林武器三选一（40150/40151/40152）。 */
+    static const u32 kWulinIds[] = {
+        40150u, 40151u, 40152u, 40153u, 40154u, 40155u, 40156u, 40157u, 40158u,
+        40159u,
+    };
+    return vm_net_mock_role_wearing_themed_full_set(
+        role, kWulinIds, (u32)(sizeof(kWulinIds) / sizeof(kWulinIds[0])), true);
+}
+
+static bool vm_net_mock_role_wearing_dream_weapon(const vm_net_mock_role_state *role)
+{
+    return vm_net_mock_role_wearing_item_id(role, 40065u) ||
+           vm_net_mock_role_wearing_item_id(role, 40066u) ||
+           vm_net_mock_role_wearing_item_id(role, 40067u);
+}
+
+static bool vm_net_mock_role_is_senior_friend_created(const vm_net_mock_role_state *role)
+{
+    return role != NULL && role->createdAtUnix != 0 &&
+           role->createdAtUnix < (u32)VM_NET_MOCK_SENIOR_FRIEND_CUTOFF_UNIX;
+}
+
+static bool vm_net_mock_role_try_unlock_special_designation(vm_net_mock_role_state *role,
+                                                            u8 id,
+                                                            bool conditionMet,
+                                                            const char *reason)
+{
+    u32 bit;
+
+    if (role == NULL || !conditionMet)
+        return false;
+    bit = vm_net_mock_special_designation_mask_bit(id);
+    if (bit == 0 || (role->specialDesignationMask & bit) != 0)
+        return false;
+    role->specialDesignationMask |= bit;
+    printf("[info][network] mock_special_designation_unlock role=%u id=%u mask=0x%x reason=%s\n",
+           role->roleId, id, role->specialDesignationMask,
+           reason ? reason : "special");
+    return true;
+}
+
+static bool vm_net_mock_role_refresh_special_designations(vm_net_mock_role_state *role)
+{
+    bool dirty = false;
+    bool dream;
+    bool senior;
+
+    if (role == NULL)
+        return false;
+    dream = vm_net_mock_role_wearing_dream_weapon(role);
+    senior = vm_net_mock_role_is_senior_friend_created(role);
+    if (vm_net_mock_role_try_unlock_special_designation(
+            role, (u8)VM_NET_MOCK_DESIGNATION_ID_CHRISTMAS_KNIGHT,
+            vm_net_mock_role_wearing_christmas_full_set(role),
+            "christmas-full-set"))
+        dirty = true;
+    if (vm_net_mock_role_try_unlock_special_designation(
+            role, (u8)VM_NET_MOCK_DESIGNATION_ID_WULIN_LEGEND,
+            vm_net_mock_role_wearing_wulin_full_set(role),
+            "wulin-full-set"))
+        dirty = true;
+    if (vm_net_mock_role_try_unlock_special_designation(
+            role, (u8)VM_NET_MOCK_DESIGNATION_ID_SENIOR_FRIEND, senior,
+            "senior-friend-created-before-cutoff"))
+        dirty = true;
+    if (vm_net_mock_role_try_unlock_special_designation(
+            role, (u8)VM_NET_MOCK_DESIGNATION_ID_HERO_KING, dream,
+            "dream-weapon"))
+        dirty = true;
+    if (vm_net_mock_role_try_unlock_special_designation(
+            role, (u8)VM_NET_MOCK_DESIGNATION_ID_SENIOR_HERO, dream && senior,
+            "dream-weapon+senior-friend"))
+        dirty = true;
+    if (dirty)
+        vm_net_mock_role_mark_inventory_dirty("special-designation-unlock");
+    return dirty;
+}
+
 static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *role,
                                                 const vm_net_mock_designation_entry *entry)
 {
@@ -2781,6 +3017,12 @@ static bool vm_net_mock_designation_is_unlocked(const vm_net_mock_role_state *ro
         u32 bit = vm_net_mock_arena_designation_mask_bit(entry->id);
         return bit != 0 && role != NULL &&
                (role->arenaDesignationMask & bit) != 0;
+    }
+    if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_SPECIAL)
+    {
+        u32 bit = vm_net_mock_special_designation_mask_bit(entry->id);
+        return bit != 0 && role != NULL &&
+               (role->specialDesignationMask & bit) != 0;
     }
     if (entry->kind == VM_NET_MOCK_DESIGNATION_KIND_LEVEL)
         return level >= entry->minLevel;
@@ -2817,6 +3059,9 @@ static const vm_net_mock_designation_entry *vm_net_mock_role_best_designation(co
     if (best != NULL)
         return best;
     best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_LEVEL);
+    if (best != NULL)
+        return best;
+    best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_SPECIAL);
     if (best != NULL)
         return best;
     best = vm_net_mock_role_best_designation_of_kind(role, VM_NET_MOCK_DESIGNATION_KIND_ARENA);
@@ -2898,7 +3143,7 @@ static u16 vm_net_mock_role_derived_attr(u32 level, u32 job, u32 attrIndex)
     return (u16)value;
 }
 
-/* Server battle attack primary: ??=??, ??=??, ??=??. */
+/* Server battle attack primary: 天机=力, 幻剑=敏, 鬼道=智. */
 static u32 vm_net_mock_role_job_primary_attr(u32 job, u32 strength, u32 agility,
                                               u32 wisdom)
 {
@@ -3012,6 +3257,32 @@ static void vm_net_mock_role_collect_equipment_bonus(const vm_net_mock_role_stat
 
 #include "mock_server_combat_formula_config.inc.c"
 
+/* jobPrimary → panel/battle attack contribution percent (admin-configurable). */
+static u32 vm_net_mock_role_job_primary_attack_coeff_percent(u32 job)
+{
+    const vm_net_mock_combat_formula_config *combatCfg =
+        vm_net_mock_combat_formula_config_get();
+
+    if (job == 2)
+        return combatCfg ? combatCfg->primaryAttackCoeffHuanjianPercent : 100u;
+    if (job == 3)
+        return combatCfg ? combatCfg->primaryAttackCoeffGuidaoPercent : 100u;
+    return combatCfg ? combatCfg->primaryAttackCoeffTianjiPercent : 100u;
+}
+
+static u32 vm_net_mock_role_primary_to_attack(u32 job, u32 primary)
+{
+    u32 coeff = vm_net_mock_role_job_primary_attack_coeff_percent(job);
+    return (u32)(((uint64_t)primary * (uint64_t)coeff) / 100ull);
+}
+
+static int32_t vm_net_mock_role_primary_delta_to_attack(u32 job,
+                                                       int32_t primaryDelta)
+{
+    u32 coeff = vm_net_mock_role_job_primary_attack_coeff_percent(job);
+    return (int32_t)(((int64_t)primaryDelta * (int64_t)coeff) / 100);
+}
+
 static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *role,
                                                 vm_net_mock_player_stats *stats)
 {
@@ -3077,15 +3348,17 @@ static void vm_net_mock_role_build_player_stats(const vm_net_mock_role_state *ro
     }
     /*
      * Battle + panel overlay share this aggregate
-     * (docs/re/2026-08-04-three-job-balance-pass1.md):
-     *   attack = jobPrimary(base+equip) + equipment.attack
+     * (docs/re/2026-08-04-three-job-balance-pass1.md + admin primary coeffs):
+     *   attack = jobPrimary * coeff% / 100 + equipment.attack
      * jobPrimary is 天机力 / 幻剑敏 / 鬼道智 (includes role base growth).
      * Client actor+0x130 still gets weapon FA via wear-apply; host overlay
      * realign uses this same stats->attack so panel matches battle.
      */
     stats->attack = vm_net_mock_cap_u32(
-        vm_net_mock_role_job_primary_attr(job, stats->strength, stats->agility,
-                                          stats->wisdom) +
+        vm_net_mock_role_primary_to_attack(
+            job, vm_net_mock_role_job_primary_attr(job, stats->strength,
+                                                   stats->agility,
+                                                   stats->wisdom)) +
             equipment.attack,
         65535);
     /* Panel / actorinfo: bare (level/耐力) + full equip.armor.
@@ -3157,13 +3430,16 @@ static void vm_net_mock_battle_apply_active_stat_modifier(vm_net_mock_player_sta
         stats->agility, modifier->agility, 65535u);
     stats->wisdom = vm_net_mock_battle_apply_signed_stat_change(
         stats->wisdom, modifier->wisdom, 65535u);
-    /* Attack tracks full job-primary Δ (base+equip primary already in
+    /* Attack tracks scaled job-primary Δ (base+equip primary already in
      * strength/agility/wisdom). Hit/dodge/crit/resist stay equipment-only
      * except skill.dsh direct combat deltas. */
     primaryAfter = vm_net_mock_role_job_primary_attr(
         stats->job, stats->strength, stats->agility, stats->wisdom);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
-        stats->attack, (int32_t)primaryAfter - (int32_t)primaryBefore, 65535u);
+        stats->attack,
+        vm_net_mock_role_primary_delta_to_attack(
+            stats->job, (int32_t)primaryAfter - (int32_t)primaryBefore),
+        65535u);
     stats->attack = vm_net_mock_battle_apply_signed_stat_change(
         stats->attack, modifier->attack, 65535u);
     stats->defense = vm_net_mock_battle_apply_signed_stat_change(
@@ -5585,6 +5861,8 @@ static void vm_net_mock_role_init_default(vm_net_mock_role_state *role)
     }
     role->designationId = 0;
     role->arenaDesignationMask = 0;
+    role->specialDesignationMask = 0;
+    role->createdAtUnix = 0;
     vm_net_mock_role_init_default_equipment(role);
     vm_net_mock_role_init_default_backpack(role);
     vm_net_mock_role_sync_derived_vitals(role);
@@ -5771,6 +6049,7 @@ static void vm_net_mock_role_normalize(vm_net_mock_role_state *role)
 {
     if (role == NULL)
         return;
+    (void)vm_net_mock_role_refresh_special_designations(role);
     if (role->roleId == 0)
         role->roleId = VM_NET_MOCK_ROLE_DEFAULT_ID;
     role->name[sizeof(role->name) - 1] = 0;
@@ -6678,11 +6957,11 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
                                           const size_t *lengths)
 {
     vm_mock_mysql_role_load_context *context = (vm_mock_mysql_role_load_context *)context_value;
-    u32 number[21];
+    u32 number[23];
     size_t name_len = 0;
     size_t scene_len = 0;
     memset(number, 0, sizeof(number));
-    if (context == NULL || context->database == NULL || column_count != 23 ||
+    if (context == NULL || context->database == NULL || column_count != 25 ||
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &number[0]) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &number[1]) ||
         values[2] == NULL ||
@@ -6706,12 +6985,14 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[20], lengths[20], &number[18]) ||
         !vm_mock_mysql_parse_u32(values[21], lengths[21], &number[19]) ||
         !vm_mock_mysql_parse_u32(values[22], lengths[22], &number[20]) ||
+        !vm_mock_mysql_parse_u32(values[23], lengths[23], &number[21]) ||
+        !vm_mock_mysql_parse_u32(values[24], lengths[24], &number[22]) ||
         number[0] >= context->database->roleCount || number[0] >= VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
         number[1] == 0 || number[2] > 255 || number[3] > 255 ||
         number[4] > VM_NET_MOCK_BACKPACK_CAPACITY_LIMIT ||
         number[13] > 65535 || number[14] > 65535 ||
         number[15] > VM_NET_MOCK_BACKPACK_MAX_ITEMS ||
-        number[16] > 255 || number[18] > 65535 || number[20] > 255 ||
+        number[16] > 255 || number[19] > 65535 || number[21] > 255 ||
         (context->seenRoleMask & (1u << number[0])) != 0)
     {
         if (context != NULL)
@@ -6748,9 +7029,11 @@ static bool vm_mock_mysql_role_detail_row(void *context_value,
     role->backpackItemCount = (u16)number[15];
     role->designationId = (u8)number[16];
     role->arenaDesignationMask = number[17];
-    role->nextBackpackSeq = (u16)number[18];
-    role->pkPoints = number[19];
-    role->pkPveDecayStreak = (u8)number[20];
+    role->specialDesignationMask = number[18];
+    role->nextBackpackSeq = (u16)number[19];
+    role->pkPoints = number[20];
+    role->pkPveDecayStreak = (u8)number[21];
+    role->createdAtUnix = number[22];
     context->seenRoleMask |= (u8)(1u << number[0]);
     ++context->roleRows;
     return true;
@@ -7076,6 +7359,16 @@ static bool vm_net_mock_role_ensure_arena_designation_column(void)
         ok = false;
         return false;
     }
+    if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "special_designation_mask",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN special_designation_mask INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER arena_designation_mask",
+            "role_special_designation_mask_column"))
+    {
+        ok = false;
+        return false;
+    }
     ok = true;
     return true;
 }
@@ -7204,7 +7497,7 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     if (!vm_net_mock_role_ensure_arena_designation_column())
         return false;
     snprintf(query, sizeof(query),
-             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,next_backpack_seq,pk_points,pk_pve_streak "
+             "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,pk_points,pk_pve_streak,UNIX_TIMESTAMP(created_at) "
              "FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR) ORDER BY role_index",
              account_hex);
     if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
@@ -7561,8 +7854,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         if (!scene_len)
             scene_hex[0] = 0;
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,next_backpack_seq) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
@@ -7571,13 +7864,15 @@ static bool vm_net_mock_role_db_save_relational_ex(
                  "scene=VALUES(scene),pos_x=VALUES(pos_x),pos_y=VALUES(pos_y),"
                  "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
                  "arena_designation_mask=VALUES(arena_designation_mask),"
+                 "special_designation_mask=VALUES(special_designation_mask),"
                  "next_backpack_seq=VALUES(next_backpack_seq)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
                  role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
                  (u32)role->pkPveDecayStreak, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
-                 role->arenaDesignationMask, role->nextBackpackSeq);
+                 role->arenaDesignationMask, role->specialDesignationMask,
+                 role->nextBackpackSeq);
         if (!vm_mysql_exec(query))
         {
             snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -10958,6 +11253,7 @@ static bool vm_net_mock_role_equip_backpack_item(vm_net_mock_role_state *role,
 
     vm_net_mock_role_sync_derived_vitals(role);
     vm_net_mock_role_mark_inventory_dirty("item-equip");
+    (void)vm_net_mock_role_refresh_special_designations(role);
 
     if (equippedItemIdOut)
         *equippedItemIdOut = itemId;

@@ -39,3 +39,7 @@ CBE `CheckMapMoveCollision*` 还会用高 nibble 的方向边缘位：
 3. 野外 SCE 怪巡逻：撞墙/边缘位停步换向，不穿山；落在 `0xF` 内会 snap 到最近可走格。
 4. 登录/切图若落点在墙或边缘口袋：自动弹到可走且至少有一方向可迈出的格。
 5. `npx tsc --noEmit`（PixiJS_web）。
+
+## 后续
+
+桥面整排同方向 fringe 误挡：见 `2026-08-13-pixi-bridge-fringe-strip.md`。

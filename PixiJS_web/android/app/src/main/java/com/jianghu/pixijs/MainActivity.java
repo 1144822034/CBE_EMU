@@ -7,6 +7,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -14,12 +15,14 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebView;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebViewClient;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -75,11 +78,56 @@ public class MainActivity extends BridgeActivity {
         wipeWebDataIfAppUpdated();
         registerPlugin(PayLauncherPlugin.class);
         registerPlugin(HangupKeepAlivePlugin.class);
+        registerPlugin(ApkUpdaterPlugin.class);
+        registerPlugin(EntertainmentHttpPlugin.class);
         super.onCreate(savedInstanceState);
         acquireCpuWakeLock();
         // Defer settings intents: some Android 8 OEMs crash if started during onCreate.
         mainHandler.postDelayed(this::maybeRequestPostNotifications, 800L);
         mainHandler.postDelayed(this::maybeRequestIgnoreBatteryOptimizations, 1600L);
+        // Bridge WebView exists after super.onCreate — install SSL bypass for
+        // entertainment hosts with expired certs (api.qemao.com 抖音源).
+        mainHandler.post(this::installEntertainmentSslBypass);
+    }
+
+    @Override
+    public void onStart() {
+        super.onStart();
+        installEntertainmentSslBypass();
+    }
+
+    /**
+     * Narrow SSL proceed for known entertainment media hosts whose certs are
+     * expired/misconfigured. Without this, APK video playback hangs on loading.
+     */
+    private void installEntertainmentSslBypass() {
+        try {
+            if (getBridge() == null) return;
+            WebView webView = getBridge().getWebView();
+            if (webView == null) return;
+            webView.setWebViewClient(
+                    new BridgeWebViewClient(getBridge()) {
+                        @Override
+                        public void onReceivedSslError(
+                                WebView view, SslErrorHandler handler, SslError error) {
+                            String host = null;
+                            try {
+                                String u = error != null ? error.getUrl() : null;
+                                if (u != null) host = Uri.parse(u).getHost();
+                            } catch (Throwable ignored) {
+                                /* ignore */
+                            }
+                            if (EntertainmentHttpPlugin.isEntertainmentApiHost(host)) {
+                                Log.w(TAG, "SSL proceed entertainment host=" + host);
+                                handler.proceed();
+                                return;
+                            }
+                            handler.cancel();
+                        }
+                    });
+        } catch (Throwable t) {
+            Log.w(TAG, "installEntertainmentSslBypass failed", t);
+        }
     }
 
     @Override

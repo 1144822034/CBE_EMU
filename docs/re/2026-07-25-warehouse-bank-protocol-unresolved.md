@@ -58,3 +58,4 @@
 
 替代玩法（非原生钱庄）已落地：商城耐久凭证 `834` + 已证实 `26/1` NPC
 服务对话框存取，见 `2026-07-27-warehouse-dialog-via-mall-pass.md`。
+金币存取（以金为单位、防刷）见 `2026-08-12-warehouse-gold-bank.md`。

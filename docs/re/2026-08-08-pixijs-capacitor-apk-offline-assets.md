@@ -3,7 +3,8 @@
 ## 已验证结论
 
 `BUILD SUCCESSFUL`（约 4min，JDK 21 + 本地 Gradle 8.11.1）。  
-APK：`PixiJS_web/android/app/build/outputs/apk/debug/app-debug.apk`（约 6.2MB，含 `web/fs/JHOnlineData`）。
+APK：`PixiJS_web/android/app/build/outputs/apk/debug/app-debug.apk`（约 6.2MB，含 `web/fs/JHOnlineData`）。  
+一键出包后拷贝为 **`android/app/release/jh_ol.apk`**（Gitee 自更新资产名，见 `scripts/assemble-android.mjs`）。
 
 Agent 复用：`.codex/skills/pixijs-android-apk/SKILL.md`。
 

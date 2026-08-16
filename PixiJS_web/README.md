@@ -40,7 +40,7 @@ set ANDROID_HOME=D:\installsoft\JDK\android-sdk
 "%USERPROFILE%\.gradle\wrapper\dists\gradle-8.11.1-all\6gcpoccneql1b0krsle0llw37\gradle-8.11.1\bin\gradle.bat" -p android assembleDebug
 ```
 
-APK：`android/app/build/outputs/apk/debug/app-debug.apk`
+APK：`android/app/release/jh_ol.apk`（Gitee 发布资产同名）
 
 息屏保活：`MainActivity` 持有 `PARTIAL_WAKE_LOCK`，暂停时仍 `resumeTimers`；首次可弹「忽略电池优化」。亮屏后前端会 `wakeFromBackground` 重连网关。
 

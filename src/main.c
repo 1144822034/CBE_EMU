@@ -544,6 +544,12 @@ static u32 g_mockBattleLastIndex = 0;
  * 4/12 cancel.  Mid-button never enters hangup auto-fire 4/2, so continuous
  * ticks are armed here and delivered on scene-sync poll (team/duel style). */
 static u8 g_mockBattleAutoPrefer = 0;
+/*
+ * Pixi [自动]: prefer without map hangup re-entry / team HangupLoop arm.
+ * Set by 4/11 type=1 with hangup=0; cleared on type=0 or real hangup start.
+ * CBE mid-fight 4/11 omits hangup → stays 0 (team still arms HangupLoop).
+ */
+static u8 g_mockBattleAutoPreferNoHangup = 0;
 /* After auto11 operate-only, the mid-battle button still emits one 4/12.
  * Suppress converting that immediate cancel into a second synth operate. */
 static u8 g_mockBattleAutoSuppressNext12 = 0;

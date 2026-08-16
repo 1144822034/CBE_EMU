@@ -1,4 +1,4 @@
-import { Container, Graphics } from "pixi.js";
+import { Container, Graphics, Rectangle } from "pixi.js";
 import {
   CBE,
   LCD_HEIGHT,
@@ -22,12 +22,27 @@ import {
   type PanelTipState,
 } from "./panelTip";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
-import { attachPageNavButtons } from "./pageNav";
+import {
+  paintListShellBody,
+} from "./listPanelShell";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
 const BRACKETS = [10, 20, 30, 40, 50, 70];
 const TAB_BG = 0x375946;
+/** Single-line rank rows. */
 const LIST_PAGE = 8;
+/** +5 vs old list-shell default 14 that clipped reward mid-name. */
+const ROW_NAME_MAX = 19;
+/** Reward fragment inside the one-line row (+5 vs old slice 6). */
+const REWARD_FRAG_MAX = 11;
+
+/** Rank reward text; summary already embeds qty (x/×/、). */
+function formatArenaRewardLine(name: string, count: number): string {
+  const n = (name || "").trim();
+  if (!n) return "";
+  if (/[x×、]/.test(n) || count <= 0) return n;
+  return `${n}×${count}`;
+}
 
 export type ArenaPanelAction = "claim" | "leave" | "close" | "refresh";
 
@@ -53,6 +68,12 @@ export class ArenaPanel extends Container {
   constructor() {
     super();
     this.visible = false;
+    /* Swallow clicks so NPC dialog / approach under world overlays stay inert. */
+    this.eventMode = "static";
+    this.hitArea = new Rectangle(0, 0, LCD_WIDTH, LCD_HEIGHT - SOFTKEY_H);
+    this.on("pointertap", (e) => {
+      e.stopPropagation();
+    });
     this.addChild(this.box);
   }
 
@@ -86,6 +107,7 @@ export class ArenaPanel extends Container {
 
   close(): void {
     clearPanelTip(this.toast);
+    clearPointerHits(this.rowHits);
     this.visible = false;
   }
 
@@ -111,9 +133,16 @@ export class ArenaPanel extends Container {
     this.redraw();
   }
 
-  /** ←→：切换当前焦点标签行（职业或段位） */
+  /** ←→：列表时切职业/段位；落在底部操作行时在三按钮间切换 */
   horizontal(dir: -1 | 1): void {
     if (!this.visible) return;
+    const rows = this.page?.rows.length ?? 0;
+    if (this.listCursor >= rows) {
+      const i = this.listCursor - rows;
+      this.listCursor = rows + ((i + dir + 3) % 3);
+      this.redraw();
+      return;
+    }
     if (this.tabFocus === "job") this.switchJob(dir);
     else this.switchBracket(dir);
   }
@@ -318,10 +347,20 @@ export class ArenaPanel extends Container {
     const bucketHint = `${JOBS[this.jobIndex]} · ${bracketLabel(this.bracket)}`;
     const infoY = brY + tabH + 4;
     this.addLabel(bucketHint, 12, infoY, CBE.inkMint);
+    const mineReward = formatArenaRewardLine(
+      this.page?.myRewardName || "",
+      this.page?.myRewardCount || 0,
+    );
+    const claimMark = this.page?.myClaimed
+      ? " 已领取"
+      : this.page?.settled
+        ? " 可领"
+        : "";
+    const mineRewardFrag = mineReward
+      ? ` ${mineReward.slice(0, REWARD_FRAG_MAX)}`
+      : "";
     const mine = this.page
-      ? `我:第${this.page.myRank || "-"} 分${this.page.myScore}${
-          this.page.settled ? " 可领" : ""
-        }`
+      ? `我:第${this.page.myRank || "-"} 分${this.page.myScore}${claimMark}${mineRewardFrag}`
       : "加载中…";
     this.addLabel(mine, 12, infoY + 14, CBE.inkLabel);
     this.addLabel(
@@ -332,100 +371,114 @@ export class ArenaPanel extends Container {
     );
 
     const listTop = infoY + 32;
-    const actionH = 3 * 14 + 4;
-    const listBottom = LCD_HEIGHT - SOFTKEY_H - actionH - 8;
+    /* One row of 领取奖励|离开擂台|关闭. */
+    const ACTION_BTN_H = 18;
+    const actionH = ACTION_BTN_H + 6;
     const rows = this.page?.rows ?? [];
-    if (!rows.length) {
-      this.addLabel("(本段暂无积分榜)", 12, listTop + 4, CBE.inkMint);
-    } else {
-      const shown = rows.slice(this.listScroll, this.listScroll + LIST_PAGE);
-      let y = listTop;
-      for (let i = 0; i < shown.length; i++) {
-        const abs = this.listScroll + i;
-        const r = shown[i]!;
-        const title =
-          r.rank === 1
-            ? "冠"
-            : r.rank === 2
-              ? "亚"
-              : r.rank === 3
-                ? "季"
-                : `${r.rank}`;
-        const line = `${title} ${r.name.slice(0, 8)} ${r.score}${
+    const pages = Math.max(1, Math.ceil(Math.max(1, rows.length) / LIST_PAGE));
+    /* Page-nav strip (~18px) must sit above action row; old footY overlapped claim hits. */
+    const navReserve = pages > 1 ? 22 : 0;
+    const listBottom = LCD_HEIGHT - SOFTKEY_H - actionH - 8 - navReserve;
+    const shellRows = rows.map((r) => {
+      const title =
+        r.rank === 1
+          ? "冠"
+          : r.rank === 2
+            ? "亚"
+            : r.rank === 3
+              ? "季"
+              : `${r.rank}`;
+      const reward = formatArenaRewardLine(r.rewardName, r.rewardCount);
+      const rewardFrag = reward ? ` ${reward.slice(0, REWARD_FRAG_MAX)}` : "";
+      return {
+        name: `${title} ${r.name.slice(0, 6)} ${r.score}${rewardFrag}${
           r.claimed ? "✓" : ""
-        }`;
-        const hi = abs === this.listCursor;
-        if (hi) {
-          this.box
-            .rect(8, y - 1, LCD_WIDTH - 16, 14)
-            .fill({ color: CBE.select });
-        }
-        this.addLabel(line, 12, y, hi ? CBE.menuHi : CBE.ink);
-        this.rowHits.push(
-          attachRowPointerHit(this, 8, y - 1, LCD_WIDTH - 16, 14, () => {
-            this.listCursor = abs;
-            this.ensureListVisible();
-            this.redraw();
-          }),
+        }`,
+      };
+    });
+    const pageStart = this.listScroll;
+    const page = rows.length ? Math.floor(pageStart / LIST_PAGE) + 1 : 1;
+    const shown = shellRows.slice(pageStart, pageStart + LIST_PAGE);
+    const paintCursor =
+      this.listCursor < rows.length ? this.listCursor - pageStart : -1;
+    paintListShellBody({
+      ctx: {
+        host: this,
+        box: this.box,
+        hits: this.rowHits,
+        addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
+        addLabelCentered: (t, cx, cy, c) => this.addLabelCentered(t, cx, cy, c),
+      },
+      x: 0,
+      listTop,
+      w: LCD_WIDTH,
+      footY: listBottom - 2,
+      rows: shown,
+      cursor: paintCursor,
+      pageSize: LIST_PAGE,
+      rowH: 14,
+      nameMax: ROW_NAME_MAX,
+      emptyText: "(本段暂无积分榜)",
+      paging: "server",
+      serverPage: page,
+      serverPages: pages,
+      onRow: (i) => {
+        this.listCursor = pageStart + i;
+        this.ensureListVisible();
+        this.redraw();
+      },
+      onPrevPage: () => {
+        this.listScroll = Math.max(0, this.listScroll - LIST_PAGE);
+        this.listCursor = Math.min(
+          this.listCursor,
+          this.listScroll + LIST_PAGE - 1,
         );
-        y += 14;
-        if (y > listBottom) break;
-      }
-      if (rows.length > LIST_PAGE) {
-        const page = Math.floor(this.listScroll / LIST_PAGE) + 1;
-        const pages = Math.ceil(rows.length / LIST_PAGE);
-        attachPageNavButtons({
-          host: this,
-          hits: this.rowHits,
-          box: this.box,
-          x: 10,
-          y: listBottom - 18,
-          w: LCD_WIDTH - 20,
-          page,
-          pages,
-          addLabel: (t, lx, ly, c) => this.addLabel(t, lx, ly, c),
-          onPrev: () => {
-            this.listScroll = Math.max(0, this.listScroll - LIST_PAGE);
-            this.listCursor = Math.min(
-              this.listCursor,
-              this.listScroll + LIST_PAGE - 1,
-            );
-            this.listCursor = Math.max(this.listScroll, this.listCursor);
-            this.redraw();
-          },
-          onNext: () => {
-            const maxScroll = Math.max(0, rows.length - LIST_PAGE);
-            this.listScroll = Math.min(maxScroll, this.listScroll + LIST_PAGE);
-            this.listCursor = Math.max(this.listCursor, this.listScroll);
-            this.listCursor = Math.min(
-              rows.length - 1,
-              this.listScroll + LIST_PAGE - 1,
-            );
-            this.redraw();
-          },
-        });
-      }
-    }
+        this.listCursor = Math.max(this.listScroll, this.listCursor);
+        this.redraw();
+      },
+      onNextPage: () => {
+        const maxScroll = Math.max(0, rows.length - LIST_PAGE);
+        this.listScroll = Math.min(maxScroll, this.listScroll + LIST_PAGE);
+        this.listCursor = Math.max(this.listCursor, this.listScroll);
+        this.listCursor = Math.min(
+          rows.length - 1,
+          this.listScroll + LIST_PAGE - 1,
+        );
+        this.redraw();
+      },
+    });
 
     const actions = ["领取奖励", "离开擂台", "关闭"];
-    let y = LCD_HEIGHT - SOFTKEY_H - actionH;
+    const actionY = LCD_HEIGHT - SOFTKEY_H - ACTION_BTN_H - 4;
+    const actionGap = 4;
+    const actionBtnW = Math.max(
+      48,
+      Math.floor((LCD_WIDTH - 16 - actionGap * (actions.length - 1)) / actions.length),
+    );
     for (let i = 0; i < actions.length; i++) {
       const idx = rows.length + i;
       const hi = idx === this.listCursor;
-      if (hi) {
-        this.box
-          .rect(8, y - 1, LCD_WIDTH - 16, 14)
-          .fill({ color: CBE.select });
-      }
-      this.addLabel(actions[i]!, 12, y, hi ? CBE.menuHi : CBE.inkBody);
+      const ax = 8 + i * (actionBtnW + actionGap);
+      this.box
+        .roundRect(ax, actionY, actionBtnW, ACTION_BTN_H, 2)
+        .fill({ color: hi ? CBE.select : CBE.bgPanelDark })
+        .stroke({
+          width: 1,
+          color: hi ? CBE.borderBright : CBE.borderDim,
+        });
+      this.addLabel(
+        actions[i]!,
+        ax + 6,
+        actionY + 3,
+        hi ? CBE.menuHi : CBE.inkBody,
+      );
       this.rowHits.push(
-        attachRowPointerHit(this, 8, y - 1, LCD_WIDTH - 16, 14, () => {
+        attachRowPointerHit(this, ax, actionY, actionBtnW, ACTION_BTN_H, () => {
           this.listCursor = idx;
           this.redraw();
           this.confirm();
         }),
       );
-      y += 14;
     }
     drawPanelTipOverlay(this, this.toast);
   }
