@@ -28,6 +28,12 @@ extern u32 g_vmAutomationBattlePhaseWatchAddress;
 extern u32 g_vmAutomationBattleAutoFlagWatchWriteCount;
 extern u32 g_vmAutomationBattleOverlayWatchWriteCount;
 extern u32 g_vmAutomationBattlePhaseWatchWriteCount;
+extern u8 g_shopReturnForensicsActive;
+extern u32 g_shopReturnForensicsGateWatchAddress;
+extern void vm_shop_return_forensics_note_gate_write(uc_engine *uc,
+                                                      uint64_t address,
+                                                      uint32_t size,
+                                                      int64_t value);
 /* Armed by a CBE code-hook only after the client creates its own item
  * controller.  This remains an observation-only memory watch. */
 extern u32 g_vmEquipmentEnhanceRulesWatchAddress;
@@ -98,6 +104,11 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    if (type == UC_MEM_WRITE && g_shopReturnForensicsActive &&
+        g_shopReturnForensicsGateWatchAddress != 0)
+    {
+        vm_shop_return_forensics_note_gate_write(uc, address, size, value);
+    }
     if (type == UC_MEM_WRITE && g_vmInputWatchUserBufLen != 0)
     {
         u32 start = (u32)address;

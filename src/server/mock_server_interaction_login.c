@@ -319,6 +319,7 @@ static u32 vm_net_mock_build_scene_interaction_followup_response(const u8 *reque
     ++objectCount;
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
     g_netMockShop17ListPending = 1;
+    g_netMockShopCatalogDeliveredBeforeActorQuery = 1;
     /*
      * `14/*` is mmShop's ordinary data-initialisation family.  In particular,
      * it is also emitted when the player opens the mall from Backpack.  Its
@@ -2066,6 +2067,7 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     u32 actorInfoLen = 0;
     vm_net_mock_role_state *activeRole = NULL;
     u32 wcoin = 0;
+    bool catalogDeliveredBeforeActorQuery = false;
     char page5Ids[160];
     char secretIds[160];
     vm_net_mock_request_object object;
@@ -2090,20 +2092,24 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     if (!vm_net_mock_get_object_u32_field(object.payload, object.payloadLen, "actorId", &actorId))
         return 0;
 
-    activeRole = vm_net_mock_active_role();
-    wcoin = vm_net_mock_role_wcoin_balance(activeRole);
-
-    if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
-        return 0;
-    if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
-        return 0;
-    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5, page5Index,
-                                                    &totalItems, &pageRows, &itemInfoLen))
-        return 0;
-    if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, 0,
-                                                    &secretTotalItems, &secretRows,
-                                                    &secretItemInfoLen))
-        return 0;
+    catalogDeliveredBeforeActorQuery =
+        g_netMockShopCatalogDeliveredBeforeActorQuery != 0;
+    if (!catalogDeliveredBeforeActorQuery)
+    {
+        activeRole = vm_net_mock_active_role();
+        wcoin = vm_net_mock_role_wcoin_balance(activeRole);
+        if (!vm_net_mock_append_shop_open_status14_object(out, outCap, &pos))
+            return 0;
+        if (!vm_net_mock_append_shop_money4_object(out, outCap, &pos))
+            return 0;
+        if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 5, page5Index,
+                                                        &totalItems, &pageRows, &itemInfoLen))
+            return 0;
+        if (!vm_net_mock_append_shop_catalog_page_object(out, outCap, &pos, 6, 0,
+                                                        &secretTotalItems, &secretRows,
+                                                        &secretItemInfoLen))
+            return 0;
+    }
     /*
      * mmShop:0x9DE returns immediately after the 1/1/14 actor-state branch and
      * clears the shop loading flag there, so keep this object last.
@@ -2111,8 +2117,10 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
     if (!vm_net_mock_append_shop_actor_state14_object(out, outCap, &pos, &actorInfoLen))
         return 0;
 
-    vm_net_mock_finish_wt_packet(out, pos, 5);
+    vm_net_mock_finish_wt_packet(out, pos,
+                                 catalogDeliveredBeforeActorQuery ? 1 : 5);
     g_netMockShop17ListPending = 1;
+    g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
     /*
      * `1/1/14(actorId)` is a mmShop status query, not a scene-enter request.
      * Runtime proves that an ordinary mall open sends the current role id in
@@ -2121,6 +2129,15 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
      * manager client-owned; a successful buy independently triggers its
      * normal backpack refresh path.
      */
+    if (catalogDeliveredBeforeActorQuery)
+    {
+        printf("[info][network] mock_shop_actor_query14 actorId=%u catalog=prior response=actorinfo-only actorinfo_len=%u\n",
+               actorId, actorInfoLen);
+        vm_autotest_note("mock_shop_actor_query14 actorId=%u catalog=prior response=1/1/14 actorinfo_len=%u evidence=mmShop:0x11F0/0x9DE\n",
+                         actorId, actorInfoLen);
+        return pos;
+    }
+
     vm_net_mock_format_shop_page_ids(5, page5Index, 8, page5Ids, sizeof(page5Ids));
     vm_net_mock_format_shop_page_ids(6, 0, 8, secretIds, sizeof(secretIds));
     printf("[info][network] mock_shop_open14 actorId=%u role=%u wcoin=%u pages=inline actor_state=last page5=%u page6=0 secret_total=%u secret_rows=%u secret_iteminfo_len=%u weapon_total=%u weapon_rows=%u weapon_iteminfo_len=%u actorinfo_len=%u owner=client-stack grid_reseed=0 secret_ids=%s weapon_ids=%s\n",
@@ -4175,6 +4192,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          */
         g_netMockBackpackGridSeededRoleId = 0;
         g_netMockShop17ListPending = 0;
+        g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
         g_netMockBackpackPreferRoleListAfterShopBuy = 0;
         g_vm_net_mock_last_scene_change_target_valid = false;
         g_vm_net_mock_last_completed_scene_change_target_valid = false;

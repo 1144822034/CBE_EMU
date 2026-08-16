@@ -1096,7 +1096,7 @@ int vm_cbfs_vm_file_open(int openMode, int namePtr, int rwPtr)
     uc_reg_read(MTK, UC_ARM_REG_LR, &lr);
     uc_mem_read(MTK, namePtr, rawName, sizeof(rawName));
     vm_read_path_string(namePtr, nameBuff, sizeof(nameBuff));
-    printf("file_open=%s\n",nameBuff);
+    // printf("file_open=%s\n",nameBuff);
     if (rwPtr)
         uc_mem_read(MTK, rwPtr, &rwBuff, 128);
     rwBuff[sizeof(rwBuff) - 1] = 0;
