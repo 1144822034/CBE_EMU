@@ -2,7 +2,8 @@
 
 Date: 2026-08-13
 
-Status: chest crash fix implemented; client regression pending
+Status: `1/18/1` rejected in backpack; `1/7/37 result=1` display-only acquire
+notice implemented, runtime acceptance pending
 
 ## 1. 当前目标
 
@@ -22,9 +23,9 @@ Status: chest crash fix implemented; client regression pending
 1/7/7 type=1           (奖励增量)
 ```
 
-这里的 `1/7/7 type=1` 已由 `mmGame` 用于本地背包增量。`1/7/37` 虽带物品
-获得文本，却也会走 `HandleItemAcquire` 插入路径；将它与上述增量行叠加已有重复
-入包的反证，故本轮明确不使用它。
+这里的 `1/7/7 type=1` 已由 `mmGame` 用于本地背包增量。`1/7/37 result=0` 虽带
+物品获得文本，却也会走 `HandleItemAcquire` 插入路径；将它与上述增量行叠加已有重复
+入包的反证，故不能使用 `result=0`。第 14 节记录了不入包的 `result=1` 分支。
 
 ## 3. IDA 证据
 
@@ -128,39 +129,123 @@ Status: chest crash fix implemented; client regression pending
 缺失的 `posinfo`，最终在 `stream_read_i16_be_tagged(0x01033A42)` 传入空 blob。
 
 修复删除 `vm_net_mock_build_chest_open_response()` 中对复合成功包追加
-`1/16/2` 的行为，保留原有 `7/1`、两组 `7/7 type=2 + 7/11` 和一组
-`7/7 type=1`。这修复的是开箱回包所属回调的协议契约，而不是给崩溃地址加兜底；
+`1/16/2` 的行为，保留两组 `7/7 type=2 + 7/11` 和一组 `7/7 type=1`。随后才单独
+调查可承载奖励文案的通道。这修复的是开箱回包所属回调的协议契约，而不是给崩溃地址加兜底；
 该个人提示通道仅保留给已验证的独立物品使用失败/提示响应，不能再复用于 `7/15`。
 
 仍待验证：黄金宝箱复测必须收到不含 `16/2` 的成功包，客户端完成三项背包更新且不再
 出现 `read_i16_null_blob`。奖励公告如需恢复，必须先获得该开箱 callback 可安全消费的
 独立事件契约，不能把 `16/2` 再拼回当前回包。
 
-## 11. 当前回调的安全提示契约（2026-08-17）
+## 11. 20/1 假设已撤回（2026-08-17）
 
-`江湖OL.CBE:net_business_dispatch_by_subcmd(0x01012F8A)` 是当前开箱回调的
-主 CBE 分发器。它将 kind `20` 交给
-`net_handle_simple_result_info(0x01011434)`；对 `1/20/1`，该函数读取
-`result` 和 `info`。`result=0` 且 `info` 非空时只调用
-`ui_show_message_box(info, 0, 0, 0)`，不会打开确认流程、修改背包或读取
-`scene/posinfo`。
+此前将 `1/20/1` 识别为开箱提示通道的结论不完整，已由背包实测撤回。它确实由主 CBE
+分发器消费，但没有适用于开箱后的通用、安全关闭生命周期；完整结论见第 12 节。
 
-因此开箱成功包现在在六个原有背包对象之后附加：
+## 12. 已否定的 `1/18/1` 中间方案（2026-08-17）
+
+黄金宝箱实测先后否定了 `1/20/1` 的两个分支：`result=0` 创建没有输入回调的文本框，
+不会自动消失；改成 `result=1` 虽会安装回调，但
+`net_handle_simple_result_info(0x01011434)` 固定传入
+`HandleSceneBackKey` 和 `HandleSceneTouchRegion`。在背包上下文点击确定会进入
+`HandleSceneBackKey(0x0101140C)` 的场景收尾路径，实际表现为客户端退出。
+
+因此 `20/1` 不是开箱成功后可复用的个人提示契约，不能仅通过切换 `result` 修复。服务端
+移除了开箱成功包中的 `20/1` 对象，并将会创建成功模态框的 `7/1` 一并省略；随后曾将
+奖励文案尝试改走固件的 `1/18/1` 定时消息队列：
 
 ```text
-1/20/1 { result: 0, info: "开启黄金宝箱，获得..." (GBK) }
+1/7/7 type=2 + 1/7/11   (宝箱)
+1/7/7 type=2 + 1/7/11   (钥匙)
+1/7/7 type=1            (奖励)
+1/18/1 msg=<GBK 开箱奖励文案>
 ```
 
-这是与运行时 `r9=01050BD0` 主 CBE 回调匹配的个人提示通道，替代错误的
-`1/16/2`。`make -j2` 已链接新的 `bin/jh-online-server.exe`。复测判据为日志
-`response=...+20/1-notice`、出现奖励文本框、背包三项更新完成，且不存在
-`read_i16_null_blob`。
+此前回包中的 `1/7/1` 曾被当作开箱请求自己的原生成功确认，但
+`HandleItemOperationResponse(0x01033544)` 会在 `result=1` 上无条件调用
+`ui_show_message_box("使用成功", 0, 0, 10)`；该消息框没有定时关闭。当前开箱回包省略
+`1/7/1`，由后续每组 `7/11` 数量流清理 pending 操作，从而保留背包状态更新而不创建
+隐藏模态框。`JianghuOL.CBE:net_business_response_dispatch`
+(`0x01012F8A`) 将 `1/18/1` 路由到 `net_handle_msg_popup(0x01010D54)`；该函数只读取
+长度定界的 `msg`，提交到已有的 30 帧定时消息队列，并清除网络回调状态，不创建
+`ui_show_message_box` 或绑定 `HandleSceneBackKey`。奖励实体仍由 `7/7 type=1` 写入背包。
 
-### 文本终止契约
+该对象不含 `25/11`、`20/1` 或 `7/1`，并且不会造成 `read_i16_null_blob`、模态确认框
+或点击提示后退出；但第 14 节的背包实测已证明它不可见，不能作为最终方案。
 
-`net_handle_simple_result_info` 取得 `info` 指针后直接交给
-`ui_show_message_box`，不携带长度参数。普通 `vm_net_mock_put_object_string()`
-只编码长度定界的内层文本，导致 UI 继续读取相邻内存并显示随机尾字符。
-`20/1.info` 现改用已有的 `vm_net_mock_put_object_cstring()`：外层 WT blob 和
-内层长度保持不变，内层长度额外包含一个终止 `0x00`。这只适用于该 C-string
-消费者，不能替换其他按长度读取的协议字符串。
+### 构造回归
+
+当时的 `scripts/chest-open-reward-notice-regression.c` 不启动监听器、不连接 MySQL，也不读取
+或修改任何角色状态。它当时通过 `1/18/1` 构造器验证 GBK 文本；该断言已由第 14 节的
+`1/7/37 result=1` 构造回归取代：
+
+- `msg` 是长度定界、无尾零的 GBK “开启黄金宝箱，获得修炼天书”；
+- `result` 为 `00-01-01`，使 `HandleItemAcquire` 不进入插入分支。
+
+2026-08-17 已按脚本注释中的 MinGW 命令重新编译，并从 `bin/` 工作目录运行（提供 SDL/Unicorn
+运行时 DLL）。输出为 `chest-open reward-notice regression passed: 1/7/37 display-only acquire notice` 与
+`chest-open response regression passed: no 7/1 or 25/11 modal/state; 7/7+7/11 cleanup`。
+
+## 13. 开箱提示通道的首次偏离（2026-08-17）
+
+用户复测提示不可见且背包仍需额外点击一次才能操作。首个偏离不是背包扣除对象，而是
+旧成功回包开头的 `1/7/1 result=1`：
+
+- `HandleItemOperationResponse(0x01033544)` 在读取 `result/type/id` 后先清除 pending
+  标记，再调用 `ui_show_message_box(0x010338A8, 0, 0, 10)`；`0x010338A8` 是固件
+  的“使用成功”文本。
+- `ui_show_message_box(0x010103F4)` 把消息框活动标志置为 1，并保存第四参数 10；
+  没有倒计时清除分支。旧 `25/11` 只更新场景中央信息横幅；背包界面没有对应绘制路径，
+  却仍置为活动状态，所以它表现为不可见的输入拦截层。
+- 同一 `HandleItemOperationResponse` 的 `7/11` 分支在读取 `info` 数量流后把待处理
+  指针清零。固件已有的小喇叭无成功框路径也省略 `7/1`，只发送 `7/7 + 7/11`。
+
+因此当时宝箱成功响应曾改为：
+
+```text
+1/7/7 type=2 + 1/7/11   (宝箱)
+1/7/7 type=2 + 1/7/11   (钥匙)
+1/7/7 type=1            (奖励)
+1/18/1 msg=<GBK 开箱奖励文案>
+```
+
+服务端仍在同一 projected role 事务中扣除两件物品并加入奖励；只移除会产生副作用的
+成功框确认，不丢弃 `7/11`，也不自动注入输入事件。该中间回归曾断言对象顺序为
+`7/7,7/11,7/7,7/11,7/7,18/1`；该最后对象已由第 14 节替换。
+
+## 14. `1/18/1` 不可见后的正确候选（2026-08-17）
+
+用户在背包内复测证明 `1/18/1 { msg }` 没有可见文本，同时不再有输入拦截层。它的
+`net_handle_msg_popup(0x01010D54)` 虽然是非模态、30 帧的长度定界文本通道，但在背包
+screen 没有可见绘制证据，故不能继续作为开箱提示方案。
+
+主 CBE 中已经存在物品获得专用的 `1/7/37` 通道：
+
+```text
+JianghuOL.CBE:net_handle_misc_player_fields(0x01011D16)
+  -> HandleItemAcquire(0x0101191A)
+  -> 先显示 msg（20 帧），后读取 result
+  -> 仅 result=0 时读取 itemid/seq/itemname 并插入物品
+```
+
+开箱奖励已由 `1/7/7 type=1` 完成一次本地背包增量，因此末尾对象改为：
+
+```text
+1/7/37 { msg: <长度定界 GBK 开箱奖励文案>, result: 1 }
+```
+
+`result=1` 使 `HandleItemAcquire` 在显示 `msg` 后立即返回，不读取也不需要
+`itemid`、`seq`、`itemname`，不会第二次插入奖励；它不调用 `ui_show_message_box`，也
+不绑定 `HandleSceneBackKey`。完整成功对象顺序为：
+
+```text
+1/7/7 type=2 + 1/7/11  (宝箱)
+1/7/7 type=2 + 1/7/11  (钥匙)
+1/7/7 type=1           (奖励)
+1/7/37 result=1         (仅显示本次奖励)
+```
+
+本次仍需背包实测确认文本可见并自然消失。构造回归锁定 `msg` 的 GBK 内层长度和
+`result=00-01-01`，并断言没有 `1/7/1`、`1/20/1`、`1/25/11` 或 `1/18/1`。若该通道
+在背包同样不可见，必须记录实际 render 生命周期；不得把 `result` 改为 0 或叠加
+`7/37`，否则会违背“单次奖励增量”的背包契约。

@@ -7342,8 +7342,9 @@ static bool vm_net_mock_append_info_banner_text11_object(u8 *out, u32 outCap,
 {
     u32 objectStart = 0;
 
-    /* mmGame renders 25/11.info as GBK. Callers may pass ASCII or explicit
-     * GBK bytes, but must never forward a UTF-8 source literal unchanged. */
+    /* JianghuOL.CBE's main business dispatcher consumes 25/11.info as GBK.
+     * Callers may pass ASCII or explicit GBK bytes, but must never forward a
+     * UTF-8 source literal unchanged. */
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 0x19, 11, &objectStart))
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 8))
