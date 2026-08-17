@@ -5482,6 +5482,68 @@ static u32 vm_net_mock_damage_after_resist(u32 damage, u32 resist)
     return kept > 0xffffffffull ? 0xffffffffu : (u32)kept;
 }
 
+/*
+ * Pixi特效称号 incoming DR: +1% per unlocked chenghao id (CSV), cap 45%.
+ * PVP halves the percent (integer). Applied after armor/resist, before HP clamp.
+ */
+enum
+{
+    VM_NET_MOCK_CHENGHAO_DR_PERCENT_CAP = 45
+};
+
+static u32 vm_net_mock_cosmetic_csv_count_ids(const char *csv)
+{
+    u32 n = 0;
+    const char *p = csv;
+
+    if (p == NULL || p[0] == 0)
+        return 0;
+    while (*p)
+    {
+        while (*p == ',' || *p == ' ')
+            ++p;
+        if (*p == 0)
+            break;
+        ++n;
+        while (*p && *p != ',')
+            ++p;
+    }
+    return n;
+}
+
+static u32 vm_net_mock_role_chenghao_incoming_dr_percent(
+    const vm_net_mock_role_state *role,
+    bool pvp)
+{
+    u32 n;
+
+    if (role == NULL)
+        return 0;
+    n = vm_net_mock_cosmetic_csv_count_ids(role->unlockedChenghaoIds);
+    if (n > (u32)VM_NET_MOCK_CHENGHAO_DR_PERCENT_CAP)
+        n = (u32)VM_NET_MOCK_CHENGHAO_DR_PERCENT_CAP;
+    if (pvp)
+        n /= 2u;
+    return n;
+}
+
+static u32 vm_net_mock_battle_apply_chenghao_incoming_dr(
+    u32 damage,
+    const vm_net_mock_role_state *role,
+    bool pvp)
+{
+    u32 pct;
+    uint64_t kept;
+
+    if (damage == 0 || role == NULL)
+        return damage;
+    pct = vm_net_mock_role_chenghao_incoming_dr_percent(role, pvp);
+    if (pct == 0)
+        return damage;
+    kept = ((uint64_t)damage * (100ull - (uint64_t)pct)) / 100ull;
+    return kept > 0xffffffffull ? 0xffffffffu : (u32)kept;
+}
+
 static bool vm_net_mock_battle_skill_is_magical(
     const vm_net_mock_skill_catalog_item *skill)
 {
@@ -5740,6 +5802,20 @@ static u32 vm_net_mock_battle_enemy_damage_to_role_ex(u32 enemyId,
         damage = vm_net_mock_battle_apply_crit_damage(damage);
         vm_net_mock_battle_note_outcome_child_flag(VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT);
     }
+    {
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+        u32 beforeDr = damage;
+        damage = vm_net_mock_battle_apply_chenghao_incoming_dr(damage, role, false);
+        if (beforeDr != damage)
+        {
+            printf("[info][network] mock_battle_chenghao_dr side=pve enemy=%u "
+                   "before=%u after=%u pct=%u unlocks=%u\n",
+                   enemyId, beforeDr, damage,
+                   vm_net_mock_role_chenghao_incoming_dr_percent(role, false),
+                   role ? vm_net_mock_cosmetic_csv_count_ids(role->unlockedChenghaoIds)
+                        : 0u);
+        }
+    }
     return vm_net_mock_min_u32(damage, roleHpCurrent);
 }
 
@@ -5770,6 +5846,18 @@ static u32 vm_net_mock_battle_enemy_skill_remitigate_to_role(u32 enemyId,
         damage = 1;
     if (keepCrit)
         damage = vm_net_mock_battle_apply_crit_damage(damage);
+    {
+        vm_net_mock_role_state *role = vm_net_mock_active_role();
+        u32 beforeDr = damage;
+        damage = vm_net_mock_battle_apply_chenghao_incoming_dr(damage, role, false);
+        if (beforeDr != damage)
+        {
+            printf("[info][network] mock_battle_chenghao_dr side=pve-skill enemy=%u "
+                   "before=%u after=%u pct=%u\n",
+                   enemyId, beforeDr, damage,
+                   vm_net_mock_role_chenghao_incoming_dr_percent(role, false));
+        }
+    }
     printf("[info][network] mock_battle_enemy_skill_mitigate enemy=%u "
            "attack=%u resist=%u damage=%u crit=%u "
            "evidence=monster-skill-resist-only\n",
@@ -6919,6 +7007,7 @@ typedef struct
     vm_net_mock_role_db_file *database;
     bool found;
     bool invalid;
+    bool upgradedFormat;
     u8 seenRoleMask;
     u8 roleRows;
 } vm_mock_mysql_role_load_context;
@@ -6936,7 +7025,8 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
         !vm_mock_mysql_parse_u32(values[0], lengths[0], &format_version) ||
         !vm_mock_mysql_parse_u32(values[1], lengths[1], &active_role_id) ||
         !vm_mock_mysql_parse_u32(values[2], lengths[2], &role_count) ||
-        format_version != VM_NET_MOCK_ROLE_DB_VERSION ||
+        (format_version != (u32)VM_NET_MOCK_ROLE_DB_PRE_COSMETICS_VERSION &&
+         format_version != (u32)VM_NET_MOCK_ROLE_DB_VERSION) ||
         role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES)
     {
         if (context != NULL)
@@ -6944,10 +7034,93 @@ static bool vm_mock_mysql_role_meta_row(void *context_value,
         return true;
     }
     memcpy(context->database->magic, "JHR1", 4);
-    context->database->version = format_version;
+    /* Cosmetics live in MySQL columns; bump in-memory/version marker to current. */
+    context->database->version = VM_NET_MOCK_ROLE_DB_VERSION;
     context->database->activeRoleId = active_role_id;
     context->database->roleCount = role_count;
+    if (format_version != (u32)VM_NET_MOCK_ROLE_DB_VERSION)
+    {
+        context->upgradedFormat = true;
+        printf("[info][network] mock_role_db_mysql_meta_upgrade account_format=%u -> %u "
+               "roles=%u active=%u\n",
+               format_version, (u32)VM_NET_MOCK_ROLE_DB_VERSION, role_count,
+               active_role_id);
+    }
     context->found = true;
+    return true;
+}
+
+static vm_net_mock_role_state *vm_mock_mysql_find_loaded_role(vm_net_mock_role_db_file *database,
+                                                               u32 role_id);
+
+typedef struct
+{
+    vm_net_mock_role_db_file *database;
+    bool invalid;
+    u32 rows;
+} vm_mock_mysql_cosmetics_load_context;
+
+static bool vm_mock_mysql_role_cosmetics_row(void *context_value,
+                                             unsigned int column_count,
+                                             const char *const *values,
+                                             const size_t *lengths)
+{
+    vm_mock_mysql_cosmetics_load_context *context =
+        (vm_mock_mysql_cosmetics_load_context *)context_value;
+    u32 roleId = 0;
+    u32 eqC = 0;
+    u32 eqW = 0;
+    u32 eqM = 0;
+    vm_net_mock_role_state *role;
+    size_t copy;
+
+    if (context == NULL || context->database == NULL || column_count != 7 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &roleId) || roleId == 0)
+    {
+        if (context)
+            context->invalid = true;
+        return true;
+    }
+    role = vm_mock_mysql_find_loaded_role(context->database, roleId);
+    if (role == NULL)
+    {
+        context->invalid = true;
+        return true;
+    }
+    role->unlockedChenghaoIds[0] = 0;
+    role->unlockedWingIds[0] = 0;
+    role->unlockedMountIds[0] = 0;
+    if (values[1] != NULL && lengths[1] > 0)
+    {
+        copy = lengths[1] < sizeof(role->unlockedChenghaoIds) - 1
+                   ? lengths[1]
+                   : sizeof(role->unlockedChenghaoIds) - 1;
+        memcpy(role->unlockedChenghaoIds, values[1], copy);
+        role->unlockedChenghaoIds[copy] = 0;
+    }
+    if (values[2] != NULL && lengths[2] > 0)
+    {
+        copy = lengths[2] < sizeof(role->unlockedWingIds) - 1
+                   ? lengths[2]
+                   : sizeof(role->unlockedWingIds) - 1;
+        memcpy(role->unlockedWingIds, values[2], copy);
+        role->unlockedWingIds[copy] = 0;
+    }
+    if (values[3] != NULL && lengths[3] > 0)
+    {
+        copy = lengths[3] < sizeof(role->unlockedMountIds) - 1
+                   ? lengths[3]
+                   : sizeof(role->unlockedMountIds) - 1;
+        memcpy(role->unlockedMountIds, values[3], copy);
+        role->unlockedMountIds[copy] = 0;
+    }
+    (void)vm_mock_mysql_parse_u32(values[4], lengths[4], &eqC);
+    (void)vm_mock_mysql_parse_u32(values[5], lengths[5], &eqW);
+    (void)vm_mock_mysql_parse_u32(values[6], lengths[6], &eqM);
+    role->equippedChenghaoId = eqC;
+    role->equippedWingId = eqW;
+    role->equippedMountId = eqM;
+    ++context->rows;
     return true;
 }
 
@@ -7373,6 +7546,63 @@ static bool vm_net_mock_role_ensure_arena_designation_column(void)
     return true;
 }
 
+static bool vm_net_mock_role_ensure_pixi_cosmetics_columns(void)
+{
+    static bool ensured = false;
+    static bool ok = false;
+
+    if (ensured)
+        return ok;
+    ensured = true;
+    if (!vm_net_mock_role_ensure_arena_designation_column())
+    {
+        ok = false;
+        return false;
+    }
+    if (!vm_net_mock_role_table_ensure_column(
+            "account_roles", "unlocked_chenghao_ids",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN unlocked_chenghao_ids TEXT NULL "
+            "AFTER special_designation_mask",
+            "role_unlocked_chenghao_ids_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "unlocked_wing_ids",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN unlocked_wing_ids TEXT NULL "
+            "AFTER unlocked_chenghao_ids",
+            "role_unlocked_wing_ids_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "unlocked_mount_ids",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN unlocked_mount_ids TEXT NULL "
+            "AFTER unlocked_wing_ids",
+            "role_unlocked_mount_ids_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "equipped_chenghao_id",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN equipped_chenghao_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER unlocked_mount_ids",
+            "role_equipped_chenghao_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "equipped_wing_id",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN equipped_wing_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER equipped_chenghao_id",
+            "role_equipped_wing_id_column") ||
+        !vm_net_mock_role_table_ensure_column(
+            "account_roles", "equipped_mount_id",
+            "ALTER TABLE account_roles "
+            "ADD COLUMN equipped_mount_id INT UNSIGNED NOT NULL DEFAULT 0 "
+            "AFTER equipped_wing_id",
+            "role_equipped_mount_id_column"))
+    {
+        ok = false;
+        return false;
+    }
+    ok = true;
+    return true;
+}
+
 static bool vm_net_mock_role_is_red_name(const vm_net_mock_role_state *role)
 {
     return role != NULL &&
@@ -7470,6 +7700,8 @@ static bool vm_net_mock_enhance_wash_sql_text(
     return true;
 }
 
+static bool g_vm_net_mock_role_db_format_upgraded;
+
 static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
 {
     char account_hex[129];
@@ -7477,6 +7709,7 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     vm_mock_mysql_role_load_context context;
     if (found_out)
         *found_out = false;
+    g_vm_net_mock_role_db_format_upgraded = false;
     if (!vm_net_mock_mysql_account_hex(account_hex))
         return false;
     memset(&context, 0, sizeof(context));
@@ -7492,9 +7725,12 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
             *found_out = context.found;
         return !context.invalid;
     }
+    g_vm_net_mock_role_db_format_upgraded = context.upgradedFormat;
     if (!vm_net_mock_role_ensure_pk_columns())
         return false;
     if (!vm_net_mock_role_ensure_arena_designation_column())
+        return false;
+    if (!vm_net_mock_role_ensure_pixi_cosmetics_columns())
         return false;
     snprintf(query, sizeof(query),
              "SELECT role_index,role_id,HEX(role_name),job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,HEX(scene),pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,pk_points,pk_pve_streak,UNIX_TIMESTAMP(created_at) "
@@ -7503,6 +7739,19 @@ static bool vm_net_mock_role_db_load_mysql_relational(bool *found_out)
     if (!vm_mysql_query(query, vm_mock_mysql_role_detail_row, &context) || context.invalid ||
         context.roleRows != g_vm_net_mock_role_db.roleCount)
         return false;
+    {
+        vm_mock_mysql_cosmetics_load_context cosCtx;
+        memset(&cosCtx, 0, sizeof(cosCtx));
+        cosCtx.database = &g_vm_net_mock_role_db;
+        snprintf(query, sizeof(query),
+                 "SELECT role_id,IFNULL(unlocked_chenghao_ids,''),IFNULL(unlocked_wing_ids,''),"
+                 "IFNULL(unlocked_mount_ids,''),equipped_chenghao_id,equipped_wing_id,"
+                 "equipped_mount_id FROM account_roles WHERE account_id=CAST(X'%s' AS CHAR)",
+                 account_hex);
+        if (!vm_mysql_query(query, vm_mock_mysql_role_cosmetics_row, &cosCtx) ||
+            cosCtx.invalid)
+            return false;
+    }
     if (!vm_net_mock_role_equipment_ensure_enhance_column())
         return false;
     snprintf(query, sizeof(query),
@@ -7690,6 +7939,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         return false;
     if (!vm_net_mock_role_ensure_arena_designation_column())
         return false;
+    if (!vm_net_mock_role_ensure_pixi_cosmetics_columns())
+        return false;
     if (timed_effect != NULL &&
         (!vm_net_mock_role_item_effect_is_valid(timed_effect) ||
          !vm_net_mock_role_prepare_item_effect_schema()))
@@ -7854,8 +8105,8 @@ static bool vm_net_mock_role_db_save_relational_ex(
         if (!scene_len)
             scene_hex[0] = 0;
         snprintf(query, sizeof(query),
-                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq) "
-                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u) "
+                 "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,pk_points,pk_pve_streak,scene,pos_x,pos_y,backpack_item_count,designation_id,arena_designation_mask,special_designation_mask,next_backpack_seq,unlocked_chenghao_ids,unlocked_wing_ids,unlocked_mount_ids,equipped_chenghao_id,equipped_wing_id,equipped_mount_id) "
+                 "VALUES(CAST(X'%s' AS CHAR),%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,X'%s',%u,%u,%u,%u,%u,%u,%u,'%s','%s','%s',%u,%u,%u) "
                  "ON DUPLICATE KEY UPDATE role_index=VALUES(role_index),role_name=VALUES(role_name),"
                  "job=VALUES(job),sex=VALUES(sex),backpack_capacity=VALUES(backpack_capacity),"
                  "level=VALUES(level),exp=VALUES(exp),hp=VALUES(hp),hp_max=VALUES(hp_max),"
@@ -7865,14 +8116,25 @@ static bool vm_net_mock_role_db_save_relational_ex(
                  "backpack_item_count=VALUES(backpack_item_count),designation_id=VALUES(designation_id),"
                  "arena_designation_mask=VALUES(arena_designation_mask),"
                  "special_designation_mask=VALUES(special_designation_mask),"
-                 "next_backpack_seq=VALUES(next_backpack_seq)",
+                 "next_backpack_seq=VALUES(next_backpack_seq),"
+                 "unlocked_chenghao_ids=VALUES(unlocked_chenghao_ids),"
+                 "unlocked_wing_ids=VALUES(unlocked_wing_ids),"
+                 "unlocked_mount_ids=VALUES(unlocked_mount_ids),"
+                 "equipped_chenghao_id=VALUES(equipped_chenghao_id),"
+                 "equipped_wing_id=VALUES(equipped_wing_id),"
+                 "equipped_mount_id=VALUES(equipped_mount_id)",
                  account_hex, role->roleId, i, name_hex, role->job, role->sex,
                  role->backpackCapacity, role->level, role->exp, role->hp, role->hpMax,
                  role->mp, role->mpMax, role->money, role->wcoin, role->pkPoints,
                  (u32)role->pkPveDecayStreak, scene_hex,
                  role->x, role->y, role->backpackItemCount, role->designationId,
                  role->arenaDesignationMask, role->specialDesignationMask,
-                 role->nextBackpackSeq);
+                 role->nextBackpackSeq,
+                 role->unlockedChenghaoIds[0] ? role->unlockedChenghaoIds : "",
+                 role->unlockedWingIds[0] ? role->unlockedWingIds : "",
+                 role->unlockedMountIds[0] ? role->unlockedMountIds : "",
+                 role->equippedChenghaoId, role->equippedWingId,
+                 role->equippedMountId);
         if (!vm_mysql_exec(query))
         {
             snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -9246,6 +9508,8 @@ static void vm_net_mock_role_db_load(void)
         g_vm_net_mock_role_db.activeRoleId = 0;
         needsSave = true;
     }
+    if (g_vm_net_mock_role_db_format_upgraded)
+        needsSave = true;
     g_vm_net_mock_role_db_valid = true;
     if (needsSave)
     {

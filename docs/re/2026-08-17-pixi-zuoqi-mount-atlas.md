@@ -21,8 +21,10 @@ Map local-player mounts load from `JHOnlineData/zuoqi/`:
 
 1. `resources/plistAtlas.ts` — format-2 loader; optional `frameNamePrefix`.
 2. `resources/mountFx.ts` — `MountOverlay`; dir packs swap face sheets; sfx flips.
-3. Status badge **骑** → `MountPanel`.
-4. Preference: `?mount=11370` or `localStorage.pixi.mountId`.
+3. Status badge **骑** → `MountPanel` (unlocked ids only via `1/31`).
+4. Unlock/equip: WT `1/31` (kind=3); peers via `31/5`.
+   See `docs/re/2026-08-17-pixi-cosmetics-1-31.md`.
+5. Equipped mount: local walk speed **×2** (`MOUNT_WALK_SPEED_MULT`).
 
 ## Facing map (dir packs)
 
@@ -30,4 +32,4 @@ CBE 1=up→face0, 2=right→2, 3=down→4, 4=left→6.
 
 ## Quick test
 
-Enter world → **骑** → pick `monster_11370` / `11372` / `11802` and walk all four ways.
+Admin unlock a mount → enter world → **骑** → equip; second Pixi client on the same map should see it.

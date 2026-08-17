@@ -1442,14 +1442,20 @@ export class BattleScreen extends Container {
 
   private async loadBattleMapBg(worldScene: string): Promise<void> {
     const gen = ++this.mapLoadGen;
-    this.mapHost.removeChildren().forEach((c) => {
-      if (c !== this.mapSprite) c.destroy({ children: true });
-    });
-    // Fallback tint while loading / missing.
-    const fallback = new Graphics()
-      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT)
-      .fill({ color: 0x2a5a38 });
-    this.mapHost.addChildAt(fallback, 0);
+    // Keep the previous battle map (if any) while the next b_*.sce loads.
+    // Clearing to a green full-screen tint flashed the LCD on every encounter.
+    for (const c of [...this.mapHost.children]) {
+      if (c === this.mapSprite) continue;
+      this.mapHost.removeChild(c);
+      c.destroy({ children: true });
+    }
+    if (!this.mapSprite) {
+      const placeholder = new Graphics()
+        .rect(0, 0, LCD_WIDTH, LCD_HEIGHT)
+        .fill({ color: CBE.bgDeep });
+      placeholder.eventMode = "none";
+      this.mapHost.addChildAt(placeholder, 0);
+    }
 
     const sce =
       (await resolveBattleSce(worldScene, resourceExists)) ||
@@ -1476,11 +1482,7 @@ export class BattleScreen extends Container {
   }
 
   private paintMap(scene: LoadedScene): void {
-    if (this.mapSprite) {
-      this.mapHost.removeChild(this.mapSprite);
-      this.mapSprite.destroy({ texture: true });
-      this.mapSprite = null;
-    }
+    const prev = this.mapSprite;
     const tex = rgbaToTexture(scene.width, scene.height, scene.rgba);
     const spr = new Sprite(tex);
     // Fit battle map into stage band (top..bottom), cover LCD width.
@@ -1490,8 +1492,22 @@ export class BattleScreen extends Container {
     spr.x = (LCD_WIDTH - scene.width * scale) / 2;
     spr.y = STAGE_TOP + (stageH - scene.height * scale) / 2;
     this.mapSprite = spr;
-    // Keep fallback under map for letterbox.
+    // Dark letterbox under cover-scaled map (never the old green flash tint).
+    for (const c of [...this.mapHost.children]) {
+      if (c === prev || c === spr) continue;
+      this.mapHost.removeChild(c);
+      c.destroy({ children: true });
+    }
+    const letterbox = new Graphics()
+      .rect(0, 0, LCD_WIDTH, LCD_HEIGHT)
+      .fill({ color: CBE.bgDeep });
+    letterbox.eventMode = "none";
+    this.mapHost.addChildAt(letterbox, 0);
     this.mapHost.addChild(spr);
+    if (prev) {
+      if (prev.parent) prev.parent.removeChild(prev);
+      prev.destroy({ texture: true });
+    }
   }
 
   private rebuildUnits(): void {

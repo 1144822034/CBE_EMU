@@ -27,7 +27,7 @@ import {
 } from "./listPanelShell";
 
 const JOBS = ["天机", "幻剑", "鬼道"];
-const BRACKETS = [10, 20, 30, 40, 50, 70];
+const BRACKETS = [10, 50, 70];
 const TAB_BG = 0x375946;
 /** Single-line rank rows. */
 const LIST_PAGE = 8;
@@ -331,7 +331,7 @@ export class ArenaPanel extends Container {
 
     const brY = jobY + tabH + 4;
     const brLabels = BRACKETS.map((b) =>
-      b === 70 ? "70" : String(b),
+      b === 70 ? "70" : bracketLabel(b),
     );
     this.drawTabs(
       8,

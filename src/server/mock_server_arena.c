@@ -150,18 +150,13 @@ static void vm_mock_arena_on_wager_duel_finished(vm_mock_service_duel *duel);
 static vm_mock_arena_participant *vm_mock_arena_ensure_participant(
     vm_mock_service_client_session *session, vm_net_mock_role_state *role);
 
+/* 等级段：10–49 → 10；50–69 → 50；70+ → 70。匹配仍要求同职业。 */
 static u16 vm_mock_arena_bracket_for_level(u32 level)
 {
     if (level >= 70)
         return 70;
     if (level >= 50)
         return 50;
-    if (level >= 40)
-        return 40;
-    if (level >= 30)
-        return 30;
-    if (level >= 20)
-        return 20;
     if (level >= 10)
         return 10;
     return 0;
@@ -170,12 +165,12 @@ static u16 vm_mock_arena_bracket_for_level(u32 level)
 static bool vm_mock_arena_same_bucket(u8 jobA, u16 bracketA, u16 levelA,
                                        u8 jobB, u16 bracketB, u16 levelB)
 {
+    (void)levelA;
+    (void)levelB;
     if (jobA == 0 || jobB == 0 || jobA != jobB)
         return false;
     if (bracketA == 0 || bracketB == 0 || bracketA != bracketB)
         return false;
-    if (bracketA == 70)
-        return levelA == levelB && levelA >= 70;
     return true;
 }
 
@@ -952,11 +947,15 @@ static void vm_mock_arena_announce_kill_streak(const vm_mock_arena_participant *
     name = p->roleName[0] ? p->roleName : NULL;
     if (name == NULL)
         return;
-    /* 阶段=段位：10段…50段 / 70级 */
+    /* 阶段=段位：10-49 / 50-69 / 70级 */
     if (p->bracket == 70)
         snprintf(stage, sizeof(stage), "70\xbc\xb6"); /* 70级 */
+    else if (p->bracket == 50)
+        snprintf(stage, sizeof(stage), "50-69");
+    else if (p->bracket == 10)
+        snprintf(stage, sizeof(stage), "10-49");
     else if (p->bracket != 0)
-        snprintf(stage, sizeof(stage), "%u\xb6\xce", (u32)p->bracket); /* N段 */
+        snprintf(stage, sizeof(stage), "%u", (u32)p->bracket);
     else
         snprintf(stage, sizeof(stage), "?");
     /* {玩家} 比武 {阶段} 连胜N人,已经{称号} ! */
@@ -1163,7 +1162,7 @@ static void vm_mock_arena_apply_kill_streak(vm_mock_arena_participant *winner,
         return;
     if (winner->killStreak < 0xffffffffu)
         winner->killStreak += 1;
-    /* 10/20/…/50 段位不播报/不发称号；仅 70 级档。 */
+    /* 10/50 段位不播报/不发称号；仅 70 级档。 */
     if (winner->bracket != 70)
         return;
     /* 仅被世界播报的首个达成者解锁文字称号。 */
@@ -2952,12 +2951,12 @@ static u32 vm_net_mock_build_arena_claim_response(const u8 *request, u32 request
         snprintf(tipGbk, sizeof(tipGbk),
                  "\xbd\xb1\xc0\xf8\xd2\xd1\xc1\xec\xc8\xa1");
     }
-    else if (p->rankPos == 0 || p->rankPos > 10)
+    else if (p->rankPos == 0 || p->rankPos > 5)
     {
         result = 4;
-        /* 未进入前十名 */
+        /* 未进入前五名 */
         snprintf(tipGbk, sizeof(tipGbk),
-                 "\xce\xb4\xbd\xf8\xc8\xeb\xc7\xb0\xca\xae\xc3\xfb");
+                 "\xce\xb4\xbd\xf8\xc8\xeb\xc7\xb0\xce\xe5\xc3\xfb");
     }
     else
     {
@@ -3125,8 +3124,9 @@ static bool vm_net_mock_arena_admin_save_reward(u8 job, u16 bracket, u8 rankPos,
                                                 u32 equipId)
 {
     char query[512];
-    if (!vm_mock_arena_ensure_tables() || job == 0 || bracket == 0 ||
-        rankPos == 0 || rankPos > 10)
+    if (!vm_mock_arena_ensure_tables() || job == 0 ||
+        (bracket != 10 && bracket != 50 && bracket != 70) ||
+        rankPos == 0 || rankPos > 5)
         return false;
     snprintf(query, sizeof(query),
              "INSERT INTO server_arena_rewards (job,bracket,rank_pos,reward_exp,"

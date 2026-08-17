@@ -175,9 +175,7 @@ export class MountOverlay {
       return;
     }
     if (!isMountId(id)) {
-      console.warn("[mount] unknown id", id);
-      this.clear();
-      return;
+      console.warn("[mount] unlisted id, trying atlas", id);
     }
     if (id === this.mountId && this.atlas) {
       this.root.visible = true;

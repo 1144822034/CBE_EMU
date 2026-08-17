@@ -10,11 +10,13 @@ MOCK_SERVER_FRAGMENTS := \
 	src/server/mock_server_catalog.c \
 	src/server/mock_server_role.c \
 	src/server/mock_server_equipment_npc.c \
+	src/server/mock_server_cosmetics.c \
 	src/server/mock_server_scene_task.c \
 	src/server/mock_server_scene_sync.c \
 	src/server/mock_server_guild.c \
 	src/server/mock_server_arena.c \
 	src/server/mock_server_auction.c \
+	src/server/mock_server_enmity.c \
 	src/server/mock_server_social.c \
 	src/server/mock_server_battle.c \
 	src/server/mock_server_interaction_login.c \

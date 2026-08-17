@@ -8231,6 +8231,19 @@ static bool vm_mock_service_duel_apply_operate(vm_mock_service_duel *duel,
             rawDamage = vm_net_mock_battle_apply_crit_damage(rawDamage);
             hitOut->childFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_CRIT;
         }
+        {
+            u32 beforeDr = rawDamage;
+            rawDamage = vm_net_mock_battle_apply_chenghao_incoming_dr(
+                rawDamage, targetRole, true);
+            if (beforeDr != rawDamage)
+            {
+                printf("[info][network] mock_battle_chenghao_dr side=pvp "
+                       "target=%u before=%u after=%u pct=%u\n",
+                       targetRole ? targetRole->roleId : 0u, beforeDr, rawDamage,
+                       vm_net_mock_role_chenghao_incoming_dr_percent(targetRole,
+                                                                    true));
+            }
+        }
         rawDamage = vm_net_mock_min_u32(rawDamage, duel->hp[targetIndex]);
         if (rawDamage != 0 && skill != NULL && operate > 2)
         {

@@ -24,12 +24,15 @@ pipeline; sheets are Pixi-only decorative overlays behind the body sprite.
    displacement (88014 `{57,-115}` otherwise lands below the feet).
 3. `SceneView.setPlayerWing(id)` — mounts overlay on the local player
    container (`zIndex` between +16 sparkles and body).
-4. Preference: URL `?wing=88010` or `localStorage.pixi.wingId`.
+4. Unlock/equip: WT `1/31` (kind=2); panel lists unlocked ids only.
+   See `docs/re/2026-08-17-pixi-cosmetics-1-31.md`.
+5. Nearby peers: `ActorLayer.applyPeerCosmetics` from `31/5`.
+6. Equipped wing: local walk **ignores MAP terrain** (still map-bound);
+   unequip snaps out of solid if needed.
 
-## Not yet
+## Notes
 
-- No CBE / mock-server equip field for wing id (unresolved protocol).
-- Peers / battle units do not show wings yet.
+- No CBE equip field (Pixi-only).
 - Fine-tuned per-id attach offsets may need art pass after in-game look.
 - `sfx_88011_0_0008` is a TexturePacker 1×1 sentinel; loader drops frames
   with size ≤2 so the loop does not flash a scaled black box.
@@ -39,7 +42,5 @@ pipeline; sheets are Pixi-only decorative overlays behind the body sprite.
 
 ## Quick test
 
-1. `npm run sync:assets` (ensures `public/.../chibang` exists).
-2. Enter world map → tap status strip **翅** → pick `sfx_88010` etc.
-3. Or URL `?wing=88010` / `localStorage.pixi.wingId`.
-4. Console still works: `localStorage.setItem('pixi.wingId','88029'); location.reload()`.
+1. Admin unlock a wing id (or unlock-all wing).
+2. Enter world → **翅** → pick unlocked id; second client should see it.

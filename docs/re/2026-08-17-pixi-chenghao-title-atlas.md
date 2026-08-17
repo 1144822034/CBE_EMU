@@ -8,20 +8,19 @@ Map nameplate titles can use animated atlases from
 `JHOnlineData/chenghao/sfx_<id>_0.{plist,png}` (86001–86048), in addition to
 legacy GIF designations (`riches_name*` / `level_name*`) and arena text titles.
 
-## Temp client policy
+## Unlock / equip policy
 
-- Title list shows **all** chenghao rows (desc `特效称号(测试)`).
-- Equipping a chenghao id is **local only** (no `23/3` wire); preference
-  `localStorage.pixi.chenghaoId`.
-- Later: gate list / equip by server unlock; keep atlas path / wire tag
-  `chenghao:<id>`.
+- List shows **unlocked** chenghao only (server CSV via `1/31/2`).
+- Equip via `1/31/3` (kind=1); classic `23/3` clears equipped chenghao.
+- Nearby peers see equipped id via `1/31/5` (not classic `titleBadge`).
+- See `docs/re/2026-08-17-pixi-cosmetics-1-31.md`.
 
 ## Client path
 
 1. `resources/chenghaoFx.ts` — catalog + `ChenghaoOverlay`.
 2. `SceneView.setPlayerNameplate` / `ActorLayer.refreshTitleBadge` — resolve
    `chenghao:<id>` and play atlas.
-3. `GameSession.openDesignations` / `selectDesignation` — merge + local equip.
+3. `GameSession.syncCosmetics` / `selectDesignation` / `withChenghaoDesignations`.
 4. Durable assets: `PixiJS_web/assets/chenghao/` via `sync-offline-assets.mjs`.
 
 ## List names

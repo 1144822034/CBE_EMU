@@ -3748,3 +3748,105 @@ export function parseQuickRepairConfirm(
   if (!obj) return null;
   return { result: fieldU32(obj, "result") };
 }
+
+/* ---------- Pixi cosmetics 1/31 (chenghao / wing / mount) ---------- */
+
+export const COSMETIC_KIND_CHENGHAO = 1;
+export const COSMETIC_KIND_WING = 2;
+export const COSMETIC_KIND_MOUNT = 3;
+
+export type CosmeticsState = {
+  unlockedChenghao: number[];
+  unlockedWing: number[];
+  unlockedMount: number[];
+  eqChenghao: number;
+  eqWing: number;
+  eqMount: number;
+};
+
+export type CosmeticsPeer = {
+  actorId: number;
+  eqChenghao: number;
+  eqWing: number;
+  eqMount: number;
+};
+
+function parseCsvIds(raw: string): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const part of String(raw || "").split(",")) {
+    const t = part.trim();
+    if (!t) continue;
+    const n = Number(t);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const id = n | 0;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+export function buildCosmeticsQueryRequest(): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 31, 1);
+  return b.finish();
+}
+
+export function buildCosmeticsEquipRequest(kind: number, id: number): Uint8Array {
+  const b = new WtBuilder();
+  b.object(1, 31, 3)
+    .u8("kind", kind & 0xff)
+    .u32("id", id >>> 0);
+  return b.finish();
+}
+
+function parseCosmeticsStateObject(obj: {
+  fields: { name: string; raw: Uint8Array }[];
+}): CosmeticsState {
+  return {
+    unlockedChenghao: parseCsvIds(fieldStringNamed(obj, "unlockedChenghao")),
+    unlockedWing: parseCsvIds(fieldStringNamed(obj, "unlockedWing")),
+    unlockedMount: parseCsvIds(fieldStringNamed(obj, "unlockedMount")),
+    eqChenghao: fieldU32(obj as never, "eqChenghao"),
+    eqWing: fieldU32(obj as never, "eqWing"),
+    eqMount: fieldU32(obj as never, "eqMount"),
+  };
+}
+
+export function parseCosmeticsState(packet: WtPacket): CosmeticsState | null {
+  const obj =
+    packet.objects.find((o) => o.kind === 31 && o.subtype === 2) ||
+    packet.objects.find((o) => o.kind === 31 && o.subtype === 4);
+  if (!obj) return null;
+  if (obj.subtype === 4 && fieldU32(obj, "result") !== 1) return null;
+  return parseCosmeticsStateObject(obj);
+}
+
+export function parseCosmeticsEquipResult(
+  packet: WtPacket,
+): { ok: boolean; state: CosmeticsState | null } | null {
+  const ack = packet.objects.find((o) => o.kind === 31 && o.subtype === 4);
+  if (!ack) return null;
+  const ok = fieldU32(ack, "result") === 1;
+  return {
+    ok,
+    state: ok ? parseCosmeticsStateObject(ack) : null,
+  };
+}
+
+export function parseCosmeticsPeerUpdates(packet: WtPacket): CosmeticsPeer[] {
+  const out: CosmeticsPeer[] = [];
+  for (const obj of packet.objects) {
+    if (obj.kind !== 31 || obj.subtype !== 5) continue;
+    const actorId = fieldU32(obj, "actorId");
+    if (!actorId) continue;
+    out.push({
+      actorId,
+      eqChenghao: fieldU32(obj, "eqChenghao"),
+      eqWing: fieldU32(obj, "eqWing"),
+      eqMount: fieldU32(obj, "eqMount"),
+    });
+  }
+  return out;
+}

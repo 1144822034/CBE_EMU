@@ -7,8 +7,16 @@ import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/de
 import { tryLoadUiTexture } from "../ui/UiAssets";
 import {
   ChenghaoOverlay,
+  chenghaoLabel,
+  chenghaoWireTag,
   parseChenghaoId,
 } from "../resources/chenghaoFx";
+import {
+  MountOverlay,
+  MOUNT_BODY_LIFT,
+  MOUNT_NAMEPLATE_EXTRA,
+} from "../resources/mountFx";
+import { WingOverlay } from "../resources/wingFx";
 import type { NpcTaskPromptType } from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
@@ -106,6 +114,15 @@ type Marker = {
   titleTextKey: string;
   /** Animated chenghao atlas (optional). */
   chenghao: ChenghaoOverlay | null;
+  /** Pixi wing / mount overlays (peers only). */
+  wing: WingOverlay | null;
+  mount: MountOverlay | null;
+  /** Classic 23/2 title fields (kept when cosmetics chenghao is off). */
+  classicTitle: string;
+  classicTitleGif: string;
+  eqChenghao: number;
+  eqWing: number;
+  eqMount: number;
   /** NPC quest mark from fuhao.actor (submit/accept/incomplete). */
   questMark: Sprite | null;
   questPrompt: NpcTaskPromptType | 0;
@@ -197,6 +214,14 @@ export class ActorLayer {
     number,
     { seed: NpcActor; respawnAt: number | null }
   >();
+  /**
+   * 31/5 can arrive before the peer marker exists (earlier poll, or before
+   * upsert's sync create runs). Keep last notice until paint can apply.
+   */
+  private pendingPeerCosmetics = new Map<
+    number,
+    { eqChenghao: number; eqWing: number; eqMount: number }
+  >();
 
   constructor(parent: Container) {
     this.root = parent;
@@ -221,6 +246,7 @@ export class ActorLayer {
       this.destroyMarker(m);
     }
     this.markers.clear();
+    this.pendingPeerCosmetics.clear();
     this.catalogNpcs = [];
     this.sceMonsters = [];
     this.teleportStones = [];
@@ -399,6 +425,7 @@ export class ActorLayer {
 
   applyPeers(peers: PeerActor[], removed: number[]): void {
     for (const id of removed) {
+      /* Keep pendingPeerCosmetics — brief 2/6 remove/re-add must not drop 31/5. */
       const m = this.markers.get(id);
       if (m?.kind === "peer") {
         m.plus16Sparkles = null;
@@ -428,6 +455,8 @@ export class ActorLayer {
         true,
         peer.plus16Count ?? 0,
       );
+      /* Marker exists after upsert's sync create; flush any early 31/5. */
+      this.paintPeerCosmetics(peer.actorId >>> 0);
     }
   }
 
@@ -435,7 +464,82 @@ export class ActorLayer {
   applyPeerTitle(actorId: number, title: string, titleGif: string): void {
     const m = this.markers.get(actorId);
     if (!m || m.kind !== "peer") return;
-    void this.refreshTitleBadge(m, title, titleGif);
+    m.classicTitle = title || "";
+    m.classicTitleGif = titleGif || "";
+    void this.refreshPeerTitle(m);
+  }
+
+  /** Live 31/5 cosmetics for a visible peer (or pending until marker exists). */
+  applyPeerCosmetics(
+    actorId: number,
+    eqChenghao: number,
+    eqWing: number,
+    eqMount: number,
+  ): void {
+    const id = actorId >>> 0;
+    this.pendingPeerCosmetics.set(id, {
+      eqChenghao: eqChenghao >>> 0,
+      eqWing: eqWing >>> 0,
+      eqMount: eqMount >>> 0,
+    });
+    this.paintPeerCosmetics(id);
+  }
+
+  private paintPeerCosmetics(actorId: number): void {
+    const id = actorId >>> 0;
+    const pending = this.pendingPeerCosmetics.get(id);
+    if (!pending) return;
+    const m = this.markers.get(id);
+    if (!m || m.kind !== "peer") {
+      console.info(
+        `[actors] cosmetics pending peer=${id} ch=${pending.eqChenghao} wing=${pending.eqWing} mount=${pending.eqMount} (no marker yet)`,
+      );
+      return;
+    }
+    m.eqChenghao = pending.eqChenghao;
+    m.eqWing = pending.eqWing;
+    m.eqMount = pending.eqMount;
+    console.info(
+      `[actors] cosmetics paint peer=${id} name=${m.nameLabel} ch=${m.eqChenghao} wing=${m.eqWing} mount=${m.eqMount}`,
+    );
+    void this.refreshPeerTitle(m);
+    void this.refreshPeerWing(m);
+    void this.refreshPeerMount(m);
+  }
+
+  /** DevTools / CDP probe: peer cosmetics vs markers. */
+  debugPeerCosmetics(): {
+    pending: { id: number; eqChenghao: number; eqWing: number; eqMount: number }[];
+    peers: {
+      id: number;
+      name: string;
+      eqChenghao: number;
+      eqWing: number;
+      eqMount: number;
+      wingVisible: boolean;
+      mountVisible: boolean;
+      titleKey: string;
+    }[];
+  } {
+    const pending = [...this.pendingPeerCosmetics.entries()].map(([id, v]) => ({
+      id,
+      ...v,
+    }));
+    const peers = [];
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer") continue;
+      peers.push({
+        id: m.id,
+        name: m.nameLabel,
+        eqChenghao: m.eqChenghao,
+        eqWing: m.eqWing,
+        eqMount: m.eqMount,
+        wingVisible: !!(m.wing && m.wing.root.visible),
+        mountVisible: !!(m.mount && m.mount.root.visible),
+        titleKey: m.titleGifKey,
+      });
+    }
+    return { pending, peers };
   }
 
   /**
@@ -462,8 +566,13 @@ export class ActorLayer {
         m.animate = true;
         const first = mv.dirs.find((d) => d >= 1 && d <= 4);
         if (first) m.dir = first;
+        m.mount?.setMoving(true);
+        m.wing?.setFacing(m.dir);
+        m.mount?.setFacing(m.dir, true);
+        this.syncPeerWingDepth(m);
       } else {
         m.moving = false;
+        m.mount?.setMoving(false);
       }
       if (m.loaded) this.applyFrame(m);
     }
@@ -480,6 +589,8 @@ export class ActorLayer {
       }
       m.plus16Sparkles?.tick(dt);
       m.chenghao?.tick(dt);
+      m.wing?.tick(dt);
+      m.mount?.tick(dt);
     }
 
     this.animAcc += dt;
@@ -518,11 +629,17 @@ export class ActorLayer {
     if (stepped) {
       m.root.position.set(m.x, m.y);
       m.root.zIndex = m.y | 0;
+      m.wing?.setFacing(m.dir);
+      m.mount?.setFacing(m.dir, true);
+      this.syncPeerWingDepth(m);
     }
     if (!m.peerMoveQueue.length) {
       m.moving = false;
       m.peerMoveAcc = 0;
+      m.mount?.setMoving(false);
       if (m.loaded) this.applyFrame(m);
+    } else {
+      m.mount?.setMoving(true);
     }
   }
 
@@ -770,6 +887,13 @@ export class ActorLayer {
         titleGifKey: "",
         titleTextKey: "",
         chenghao: null,
+        wing: null,
+        mount: null,
+        classicTitle: "",
+        classicTitleGif: "",
+        eqChenghao: 0,
+        eqWing: 0,
+        eqMount: 0,
         questMark: null,
         questPrompt: 0,
         questMarkGen: 0,
@@ -840,7 +964,15 @@ export class ActorLayer {
     this.layoutNameplate(m);
 
     if (kind === "peer") {
-      void this.refreshTitleBadge(m, title, titleGif);
+      m.classicTitle = title || "";
+      m.classicTitleGif = titleGif || "";
+      /* Prefer buffered 31/5 over classic-only refresh when notice arrived early. */
+      this.paintPeerCosmetics(id >>> 0);
+      if (!this.pendingPeerCosmetics.has(id >>> 0)) {
+        void this.refreshPeerTitle(m);
+        void this.refreshPeerWing(m);
+        void this.refreshPeerMount(m);
+      }
       if (!m.plus16Sparkles) {
         m.plus16Sparkles = new Plus16Sparkles();
         m.root.addChild(m.plus16Sparkles.root);
@@ -888,6 +1020,9 @@ export class ActorLayer {
         continue;
       }
       if (child === m.questMark) continue;
+      if (m.wing && child === m.wing.root) continue;
+      if (m.mount && child === m.mount.root) continue;
+      if (m.plus16Sparkles && child === m.plus16Sparkles.root) continue;
       if (!(child instanceof Sprite)) continue;
       m.root.removeChild(child);
       child.destroy({ texture: false });
@@ -926,6 +1061,67 @@ export class ActorLayer {
     m.root.addChild(spr);
     m.questMark = spr;
     this.layoutNameplate(m);
+  }
+
+  private async refreshPeerTitle(m: Marker): Promise<void> {
+    if (m.eqChenghao) {
+      await this.refreshTitleBadge(
+        m,
+        chenghaoLabel(m.eqChenghao),
+        chenghaoWireTag(m.eqChenghao),
+      );
+      return;
+    }
+    await this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
+  }
+
+  private async refreshPeerWing(m: Marker): Promise<void> {
+    const id = m.eqWing | 0;
+    if (!id) {
+      m.wing?.clear();
+      return;
+    }
+    if (!m.wing) {
+      m.wing = new WingOverlay();
+      m.root.addChild(m.wing.root);
+    }
+    await m.wing.setWingId(id);
+    if (this.markers.get(m.id) !== m) return;
+    const bodyH = m.sprite ? Math.round(m.sprite.height) : 24;
+    m.wing.setBodyDisplayHeight(bodyH);
+    m.wing.setFacing(m.dir);
+    this.syncPeerWingDepth(m);
+  }
+
+  private async refreshPeerMount(m: Marker): Promise<void> {
+    const id = m.eqMount | 0;
+    if (!id) {
+      m.mount?.clear();
+      if (m.sprite) m.sprite.y = 0;
+      this.layoutNameplate(m);
+      return;
+    }
+    if (!m.mount) {
+      m.mount = new MountOverlay();
+      m.root.addChild(m.mount.root);
+    }
+    await m.mount.setMountId(id);
+    if (this.markers.get(m.id) !== m) return;
+    const bodyH = m.sprite ? Math.round(m.sprite.height) : 24;
+    m.mount.setBodyDisplayHeight(bodyH);
+    m.mount.setFacing(m.dir, false);
+    m.mount.setMoving(m.moving);
+    if (m.sprite) m.sprite.y = -MOUNT_BODY_LIFT;
+    this.layoutNameplate(m);
+    this.syncPeerWingDepth(m);
+  }
+
+  private syncPeerWingDepth(m: Marker): void {
+    if (!m.wing) return;
+    const facingBack = m.dir === 1;
+    if (m.mount) m.mount.root.zIndex = 0.5;
+    m.wing.root.zIndex = facingBack ? 3 : 0.75;
+    if (m.sprite) m.sprite.zIndex = 1;
   }
 
   private async refreshTitleBadge(
@@ -1024,11 +1220,12 @@ export class ActorLayer {
     const bodyH = m.sprite
       ? Math.round(m.sprite.height)
       : 16;
+    const mountExtra = m.eqMount ? MOUNT_BODY_LIFT + MOUNT_NAMEPLATE_EXTRA : 0;
     const nameH = m.label.height || 12;
     m.label.scale.set(NAMEPLATE_SCALE);
     m.label.position.set(
       -Math.floor(m.label.width / 2),
-      -(bodyH + 2 + nameH),
+      -(bodyH + 2 + nameH + mountExtra),
     );
     let topY = m.label.y;
     if (m.titleBadge.visible) {
@@ -1094,6 +1291,15 @@ export class ActorLayer {
       composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
       ACTOR_DISPLAY_SCALE,
     );
+    if (m.kind === "peer") {
+      m.sprite.y = m.eqMount ? -MOUNT_BODY_LIFT : 0;
+      m.wing?.setBodyDisplayHeight(Math.round(m.sprite.height));
+      m.wing?.setFacing(m.dir);
+      m.mount?.setBodyDisplayHeight(Math.round(m.sprite.height));
+      m.mount?.setFacing(m.dir, false);
+      m.mount?.setMoving(m.moving);
+      this.syncPeerWingDepth(m);
+    }
     this.layoutNameplate(m);
   }
 

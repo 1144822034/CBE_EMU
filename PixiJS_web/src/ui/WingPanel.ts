@@ -1,5 +1,5 @@
 /**
- * Dev/preview wing picker — list JHOnlineData/chibang sheets for map attach.
+ * Wing picker — only unlocked ids from server 1/31.
  */
 import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
@@ -11,7 +11,7 @@ import {
   paintListShellChrome,
   type ListShellCtx,
 } from "./listPanelShell";
-import { WING_IDS, wingLabel } from "../resources/wingFx";
+import { wingLabel } from "../resources/wingFx";
 
 const PAGE_SIZE = 10;
 
@@ -21,11 +21,7 @@ export class WingPanel extends Container {
   private rowHits: Container[] = [];
   private listCursor = 0;
   private selectedId = 0;
-
-  private readonly rows: { id: number; label: string }[] = [
-    { id: 0, label: "关闭翅膀" },
-    ...WING_IDS.map((id) => ({ id, label: wingLabel(id) })),
-  ];
+  private rows: { id: number; label: string }[] = [{ id: 0, label: "关闭翅膀" }];
 
   onPick: ((wingId: number) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -43,7 +39,14 @@ export class WingPanel extends Container {
     this.addChild(this.box);
   }
 
-  open(currentWingId = 0): void {
+  open(currentWingId = 0, unlockedIds: number[] = []): void {
+    const unlocked = [...new Set(unlockedIds.filter((id) => id > 0))].sort(
+      (a, b) => a - b,
+    );
+    this.rows = [
+      { id: 0, label: "关闭翅膀" },
+      ...unlocked.map((id) => ({ id, label: wingLabel(id) })),
+    ];
     this.selectedId = currentWingId | 0;
     const idx = this.rows.findIndex((r) => r.id === this.selectedId);
     this.listCursor = idx >= 0 ? idx : 0;
@@ -121,12 +124,11 @@ export class WingPanel extends Container {
       cursor: this.listCursor,
       pageSize: PAGE_SIZE,
       paging: "local",
-      emptyText: "(无翅膀)",
+      emptyText: "尚无已解锁翅膀",
       onRow: (absIndex) => {
         this.listCursor = absIndex;
         this.confirm();
       },
     });
-    this.addLabel("点选切换 · 首项关闭翅膀", bounds.x + 10, footY + 6, CBE.inkLabel);
   }
 }

@@ -268,14 +268,14 @@ static void vm_mock_admin_render_arena_page(char *response, size_t responseCap,
 
     vm_mock_admin_text_appendf(
         &page,
-        "<section class=\"card\"><h2>排行奖励 (职业×段位×名次1-10)</h2>"
+        "<section class=\"card\"><h2>排行奖励 (职业×段位×名次1-5)</h2>"
         "<form method=\"post\" action=\"/action\" class=\"grid2\">"
         "<input type=\"hidden\" name=\"action\" value=\"save-arena-reward\">"
         "<div><label>职业(1天机2幻剑3鬼道)</label>"
         "<input name=\"job\" value=\"1\"></div>"
-        "<div><label>段位(10/20/30/40/50/70)</label>"
+        "<div><label>段位(10=10-49 / 50=50-69 / 70=70+)</label>"
         "<input name=\"bracket\" value=\"10\"></div>"
-        "<div><label>名次</label><input name=\"rank_pos\" value=\"1\"></div>"
+        "<div><label>名次(1-5)</label><input name=\"rank_pos\" value=\"1\"></div>"
         "<div><label>经验</label><input name=\"reward_exp\" value=\"0\"></div>"
         "<div><label>铜币</label><input name=\"reward_money\" value=\"0\"></div>"
         "<div><label>酷宝</label><input name=\"reward_wcoin\" value=\"0\"></div>"
@@ -451,7 +451,7 @@ static void vm_mock_admin_handle_arena_action(vm_mock_service_socket client,
         u32 equipId = 0;
         (void)vm_mock_admin_form_u32(body, "job", 3u, &job);
         (void)vm_mock_admin_form_u32(body, "bracket", 70u, &bracket);
-        (void)vm_mock_admin_form_u32(body, "rank_pos", 10u, &rankPos);
+        (void)vm_mock_admin_form_u32(body, "rank_pos", 5u, &rankPos);
         (void)vm_mock_admin_form_u32(body, "reward_exp", 0xffffffffu, &exp);
         (void)vm_mock_admin_form_u32(body, "reward_money", 0xffffffffu, &money);
         (void)vm_mock_admin_form_u32(body, "reward_wcoin", 0xffffffffu, &wcoin);

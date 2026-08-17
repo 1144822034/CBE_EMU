@@ -4632,6 +4632,9 @@ static u32 vm_net_mock_build_pos_info(u8 *out, u32 outCap, u16 x, u16 y)
 
 static bool vm_net_mock_append_books42_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_backpack_items_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos);
+static bool vm_net_mock_append_backpack_reservoir_counts_object(
+    u8 *out, u32 outCap, u32 *pos, bool *appendedOut);
 static bool vm_net_mock_append_role_skills_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_fb_target_empty11_object(u8 *out, u32 outCap, u32 *pos);
 static bool vm_net_mock_append_scene_npcs11_once_or_empty(u8 *out, u32 outCap, u32 *pos,
@@ -4709,7 +4712,9 @@ enum
     VM_NET_MOCK_ROLE_DB_BACKPACK_VERSION = 2,
     VM_NET_MOCK_ROLE_DB_EQUIP_VERSION = 3,
     VM_NET_MOCK_ROLE_DB_SHOP_WCOIN_VERSION = 4,
-    VM_NET_MOCK_ROLE_DB_VERSION = 5,
+    /* Relational rows before Pixi cosmetics CSV/equipped columns. */
+    VM_NET_MOCK_ROLE_DB_PRE_COSMETICS_VERSION = 5,
+    VM_NET_MOCK_ROLE_DB_VERSION = 6,
     /* Money 0–9, level 10–22, arena 30–40, special equip/time 41–45. */
     VM_NET_MOCK_ROLE_DESIGNATION_COUNT = 46,
     VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL = 16,
@@ -5076,6 +5081,16 @@ typedef struct
     u32 specialDesignationMask;
     /* account_roles.created_at → UNIX_TIMESTAMP；0=未知（不授资深类）。 */
     u32 createdAtUnix;
+    /*
+     * Pixi-only cosmetics (not 23/u8). CSV unlock lists + equipped atlas ids.
+     * See mock_server_cosmetics.c / WT 1/31.
+     */
+    char unlockedChenghaoIds[512];
+    char unlockedWingIds[512];
+    char unlockedMountIds[512];
+    u32 equippedChenghaoId;
+    u32 equippedWingId;
+    u32 equippedMountId;
     u32 equippedItemIds[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Parallel to equippedItemIds; lost on unequip if not persisted here. */
     u16 equippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];

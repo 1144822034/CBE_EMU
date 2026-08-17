@@ -181,9 +181,7 @@ export class ChenghaoOverlay {
       return;
     }
     if (!isChenghaoId(id)) {
-      console.warn("[chenghao] unknown id", id);
-      this.clear();
-      return;
+      console.warn("[chenghao] unlisted id, trying atlas", id);
     }
     if (id === this.titleId && this.atlas) {
       this.root.visible = true;

@@ -209,6 +209,16 @@ import {
   buildQuickRepairConfirmRequest,
   parseQuickRepairQuote,
   parseQuickRepairConfirm,
+  buildCosmeticsQueryRequest,
+  buildCosmeticsEquipRequest,
+  parseCosmeticsState,
+  parseCosmeticsEquipResult,
+  parseCosmeticsPeerUpdates,
+  COSMETIC_KIND_CHENGHAO,
+  COSMETIC_KIND_WING,
+  COSMETIC_KIND_MOUNT,
+  type CosmeticsState,
+  type CosmeticsPeer,
   NpcServiceOpcode,
 } from "../net/protocolExtras";
 import {
@@ -217,9 +227,10 @@ import {
   chenghaoWireTag,
   isChenghaoId,
   parseChenghaoId,
-  readChenghaoPreference,
   writeChenghaoPreference,
 } from "../resources/chenghaoFx";
+import { writeWingIdPreference } from "../resources/wingFx";
+import { writeMountIdPreference } from "../resources/mountFx";
 import {
   bracketForLevel,
   buildArenaClaimRequest,
@@ -412,6 +423,8 @@ export type SessionCallbacks = {
   onOtherEquip?: (equip: OtherEquipView) => void;
   /** Equipped designation changed (23/2) — refresh overhead badge. */
   onDesignationUpdate?: (info: { name: string; gif: string }) => void;
+  /** Pixi cosmetics 1/31 state (unlock lists + equipped ids). */
+  onCosmeticsUpdate?: (state: CosmeticsState) => void;
   /** Pixi 比武擂台 HUD push (41/5). */
   onArenaHud?: (hud: ArenaHud | null) => void;
   onWagerEvent?: (ev: WagerEvent) => void;
@@ -422,6 +435,8 @@ export type SessionCallbacks = {
     name: string;
     gif: string;
   }) => void;
+  /** Peer cosmetics update (31/5). */
+  onCosmeticsPeer?: (peer: CosmeticsPeer) => void;
   onBattle: (battle: BattleState) => void;
   onBattleUpdate?: (update: BattleActionUpdate) => void;
   onSkills?: (skills: BattleSkillRow[]) => void;
@@ -590,11 +605,17 @@ export class GameSession {
   roleTitle = "";
   /** Overhead GIF: riches_nameN.gif / level_nameN.gif / chenghao:ID */
   roleTitleGif = "";
-  /**
-   * Local Pixi-only chenghao FX title (86001+). Temporary until server unlock
-   * gates these; selectDesignation for these ids does not hit the wire.
-   */
+  /** Equipped Pixi chenghao id from 1/31 (0 = none). */
   localChenghaoId = 0;
+  /** Server unlock lists + equipped wing/mount/chenghao (1/31). */
+  cosmetics: CosmeticsState = {
+    unlockedChenghao: [],
+    unlockedWing: [],
+    unlockedMount: [],
+    eqChenghao: 0,
+    eqWing: 0,
+    eqMount: 0,
+  };
   /** Field PK score; red name when >= 60. */
   pkPoints = 0;
   roleName = "";
@@ -604,6 +625,11 @@ export class GameSession {
   roleSex = 0;
   /** Live 2/10 peers — battle right seats prefer these visuals to match the map. */
   private scenePeerById = new Map<number, PeerActor>();
+  /**
+   * Last 31/5 per map actorId. 2/10 may recreate markers without a fresh notice;
+   * re-apply from this cache after every peer upsert.
+   */
+  private scenePeerCosmeticsById = new Map<number, CosmeticsPeer>();
   /** Learned skill IDs from WT 1/12/1. */
   learnedSkillIds: number[] = [];
   /** Resolved rows (id + skill.dsh name) for battle menu. */
@@ -738,6 +764,7 @@ export class GameSession {
     this.roleJobIndex = 0;
     this.roleSex = 0;
     this.scenePeerById.clear();
+    this.scenePeerCosmeticsById.clear();
     this.scene = "";
     this.loadedScene = "";
     this.sceneTransferExpected = null;
@@ -774,6 +801,7 @@ export class GameSession {
     this.pendingEncounterVisual = null;
     this.nearbyList = [];
     this.scenePeerById.clear();
+    this.scenePeerCosmeticsById.clear();
     this.teamMembers = [];
     this.teamLeaderId = 0;
     this.friends = [];
@@ -795,6 +823,14 @@ export class GameSession {
     this.roleTitle = "";
     this.roleTitleGif = "";
     this.localChenghaoId = 0;
+    this.cosmetics = {
+      unlockedChenghao: [],
+      unlockedWing: [],
+      unlockedMount: [],
+      eqChenghao: 0,
+      eqWing: 0,
+      eqMount: 0,
+    };
     this.hp = 500;
     this.hpMax = 500;
     this.mp = 200;
@@ -2008,27 +2044,29 @@ export class GameSession {
 
   async openDesignations(): Promise<DesignationPage | null> {
     if (!this.transport) return null;
+    await this.syncCosmetics();
     const bodies = await this.transport.exchange(0, buildDesignationListRequest());
     this.handleBodies(bodies);
     this.designationPage = this.withChenghaoDesignations(this.designationPage);
     return this.designationPage;
   }
 
-  /**
-   * Temp: append all chenghao FX titles so they show in the list. Later the
-   * server unlock mask will gate which rows appear.
-   */
+  /** Append unlocked Pixi chenghao rows (server CSV) into the classic 23 list. */
   withChenghaoDesignations(page: DesignationPage | null): DesignationPage | null {
     const base = page ?? { equippedId: 0, rows: [] };
     const equippedChenghao =
+      this.cosmetics.eqChenghao ||
       this.localChenghaoId ||
       parseChenghaoId(this.roleTitleGif) ||
-      readChenghaoPreference();
+      0;
     const serverRows = base.rows.filter((r) => !isChenghaoId(r.id));
-    const fxRows = CHENGHAO_SPECS.map((s) => ({
+    const unlocked = new Set(
+      this.cosmetics.unlockedChenghao.filter((id) => isChenghaoId(id)),
+    );
+    const fxRows = CHENGHAO_SPECS.filter((s) => unlocked.has(s.id)).map((s) => ({
       id: s.id,
       name: chenghaoLabel(s.id),
-      desc: "特效称号(测试)",
+      desc: "特效称号",
       gif: chenghaoWireTag(s.id),
     }));
     const equippedId = equippedChenghao
@@ -2042,6 +2080,85 @@ export class GameSession {
     };
   }
 
+  /** Query 1/31/1 and apply equipped overlays. */
+  async syncCosmetics(): Promise<CosmeticsState | null> {
+    if (!this.transport) return null;
+    const bodies = await this.transport.exchange(0, buildCosmeticsQueryRequest());
+    this.handleBodies(bodies);
+    return this.cosmetics;
+  }
+
+  /**
+   * Equip / unequip Pixi cosmetic via 1/31/3.
+   * kind: 1=chenghao 2=wing 3=mount; id 0 unequips.
+   */
+  async equipCosmetic(
+    kind: number,
+    id: number,
+  ): Promise<{ ok: boolean; state: CosmeticsState | null }> {
+    if (!this.transport) return { ok: false, state: null };
+    const bodies = await this.transport.exchange(
+      0,
+      buildCosmeticsEquipRequest(kind, id >>> 0),
+    );
+    let ok = false;
+    let state: CosmeticsState | null = null;
+    for (const body of bodies) {
+      const packet = ingestPacket(body);
+      if (!packet) continue;
+      const ack = parseCosmeticsEquipResult(packet);
+      if (ack) {
+        ok = ack.ok;
+        if (ack.state) state = ack.state;
+      }
+    }
+    this.handleBodies(bodies);
+    return { ok, state: state || (ok ? this.cosmetics : null) };
+  }
+
+  async equipWing(wingId: number): Promise<boolean> {
+    const id = wingId | 0;
+    if (id && !this.cosmetics.unlockedWing.includes(id)) return false;
+    const r = await this.equipCosmetic(COSMETIC_KIND_WING, id);
+    return r.ok;
+  }
+
+  async equipMount(mountId: number): Promise<boolean> {
+    const id = mountId | 0;
+    if (id && !this.cosmetics.unlockedMount.includes(id)) return false;
+    const r = await this.equipCosmetic(COSMETIC_KIND_MOUNT, id);
+    return r.ok;
+  }
+
+  private applyCosmeticsState(state: CosmeticsState): void {
+    this.cosmetics = {
+      unlockedChenghao: state.unlockedChenghao.slice(),
+      unlockedWing: state.unlockedWing.slice(),
+      unlockedMount: state.unlockedMount.slice(),
+      eqChenghao: state.eqChenghao >>> 0,
+      eqWing: state.eqWing >>> 0,
+      eqMount: state.eqMount >>> 0,
+    };
+    this.localChenghaoId = this.cosmetics.eqChenghao;
+    writeChenghaoPreference(this.cosmetics.eqChenghao);
+    writeWingIdPreference(this.cosmetics.eqWing);
+    writeMountIdPreference(this.cosmetics.eqMount);
+    if (this.cosmetics.eqChenghao && isChenghaoId(this.cosmetics.eqChenghao)) {
+      this.applySelfDesignation(
+        chenghaoLabel(this.cosmetics.eqChenghao),
+        chenghaoWireTag(this.cosmetics.eqChenghao),
+      );
+    } else if (
+      parseChenghaoId(this.roleTitleGif) ||
+      parseChenghaoId(this.roleTitle)
+    ) {
+      /* Unequipped chenghao: clear FX tag; classic 23/2 may refill later. */
+      this.applySelfDesignation("", "");
+    }
+    this.designationPage = this.withChenghaoDesignations(this.designationPage);
+    this.cb.onCosmeticsUpdate?.(this.cosmetics);
+  }
+
   async selectDesignation(designationId: number): Promise<{
     ok: boolean;
     name?: string;
@@ -2050,15 +2167,17 @@ export class GameSession {
     if (!this.transport) return { ok: false };
     const id = designationId | 0;
     if (isChenghaoId(id)) {
+      if (!this.cosmetics.unlockedChenghao.includes(id)) {
+        return { ok: false };
+      }
+      const r = await this.equipCosmetic(COSMETIC_KIND_CHENGHAO, id);
+      if (!r.ok) return { ok: false };
       const name = chenghaoLabel(id);
       const gif = chenghaoWireTag(id);
-      this.localChenghaoId = id;
-      writeChenghaoPreference(id);
-      this.applySelfDesignation(name, gif);
       this.designationPage = this.withChenghaoDesignations(this.designationPage);
       return { ok: true, name, gif };
     }
-    // Server title: clear local chenghao preview preference.
+    /* Classic title: server clears equipped chenghao and broadcasts 31/5. */
     this.localChenghaoId = 0;
     writeChenghaoPreference(0);
     const bodies = await this.transport.exchange(
@@ -2285,6 +2404,11 @@ export class GameSession {
     for (const id of removed) this.scenePeerById.delete(id >>> 0);
     for (const p of peers) this.scenePeerById.set(p.actorId >>> 0, p);
     return { peers, removed };
+  }
+
+  /** Cached 31/5 notices for map peers (kept across brief 2/6 remove/re-add). */
+  peerCosmeticsSnapshot(): CosmeticsPeer[] {
+    return [...this.scenePeerCosmeticsById.values()];
   }
 
   async fetchWagerBoard(): Promise<{
@@ -5099,13 +5223,7 @@ export class GameSession {
         this.gold = roleEnter.money >>> 0;
         this.roleTitle = roleEnter.title || "";
         this.roleTitleGif = roleEnter.titleGif || "";
-        // Temp: keep last local chenghao preview across re-enter.
-        const prefChenghao = readChenghaoPreference();
-        if (prefChenghao) {
-          this.localChenghaoId = prefChenghao;
-          this.roleTitle = chenghaoLabel(prefChenghao);
-          this.roleTitleGif = chenghaoWireTag(prefChenghao);
-        }
+        this.localChenghaoId = 0;
         this.roleName = roleEnter.name || this.roleName;
         if (this.roleSelectInFlight) {
           this.roleEnterSceneLock = roleEnter.scene;
@@ -5745,6 +5863,20 @@ export class GameSession {
             gif: designationUpd.gif,
           });
         }
+      }
+
+      const cosmeticsState = parseCosmeticsState(packet);
+      if (cosmeticsState) this.applyCosmeticsState(cosmeticsState);
+      for (const peerCos of parseCosmeticsPeerUpdates(packet)) {
+        if (peerCos.actorId === (this.selectedRoleId >>> 0)) {
+          /* Self echo in 31/5 — state already applied from 31/4 when present. */
+          continue;
+        }
+        this.scenePeerCosmeticsById.set(peerCos.actorId >>> 0, peerCos);
+        console.info(
+          `[session] cosmetics 31/5 peer=${peerCos.actorId} ch=${peerCos.eqChenghao} wing=${peerCos.eqWing} mount=${peerCos.eqMount}`,
+        );
+        this.cb.onCosmeticsPeer?.(peerCos);
       }
 
       const ranking = parseRankingBoard(packet);

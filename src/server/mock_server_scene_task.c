@@ -10209,6 +10209,7 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
         if (role != NULL)
         {
             role->designationId = selectedDesignation->id;
+            vm_net_mock_role_clear_equipped_chenghao(role, "classic-designation-select");
             vm_net_mock_role_mark_inventory_dirty("role-designation-select");
             activeDesignation = selectedDesignation;
             {
@@ -10224,6 +10225,11 @@ static u32 vm_net_mock_build_role_designation23_response(const u8 *request, u32 
                              selectedDesignation->overheadResource
                                  ? selectedDesignation->overheadResource
                                  : "");
+                    vm_mock_service_session_sync_online_cosmetics(session, role);
+                    vm_mock_service_broadcast_cosmetics31_5(
+                        role->roleId, role->scene, role->equippedChenghaoId,
+                        role->equippedWingId, role->equippedMountId,
+                        session->clientId);
                 }
             }
         }

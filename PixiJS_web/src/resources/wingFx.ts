@@ -126,9 +126,8 @@ export class WingOverlay {
       return;
     }
     if (!isWingId(id)) {
-      console.warn("[wing] unknown id", id);
-      this.clear();
-      return;
+      /* Still try JHOnlineData atlas — catalog may lag behind server unlocks. */
+      console.warn("[wing] unlisted id, trying atlas", id);
     }
     if (id === this.wingId && this.atlas) {
       this.root.visible = true;

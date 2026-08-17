@@ -4069,6 +4069,20 @@ typedef struct vm_mock_service_client_session
     u16 onlineEquippedEnhanceLevels[VM_NET_MOCK_EQUIP_SLOT_COUNT];
     /* Mirrored from role->pkPoints for nearby Pixi pkinfo companion. */
     u32 onlinePkPoints;
+    /* Pixi cosmetics equipped (WT 1/31); mirrored from role on presence capture. */
+    u32 onlineEqChenghaoId;
+    u32 onlineEqWingId;
+    u32 onlineEqMountId;
+    struct
+    {
+        bool valid;
+        u32 actorId;
+        u32 eqChenghao;
+        u32 eqWing;
+        u32 eqMount;
+    } cosmeticNotices[64];
+    /* Admin unlock / grant: next poll delivers fresh 31/2 for this session. */
+    bool cosmeticsStatePushPending;
     u32 onlineHp;
     u32 onlineHpMax;
     u32 onlineMp;
@@ -10189,6 +10203,9 @@ static void vm_mock_service_capture_session_presence(u32 clientId)
     memcpy(session->onlineEquippedEnhanceLevels, role->equippedEnhanceLevels,
            sizeof(session->onlineEquippedEnhanceLevels));
     session->onlinePkPoints = role->pkPoints;
+    session->onlineEqChenghaoId = role->equippedChenghaoId;
+    session->onlineEqWingId = role->equippedWingId;
+    session->onlineEqMountId = role->equippedMountId;
     session->onlineHp = hp;
     session->onlineHpMax = hpMax;
     session->onlineMp = mp;

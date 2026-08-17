@@ -1,5 +1,5 @@
 /**
- * Dev/preview mount picker — list JHOnlineData/zuoqi sheets for map attach.
+ * Mount picker — only unlocked ids from server 1/31.
  */
 import { Container, Graphics } from "pixi.js";
 import { CBE, LCD_HEIGHT, LCD_WIDTH, SOFTKEY_H } from "./constants";
@@ -11,7 +11,7 @@ import {
   paintListShellChrome,
   type ListShellCtx,
 } from "./listPanelShell";
-import { MOUNT_IDS, mountLabel } from "../resources/mountFx";
+import { mountLabel } from "../resources/mountFx";
 
 const PAGE_SIZE = 10;
 
@@ -21,11 +21,7 @@ export class MountPanel extends Container {
   private rowHits: Container[] = [];
   private listCursor = 0;
   private selectedId = 0;
-
-  private readonly rows: { id: number; label: string }[] = [
-    { id: 0, label: "关闭坐骑" },
-    ...MOUNT_IDS.map((id) => ({ id, label: mountLabel(id) })),
-  ];
+  private rows: { id: number; label: string }[] = [{ id: 0, label: "关闭坐骑" }];
 
   onPick: ((mountId: number) => void) | null = null;
   onClose: (() => void) | null = null;
@@ -43,7 +39,14 @@ export class MountPanel extends Container {
     this.addChild(this.box);
   }
 
-  open(currentMountId = 0): void {
+  open(currentMountId = 0, unlockedIds: number[] = []): void {
+    const unlocked = [...new Set(unlockedIds.filter((id) => id > 0))].sort(
+      (a, b) => a - b,
+    );
+    this.rows = [
+      { id: 0, label: "关闭坐骑" },
+      ...unlocked.map((id) => ({ id, label: mountLabel(id) })),
+    ];
     this.selectedId = currentMountId | 0;
     const idx = this.rows.findIndex((r) => r.id === this.selectedId);
     this.listCursor = idx >= 0 ? idx : 0;
@@ -121,7 +124,7 @@ export class MountPanel extends Container {
       cursor: this.listCursor,
       pageSize: PAGE_SIZE,
       paging: "local",
-      emptyText: "(无坐骑)",
+      emptyText: "尚无已解锁坐骑",
       onRow: (absIndex) => {
         this.listCursor = absIndex;
         this.confirm();

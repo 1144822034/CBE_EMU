@@ -54,6 +54,8 @@ const PORTAL_ACTOR = "n_teleporter.actor";
  * per-frame steps race on 90/120Hz OEM displays after APK release.
  */
 const WALK_PX_PER_MS = 1 / (1000 / 60);
+/** Mount equipped: local walk multiplier (Pixi-only). */
+const MOUNT_WALK_SPEED_MULT = 2;
 /** Cap one tick so a long hitch cannot teleport past collision samples. */
 const WALK_DT_CLAMP_MS = 50;
 /** Map-corner status strip (修/拍/擂/斗/练/娱). */
@@ -664,6 +666,7 @@ export class SceneView {
    */
   async setPlayerWing(wingId: number, persist = true): Promise<void> {
     const id = wingId | 0;
+    const hadWing = !!this.wingOverlay.currentWingId;
     await this.wingOverlay.setWingId(id);
     if (persist) writeWingIdPreference(id);
     if (this.playerSprite) {
@@ -671,6 +674,13 @@ export class SceneView {
     }
     this.wingOverlay.setFacing(this.playerDir);
     this.syncWingDepth();
+    /* Landing from flight: snap out of solid if wings were removed. */
+    if (hadWing && !id) {
+      this.ensurePlayerWalkable("unequip-wing");
+      this.player.position.set(this.playerX, this.playerY);
+      this.player.zIndex = this.playerY | 0;
+      this.applyCamera();
+    }
   }
 
   getPlayerWingId(): number {
@@ -1029,6 +1039,8 @@ export class SceneView {
     fromX = this.playerX,
     fromY = this.playerY,
   ): void {
+    /* Winged: ignore terrain; do not snap feet out of solid cells. */
+    if (this.wingOverlay.currentWingId) return;
     const map = this.mapPreview;
     if (!map?.cells.length) return;
     if (!mapStandTrapped(map, this.playerX, this.playerY)) return;
@@ -1073,7 +1085,10 @@ export class SceneView {
 
     if (!this.inputEnabled) return;
     const dtMove = Math.min(Math.max(dt, 0), WALK_DT_CLAMP_MS);
-    const speed = WALK_PX_PER_MS * dtMove;
+    const winged = !!this.wingOverlay.currentWingId;
+    const mounted = !!this.mountOverlay.currentMountId;
+    const speed =
+      WALK_PX_PER_MS * dtMove * (mounted ? MOUNT_WALK_SPEED_MULT : 1);
     let dx = 0;
     let dy = 0;
     if (this.keys.has("arrowleft") || this.keys.has("a")) dx -= 1;
@@ -1102,23 +1117,26 @@ export class SceneView {
       // Axis-separated slide so one blocked axis does not freeze both.
       let tx = nx;
       let ty = ny;
-      // Inside solid or fringe pocket (no open step): allow escape.
+      // Winged: ignore MAP solid / fringe. Still clamp to map bounds below.
+      // Grounded: inside solid or fringe pocket (no open step) allow escape.
       // Edge fringe uses CBE exit|entry — mapMoveBlocked.
-      const stuck =
-        !!this.mapPreview &&
-        mapStandTrapped(this.mapPreview, this.playerX, this.playerY);
-      if (!stuck && this.mapPreview) {
-        const ox = this.playerX;
-        const oy = this.playerY;
-        if (mapMoveBlocked(this.mapPreview, ox, oy, tx, oy, 1)) {
-          tx = ox;
-        }
-        if (mapMoveBlocked(this.mapPreview, tx, oy, tx, ty, 1)) {
-          ty = oy;
-        }
-        if (mapMoveBlocked(this.mapPreview, ox, oy, tx, ty, 1)) {
-          tx = ox;
-          ty = oy;
+      if (!winged) {
+        const stuck =
+          !!this.mapPreview &&
+          mapStandTrapped(this.mapPreview, this.playerX, this.playerY);
+        if (!stuck && this.mapPreview) {
+          const ox = this.playerX;
+          const oy = this.playerY;
+          if (mapMoveBlocked(this.mapPreview, ox, oy, tx, oy, 1)) {
+            tx = ox;
+          }
+          if (mapMoveBlocked(this.mapPreview, tx, oy, tx, ty, 1)) {
+            ty = oy;
+          }
+          if (mapMoveBlocked(this.mapPreview, ox, oy, tx, ty, 1)) {
+            tx = ox;
+            ty = oy;
+          }
         }
       }
       this.playerX = tx;
@@ -1129,7 +1147,7 @@ export class SceneView {
       this.applyCamera();
 
       // Click-path stuck on collision: stop instead of spinning in place.
-      if (this.walkTarget) {
+      if (this.walkTarget && !winged) {
         const step = Math.hypot(this.playerX - this.walkLastX, this.playerY - this.walkLastY);
         if (step < 0.15) this.walkStuckMs += dtMove;
         else this.walkStuckMs = 0;
@@ -1148,7 +1166,6 @@ export class SceneView {
       this.mountOverlay.setMoveVector(dx, dy);
       this.mountOverlay.setMoving(true);
 
-      const mounted = !!this.mountOverlay.currentMountId;
       if (mounted) {
         // Rider stays in stand pose; mount sheet provides motion.
         this.playerPhase = 0;

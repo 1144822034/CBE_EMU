@@ -521,15 +521,13 @@ export const ARENA_NPC_WAGER = 0xf6000004;
 export function bracketForLevel(level: number): number {
   if (level >= 70) return 70;
   if (level >= 50) return 50;
-  if (level >= 40) return 40;
-  if (level >= 30) return 30;
-  if (level >= 20) return 20;
   if (level >= 10) return 10;
   return 0;
 }
 
 export function bracketLabel(bracket: number): string {
   if (bracket === 70) return "70级";
-  if (bracket >= 10 && bracket <= 50) return `${bracket}-${bracket + 9}`;
+  if (bracket === 50) return "50-69";
+  if (bracket === 10) return "10-49";
   return String(bracket);
 }

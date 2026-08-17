@@ -23,8 +23,6 @@ import {
 } from "./net/apkUpdate";
 import { openPayUrl } from "./net/openPayUrl";
 import { SceneView } from "./render/SceneView";
-import { readWingIdPreference } from "./resources/wingFx";
-import { readMountIdPreference } from "./resources/mountFx";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
 import { GameSession } from "./game/GameSession";
 import { PhoneShell } from "./ui/PhoneShell";
@@ -652,12 +650,9 @@ async function main(): Promise<void> {
 
   const view = new SceneView(app);
   view.root.visible = false;
-  {
-    const prefWing = readWingIdPreference();
-    if (prefWing) void view.setPlayerWing(prefWing, false);
-    const prefMount = readMountIdPreference();
-    if (prefMount) void view.setPlayerMount(prefMount, false);
-  }
+  (window as unknown as { __pixiView?: SceneView }).__pixiView = view;
+  (window as unknown as { __pixiActorsDebug?: () => unknown }).__pixiActorsDebug =
+    () => view.actors.debugPeerCosmetics();
 
   const syncWorldStatusBadges = () => {
     // 「斗」= hangup (vip_effect.gif). 「练」awaits training-buff tracking.
@@ -1526,6 +1521,7 @@ async function main(): Promise<void> {
       void session.fetchWagerBoard().then((board) => {
         if (board.mine?.needConfirm) view.setLeiBlink(true);
       });
+      void session.syncCosmetics();
     },
     onPlayerPos: (x, y) => {
       view.setPlayerPos(x, y);
@@ -1542,9 +1538,27 @@ async function main(): Promise<void> {
     onNpcTaskPrompts: (prompts) => {
       view.actors.setTaskPrompts(prompts);
     },
-    onPeers: (peers, removed) => view.actors.applyPeers(peers, removed),
+    onPeers: (peers, removed) => {
+      view.actors.applyPeers(peers, removed);
+      for (const cos of session.peerCosmeticsSnapshot()) {
+        view.actors.applyPeerCosmetics(
+          cos.actorId,
+          cos.eqChenghao,
+          cos.eqWing,
+          cos.eqMount,
+        );
+      }
+    },
     onPeerDesignation: (info) => {
       view.actors.applyPeerTitle(info.actorId, info.name, info.gif);
+    },
+    onCosmeticsPeer: (peer) => {
+      view.actors.applyPeerCosmetics(
+        peer.actorId,
+        peer.eqChenghao,
+        peer.eqWing,
+        peer.eqMount,
+      );
     },
     onPeerMoves: (moves) => view.actors.applyPeerMoves(moves),
     onNearbyPage: (page) => {
@@ -1555,8 +1569,17 @@ async function main(): Promise<void> {
        * (arena enter used to leave ready pending until this page).
        */
       const synced = session.syncMapPeersFromNearbyPage(page.peers);
-      if (synced.peers.length || synced.removed.length)
+      if (synced.peers.length || synced.removed.length) {
         view.actors.applyPeers(synced.peers, synced.removed);
+        for (const cos of session.peerCosmeticsSnapshot()) {
+          view.actors.applyPeerCosmetics(
+            cos.actorId,
+            cos.eqChenghao,
+            cos.eqWing,
+            cos.eqMount,
+          );
+        }
+      }
       if (phase === "social" && social.panelKind === "nearby")
         social.openNearby(page.peers);
       setChromeStatus(
@@ -1859,6 +1882,27 @@ async function main(): Promise<void> {
         isRedNamePk(session.pkPoints),
       );
       hud.setIdentity(name, session.scene, info.name);
+    },
+    onCosmeticsUpdate: (state) => {
+      void view.setPlayerWing(state.eqWing, false);
+      void view.setPlayerMount(state.eqMount, false);
+      const name =
+        session.roleName ||
+        activeRole?.name ||
+        pendingRoles.find((r) => r.roleId === session.selectedRoleId)?.name ||
+        "侠客";
+      void view.setPlayerNameplate(
+        name,
+        session.roleTitle,
+        session.roleTitleGif,
+        isRedNamePk(session.pkPoints),
+      );
+      if (wingPanel.visible) {
+        wingPanel.open(state.eqWing, state.unlockedWing);
+      }
+      if (mountPanel.visible) {
+        mountPanel.open(state.eqMount, state.unlockedMount);
+      }
     },
     onBattle: (state) => {
       // Prefer selectedRoleId — stale activeRole was the first account role and
@@ -2527,16 +2571,30 @@ async function main(): Promise<void> {
     if (entertainPanel.visible) entertainPanel.close();
     if (mountPanel.visible) mountPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
-    wingPanel.open(view.getPlayerWingId());
-    showPhase("world");
-    syncWorldWalkInput();
-    shell.setSoftkeys(wingPanel.softkeys());
-    setChromeStatus("翅膀");
+    void (async () => {
+      await session.syncCosmetics();
+      if (phase !== "world") return;
+      wingPanel.open(view.getPlayerWingId(), session.cosmetics.unlockedWing);
+      showPhase("world");
+      syncWorldWalkInput();
+      shell.setSoftkeys(wingPanel.softkeys());
+      setChromeStatus(
+        session.cosmetics.unlockedWing.length
+          ? "翅膀"
+          : "翅膀（尚无解锁，请管理端授权）",
+      );
+    })();
   };
 
   wingPanel.onPick = (wingId) => {
-    void view.setPlayerWing(wingId, true);
-    setChromeStatus(wingId ? `翅膀 ${wingId}` : "翅膀已关");
+    void (async () => {
+      const ok = await session.equipWing(wingId);
+      if (!ok) {
+        setChromeStatus("翅膀装备失败（未解锁？）");
+        return;
+      }
+      setChromeStatus(wingId ? `翅膀 ${wingId}` : "翅膀已关");
+    })();
   };
   wingPanel.onClose = () => {
     syncWorldWalkInput();
@@ -2565,16 +2623,30 @@ async function main(): Promise<void> {
     if (entertainPanel.visible) entertainPanel.close();
     if (wingPanel.visible) wingPanel.close();
     if (entertainWeb.isExpanded()) entertainWeb.minimize();
-    mountPanel.open(view.getPlayerMountId());
-    showPhase("world");
-    syncWorldWalkInput();
-    shell.setSoftkeys(mountPanel.softkeys());
-    setChromeStatus("坐骑");
+    void (async () => {
+      await session.syncCosmetics();
+      if (phase !== "world") return;
+      mountPanel.open(view.getPlayerMountId(), session.cosmetics.unlockedMount);
+      showPhase("world");
+      syncWorldWalkInput();
+      shell.setSoftkeys(mountPanel.softkeys());
+      setChromeStatus(
+        session.cosmetics.unlockedMount.length
+          ? "坐骑"
+          : "坐骑（尚无解锁，请管理端授权）",
+      );
+    })();
   };
 
   mountPanel.onPick = (mountId) => {
-    void view.setPlayerMount(mountId, true);
-    setChromeStatus(mountId ? `坐骑 ${mountId}` : "坐骑已关");
+    void (async () => {
+      const ok = await session.equipMount(mountId);
+      if (!ok) {
+        setChromeStatus("坐骑装备失败（未解锁？）");
+        return;
+      }
+      setChromeStatus(mountId ? `坐骑 ${mountId}` : "坐骑已关");
+    })();
   };
   mountPanel.onClose = () => {
     syncWorldWalkInput();
@@ -5111,6 +5183,21 @@ dialog.hide();
       } else {
         auctionPanel.move(dir === "up" ? -1 : 1);
       }
+      return;
+    }
+    if (phase === "world" && mountPanel.visible) {
+      if (!down) return;
+      if (dir === "up" || dir === "down") mountPanel.move(dir === "up" ? -1 : 1);
+      return;
+    }
+    if (phase === "world" && wingPanel.visible) {
+      if (!down) return;
+      if (dir === "up" || dir === "down") wingPanel.move(dir === "up" ? -1 : 1);
+      return;
+    }
+    if (phase === "world" && entertainPanel.visible) {
+      if (!down) return;
+      if (dir === "up" || dir === "down") entertainPanel.move(dir === "up" ? -1 : 1);
       return;
     }
     if (phase === "world" && (arenaPanel.visible || wagerPanel.visible)) {

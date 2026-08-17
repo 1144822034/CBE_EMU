@@ -4771,6 +4771,9 @@ static bool vm_net_mock_append_scene_player_moveinfo2_object(u8 *out, u32 outCap
             peerSync->actorId = seed->actorId;
             if (deliveredMoveSerial != 0)
                 peerSync->lastMoveSerial = deliveredMoveSerial;
+            if (observer != NULL)
+                vm_mock_service_session_enqueue_peer_cosmetics(
+                    observer, seed->session, seed->actorId);
         }
     }
     return true;
@@ -4944,6 +4947,8 @@ static u32 vm_mock_service_mark_scene_nearby_role_baseline_visible(const char *s
         peerSync->visible = true;
         peerSync->actorId = seeds[i].actorId;
         peerSync->lastMoveSerial = source->pendingDirQueueSerial;
+        vm_mock_service_session_enqueue_peer_cosmetics(
+            observer, source, seeds[i].actorId);
         ++markedCount;
     }
     return markedCount;
@@ -5170,6 +5175,19 @@ static int vm_net_mock_append_scene_sync_chat_objects_limited(
             (u8)((observer->chatNoticeHead + 1) % VM_MOCK_SERVICE_CHAT_NOTICE_MAX);
         --observer->chatNoticeCount;
         ++appended;
+    }
+    {
+        int statePush = vm_net_mock_append_pending_cosmetics31_2(
+            out, outCap, pos, observer);
+        if (statePush < 0)
+            return -1;
+        appended += statePush;
+        int cos = vm_net_mock_append_pending_cosmetics31_5(
+            out, outCap, pos, observer,
+            (u8)(maxObjects > appended ? maxObjects - appended : 0));
+        if (cos < 0)
+            return -1;
+        appended += cos;
     }
     return appended;
 }

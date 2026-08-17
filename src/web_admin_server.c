@@ -5483,6 +5483,47 @@ static void vm_mock_admin_render_item_picker_modal(vm_mock_admin_text *page)
         "</section></div>");
 }
 
+static void vm_mock_admin_render_cosmetic_grant_form(
+    vm_mock_admin_text *page, const char *account,
+    const u32 *roleIds, char roleNames[][128], u32 roleCount)
+{
+    if (page == NULL || account == NULL || account[0] == 0 ||
+        roleIds == NULL || roleNames == NULL || roleCount == 0)
+    {
+        return;
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "<div class=\"item-grant\"><h2>解锁外观（称号/翅膀/坐骑）</h2>"
+        "<form class=\"grant-form\" method=\"post\" action=\"/action\">"
+        "<input type=\"hidden\" name=\"action\" value=\"grant-cosmetic\">"
+        "<input type=\"hidden\" name=\"account\" value=\"");
+    vm_mock_admin_text_append_html(page, account);
+    vm_mock_admin_text_appendf(page,
+        "\"><label><span>角色</span><select name=\"role\" required>");
+    for (u32 i = 0; i < roleCount; ++i)
+    {
+        vm_mock_admin_text_appendf(page, "<option value=\"%u\">", roleIds[i]);
+        vm_mock_admin_text_append_html(page, roleNames[i]);
+        vm_mock_admin_text_appendf(page, "（ID %u）</option>", roleIds[i]);
+    }
+    vm_mock_admin_text_appendf(
+        page,
+        "</select></label>"
+        "<label><span>类型</span><select name=\"kind\" required>"
+        "<option value=\"chenghao\">特效称号</option>"
+        "<option value=\"wing\">翅膀</option>"
+        "<option value=\"mount\">坐骑</option>"
+        "</select></label>"
+        "<label><span>ID</span><input type=\"number\" name=\"id\" min=\"0\" "
+        "placeholder=\"如 86043 / 88010 / 75537\"></label>"
+        "<label><span><input type=\"checkbox\" name=\"all\" value=\"1\"> "
+        "解锁该类型全部</span></label>"
+        "<button type=\"submit\">解锁外观</button></form>"
+        "<p class=\"muted grant-note\">不改 special_designation_mask；"
+        "走 Pixi WT 1/31。勾选「全部」时忽略 ID。</p></div>");
+}
+
 static void vm_mock_admin_render_item_grant_form(
     vm_mock_admin_text *page, const char *account,
     const u32 *roleIds, char roleNames[][128], u32 roleCount)
@@ -6515,6 +6556,9 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
     }
     vm_mock_admin_text_appendf(&page, "</tbody></table></div>");
     vm_mock_admin_render_item_grant_form(
+        &page, selectedAccount, managedRoleIds, managedRoleNames,
+        managedRoleCount);
+    vm_mock_admin_render_cosmetic_grant_form(
         &page, selectedAccount, managedRoleIds, managedRoleNames,
         managedRoleCount);
     vm_mock_admin_text_appendf(&page, "</div><div class=\"forms\">"
@@ -9418,6 +9462,37 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
         vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
                                ok ? "物品给予成功" :
                                     (error ? error : "物品给予失败"));
+        return;
+    }
+    if (strcmp(action, "grant-cosmetic") == 0)
+    {
+        char kind[32];
+        char idText[32];
+        char allText[8];
+        u32 cosmeticId = 0;
+        u32 granted = 0;
+        bool unlockAll = false;
+        kind[0] = 0;
+        idText[0] = 0;
+        allText[0] = 0;
+        (void)vm_mock_admin_form_value(body, "kind", kind, sizeof(kind));
+        (void)vm_mock_admin_form_value(body, "id", idText, sizeof(idText));
+        (void)vm_mock_admin_form_value(body, "all", allText, sizeof(allText));
+        unlockAll = allText[0] == '1';
+        if (!unlockAll && idText[0] != 0)
+            (void)vm_net_mock_parse_u32_strict(idText, &cosmeticId);
+        if (!vm_mock_admin_form_value(body, "role", role, sizeof(role)) ||
+            kind[0] == 0 || (!unlockAll && cosmeticId == 0))
+        {
+            vm_mock_admin_redirect(client, account, "error",
+                                   "外观参数无效（需类型，且 ID 或勾选全部）");
+            return;
+        }
+        ok = vm_mock_service_account_grant_role_cosmetic(
+            account, role, kind, cosmeticId, unlockAll, &granted, &error);
+        vm_mock_admin_redirect(client, account, ok ? "ok" : "error",
+                               ok ? "外观解锁成功" :
+                                    (error ? error : "外观解锁失败"));
         return;
     }
 

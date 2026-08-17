@@ -97,6 +97,7 @@ static void vm_mock_arena_restore_venue_scene_if_needed(
     vm_net_mock_role_state *role);
 
 #include "mock_server_equipment_npc.c"
+#include "mock_server_cosmetics.c"
 #include "mock_server_recovered_helpers.inc"
 #include "mock_server_scene_task.c"
 

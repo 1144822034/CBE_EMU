@@ -8384,6 +8384,7 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
     u8 objectCount = 0;
     char refreshLabel[64];
     bool appended17 = false;
+    bool appended30 = false;
     bool appended42 = false;
     bool appended11 = false;
     bool appendedMoney = false;
@@ -8556,6 +8557,8 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
 
     if (consumed || result == 1)
     {
+        bool appendedReservoir = false;
+
         if (vm_net_mock_append_backpack_items_object(out, outCap, &pos))
         {
             objectCount += 1;
@@ -8566,6 +8569,31 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
             printf("[warn][network] mock_item_discard_encode_failed phase=17/1 "
                    "item=%u seq=%u role=%u evidence=keep-7/4-clear-wait-flag\n",
                    itemId, seq, role ? role->roleId : 0);
+        }
+        /*
+         * Pixi needs 30/21 real seq after discard.  17/1 alone has no seq; the
+         * client used to reattach seq by itemId Map and collapsed duplicate
+         * white equips (full 256 bag of same ids) so further discards missed.
+         */
+        if (role != NULL &&
+            vm_net_mock_role_backpack_client_grid_count(role) != 0 &&
+            vm_net_mock_append_backpack_grid_object(out, outCap, &pos))
+        {
+            objectCount += 1;
+            appended30 = true;
+            if (vm_net_mock_append_backpack_reservoir_counts_object(
+                    out, outCap, &pos, &appendedReservoir) &&
+                appendedReservoir)
+            {
+                objectCount += 1;
+            }
+        }
+        else if (role != NULL &&
+                 vm_net_mock_role_backpack_client_grid_count(role) != 0)
+        {
+            printf("[warn][network] mock_item_discard_encode_failed phase=30/21 "
+                   "item=%u seq=%u evidence=keep-7/4-clear-wait-flag\n",
+                   itemId, seq);
         }
         if (vm_net_mock_append_books42_object(out, outCap, &pos))
         {
@@ -8647,8 +8675,9 @@ static u32 vm_net_mock_build_item_discard_response(const u8 *request, u32 reques
                  appended42 ? "+7/42" : "");
     else
     {
-        snprintf(refreshLabel, sizeof(refreshLabel), "7/4%s%s%s%s",
+        snprintf(refreshLabel, sizeof(refreshLabel), "7/4%s%s%s%s%s",
                  appended17 ? "+17/1" : "",
+                 appended30 ? "+30/21" : "",
                  appended42 ? "+7/42" : "",
                  appended11 ? "+7/11" : "",
                  appendedMoney ? "+10/26" : "");
@@ -8773,7 +8802,13 @@ static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *po
         return false;
     if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
         return false;
-    if (!vm_net_mock_put_object_u8(out, outCap, pos, "gridnum", (u8)gridCount))
+    /*
+     * Pixi bag hard-cap is 256.  A u8 gridnum truncates 256→0 so CBE/legacy
+     * parsers treat a full bag as empty (same class as pre-i16 17/1 rowcount).
+     * Wire u16 like 17/1 maxnum / row count.
+     */
+    if (!vm_net_mock_put_object_u16(out, outCap, pos, "gridnum",
+                                    (u16)(gridCount > 0xffffu ? 0xffffu : gridCount)))
         return false;
     if (!vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo, (u16)itemInfoLen))
         return false;
