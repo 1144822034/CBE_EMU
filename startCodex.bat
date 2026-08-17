@@ -1,0 +1,1 @@
+codex -c approvals_reviewer=auto_review

@@ -4450,6 +4450,11 @@ static void vm_net_mock_audit_wt_response_contract(const char *source,
         u32 fieldOffset = 0;
         u32 fieldCount = 0;
         int written;
+        bool auditHintObject = false;
+        char auditFields[192];
+        u32 auditFieldsLen = 0;
+
+        memset(auditFields, 0, sizeof(auditFields));
 
         /* ParseDMenuResponse treats the protocol's one-byte 0x63 object as
          * its own completed object.  It is not expected in normal responses,
@@ -4487,6 +4492,10 @@ static void vm_net_mock_audit_wt_response_contract(const char *source,
         errorMajor = packet[offset];
         errorKind = packet[offset + 1];
         errorSubtype = packet[offset + 2];
+        auditHintObject = source != NULL &&
+                          strcmp(source, "builtin-chest-open") == 0 &&
+                          errorMajor == 1 && errorKind == 16 &&
+                          errorSubtype == 2;
         objectLen = ((u32)packet[offset + 4] << 8) | packet[offset + 5];
         if (objectLen < 6 || objectLen > declaredLen - offset)
         {
@@ -4518,6 +4527,30 @@ static void vm_net_mock_audit_wt_response_contract(const char *source,
                 errorField = fieldCount;
                 goto invalid;
             }
+            if (auditHintObject && auditFieldsLen + 32 < sizeof(auditFields))
+            {
+                u32 nameStart = fieldOffset + 1;
+                u32 valueStart = fieldOffset + 3 + nameLen;
+                bool nested = valueLen >= 2;
+                u16 innerLen = nested
+                                   ? (u16)(((u16)packet[valueStart] << 8) |
+                                           packet[valueStart + 1])
+                                   : 0;
+                int fieldWritten = snprintf(
+                    auditFields + auditFieldsLen,
+                    sizeof(auditFields) - auditFieldsLen,
+                    "%s%.*s:outer=%u inner=%s%u first=%02x-%02x-%02x",
+                    auditFieldsLen ? "," : "", (int)nameLen,
+                    packet + nameStart, valueLen, nested ? "" : "-",
+                    innerLen, valueLen > 0 ? packet[valueStart] : 0,
+                    valueLen > 1 ? packet[valueStart + 1] : 0,
+                    valueLen > 2 ? packet[valueStart + 2] : 0);
+                if (fieldWritten > 0)
+                    auditFieldsLen += (u32)fieldWritten <
+                                      sizeof(auditFields) - auditFieldsLen
+                                          ? (u32)fieldWritten
+                                          : (u32)sizeof(auditFields) - auditFieldsLen - 1;
+            }
             fieldOffset += 3 + nameLen + valueLen;
             ++fieldCount;
             if (fieldCount > fieldLimit)
@@ -4545,6 +4578,18 @@ static void vm_net_mock_audit_wt_response_contract(const char *source,
         }
         ++parsedObjectCount;
         offset = objectEnd;
+        if (auditHintObject)
+        {
+            printf("[info][network] mock_wt_16_2_audit source=%s account=%s "
+                   "offset=%u object_len=%u fields=%s\n",
+                   source ? source : "-", accountId ? accountId : "-",
+                   objectStart, objectLen, auditFields[0] ? auditFields : "-");
+            vm_autotest_note("mock_wt_16_2_audit source=%s account=%s "
+                             "offset=%u object_len=%u fields=%s\n",
+                             source ? source : "-", accountId ? accountId : "-",
+                             objectStart, objectLen,
+                             auditFields[0] ? auditFields : "-");
+        }
         if (parsedObjectCount > objectLimit)
         {
             reason = "object-limit";
