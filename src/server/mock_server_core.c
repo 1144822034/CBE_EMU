@@ -5478,6 +5478,11 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE 0xef000001u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CHALLENGE 0xef000002u
 #define VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA        VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA_CREATE
+/* A merchant click first returns another regular action=1 NPC dialog.  Only
+ * its one-shot confirm option may mutate the role; cancel returns to the
+ * original list without touching currency or the backpack. */
+#define VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION 0xf0000001u
+#define VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION  0xf1000001u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u

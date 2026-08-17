@@ -2157,6 +2157,31 @@ typedef struct
     char scene[64];
 } vm_mock_service_npc_context;
 
+enum
+{
+    VM_MOCK_SERVICE_NPC_TRANSACTION_NONE = 0,
+    VM_MOCK_SERVICE_NPC_TRANSACTION_BUY = 1,
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL = 2
+};
+
+/* A 26/1 action=1 request only carries a private menu value.  Retain the
+ * selected merchandise server-side until the immediate confirmation request,
+ * then consume this context before any durable role mutation. */
+typedef struct
+{
+    bool active;
+    u8 kind;
+    u32 roleId;
+    u32 actorId;
+    u32 serviceMask;
+    u32 itemId;
+    u16 backpackSeq;
+    u32 selector;
+    u32 page;
+    u32 quotedPrice;
+    char scene[64];
+} vm_mock_service_npc_transaction_context;
+
 typedef struct vm_mock_service_client_session
 {
     u32 clientId;
@@ -2294,6 +2319,7 @@ typedef struct vm_mock_service_client_session
     vm_mock_service_task_offer_context
         taskOfferContexts[VM_MOCK_SERVICE_TASK_OFFER_CONTEXT_MAX];
     vm_mock_service_npc_context npcServiceContext;
+    vm_mock_service_npc_transaction_context npcTransactionContext;
     char scenePendingScene[64];
     vm_mock_service_peer_sync peerSync[VM_MOCK_SERVICE_PEER_SYNC_MAX];
     struct vm_mock_service_client_session *next;
