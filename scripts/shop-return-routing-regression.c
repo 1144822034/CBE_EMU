@@ -89,6 +89,65 @@ static u32 make_shop_actor_query14_request(u8 *request, u32 actorId)
     return pos;
 }
 
+static u32 make_scene_task_subset_followup_request(u8 *request)
+{
+    u8 typePayload[32];
+    u32 typePayloadLen = 0;
+    u32 pos = 4;
+
+    if (!vm_net_mock_put_object_u8(typePayload, sizeof(typePayload),
+                                   &typePayloadLen, "Type", 101))
+    {
+        return 0;
+    }
+    request[0] = 'W';
+    request[1] = 'T';
+    /* Runtime's mall-return request is WT49 and starts at 7/42.  Preserve
+     * that ordering here so the regression covers the same dispatcher
+     * signature, not merely an equivalent object set. */
+    pos = append_request_object(request, pos, 1, 7, 42, NULL, 0);
+    pos = append_request_object(request, pos, 1, 12, 1, NULL, 0);
+    pos = append_request_object(request, pos, 1, 6, 1, NULL, 0);
+    pos = append_request_object(request, pos, 1, 6, 13, NULL, 0);
+    pos = append_request_object(request, pos, 1, 6, 14, NULL, 0);
+    pos = append_request_object(request, pos, 1, 2, 10, typePayload,
+                                (u16)typePayloadLen);
+    pos = append_request_object(request, pos, 1, 0x19, 5, NULL, 0);
+    request[2] = (u8)(pos >> 8);
+    request[3] = (u8)pos;
+    return pos;
+}
+
+static u32 make_scene_change_post_enter_request(u8 *request, const char *scene,
+                                                u16 x, u16 y)
+{
+    u8 targetPayload[128];
+    u32 targetPayloadLen = 0;
+    u32 pos = 4;
+
+    if (!vm_net_mock_put_object_u8(targetPayload, sizeof(targetPayload),
+                                   &targetPayloadLen, "maptype", 2) ||
+        !vm_net_mock_put_object_string(targetPayload, sizeof(targetPayload),
+                                       &targetPayloadLen, "mapID", scene) ||
+        !vm_net_mock_put_object_u32(targetPayload, sizeof(targetPayload),
+                                    &targetPayloadLen, "exitID", 0))
+    {
+        return 0;
+    }
+    (void)x;
+    (void)y;
+    request[0] = 'W';
+    request[1] = 'T';
+    pos = append_request_object(request, pos, 1, 0x19, 5, NULL, 0);
+    pos = append_request_object(request, pos, 1, 2, 3, targetPayload,
+                                (u16)targetPayloadLen);
+    pos = append_request_object(request, pos, 1, 0x1b, 11, NULL, 0);
+    pos = append_request_object(request, pos, 1, 7, 42, NULL, 0);
+    request[2] = (u8)(pos >> 8);
+    request[3] = (u8)pos;
+    return pos;
+}
+
 static int assert_response_objects(const char *label, const u8 *response,
                                    u32 responseLen,
                                    const u8 expected[][3], u8 expectedCount)
@@ -337,11 +396,24 @@ static int assert_shop_return_npc_bootstrap_contract(void)
     bool savedRoleDbValid = g_vm_net_mock_role_db_valid;
     bool savedNpcPending = g_vm_net_mock_scene_moveinfo_npc_pending;
     bool savedNpcSeeded = g_vm_net_mock_scene_moveinfo_npc_seeded;
+    vm_net_mock_scene_change_target savedLastTarget =
+        g_vm_net_mock_last_scene_change_target;
+    bool savedLastTargetValid = g_vm_net_mock_last_scene_change_target_valid;
+    vm_net_mock_scene_change_target savedCompletedTarget =
+        g_vm_net_mock_last_completed_scene_change_target;
+    bool savedCompletedTargetValid =
+        g_vm_net_mock_last_completed_scene_change_target_valid;
+    u32 savedCompletedTargetTick =
+        g_vm_net_mock_last_completed_scene_change_tick;
+    u32 savedSchedulerTick = g_schedulerTick;
     char savedNpcPendingScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_pending_scene)];
     char savedNpcSeededScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene)];
+    u8 request[64];
+    u8 postEnterRequest[256];
     u8 response[65536];
-    u32 responseLen = 5;
-    u8 objectCount = 0;
+    u32 requestLen = 0;
+    u32 postEnterRequestLen = 0;
+    u32 responseLen = 0;
     u8 npcNum = 0;
 
     memcpy(savedNpcPendingScene, g_vm_net_mock_scene_moveinfo_npc_pending_scene,
@@ -381,18 +453,55 @@ static int assert_shop_return_npc_bootstrap_contract(void)
     g_vm_net_mock_scene_moveinfo_npc_seeded = true;
     snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
              sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene), "%s", scene);
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    snprintf(g_vm_net_mock_last_completed_scene_change_target.scene,
+             sizeof(g_vm_net_mock_last_completed_scene_change_target.scene),
+             "%s", scene);
+    g_vm_net_mock_last_completed_scene_change_target.x = 172;
+    g_vm_net_mock_last_completed_scene_change_target.y = 132;
+    g_vm_net_mock_last_completed_scene_change_target_valid = true;
+    /* The marker is session-scoped, unlike the short repeated-scene window.
+     * Keep this completion deliberately stale so the test proves a long shop
+     * visit still starts the dedicated 30/1 -> post-enter return lifecycle. */
+    g_schedulerTick = 100;
+    g_vm_net_mock_last_completed_scene_change_tick = 0;
+    requestLen = make_scene_task_subset_followup_request(request);
 
-    if (!vm_net_mock_append_scene_npc_lifecycle_seed(
-            response, sizeof(response), &responseLen, &objectCount, scene,
-            false, false) ||
-        !response_has_object(response, responseLen, 1, 0x1b, 11) ||
+    if (requestLen != 49 ||
+        (responseLen = vm_net_mock_build_scene_task_subset_followup_response(
+             request, requestLen, response, sizeof(response))) == 0 ||
+        !response_has_object(response, responseLen, 1, 0x1e, 1) ||
         response_has_object(response, responseLen, 1, 0x1e, 2) ||
-        !vm_net_mock_get_object_u8_field(response, responseLen, "npcnum",
-                                         &npcNum) ||
-        npcNum == 0 || session->shopSceneNpcReseedPending)
+        response_has_object(response, responseLen, 1, 0x1b, 11) ||
+        !vm_net_mock_request_contains(response, responseLen, "posinfo") ||
+        session->shopSceneNpcReseedPending ||
+        !session->shopSceneReturnPostEnterPending)
     {
         fprintf(stderr,
-                "shop return NPC: bootstrap follow-up did not emit a non-empty 27/11 without 30/2\n");
+                "shop return NPC: bootstrap follow-up did not enter the new scene shell before NPC delivery\n");
+        goto fail;
+    }
+
+    postEnterRequestLen = make_scene_change_post_enter_request(
+        postEnterRequest, scene, 172, 132);
+    if (postEnterRequestLen != 78 ||
+        (responseLen = vm_net_mock_build_scene_change_post_enter_followup_response(
+             postEnterRequest, postEnterRequestLen, response,
+             sizeof(response))) == 0 ||
+        response_has_object(response, responseLen, 1, 0x1e, 1) ||
+        !response_has_object(response, responseLen, 1, 0x1e, 2) ||
+        !response_has_object(response, responseLen, 1, 0x1b, 11) ||
+        !vm_net_mock_request_contains(response, responseLen, "posinfo") ||
+        !vm_net_mock_get_object_u8_field(response, responseLen, "npcnum",
+                                         &npcNum) ||
+        npcNum == 0 || session->shopSceneReturnPostEnterPending)
+    {
+        fprintf(stderr,
+                "shop return NPC: post-enter callback did not restore position and deliver non-empty 27/11\n");
         goto fail;
     }
 
@@ -407,6 +516,13 @@ static int assert_shop_return_npc_bootstrap_contract(void)
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
     g_vm_net_mock_scene_moveinfo_npc_pending = savedNpcPending;
     g_vm_net_mock_scene_moveinfo_npc_seeded = savedNpcSeeded;
+    g_vm_net_mock_last_scene_change_target = savedLastTarget;
+    g_vm_net_mock_last_scene_change_target_valid = savedLastTargetValid;
+    g_vm_net_mock_last_completed_scene_change_target = savedCompletedTarget;
+    g_vm_net_mock_last_completed_scene_change_target_valid =
+        savedCompletedTargetValid;
+    g_vm_net_mock_last_completed_scene_change_tick = savedCompletedTargetTick;
+    g_schedulerTick = savedSchedulerTick;
     memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, savedNpcPendingScene,
            sizeof(savedNpcPendingScene));
     memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,
@@ -425,6 +541,13 @@ fail:
     g_vm_net_mock_role_db_valid = savedRoleDbValid;
     g_vm_net_mock_scene_moveinfo_npc_pending = savedNpcPending;
     g_vm_net_mock_scene_moveinfo_npc_seeded = savedNpcSeeded;
+    g_vm_net_mock_last_scene_change_target = savedLastTarget;
+    g_vm_net_mock_last_scene_change_target_valid = savedLastTargetValid;
+    g_vm_net_mock_last_completed_scene_change_target = savedCompletedTarget;
+    g_vm_net_mock_last_completed_scene_change_target_valid =
+        savedCompletedTargetValid;
+    g_vm_net_mock_last_completed_scene_change_tick = savedCompletedTargetTick;
+    g_schedulerTick = savedSchedulerTick;
     memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, savedNpcPendingScene,
            sizeof(savedNpcPendingScene));
     memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,

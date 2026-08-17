@@ -993,10 +993,17 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
      * completion (or the session changes scenes).  A player can legitimately
      * spend longer than the 90-tick reuse window in the shop.
      */
+    /* A returned mmShop shell has discarded its mmGame scene tables even when
+     * the map name did not change.  Both the legacy marker and the grid
+     * bootstrap marker must therefore enter through the normal 30/1 ->
+     * post-enter 30/2 lifecycle.  Delivering 27/11 plus a no-posinfo 30/2 to
+     * the discarded shell leaves the new scene on its loading page. */
     shopReturnReload =
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
-        vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene);
+        (vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene) ||
+         (vm_mock_service_shop_scene_npc_reseed_matches(currentScene) &&
+          vm_mock_service_shop_scene_npc_reseed_is_bootstrap_only()));
     if (shopReturnReload &&
         !vm_net_mock_get_shop_return_persisted_position(
             currentScene, &shopReturnX, &shopReturnY))
@@ -1049,12 +1056,8 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
          * post-enter refresh only. The scene is already live on screen.
          *
          * mmShop is different: returning from it constructs a fresh mmGame
-         * shell. The shop-open lifecycle flag distinguishes that reload from a
-         * normal visible-scene repeat; it must not be gated by the generic
-         * recent-scene window because the player may browse the shop for longer
-         * than nine seconds. The matching shop return must be a genuine
-         * `30/2` scene re-enter with posinfo; the parser then calls the scene
-         * entry method rather than only resetting its download state.
+         * shell. Its session-scoped marker is handled by the early 30/1
+         * return above, before any current-shell objects are serialized.
          */
         if (deferredTeleportNpcSeedAfterCurrentCompletion)
         {
@@ -1081,13 +1084,13 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
             return 0;
         }
         vm_net_mock_finish_wt_packet(out, pos, objectCount);
-        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u completion=%s\n",
+        printf("[info][network] mock_scene_resource_followup_repeat_ack scene=%s objects=%u resp=%u age=%u recent=%u shop_return=%u completion=none\n",
                currentScene,
                objectCount,
                pos,
                g_schedulerTick - g_vm_net_mock_last_completed_scene_change_tick,
                recentCompletedScene ? 1u : 0u,
-               0u, "none");
+               0u);
         vm_autotest_note("mock_scene_resource_followup_repeat_ack scene=%s objects=%u response=%s age=%u evidence=JianghuOL.CBE:0x01039770+0x0103993C\n",
                           currentScene,
                           objectCount,
@@ -1474,7 +1477,9 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     shopReturnReload =
         !completeDeferredScene &&
         currentScene != NULL &&
-        vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene);
+        (vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene) ||
+         (vm_mock_service_shop_scene_npc_reseed_matches(currentScene) &&
+          vm_mock_service_shop_scene_npc_reseed_is_bootstrap_only()));
     if (shopReturnReload &&
         !vm_net_mock_get_shop_return_persisted_position(
             responseScene, &shopReturnX, &shopReturnY))
