@@ -5780,6 +5780,15 @@ static bool vm_net_mock_append_battle_terminal_status_objects(
                          autoFlask.hpRestored, autoFlask.mpRestored,
                          autoFlask.updateCount);
     }
+
+    /* 4/7 is the native victory/terminal settlement boundary.  The status
+     * builder has already committed the role HP/MP/reward projection above;
+     * apply the per-battle equipment wear here so normal victories and team
+     * victories cannot skip it merely because the response contained 4/7.
+     * Death and successful escape use save_completed_current_role_state(),
+     * while the service-state serial guard keeps repeated terminal delivery
+     * idempotent. */
+    vm_net_mock_role_service_apply_battle_wear(vm_net_mock_active_role());
     return true;
 }
 

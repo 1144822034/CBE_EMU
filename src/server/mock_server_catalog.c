@@ -1558,38 +1558,57 @@ static bool vm_net_mock_role_service_repair_all(vm_net_mock_role_state *role,
     return true;
 }
 
+static u32 vm_net_mock_role_service_wear_equipment_instances(
+    vm_net_mock_role_state *role,
+    vm_net_mock_role_service_state *state)
+{
+    u32 wornCount = 0;
+
+    if (role == NULL || state == NULL)
+        return 0;
+    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
+    {
+        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot) ||
+            role->equippedItems[slot].durability == 0)
+        {
+            continue;
+        }
+        --role->equippedItems[slot].durability;
+        state->durability[slot] = role->equippedItems[slot].durability;
+        ++wornCount;
+    }
+    return wornCount;
+}
+
 static void vm_net_mock_role_service_apply_battle_wear(
     vm_net_mock_role_state *role)
 {
     vm_net_mock_role_service_state *state =
         vm_net_mock_role_service_state_get(role);
     vm_net_mock_role_state before;
+    u32 previousWearSerial = 0;
+    u32 wornCount = 0;
 
     if (state == NULL || role == NULL || g_mockBattleOperateSessionSerial == 0 ||
         state->lastBattleWearSerial == g_mockBattleOperateSessionSerial)
     {
         return;
     }
+    previousWearSerial = state->lastBattleWearSerial;
     state->lastBattleWearSerial = g_mockBattleOperateSessionSerial;
     before = *role;
-    for (u32 slot = 0; slot < VM_NET_MOCK_EQUIP_SLOT_COUNT; ++slot)
-    {
-        if (!vm_net_mock_role_equipment_slot_is_usable(role, slot) ||
-            role->equippedItems[slot].durability == 0)
-            continue;
-        --role->equippedItems[slot].durability;
-        state->durability[slot] = role->equippedItems[slot].durability;
-    }
+    wornCount = vm_net_mock_role_service_wear_equipment_instances(role, state);
     if (!vm_net_mock_role_db_save("battle-equipment-durability-wear"))
     {
         *role = before;
+        state->lastBattleWearSerial = previousWearSerial;
         vm_net_mock_role_service_sync_equipment(state, role);
         printf("[error][network] mock_equipment_durability_wear_store role=%u battle=%u error=%s\n",
                role->roleId, g_mockBattleOperateSessionSerial, vm_mysql_last_error());
         return;
     }
-    printf("[info][network] mock_equipment_durability_wear role=%u battle=%u amount=1\n",
-           role->roleId, g_mockBattleOperateSessionSerial);
+    printf("[info][network] mock_equipment_durability_wear role=%u battle=%u amount=1 slots=%u\n",
+           role->roleId, g_mockBattleOperateSessionSerial, wornCount);
 
     /* 战斗心得 is a live one-hour effect.  Its resource wording promises
      * automatic repair, not a free repair: retain the existing NPC repair
