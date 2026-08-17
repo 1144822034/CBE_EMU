@@ -2,7 +2,7 @@
 
 Date: 2026-08-13
 
-Status: implemented; final link pending service executable release
+Status: chest crash fix implemented; client regression pending
 
 ## 1. 当前目标
 
@@ -65,12 +65,102 @@ Status: implemented; final link pending service executable release
 
 ## 7. 实现与当前验证结果
 
-- `vm_net_mock_build_chest_open_response()` 在角色投影验证完成后，先构造原有六个
-  物品对象，再附加 `1/16/2 { result=4, hint }`；角色 MySQL 保存失败时仍以原有的
-  单独失败提示覆盖整个输出缓冲，因此不会把未提交的开箱显示成成功。
-- 新增无副作用回归
-  `scripts/chest-open-reward-notice-regression.c`。2026-08-13 已通过，断言青铜、
-  白银、黄金宝箱的 GBK 名称，以及单件和多件（`×12`）后缀。
-- `make -j2` 已重新编译包含本修改的 `obj/server/main.o`，但最终链接 `bin/jh-online-server.exe`
-  被正在运行的服务进程占用而失败：`Permission denied`。本次没有停止或替换用户正在
-  使用的服务。服务停止后需再执行一次 `make -j2`，以生成包含本修改的新可执行文件。
+- 曾尝试在原有六个物品对象之后附加 `1/16/2 { result=4, hint }`。运行时证明该对象
+  并不由本次 `7/15` 回调中的 mmGame 提示分支消费，已在第 10 节撤回。
+- 文案格式回归仅覆盖 GBK 字符串，不能证明 callback 所属关系，保留为辅助检查而非
+  开箱成功证据。
+- 当前 `make -j2` 已成功链接 `bin/jh-online-server.exe`。
+
+## 8. 2026-08-17 运行时回归调查
+
+黄金宝箱 `524` 的一次开箱在 `stream_read_i16_be_tagged(0x01033A42)`
+中以空 blob 崩溃，回包末尾确有 `1/16/2` 对象。该地址同时被场景 `posinfo`
+和物品扩展读取器使用，因而它只能证明 `16/2` 回调期间有缺失 blob，不能单独证明
+`hint` 的嵌套字符串为空，也不能证明删除提示是修复。
+
+此前该提示已经由真实客户端显示过；提示实现及文案回归因此保持恢复状态。传输层现在对
+每个 `1/16/2` 回包只读记录 `result` 的三字节编码、`hint` 的外层/内层长度和字段顺序；
+崩溃 hook 同时记录 LR 周围指令。下一次隔离复现必须以这些原始证据区分：
+
+1. `result=4` 未命中并回退到缺失 `posinfo` 的场景分支；
+2. `hint` 字段没有被对象解析器识别；
+3. 前序 `7/7` 物品回包破坏了随后回调的对象/流状态。
+
+在首次偏离被这组证据确认前，不再通过移除提示对象改变业务行为。
+
+## 9. 动态模块取证修正（2026-08-17）
+
+最新崩溃现场的调用方为 `0x0502F417`，对象也位于 `0x050020E8`；这说明本次
+`mmGameMstarWqvga.cbm` 位于动态内存池，而不是此前观察器写死的
+`0x0518xxxx` 装载地址。因此此前缺少 `mmgame_transfer_result` / `sub_bcc`
+记录不能作为“客户端没有经过 `16/2`”的证据。
+
+观察器现按 `mmGame:sub_11CE` 的本地偏移 `0x11CE` 和入口字节
+`F0 B5 FF B0 FF B0 A9 B0` 验证候选代码基址，再观察本地 PC
+`0x1250`（`16/3 result`）、`0x138E`（`16/2 result`）、`0x13FE`
+（调用 `sub_BCC`）和 `0x0BCC`（进入 `sub_BCC`）。它仅读取寄存器和
+客户内存，并在日志中输出动态 `base` 与 `local`；不会改动 CBE/CBM、响应字节、
+事件、输入或客户端状态。`make -j2` 已于本轮通过。
+
+下一次同一黄金宝箱复现的最小证据集必须包含：
+
+1. `mock_wt_16_2_audit`，证明服务端发送的 `result=4` 与非空 `hint`；
+2. `mmgame_transfer_result ... local=138e`，证明客户端 getter 实际返回值；
+3. 有无 `mmgame_transfer_sub_bcc ... local=13fe/0bcc`；
+4. 若仍崩溃，匹配同次 `stream_read_i16_null_blob` 的 `lr`、`reader_head`。
+
+若第 2 项返回非 `4`，继续追溯对象字段/生命周期；若为 `4` 而仍进入第 3 项，
+再检查对象顺序或前序回调状态。两种情况都不得以伪造 `posinfo` 或删除提示对象处理。
+
+最新一次崩溃仍只产生 `stream_read_i16_null_blob`，没有已验证的 `sub_11CE` 分支记录；
+因此不能把调用方预设为 mmGame。首次空 blob 现在额外执行一次只读内存池扫描，要求同一
+候选同时匹配 `sub_11CE`、`16/2 result`、`sub_BCC` 调用和 `sub_BCC` 入口四个机器码
+指纹，并输出 `mmgame_transfer_image crash_scan`。该扫描不写客户内存，目的仅是获取本次
+实际装载的四个动态地址，排除调用模块误归属后再继续追踪字段读取。
+
+## 10. 根因与修复（2026-08-17）
+
+本次原始包审计证明开箱成功包中的 `1/16/2` 字节本身完整：`result` 为
+`00-01-04`，`hint` 外层/内层长度均非零。但崩溃现场的 `r5` 已是这个
+`16/2` 对象，而 `r9=01050BD0` 为主 CBE data base；同时没有命中经过四重
+指纹验证的 mmGame `sub_11CE`。对象因此由 `7/15` 开箱回调的主 CBE 分支处理，
+不是由 `result=4` 文本提示分支处理。该分支把非本契约对象回退为场景结果并读取
+缺失的 `posinfo`，最终在 `stream_read_i16_be_tagged(0x01033A42)` 传入空 blob。
+
+修复删除 `vm_net_mock_build_chest_open_response()` 中对复合成功包追加
+`1/16/2` 的行为，保留原有 `7/1`、两组 `7/7 type=2 + 7/11` 和一组
+`7/7 type=1`。这修复的是开箱回包所属回调的协议契约，而不是给崩溃地址加兜底；
+该个人提示通道仅保留给已验证的独立物品使用失败/提示响应，不能再复用于 `7/15`。
+
+仍待验证：黄金宝箱复测必须收到不含 `16/2` 的成功包，客户端完成三项背包更新且不再
+出现 `read_i16_null_blob`。奖励公告如需恢复，必须先获得该开箱 callback 可安全消费的
+独立事件契约，不能把 `16/2` 再拼回当前回包。
+
+## 11. 当前回调的安全提示契约（2026-08-17）
+
+`江湖OL.CBE:net_business_dispatch_by_subcmd(0x01012F8A)` 是当前开箱回调的
+主 CBE 分发器。它将 kind `20` 交给
+`net_handle_simple_result_info(0x01011434)`；对 `1/20/1`，该函数读取
+`result` 和 `info`。`result=0` 且 `info` 非空时只调用
+`ui_show_message_box(info, 0, 0, 0)`，不会打开确认流程、修改背包或读取
+`scene/posinfo`。
+
+因此开箱成功包现在在六个原有背包对象之后附加：
+
+```text
+1/20/1 { result: 0, info: "开启黄金宝箱，获得..." (GBK) }
+```
+
+这是与运行时 `r9=01050BD0` 主 CBE 回调匹配的个人提示通道，替代错误的
+`1/16/2`。`make -j2` 已链接新的 `bin/jh-online-server.exe`。复测判据为日志
+`response=...+20/1-notice`、出现奖励文本框、背包三项更新完成，且不存在
+`read_i16_null_blob`。
+
+### 文本终止契约
+
+`net_handle_simple_result_info` 取得 `info` 指针后直接交给
+`ui_show_message_box`，不携带长度参数。普通 `vm_net_mock_put_object_string()`
+只编码长度定界的内层文本，导致 UI 继续读取相邻内存并显示随机尾字符。
+`20/1.info` 现改用已有的 `vm_net_mock_put_object_cstring()`：外层 WT blob 和
+内层长度保持不变，内层长度额外包含一个终止 `0x00`。这只适用于该 C-string
+消费者，不能替换其他按长度读取的协议字符串。

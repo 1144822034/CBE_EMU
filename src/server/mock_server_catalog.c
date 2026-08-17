@@ -5999,9 +5999,8 @@ static const char *vm_net_mock_chest_world_broadcast_name_gbk(u32 chestItemId)
     }
 }
 
-/* `1/16/2.result=4` is the mmGame text-notice path.  Keep this separate from
- * the 1/7/37 item-acquire path: the latter inserts an item itself and would
- * duplicate the already-proven 1/7/7 type=1 backpack increment below. */
+/* Keep the text separate from the 1/7/37 item-acquire path: the latter
+ * inserts an item itself and would duplicate the proven 1/7/7 type=1 update. */
 static bool vm_net_mock_format_chest_open_reward_hint_gbk(
     u32 chestItemId, const char *rewardNameGbk, u32 rewardCount,
     char *hintOut, size_t hintOutCap)
@@ -6045,9 +6044,9 @@ static bool vm_net_mock_append_chest_open_reward_hint_object(
     if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xFF ||
         !vm_net_mock_format_chest_open_reward_hint_gbk(chestItemId, rewardNameGbk,
                                                        rewardCount, hint, sizeof(hint)) ||
-        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 16, 2, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 4) ||
-        !vm_net_mock_put_object_string(out, outCap, pos, "hint", hint))
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 20, 1, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 0) ||
+        !vm_net_mock_put_object_cstring(out, outCap, pos, "info", hint))
     {
         return false;
     }
@@ -6063,6 +6062,9 @@ static bool vm_net_mock_append_chest_open_reward_hint_object(
  * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=2 as a selected-row update
  *   and type=1 as a one-shot additive reward row.
  * - the same CBE parser consumes 1/7/11 to synchronize the item count.
+ * - JianghuOL.CBE:net_business_dispatch_by_subcmd handles 1/20/1 result=0
+ *   with an `info` message box.  Unlike 16/2, this object belongs to the
+ *   main-CBE callback that owns request 7/15.
  *
  * 1/7/37 is intentionally absent: HandleItemAcquire can insert an item too,
  * and battle-reward runtime evidence shows pairing it with 7/7 type=1 risks a
@@ -6214,12 +6216,12 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1+16/2-notice evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1+20/1-notice evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544/0x01012F8A/0x01011434+mmGame:0x11CE/0x0D04\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1+16/2-notice evidence=JianghuOL.CBE:0x01033544 mmGame:0x11CE/0x0D04\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1+20/1-notice evidence=JianghuOL.CBE:0x01033544/0x01012F8A/0x01011434 mmGame:0x11CE/0x0D04\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
                      reward->count, reward->weight, totalWeight,

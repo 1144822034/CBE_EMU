@@ -9792,6 +9792,44 @@ static void vm_autotest_note_shop_parser_pc(u32 pc)
     }
 }
 
+/*
+ * mmGame is loaded at a variable pool address.  Identify sub_11CE from its
+ * immutable entry bytes before interpreting a local PC as one of its branches.
+ */
+static bool vm_identify_mmgame_transfer_pc(u32 pc, u32 *codeBase, u32 *localPc)
+{
+    static const u8 parserEntry[] = {0xF0, 0xB5, 0xFF, 0xB0, 0xFF, 0xB0, 0xA9, 0xB0};
+    static const u32 transferLocals[] = {0x1250u, 0x138Eu, 0x13FEu, 0x0BCCu};
+    u8 entryBytes[sizeof(parserEntry)];
+
+    for (u32 i = 0; i < sizeof(transferLocals) / sizeof(transferLocals[0]); ++i)
+    {
+        u32 candidateBase;
+
+        if (pc < transferLocals[i])
+            continue;
+        candidateBase = pc - transferLocals[i];
+        if ((candidateBase & 0xFu) != 0 ||
+            candidateBase < VM_Memory_Pool_ADDRESS ||
+            candidateBase + 0x11CEu + sizeof(parserEntry) > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE)
+        {
+            continue;
+        }
+        if (uc_mem_read(MTK, candidateBase + 0x11CEu, entryBytes, sizeof(entryBytes)) != UC_ERR_OK ||
+            memcmp(entryBytes, parserEntry, sizeof(parserEntry)) != 0)
+        {
+            continue;
+        }
+
+        if (codeBase)
+            *codeBase = candidateBase;
+        if (localPc)
+            *localPc = transferLocals[i];
+        return true;
+    }
+    return false;
+}
+
 static void vm_note_mmgame_transfer_parser_pc(u32 pc)
 {
     static u32 seenResult16_3 = 0;
@@ -9808,17 +9846,16 @@ static void vm_note_mmgame_transfer_parser_pc(u32 pc)
     u32 getterU16 = 0;
     u32 getterInt = 0;
     u32 getterLen = 0;
+    u32 codeBase = 0;
+    u32 localPc = 0;
     char objectHead[64];
 
     objectHead[0] = 0;
 
-    if (pc != 0x05181250 && pc != 0x0518138E &&
-        pc != 0x051813FE && pc != 0x05180BCC)
-    {
+    if (!vm_identify_mmgame_transfer_pc(pc, &codeBase, &localPc))
         return;
-    }
 
-    if (pc == 0x05181250)
+    if (localPc == 0x1250u)
     {
         if (seenResult16_3 >= 32)
             return;
@@ -9826,7 +9863,7 @@ static void vm_note_mmgame_transfer_parser_pc(u32 pc)
         uc_reg_read(MTK, UC_ARM_REG_R0, &result);
         uc_reg_read(MTK, UC_ARM_REG_R5, &object);
     }
-    else if (pc == 0x0518138E)
+    else if (localPc == 0x138Eu)
     {
         if (seenResult16_2 >= 32)
             return;
@@ -9834,7 +9871,7 @@ static void vm_note_mmgame_transfer_parser_pc(u32 pc)
         uc_reg_read(MTK, UC_ARM_REG_R0, &result);
         uc_reg_read(MTK, UC_ARM_REG_R5, &object);
     }
-    else if (pc == 0x051813FE)
+    else if (localPc == 0x13FEu)
     {
         if (seenSubBccCall >= 32)
             return;
@@ -9863,25 +9900,81 @@ static void vm_note_mmgame_transfer_parser_pc(u32 pc)
         vm_autotest_format_mem_hex(object, 16, objectHead, sizeof(objectHead));
     }
 
-    if (pc == 0x05181250 || pc == 0x0518138E)
+    if (localPc == 0x1250u || localPc == 0x138Eu)
     {
-        printf("[info][mmgame] transfer_result pc=%08x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
-               pc, subtype, result, object, kind, getterInt, objectHead,
-               pc == 0x05181250 ? seenResult16_3 : seenResult16_2);
-        vm_autotest_note("mmgame_transfer_result pc=%08x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
-                         pc, subtype, result, object, kind, getterInt, objectHead,
-                         pc == 0x05181250 ? seenResult16_3 : seenResult16_2);
+        printf("[info][mmgame] transfer_result pc=%08x base=%08x local=%04x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
+               pc, codeBase, localPc, subtype, result, object, kind, getterInt, objectHead,
+               localPc == 0x1250u ? seenResult16_3 : seenResult16_2);
+        vm_autotest_note("mmgame_transfer_result pc=%08x base=%08x local=%04x subtype=%u result=%u object=%08x kind=%u getter_int=%08x head=%s count=%u\n",
+                         pc, codeBase, localPc, subtype, result, object, kind, getterInt, objectHead,
+                         localPc == 0x1250u ? seenResult16_3 : seenResult16_2);
         return;
     }
 
-    printf("[info][mmgame] transfer_sub_bcc pc=%08x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
-           pc, object, kind, subtype, index, getterRaw, getterString, getterU16,
+    printf("[info][mmgame] transfer_sub_bcc pc=%08x base=%08x local=%04x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
+           pc, codeBase, localPc, object, kind, subtype, index, getterRaw, getterString, getterU16,
            getterInt, getterLen, objectHead,
-           pc == 0x051813FE ? seenSubBccCall : seenSubBccEntry);
-    vm_autotest_note("mmgame_transfer_sub_bcc pc=%08x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
-                     pc, object, kind, subtype, index, getterRaw, getterString,
+           localPc == 0x13FEu ? seenSubBccCall : seenSubBccEntry);
+    vm_autotest_note("mmgame_transfer_sub_bcc pc=%08x base=%08x local=%04x object=%08x kind=%u subtype=%u index=%u getters raw=%08x str=%08x u16=%08x int=%08x len=%08x head=%s count=%u\n",
+                     pc, codeBase, localPc, object, kind, subtype, index, getterRaw, getterString,
                      getterU16, getterInt, getterLen, objectHead,
-                     pc == 0x051813FE ? seenSubBccCall : seenSubBccEntry);
+                     localPc == 0x13FEu ? seenSubBccCall : seenSubBccEntry);
+}
+
+static void vm_trace_mmgame_transfer_image_at_crash(void)
+{
+    static u32 scanCount = 0;
+    static const u8 parserEntry[] = {0xF0, 0xB5, 0xFF, 0xB0, 0xFF, 0xB0, 0xA9, 0xB0};
+    static const u8 result16_2[] = {0x02, 0x28, 0x12, 0xD1};
+    static const u8 subBccCall[] = {0xFF, 0xF7, 0xE5, 0xFB};
+    static const u8 subBccEntry[] = {0xF0, 0xB5, 0xFF, 0xB0, 0x04, 0x1C, 0x0E, 0x1C};
+    u8 page[0x1000];
+    u32 matches = 0;
+
+    if (scanCount >= 1)
+        return;
+    ++scanCount;
+
+    for (u32 pageBase = VM_Memory_Pool_ADDRESS;
+         pageBase < VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE;
+         pageBase += sizeof(page))
+    {
+        if (uc_mem_read(MTK, pageBase, page, sizeof(page)) != UC_ERR_OK)
+            continue;
+        for (u32 pageOffset = 0xEu;
+             pageOffset + sizeof(parserEntry) <= sizeof(page);
+             pageOffset += 0x10u)
+        {
+            u32 entry = pageBase + pageOffset;
+            u32 codeBase;
+            u8 branchBytes[sizeof(subBccEntry)];
+
+            if (memcmp(page + pageOffset, parserEntry, sizeof(parserEntry)) != 0 ||
+                entry < 0x11CEu)
+            {
+                continue;
+            }
+            codeBase = entry - 0x11CEu;
+            if (codeBase < VM_Memory_Pool_ADDRESS ||
+                codeBase + 0x13FEu + sizeof(branchBytes) > VM_Memory_Pool_ADDRESS + VM_MEMPOOL_TOTAL_SIZE ||
+                uc_mem_read(MTK, codeBase + 0x138Eu, branchBytes, sizeof(result16_2)) != UC_ERR_OK ||
+                memcmp(branchBytes, result16_2, sizeof(result16_2)) != 0 ||
+                uc_mem_read(MTK, codeBase + 0x13FEu, branchBytes, sizeof(subBccCall)) != UC_ERR_OK ||
+                memcmp(branchBytes, subBccCall, sizeof(subBccCall)) != 0 ||
+                uc_mem_read(MTK, codeBase + 0x0BCCu, branchBytes, sizeof(subBccEntry)) != UC_ERR_OK ||
+                memcmp(branchBytes, subBccEntry, sizeof(subBccEntry)) != 0)
+            {
+                continue;
+            }
+            printf("[info][mmgame] transfer_image crash_scan base=%08x result16_2=%08x sub_bcc_call=%08x sub_bcc=%08x\n",
+                   codeBase, codeBase + 0x138Eu, codeBase + 0x13FEu, codeBase + 0x0BCCu);
+            vm_autotest_note("mmgame_transfer_image crash_scan base=%08x result16_2=%08x sub_bcc_call=%08x sub_bcc=%08x\n",
+                             codeBase, codeBase + 0x138Eu, codeBase + 0x13FEu, codeBase + 0x0BCCu);
+            ++matches;
+        }
+    }
+    printf("[info][mmgame] transfer_image crash_scan_done matches=%u\n", matches);
+    vm_autotest_note("mmgame_transfer_image crash_scan_done matches=%u\n", matches);
 }
 
 static void vm_note_stream_read_i16_pc(u32 pc)
@@ -9894,6 +9987,7 @@ static void vm_note_stream_read_i16_pc(u32 pc)
     u32 r2 = 0;
     u32 r3 = 0;
     char readerHead[64];
+    char lrHead[64];
 
     if (pc != 0x01033A42)
         return;
@@ -9905,7 +9999,10 @@ static void vm_note_stream_read_i16_pc(u32 pc)
         return;
     ++seenNullBlob;
 
+    vm_trace_mmgame_transfer_image_at_crash();
+
     readerHead[0] = 0;
+    lrHead[0] = 0;
     uc_reg_read(MTK, UC_ARM_REG_R1, &reader);
     uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
     uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
@@ -9915,11 +10012,13 @@ static void vm_note_stream_read_i16_pc(u32 pc)
         uc_mem_read(MTK, reader, &cursor, sizeof(cursor));
         vm_autotest_format_mem_hex(reader, 32, readerHead, sizeof(readerHead));
     }
+    if (lr >= 4)
+        vm_autotest_format_mem_hex(lr - 4, 16, lrHead, sizeof(lrHead));
 
-    printf("[info][stream] read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s count=%u\n",
-           pc, lr, reader, cursor, r2, r3, readerHead, seenNullBlob);
-    vm_autotest_note("stream_read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s count=%u\n",
-                     pc, lr, reader, cursor, r2, r3, readerHead, seenNullBlob);
+    printf("[info][stream] read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s lr_head=%s count=%u\n",
+           pc, lr, reader, cursor, r2, r3, readerHead, lrHead, seenNullBlob);
+    vm_autotest_note("stream_read_i16_null_blob pc=%08x lr=%08x reader=%08x cursor=%u r2=%08x r3=%08x reader_head=%s lr_head=%s count=%u\n",
+                     pc, lr, reader, cursor, r2, r3, readerHead, lrHead, seenNullBlob);
 }
 
 static void vm_note_net_wrapper_pc(u32 pc)
