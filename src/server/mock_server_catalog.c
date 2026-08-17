@@ -6805,6 +6805,8 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
          * mall's catalog packets remain untouched. */
         g_netMockBackpackGridSeededRoleId = 0;
         g_netMockBackpackGridReseedPendingRoleId = 0;
+        vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
+            "shop-return-grid-bootstrap");
         printf("[info][network] mock_backpack_grid_reseed role=%u reason=shop-return-bootstrap next=30/21\n",
                role->roleId);
         vm_autotest_note("mock_backpack_grid_reseed role=%u reason=shop-return-bootstrap next=30/21 evidence=shop-actorinfo-only->group-type1\n",

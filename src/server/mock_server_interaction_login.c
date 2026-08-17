@@ -566,6 +566,7 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
     u8 npcCount = 0;
     bool startupSeed = false;
     bool shopReturnSeed = false;
+    bool bootstrapOnlySeed = false;
     const char *phase = NULL;
 
     if (out == NULL || pos == NULL || objectCount == NULL ||
@@ -580,7 +581,15 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
             vm_net_mock_scene_names_equal_exact(activeSession->shopSceneNpcReseedScene,
                                                 currentScene))
         {
-            shopReturnSeed = allowShopReturnSeed;
+            /* A backpack-return bootstrap has already rebuilt mmGame's scene
+             * tables.  Its first scene follow-up must therefore recreate the
+             * NPC directory even when that particular follow-up is also
+             * completing an unrelated deferred target.  Unlike the legacy
+             * shop-return marker, it never authorizes a 30/2 scene re-enter;
+             * only the 27/11 lifecycle payload is consumed here. */
+            bootstrapOnlySeed =
+                vm_mock_service_shop_scene_npc_reseed_is_bootstrap_only();
+            shopReturnSeed = allowShopReturnSeed || bootstrapOnlySeed;
         }
         else
         {
@@ -589,6 +598,7 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
                    activeSession->shopSceneNpcReseedScene,
                    currentScene);
             activeSession->shopSceneNpcReseedPending = false;
+            activeSession->shopSceneNpcReseedMode = 0;
             activeSession->shopSceneNpcReseedScene[0] = 0;
         }
     }
@@ -609,12 +619,19 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
         /* The shop-return marker also owns the trailing 30/2 completion.
          * A scene with no NPC rows still needs that completion, so NPC
          * availability must never consume the lifecycle marker. */
+        if (bootstrapOnlySeed)
+        {
+            vm_mock_service_clear_shop_scene_npc_reseed_pending(
+                "backpack-grid-bootstrap-no-npc");
+        }
         return true;
     }
 
     phase = startupSeed
                 ? "startup-scene-followup-immediate"
-                : "shop-return-scene-followup-reseed";
+                : (bootstrapOnlySeed
+                       ? "backpack-grid-bootstrap-reseed"
+                       : "shop-return-scene-followup-reseed");
     if (shopReturnSeed)
         vm_net_mock_mark_scene_moveinfo_npc_seed_pending(currentScene);
     if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, pos,
@@ -623,6 +640,11 @@ static bool vm_net_mock_append_scene_npc_lifecycle_seed(u8 *out, u32 outCap,
         return false;
     }
     *objectCount += 1;
+    if (bootstrapOnlySeed)
+    {
+        vm_mock_service_clear_shop_scene_npc_reseed_pending(
+            "backpack-grid-bootstrap-npc-seeded");
+    }
     printf("[info][mock-service] scene_npc_lifecycle_seed client=%08x scene=%s phase=%s npcnum=%u objects=%u evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
            activeSession ? activeSession->clientId : 0,
            currentScene,
@@ -647,6 +669,7 @@ static void vm_mock_service_complete_shop_scene_return(const char *scene,
            "scene=%s source=%s completion=30/2-posinfo-reenter\n",
            session->clientId, scene, source ? source : "-");
     session->shopSceneNpcReseedPending = false;
+    session->shopSceneNpcReseedMode = 0;
     session->shopSceneNpcReseedScene[0] = 0;
 }
 
@@ -973,7 +996,7 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
     shopReturnReload =
         !g_vm_net_mock_last_scene_change_target_valid &&
         currentScene != NULL &&
-        vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+        vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene);
     if (shopReturnReload &&
         !vm_net_mock_get_shop_return_persisted_position(
             currentScene, &shopReturnX, &shopReturnY))
@@ -1451,7 +1474,7 @@ static u32 vm_net_mock_build_scene_task_subset_followup_response(const u8 *reque
     shopReturnReload =
         !completeDeferredScene &&
         currentScene != NULL &&
-        vm_mock_service_shop_scene_npc_reseed_matches(currentScene);
+        vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(currentScene);
     if (shopReturnReload &&
         !vm_net_mock_get_shop_return_persisted_position(
             responseScene, &shopReturnX, &shopReturnY))

@@ -2,7 +2,7 @@
 
 Date: 2026-08-17
 
-Status: protocol fix implemented; end-to-end runtime validation pending
+Status: protocol fixes implemented; end-to-end runtime validation pending
 
 ## 1. 当前卡点
 
@@ -123,3 +123,40 @@ Status: protocol fix implemented; end-to-end runtime validation pending
 - `make -j2`：通过（当前构建无待重编译目标）。
 - `tmp/shop-return-routing-regression.exe`：通过；日志包含 `mock_backpack_grid_reseed role=1 reason=shop-return-bootstrap`，并实际生成 `30/21`、`gridnum=1`。
 - 完整自动化未运行：`CBE_AUTOMATION_MYSQL_PASSWORD` 未配置，隔离 fixture 无法创建测试数据库。
+
+## 13. 返回 bootstrap 的 NPC 生命周期回归
+
+### 现象与首次偏离
+
+- 在上述 `30/21` 网格重播生效后，用户回到场景时背包已恢复，但原场景 NPC 全部消失。
+- `bin/server_out.txt` 的登录首屏包含
+  `mock_scene_npc_seed phase=startup-scene-followup-immediate`，并实际发送
+  `1/27/11`、`npcnum=3`。
+- 商城返回的 `5/10 + 7/7(type=1)` 已重播 `30/21`，紧随其后的
+  `scene-task-subset-followup` 只有任务/书籍对象，缺少新的非空 `27/11`。这是
+  NPC 消失前的首次服务端契约偏离，不是渲染层故障。
+
+### 根因
+
+商城关闭会重新建立 mmGame bootstrap，客户端会丢弃旧场景的 NPC 节点；但服务端的
+`g_vm_net_mock_scene_moveinfo_npc_seeded` 仍将同名场景视为“已播种”。此前新增的
+背包重播标记仅在允许传统商城场景重入的 follow-up 中消费；当该 follow-up 同时带有
+延迟场景完成状态时，标记未被消费，因而没有为新 bootstrap 重发 `27/11`。
+
+### 修复
+
+- `mock_server_catalog.c`：商城返回的同角色 `5/10` 重播 `30/21` 时，按当前会话和精确
+  场景设置一次性 `bootstrap-only` NPC 重播标记。
+- `mock_server_interaction_login.c`：匹配该标记的下一次场景资源/任务 follow-up 无条件消费
+  `27/11` 生命周期目录，即使当前响应不允许传统商城场景重入；调用既有
+  `vm_net_mock_mark_scene_moveinfo_npc_seed_pending()` 清除旧的一次性目录状态。
+- `mock_server_equipment_npc.c`：区分传统商城返回（可走原 `30/2` 完成路径）和
+  `bootstrap-only`（只允许 `27/11`，绝不触发场景重入）。
+
+### 回归证据
+
+- `scripts/shop-return-routing-regression.c` 新增 bootstrap NPC 协议回归：预先设置旧场景已
+  播种状态，模拟商城返回重播标记，并调用真实场景生命周期 builder。
+- 断言响应含非空 `1/27/11`（当前 c04 临安府场景为 3 个 NPC），不含 `1/30/2`，并且
+  session marker 在响应后清除。
+- 该回归不启动客户端、不修改 CBE/CBM 内存或状态；完整 UI 路径仍需隔离 MySQL 配置后再跑。

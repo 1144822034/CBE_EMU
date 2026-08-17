@@ -322,6 +322,116 @@ fail:
     return 1;
 }
 
+static int assert_shop_return_npc_bootstrap_contract(void)
+{
+    static const char scene[] =
+        "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31\x2e\x73\x63\x65";
+    vm_net_mock_role_state savedRole;
+    vm_mock_service_client_session *savedSessions =
+        g_vm_mock_service_client_sessions;
+    vm_mock_service_client_session *session = NULL;
+    u32 savedActiveClientId = g_vm_mock_service_active_client_id;
+    u32 savedRoleCount = g_vm_net_mock_role_db.roleCount;
+    u32 savedActiveRoleId = g_vm_net_mock_role_db.activeRoleId;
+    bool savedRoleDbLoaded = g_vm_net_mock_role_db_loaded;
+    bool savedRoleDbValid = g_vm_net_mock_role_db_valid;
+    bool savedNpcPending = g_vm_net_mock_scene_moveinfo_npc_pending;
+    bool savedNpcSeeded = g_vm_net_mock_scene_moveinfo_npc_seeded;
+    char savedNpcPendingScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_pending_scene)];
+    char savedNpcSeededScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene)];
+    u8 response[65536];
+    u32 responseLen = 5;
+    u8 objectCount = 0;
+    u8 npcNum = 0;
+
+    memcpy(savedNpcPendingScene, g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+           sizeof(savedNpcPendingScene));
+    memcpy(savedNpcSeededScene, g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+           sizeof(savedNpcSeededScene));
+    memset(&savedRole, 0, sizeof(savedRole));
+    if (g_vm_net_mock_role_db.roleCount != 0)
+        savedRole = g_vm_net_mock_role_db.roles[0];
+    memset(&g_vm_net_mock_role_db.roles[0], 0,
+           sizeof(g_vm_net_mock_role_db.roles[0]));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", scene);
+    g_vm_net_mock_role_db.roles[0].x = 172;
+    g_vm_net_mock_role_db.roles[0].y = 132;
+
+    g_vm_mock_service_active_client_id = 0x12345678u;
+    session = vm_mock_service_get_or_create_client_session(
+        g_vm_mock_service_active_client_id);
+    if (session == NULL)
+    {
+        fprintf(stderr, "shop return NPC: client session allocation failed\n");
+        goto fail;
+    }
+    session->sceneVisibleReady = true;
+    session->sceneVisiblePending = false;
+    snprintf(session->sceneVisibleScene, sizeof(session->sceneVisibleScene),
+             "%s", scene);
+    vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
+        "shop-return-regression");
+    g_vm_net_mock_scene_moveinfo_npc_pending = false;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = true;
+    snprintf(g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+             sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene), "%s", scene);
+
+    if (!vm_net_mock_append_scene_npc_lifecycle_seed(
+            response, sizeof(response), &responseLen, &objectCount, scene,
+            false, false) ||
+        !response_has_object(response, responseLen, 1, 0x1b, 11) ||
+        response_has_object(response, responseLen, 1, 0x1e, 2) ||
+        !vm_net_mock_get_object_u8_field(response, responseLen, "npcnum",
+                                         &npcNum) ||
+        npcNum == 0 || session->shopSceneNpcReseedPending)
+    {
+        fprintf(stderr,
+                "shop return NPC: bootstrap follow-up did not emit a non-empty 27/11 without 30/2\n");
+        goto fail;
+    }
+
+    g_vm_mock_service_active_client_id = savedActiveClientId;
+    g_vm_mock_service_client_sessions = savedSessions;
+    if (savedSessions == NULL && session != NULL)
+        free(session);
+    g_vm_net_mock_role_db.roles[0] = savedRole;
+    g_vm_net_mock_role_db.roleCount = savedRoleCount;
+    g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    g_vm_net_mock_scene_moveinfo_npc_pending = savedNpcPending;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = savedNpcSeeded;
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, savedNpcPendingScene,
+           sizeof(savedNpcPendingScene));
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,
+           sizeof(savedNpcSeededScene));
+    return 0;
+
+fail:
+    g_vm_mock_service_active_client_id = savedActiveClientId;
+    g_vm_mock_service_client_sessions = savedSessions;
+    if (savedSessions == NULL && session != NULL)
+        free(session);
+    g_vm_net_mock_role_db.roles[0] = savedRole;
+    g_vm_net_mock_role_db.roleCount = savedRoleCount;
+    g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    g_vm_net_mock_scene_moveinfo_npc_pending = savedNpcPending;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = savedNpcSeeded;
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, savedNpcPendingScene,
+           sizeof(savedNpcPendingScene));
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,
+           sizeof(savedNpcSeededScene));
+    return 1;
+}
+
 static int assert_dispatch_matches_builder(const char *label,
                                             const u8 *request, u32 requestLen,
                                             bool shopResponse,
@@ -403,11 +513,12 @@ int main(void)
             "builtin-backpack-items-books-combo") != 0 ||
         assert_shop_actor_query_catalog_contract() != 0 ||
         assert_shop_catalog_marker_snapshot() != 0 ||
-        assert_shop_return_grid_reseed_contract() != 0)
+        assert_shop_return_grid_reseed_contract() != 0 ||
+        assert_shop_return_npc_bootstrap_contract() != 0)
     {
         return 1;
     }
 
-    puts("shop-return regression passed: backpack routing and one-shot shop actor-query catalog contract");
+    puts("shop-return regression passed: backpack routing, grid reseed, and bootstrap NPC catalog contract");
     return 0;
 }
