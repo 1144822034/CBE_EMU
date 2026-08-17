@@ -1569,6 +1569,31 @@ static bool vm_net_mock_append_battle_case11_auto_flag_object(u8 *out, u32 outCa
     return true;
 }
 
+/* Handle25_2 (mmBattle:0x8996) consumes this only for the scene-hangup
+ * start contract.  result=1,type=1 arms the client-owned terminal path:
+ * after the final action callback marks completion, DrawBattleMain
+ * (0x5444) emits the regular 25/5 from 0x5E92.  It must accompany the
+ * initial 4/5+4/11 packet rather than be sent after 4/7, because the flag
+ * is consumed by battle state while the final action is still pending. */
+static bool vm_net_mock_append_battle_hangup_auto_exit25_2_object(
+    u8 *out, u32 outCap, u32 *pos)
+{
+    u32 objectStart = 0;
+
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 25, 2,
+                                     &objectStart))
+    {
+        return false;
+    }
+    if (!vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 1))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    return true;
+}
+
 static bool vm_net_mock_append_battle_action6_object_ex(u8 *out, u32 outCap, u32 *pos,
                                                         const u8 *actionInfo,
                                                         u32 actionInfoLen,
@@ -5907,9 +5932,10 @@ static bool vm_net_mock_append_battle_terminal_case11_object(u8 *out, u32 outCap
 
 /*
  * A rewarded scene-hangup victory owns a visible 4/7 result panel. Manual
- * panel dismissal sends 25/5; automatic hangup uses this same exact-session
- * predicate to perform its verified delayed 4/5 continuation. The scope
- * keeps ordinary battles and the separate revival path on their own terminal
+ * panel dismissal sends 25/5; native automatic hangup reaches that same
+ * request through its 25/2 -> mmBattle:0x5444 exit chain.  This exact-session
+ * predicate then performs the delayed 4/5 continuation. The scope keeps
+ * ordinary battles and the separate revival path on their own terminal
  * contracts.
  */
 static bool vm_net_mock_scene_hangup_result_panel_active(void)
@@ -7408,7 +7434,6 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     u8 battleSide = (u8)vm_net_mock_env_u32("CBE_BATTLE_SIDE",
                                             vm_net_mock_battle_default_side(playerOnRight));
     u8 battleEnemyCount = 1;
-    u8 autoFlagType = (u8)vm_net_mock_env_u32("CBE_HANGUP_BATTLE_AUTO_FLAG", 1);
 
     if (!continuation)
     {
@@ -7620,12 +7645,15 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
     ++objectCount;
-    if (autoFlagType != 0)
+    if (!vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos, 1))
+        return 0;
+    ++objectCount;
+    if (!vm_net_mock_append_battle_hangup_auto_exit25_2_object(out, outCap,
+                                                                &pos))
     {
-        if (!vm_net_mock_append_battle_case11_auto_flag_object(out, outCap, &pos, autoFlagType))
-            return 0;
-        ++objectCount;
+        return 0;
     }
+    ++objectCount;
     if (moveResponseLen != 0 &&
         !vm_net_mock_append_response_objects(out, outCap, &pos, &objectCount,
                                              moveResponse, moveResponseLen))
@@ -7635,10 +7663,7 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
     g_mockBattleOperateSessionArmed = 1;
-    if (autoFlagType != 0)
-        vm_net_mock_battle_auto_arm();
-    else
-        vm_net_mock_battle_auto_reset();
+    vm_net_mock_battle_auto_arm();
     g_mockBattleOperateSessionFinished = 0;
     g_mockBattlePendingEnemyTurn = 0;
     g_mockBattleAwaitingSettlement = 0;
@@ -7687,7 +7712,7 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
         u32 perEnemyMaxHp = vm_net_mock_env_u32("CBE_BATTLE_ENEMY_MAX_HP", perEnemyHp);
         if (perEnemyMaxHp < perEnemyHp)
             perEnemyMaxHp = perEnemyHp;
-        printf("[info][network] mock_hangup_battle_start source=%s tick=%u scene=%s table_scene=%s enemy=%u enemies=%u roleid=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u subtype=5 runtime_index=%u pos=(%u,%u) target_source=sce-static-node-order auto=%u move_upload=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01015E14 Type=2 + runtime:2/10+25/3(+2/1) + automonster.dsh + SCE2 + mmBattle:0x66CC\n",
+        printf("[info][network] mock_hangup_battle_start source=%s tick=%u scene=%s table_scene=%s enemy=%u enemies=%u roleid=%u rolehp=%u/%u rolemp=%u/%u enemyhp=%u/%u per_enemy_hp=%u/%u subtype=5 runtime_index=%u pos=(%u,%u) target_source=sce-static-node-order auto=%u native_exit25_2=1 move_upload=%u objects=%u resp=%u evidence=JianghuOL.CBE:0x01015E14 mmBattle:0x8996+0x5444\n",
                continuation ? "scene-poll" : "request",
                g_schedulerTick,
                scene ? scene : "-",
@@ -7706,11 +7731,11 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
                sceneMonsterIndex,
                sceneMonsterPosX,
                sceneMonsterPosY,
-               autoFlagType,
+               1u,
                hasMoveUpload ? 1u : 0u,
                objectCount,
                pos);
-        vm_autotest_note("mock_hangup_battle_start source=%s tick=%u scene=%s enemy=%u enemies=%u subtype=5 runtime_index=%u pos=(%u,%u) target_source=sce-static-node-order auto=%u response=%s evidence=JianghuOL.CBE:0x01015E14 SCE2 mmBattle:0x66CC\n",
+        vm_autotest_note("mock_hangup_battle_start source=%s tick=%u scene=%s enemy=%u enemies=%u subtype=5 runtime_index=%u pos=(%u,%u) target_source=sce-static-node-order auto=%u native_exit25_2=1 response=%s evidence=JianghuOL.CBE:0x01015E14 SCE2 mmBattle:0x8996+0x5444\n",
                           continuation ? "scene-poll" : "request",
                           g_schedulerTick,
                           scene ? scene : "-",
@@ -7719,8 +7744,9 @@ static u32 vm_net_mock_build_hangup_battle_start_response(const u8 *request, u32
                          sceneMonsterIndex,
                          sceneMonsterPosX,
                          sceneMonsterPosY,
-                         autoFlagType,
-                         continuation ? "2/2+4/5+4/11" : "2/10+2/2+4/5+4/11");
+                         1u,
+                         continuation ? "2/2+4/5+4/11+25/2" :
+                                        "2/10+2/2+4/5+4/11+25/2");
     }
     return pos;
 }
@@ -8010,8 +8036,6 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     bool continueSceneHangup = false;
     bool continueSceneHangupBeforePollDeadline = false;
     int teamBattleRosterPreambleCount = 0;
-    u8 hangupAutoFlagType = (u8)vm_net_mock_env_u32(
-        "CBE_HANGUP_BATTLE_AUTO_FLAG", 1);
     u32 responseObjectCount = 1;
     const char *roleName = role ? role->name : vm_net_mock_default_role_name();
 
@@ -8269,10 +8293,10 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     if (!vm_net_mock_put_object_raw(out, outCap, &pos, "battleinfo", battleInfo, (u16)battleInfoLen))
         return 0;
     vm_net_mock_finish_wt_object(out, objectStart, pos);
-    if (continueSceneHangup && hangupAutoFlagType != 0)
+    if (continueSceneHangup)
     {
         if (!vm_net_mock_append_battle_case11_auto_flag_object(
-                out, outCap, &pos, hangupAutoFlagType))
+                out, outCap, &pos, 1))
         {
             return 0;
         }
@@ -8286,7 +8310,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
     }
     vm_net_mock_finish_wt_packet(out, pos, responseObjectCount);
     g_mockBattleOperateSessionArmed = 1;
-    if (continueSceneHangup && hangupAutoFlagType != 0)
+    if (continueSceneHangup)
         vm_net_mock_battle_auto_arm();
     else
         vm_net_mock_battle_auto_reset();
@@ -8361,7 +8385,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                prefillEnemyTemplate ? 1u : 0u,
                continueSceneHangup ? 1u : 0u,
                continueSceneHangupBeforePollDeadline ? 1u : 0u,
-               continueSceneHangup ? (u32)hangupAutoFlagType : 0u,
+               continueSceneHangup ? 1u : 0u,
                responseObjectCount);
         vm_autotest_note("mock_challenge_battle_start id=%u requested=%u roleid=%u enemies=%u wire=%u level=%u hp=%u/%u perhp=%u/%u rolemp=%u/%u enemymp=%u atk=%u def=%u exp=%u gold=%u index=%u pos=(%u,%u) reqIndex=%u reqPos=(%u,%u) target_source=%s subtype=%u side=%u scene_start=%u hangup_continue=%u auto=%u table=%08x ids=%u/%u/%u/%u\n",
                          id, requestedEnemyId,
@@ -8385,7 +8409,7 @@ static u32 vm_net_mock_build_challenge_interaction_response_ex(
                          sceneMonsterTargetSource,
                          battleStartSubtype, battleSide, useSceneMonsterStart ? 1 : 0,
                          continueSceneHangup ? 1u : 0u,
-                         continueSceneHangup ? (u32)hangupAutoFlagType : 0u,
+                         continueSceneHangup ? 1u : 0u,
                           enemyTable, enemyTableIds[0], enemyTableIds[1],
                           enemyTableIds[2], enemyTableIds[3]);
     }

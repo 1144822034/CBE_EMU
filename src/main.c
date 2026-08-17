@@ -233,6 +233,10 @@ typedef enum
      * close natively and enter the next hangup round. */
     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL,
     VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL,
+    /* Proves the native scene-hangup exit contract without any reward-panel
+     * input: 25/2(result=1,type=1) must reach mmBattle:0x8996, then the
+     * final action reaches 0x5E92 and emits the client's own 25/5. */
+    VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT,
     /* Exercises the product's opt-in reward confirmation assist.  The test
      * scenario itself schedules no reward-panel tap; it must observe the
      * real 4/7 panel, one host hardware touch, the client-owned 25/5, then
@@ -268,6 +272,7 @@ typedef enum
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_VISIBLE,
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_CANCEL_RESPONSE,
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL,
+    VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT,
     VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE,
     VM_AUTOMATION_STAGE_PASSED,
     VM_AUTOMATION_STAGE_FAILED
@@ -303,6 +308,11 @@ typedef struct
     u8 hangupAutoEnableResponseSeen;
     u8 hangupAutoDisableResponseSeen;
     u8 hangupSettlementResponseSeen;
+    u8 hangupNativeAutoExitResponseSeen;
+    u8 hangupNativeAutoExitParserSeen;
+    u8 hangupNativeAutoExitPcSeen;
+    u8 hangupNativeManualExitPcSeen;
+    u8 hangupNativeExitUplinkSeen;
     u8 hangupAutoVisibleCaptured;
     u8 hangupRapidEntryTapSent;
     u8 hangupRapidEntryAwaitResponse;
@@ -325,6 +335,11 @@ typedef struct
     u32 hangupSettlementInputCount;
     u32 hangupSettlementActionResponseCount;
     u32 hangupSettlementResponseCount;
+    u32 hangupNativeAutoExitResponseSequence;
+    u32 hangupNativeAutoExitParserFrame;
+    u32 hangupNativeAutoExitPcFrame;
+    u32 hangupNativeManualExitPcFrame;
+    u32 hangupNativeExitUplinkFrame;
     u32 hangupRapidEntrySettlementBaseline;
     u32 hangupRapidEntryTapFrame;
     u32 hangupRapidEntryResponseSequence;
@@ -359,6 +374,7 @@ typedef struct
     u32 equipmentEnhanceStage1ResponseFrame;
     u32 equipmentEnhanceStage1ResponseSequence;
     u32 battleModuleSpBf;
+    u32 battleModuleCodeBase;
     u32 hangupBattleResponseCount;
     u32 battleActionResponseCount;
     u32 captureIndex;
@@ -421,6 +437,7 @@ static void vm_autotest_trace_update_guest_callback(const char *phase,
                                                      u32 responseLen);
 static void vm_automation_note_battle_handler_pc(u32 localPc,
                                                   u32 moduleSpBf);
+static void vm_automation_note_battle_native_exit_pc(u32 pc);
 static void vm_automation_note_battle_scene_char_list(u32 sequence,
                                                        u32 localPc);
 static void vm_automation_render_complete(void);
@@ -3318,6 +3335,76 @@ static void vm_hangup_protocol_parser_trace_note_pc(u32 pc)
 }
 
 /*
+ * The on-disk CBM is a packed module rather than the code image executed in
+ * the VM pool.  This opt-in probe preserves the post-loader image for static
+ * analysis.  It is deliberately one-shot and read-only: the guest module,
+ * packet queue, registers and input queue are never changed.
+ */
+#define VM_HANGUP_FORENSICS_BATTLE_MODULE_SIZE 0x1614fu
+#define VM_HANGUP_FORENSICS_BATTLE_MODULE_CHUNK 4096u
+
+static void vm_hangup_forensics_dump_loaded_battle_module_once(u32 codeBase)
+{
+    const char *path = getenv("CBE_FORENSICS_BATTLE_MODULE_DUMP");
+    static u8 attempted = 0;
+    u8 buffer[VM_HANGUP_FORENSICS_BATTLE_MODULE_CHUNK];
+    u32 offset = 0;
+    FILE *dump;
+    FILE *existing;
+    FILE *trace;
+
+    if (attempted || path == NULL || path[0] == 0 || codeBase == 0)
+        return;
+    attempted = 1;
+    existing = fopen(path, "rb");
+    if (existing != NULL)
+    {
+        fclose(existing);
+        goto trace_failure;
+    }
+    dump = fopen(path, "wb");
+    if (dump == NULL)
+        goto trace_failure;
+
+    while (offset < VM_HANGUP_FORENSICS_BATTLE_MODULE_SIZE)
+    {
+        u32 chunk = VM_HANGUP_FORENSICS_BATTLE_MODULE_SIZE - offset;
+
+        if (chunk > sizeof(buffer))
+            chunk = sizeof(buffer);
+        if (uc_mem_read(MTK, codeBase + offset, buffer, chunk) != UC_ERR_OK ||
+            fwrite(buffer, 1, chunk, dump) != chunk)
+        {
+            fclose(dump);
+            goto trace_failure;
+        }
+        offset += chunk;
+    }
+    fclose(dump);
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "[info][forensics] mmBattle_runtime_dump path=%s code_base=%08x bytes=%u trigger=local-7bd0 read_only=1\n",
+                path, codeBase, VM_HANGUP_FORENSICS_BATTLE_MODULE_SIZE);
+        fflush(trace);
+        fclose(trace);
+    }
+    return;
+
+trace_failure:
+    trace = fopen("logs/hangup-protocol.log", "ab");
+    if (trace != NULL)
+    {
+        fprintf(trace,
+                "[warn][forensics] mmBattle_runtime_dump_failed path=%s code_base=%08x trigger=local-7bd0\n",
+                path, codeBase);
+        fflush(trace);
+        fclose(trace);
+    }
+}
+
+/*
  * Read-only mmBattle boundary for the post-shop hangup investigation.
  *
  * The mmBattle callback keeps the main CBE R9 while its code is relocated into
@@ -3382,12 +3469,17 @@ static void vm_hangup_battle_module_trace_note_pc(u32 pc)
     if (pc < codeBase)
         return;
     localPc = pc - codeBase;
+    if (localPc == 0x7BD0u)
+        vm_hangup_forensics_dump_loaded_battle_module_once(codeBase);
     g_hangupProtocolParserTrace.mmBattleCodeBase = codeBase;
     if (localPc == 0x6BEEu)
         g_hangupProtocolParserTrace.battleStartReadySeen = 1;
     {
         int appIndex = vm_dl_find_loaded_index_by_pc(pc);
         u32 moduleSpBf = appIndex >= 0 ? g_vmDlLoadedApps[appIndex].spBf : 0;
+
+        if (g_vmAutomation.active && localPc == 0x66CCu)
+            g_vmAutomation.battleModuleCodeBase = codeBase;
         vm_automation_note_battle_handler_pc(localPc, moduleSpBf);
     }
     switch (localPc)
@@ -5861,13 +5953,35 @@ static void vm_hangup_auto_confirm_note_network_response(
 static void vm_hangup_auto_confirm_note_uplink(const u8 *packet,
                                                 u32 packetLen)
 {
-    if (!g_vmHangupAutoConfirm.enabled || packet == NULL ||
+    if (packet == NULL ||
         packetLen < 9u || packet[0] != 'W' || packet[1] != 'T' ||
         (((u32)packet[2] << 8) | packet[3]) != packetLen ||
         packet[4] != 1 || packet[5] != 25 || packet[6] != 5)
     {
         return;
     }
+
+    if (g_vmAutomation.active &&
+        g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT &&
+        !g_vmAutomation.hangupNativeExitUplinkSeen)
+    {
+        g_vmAutomation.hangupNativeExitUplinkSeen = 1;
+        g_vmAutomation.hangupNativeExitUplinkFrame =
+            g_vmAutomation.renderFrames;
+        /* A fresh 0x66CC visit after this client-owned request is the only
+         * accepted next-battle parser boundary. */
+        g_vmAutomation.battleStartHandlerSeen = 0;
+        g_vmAutomation.battleSceneCharListSeen = 0;
+        g_vmAutomation.battleStartHandlerFrame = 0;
+        g_vmAutomation.battleSceneCharListFrame = 0;
+        vm_autotest_note("automation_hangup_native_auto_exit_uplink wt=25/5 "
+                         "frame=%u reentry_handler_reset=1\n",
+                         g_vmAutomation.hangupNativeExitUplinkFrame);
+    }
+
+    if (!g_vmHangupAutoConfirm.enabled)
+        return;
 
     /* This is emitted by BattleScene_ExitAndCleanup itself.  It is evidence
      * that the client consumed our normal touchscreen event; the helper does
@@ -5995,6 +6109,8 @@ static const char *vm_automation_stage_name(vm_automation_stage stage)
         return "wait-hangup-auto-cancel-response";
     case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL:
         return "wait-hangup-auto-terminal";
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT:
+        return "wait-hangup-native-auto-exit";
     case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE:
         return "wait-hangup-auto-reward-continue";
     case VM_AUTOMATION_STAGE_PASSED: return "passed";
@@ -6025,6 +6141,8 @@ static const char *vm_automation_scenario_name(void)
         return "hangup-auto-cancel-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL:
         return "hangup-auto-terminal-v1";
+    case VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT:
+        return "hangup-native-auto-exit-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE:
         return "hangup-auto-reward-continue-v1";
     case VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY:
@@ -6041,6 +6159,7 @@ static bool vm_automation_scenario_uses_direct_hangup(void)
     return g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_DIRECT_HANGUP ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
+           g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT ||
            g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
            g_vmAutomation.scenario ==
                VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
@@ -6370,6 +6489,8 @@ static void vm_automation_note_battle_handler_pc(u32 localPc,
         if ((g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL ||
              g_vmAutomation.scenario == VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
              g_vmAutomation.scenario ==
+                 VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT ||
+             g_vmAutomation.scenario ==
                  VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
              g_vmAutomation.scenario ==
                  VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
@@ -6397,6 +6518,83 @@ static void vm_automation_note_battle_handler_pc(u32 localPc,
                              g_vmAutomationBattlePhaseWatchAddress,
                              g_vmAutomation.renderFrames);
         }
+    }
+}
+
+static void vm_automation_note_battle_native_exit_pc(u32 pc)
+{
+    u32 localPc;
+    u32 codeBase;
+
+    if (!g_vmAutomation.active ||
+        g_vmAutomation.scenario !=
+            VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT)
+    {
+        return;
+    }
+    codeBase = g_vmAutomation.battleModuleCodeBase;
+    if (codeBase == 0)
+    {
+        int appIndex;
+
+        /* The 25/2 parser can run before the first observed 0x66CC callback.
+         * Derive a candidate base only from the loaded module containing this
+         * PC, and only after the exact response object was queued. */
+        if (!g_vmAutomation.hangupNativeAutoExitResponseSeen)
+            return;
+        appIndex = vm_dl_find_loaded_index_by_pc(pc);
+        if (appIndex < 0)
+            return;
+        codeBase = g_vmDlLoadedApps[appIndex].buffer;
+        if (codeBase == 0 || pc < codeBase)
+            return;
+        localPc = pc - codeBase;
+        if (localPc != 0x8996u && localPc != 0x5E92u &&
+            localPc != 0x60C8u)
+        {
+            return;
+        }
+        g_vmAutomation.battleModuleCodeBase = codeBase;
+    }
+    else
+    {
+        if (pc < codeBase)
+            return;
+        localPc = pc - codeBase;
+    }
+
+    if (localPc == 0x8996u &&
+        !g_vmAutomation.hangupNativeAutoExitParserSeen)
+    {
+        g_vmAutomation.hangupNativeAutoExitParserSeen = 1;
+        g_vmAutomation.hangupNativeAutoExitParserFrame =
+            g_vmAutomation.renderFrames;
+        vm_autotest_note("automation_hangup_native_auto_exit_parser "
+                         "local_pc=0x8996 code_base=%08x frame=%u\n",
+                         codeBase,
+                         g_vmAutomation.hangupNativeAutoExitParserFrame);
+    }
+    else if (localPc == 0x5E92u &&
+             !g_vmAutomation.hangupNativeAutoExitPcSeen)
+    {
+        g_vmAutomation.hangupNativeAutoExitPcSeen = 1;
+        g_vmAutomation.hangupNativeAutoExitPcFrame =
+            g_vmAutomation.renderFrames;
+        vm_autotest_note("automation_hangup_native_auto_exit_pc "
+                         "local_pc=0x5e92 code_base=%08x frame=%u\n",
+                         codeBase,
+                         g_vmAutomation.hangupNativeAutoExitPcFrame);
+    }
+    else if (localPc == 0x60C8u &&
+             !g_vmAutomation.hangupNativeManualExitPcSeen)
+    {
+        g_vmAutomation.hangupNativeManualExitPcSeen = 1;
+        g_vmAutomation.hangupNativeManualExitPcFrame =
+            g_vmAutomation.renderFrames;
+        vm_autotest_note("automation_hangup_native_auto_exit_manual_pc "
+                         "local_pc=0x60c8 code_base=%08x frame=%u\n",
+                         codeBase,
+                         g_vmAutomation.hangupNativeManualExitPcFrame);
     }
 }
 
@@ -6787,6 +6985,7 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
     u8 sawHangup = 0;
     u8 sawAutoEnable = 0;
     u8 sawAutoDisable = 0;
+    u8 sawNativeAutoExit = 0;
     u8 sawSettlement = 0;
     u8 sawBattleAction = 0;
     u8 sawActorOtherAck = 0;
@@ -6849,6 +7048,22 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                     sawAutoEnable = 1;
                 else if (autoType == 0)
                     sawAutoDisable = 1;
+            }
+        }
+        if (kind == 25 && subtype == 2)
+        {
+            u8 result = 0;
+            u8 type = 0;
+
+            if (vm_automation_response_object_u8_field(
+                    packet + offset + 6u, (u16)(objectLen - 6u),
+                    "result", &result) &&
+                vm_automation_response_object_u8_field(
+                    packet + offset + 6u, (u16)(objectLen - 6u),
+                    "type", &type) &&
+                result == 1 && type == 1)
+            {
+                sawNativeAutoExit = 1;
             }
         }
         offset += objectLen;
@@ -6950,6 +7165,17 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
         g_vmAutomation.hangupAutoEnableResponseSeen = 1;
     if (sawAutoDisable)
         g_vmAutomation.hangupAutoDisableResponseSeen = 1;
+    if (sawNativeAutoExit &&
+        g_vmAutomation.scenario ==
+            VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT &&
+        !g_vmAutomation.hangupNativeAutoExitResponseSeen)
+    {
+        g_vmAutomation.hangupNativeAutoExitResponseSeen = 1;
+        g_vmAutomation.hangupNativeAutoExitResponseSequence = sequence;
+        vm_autotest_note("automation_hangup_native_auto_exit_response "
+                         "seq=%u result=1 type=1 frame=%u\n",
+                         sequence, g_vmAutomation.renderFrames);
+    }
     if (sawBattleAction)
     {
         ++g_vmAutomation.battleActionResponseCount;
@@ -6998,10 +7224,10 @@ static void vm_automation_note_network_response(const u8 *packet, u32 packetLen,
                          "actor_other_ack=1 battle_start=%u frame=%u\n",
                          sequence, sawHangup, g_vmAutomation.renderFrames);
     }
-    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u enhance_stage1=%u hangup=%u auto=%u/%u settlement=%u hangup_count=%u action_count=%u\n",
+    vm_autotest_note("automation_packet seq=%u title_update=%u title_login=%u task_subset=%u shop=%u/%u scene_complete=%u actor_other_ack=%u enhance_stage1=%u hangup=%u auto=%u/%u native_exit25_2=%u settlement=%u hangup_count=%u action_count=%u\n",
                      sequence, sawTitleUpdateComplete, sawTitleLoginResponse, sawTaskSubset, sawShopStatus, sawShopMoney,
                      sawSceneComplete, sawActorOtherAck, sawEquipmentEnhanceStage1, sawHangup, sawAutoEnable, sawAutoDisable,
-                     sawSettlement, g_vmAutomation.hangupBattleResponseCount,
+                     sawNativeAutoExit, sawSettlement, g_vmAutomation.hangupBattleResponseCount,
                      g_vmAutomation.battleActionResponseCount);
 }
 
@@ -7086,6 +7312,9 @@ static void vm_automation_tick(void)
                 ? 60000u : g_vmAutomation.stepTimeoutMs;
         if (g_vmAutomation.stage == VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL)
             stageTimeoutMs = 45000u;
+        else if (g_vmAutomation.stage ==
+                 VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT)
+            stageTimeoutMs = 60000u;
         else if (g_vmAutomation.stage ==
                  VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE)
         {
@@ -7578,6 +7807,8 @@ static void vm_automation_tick(void)
             else if (g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL ||
                      g_vmAutomation.scenario ==
+                         VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT ||
+                     g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE ||
                      g_vmAutomation.scenario ==
                          VM_AUTOMATION_SCENARIO_HANGUP_AUTO_VITALS_RECOVERY ||
@@ -7591,14 +7822,20 @@ static void vm_automation_tick(void)
                                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL
                             ? "hangup-auto-terminal-start"
                             : (g_vmAutomation.scenario ==
+                                   VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT
+                                ? "hangup-native-auto-exit-start"
+                            : (g_vmAutomation.scenario ==
                                    VM_AUTOMATION_SCENARIO_HANGUP_AUTO_RAPID_ENTRY
                                 ? "hangup-auto-rapid-entry-start"
-                                : "hangup-auto-reward-continue-start"));
+                                : "hangup-auto-reward-continue-start")));
                     vm_automation_set_stage(
                         g_vmAutomation.scenario ==
                                 VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL
                             ? VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_TERMINAL
-                            : VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE,
+                            : (g_vmAutomation.scenario ==
+                                   VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT
+                                ? VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT
+                                : VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE),
                         "three-enemy-auto-round-rendered");
                 }
             }
@@ -7642,6 +7879,51 @@ static void vm_automation_tick(void)
             vm_automation_request_capture("hangup-auto-reward-panel");
             vm_automation_finish(1,
                                  "native-4-7-reward-panel-received");
+        }
+        break;
+    case VM_AUTOMATION_STAGE_WAIT_HANGUP_NATIVE_AUTO_EXIT:
+        /* This scenario adds no reward-panel input.  The automatic close is
+         * acceptable only when the exact server object reaches 0x8996, the
+         * distinct DrawBattleMain sender reaches 0x5E92, and the resulting
+         * client 25/5 leads to a fresh scene-poll battle parser/action. */
+        if (!g_vmAutomation.hangupNativeAutoExitResponseSeen)
+        {
+            vm_automation_request_capture("hangup-native-auto-exit-missing-25-2");
+            vm_automation_finish(0, "hangup-start-response-missing-25-2-result-1-type-1");
+            break;
+        }
+        if (g_vmAutomation.hangupNativeManualExitPcSeen)
+        {
+            vm_automation_request_capture("hangup-native-auto-exit-manual-path");
+            vm_automation_finish(0, "native-auto-exit-visited-manual-0x60c8");
+            break;
+        }
+        if (g_vmAutomation.hangupNativeAutoExitParserSeen &&
+            g_vmAutomation.hangupSettlementResponseSeen &&
+            g_vmAutomation.hangupNativeAutoExitPcSeen &&
+            g_vmAutomation.hangupNativeExitUplinkSeen &&
+            g_vmAutomation.hangupBattleResponseCount >= 2u &&
+            g_vmAutomation.battleStartHandlerSeen &&
+            g_vmAutomation.battleActionResponseCount >
+                g_vmAutomation.hangupSettlementActionResponseCount &&
+            g_vmAutomation.inputCount ==
+                g_vmAutomation.hangupSettlementInputCount &&
+            g_vmHangupAutoConfirm.confirmPressCount == 0 &&
+            g_vmHangupAutoConfirm.clientExitCount == 0)
+        {
+            vm_autotest_note("automation_hangup_native_auto_exit_complete "
+                             "start_seq=%u parser_frame=%u exit_frame=%u "
+                             "uplink_frame=%u inputs=%u next_starts=%u actions=%u\n",
+                             g_vmAutomation.hangupNativeAutoExitResponseSequence,
+                             g_vmAutomation.hangupNativeAutoExitParserFrame,
+                             g_vmAutomation.hangupNativeAutoExitPcFrame,
+                             g_vmAutomation.hangupNativeExitUplinkFrame,
+                             g_vmAutomation.inputCount,
+                             g_vmAutomation.hangupBattleResponseCount,
+                             g_vmAutomation.battleActionResponseCount);
+            vm_automation_request_capture("hangup-native-auto-exit-continued");
+            vm_automation_finish(
+                1, "native-25-2-0x8996-0x5e92-25-5-scene-poll-next-4-5-4-6");
         }
         break;
     case VM_AUTOMATION_STAGE_WAIT_HANGUP_AUTO_REWARD_CONTINUE:
@@ -7949,15 +8231,23 @@ static void vm_autotest_parse_actions(const char *script)
 static void vm_hangup_auto_confirm_init(int argc, char *args[])
 {
     const char *configured = getenv("CBE_HANGUP_AUTO_CONFIRM");
+    const char *configurationSource =
+        configured != NULL ? "environment" : "disabled-by-default";
     bool enabled = false;
 
     for (int i = 1; i < argc; ++i)
     {
         static const char option[] = "--hangup-auto-confirm=";
         if (strcmp(args[i], "--hangup-auto-confirm") == 0)
+        {
             configured = "1";
+            configurationSource = "cli";
+        }
         else if (strncmp(args[i], option, sizeof(option) - 1u) == 0)
+        {
             configured = args[i] + sizeof(option) - 1u;
+            configurationSource = "cli";
+        }
     }
     if (configured != NULL && configured[0] != 0 &&
         strcmp(configured, "0") != 0 &&
@@ -7971,7 +8261,8 @@ static void vm_hangup_auto_confirm_init(int argc, char *args[])
     if (enabled)
     {
         printf("[info][hangup] reward_auto_confirm enabled "
-               "mode=hardware-input-after-rendered-4/7\n");
+               "mode=hardware-input-after-rendered-4/7 source=%s\n",
+               configurationSource ? configurationSource : "config");
     }
 }
 
@@ -8011,6 +8302,8 @@ static void vm_automation_init_config(int argc, char *args[])
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_CANCEL;
     else if (strcmp(scenario, "hangup-auto-terminal-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_TERMINAL;
+    else if (strcmp(scenario, "hangup-native-auto-exit-v1") == 0)
+        parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT;
     else if (strcmp(scenario, "hangup-auto-reward-continue-v1") == 0)
         parsedScenario = VM_AUTOMATION_SCENARIO_HANGUP_AUTO_REWARD_CONTINUE;
     else if (strcmp(scenario, "hangup-auto-vitals-recovery-v1") == 0)
@@ -8037,8 +8330,9 @@ static void vm_automation_init_config(int argc, char *args[])
             : VM_AUTOMATION_STAGE_BOOT_CONFIRM);
     g_vmAutomation.active = 1;
     g_vmAutomation.maxSteps = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
-        ? 1u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
-            ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u));
+        ? 1u : (parsedScenario == VM_AUTOMATION_SCENARIO_HANGUP_NATIVE_AUTO_EXIT
+            ? 14u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
+                ? 4u : (g_vmAutomation.timedTitleDriver ? 13u : 10u)));
     g_vmAutomation.totalTimeoutMs = parsedScenario == VM_AUTOMATION_SCENARIO_TITLE_MODULE_UPDATE
         ? 30000u : (parsedScenario == VM_AUTOMATION_SCENARIO_SCENE_TELEPORT_STONE_PROBE
             ? 75000u : (g_vmAutomation.timedTitleDriver ? 180000u : 120000u));
@@ -19547,6 +19841,7 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_hangup_battle_state_watch_note_pc((u32)address & ~1u);
     vm_hangup_transition_trace_note_pc((u32)address & ~1u);
     vm_hangup_battle_module_trace_note_pc((u32)address & ~1u);
+    vm_automation_note_battle_native_exit_pc((u32)address & ~1u);
     vm_hangup_battle_render_trace_note_pc((u32)address & ~1u);
     vm_hangup_vital_forensics_note_pc((u32)address & ~1u);
     vm_note_sce_load_entry_pc((u32)address & ~1u);

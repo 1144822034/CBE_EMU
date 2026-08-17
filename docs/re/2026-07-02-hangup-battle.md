@@ -36,8 +36,9 @@ Success response:
 - `1/4/5`: scene-monster battle start. Its `battleinfo` contains the server
   SCE2-derived **runtime static-scene-node** tuple and local player vitals; the
   client copies the monster model from its existing scene node.
-- Optional `1/4/11`: auto-battle UI flag, controlled by
-  `CBE_HANGUP_BATTLE_AUTO_FLAG`.
+- `1/4/11 { result=1,type=1 }`: required native auto-battle flag. Every
+  scene-hangup start carries it so `BattleAutoAction_TimerTick` can issue its
+  first `4/12`; this behavior is not environment-configurable.
 - When the request contains a trailing movement upload, one empty `1/2/1`
   acknowledgement follows the battle objects.
 
