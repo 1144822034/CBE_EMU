@@ -2189,6 +2189,9 @@ typedef struct vm_mock_service_client_session
     u16 sceneVisibleY;
     u32 sceneVisibleTick;
     bool shopSceneNpcReseedPending;
+    /* 1 = real shop scene return (30/2 may be required), 2 = fresh mmGame
+     * bootstrap only (replay 27/11 without re-entering the scene). */
+    u8 shopSceneNpcReseedMode;
     char shopSceneNpcReseedScene[64];
     /* mmShop -> mmGame first delivers a coordinate-bearing 30/2 result, then
      * immediately emits the regular scene post-enter combo.  That combo can
@@ -2854,6 +2857,7 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
               !vm_net_mock_scene_names_equal_exact(session->shopSceneNpcReseedScene,
                                                    scene);
     session->shopSceneNpcReseedPending = true;
+    session->shopSceneNpcReseedMode = 1;
     snprintf(session->shopSceneNpcReseedScene,
              sizeof(session->shopSceneNpcReseedScene), "%s", scene);
     if (changed)
@@ -2861,6 +2865,79 @@ static void vm_mock_service_mark_shop_scene_npc_reseed_pending(const char *sourc
         printf("[info][mock-service] scene_npc_reseed_arm client=%08x scene=%s trigger=shop-open source=%s delivery=next-scene-followup\n",
                session->clientId, scene, source ? source : "-");
     }
+}
+
+static void vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
+    const char *source)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+    const char *scene = vm_net_mock_current_scene_name();
+    bool changed = false;
+
+    if (session == NULL)
+        return;
+    if (!vm_net_mock_scene_name_is_safe(scene) &&
+        session->sceneVisibleReady && !session->sceneVisiblePending &&
+        vm_net_mock_scene_name_is_safe(session->sceneVisibleScene))
+    {
+        scene = session->sceneVisibleScene;
+    }
+    if (!vm_net_mock_scene_name_is_safe(scene))
+        return;
+    changed = !session->shopSceneNpcReseedPending ||
+              session->shopSceneNpcReseedMode != 2 ||
+              session->shopSceneNpcReseedScene[0] == 0 ||
+              !vm_net_mock_scene_names_equal_exact(session->shopSceneNpcReseedScene,
+                                                   scene);
+    session->shopSceneNpcReseedPending = true;
+    session->shopSceneNpcReseedMode = 2;
+    snprintf(session->shopSceneNpcReseedScene,
+             sizeof(session->shopSceneNpcReseedScene), "%s", scene);
+    if (changed)
+    {
+        printf("[info][mock-service] scene_npc_reseed_arm client=%08x "
+               "scene=%s trigger=backpack-grid-bootstrap source=%s "
+               "delivery=next-scene-followup mode=bootstrap-only\n",
+               session->clientId, scene, source ? source : "-");
+    }
+}
+
+static bool vm_mock_service_shop_scene_npc_reseed_is_bootstrap_only(void)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    return session != NULL && session->shopSceneNpcReseedPending &&
+           session->shopSceneNpcReseedMode == 2;
+}
+
+static bool vm_mock_service_shop_scene_npc_reseed_matches(const char *scene);
+
+static bool vm_mock_service_shop_scene_npc_reseed_requires_scene_enter(
+    const char *scene)
+{
+    return vm_mock_service_shop_scene_npc_reseed_matches(scene) &&
+           !vm_mock_service_shop_scene_npc_reseed_is_bootstrap_only();
+}
+
+static void vm_mock_service_clear_shop_scene_npc_reseed_pending(
+    const char *source)
+{
+    vm_mock_service_client_session *session =
+        vm_mock_service_get_active_client_session();
+
+    if (session == NULL || !session->shopSceneNpcReseedPending)
+        return;
+    printf("[info][mock-service] scene_npc_reseed_clear client=%08x "
+           "scene=%s source=%s mode=%u\n",
+           session->clientId,
+           session->shopSceneNpcReseedScene[0] ?
+               session->shopSceneNpcReseedScene : "-",
+           source ? source : "-", (u32)session->shopSceneNpcReseedMode);
+    session->shopSceneNpcReseedPending = false;
+    session->shopSceneNpcReseedMode = 0;
+    session->shopSceneNpcReseedScene[0] = 0;
 }
 
 static bool vm_mock_service_shop_scene_npc_reseed_matches(const char *scene)
@@ -4457,6 +4534,7 @@ static void vm_mock_service_session_mark_offline(vm_mock_service_client_session 
     session->sceneVisibleTick = g_schedulerTick;
     session->scenePendingScene[0] = 0;
     session->shopSceneNpcReseedPending = false;
+    session->shopSceneNpcReseedMode = 0;
     session->shopSceneNpcReseedScene[0] = 0;
     session->shopSceneReturnPostEnterPending = false;
     session->shopSceneReturnPostEnterScene[0] = 0;

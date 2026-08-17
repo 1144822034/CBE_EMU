@@ -51,6 +51,12 @@ static void vm_net_mock_monster_catalog_ensure_loaded(void);
 static bool vm_net_mock_ensure_actor_resource_available(
     const char *actorResource, const char **errorOut);
 
+/* A fresh mmGame bootstrap can discard client-side NPC nodes without being a
+ * scene enter.  The catalog arms this narrow session marker so the next
+ * scene task/resource response replays 27/11 without emitting 30/2. */
+static void vm_mock_service_mark_backpack_bootstrap_npc_reseed_pending(
+    const char *source);
+
 /* Chest configuration belongs to the catalog, while durable world-chat
  * storage and live delivery belong to the social service.  A successful
  * chest opening calls this narrow bridge only after the role mutation has
