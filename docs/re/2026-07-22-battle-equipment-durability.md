@@ -2,7 +2,7 @@
 
 ## phase
 
-战斗状态持久化；状态：已实现并已验证。
+战斗状态持久化；状态：已实现，纯状态回归通过，客户端黑盒待验收。
 
 ## 预期
 
@@ -60,44 +60,47 @@ currentCount。
 
 ## 首个偏离
 
-vm_net_mock_role_apply_battle_settlement 调用了
-vm_net_mock_role_service_apply_battle_wear，而它只会在胜利
-4/7 结算路径执行。
+正常胜利的 `4/6 + 4/7` 路径先由
+`vm_net_mock_append_battle_terminal_status_objects()` 构建结算对象。构建成功后，
+调用方看到 `terminalStatusAppended=true`，会跳过旧的
+`vm_net_mock_battle_save_terminal_role_state()`；而旧的耐久扣减只在该保存助手中，
+所以正常胜利没有执行装备耐久扣减。死亡和成功逃跑走的是另一条当前状态保存路径，
+也没有共享这个扣减边界。
 
-- 击败怪物：4/6 + 4/7 -> vm_net_mock_battle_save_terminal_role_state
-  -> vm_net_mock_role_apply_battle_settlement，会扣一次。
-- 成功逃跑：4/4 result=1 -> vm_net_mock_battle_save_current_role_state，
-  不经过 4/7，原先不会扣。
-- 角色死亡：敌方动作使 HP 变 0 -> 同一 save_current_role_state，
-  原先也不会扣。
-
-因此扣耐久被错误归属给“胜利奖励结算”而非“战斗已结束”。
+这说明首个错误状态不是客户端 `4/7` 解析，而是服务端把耐久扣减错误地绑定在某个
+结算保存分支上，导致不同终局的持久化行为不一致。
 
 ## 修复设计
 
-保留现有 lastBattleWearSerial 防重和 MySQL 行持久化，但将调用从奖励结算
-移到终结状态拥有者：
+保留 `lastBattleWearSerial` 的单场防重和 MySQL 持久化，并把扣减挂到已经成功追加
+`4/7`（以及自动药品同步对象）的终局边界：
 
-1. vm_net_mock_battle_save_terminal_role_state：胜利结算完成后扣一次；
-2. 角色死亡的每个终结分支：保存角色当前状态后扣一次；
-3. 成功逃跑分支：发送 4/4 result=1、结束战斗后扣一次。
+1. `vm_net_mock_append_battle_terminal_status_objects()` 成功追加 `4/7` 后调用
+   `vm_net_mock_role_service_apply_battle_wear()`，覆盖普通胜利、组队胜利和战斗物品
+   导致的终局；
+2. 没有 `4/7` 的死亡、成功逃跑及零奖励终局继续由
+   `vm_net_mock_battle_save_completed_current_role_state()` 或
+   `vm_net_mock_battle_save_terminal_role_state()` 调用同一助手；
+3. 保存失败时恢复本场原有 serial，允许后续同一终局重试，而不是把失败静默记成已扣；
+4. 失败逃跑仍是进行中的战斗，不扣耐久；`4/7` 不新增未经固件证明的装备字段或
+   刷新对象。
 
-失败逃跑仍是进行中的战斗，不能扣耐久。4/7 不新增未知字段或伪造装备
-刷新包。
+助手只处理可用、槽位匹配且耐久大于 0 的装备，每件减 1 并钳制到 0；日志同时记录
+本场 serial 和实际扣减槽位数。
 
 ## 回归
 
-tmp/battle-equipment-durability-regression.php 是此前的临时回归脚本；它的
-100/100 固定夹具不再适用于真实 equip.dsh 上限。新的持久回归在
-scripts/equipment-durability-max-regression.php 中建立 1001=50、1101=80 的
-真实装备上限，并验证修理不会超过它们。
+`scripts/equipment-durability-max-regression.php` 使用真实 `equip.dsh` 上限验证修理
+不会超过物品定义；`scripts/battle-equipment-durability-regression.c` 在不连接
+MySQL、不启动服务、不操作客户端的纯状态夹具中验证战斗扣减助手。
 
 1. 旧 44/100、70/100 记录在原生装备 bootstrap 前归一为 44/50、70/80；
 2. `26/1 {type=2,id=0xe3000001}` 修理后分别为 50/50、80/80；
 3. 铜钱只按真实缺口 6+10 扣除。
 
-战斗结算路径仍使用同一 `lastBattleWearSerial` 防重助手；后续需要以真实
-DSH 上限夹具补充胜利、逃跑和死亡的黑盒回归。
+战斗结算路径使用同一 `lastBattleWearSerial` 防重助手；仍需用隔离测试账号完成
+客户端黑盒场景，确认战斗结束后重新打开装备界面时，原生 `1/7/7 type=2` bootstrap
+读取到持久化后的耐久。
 
 运行结果（隔离服务）：
 
@@ -105,3 +108,9 @@ DSH 上限夹具补充胜利、逃跑和死亡的黑盒回归。
 
 修理回归不向 26/1 对话响应附加未经验证的装备替换对象；客户端仍会通过既有
 1/7/7 type=2 装备 bootstrap 消费当前耐久。
+
+本次战斗扣减纯回归输出：
+
+    battle-equipment-durability-v1 passed: usable=44->43->0 broken/wrong-slot unchanged
+
+构建验证：`make -j2` 成功链接 `bin/jh-online-server.exe`。
