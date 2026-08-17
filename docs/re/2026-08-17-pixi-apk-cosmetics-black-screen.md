@@ -83,4 +83,12 @@
 - broadcast / enqueue 使用观察者侧的 map `actorId`
 - 客户端：未收录翅/骑/称号 id 仍尝试加载图集
 
-**现网 `47.108.210.191` 需重新部署 mock** 后硬刷新客户端才生效。
+## 2026-08-18 安全黑屏优化（已再次回退）
+
+浏览器反馈妆容全无后，已将 `plistAtlas` / SceneView·ActorLayer nudge **整段回退到** `3fc36cc`（化妆品可显示的检查点）。
+
+根因之一：失败路径 `Assets.unload` 卸掉坐骑多 face 共享的 PNG，已显示贴图变空白。
+
+黑屏需另开、更窄的 native-only 方案（跳过采样即可，禁止 unload 共享图）。
+
+客户端补充：忽略「尚无缓存时的全 0 `31/5`」，避免 visibility enqueue 早于 `onlineEq*` 同步时冲掉后续真妆容。

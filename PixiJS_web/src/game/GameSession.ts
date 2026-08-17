@@ -5872,7 +5872,22 @@ export class GameSession {
           /* Self echo in 31/5 — state already applied from 31/4 when present. */
           continue;
         }
-        this.scenePeerCosmeticsById.set(peerCos.actorId >>> 0, peerCos);
+        const id = peerCos.actorId >>> 0;
+        const allZero =
+          !(peerCos.eqChenghao || peerCos.eqWing || peerCos.eqMount);
+        const prev = this.scenePeerCosmeticsById.get(id);
+        /*
+         * Visibility enqueue can race before onlineEq* is mirrored → empty
+         * 31/5. Caching that would wipe a later real notice on peer rebuild.
+         * Keep empty only when we already had a notice (true unequip).
+         */
+        if (allZero && !prev) {
+          console.info(
+            `[session] cosmetics 31/5 peer=${id} empty ignored (no prior)`,
+          );
+          continue;
+        }
+        this.scenePeerCosmeticsById.set(id, peerCos);
         console.info(
           `[session] cosmetics 31/5 peer=${peerCos.actorId} ch=${peerCos.eqChenghao} wing=${peerCos.eqWing} mount=${peerCos.eqMount}`,
         );

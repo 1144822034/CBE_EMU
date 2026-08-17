@@ -477,6 +477,12 @@ export class ActorLayer {
     eqMount: number,
   ): void {
     const id = actorId >>> 0;
+    const allZero = !(eqChenghao || eqWing || eqMount);
+    const prev = this.pendingPeerCosmetics.get(id);
+    if (allZero && !prev) {
+      /* Match GameSession: ignore empty first notice. */
+      return;
+    }
     this.pendingPeerCosmetics.set(id, {
       eqChenghao: eqChenghao >>> 0,
       eqWing: eqWing >>> 0,
