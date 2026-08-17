@@ -4638,7 +4638,20 @@ static u32 vm_net_mock_battle_player_skill_damage_to_enemy(u32 operate, u32 enem
     return finalDamage;
 }
 
-static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent)
+/* The encounter may contain several copies of one monster type.  The type id
+ * selects stats, but it cannot identify an attack: using it alone makes every
+ * copy consume the same deterministic hit roll.  The wire slot is the
+ * stable, per-battle identity of the attacking monster and remains unchanged
+ * when a 4/6 response is replayed. */
+static u32 vm_net_mock_battle_enemy_attack_roll_salt(u32 enemyId,
+                                                     u8 enemyWireSlot)
+{
+    return enemyId ^ 0xa54ff53au ^
+           ((u32)enemyWireSlot * 0x9e3779b9u);
+}
+
+static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurrent,
+                                                   u8 enemyWireSlot)
 {
     vm_net_mock_monster_stats stats = vm_net_mock_monster_stats_for_enemy(enemyId);
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -4664,7 +4677,7 @@ static u32 vm_net_mock_battle_enemy_damage_to_role(u32 enemyId, u32 roleHpCurren
         return 0;
     if (!vm_net_mock_battle_enemy_attack_hits(
             &stats, &playerStats,
-            enemyId ^ 0xa54ff53au))
+            vm_net_mock_battle_enemy_attack_roll_salt(enemyId, enemyWireSlot)))
         return 0;
     if (vm_net_mock_battle_monster_uses_magic_damage(enemyId))
         damage = vm_net_mock_battle_apply_resistance(damage, playerStats.resist);

@@ -2091,7 +2091,8 @@ static u32 vm_net_mock_build_battle_item_use_response(const u8 *request, u32 req
                                                                   playerSlot);
                 u32 oneCounterDamage = vm_net_mock_battle_apply_damage_to_role(
                     vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                            g_mockBattleRoleHpCurrent));
+                                                            g_mockBattleRoleHpCurrent,
+                                                            counterWireSlots[i]));
 
                 if (counterActionType == 1)
                 {
@@ -2542,10 +2543,10 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
     if (!terminalFollowup && g_mockBattlePendingEnemyTurn != 0 &&
         g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0)
     {
+        u8 counterEnemyWireSlot = vm_net_mock_battle_first_alive_enemy_wire(
+            playerOnRight, battleSide, enemySlot);
         u8 counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTOR_WIRE_SLOT",
-                                                         vm_net_mock_battle_first_alive_enemy_wire(playerOnRight,
-                                                                                                   battleSide,
-                                                                                                   enemySlot));
+                                                         counterEnemyWireSlot);
         u8 counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_TARGET_WIRE_SLOT",
                                                           playerSlot);
         if (counterActionType == 1)
@@ -2556,10 +2557,11 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                                                            counterTargetWireSlot);
         }
         vm_net_mock_battle_select_enemy_modifier_for_wire(
-            counterActorWireSlot, playerOnRight, battleSide, enemySlot);
+            counterEnemyWireSlot, playerOnRight, battleSide, enemySlot);
         counterDamageValue = vm_net_mock_battle_apply_damage_to_role(
             vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                    g_mockBattleRoleHpCurrent));
+                                                    g_mockBattleRoleHpCurrent,
+                                                    counterEnemyWireSlot));
         if (counterDamageValue == 0)
             counterRecordChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
@@ -2677,7 +2679,8 @@ static u32 vm_net_mock_build_battle_operate_response(const u8 *request, u32 requ
                     counterWireSlots[i], playerOnRight, battleSide, enemySlot);
                 u32 oneCounterDamage = vm_net_mock_battle_apply_damage_to_role(
                     vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                            g_mockBattleRoleHpCurrent));
+                                                            g_mockBattleRoleHpCurrent,
+                                                            counterWireSlots[i]));
                 counterDamageValues[i] = oneCounterDamage;
                 counterChildFlags[i] = oneCounterDamage == 0
                                            ? VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE
@@ -3353,10 +3356,10 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
     if (!terminalFollowup && g_mockBattlePendingEnemyTurn != 0 &&
         g_mockBattleEnemyHpCurrent > 0 && g_mockBattleRoleHpCurrent > 0)
     {
+        u8 counterEnemyWireSlot = vm_net_mock_battle_first_alive_enemy_wire(
+            playerOnRight, battleSide, enemySlot);
         u8 counterActorWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_ACTOR_WIRE_SLOT",
-                                                         vm_net_mock_battle_first_alive_enemy_wire(playerOnRight,
-                                                                                                   battleSide,
-                                                                                                   enemySlot));
+                                                         counterEnemyWireSlot);
         u8 counterTargetWireSlot = (u8)vm_net_mock_env_u32("CBE_BATTLE_COUNTER_TARGET_WIRE_SLOT",
                                                           playerSlot);
         if (counterActionType == 1)
@@ -3367,10 +3370,11 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                                                            counterTargetWireSlot);
         }
         vm_net_mock_battle_select_enemy_modifier_for_wire(
-            counterActorWireSlot, playerOnRight, battleSide, enemySlot);
+            counterEnemyWireSlot, playerOnRight, battleSide, enemySlot);
         counterDamageValue = vm_net_mock_battle_apply_damage_to_role(
             vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                    g_mockBattleRoleHpCurrent));
+                                                    g_mockBattleRoleHpCurrent,
+                                                    counterEnemyWireSlot));
         if (counterDamageValue == 0)
             counterRecordChildFlag = VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE;
         counterHpDelta = vm_net_mock_battle_negative_delta_u32(counterDamageValue);
@@ -3488,7 +3492,8 @@ static u32 vm_net_mock_build_battle_operate_response_fallback(const u8 *request,
                     counterWireSlots[i], playerOnRight, battleSide, enemySlot);
                 u32 oneCounterDamage = vm_net_mock_battle_apply_damage_to_role(
                     vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                            g_mockBattleRoleHpCurrent));
+                                                            g_mockBattleRoleHpCurrent,
+                                                            counterWireSlots[i]));
                 counterDamageValues[i] = oneCounterDamage;
                 counterChildFlags[i] = oneCounterDamage == 0
                                            ? VM_NET_MOCK_BATTLE_CHILD_FLAG_DODGE
@@ -6809,7 +6814,8 @@ static u32 vm_net_mock_build_battle_escape_response(const u8 *request, u32 reque
 
             oneCounterDamage = vm_net_mock_battle_apply_damage_to_role(
                 vm_net_mock_battle_enemy_damage_to_role(g_vm_net_mock_battle_enemy_id_current,
-                                                        g_mockBattleRoleHpCurrent));
+                                                        g_mockBattleRoleHpCurrent,
+                                                        enemyWire));
             /* Escape failure still resolves every living enemy.  A miss is
              * encoded as a zero-delta action so its turn remains visible. */
             if (oneCounterDamage != 0)
