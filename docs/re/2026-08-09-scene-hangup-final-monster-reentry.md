@@ -124,8 +124,9 @@ scene_hangup_start ... source=scene-poll
 ## 实现：挂机奖励自动确认（模拟器输入辅助）
 
 `src/main.c` 提供 `CBE_HANGUP_AUTO_CONFIRM=1`（或
-`--hangup-auto-confirm`）开关；`bin/multiplayer/start-player-common.bat`
-默认启用，设置环境变量 `CBE_HANGUP_AUTO_CONFIRM=0` 可关闭。
+`--hangup-auto-confirm`）开关。所有 `CBE_CLIENT_ONLY` 客户端构建在未设置该变量时
+默认启用，`bin/multiplayer/start-player-common.bat` 仍显式设置为 1；设置环境变量
+`CBE_HANGUP_AUTO_CONFIRM=0` 可关闭。
 
 其一次性、可审计链路为：
 

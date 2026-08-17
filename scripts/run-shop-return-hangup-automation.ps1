@@ -4,7 +4,7 @@ param(
     [int]$ServicePort = 19190,
     [ValidateRange(1024, 65535)]
     [int]$AdminPort = 19191,
-    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'equipment-enhance-bag-probe-v1', 'equipment-enhance-stage1-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')]
+    [ValidateSet('shop-return-hangup-v1', 'direct-hangup-control-v1', 'title-module-update-v1', 'scene-teleport-stone-probe-v1', 'equipment-enhance-rules-probe-v1', 'equipment-enhance-bag-probe-v1', 'equipment-enhance-stage1-probe-v1', 'hangup-auto-cancel-v1', 'hangup-auto-terminal-v1', 'hangup-native-auto-exit-v1', 'hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')]
     [string]$Scenario = 'shop-return-hangup-v1',
     [switch]$KeepDatabase
 )
@@ -150,16 +150,16 @@ try {
     if ($Scenario -eq 'hangup-auto-cancel-v1') {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '100'
-    } elseif ($Scenario -in @('hangup-auto-terminal-v1', 'hangup-auto-reward-continue-v1')) {
+    } elseif ($Scenario -in @('hangup-auto-terminal-v1', 'hangup-native-auto-exit-v1', 'hangup-auto-reward-continue-v1')) {
         $env:CBE_BATTLE_ENEMY_COUNT = '3'
         $env:CBE_BATTLE_ENEMY_HP = '20'
     } elseif ($Scenario -in @('hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) {
         $env:CBE_BATTLE_ENEMY_COUNT = '1'
         $env:CBE_BATTLE_ENEMY_HP = '20'
     }
-    # This product-mode fixture verifies the real client-owned result-panel
-    # exit: the helper observes a rendered 4/7, sends one hardware tap, and
-    # waits for the client's resulting 25/5 before the server may open round 2.
+    # The legacy input helper stays disabled for the native-auto-exit run.
+    # Its 25/5 must originate from mmBattle's 0x5E92 sender after parsing
+    # 25/2(result=1,type=1), never from a host-side confirmation event.
     $env:CBE_HANGUP_AUTO_CONFIRM = if ($Scenario -in @('hangup-auto-reward-continue-v1', 'hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) { '1' } else { '0' }
     if ($Scenario -eq 'hangup-auto-vitals-recovery-v1') {
         $env:CBE_BATTLE_RECOVER_HP = '15'
@@ -176,6 +176,10 @@ try {
         admin_port = $AdminPort
         configured_recover_hp = $env:CBE_BATTLE_RECOVER_HP
         configured_recover_mp = $env:CBE_BATTLE_RECOVER_MP
+        native_auto_exit = ($Scenario -eq 'hangup-native-auto-exit-v1')
+        native_auto_exit_contract = if ($Scenario -eq 'hangup-native-auto-exit-v1') {
+            'CBE_HANGUP_AUTO_CONFIRM=0; 25/2(result=1,type=1) -> mmBattle 0x8996 -> 0x5E92 -> client 25/5 -> scene poll next 4/5/4/6; no 0x60C8'
+        } else { $null }
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'test-plan.json') -Encoding utf8
 
     $serverProcess = Start-Process -FilePath $server -WorkingDirectory $runDir -PassThru `
@@ -246,6 +250,63 @@ try {
     Write-Host "automation run directory: $runDir"
     if ($result.result -ne 'passed') {
         throw "scenario failed at $($result.stage): $($result.reason)"
+    }
+    if ($Scenario -eq 'hangup-native-auto-exit-v1') {
+        $serverLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'server.stdout.log')
+        $automationLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'automation.log')
+        $clientLog = Get-Content -Raw -LiteralPath (Join-Path $runDir 'client.stdout.log')
+        $responseObject = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_response .*result=1 type=1 '
+        ).Count
+        $parser8996 = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_parser local_pc=0x8996 '
+        ).Count
+        $sender5e92 = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_pc local_pc=0x5e92 '
+        ).Count
+        $manualExit = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_manual_pc '
+        ).Count
+        $exitUplink = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_uplink wt=25/5 .*reentry_handler_reset=1'
+        ).Count
+        $serverRoundComplete = [regex]::Matches(
+            $serverLog,
+            'scene_hangup_round_complete '
+        ).Count
+        $scenePollStart = [regex]::Matches(
+            $serverLog,
+            'mock_hangup_battle_start source=scene-poll .*native_exit25_2=1 '
+        ).Count
+        $hostConfirm = [regex]::Matches(
+            $clientLog,
+            'reward_auto_confirm_input '
+        ).Count
+        $completion = [regex]::Matches(
+            $automationLog,
+            'automation_hangup_native_auto_exit_complete '
+        ).Count
+        [pscustomobject]@{
+            response_object = $responseObject
+            parser_8996 = $parser8996
+            sender_5e92 = $sender5e92
+            manual_exit_pc = $manualExit
+            native_exit_uplink = $exitUplink
+            server_round_complete = $serverRoundComplete
+            scene_poll_start = $scenePollStart
+            host_confirm_inputs = $hostConfirm
+            completion = $completion
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runDir 'native-auto-exit-evidence.json') -Encoding utf8
+        if ($responseObject -ne 1 -or $parser8996 -ne 1 -or $sender5e92 -ne 1 -or
+            $manualExit -ne 0 -or $exitUplink -ne 1 -or $serverRoundComplete -lt 1 -or
+            $scenePollStart -lt 1 -or $hostConfirm -ne 0 -or $completion -ne 1) {
+            throw 'native auto-exit evidence missing: expected 25/2->0x8996->0x5e92->client 25/5->scene poll, with no 0x60C8 or host confirmation input'
+        }
     }
     if ($Scenario -in @('hangup-auto-rapid-entry-v1', 'hangup-auto-vitals-recovery-v1', 'hangup-auto-vitals-flask-v1', 'hangup-auto-restart-delay-v1')) {
         # The isolated server trace proves the terminal contract; the old

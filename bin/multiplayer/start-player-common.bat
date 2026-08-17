@@ -10,7 +10,7 @@ for %%I in ("%~dp0..") do set "BIN_DIR=%%~fI"
 set "PROFILE_DIR=%BIN_DIR%\multiplayer-data\%~1"
 set "ENDPOINT=%CBE_MULTIPLAYER_ENDPOINT%"
 if "%ENDPOINT%"=="" set "ENDPOINT=127.0.0.1:19090"
-if "%CBE_HANGUP_AUTO_CONFIRM%"=="" set "CBE_HANGUP_AUTO_CONFIRM=1"
+if "%CBE_HANGUP_AUTO_CONFIRM%"=="" set "CBE_HANGUP_AUTO_CONFIRM=0"
 
 call "%~dp0prepare-profile.bat" "%PROFILE_DIR%" || (
     echo Profile setup failed for %~1.
