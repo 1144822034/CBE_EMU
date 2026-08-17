@@ -5999,54 +5999,34 @@ static const char *vm_net_mock_chest_world_broadcast_name_gbk(u32 chestItemId)
     }
 }
 
-/* Keep the text separate from the 1/7/37 item-acquire path: the latter
- * inserts an item itself and would duplicate the proven 1/7/7 type=1 update. */
-static bool vm_net_mock_format_chest_open_reward_hint_gbk(
-    u32 chestItemId, const char *rewardNameGbk, u32 rewardCount,
-    char *hintOut, size_t hintOutCap)
+static bool vm_net_mock_append_chest_open_reward_notice_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u32 chestItemId,
+    const char *rewardNameGbk, u32 rewardCount)
 {
-    static const char openedGbk[] = "\xBF\xAA\xC6\xF4"; /* 开启 */
-    static const char receivedGbk[] = "\xA3\xAC\xBB\xF1\xB5\xC3"; /* ，获得 */
-    static const char multiplierGbk[] = "\xA1\xC1"; /* × */
+    static const char openedGbk[] = "\xBF\xAA\xC6\xF4";
+    static const char receivedGbk[] = "\xA3\xAC\xBB\xF1\xB5\xC3";
+    static const char multiplierGbk[] = "\xA1\xC1";
     const char *chestNameGbk = vm_net_mock_chest_world_broadcast_name_gbk(chestItemId);
-    int written = 0;
+    char hint[192];
+    u32 objectStart = 0;
+    int written;
 
-    if (hintOut == NULL || hintOutCap == 0)
-        return false;
-    hintOut[0] = 0;
-    if (chestNameGbk == NULL || chestNameGbk[0] == 0 ||
+    if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xff ||
+        chestNameGbk == NULL || chestNameGbk[0] == 0 ||
         rewardNameGbk == NULL || rewardNameGbk[0] == 0 || rewardCount == 0)
     {
         return false;
     }
-    if (rewardCount == 1)
-        written = snprintf(hintOut, hintOutCap, "%s%s%s%s", openedGbk,
-                           chestNameGbk, receivedGbk, rewardNameGbk);
-    else
-        written = snprintf(hintOut, hintOutCap, "%s%s%s%s%s%u", openedGbk,
-                           chestNameGbk, receivedGbk, rewardNameGbk,
-                           multiplierGbk, rewardCount);
-    if (written <= 0 || (size_t)written >= hintOutCap)
-    {
-        hintOut[0] = 0;
-        return false;
-    }
-    return true;
-}
-
-static bool vm_net_mock_append_chest_open_reward_hint_object(
-    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u32 chestItemId,
-    const char *rewardNameGbk, u32 rewardCount)
-{
-    char hint[192];
-    u32 objectStart = 0;
-
-    if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xFF ||
-        !vm_net_mock_format_chest_open_reward_hint_gbk(chestItemId, rewardNameGbk,
-                                                       rewardCount, hint, sizeof(hint)) ||
-        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 20, 1, &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 0) ||
-        !vm_net_mock_put_object_cstring(out, outCap, pos, "info", hint))
+    written = rewardCount == 1 ?
+        snprintf(hint, sizeof(hint), "%s%s%s%s", openedGbk, chestNameGbk,
+                 receivedGbk, rewardNameGbk) :
+        snprintf(hint, sizeof(hint), "%s%s%s%s%s%u", openedGbk, chestNameGbk,
+                 receivedGbk, rewardNameGbk, multiplierGbk, rewardCount);
+    if (written <= 0 || (size_t)written >= sizeof(hint) ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 37,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_string(out, outCap, pos, "msg", hint) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
     {
         return false;
     }
@@ -6057,18 +6037,27 @@ static bool vm_net_mock_append_chest_open_reward_hint_object(
 
 /*
  * Client contract:
- * - JianghuOL.CBE:0x01033544 consumes 1/7/1 only for the pending item-use
- *   acknowledgement.
+ * - JianghuOL.CBE:0x01033544 treats 1/7/1 result=1 as the pending item-use
+ *   acknowledgement, but it unconditionally calls
+ *   ui_show_message_box("使用成功", 0, 0, 10).  That modal has no timer and
+ *   consumes the next backpack input even when a later non-modal notice is
+ *   drawn over it.
+ * - Chest opening therefore deliberately omits 1/7/1.  The following 7/11
+ *   quantity stream reaches the same handler and clears the pending item
+ *   operation after the 7/7 row update, without creating the success modal.
+ *   This is the same no-popup contract already used for the small-horn item
+ *   path in vm_net_mock_build_item_use_response().
  * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=2 as a selected-row update
  *   and type=1 as a one-shot additive reward row.
  * - the same CBE parser consumes 1/7/11 to synchronize the item count.
- * - JianghuOL.CBE:net_business_dispatch_by_subcmd handles 1/20/1 result=0
- *   with an `info` message box.  Unlike 16/2, this object belongs to the
- *   main-CBE callback that owns request 7/15.
- *
- * 1/7/37 is intentionally absent: HandleItemAcquire can insert an item too,
- * and battle-reward runtime evidence shows pairing it with 7/7 type=1 risks a
- * duplicate local add.  The proven no-popup 7/7 path is sufficient here.
+ * - JianghuOL.CBE:HandleItemAcquire(0x0101191A) consumes 1/7/37.  It always
+ *   submits the length-delimited `msg` to the timed acquire-notice UI first;
+ *   it reads `result` afterwards and inserts an item only for result=0.
+ *   Chest opening sends result=1, so this is a display-only acquire notice:
+ *   it cannot duplicate the separately proven 7/7 type=1 reward update.
+ *   This handler does not call ui_show_message_box or install a scene/back-key
+ *   callback.  The fields itemid/seq/itemname are intentionally absent because
+ *   they are read only by its result=0 item-insertion branch.
  */
 static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                                                  u32 requestLen,
@@ -6094,7 +6083,6 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 0;
-    u8 itemUseType = 1;
     u8 requestSubtype = 0;
 
     if (out == NULL || outCap < pos ||
@@ -6161,18 +6149,9 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest reward state is invalid");
 
-    itemUseType = parsed.itemUseType ? parsed.itemUseType : 1;
-    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1,
-                                     &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1) ||
-        !vm_net_mock_put_object_u8(out, outCap, &pos, "type", itemUseType) ||
-        !vm_net_mock_put_object_u16(out, outCap, &pos, "id",
-                                    (u16)chest->chestItemId))
-    {
-        return 0;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, pos);
-    ++objectCount;
+    /* Do not prepend 7/1 here.  Its success branch is a modal message-box
+     * side effect, not a required state transition; 7/11 below owns the
+     * pending-operation cleanup for this multi-row chest transaction. */
     if (!vm_net_mock_append_backpack_item_remove7_objects(
             out, outCap, &pos, &objectCount, chestItem->seq,
             chest->chestItemId, chestRemaining) ||
@@ -6185,12 +6164,11 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         return 0;
     }
     ++objectCount;
-    if (!vm_net_mock_append_chest_open_reward_hint_object(
+    if (!vm_net_mock_append_chest_open_reward_notice_object(
             out, outCap, &pos, &objectCount, chest->chestItemId,
             rewardCatalogItem->name, reward->count))
     {
-        return vm_net_mock_build_item_use_hint_response(
-            out, outCap, "Chest reward notice is invalid");
+        return 0;
     }
     vm_net_mock_finish_wt_packet(out, pos, objectCount);
 
@@ -6216,12 +6194,12 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/1+2x(7/7-type2+7/11)+7/7-type1+20/1-notice evidence=item.dsh:522-524+JianghuOL.CBE:0x01033544/0x01012F8A/0x01011434+mmGame:0x11CE/0x0D04\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=2x(7/7-type2+7/11)+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544/0x0101191A\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/1+7/7-type2+7/11+7/7-type1+20/1-notice evidence=JianghuOL.CBE:0x01033544/0x01012F8A/0x01011434 mmGame:0x11CE/0x0D04\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/7-type2+7/11+7/7-type2+7/11+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544/0x0101191A\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
                      reward->count, reward->weight, totalWeight,
