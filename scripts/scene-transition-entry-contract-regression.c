@@ -104,6 +104,95 @@ static bool build_scene_task_subset_request(u8 *out, u32 outCap, u32 *lengthOut)
     return true;
 }
 
+static bool build_scene_change_post_enter_request(u8 *out, u32 outCap,
+                                                  const char *scene,
+                                                  u32 exitId,
+                                                  u32 *lengthOut)
+{
+    u32 pos = 4;
+    u32 objectStart = 0;
+
+    if (out == NULL || lengthOut == NULL ||
+        !append_empty_request_object(out, outCap, &pos, 0x19, 5, NULL) ||
+        !begin_request_object(out, outCap, &pos, 2, 3, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "maptype", 2) ||
+        !vm_net_mock_put_object_string(out, outCap, &pos, "mapID", scene) ||
+        !vm_net_mock_put_object_u32(out, outCap, &pos, "exitID", exitId))
+    {
+        return false;
+    }
+    finish_request_object(out, objectStart, pos);
+    if (!append_empty_request_object(out, outCap, &pos, 0x1b, 11, NULL) ||
+        !append_empty_request_object(out, outCap, &pos, 7, 42, NULL))
+    {
+        return false;
+    }
+    finish_request_packet(out, pos);
+    *lengthOut = pos;
+    return true;
+}
+
+static bool response_has_object(const u8 *packet, u32 length, u8 kind,
+                                u8 subtype)
+{
+    u32 offset = 5;
+
+    if (packet == NULL || length < 5 || packet[0] != 'W' || packet[1] != 'T')
+        return false;
+    for (u32 i = 0; i < packet[4]; ++i)
+    {
+        u16 objectLen = 0;
+
+        if (offset + 6 > length)
+            return false;
+        objectLen = (u16)((packet[offset + 4] << 8) | packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > length)
+            return false;
+        if (packet[offset] == 1 && packet[offset + 1] == kind &&
+            packet[offset + 2] == subtype)
+        {
+            return true;
+        }
+        offset += objectLen;
+    }
+    return false;
+}
+
+static bool response_object_get_u8_field(const u8 *packet, u32 length,
+                                         u8 kind, u8 subtype,
+                                         const char *fieldName, u8 *valueOut)
+{
+    u32 offset = 5;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (packet == NULL || length < 5 || packet[0] != 'W' || packet[1] != 'T' ||
+        fieldName == NULL || fieldName[0] == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < packet[4]; ++i)
+    {
+        u16 objectLen = 0;
+
+        if (offset + 6 > length)
+            return false;
+        objectLen = (u16)((packet[offset + 4] << 8) | packet[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > length)
+            return false;
+        if (packet[offset] != 1 || packet[offset + 1] != kind ||
+            packet[offset + 2] != subtype)
+        {
+            offset += objectLen;
+            continue;
+        }
+        return vm_net_mock_get_object_u8_field(packet + offset + 6,
+                                               objectLen - 6, fieldName,
+                                               valueOut);
+    }
+    return false;
+}
+
 static int count_scene_result_posinfo(const u8 *packet, u32 length,
                                       bool wantPosinfo)
 {
@@ -166,6 +255,137 @@ static int count_scene_result_posinfo(const u8 *packet, u32 length,
             ++count;
     }
     return count;
+}
+
+static int assert_post_enter_npc_seed_handoff(void)
+{
+    static const char targetScene[] =
+        "\x63\x30\x34\xc1\xd9\xb0\xb2\xb8\xae\x5f\x30\x31\x2e\x73\x63\x65";
+    vm_net_mock_role_db_file savedRoleDb = g_vm_net_mock_role_db;
+    bool savedRoleDbLoaded = g_vm_net_mock_role_db_loaded;
+    bool savedRoleDbValid = g_vm_net_mock_role_db_valid;
+    vm_net_mock_scene_change_target savedTarget =
+        g_vm_net_mock_last_scene_change_target;
+    bool savedTargetValid = g_vm_net_mock_last_scene_change_target_valid;
+    u32 savedTargetSerial = g_vm_net_mock_last_scene_change_target_serial;
+    vm_net_mock_scene_change_target savedCompletedTarget =
+        g_vm_net_mock_last_completed_scene_change_target;
+    bool savedCompletedTargetValid =
+        g_vm_net_mock_last_completed_scene_change_target_valid;
+    u32 savedCompletedTargetTick = g_vm_net_mock_last_completed_scene_change_tick;
+    bool savedNpcPending = g_vm_net_mock_scene_moveinfo_npc_pending;
+    bool savedNpcSeeded = g_vm_net_mock_scene_moveinfo_npc_seeded;
+    char savedNpcPendingScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_pending_scene)];
+    char savedNpcSeededScene[sizeof(g_vm_net_mock_scene_moveinfo_npc_seeded_scene)];
+    u32 savedSchedulerTick = g_schedulerTick;
+    u8 postEnter[256];
+    u8 followup[256];
+    u8 response[4096];
+    u32 postEnterLen = 0;
+    u32 followupLen = 0;
+    u32 responseLen = 0;
+    u8 npcNum = 0;
+    int result = 1;
+
+    memcpy(savedNpcPendingScene, g_vm_net_mock_scene_moveinfo_npc_pending_scene,
+           sizeof(savedNpcPendingScene));
+    memcpy(savedNpcSeededScene, g_vm_net_mock_scene_moveinfo_npc_seeded_scene,
+           sizeof(savedNpcSeededScene));
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    g_vm_net_mock_role_db.roles[0].roleId = 1;
+    snprintf(g_vm_net_mock_role_db.roles[0].scene,
+             sizeof(g_vm_net_mock_role_db.roles[0].scene), "%s", targetScene);
+    g_vm_net_mock_role_db.roles[0].x = 201;
+    g_vm_net_mock_role_db.roles[0].y = 140;
+    memset(&g_vm_net_mock_last_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_scene_change_target));
+    memset(&g_vm_net_mock_last_completed_scene_change_target, 0,
+           sizeof(g_vm_net_mock_last_completed_scene_change_target));
+    g_vm_net_mock_last_scene_change_target_valid = false;
+    g_vm_net_mock_last_completed_scene_change_target_valid = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending = false;
+    g_vm_net_mock_scene_moveinfo_npc_pending_scene[0] = 0;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = false;
+    g_vm_net_mock_scene_moveinfo_npc_seeded_scene[0] = 0;
+    g_schedulerTick = 100;
+
+    if (!build_scene_change_post_enter_request(postEnter, sizeof(postEnter),
+                                               targetScene, 0, &postEnterLen) ||
+        postEnterLen != 78 ||
+        !build_scene_task_subset_request(followup, sizeof(followup),
+                                         &followupLen) ||
+        followupLen != 39)
+    {
+        fputs("could not construct post-enter NPC handoff requests\n", stderr);
+        goto cleanup;
+    }
+
+    responseLen = vm_net_mock_build_scene_change_post_enter_followup_response(
+        postEnter, postEnterLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        !response_has_object(response, responseLen, 0x1b, 11) ||
+        response_object_get_u8_field(response, responseLen, 0x1b, 11,
+                                     "npcnum", &npcNum) ||
+        !g_vm_net_mock_scene_moveinfo_npc_pending ||
+        g_vm_net_mock_scene_moveinfo_npc_seeded ||
+        !g_vm_net_mock_last_completed_scene_change_target_valid)
+    {
+        fputs("post-enter response consumed the NPC catalog before WT6/1\n",
+              stderr);
+        goto cleanup;
+    }
+
+    responseLen = vm_net_mock_build_scene_resource_followup_response(
+        followup, followupLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        !response_has_object(response, responseLen, 0x1b, 11) ||
+        !response_object_get_u8_field(response, responseLen, 0x1b, 11,
+                                      "npcnum", &npcNum) ||
+        npcNum == 0 ||
+        g_vm_net_mock_scene_moveinfo_npc_pending ||
+        !g_vm_net_mock_scene_moveinfo_npc_seeded ||
+        count_scene_result_posinfo(response, responseLen, true) != 0 ||
+        count_scene_result_posinfo(response, responseLen, false) != 0)
+    {
+        fputs("first WT6/1 did not own the one-shot non-empty NPC catalog\n",
+              stderr);
+        goto cleanup;
+    }
+
+    responseLen = vm_net_mock_build_scene_resource_followup_response(
+        followup, followupLen, response, sizeof(response));
+    if (responseLen == 0 ||
+        response_object_get_u8_field(response, responseLen, 0x1b, 11,
+                                     "npcnum", &npcNum))
+    {
+        fputs("repeated WT6/1 duplicated the NPC catalog\n", stderr);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    g_vm_net_mock_role_db = savedRoleDb;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    g_vm_net_mock_last_scene_change_target = savedTarget;
+    g_vm_net_mock_last_scene_change_target_valid = savedTargetValid;
+    g_vm_net_mock_last_scene_change_target_serial = savedTargetSerial;
+    g_vm_net_mock_last_completed_scene_change_target = savedCompletedTarget;
+    g_vm_net_mock_last_completed_scene_change_target_valid =
+        savedCompletedTargetValid;
+    g_vm_net_mock_last_completed_scene_change_tick = savedCompletedTargetTick;
+    g_vm_net_mock_scene_moveinfo_npc_pending = savedNpcPending;
+    g_vm_net_mock_scene_moveinfo_npc_seeded = savedNpcSeeded;
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_pending_scene, savedNpcPendingScene,
+           sizeof(savedNpcPendingScene));
+    memcpy(g_vm_net_mock_scene_moveinfo_npc_seeded_scene, savedNpcSeededScene,
+           sizeof(savedNpcSeededScene));
+    g_schedulerTick = savedSchedulerTick;
+    return result;
 }
 
 int main(void)
@@ -267,6 +487,9 @@ int main(void)
             return 1;
         }
     }
+
+    if (assert_post_enter_npc_seed_handoff() != 0)
+        return 1;
 
     puts("scene transition entry contract regression passed");
     return 0;

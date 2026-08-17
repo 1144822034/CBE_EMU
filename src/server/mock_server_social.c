@@ -1587,16 +1587,11 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
     vm_net_mock_mark_scene_moveinfo_npc_seed_pending(target.scene);
 
     /*
-     * Evidence:
-     * - runtime: once EnterSceneByMapName() gets a real same-screen lifecycle,
-     *   Penglai _02 emits `25/5 + 2/3 + 27/11 + 7/42` instead of stalling;
-     * - IDA/runtime from earlier scene probes: 27/11 is consumed by
-     *   scene_parse_npcinfo_and_spawn_npcs(), and deferred scene completion
-     *   already wants 27/12 + 27/11 + 27/4. A later 30/2 scene-pos result
-     *   repeats the mode-7 scene-enter lifecycle after the local portal shell.
-     *
-     * Populate 27/11 from the current SCE only after the scene shell exists;
-     * the one-shot guard prevents a later follow-up from recreating the nodes.
+     * The post-enter request proves the destination shell exists, but its
+     * scene-runtime and actor-asset tables are still incomplete.  A non-empty
+     * 27/11 here is parsed before those tables can own the new nodes; the
+     * subsequent WT6/1 is the first safe runtime boundary.  Preserve the
+     * pending catalog and acknowledge only the requested FB gate now.
      */
     if (!vm_net_mock_append_info_banner_result5_object(out, outCap, &pos))
         return 0;
@@ -1605,11 +1600,13 @@ static u32 vm_net_mock_build_scene_change_post_enter_followup_response(const u8 
                                                          target.scene, target.x, target.y))
         return 0;
     objectCount += 1;
-    if (!vm_net_mock_append_scene_npcs11_once_or_empty(out, outCap, &pos,
-                                                       target.scene,
-                                                       "post-enter-completion"))
+    if (!vm_net_mock_append_fb_target_empty11_object(out, outCap, &pos))
         return 0;
     objectCount += 1;
+    printf("[info][network] mock_scene_npc_seed_defer scene=%s "
+           "phase=scene-change-post-enter reason=scene-runtime-not-ready "
+           "next=WT6/1 evidence=JianghuOL.CBE:0x01012FB4+0x01037998\n",
+           target.scene);
     if (!vm_net_mock_append_fb_target_result4_object(out, outCap, &pos,
                                                      g_vm_net_mock_last_scene_change_fb4_type,
                                                      vm_net_mock_fb_target_info_text()))

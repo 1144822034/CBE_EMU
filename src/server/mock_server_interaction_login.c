@@ -1021,14 +1021,14 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
             out, outCap, currentScene, shopReturnX, shopReturnY,
             "scene-resource-followup");
     }
-    /* See the paired direct-map-stone completion response. That WT2/3 sends
-     * the required empty 27/11 gate object and leaves this one-shot catalog
-     * pending. WT6/1 is the first client-requested scene-runtime phase after
-     * the no-posinfo 30/2, so it owns the non-empty 27/11 NPC creation data.
+    /* The paired completed-scene response sends the required empty 27/11 gate
+     * object and leaves this one-shot catalog pending. WT6/1 is the first
+     * client-requested scene-runtime phase after that completion, so it owns
+     * the non-empty 27/11 NPC creation data.
      *
-     * Do not scope this by a destination name. The direct-map-stone contract
-     * is identified by the only state it deliberately leaves behind: the
-     * just-completed current scene has a matching pending but unseeded catalog.
+     * Do not scope this by a destination name or transfer mechanism. The
+     * contract is identified by the matching pending-but-unseeded catalog for
+     * the just-completed current scene.
      * Ordinary completions have already consumed that catalog, and a real shop
      * return retains its own explicit session marker. */
     vm_net_mock_reset_scene_moveinfo_npc_seed_if_needed(currentScene);
@@ -1063,12 +1063,12 @@ static u32 vm_net_mock_build_scene_resource_followup_response(const u8 *request,
         {
             if (!vm_net_mock_append_scene_npcs11_once_or_empty(
                     out, outCap, &pos, currentScene,
-                    "direct-map-stone-current-scene-completion-followup"))
+                    "completed-scene-runtime-followup"))
             {
                 return 0;
             }
             objectCount += 1;
-            printf("[info][network] mock_scene_npc_seed_deliver scene=%s phase=WT6/1 after=direct-map-stone-current-scene-completion\n",
+            printf("[info][network] mock_scene_npc_seed_deliver scene=%s phase=WT6/1 after=completed-scene-runtime-init\n",
                    currentScene);
         }
         else if (!vm_net_mock_append_scene_npc_lifecycle_seed(
