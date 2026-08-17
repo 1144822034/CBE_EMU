@@ -6798,6 +6798,18 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
         return false;
     if (role == NULL)
         return true;
+    if (g_netMockBackpackGridReseedPendingRoleId == role->roleId)
+    {
+        /* The client has just reached the same-role bootstrap after the mall
+         * return.  Re-arm only this bootstrap; ordinary group polls and the
+         * mall's catalog packets remain untouched. */
+        g_netMockBackpackGridSeededRoleId = 0;
+        g_netMockBackpackGridReseedPendingRoleId = 0;
+        printf("[info][network] mock_backpack_grid_reseed role=%u reason=shop-return-bootstrap next=30/21\n",
+               role->roleId);
+        vm_autotest_note("mock_backpack_grid_reseed role=%u reason=shop-return-bootstrap next=30/21 evidence=shop-actorinfo-only->group-type1\n",
+                         role->roleId);
+    }
     if (g_netMockBackpackGridSeededRoleId != role->roleId)
     {
         bool appendedReservoirCounts = false;

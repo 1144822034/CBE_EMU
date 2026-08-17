@@ -1875,6 +1875,7 @@ typedef struct vm_mock_service_account_state
     u8 netMockTitleServerListPending;
     u8 netMockTitleServerSelectConfirmed;
     u32 netMockBackpackGridSeededRoleId;
+    u32 netMockBackpackGridReseedPendingRoleId;
     u8 netMockShop17ListPending;
     u8 netMockShopCatalogDeliveredBeforeActorQuery;
     u32 netMockTitleServerListTick;
@@ -2449,6 +2450,8 @@ static void vm_mock_service_account_capture(vm_mock_service_account_state *state
     state->netMockTitleServerListPending = g_netMockTitleServerListPending;
     state->netMockTitleServerSelectConfirmed = g_netMockTitleServerSelectConfirmed;
     state->netMockBackpackGridSeededRoleId = g_netMockBackpackGridSeededRoleId;
+    state->netMockBackpackGridReseedPendingRoleId =
+        g_netMockBackpackGridReseedPendingRoleId;
     state->netMockShop17ListPending = g_netMockShop17ListPending;
     state->netMockShopCatalogDeliveredBeforeActorQuery =
         g_netMockShopCatalogDeliveredBeforeActorQuery;
@@ -2567,6 +2570,8 @@ static void vm_mock_service_account_restore(vm_mock_service_account_state *state
     g_netMockTitleServerListPending = state->netMockTitleServerListPending;
     g_netMockTitleServerSelectConfirmed = state->netMockTitleServerSelectConfirmed;
     g_netMockBackpackGridSeededRoleId = state->netMockBackpackGridSeededRoleId;
+    g_netMockBackpackGridReseedPendingRoleId =
+        state->netMockBackpackGridReseedPendingRoleId;
     g_netMockShop17ListPending = state->netMockShop17ListPending;
     g_netMockShopCatalogDeliveredBeforeActorQuery =
         state->netMockShopCatalogDeliveredBeforeActorQuery;

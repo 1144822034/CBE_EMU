@@ -2131,10 +2131,16 @@ static u32 vm_net_mock_build_shop_actor_query14_response(const u8 *request, u32 
      */
     if (catalogDeliveredBeforeActorQuery)
     {
+        /* This query is the first packet on the mall-return path.  The
+         * following 5/10 + 7/7(type=1) is a new mmGame bootstrap; arm one
+         * same-role 30/21 delivery for that boundary without treating the
+         * ActorInfo query as a scene transition. */
+        g_netMockBackpackGridReseedPendingRoleId = actorId;
         printf("[info][network] mock_shop_actor_query14 actorId=%u catalog=prior response=actorinfo-only actorinfo_len=%u\n",
                actorId, actorInfoLen);
-        vm_autotest_note("mock_shop_actor_query14 actorId=%u catalog=prior response=1/1/14 actorinfo_len=%u evidence=mmShop:0x11F0/0x9DE\n",
-                         actorId, actorInfoLen);
+        vm_autotest_note("mock_shop_actor_query14 actorId=%u catalog=prior response=1/1/14 actorinfo_len=%u grid_reseed_pending=%u evidence=mmShop:0x11F0/0x9DE->group-type1\n",
+                         actorId, actorInfoLen,
+                         g_netMockBackpackGridReseedPendingRoleId);
         return pos;
     }
 
@@ -4191,6 +4197,7 @@ static u32 vm_net_mock_build_title_role_select_response(const u8 *request, u32 r
          * boundary that actually recreates the manager.
          */
         g_netMockBackpackGridSeededRoleId = 0;
+        g_netMockBackpackGridReseedPendingRoleId = 0;
         g_netMockShop17ListPending = 0;
         g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
         g_netMockBackpackPreferRoleListAfterShopBuy = 0;
