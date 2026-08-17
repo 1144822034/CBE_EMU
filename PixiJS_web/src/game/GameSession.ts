@@ -169,10 +169,12 @@ import {
   parseBagItems,
   parseBagItemUpdates,
   mergeBagItemUpdateDeltas,
+  mergeBag17WithGridSeq,
   applyChestOpenToBag,
   parseFlaskReservoirUpdates,
   applyFlaskReservoirsToBag,
   preserveFlaskReservoirAcrossBagRefresh,
+  bagVisibleStackCount,
   parseItemEquipResult,
   parseWornEquipmentSnapshot,
   parseMallState,
@@ -209,6 +211,15 @@ import {
   parseQuickRepairConfirm,
   NpcServiceOpcode,
 } from "../net/protocolExtras";
+import {
+  CHENGHAO_SPECS,
+  chenghaoLabel,
+  chenghaoWireTag,
+  isChenghaoId,
+  parseChenghaoId,
+  readChenghaoPreference,
+  writeChenghaoPreference,
+} from "../resources/chenghaoFx";
 import {
   bracketForLevel,
   buildArenaClaimRequest,
@@ -577,8 +588,13 @@ export class GameSession {
   exp = 0;
   gold = 0;
   roleTitle = "";
-  /** Overhead GIF: riches_nameN.gif / level_nameN.gif */
+  /** Overhead GIF: riches_nameN.gif / level_nameN.gif / chenghao:ID */
   roleTitleGif = "";
+  /**
+   * Local Pixi-only chenghao FX title (86001+). Temporary until server unlock
+   * gates these; selectDesignation for these ids does not hit the wire.
+   */
+  localChenghaoId = 0;
   /** Field PK score; red name when >= 60. */
   pkPoints = 0;
   roleName = "";
@@ -778,6 +794,7 @@ export class GameSession {
     this.y = 0;
     this.roleTitle = "";
     this.roleTitleGif = "";
+    this.localChenghaoId = 0;
     this.hp = 500;
     this.hpMax = 500;
     this.mp = 200;
@@ -1993,7 +2010,36 @@ export class GameSession {
     if (!this.transport) return null;
     const bodies = await this.transport.exchange(0, buildDesignationListRequest());
     this.handleBodies(bodies);
+    this.designationPage = this.withChenghaoDesignations(this.designationPage);
     return this.designationPage;
+  }
+
+  /**
+   * Temp: append all chenghao FX titles so they show in the list. Later the
+   * server unlock mask will gate which rows appear.
+   */
+  withChenghaoDesignations(page: DesignationPage | null): DesignationPage | null {
+    const base = page ?? { equippedId: 0, rows: [] };
+    const equippedChenghao =
+      this.localChenghaoId ||
+      parseChenghaoId(this.roleTitleGif) ||
+      readChenghaoPreference();
+    const serverRows = base.rows.filter((r) => !isChenghaoId(r.id));
+    const fxRows = CHENGHAO_SPECS.map((s) => ({
+      id: s.id,
+      name: chenghaoLabel(s.id),
+      desc: "特效称号(测试)",
+      gif: chenghaoWireTag(s.id),
+    }));
+    const equippedId = equippedChenghao
+      ? equippedChenghao
+      : isChenghaoId(base.equippedId)
+        ? 0
+        : base.equippedId;
+    return {
+      equippedId,
+      rows: [...serverRows, ...fxRows],
+    };
   }
 
   async selectDesignation(designationId: number): Promise<{
@@ -2002,9 +2048,22 @@ export class GameSession {
     gif?: string;
   }> {
     if (!this.transport) return { ok: false };
+    const id = designationId | 0;
+    if (isChenghaoId(id)) {
+      const name = chenghaoLabel(id);
+      const gif = chenghaoWireTag(id);
+      this.localChenghaoId = id;
+      writeChenghaoPreference(id);
+      this.applySelfDesignation(name, gif);
+      this.designationPage = this.withChenghaoDesignations(this.designationPage);
+      return { ok: true, name, gif };
+    }
+    // Server title: clear local chenghao preview preference.
+    this.localChenghaoId = 0;
+    writeChenghaoPreference(0);
     const bodies = await this.transport.exchange(
       0,
-      buildDesignationSelectRequest(designationId),
+      buildDesignationSelectRequest(id),
     );
     /* 23/3 ack and 23/2 update may arrive in separate bodies. */
     let ok = false;
@@ -2031,10 +2090,10 @@ export class GameSession {
     if (ok) {
       await this.openDesignations();
       const page = this.designationPage;
-      const row = page?.rows.find(
-        (r) => r.id === (page.equippedId || designationId),
-      );
-      if (row) {
+      const row =
+        page?.rows.find((r) => r.id === designationId) ||
+        page?.rows.find((r) => r.id === page.equippedId);
+      if (row && !isChenghaoId(row.id)) {
         /* Prefer refreshed list; empty row.gif must clear prior wealth/level badge. */
         name = row.name || name;
         gif = row.gif || "";
@@ -3645,9 +3704,15 @@ export class GameSession {
 
   async discardItem(itemId: number, seq: number, count = 1): Promise<void> {
     if (!this.transport) return;
+    // Equip / flask / mall-pass rows are atomic: never send reservoir/durability
+    // as discard count (would look like ×4029249 in UI and confuse parsers).
+    const row = this.bagItems.find((it) => it.seq === seq && it.itemId === itemId);
+    const discardCount = row
+      ? Math.max(1, bagVisibleStackCount(row))
+      : Math.max(1, count | 0);
     const bodies = await this.transport.exchange(
       0,
-      buildItemDiscardRequest(seq, itemId, count),
+      buildItemDiscardRequest(seq, itemId, discardCount),
     );
     this.handleBodies(bodies);
   }
@@ -5034,6 +5099,13 @@ export class GameSession {
         this.gold = roleEnter.money >>> 0;
         this.roleTitle = roleEnter.title || "";
         this.roleTitleGif = roleEnter.titleGif || "";
+        // Temp: keep last local chenghao preview across re-enter.
+        const prefChenghao = readChenghaoPreference();
+        if (prefChenghao) {
+          this.localChenghaoId = prefChenghao;
+          this.roleTitle = chenghaoLabel(prefChenghao);
+          this.roleTitleGif = chenghaoWireTag(prefChenghao);
+        }
         this.roleName = roleEnter.name || this.roleName;
         if (this.roleSelectInFlight) {
           this.roleEnterSceneLock = roleEnter.scene;
@@ -5524,24 +5596,19 @@ export class GameSession {
 
       const bagFull = parseBagItems(packet);
       if (bagFull.length) {
-        // Preserve known seq from prior 30/21 when 17/1 only has row order.
-        // Equip durability: keep prior/pending (CBE +0x110); 30/21 is stack only.
-        // Flask: 30/21 wire count is visible 1; keep prior reservoir until 7/11.
-        const byId = new Map(this.bagItems.map((i) => [i.itemId, i]));
-        const bySeq = new Map(this.bagItems.map((i) => [i.seq, i]));
-        this.bagItems = bagFull.map((it) => {
-          const prevSeq = bySeq.get(it.seq);
-          const prevId = byId.get(it.itemId);
-          const prev = prevSeq ?? prevId;
-          const merged =
-            prev && prev.seq > 0 && it.seq <= 0
-              ? { ...it, seq: prev.seq }
-              : it;
-          const withFlask = preserveFlaskReservoirAcrossBagRefresh(
-            merged,
-            bySeq.get(merged.seq),
-          );
-          return this.applyBagEquipDurability(withFlask, prevSeq ?? prevId);
+        // Prefer 30/21 seqs already merged inside parseBagItems.
+        // Discard historically returned 17/1-only (all seq=0). Reattach via
+        // prior-bag multiset — never Map-by-itemId (collapses duplicate equips).
+        const hasWireSeq = bagFull.some((it) => it.seq > 0);
+        const priorHasSeq = this.bagItems.some((it) => it.seq > 0);
+        const reconciled =
+          !hasWireSeq && priorHasSeq
+            ? mergeBag17WithGridSeq(bagFull, this.bagItems)
+            : bagFull;
+        this.bagItems = reconciled.map((it) => {
+          const prev = this.bagItems.find((b) => b.seq === it.seq && it.seq > 0);
+          const withFlask = preserveFlaskReservoirAcrossBagRefresh(it, prev);
+          return this.applyBagEquipDurability(withFlask, prev);
         });
         this.cb.onBag?.(this.bagItems);
       } else {

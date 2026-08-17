@@ -5,6 +5,10 @@ import { BitmapLabel } from "../ui/BitmapLabel";
 import { ACTOR_DISPLAY_SCALE, NAMEPLATE_SCALE } from "../ui/constants";
 import { resolveTitleGif, isArenaTextTitle, arenaTextTitleColor } from "../ui/designation";
 import { tryLoadUiTexture } from "../ui/UiAssets";
+import {
+  ChenghaoOverlay,
+  parseChenghaoId,
+} from "../resources/chenghaoFx";
 import type { NpcTaskPromptType } from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
@@ -100,6 +104,8 @@ type Marker = {
   titleTextLabel: BitmapLabel | null;
   titleGifKey: string;
   titleTextKey: string;
+  /** Animated chenghao atlas (optional). */
+  chenghao: ChenghaoOverlay | null;
   /** NPC quest mark from fuhao.actor (submit/accept/incomplete). */
   questMark: Sprite | null;
   questPrompt: NpcTaskPromptType | 0;
@@ -473,6 +479,7 @@ export class ActorLayer {
         this.tickPeerMove(m, dt);
       }
       m.plus16Sparkles?.tick(dt);
+      m.chenghao?.tick(dt);
     }
 
     this.animAcc += dt;
@@ -762,6 +769,7 @@ export class ActorLayer {
         titleTextLabel: null,
         titleGifKey: "",
         titleTextKey: "",
+        chenghao: null,
         questMark: null,
         questPrompt: 0,
         questMarkGen: 0,
@@ -925,13 +933,20 @@ export class ActorLayer {
     titleLabel: string,
     titleGif: string,
   ): Promise<void> {
-    const gif =
-      resolveTitleGif(titleGif) || resolveTitleGif(titleLabel) || null;
+    const chenghaoId =
+      parseChenghaoId(titleGif) || parseChenghaoId(titleLabel) || 0;
+    const gif = chenghaoId
+      ? null
+      : resolveTitleGif(titleGif) || resolveTitleGif(titleLabel) || null;
     const textTitle =
-      !gif && (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
+      !chenghaoId &&
+      !gif &&
+      (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
         ? (isArenaTextTitle(titleLabel) ? titleLabel : titleGif).trim()
         : "";
-    const key = gif || (textTitle ? `text:${textTitle}` : "");
+    const key = chenghaoId
+      ? `chenghao:${chenghaoId}`
+      : gif || (textTitle ? `text:${textTitle}` : "");
     if (
       key === m.titleGifKey &&
       (key ? m.titleBadge.visible : !m.titleBadge.visible)
@@ -941,14 +956,29 @@ export class ActorLayer {
     }
     m.titleGifKey = key;
     m.titleTextKey = textTitle;
+    if (m.chenghao && m.chenghao.root.parent === m.titleBadge) {
+      m.titleBadge.removeChild(m.chenghao.root);
+    }
     m.titleBadge.removeChildren().forEach((c) => c.destroy());
     m.titleSpr = null;
     m.titleTextLabel = null;
-    if (!gif && !textTitle) {
+    if (!chenghaoId && !gif && !textTitle) {
+      m.chenghao?.clear();
       m.titleBadge.visible = false;
       this.layoutNameplate(m);
       return;
     }
+    if (chenghaoId) {
+      if (!m.chenghao) m.chenghao = new ChenghaoOverlay();
+      await m.chenghao.setTitleId(chenghaoId);
+      if (this.markers.get(m.id) !== m) return;
+      if (m.titleGifKey !== key) return;
+      m.titleBadge.addChild(m.chenghao.root);
+      m.titleBadge.visible = true;
+      this.layoutNameplate(m);
+      return;
+    }
+    m.chenghao?.clear();
     if (gif) {
       const tex = await tryLoadUiTexture(gif);
       if (this.markers.get(m.id) !== m) return;

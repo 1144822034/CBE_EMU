@@ -19,3 +19,16 @@ export function publicAssetUrl(assetPath: string): string {
 export function jhOnlineDataUrl(name: string): string {
   return publicAssetUrl(`JHOnlineData/${encodeURIComponent(name)}`);
 }
+
+/**
+ * Nested JHOnlineData path (`chibang/sfx_88010_0.plist`).
+ * Encodes each segment so `/` stays a path separator (unlike `jhOnlineDataUrl`).
+ */
+export function jhOnlineDataPathUrl(relativePath: string): string {
+  const parts = String(relativePath || "")
+    .replace(/^[/\\]+/, "")
+    .split(/[/\\]+/)
+    .filter(Boolean)
+    .map(encodeURIComponent);
+  return publicAssetUrl(`JHOnlineData/${parts.join("/")}`);
+}

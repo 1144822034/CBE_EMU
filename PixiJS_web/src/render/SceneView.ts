@@ -28,6 +28,20 @@ import {
   rebindPoseTextureKey,
   releasePoseTextureKey,
 } from "./poseTextureCache";
+import {
+  WingOverlay,
+  writeWingIdPreference,
+} from "../resources/wingFx";
+import {
+  MountOverlay,
+  MOUNT_BODY_LIFT,
+  MOUNT_NAMEPLATE_EXTRA,
+  writeMountIdPreference,
+} from "../resources/mountFx";
+import {
+  ChenghaoOverlay,
+  parseChenghaoId,
+} from "../resources/chenghaoFx";
 
 /** CBE map nameplate colors (sampled from reference-shots). */
 const NAME_YELLOW = 0xf8dc00;
@@ -101,6 +115,12 @@ export class SceneView {
   onLeiTap: (() => void) | null = null;
   /** Top-left「娱」entertainment badge (after 练). */
   onYuTap: (() => void) | null = null;
+  /** Top-left「翅」wing picker badge (after 娱). */
+  onChiTap: (() => void) | null = null;
+  /** Top-left「骑」mount picker badge (after 翅). */
+  onQiTap: (() => void) | null = null;
+  /** Top-left「称」title list badge (after 骑). */
+  onChenTap: (() => void) | null = null;
   /** Collision radius in map pixels. */
   monsterCollideRadius = 22;
   /** Approach / collide radius for talk prompt. */
@@ -130,6 +150,12 @@ export class SceneView {
   private lastRedName = false;
   /** One rainbow gem per worn +16 piece (local player). */
   private plus16Sparkles = new Plus16Sparkles();
+  /** Optional chibang wing atlas behind/on the body sprite. */
+  private wingOverlay = new WingOverlay();
+  /** Optional zuoqi mount atlas under the body sprite. */
+  private mountOverlay = new MountOverlay();
+  /** Optional chenghao animated title above the nameplate. */
+  private chenghaoOverlay = new ChenghaoOverlay();
   private xiuBadge = new Container();
   private paiBadge = new Container();
   private leiBadge = new Container();
@@ -139,6 +165,12 @@ export class SceneView {
   private lianBadge = new Container();
   /** Entertainment 「娱」— after 斗/练 when shown, else right after 擂. */
   private yuBadge = new Container();
+  /** Wing preview 「翅」— after 娱. */
+  private chiBadge = new Container();
+  /** Mount preview 「骑」— after 翅. */
+  private qiBadge = new Container();
+  /** Title list 「称」— after 骑. */
+  private chenBadge = new Container();
   private paiBlink = false;
   private paiBlinkPhase = 0;
   private leiBlink = false;
@@ -182,14 +214,18 @@ export class SceneView {
       .circle(0, -4, 5)
       .fill({ color: 0xffe08a })
       .stroke({ width: 1, color: 0x5a4010 });
-    this.titleBadge.zIndex = 3;
-    this.nameLabel.zIndex = 2;
+    this.titleBadge.zIndex = 5;
+    this.nameLabel.zIndex = 4;
     this.nameLabel.pivot.set(0, 0);
-    /* Foot halo under body (sprite z=1). */
+    /* Depth: sparkles 0 → mount 0.5 → wing-behind 1 → body 2 → wing-back 3 → name 4 → title 5 */
     this.plus16Sparkles.root.zIndex = 0;
+    this.mountOverlay.root.zIndex = 0.5;
+    this.wingOverlay.root.zIndex = 1;
     this.playerFallback.zIndex = 0;
     this.player.addChild(
       this.plus16Sparkles.root,
+      this.mountOverlay.root,
+      this.wingOverlay.root,
       this.playerFallback,
       this.titleBadge,
       this.nameLabel,
@@ -242,6 +278,30 @@ export class SceneView {
     });
     this.root.addChild(this.yuBadge);
     void this.mountYuArt();
+
+    this.mountStatusBadgeSlot(this.chiBadge, 4);
+    this.chiBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onChiTap?.();
+    });
+    this.root.addChild(this.chiBadge);
+    void this.mountChiArt();
+
+    this.mountStatusBadgeSlot(this.qiBadge, 5);
+    this.qiBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onQiTap?.();
+    });
+    this.root.addChild(this.qiBadge);
+    void this.mountQiArt();
+
+    this.mountStatusBadgeSlot(this.chenBadge, 6);
+    this.chenBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.onChenTap?.();
+    });
+    this.root.addChild(this.chenBadge);
+    void this.mountChenArt();
     this.layoutStatusBadges();
 
     window.addEventListener("keydown", (e) => {
@@ -598,6 +658,56 @@ export class SceneView {
     this.plus16Sparkles.setCount(count);
   }
 
+  /**
+   * Local map wing from `JHOnlineData/chibang/sfx_<id>_0`.
+   * Pass 0 to clear. Persists to localStorage when `persist` is true.
+   */
+  async setPlayerWing(wingId: number, persist = true): Promise<void> {
+    const id = wingId | 0;
+    await this.wingOverlay.setWingId(id);
+    if (persist) writeWingIdPreference(id);
+    if (this.playerSprite) {
+      this.wingOverlay.setBodyDisplayHeight(this.playerSprite.height);
+    }
+    this.wingOverlay.setFacing(this.playerDir);
+    this.syncWingDepth();
+  }
+
+  getPlayerWingId(): number {
+    return this.wingOverlay.currentWingId;
+  }
+
+  /**
+   * Local map mount from `JHOnlineData/zuoqi/sfx_<id>_0`.
+   * Pass 0 to clear. Persists to localStorage when `persist` is true.
+   */
+  async setPlayerMount(mountId: number, persist = true): Promise<void> {
+    const id = mountId | 0;
+    await this.mountOverlay.setMountId(id);
+    if (persist) writeMountIdPreference(id);
+    if (this.playerSprite) {
+      this.mountOverlay.setBodyDisplayHeight(this.playerSprite.height);
+      this.applyMountBodyLift();
+    }
+    this.mountOverlay.setFacing(
+      this.playerDir,
+      this.playerDir === 2 || this.playerDir === 4,
+    );
+    if (this.playerActor) this.applyPlayerFrame(true);
+    else this.layoutNameplate();
+  }
+
+  getPlayerMountId(): number {
+    return this.mountOverlay.currentMountId;
+  }
+
+  private applyMountBodyLift(): void {
+    if (!this.playerSprite) return;
+    this.playerSprite.y = this.mountOverlay.currentMountId
+      ? -MOUNT_BODY_LIFT
+      : 0;
+  }
+
   setPlayerPos(x: number, y: number): void {
     this.playerX = x;
     this.playerY = y;
@@ -610,8 +720,8 @@ export class SceneView {
   }
 
   /**
-   * CBE nameplate: designation GIF above yellow role name.
-   * Pixi arena text titles (no GIF): draw UC3 title string instead.
+   * CBE nameplate: designation GIF / chenghao atlas / Pixi arena text title
+   * above yellow role name.
    */
   async setPlayerNameplate(
     name: string,
@@ -621,18 +731,20 @@ export class SceneView {
   ): Promise<void> {
     this.lastName = name.slice(0, 8);
     this.lastRedName = redName;
-    const gif =
-      resolveTitleGif(titleGif) ||
-      resolveTitleGif(titleLabel) ||
-      null;
+    const chenghaoId =
+      parseChenghaoId(titleGif) || parseChenghaoId(titleLabel) || 0;
+    const gif = chenghaoId
+      ? null
+      : resolveTitleGif(titleGif) || resolveTitleGif(titleLabel) || null;
     this.lastTitleGif = gif;
     const textTitle =
-      !gif && (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
+      !chenghaoId &&
+      !gif &&
+      (isArenaTextTitle(titleLabel) || isArenaTextTitle(titleGif))
         ? (isArenaTextTitle(titleLabel) ? titleLabel : titleGif || "").trim()
         : "";
     this.lastTitleText = textTitle;
 
-    // Map scene self nameplate — only place outside ActorLayer that keeps outline.
     await this.nameLabel.setText(this.lastName, redName ? NAME_RED : NAME_YELLOW, {
       uc3: true,
       smooth: false,
@@ -642,9 +754,22 @@ export class SceneView {
     this.nameLabel.scale.set(NAMEPLATE_SCALE);
     this.layoutNameplate();
 
+    // Detach chenghao before wiping badge children.
+    if (this.chenghaoOverlay.root.parent === this.titleBadge) {
+      this.titleBadge.removeChild(this.chenghaoOverlay.root);
+    }
     this.titleBadge.removeChildren().forEach((c) => c.destroy());
     this.titleSpr = null;
     this.titleTextLabel = null;
+
+    if (chenghaoId) {
+      await this.chenghaoOverlay.setTitleId(chenghaoId);
+      this.titleBadge.addChild(this.chenghaoOverlay.root);
+      this.titleBadge.visible = true;
+      this.layoutNameplate();
+      return;
+    }
+    this.chenghaoOverlay.clear();
 
     if (gif) {
       const tex = await tryLoadUiTexture(gif);
@@ -678,7 +803,11 @@ export class SceneView {
 
   private layoutNameplate(): void {
     const nameH = this.nameLabel.height || 16;
-    const lift = this.playerSprite ? this.playerSprite.height + 2 : 20;
+    const bodyH = this.playerSprite ? this.playerSprite.height + 2 : 20;
+    const mountExtra = this.mountOverlay.currentMountId
+      ? MOUNT_BODY_LIFT + MOUNT_NAMEPLATE_EXTRA
+      : 0;
+    const lift = bodyH + mountExtra;
     this.nameLabel.position.set(-Math.floor(this.nameLabel.width / 2), -lift - nameH);
     if (this.titleBadge.visible) {
       this.titleBadge.position.set(0, this.nameLabel.y - 2);
@@ -690,11 +819,15 @@ export class SceneView {
 
   private applyPlayerFrame(force = false): void {
     if (!this.playerActor) return;
+    // Mounted: keep stand pose (no walk-cycle bob while the mount animates).
+    const mounted = !!this.mountOverlay.currentMountId;
+    const moving = mounted ? false : this.playerMoving;
+    const phase = mounted ? 0 : this.playerPhase;
     const composed = composeMapActor(
       this.playerActor,
       this.playerDir,
-      this.playerMoving,
-      this.playerPhase,
+      moving,
+      phase,
     );
     if (!composed || composed.width < 4 || composed.height < 4) {
       if (force) {
@@ -706,8 +839,8 @@ export class SceneView {
     const key = poseTextureKey(
       this.playerActorRes || "player",
       this.playerDir,
-      this.playerMoving,
-      this.playerPhase,
+      moving,
+      phase,
       composed.width,
       composed.height,
     );
@@ -722,17 +855,39 @@ export class SceneView {
     if (!this.playerSprite) {
       this.playerSprite = new Sprite(tex);
       this.playerSprite.anchor.set(0.5, 1);
-      this.playerSprite.zIndex = 1;
+      this.playerSprite.zIndex = 2;
       this.player.addChild(this.playerSprite);
     } else {
       this.playerSprite.texture = tex;
+      this.playerSprite.zIndex = 2;
     }
     this.playerSprite.scale.set(
       composed.flipX ? -ACTOR_DISPLAY_SCALE : ACTOR_DISPLAY_SCALE,
       ACTOR_DISPLAY_SCALE,
     );
+    this.wingOverlay.setBodyDisplayHeight(this.playerSprite.height);
+    this.wingOverlay.setFacing(this.playerDir);
+    this.mountOverlay.setBodyDisplayHeight(this.playerSprite.height);
+    // Do not commitSide here — playerDir jitters on click-paths; move loop owns flip.
+    this.mountOverlay.setFacing(this.playerDir, false);
+    this.applyMountBodyLift();
+    this.syncWingDepth();
     this.playerFallback.visible = false;
     this.layoutNameplate();
+  }
+
+  /**
+   * Back-facing (dir=1): wing must paint above the body so it sits on the
+   * visible back. Front/side: wing stays under the body.
+   */
+  private syncWingDepth(): void {
+    const facingBack = this.playerDir === 1;
+    this.mountOverlay.root.zIndex = 0.5;
+    this.wingOverlay.root.zIndex = facingBack ? 3 : 1;
+    if (this.playerSprite) this.playerSprite.zIndex = 2;
+    this.nameLabel.zIndex = 4;
+    this.titleBadge.zIndex = 5;
+    this.player.sortChildren();
   }
 
   private async mountXiuArt(): Promise<void> {
@@ -751,6 +906,18 @@ export class SceneView {
 
   private async mountYuArt(): Promise<void> {
     await this.mountTextStatusBadge(this.yuBadge, "娱", 0x102818, 0xa8e8c0);
+  }
+
+  private async mountChiArt(): Promise<void> {
+    await this.mountTextStatusBadge(this.chiBadge, "翅", 0x201028, 0xe0a8e8);
+  }
+
+  private async mountQiArt(): Promise<void> {
+    await this.mountTextStatusBadge(this.qiBadge, "骑", 0x281810, 0xe8c8a0);
+  }
+
+  private async mountChenArt(): Promise<void> {
+    await this.mountTextStatusBadge(this.chenBadge, "称", 0x102028, 0xa8c8e8);
   }
 
   /** Flash「拍」when auction claims / refunds are pending. */
@@ -785,7 +952,7 @@ export class SceneView {
 
   /**
    * Compact strip: 修/拍/擂 fixed; 斗/练 only occupy slots while visible;
-   * 娱 always sits in the next free slot (so after 擂 when both are off).
+   * 娱 → 翅 → 骑 → 称 sit in the next free slots.
    */
   private layoutStatusBadges(): void {
     let next = 3;
@@ -795,7 +962,10 @@ export class SceneView {
     if (this.lianBadge.visible) {
       this.mountStatusBadgeSlot(this.lianBadge, next++);
     }
-    this.mountStatusBadgeSlot(this.yuBadge, next);
+    this.mountStatusBadgeSlot(this.yuBadge, next++);
+    this.mountStatusBadgeSlot(this.chiBadge, next++);
+    this.mountStatusBadgeSlot(this.qiBadge, next++);
+    this.mountStatusBadgeSlot(this.chenBadge, next);
   }
 
   private mountStatusBadgeSlot(host: Container, index: number): void {
@@ -878,6 +1048,9 @@ export class SceneView {
     this.lastTick = now;
     this.actors.tick(dt);
     this.plus16Sparkles.tick(dt);
+    this.wingOverlay.tick(dt);
+    this.mountOverlay.tick(dt);
+    this.chenghaoOverlay.tick(dt);
     if (this.paiBlink) {
       this.paiBlinkPhase += dt * 0.01;
       this.paiBadge.alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(this.paiBlinkPhase));
@@ -971,15 +1144,26 @@ export class SceneView {
       const dirChanged = dir !== this.playerDir;
       this.playerDir = dir;
       this.playerMoving = true;
+      // Mount L/R flip: only when horizontal clearly dominates (see MountOverlay).
+      this.mountOverlay.setMoveVector(dx, dy);
+      this.mountOverlay.setMoving(true);
 
-      this.playerAnimAcc += dt;
-      let stepped = false;
-      while (this.playerAnimAcc >= 140) {
-        this.playerAnimAcc -= 140;
-        this.playerPhase = (this.playerPhase + 1) % 256;
-        stepped = true;
+      const mounted = !!this.mountOverlay.currentMountId;
+      if (mounted) {
+        // Rider stays in stand pose; mount sheet provides motion.
+        this.playerPhase = 0;
+        this.playerAnimAcc = 0;
+        if (dirChanged || !this.playerSprite) this.applyPlayerFrame();
+      } else {
+        this.playerAnimAcc += dt;
+        let stepped = false;
+        while (this.playerAnimAcc >= 140) {
+          this.playerAnimAcc -= 140;
+          this.playerPhase = (this.playerPhase + 1) % 256;
+          stepped = true;
+        }
+        if (stepped || dirChanged || !this.playerSprite) this.applyPlayerFrame();
       }
-      if (stepped || dirChanged || !this.playerSprite) this.applyPlayerFrame();
 
       this.movePixelAcc += speed;
       while (this.movePixelAcc >= 4) {
@@ -997,6 +1181,7 @@ export class SceneView {
         // Keep facing; side idle pose comes from composeMapActor (walk part6 收脚).
         this.playerMoving = false;
         this.playerPhase = 0;
+        this.mountOverlay.setMoving(false);
         this.applyPlayerFrame(true);
       }
       this.checkMonsterCollision();

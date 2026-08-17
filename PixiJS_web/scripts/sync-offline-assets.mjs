@@ -117,6 +117,42 @@ if (fs.existsSync(arenaSfxSrc)) {
   );
 }
 
+/* Pixi map wings (TexturePacker plist+png): not in CBE JHOnlineData pack. */
+const chibangSrc = path.join(pixiRoot, "assets", "chibang");
+const chibangDest = path.join(dataDest, "chibang");
+if (fs.existsSync(chibangSrc)) {
+  copyDir(chibangSrc, chibangDest);
+  console.log(`[sync-offline-assets] chibang ← ${chibangSrc}`);
+} else {
+  console.warn(
+    "[sync-offline-assets] missing assets/chibang (map wings skipped)",
+  );
+}
+
+/* Pixi map mounts (TexturePacker plist+png). */
+const zuoqiSrc = path.join(pixiRoot, "assets", "zuoqi");
+const zuoqiDest = path.join(dataDest, "zuoqi");
+if (fs.existsSync(zuoqiSrc)) {
+  copyDir(zuoqiSrc, zuoqiDest);
+  console.log(`[sync-offline-assets] zuoqi ← ${zuoqiSrc}`);
+} else {
+  console.warn(
+    "[sync-offline-assets] missing assets/zuoqi (map mounts skipped)",
+  );
+}
+
+/* Pixi designation FX titles (TexturePacker plist+png). */
+const chenghaoSrc = path.join(pixiRoot, "assets", "chenghao");
+const chenghaoDest = path.join(dataDest, "chenghao");
+if (fs.existsSync(chenghaoSrc)) {
+  copyDir(chenghaoSrc, chenghaoDest);
+  console.log(`[sync-offline-assets] chenghao ← ${chenghaoSrc}`);
+} else {
+  console.warn(
+    "[sync-offline-assets] missing assets/chenghao (title FX skipped)",
+  );
+}
+
 const skySrc = resolveFont16Sky();
 if (!skySrc) {
   console.error("[sync-offline-assets] missing font_16_sky.uc3");

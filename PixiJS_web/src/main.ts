@@ -23,6 +23,8 @@ import {
 } from "./net/apkUpdate";
 import { openPayUrl } from "./net/openPayUrl";
 import { SceneView } from "./render/SceneView";
+import { readWingIdPreference } from "./resources/wingFx";
+import { readMountIdPreference } from "./resources/mountFx";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
 import { GameSession } from "./game/GameSession";
 import { PhoneShell } from "./ui/PhoneShell";
@@ -51,6 +53,8 @@ import {
   type EntertainmentEntry,
 } from "./ui/EntertainmentPanel";
 import { EntertainmentWebLayer } from "./ui/EntertainmentWebLayer";
+import { WingPanel } from "./ui/WingPanel";
+import { MountPanel } from "./ui/MountPanel";
 import {
   ARENA_NPC_ENTER,
   ARENA_NPC_LEAVE,
@@ -87,8 +91,10 @@ import type { RoleRow } from "./net/protocol";
 import { isRedNamePk, PK_POINTS_MAX } from "./net/protocol";
 import {
   augmentEquipSellDialog,
+  EquipSellBatchAction,
   EquipSellService,
   DREAM_BADGE_EQUIP_IDS,
+  bagVisibleStackCount,
   isBattleMedicineOrFlask,
   isCrystalFragment,
   isDreamBadge,
@@ -589,6 +595,8 @@ async function main(): Promise<void> {
   const auctionPanel = new AuctionPanel();
   const entertainPanel = new EntertainmentPanel();
   const entertainWeb = new EntertainmentWebLayer();
+  const wingPanel = new WingPanel();
+  const mountPanel = new MountPanel();
   let auctionCache: {
     rows: AuctionListing[];
     mine: AuctionListing[];
@@ -634,6 +642,8 @@ async function main(): Promise<void> {
   wagerPanel.visible = false;
   auctionPanel.visible = false;
   entertainPanel.visible = false;
+  wingPanel.visible = false;
+  mountPanel.visible = false;
   taskUi.visible = false;
   chatPanel.visible = false;
   tradeUi.visible = false;
@@ -642,6 +652,12 @@ async function main(): Promise<void> {
 
   const view = new SceneView(app);
   view.root.visible = false;
+  {
+    const prefWing = readWingIdPreference();
+    if (prefWing) void view.setPlayerWing(prefWing, false);
+    const prefMount = readMountIdPreference();
+    if (prefMount) void view.setPlayerMount(prefMount, false);
+  }
 
   const syncWorldStatusBadges = () => {
     // 「斗」= hangup (vip_effect.gif). 「练」awaits training-buff tracking.
@@ -668,6 +684,8 @@ async function main(): Promise<void> {
     wagerPanel,
     auctionPanel,
     entertainPanel,
+    wingPanel,
+    mountPanel,
     taskUi,
     chatPanel,
     tradeUi,
@@ -683,6 +701,8 @@ async function main(): Promise<void> {
   wagerPanel.zIndex = 55;
   auctionPanel.zIndex = 55;
   entertainPanel.zIndex = 56;
+  wingPanel.zIndex = 56;
+  mountPanel.zIndex = 56;
   await title.mountArt();
   await roles.mountArt();
   await hud.mountArt();
@@ -729,6 +749,8 @@ async function main(): Promise<void> {
       arenaPanel.visible ||
       wagerPanel.visible ||
       entertainPanel.visible ||
+      wingPanel.visible ||
+      mountPanel.visible ||
       entertainWeb.isExpanded();
     if (phase === "world" && !overlayOpen) {
       view.inputEnabled = true;
@@ -1147,6 +1169,8 @@ async function main(): Promise<void> {
       if (auctionPanel.visible) auctionPanel.close();
       if (wagerPanel.visible) wagerPanel.close();
       if (entertainPanel.visible) entertainPanel.close();
+      if (wingPanel.visible) wingPanel.close();
+      if (mountPanel.visible) mountPanel.close();
       // Video/music HTML overlay stays up across battle / hangup / auto so
       // players can keep watching. Tear down only on auth / character screens.
       if (
@@ -1179,6 +1203,8 @@ async function main(): Promise<void> {
     else if (p === "world") {
       if (approach.open) shell.setSoftkeys({ left: "确定", right: "取消" });
       else if (entertainPanel.visible) shell.setSoftkeys(entertainPanel.softkeys());
+      else if (wingPanel.visible) shell.setSoftkeys(wingPanel.softkeys());
+      else if (mountPanel.visible) shell.setSoftkeys(mountPanel.softkeys());
       else shell.setSoftkeys({ left: "菜单", right: "菜单" });
     }
     else if (p === "menu") {
@@ -2423,6 +2449,10 @@ async function main(): Promise<void> {
 
   view.onYuTap = () => {
     if (phase !== "world" && phase !== "battle") return;
+    if (wingPanel.visible) {
+      wingPanel.close();
+      syncWorldWalkInput();
+    }
     if (entertainWeb.isExpanded()) {
       entertainWeb.minimize();
       return;
@@ -2442,6 +2472,125 @@ async function main(): Promise<void> {
       return;
     }
     openEntertainmentPanel();
+  };
+
+  const openTitleList = () => {
+    dialog.hide();
+    closeApproach(false);
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (entertainPanel.visible) entertainPanel.close();
+    if (wingPanel.visible) wingPanel.close();
+    if (mountPanel.visible) mountPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    showPhase("social");
+    social.openTitles([]);
+    showGameTip("称号…");
+    void session.openDesignations().then((page) => {
+      if (!page) {
+        showGameTip("称号列表失败");
+        return;
+      }
+      social.openTitles(
+        page.rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          desc: r.desc,
+          equipped: r.id === page.equippedId,
+        })),
+        { focusId: page.equippedId || undefined },
+      );
+    });
+  };
+
+  view.onChenTap = () => {
+    if (phase !== "world") return;
+    if (social.visible && social.panelKind === "titles") {
+      social.hide();
+      showPhase("world");
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      setChromeStatus("");
+      return;
+    }
+    openTitleList();
+  };
+
+  const openWingPanel = () => {
+    if (phase !== "world") return;
+    dialog.hide();
+    closeApproach(false);
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (entertainPanel.visible) entertainPanel.close();
+    if (mountPanel.visible) mountPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    wingPanel.open(view.getPlayerWingId());
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(wingPanel.softkeys());
+    setChromeStatus("翅膀");
+  };
+
+  wingPanel.onPick = (wingId) => {
+    void view.setPlayerWing(wingId, true);
+    setChromeStatus(wingId ? `翅膀 ${wingId}` : "翅膀已关");
+  };
+  wingPanel.onClose = () => {
+    syncWorldWalkInput();
+    shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    setChromeStatus("");
+  };
+
+  view.onChiTap = () => {
+    if (phase !== "world") return;
+    if (wingPanel.visible) {
+      wingPanel.cancel();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    openWingPanel();
+  };
+
+  const openMountPanel = () => {
+    if (phase !== "world") return;
+    dialog.hide();
+    closeApproach(false);
+    if (auctionPanel.visible) auctionPanel.close();
+    if (wagerPanel.visible) wagerPanel.close();
+    if (arenaPanel.visible) arenaPanel.close();
+    if (entertainPanel.visible) entertainPanel.close();
+    if (wingPanel.visible) wingPanel.close();
+    if (entertainWeb.isExpanded()) entertainWeb.minimize();
+    mountPanel.open(view.getPlayerMountId());
+    showPhase("world");
+    syncWorldWalkInput();
+    shell.setSoftkeys(mountPanel.softkeys());
+    setChromeStatus("坐骑");
+  };
+
+  mountPanel.onPick = (mountId) => {
+    void view.setPlayerMount(mountId, true);
+    setChromeStatus(mountId ? `坐骑 ${mountId}` : "坐骑已关");
+  };
+  mountPanel.onClose = () => {
+    syncWorldWalkInput();
+    shell.setSoftkeys({ left: "菜单", right: "菜单" });
+    setChromeStatus("");
+  };
+
+  view.onQiTap = () => {
+    if (phase !== "world") return;
+    if (mountPanel.visible) {
+      mountPanel.cancel();
+      syncWorldWalkInput();
+      shell.setSoftkeys({ left: "菜单", right: "菜单" });
+      return;
+    }
+    openMountPanel();
   };
 
   /** Hide map SCE spawn on engage; restore if 4/5 never arrives. */
@@ -2943,23 +3092,7 @@ async function main(): Promise<void> {
       return;
     }
     if (leaf === "title") {
-      showPhase("social");
-      social.openTitles([]);
-      showGameTip("称号…");
-      void session.openDesignations().then((page) => {
-        if (!page) {
-          showGameTip("称号列表失败");
-          return;
-        }
-        social.openTitles(
-          page.rows.map((r) => ({
-            id: r.id,
-            name: r.name,
-            desc: r.desc,
-            equipped: r.id === page.equippedId,
-          })),
-        );
-      });
+      openTitleList();
       return;
     }
     if (leaf === "nearby") {
@@ -3498,7 +3631,8 @@ async function main(): Promise<void> {
       if (action === "discard") {
         pendingDiscard = bag;
         discardConfirmOpen = true;
-        const qty = bag.count > 1 ? `×${bag.count}` : "";
+        const vis = Math.max(1, bagVisibleStackCount(bag));
+        const qty = vis > 1 ? `×${vis}` : "";
         dialog.show({
           title: "确认丢弃",
           body: `确定丢弃「${bag.name}」${qty}？\n丢弃后无法找回。`,
@@ -3869,6 +4003,7 @@ async function main(): Promise<void> {
                 desc: t.desc,
                 equipped: t.id === page.equippedId,
               })),
+              { focusId: page.equippedId || row.id },
             );
           }
           /* Nameplate refresh is driven by onDesignationUpdate from 23/2. */
@@ -4158,7 +4293,8 @@ async function main(): Promise<void> {
       showPhase("world");
       return;
     }
-    if (action === 290) {
+    // Dream-badge combine only — do not swallow other dialogs that reused 290/291.
+    if (action === 290 && dreamBadgeCombineOpen) {
       dialog.hide();
       const bag = pendingDreamBadge;
       dreamBadgeCombineOpen = false;
@@ -4187,7 +4323,7 @@ async function main(): Promise<void> {
       })();
       return;
     }
-    if (action === 291) {
+    if (action === 291 && dreamBadgeCombineOpen) {
       dialog.hide();
       returnFromDreamBadgeCombine();
       return;
@@ -4241,17 +4377,22 @@ async function main(): Promise<void> {
       }
       void (async () => {
         showGameTip(`丢弃 ${bag.name}…`);
-        await session.discardItem(bag.itemId, bag.seq, bag.count);
-        await session.openBag();
-        system.setBag(session.bagItems);
-        const cap =
-          session.characterStats?.backpackCapacity ||
-          Math.max(20, session.bagItems.length);
-        system.setBagMeta(
-          session.characterStats?.money ?? session.gold,
-          cap,
-        );
-        showGameTip(`已丢弃 ${bag.name}`);
+        try {
+          await session.discardItem(bag.itemId, bag.seq, bag.count);
+          await session.openBag();
+          system.setBag(session.bagItems);
+          const cap =
+            session.characterStats?.backpackCapacity ||
+            Math.max(20, session.bagItems.length);
+          system.setBagMeta(
+            session.characterStats?.money ?? session.gold,
+            cap,
+          );
+          showGameTip(`已丢弃 ${bag.name}`);
+        } catch (e) {
+          console.warn("[bag] discard failed", e);
+          showGameTip("丢弃失败，请重试");
+        }
         showPhase("system");
         system.open("bag");
       })();
@@ -4285,20 +4426,21 @@ async function main(): Promise<void> {
       return;
     }
     // Equip-sell voucher: client-only batch sell of unenhanced bag equips.
-    if (action === 290) {
+    // Actions 293..295 — must not reuse dream-badge combine 290/291.
+    if (action === EquipSellBatchAction.OPEN_CONFIRM) {
       dialog.show({
         title: "确认出售",
         body: "出售背包中全部未强化装备？售出后不可找回。",
         options: [
-          { label: "确认出售", action: 291, value: 0 },
-          { label: "取消", action: 292, value: 0 },
+          { label: "确认出售", action: EquipSellBatchAction.CONFIRM, value: 0 },
+          { label: "取消", action: EquipSellBatchAction.CANCEL, value: 0 },
         ],
       });
       showPhase("dialog");
       setChromeStatus("确认批量出售");
       return;
     }
-    if (action === 291) {
+    if (action === EquipSellBatchAction.CONFIRM) {
       dialog.hide();
       void (async () => {
         showGameTip("批量出售中…");
@@ -4309,7 +4451,7 @@ async function main(): Promise<void> {
       })();
       return;
     }
-    if (action === 292) {
+    if (action === EquipSellBatchAction.CANCEL) {
       void session
         .pickNpcOption(1, EquipSellService.OPEN, "出售装备")
         .then(() => {
@@ -4653,7 +4795,31 @@ dialog.hide();
       }
     }
     if (phase === "world") {
-      // Overlays on world (auction/arena/wager/entertain) must win over 菜单 softkeys.
+      // Overlays on world (auction/arena/wager/entertain/wing) must win over 菜单 softkeys.
+      if (mountPanel.visible) {
+        if (which === "left" || which === "center") {
+          mountPanel.confirm();
+          return;
+        }
+        if (which === "right") {
+          mountPanel.cancel();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
+      if (wingPanel.visible) {
+        if (which === "left" || which === "center") {
+          wingPanel.confirm();
+          return;
+        }
+        if (which === "right") {
+          wingPanel.cancel();
+          syncWorldWalkInput();
+          shell.setSoftkeys({ left: "菜单", right: "菜单" });
+        }
+        return;
+      }
       if (entertainPanel.visible) {
         if (which === "left" || which === "center") {
           entertainPanel.confirm();
@@ -4804,6 +4970,14 @@ dialog.hide();
   const handleOk = () => {
     if (phase === "map") {
       worldMap.confirm();
+      return;
+    }
+    if (phase === "world" && mountPanel.visible) {
+      mountPanel.confirm();
+      return;
+    }
+    if (phase === "world" && wingPanel.visible) {
+      wingPanel.confirm();
       return;
     }
     if (phase === "world" && entertainPanel.visible) {
@@ -5084,6 +5258,28 @@ dialog.hide();
       if (k === "arrowup" || k === "w") dialog.move(-1);
       if (k === "arrowdown" || k === "s") dialog.move(1);
     }
+    if (mountPanel.visible) {
+      if (k === "arrowup" || k === "w") {
+        mountPanel.move(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        mountPanel.move(1);
+        e.preventDefault();
+      }
+      return;
+    }
+    if (wingPanel.visible) {
+      if (k === "arrowup" || k === "w") {
+        wingPanel.move(-1);
+        e.preventDefault();
+      }
+      if (k === "arrowdown" || k === "s") {
+        wingPanel.move(1);
+        e.preventDefault();
+      }
+      return;
+    }
     if (entertainPanel.visible) {
       if (k === "arrowup" || k === "w") {
         entertainPanel.move(-1);
@@ -5252,7 +5448,9 @@ dialog.hide();
         (auctionPanel.visible ||
           arenaPanel.visible ||
           wagerPanel.visible ||
-          entertainPanel.visible)
+          entertainPanel.visible ||
+          wingPanel.visible ||
+          mountPanel.visible)
       ) {
         handleSoftkey("left");
       } else if (phase === "world" && approach.open) approach.confirm();
@@ -5274,7 +5472,9 @@ dialog.hide();
         (auctionPanel.visible ||
           arenaPanel.visible ||
           wagerPanel.visible ||
-          entertainPanel.visible)
+          entertainPanel.visible ||
+          wingPanel.visible ||
+          mountPanel.visible)
       ) {
         handleSoftkey("right");
       } else if (phase === "world" && approach.open) {

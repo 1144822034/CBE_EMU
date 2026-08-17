@@ -414,12 +414,24 @@ export function isEquipSellDialog(dialog: NpcDialog): boolean {
   });
 }
 
+/**
+ * Client-only dialog actions for equip-sell batch (must not collide with
+ * dream-badge combine 290/291 in main.ts).
+ */
+export const EquipSellBatchAction = {
+  OPEN_CONFIRM: 293,
+  CONFIRM: 294,
+  CANCEL: 295,
+} as const;
+
 /** Inject client-only「出售背包全部装备」into equip-sell dialogs. */
 export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
   if (!isEquipSellDialog(dialog)) return dialog;
   if (
     dialog.options.some(
-      (o) => o.action === 290 || o.label === "出售背包全部装备",
+      (o) =>
+        o.action === EquipSellBatchAction.OPEN_CONFIRM ||
+        o.label === "出售背包全部装备",
     )
   ) {
     return dialog;
@@ -428,7 +440,11 @@ export function augmentEquipSellDialog(dialog: NpcDialog): NpcDialog {
     ...dialog,
     options: [
       ...dialog.options,
-      { label: "出售背包全部装备", action: 290, value: 0 },
+      {
+        label: "出售背包全部装备",
+        action: EquipSellBatchAction.OPEN_CONFIRM,
+        value: 0,
+      },
     ],
   };
 }
@@ -3041,8 +3057,11 @@ export function preserveFlaskReservoirAcrossBagRefresh(
  * clobber a correct 17/1 stack of N — auction claim / chest openBag then
  * looked like「领了N个玄晶背包只有1」(same class as warehouse SET overwrite).
  * Equip / flask keep grid wire (instance=1 / visible stack=1).
+ *
+ * Also used when discard returns 17/1-only: pass prior bag as the "grid" so
+ * duplicate itemIds keep distinct seqs (Map-by-itemId collapsed them).
  */
-function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[] {
+export function mergeBag17WithGridSeq(from17: BagItem[], fromGrid: BagItem[]): BagItem[] {
   const pools = new Map<number, BagItem[]>();
   for (const g of fromGrid) {
     const arr = pools.get(g.itemId) ?? [];

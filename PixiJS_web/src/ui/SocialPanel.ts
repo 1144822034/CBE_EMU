@@ -292,6 +292,7 @@ export class SocialPanel extends Container {
 
   openTitles(
     rows: { id: number; name: string; desc: string; equipped: boolean }[],
+    opts?: { focusId?: number },
   ): void {
     this.kind = "titles";
     this.title = "称号";
@@ -301,6 +302,16 @@ export class SocialPanel extends Container {
       subtitle: r.desc.slice(0, 16),
     }));
     this.enterList();
+    const focusId =
+      opts?.focusId ??
+      rows.find((r) => r.equipped)?.id;
+    if (focusId != null && focusId !== 0) {
+      const ix = this.rows.findIndex((r) => r.id === focusId);
+      if (ix >= 0) {
+        this.listCursor = ix;
+        this.redraw();
+      }
+    }
   }
 
   /** Call before openRanking(); pass the token into openRank when it returns. */

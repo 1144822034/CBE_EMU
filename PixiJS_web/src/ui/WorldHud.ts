@@ -97,7 +97,7 @@ const CHAT_VISIBLE_ROWS = 2;
 const CHAT_LINE_H = UC3_CELL;
 /**
  * Party mates under the HUD chrome, left of the map.
- * Must clear SceneView map-corner status strip (修/拍/擂/[斗]/[练]/娱 @ y=4, 17px).
+ * Must clear SceneView map-corner status strip (修/拍/擂/[斗]/[练]/娱/翅/骑 @ y=4, 17px).
  * Evidence: partyHost previously at WORLD_TOP_H+1 covered those badges (HUD above map).
  */
 const MAP_STATUS_STRIP_BOTTOM = 4 + 17;
