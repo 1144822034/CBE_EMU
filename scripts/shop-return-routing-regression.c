@@ -177,10 +177,11 @@ static int assert_shop_actor_query_catalog_contract(void)
     if (assert_response_objects("actor query after catalog", response, responseLen,
                                 actorOnlyObject, 1) != 0 ||
         g_netMockShopCatalogDeliveredBeforeActorQuery ||
+        g_netMockBackpackGridReseedPendingRoleId != 1 ||
         !g_netLastHandledValid ||
         strcmp(g_netLastHandledSource, "builtin-shop-actor-query14") != 0)
     {
-        fprintf(stderr, "actor query after catalog: expected actorinfo-only response\n");
+        fprintf(stderr, "actor query after catalog: expected actorinfo-only response and role-bound grid reseed\n");
         return 1;
     }
 
@@ -191,12 +192,14 @@ static int assert_shop_actor_query_catalog_contract(void)
     if (assert_response_objects("standalone actor query", response, responseLen,
                                 inlineObjects,
                                 (u8)(sizeof(inlineObjects) / sizeof(inlineObjects[0]))) != 0 ||
+        g_netMockBackpackGridReseedPendingRoleId != 1 ||
         !g_netLastHandledValid ||
         strcmp(g_netLastHandledSource, "builtin-shop-actor-query14") != 0)
     {
         fprintf(stderr, "standalone actor query: inline catalog fallback regressed\n");
         return 1;
     }
+    g_netMockBackpackGridReseedPendingRoleId = 0;
     return 0;
 }
 
@@ -206,17 +209,117 @@ static int assert_shop_catalog_marker_snapshot(void)
 
     vm_mock_service_account_state_init(&state, "shop-return-regression");
     g_netMockShopCatalogDeliveredBeforeActorQuery = 1;
+    g_netMockBackpackGridReseedPendingRoleId = 1;
     vm_mock_service_account_capture(&state);
     g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
+    g_netMockBackpackGridReseedPendingRoleId = 0;
     vm_mock_service_account_restore(&state);
-    if (!g_netMockShopCatalogDeliveredBeforeActorQuery)
+    if (!g_netMockShopCatalogDeliveredBeforeActorQuery ||
+        g_netMockBackpackGridReseedPendingRoleId != 1)
     {
         fprintf(stderr, "shop catalog marker: account snapshot lost state\n");
         return 1;
     }
     vm_mock_service_account_restore(NULL);
     g_netMockShopCatalogDeliveredBeforeActorQuery = 0;
+    g_netMockBackpackGridReseedPendingRoleId = 0;
     return 0;
+}
+
+static bool response_has_object(const u8 *response, u32 responseLen,
+                                u8 major, u8 kind, u8 subtype)
+{
+    u32 offset = 5;
+    u8 objectCount = 0;
+
+    if (response == NULL || responseLen < 5 || response[0] != 'W' ||
+        response[1] != 'T')
+    {
+        return false;
+    }
+    objectCount = response[4];
+    while (objectCount-- != 0)
+    {
+        u32 objectLen = 0;
+        if (offset + 6 > responseLen)
+            return false;
+        objectLen = ((u32)response[offset + 4] << 8) |
+                    response[offset + 5];
+        if (objectLen < 6 || offset + objectLen > responseLen)
+            return false;
+        if (response[offset] == major && response[offset + 1] == kind &&
+            response[offset + 2] == subtype)
+        {
+            return true;
+        }
+        offset += objectLen;
+    }
+    return false;
+}
+
+static int assert_shop_return_grid_reseed_contract(void)
+{
+    vm_net_mock_role_state *role = NULL;
+    vm_net_mock_role_state savedRole;
+    u8 response[65536];
+    u32 responseLen = 5;
+    u8 responseObjectCount = 0;
+    u32 savedRoleCount = g_vm_net_mock_role_db.roleCount;
+    u32 savedActiveRoleId = g_vm_net_mock_role_db.activeRoleId;
+    bool savedRoleDbLoaded = g_vm_net_mock_role_db_loaded;
+    bool savedRoleDbValid = g_vm_net_mock_role_db_valid;
+
+    memset(&savedRole, 0, sizeof(savedRole));
+    savedRole = g_vm_net_mock_role_db.roles[0];
+    memset(&g_vm_net_mock_role_db.roles[0], 0,
+           sizeof(g_vm_net_mock_role_db.roles[0]));
+    g_vm_net_mock_role_db.roleCount = 1;
+    g_vm_net_mock_role_db.activeRoleId = 1;
+    g_vm_net_mock_role_db_loaded = true;
+    g_vm_net_mock_role_db_valid = true;
+    role = &g_vm_net_mock_role_db.roles[0];
+    role->roleId = 1;
+    role->backpackCapacity = 20;
+    role->backpackItemCount = 1;
+    role->nextBackpackSeq = 2;
+    role->backpackItems[0].itemId = 800;
+    role->backpackItems[0].seq = 1;
+    role->backpackItems[0].count = 5;
+
+    g_netMockBackpackGridSeededRoleId = 1;
+    g_netMockBackpackGridReseedPendingRoleId = 1;
+    if (!vm_net_mock_append_backpack_role_grid_main_objects(
+            response, sizeof(response), &responseLen, &responseObjectCount))
+    {
+        fprintf(stderr, "shop return grid: bootstrap builder failed\n");
+        goto fail;
+    }
+    vm_net_mock_finish_wt_packet(response, responseLen, responseObjectCount);
+    if (responseObjectCount == 0 ||
+        !response_has_object(response, responseLen, 1, 30, 21) ||
+        g_netMockBackpackGridReseedPendingRoleId != 0 ||
+        g_netMockBackpackGridSeededRoleId != 1)
+    {
+        fprintf(stderr, "shop return grid: same-role bootstrap did not consume reseed\n");
+        goto fail;
+    }
+
+    g_vm_net_mock_role_db.roles[0] = savedRole;
+    g_vm_net_mock_role_db.roleCount = savedRoleCount;
+    g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    g_netMockBackpackGridReseedPendingRoleId = 0;
+    return 0;
+
+fail:
+    g_vm_net_mock_role_db.roles[0] = savedRole;
+    g_vm_net_mock_role_db.roleCount = savedRoleCount;
+    g_vm_net_mock_role_db.activeRoleId = savedActiveRoleId;
+    g_vm_net_mock_role_db_loaded = savedRoleDbLoaded;
+    g_vm_net_mock_role_db_valid = savedRoleDbValid;
+    g_netMockBackpackGridReseedPendingRoleId = 0;
+    return 1;
 }
 
 static int assert_dispatch_matches_builder(const char *label,
@@ -299,7 +402,8 @@ int main(void)
             "empty 17/1 backpack combo", backpackRequest, backpackRequestLen, false,
             "builtin-backpack-items-books-combo") != 0 ||
         assert_shop_actor_query_catalog_contract() != 0 ||
-        assert_shop_catalog_marker_snapshot() != 0)
+        assert_shop_catalog_marker_snapshot() != 0 ||
+        assert_shop_return_grid_reseed_contract() != 0)
     {
         return 1;
     }
