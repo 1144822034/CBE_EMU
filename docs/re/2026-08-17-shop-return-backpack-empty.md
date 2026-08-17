@@ -150,13 +150,59 @@ Status: protocol fixes implemented; end-to-end runtime validation pending
 - `mock_server_interaction_login.c`：匹配该标记的下一次场景资源/任务 follow-up 无条件消费
   `27/11` 生命周期目录，即使当前响应不允许传统商城场景重入；调用既有
   `vm_net_mock_mark_scene_moveinfo_npc_seed_pending()` 清除旧的一次性目录状态。
-- `mock_server_equipment_npc.c`：区分传统商城返回（可走原 `30/2` 完成路径）和
-  `bootstrap-only`（只允许 `27/11`，绝不触发场景重入）。
+- `mock_server_equipment_npc.c`：区分商城返回的触发来源；两种来源都必须进入同一条带坐标的
+  `30/1 -> post-enter 30/2` 场景生命周期，不能在旧壳中直接重播 NPC。
 
 ### 回归证据
 
 - `scripts/shop-return-routing-regression.c` 新增 bootstrap NPC 协议回归：预先设置旧场景已
   播种状态，模拟商城返回重播标记，并调用真实场景生命周期 builder。
-- 断言响应含非空 `1/27/11`（当前 c04 临安府场景为 3 个 NPC），不含 `1/30/2`，并且
-  session marker 在响应后清除。
+- 断言响应含非空 `1/27/11`（当前 c04 临安府场景为 3 个 NPC），且 session marker 在
+  响应后清除。
 - 该回归不启动客户端、不修改 CBE/CBM 内存或状态；完整 UI 路径仍需隔离 MySQL 配置后再跑。
+
+## 14. NPC 重播后的加载状态完成
+
+### 新的运行时证据
+
+修复 NPC 缺失后，真实商城返回日志的顺序为：
+
+1. `5/10` 重播背包 `30/21`，并 arm `mode=bootstrap-only`。
+2. 客户端发出 `27/4`，随后发出长度 49、首对象为 `WT 7/42` 的场景任务子集请求；调度器将其
+   路由为 `builtin-scene-task-subset-followup`。
+3. 服务端输出 `mock_scene_npc_seed phase=backpack-grid-bootstrap-reseed`，证明非空
+   `27/11` 已进入正确的 NPC parser 路径。
+4. 同一响应原先输出
+   `net_send ... source=builtin-scene-task-subset-followup resp=671`，但没有 `30/2` 完成
+   对象日志。客户端已因 `27/11` 发起 actor
+   资源加载，却未收到关闭当前下载状态的完成确认，画面重新显示加载并停住。
+
+此前只在 39 字节资源 follow-up builder 中追加无坐标 `30/2`；本次日志证明商城返回实际先命中
+49 字节 task-subset builder，因此该修改没有覆盖首次偏离。这是已排除的错误路由假设。
+
+后续同一会话的复现已确认 49 字节和 39 字节两条商城返回 follow-up 都会生成
+`27/11 + 30/2-no-posinfo`，但加载循环仍会发生。该组合将 NPC 目录交给商城前的旧场景壳，
+而无坐标 `30/2` 只执行下载状态重置，不能建立新的 `mmGame` 场景壳。
+
+仓库已有的隔离端到端回归 `shop-return-hangup-v1-20260803T072135595Z-22268` 已验证正确
+顺序为 `30/1 {scene,posinfo}`，随后由真实 post-enter 请求取得
+`30/2 {scene,posinfo} + 27/11`。本轮恢复该契约，并将 `bootstrap-only` 标记也路由到相同的
+场景重入路径；传送资源完成仍保留它自己的无坐标 `30/2` 契约。
+
+### 修复契约
+
+`JianghuOL.CBE:0x01039770` 对无 `posinfo` 的 `30/2` 只执行下载状态完成；只有含位置字段的
+场景对象才能安装新的场景壳。商城返回因此先返回
+`1/30/1 { scene, posinfo }`，等待客户端真实 post-enter 请求，再返回
+`1/30/2 { result=1, type=2, scene, posinfo } + 1/27/11 { npcnum, npcinfo }`。
+
+坐标始终来自当前角色的同精确场景持久化位置。普通场景刷新和传送资源完成的无坐标确认
+不受影响。
+
+### 回归
+
+- `scripts/shop-return-routing-regression.c` 构造真实的 49 字节商城返回 task-subset 请求，验证
+  第一响应仅含带坐标 `30/1`，不在旧壳发送 `27/11`。
+- 随后构造真实的 78 字节 post-enter 请求，断言响应含带坐标 `30/2` 与非空 `27/11`，且不再
+  含 `30/1`。
+- 完整 UI 自动化仍受隔离 MySQL 密码缺失限制；本次修改的构建和协议回归结果见本轮执行记录。
