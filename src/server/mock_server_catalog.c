@@ -1349,6 +1349,24 @@ static bool vm_net_mock_role_service_persist_skill(
     return vm_mysql_exec(query);
 }
 
+static bool vm_net_mock_role_service_delete_skill(
+    const vm_net_mock_role_service_state *state, u32 skillId)
+{
+    char accountHex[129];
+    char query[640];
+
+    if (state == NULL || skillId == 0 ||
+        !vm_net_mock_role_service_tables_ensure() ||
+        !vm_net_mock_role_service_account_hex(state->accountId, accountHex))
+    {
+        return false;
+    }
+    snprintf(query, sizeof(query),
+             "DELETE FROM account_role_skills WHERE account_id=X'%s' AND role_id=%u AND skill_id=%u",
+             accountHex, state->roleId, skillId);
+    return vm_mysql_exec(query);
+}
+
 static bool vm_net_mock_role_service_has_skill(
     const vm_net_mock_role_service_state *state, u32 skillId)
 {
@@ -1487,6 +1505,37 @@ static bool vm_net_mock_role_service_add_skill(vm_net_mock_role_state *role,
         return false;
     }
     state->learnedSkillIds[state->learnedSkillCount++] = skillId;
+    return true;
+}
+
+static bool vm_net_mock_role_service_remove_skill(vm_net_mock_role_state *role,
+                                                  u32 skillId)
+{
+    vm_net_mock_role_service_state *state =
+        vm_net_mock_role_service_state_get(role);
+    u32 index = 0;
+
+    if (state == NULL || skillId == 0)
+        return false;
+    while (index < state->learnedSkillCount &&
+           state->learnedSkillIds[index] != skillId)
+    {
+        ++index;
+    }
+    if (index >= state->learnedSkillCount ||
+        !vm_net_mock_role_service_delete_skill(state, skillId))
+    {
+        if (index < state->learnedSkillCount)
+        {
+            printf("[error][network] mock_role_skill_delete role=%u skill=%u error=%s\n",
+                   role ? role->roleId : 0, skillId, vm_mysql_last_error());
+        }
+        return false;
+    }
+    for (u32 i = index + 1u; i < state->learnedSkillCount; ++i)
+        state->learnedSkillIds[i - 1u] = state->learnedSkillIds[i];
+    --state->learnedSkillCount;
+    state->learnedSkillIds[state->learnedSkillCount] = 0;
     return true;
 }
 
