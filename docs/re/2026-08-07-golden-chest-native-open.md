@@ -1,5 +1,10 @@
 # 黄金宝箱开启卡住：原生 `WT 7/15` 请求契约
 
+> 2026-08-18 correction: the request contract in this record remains valid,
+> but the earlier `7/7 type=2` consumption response does not.  Current chest
+> and key synchronization uses `7/11` only; see
+> [黄金宝箱连续开启耗尽物品物理槽](2026-08-18-chest-open-category15-slot-leak.md).
+
 ## 触发条件与原始证据
 
 使用 `guest00024` 角色开启已在后台配置奖池的黄金宝箱后，客户端一直显示

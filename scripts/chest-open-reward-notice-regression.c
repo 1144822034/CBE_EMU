@@ -79,13 +79,13 @@ static bool assert_acquire_notice_packet(const u8 *packet, u32 packetLen,
 
 static bool assert_chest_packet_without_modal(const u8 *packet, u32 packetLen)
 {
-    static const u8 expectedKind[] = { 7, 7, 7, 7, 7, 7 };
-    static const u8 expectedSubtype[] = { 7, 11, 7, 11, 7, 37 };
+    static const u8 expectedKind[] = { 7, 7, 7, 7 };
+    static const u8 expectedSubtype[] = { 11, 11, 7, 37 };
     u32 offset = 5;
     u8 objectCount;
 
     if (packet == NULL || packetLen < offset || packet[0] != 'W' ||
-        packet[1] != 'T' || packet[4] != 6)
+        packet[1] != 'T' || packet[4] != 4)
         return false;
     objectCount = packet[4];
     for (u8 i = 0; i < objectCount; ++i)
@@ -142,10 +142,10 @@ int main(void)
     }
 
     memset(chestPacket, 0, sizeof(chestPacket));
-    if (!vm_net_mock_append_backpack_item_remove7_objects(
+    if (!vm_net_mock_append_backpack_item_count11_object(
             chestPacket, sizeof(chestPacket), &chestPacketLen,
             &chestObjectCount, 238, 524, 0) ||
-        !vm_net_mock_append_backpack_item_remove7_objects(
+        !vm_net_mock_append_backpack_item_count11_object(
             chestPacket, sizeof(chestPacket), &chestPacketLen,
             &chestObjectCount, 258, 815, 0) ||
         !vm_net_mock_append_backpack_item_add7_object(
@@ -157,7 +157,7 @@ int main(void)
     ++chestObjectCount;
     if (!vm_net_mock_append_chest_open_reward_notice_object(
             chestPacket, sizeof(chestPacket), &chestPacketLen,
-            &chestObjectCount, 524, rewardGbk, 1) || chestObjectCount != 6)
+            &chestObjectCount, 524, rewardGbk, 1) || chestObjectCount != 4)
     {
         fputs("chest reward response object was not appended\n", stderr);
         return 1;
@@ -171,6 +171,6 @@ int main(void)
         return 1;
     }
     puts("chest-open reward-notice regression passed: 1/7/37 display-only acquire notice");
-    puts("chest-open response regression passed: no 7/1 or 25/11 modal/state; 7/7+7/11 cleanup");
+    puts("chest-open response regression passed: sequence-only 7/11 consumption; no additive 7/7 type=2 rows");
     return 0;
 }

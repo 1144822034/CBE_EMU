@@ -5,6 +5,12 @@ Date: 2026-08-13
 Status: `1/18/1` rejected in backpack; `1/7/37 result=1` display-only acquire
 notice implemented, runtime acceptance pending
 
+> 2026-08-18 correction: the notice conclusion remains applicable, but the
+> two consumption-side `7/7 type=2` objects documented in earlier sections
+> caused category-15 physical-slot leaks.  They have been removed; current
+> consumption uses two sequence-keyed `7/11` objects.  See
+> [黄金宝箱连续开启耗尽物品物理槽](2026-08-18-chest-open-category15-slot-leak.md).
+
 ## 1. 当前目标
 
 青铜、白银和黄金宝箱会正确扣除宝箱/钥匙并把中奖物品加入背包，但客户端没有

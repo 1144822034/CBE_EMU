@@ -1,5 +1,10 @@
 # 青铜、白银、黄金宝箱：奖池与概率契约
 
+> 2026-08-18 correction: the earlier `7/7 type=2 + 7/11` consumption pair
+> below was disproved by repeated-open runtime evidence.  Current chest
+> consumption uses sequence-keyed `7/11` only; see
+> [黄金宝箱连续开启耗尽物品物理槽](2026-08-18-chest-open-category15-slot-leak.md).
+
 ## 结论
 
 青铜宝箱、白银宝箱、黄金宝箱的**可开出物品与概率不由客户端
