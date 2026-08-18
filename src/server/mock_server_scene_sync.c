@@ -3568,7 +3568,7 @@ static bool vm_net_mock_npc_service_option_default(
         value = VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL;
         break;
     case VM_NET_MOCK_NPC_KIND_SKILL_TRAINER:
-        name = "\xd1\xa7\xcf\xb0\xbc\xbc\xc4\xdc"; /* 学习技能 */
+        name = "\xbc\xbc\xc4\xdc\xd0\xde\xcf\xb0"; /* 技能修习 */
         description = "\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6"; /* 技能导师 */
         value = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS;
         break;
@@ -3679,8 +3679,13 @@ static bool vm_net_mock_npc_transaction_context_begin(
 
     if (session == NULL || role == NULL || serviceContext == NULL ||
         (kind != VM_MOCK_SERVICE_NPC_TRANSACTION_BUY &&
-         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SELL) ||
-        itemId == 0 || quotedPrice == 0 ||
+         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SELL &&
+         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN &&
+         kind != VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET) ||
+        itemId == 0 ||
+        ((kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY ||
+          kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL) &&
+         quotedPrice == 0) ||
         (kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL && backpackSeq == 0) ||
         !vm_net_mock_scene_name_is_safe(serviceContext->scene))
     {
@@ -3721,7 +3726,9 @@ static bool vm_net_mock_npc_transaction_context_take(
     vm_net_mock_npc_transaction_context_clear(session);
     valid = role != NULL && serviceContext != NULL && transaction.active &&
             (transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY ||
-             transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL) &&
+             transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL ||
+             transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN ||
+             transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET) &&
             transaction.roleId == role->roleId &&
             transaction.actorId == serviceContext->actorId &&
             transaction.serviceMask == serviceContext->serviceMask &&
@@ -4806,6 +4813,44 @@ static bool vm_net_mock_append_backpack_item_count11_object(
     return true;
 }
 
+static bool vm_net_mock_npc_service_opcode_is_supported(u32 opcode)
+{
+    switch (opcode)
+    {
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_BUY_WEAPON_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_REPAIR_ALL &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_ARMOR &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_MEDICINE &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_BUY_ITEM_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_INSTANCE_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_ENTER_INSTANCE_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_CHALLENGE_INSTANCE_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_ARENA &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION &
+        VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE:
+    case VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool vm_net_mock_is_npc_service_dialog_request(
     const u8 *request, u32 requestLen, u32 *serviceValueOut)
 {
@@ -4826,12 +4871,8 @@ static bool vm_net_mock_is_npc_service_dialog_request(
         requestType != 2 ||
         !vm_net_mock_get_object_number_field(object.payload, object.payloadLen,
                                              "id", &serviceValue) ||
-        (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) <
-            (VM_NET_MOCK_NPC_SERVICE_OPEN_WEAPON &
-             VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) ||
-        (serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK) >
-            (VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION &
-             VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
+        !vm_net_mock_npc_service_opcode_is_supported(
+            serviceValue & VM_NET_MOCK_NPC_SERVICE_OPCODE_MASK))
     {
         return false;
     }
@@ -5382,6 +5423,84 @@ static u32 vm_net_mock_build_pending_instance_challenge_battle_response(
     return responseLen;
 }
 
+static bool vm_net_mock_npc_skill_is_starter(
+    const vm_net_mock_skill_catalog_item *skill)
+{
+    return skill != NULL && skill->levelRequired <= 1u;
+}
+
+static bool vm_net_mock_npc_skill_list_matches(
+    const vm_net_mock_skill_catalog_item *skill,
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_role_service_state *serviceState,
+    bool forgetList)
+{
+    u8 rawJob = role ? vm_net_mock_role_job_to_skill_raw_job(role->job) : 0xffu;
+    bool learned = skill != NULL &&
+                   vm_net_mock_role_service_has_skill(serviceState,
+                                                      skill->skillId);
+
+    if (skill == NULL || role == NULL || skill->rawJob != rawJob)
+        return false;
+    if (forgetList)
+        return learned && !vm_net_mock_npc_skill_is_starter(skill);
+    return !learned && skill->levelRequired <= role->level;
+}
+
+static u32 vm_net_mock_npc_skill_list_total(
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_role_service_state *serviceState,
+    bool forgetList)
+{
+    u32 total = 0;
+
+    for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
+    {
+        if (vm_net_mock_npc_skill_list_matches(&g_vm_net_mock_skill_catalog[i],
+                                               role, serviceState,
+                                               forgetList))
+        {
+            ++total;
+        }
+    }
+    return total;
+}
+
+static u32 vm_net_mock_npc_skill_list_item_page(
+    const vm_net_mock_role_state *role,
+    const vm_net_mock_role_service_state *serviceState,
+    bool forgetList, u32 skillId)
+{
+    u32 ordinal = 0;
+
+    for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
+    {
+        const vm_net_mock_skill_catalog_item *skill =
+            &g_vm_net_mock_skill_catalog[i];
+        if (!vm_net_mock_npc_skill_list_matches(skill, role, serviceState,
+                                                forgetList))
+        {
+            continue;
+        }
+        if (skill->skillId == skillId)
+            return ordinal / VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS;
+        ++ordinal;
+    }
+    return 0;
+}
+
+static u32 vm_net_mock_npc_skill_list_clamp_page(u32 total, u32 page)
+{
+    if (total == 0)
+        return 0;
+    if (page >= (total + VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS - 1u) /
+                    VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS)
+    {
+        return (total - 1u) / VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS;
+    }
+    return page;
+}
+
 static u32 vm_net_mock_build_npc_service_dialog_response(
     const u8 *request, u32 requestLen, u8 *out, u32 outCap)
 {
@@ -5408,6 +5527,7 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
     u32 objectStart = 0;
     u8 objectCount = 1;
     bool appendSkills = false;
+    bool skillPrompt = false;
     u16 backpackAddSeq = 0;
     const char *action = "invalid";
     u32 result = 0;
@@ -5458,19 +5578,35 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
         if (transactionCancel)
         {
-            operation = transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY
-                            ? VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE
-                            : VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
-            value = transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY
-                        ? ((transaction.page <<
-                            VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT) |
-                           transaction.selector)
-                        : transaction.page;
+            if (transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY)
+            {
+                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_CATEGORY_BASE;
+                value = (transaction.page <<
+                         VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT) |
+                        transaction.selector;
+                action = "shop-buy-cancel";
+            }
+            else if (transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL)
+            {
+                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_EQUIPMENT_SELL_BASE;
+                value = transaction.page;
+                action = "equipment-sell-cancel";
+            }
+            else if (transaction.kind ==
+                     VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN)
+            {
+                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE;
+                value = transaction.page;
+                action = "skill-learn-cancel";
+            }
+            else
+            {
+                operation = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE;
+                value = transaction.page;
+                action = "skill-forget-cancel";
+            }
             serviceValue = operation | value;
             restoredListPage = transaction.page;
-            action = transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY
-                         ? "shop-buy-cancel"
-                         : "equipment-sell-cancel";
         }
         else if (transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_BUY)
         {
@@ -5478,10 +5614,23 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
             value = transaction.itemId;
             serviceValue = operation | value;
         }
-        else
+        else if (transaction.kind == VM_MOCK_SERVICE_NPC_TRANSACTION_SELL)
         {
             operation = VM_NET_MOCK_NPC_SERVICE_SELL_EQUIPMENT_BASE;
             value = transaction.backpackSeq;
+            serviceValue = operation | value;
+        }
+        else if (transaction.kind ==
+                 VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN)
+        {
+            operation = VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE;
+            value = transaction.itemId;
+            serviceValue = operation | value;
+        }
+        else
+        {
+            operation = VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE;
+            value = transaction.itemId;
             serviceValue = operation | value;
         }
     }
@@ -6252,139 +6401,444 @@ static u32 vm_net_mock_build_npc_service_dialog_response(
         }
     }
     else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS ||
-             operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
+             operation == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE ||
+             operation == VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE)
     {
         u8 rawJob = vm_net_mock_role_job_to_skill_raw_job(role->job);
-        action = operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE
-                     ? "skill-learn"
-                     : "skill-list";
+        bool learnList = operation == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE ||
+                         operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE;
+        bool forgetList = operation == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE ||
+                          operation == VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE;
+        bool skillMutationRequest =
+            operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE ||
+            operation == VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE;
+        u32 page = (learnList || forgetList) ? value : 0;
+        u32 total = 0;
+        u32 start = 0;
+        u32 ordinal = 0;
+
+        if (!transactionCancel)
+        {
+            action = serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS
+                         ? "skill-menu"
+                         : (operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE
+                                ? (transactionConfirm
+                                       ? "skill-learn"
+                                       : "skill-learn-confirm-prompt")
+                                : (operation == VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE
+                                       ? (transactionConfirm
+                                              ? "skill-forget"
+                                              : "skill-forget-confirm-prompt")
+                                       : (learnList ? "skill-learn-list"
+                                                    : "skill-forget-list")));
+        }
         if (!vm_net_mock_npc_service_context_has(
                 shopContext, VM_NET_MOCK_NPC_KIND_SKILL_TRAINER))
         {
             dialogText =
                 "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
         }
+        else if (serviceValue == VM_NET_MOCK_NPC_SERVICE_OPEN_SKILLS)
+        {
+            dialogText =
+                "\xc7\xeb\xd1\xa1\xd4\xf1\xbc\xbc\xc4\xdc\xb5\xbc\xca\xa6\xb7\xfe\xce\xf1\xa3\xba"; /* 请选择技能导师服务： */
+            optionNames[0] =
+                "\xd1\xa7\xcf\xb0\xd0\xc2\xbc\xbc\xc4\xdc"; /* 学习新技能 */
+            optionDescriptions[0] =
+                "\xb2\xe9\xbf\xb4\xb5\xb1\xc7\xb0\xb5\xc8\xbc\xb6\xbf\xc9\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc"; /* 查看当前等级可学习的技能 */
+            optionValues[0] = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE;
+            optionNames[1] =
+                "\xd2\xc5\xcd\xfc\xd2\xd1\xd1\xa7\xbc\xbc\xc4\xdc"; /* 遗忘已学技能 */
+            optionDescriptions[1] =
+                "\xb2\xe9\xbf\xb4\xbf\xc9\xd2\xc5\xcd\xfc\xb5\xc4\xd2\xd1\xd1\xa7\xbc\xbc\xc4\xdc"; /* 查看可遗忘的已学技能 */
+            optionValues[1] = VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE;
+            optionCount = 2;
+            result = 1;
+        }
         else
         {
-        serviceState = vm_net_mock_role_service_state_get(role);
-        snprintf(dialogTextStorage, sizeof(dialogTextStorage), "%s%u%s",
-                 "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xa8\xb5\xb1\xc7\xb0", /* 请选择要学习的技能（当前 */
-                 role->level,
-                 "\xbc\xb6\xa3\xa9\xa3\xba"); /* 级）： */
-        dialogText = dialogTextStorage;
-        if (operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
-        {
-            const vm_net_mock_skill_catalog_item *skill =
-                vm_net_mock_find_skill_catalog_item(value);
-            if (skill == NULL || skill->rawJob != rawJob)
+            serviceState = vm_net_mock_role_service_state_get(role);
+            if (operation == VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE)
             {
-                dialogText =
-                    "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                const vm_net_mock_skill_catalog_item *skill =
+                    vm_net_mock_find_skill_catalog_item(value);
+                page = vm_net_mock_npc_skill_list_item_page(
+                    role, serviceState, false, value);
+                restoredListPage = page;
+                if (skill == NULL || skill->rawJob != rawJob)
+                {
+                    dialogText =
+                        "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                }
+                else if (skill->levelRequired > role->level)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "%s%u%s%s%s%u%s",
+                             "\xb5\xb1\xc7\xb0\xb5\xc8\xbc\xb6", role->level,
+                             "\xa3\xac", skill->name,
+                             "\xd0\xe8\xd2\xaa", skill->levelRequired,
+                             "\xbc\xb6\xa3\xac\xce\xde\xb7\xa8\xd1\xa7\xcf\xb0\xa1\xa3"); /* 当前等级...需要...级，无法学习。 */
+                }
+                else if (vm_net_mock_role_service_has_skill(serviceState,
+                                                             skill->skillId))
+                {
+                    dialogText =
+                        "\xb8\xc3\xbc\xbc\xc4\xdc\xd2\xd1\xbe\xad\xd1\xa7\xbb\xe1\xa1\xa3"; /* 该技能已经学会。 */
+                }
+                else if (role->money < skill->learnPrice)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "%s%u%s",
+                             "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa",
+                             skill->learnPrice,
+                             "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱不足，需要...铜钱。 */
+                    dialogText = dialogTextStorage;
+                }
+                else if (!transactionConfirm)
+                {
+                    if (!vm_net_mock_npc_transaction_context_begin(
+                            session, role, shopContext,
+                            VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN,
+                            skill->skillId, 0, 0, page, skill->learnPrice))
+                    {
+                        dialogText =
+                            "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                    }
+                    else
+                    {
+                        snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                                 "%s%s\n%s%u\n%s%u%s",
+                                 "\xd1\xa7\xcf\xb0\xc8\xb7\xc8\xcf\xa3\xba",
+                                 skill->name,
+                                 "\xb5\xc8\xbc\xb6\xa3\xba\x4c\x76\x2e",
+                                 skill->levelRequired,
+                                 "\xb7\xd1\xd3\xc3\xa3\xba", skill->learnPrice,
+                                 "\xcd\xad\xc7\xae"); /* 学习确认/等级/费用 */
+                        dialogText = dialogTextStorage;
+                        optionNames[0] =
+                            "\xc8\xb7\xc8\xcf\xd1\xa7\xcf\xb0"; /* 确认学习 */
+                        optionDescriptions[0] =
+                            "\xc8\xb7\xc8\xcf\xd1\xa7\xcf\xb0\xb8\xc3\xbc\xbc\xc4\xdc"; /* 确认学习该技能 */
+                        optionValues[0] =
+                            VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION;
+                        optionNames[1] =
+                            "\xb7\xb5\xbb\xd8\xbc\xbc\xc4\xdc\xc1\xd0\xb1\xed"; /* 返回技能列表 */
+                        optionDescriptions[1] =
+                            "\xd4\xdd\xb2\xbb\xd1\xa7\xcf\xb0\xb8\xc3\xbc\xbc\xc4\xdc"; /* 暂不学习该技能 */
+                        optionValues[1] =
+                            VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION;
+                        optionCount = 2;
+                        skillPrompt = true;
+                    }
+                }
+                else if (transaction.kind !=
+                             VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN ||
+                         transaction.itemId != skill->skillId ||
+                         transaction.quotedPrice != skill->learnPrice)
+                {
+                    dialogText =
+                        "\xbc\xbc\xc4\xdc\xd7\xb4\xcc\xac\xd2\xd1\xb1\xe4\xbb\xaf\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 技能状态已变化，请重新选择。 */
+                }
+                else
+                {
+                    vm_net_mock_role_state before = *role;
+
+                    if (!vm_net_mock_role_service_add_skill(role,
+                                                             skill->skillId))
+                    {
+                        dialogText =
+                            "\xbc\xbc\xc4\xdc\xb2\xd9\xd7\xf7\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa3\xa1"; /* 技能操作失败，请稍后重试！ */
+                    }
+                    else
+                    {
+                        role->money -= skill->learnPrice;
+                        if (!vm_net_mock_role_db_save("npc-skill-learn"))
+                        {
+                            *role = before;
+                            if (!vm_net_mock_role_service_remove_skill(
+                                    role, skill->skillId))
+                            {
+                                printf("[error][network] mock_role_skill_learn_rollback role=%u skill=%u\n",
+                                       role->roleId, skill->skillId);
+                            }
+                            dialogText =
+                                "\xbc\xbc\xc4\xdc\xb2\xd9\xd7\xf7\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa3\xa1"; /* 技能操作失败，请稍后重试！ */
+                        }
+                        else
+                        {
+                            snprintf(dialogTextStorage,
+                                     sizeof(dialogTextStorage), "%s%u%s",
+                                     "\xbc\xbc\xc4\xdc\xd1\xa7\xcf\xb0\xb3\xc9\xb9\xa6\xa3\xac\xcf\xfb\xba\xc4",
+                                     skill->learnPrice,
+                                     "\xcd\xad\xc7\xae\xa1\xa3"); /* 技能学习成功，消耗...铜钱。 */
+                            dialogText = dialogTextStorage;
+                            appendSkills = true;
+                            result = 1;
+                            serviceState =
+                                vm_net_mock_role_service_state_get(role);
+                        }
+                    }
+                }
             }
-            else if (skill->levelRequired > role->level)
+            else if (operation == VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE)
             {
-                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
-                         "%s%u%s%s%s%u%s",
-                         "\xb5\xb1\xc7\xb0\xb5\xc8\xbc\xb6", /* 当前等级 */
+                const vm_net_mock_skill_catalog_item *skill =
+                    vm_net_mock_find_skill_catalog_item(value);
+                page = vm_net_mock_npc_skill_list_item_page(
+                    role, serviceState, true, value);
+                restoredListPage = page;
+                if (skill == NULL || skill->rawJob != rawJob ||
+                    !vm_net_mock_role_service_has_skill(serviceState,
+                                                        value))
+                {
+                    dialogText =
+                        "\xb8\xc3\xbc\xbc\xc4\xdc\xce\xb4\xd1\xa7\xbb\xe1\xbb\xf2\xd2\xd1\xd2\xc5\xcd\xfc\xa1\xa3"; /* 该技能未学会或已遗忘。 */
+                }
+                else if (vm_net_mock_npc_skill_is_starter(skill))
+                {
+                    dialogText =
+                        "\xb3\xf5\xca\xbc\xbc\xbc\xc4\xdc\xb2\xbb\xc4\xdc\xd2\xc5\xcd\xfc\xa1\xa3"; /* 初始技能不能遗忘。 */
+                }
+                else if (role->money < skill->learnPrice)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "%s%u%s",
+                             "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa",
+                             skill->learnPrice,
+                             "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱不足，需要...铜钱。 */
+                    dialogText = dialogTextStorage;
+                }
+                else if (!transactionConfirm)
+                {
+                    if (!vm_net_mock_npc_transaction_context_begin(
+                            session, role, shopContext,
+                            VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET,
+                            skill->skillId, 0, 0, page, skill->learnPrice))
+                    {
+                        dialogText =
+                            "\xb7\xfe\xce\xf1\xc7\xeb\xc7\xf3\xce\xde\xd0\xa7\xa1\xa3"; /* 服务请求无效。 */
+                    }
+                    else
+                    {
+                        snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                                 "%s%s\n%s%u\n%s%u%s",
+                                 "\xd2\xc5\xcd\xfc\xc8\xb7\xc8\xcf\xa3\xba",
+                                 skill->name,
+                                 "\xb5\xc8\xbc\xb6\xa3\xba\x4c\x76\x2e",
+                                 skill->levelRequired,
+                                 "\xb7\xd1\xd3\xc3\xa3\xba", skill->learnPrice,
+                                 "\xcd\xad\xc7\xae"); /* 遗忘确认/等级/费用 */
+                        dialogText = dialogTextStorage;
+                        optionNames[0] =
+                            "\xc8\xb7\xc8\xcf\xd2\xc5\xcd\xfc"; /* 确认遗忘 */
+                        optionDescriptions[0] =
+                            "\xc8\xb7\xc8\xcf\xd2\xc5\xcd\xfc\xb8\xc3\xbc\xbc\xc4\xdc"; /* 确认遗忘该技能 */
+                        optionValues[0] =
+                            VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION;
+                        optionNames[1] =
+                            "\xb7\xb5\xbb\xd8\xbc\xbc\xc4\xdc\xc1\xd0\xb1\xed"; /* 返回技能列表 */
+                        optionDescriptions[1] =
+                            "\xd4\xdd\xb2\xbb\xd2\xc5\xcd\xfc\xb8\xc3\xbc\xbc\xc4\xdc"; /* 暂不遗忘该技能 */
+                        optionValues[1] =
+                            VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION;
+                        optionCount = 2;
+                        skillPrompt = true;
+                    }
+                }
+                else if (transaction.kind !=
+                             VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET ||
+                         transaction.itemId != skill->skillId ||
+                         transaction.quotedPrice != skill->learnPrice)
+                {
+                    dialogText =
+                        "\xbc\xbc\xc4\xdc\xd7\xb4\xcc\xac\xd2\xd1\xb1\xe4\xbb\xaf\xa3\xac\xc7\xeb\xd6\xd8\xd0\xc2\xd1\xa1\xd4\xf1\xa1\xa3"; /* 技能状态已变化，请重新选择。 */
+                }
+                else
+                {
+                    vm_net_mock_role_state before = *role;
+
+                    if (!vm_net_mock_role_service_remove_skill(role,
+                                                                skill->skillId))
+                    {
+                        dialogText =
+                            "\xbc\xbc\xc4\xdc\xb2\xd9\xd7\xf7\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa3\xa1"; /* 技能操作失败，请稍后重试！ */
+                    }
+                    else
+                    {
+                        role->money -= skill->learnPrice;
+                        if (!vm_net_mock_role_db_save("npc-skill-forget"))
+                        {
+                            *role = before;
+                            if (!vm_net_mock_role_service_add_skill(
+                                    role, skill->skillId))
+                            {
+                                printf("[error][network] mock_role_skill_forget_rollback role=%u skill=%u\n",
+                                       role->roleId, skill->skillId);
+                            }
+                            dialogText =
+                                "\xbc\xbc\xc4\xdc\xb2\xd9\xd7\xf7\xca\xa7\xb0\xdc\xa3\xac\xc7\xeb\xc9\xd4\xba\xf3\xd6\xd8\xca\xd4\xa3\xa1"; /* 技能操作失败，请稍后重试！ */
+                        }
+                        else
+                        {
+                            snprintf(dialogTextStorage,
+                                     sizeof(dialogTextStorage), "%s%s%s%u%s",
+                                     "\xd2\xd1\xd2\xc5\xcd\xfc\xbc\xbc\xc4\xdc\xa3\xba",
+                                     skill->name,
+                                     "\xa3\xac\xcf\xfb\xba\xc4",
+                                     skill->learnPrice,
+                                     "\xcd\xad\xc7\xae\xa1\xa3"); /* 已遗忘技能：...，消耗...铜钱。 */
+                            dialogText = dialogTextStorage;
+                            appendSkills = true;
+                            result = 1;
+                            serviceState =
+                                vm_net_mock_role_service_state_get(role);
+                        }
+                    }
+                }
+            }
+
+            if (skillPrompt)
+                goto npc_service_serialize;
+
+            for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
+            {
+                const vm_net_mock_skill_catalog_item *skill =
+                    &g_vm_net_mock_skill_catalog[i];
+                if (skill->rawJob != rawJob)
+                    continue;
+                if (vm_net_mock_role_service_has_skill(serviceState,
+                                                       skill->skillId))
+                {
+                    ++skillLearnedCount;
+                }
+                else if (skill->levelRequired > role->level)
+                {
+                    ++skillLevelLockedCount;
+                    if (skillNextLocked == NULL)
+                        skillNextLocked = skill;
+                }
+                else
+                {
+                    ++skillEligibleCount;
+                }
+            }
+
+            total = vm_net_mock_npc_skill_list_total(role, serviceState,
+                                                     forgetList);
+            page = vm_net_mock_npc_skill_list_clamp_page(total, page);
+            start = page * VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS;
+            restoredListPage = page;
+            if (!skillMutationRequest)
+            {
+                snprintf(dialogTextStorage, sizeof(dialogTextStorage), "%s%u%s",
+                         forgetList
+                             ? "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd2\xc5\xcd\xfc\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xa8\xb5\xb1\xc7\xb0"
+                             : "\xc7\xeb\xd1\xa1\xd4\xf1\xd2\xaa\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa3\xa8\xb5\xb1\xc7\xb0", /* 请选择要遗忘/学习的技能（当前 */
                          role->level,
-                         "\xa3\xac", /* ， */
-                         skill->name,
-                         "\xd0\xe8\xd2\xaa", /* 需要 */
-                         skill->levelRequired,
-                         "\xbc\xb6\xa3\xac\xce\xde\xb7\xa8\xd1\xa7\xcf\xb0\xa1\xa3"); /* 级，无法学习。 */
+                         "\xbc\xb6\xa3\xa9\xa3\xba"); /* 级）： */
+                dialogText = dialogTextStorage;
             }
-            else if (vm_net_mock_role_service_has_skill(serviceState,
-                                                         skill->skillId))
+
+            ordinal = 0;
+            for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
             {
-                dialogText =
-                    "\xb8\xc3\xbc\xbc\xc4\xdc\xd2\xd1\xbe\xad\xd1\xa7\xbb\xe1\xa1\xa3"; /* 该技能已经学会。 */
+                const vm_net_mock_skill_catalog_item *skill =
+                    &g_vm_net_mock_skill_catalog[i];
+                if (!vm_net_mock_npc_skill_list_matches(skill, role,
+                                                        serviceState,
+                                                        forgetList))
+                {
+                    continue;
+                }
+                if (ordinal >= start &&
+                    ordinal < start + VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS)
+                {
+                    snprintf(optionNameStorage[optionCount],
+                             sizeof(optionNameStorage[optionCount]), "%s%s",
+                             forgetList ? "\xd2\xc5\xcd\xfc" : "\xd1\xa7\xcf\xb0",
+                             skill->name); /* 遗忘/学习... */
+                    if (forgetList)
+                    {
+                        snprintf(optionDescriptionStorage[optionCount],
+                                 sizeof(optionDescriptionStorage[optionCount]),
+                                 "%s Lv.%u %u%s", skill->name,
+                                 skill->levelRequired, skill->learnPrice,
+                                 "\xcd\xad\xc7\xae");
+                    }
+                    else
+                    {
+                        snprintf(optionDescriptionStorage[optionCount],
+                                 sizeof(optionDescriptionStorage[optionCount]),
+                                 "%s Lv.%u %u%s", skill->name,
+                                 skill->levelRequired, skill->learnPrice,
+                                 "\xcd\xad\xc7\xae");
+                    }
+                    optionNames[optionCount] = optionNameStorage[optionCount];
+                    optionDescriptions[optionCount] =
+                        optionDescriptionStorage[optionCount];
+                    optionValues[optionCount] =
+                        (forgetList
+                             ? VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE
+                             : VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE) |
+                        skill->skillId;
+                    ++optionCount;
+                }
+                ++ordinal;
             }
-            else if (role->money < skill->learnPrice)
+            if (page > 0 &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
             {
-                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
-                         "%s%u%s",
-                         "\xcd\xad\xc7\xae\xb2\xbb\xd7\xe3\xa3\xac\xd0\xe8\xd2\xaa", /* 铜钱不足，需要 */
-                         skill->learnPrice,
-                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
+                optionNames[optionCount] =
+                    "\xc9\xcf\xd2\xbb\xd2\xb3"; /* 上一页 */
+                optionDescriptions[optionCount] =
+                    forgetList ? "\xd2\xc5\xcd\xfc\xbc\xbc\xc4\xdc"
+                               : "\xd1\xa7\xcf\xb0\xbc\xbc\xc4\xdc";
+                optionValues[optionCount] =
+                    (forgetList
+                         ? VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE
+                         : VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE) |
+                    (page - 1u);
+                ++optionCount;
             }
-            else if (vm_net_mock_role_service_add_skill(role, skill->skillId))
+            if (start + VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS < total &&
+                optionCount < VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
             {
-                role->money -= skill->learnPrice;
-                vm_net_mock_role_db_save("npc-skill-learn");
-                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
-                         "%s%u%s",
-                         "\xbc\xbc\xc4\xdc\xd1\xa7\xcf\xb0\xb3\xc9\xb9\xa6\xa3\xac\xcf\xfb\xba\xc4", /* 技能学习成功，消耗 */
-                         skill->learnPrice,
-                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
-                appendSkills = true;
-                result = 1;
-                serviceState = vm_net_mock_role_service_state_get(role);
+                optionNames[optionCount] =
+                    "\xcf\xc2\xd2\xbb\xd2\xb3"; /* 下一页 */
+                optionDescriptions[optionCount] =
+                    forgetList ? "\xd2\xc5\xcd\xfc\xbc\xbc\xc4\xdc"
+                               : "\xd1\xa7\xcf\xb0\xbc\xbc\xc4\xdc";
+                optionValues[optionCount] =
+                    (forgetList
+                         ? VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE
+                         : VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE) |
+                    (page + 1u);
+                ++optionCount;
             }
-        }
-        for (u32 i = 0; i < vm_net_mock_load_skill_catalog(); ++i)
-        {
-            const vm_net_mock_skill_catalog_item *skill =
-                &g_vm_net_mock_skill_catalog[i];
-            if (skill->rawJob != rawJob)
+            if (optionCount == 0 && result == 0 && !skillMutationRequest)
             {
-                continue;
+                if (!forgetList && skillNextLocked != NULL)
+                {
+                    snprintf(dialogTextStorage, sizeof(dialogTextStorage),
+                             "%s%u%s%s%s%u%s%u%s",
+                             "\xb5\xb1\xc7\xb0", role->level,
+                             "\xbc\xb6\xa3\xbb\xcf\xc2\xd2\xbb\xbc\xbc\xc4\xdc",
+                             skillNextLocked->name,
+                             "\xd0\xe8\xd2\xaa", skillNextLocked->levelRequired,
+                             "\xbc\xb6\xa3\xac\xd1\xa7\xcf\xb0\xb7\xd1\xd3\xc3",
+                             skillNextLocked->learnPrice,
+                             "\xcd\xad\xc7\xae\xa1\xa3"); /* 当前...级；下一技能... */
+                    dialogText = dialogTextStorage;
+                }
+                else
+                {
+                    dialogText = forgetList
+                                     ? "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xc5\xcd\xfc\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3" /* 当前没有可遗忘的技能。 */
+                                     : "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xd4\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3"; /* 当前没有可以学习的技能。 */
+                }
             }
-            if (vm_net_mock_role_service_has_skill(serviceState,
-                                                   skill->skillId))
-            {
-                ++skillLearnedCount;
-                continue;
-            }
-            if (skill->levelRequired > role->level)
-            {
-                ++skillLevelLockedCount;
-                if (skillNextLocked == NULL)
-                    skillNextLocked = skill;
-                continue;
-            }
-            ++skillEligibleCount;
-            if (skill->skillId > VM_NET_MOCK_NPC_SERVICE_VALUE_MASK ||
-                optionCount >= VM_NET_MOCK_NPC_SERVICE_DIALOG_MAX_OPTIONS)
-            {
-                continue;
-            }
-            snprintf(optionNameStorage[optionCount],
-                     sizeof(optionNameStorage[optionCount]), "%s%s",
-                     "\xd1\xa7\xcf\xb0", skill->name); /* 学习... */
-            snprintf(optionDescriptionStorage[optionCount],
-                     sizeof(optionDescriptionStorage[optionCount]),
-                     "%s Lv.%u %u%s", skill->name, skill->levelRequired,
-                     skill->learnPrice, "\xcd\xad\xc7\xae"); /* 铜钱 */
-            optionNames[optionCount] = optionNameStorage[optionCount];
-            optionDescriptions[optionCount] =
-                optionDescriptionStorage[optionCount];
-            optionValues[optionCount] =
-                VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE | skill->skillId;
-            ++optionCount;
-        }
-        if (operation != VM_NET_MOCK_NPC_SERVICE_LEARN_SKILL_BASE &&
-            optionCount == 0 && !appendSkills)
-        {
-            if (skillNextLocked != NULL)
-            {
-                snprintf(dialogTextStorage, sizeof(dialogTextStorage),
-                         "%s%u%s%s%s%u%s%u%s",
-                         "\xb5\xb1\xc7\xb0", /* 当前 */
-                         role->level,
-                         "\xbc\xb6\xa3\xbb\xcf\xc2\xd2\xbb\xbc\xbc\xc4\xdc", /* 级；下一技能 */
-                         skillNextLocked->name,
-                         "\xd0\xe8\xd2\xaa", /* 需要 */
-                         skillNextLocked->levelRequired,
-                         "\xbc\xb6\xa3\xac\xd1\xa7\xcf\xb0\xb7\xd1\xd3\xc3", /* 级，学习费用 */
-                         skillNextLocked->learnPrice,
-                         "\xcd\xad\xc7\xae\xa1\xa3"); /* 铜钱。 */
-            }
-            else
-            {
-                dialogText =
-                    "\xb5\xb1\xc7\xb0\xc3\xbb\xd3\xd0\xbf\xc9\xd2\xd4\xd1\xa7\xcf\xb0\xb5\xc4\xbc\xbc\xc4\xdc\xa1\xa3"; /* 当前没有可以学习的技能。 */
-            }
-        }
         }
     }
 
@@ -6425,19 +6879,16 @@ npc_service_serialize:
             return 0;
         ++objectCount;
     }
-    /*
-     * A completed merchant purchase has two independent UI owners.  The
-     * 26/1 dialog is the action=1 completion and must remain the first (and
-     * only dialog) object.  The scene HUD, however, owns copper through
-     * 10/26.  Omitting that native wallet confirmation left the client in the
-     * request wait state after a successful buy even though the transaction
-     * had already committed.  Do not append 7/7 here: that item-manager
-     * packet belongs to a different callback and can re-arm this dialog's
-     * wait state.  The next backpack query remains responsible for the item
-     * row itself.
-     */
+    /* The 26/1 dialog completes action=1, while the scene HUD owns copper
+     * through 10/26.  Every successful service that changes copper must send
+     * both native objects.  Do not append 7/7 here: that item-manager packet
+     * belongs to a different callback and can re-arm this dialog's wait
+     * state.  Merchant item rows remain owned by the next backpack query. */
     if (result == 1 &&
-        (strcmp(action, "shop-buy") == 0 || strcmp(action, "weapon-buy") == 0))
+        (strcmp(action, "shop-buy") == 0 ||
+         strcmp(action, "weapon-buy") == 0 ||
+         strcmp(action, "skill-learn") == 0 ||
+         strcmp(action, "skill-forget") == 0))
     {
         if (!vm_net_mock_append_type1_object(out, outCap, &pos, 0))
             return 0;

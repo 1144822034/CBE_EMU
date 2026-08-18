@@ -2162,12 +2162,14 @@ enum
 {
     VM_MOCK_SERVICE_NPC_TRANSACTION_NONE = 0,
     VM_MOCK_SERVICE_NPC_TRANSACTION_BUY = 1,
-    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL = 2
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SELL = 2,
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_LEARN = 3,
+    VM_MOCK_SERVICE_NPC_TRANSACTION_SKILL_FORGET = 4
 };
 
 /* A 26/1 action=1 request only carries a private menu value.  Retain the
- * selected merchandise server-side until the immediate confirmation request,
- * then consume this context before any durable role mutation. */
+ * selected merchandise or skill server-side until the immediate confirmation
+ * request, then consume this context before any durable role mutation. */
 typedef struct
 {
     bool active;

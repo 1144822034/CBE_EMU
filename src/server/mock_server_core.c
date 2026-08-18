@@ -5480,11 +5480,15 @@ static u32 vm_net_mock_npc_service_kind_mask(u16 kind)
  * original list without touching currency or the backpack. */
 #define VM_NET_MOCK_NPC_SERVICE_CONFIRM_TRANSACTION 0xf0000001u
 #define VM_NET_MOCK_NPC_SERVICE_CANCEL_TRANSACTION  0xf1000001u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_LEARN_BASE 0xf2000000u
+#define VM_NET_MOCK_NPC_SERVICE_OPEN_SKILL_FORGET_BASE 0xf3000000u
+#define VM_NET_MOCK_NPC_SERVICE_FORGET_SKILL_BASE 0xf4000000u
 #define VM_NET_MOCK_NPC_SERVICE_VALUE_MASK        0x00ffffffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_MASK     0x000000ffu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_SHIFT 8u
 #define VM_NET_MOCK_NPC_SERVICE_MEDICINE_SELECTOR 0xfeu
 #define VM_NET_MOCK_NPC_SERVICE_CATEGORY_PAGE_ITEMS 5u
+#define VM_NET_MOCK_NPC_SERVICE_SKILL_PAGE_ITEMS 5u
 /* Equipment resale is deliberately a low-value copper sink/source.  Both the
  * explicit recovery NPC and the Battle Insight full-bag auto-sale consume this
  * one authoritative percentage. */
