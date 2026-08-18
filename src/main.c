@@ -9290,6 +9290,7 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
     static u32 seenCbmRegister = 0;
     static u32 seenItemLookup = 0;
     static u32 seenEquipLookup = 0;
+    static u32 seenItemCountStream = 0;
     u32 r9 = 0;
 
     if (!g_autotestEnabled)
@@ -9298,6 +9299,9 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
         pc != 0x01012F7E && pc != 0x01012F8E && pc != 0x01012FA4 &&
         pc != 0x0101191A && pc != 0x010119DE &&
         pc != 0x01033544 && pc != 0x0103374E &&
+        pc != 0x01033626 && pc != 0x010336AE &&
+        pc != 0x010336B6 && pc != 0x010336C4 &&
+        pc != 0x01033728 &&
         pc != 0x01039952 && pc != 0x01039AF8 &&
         pc != 0x0101918E && pc != 0x010191A2 && pc != 0x01028178 &&
         pc != 0x0518164A && pc != 0x0518169C &&
@@ -9346,6 +9350,75 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
                          itemCategory, seenBackpackRenderFilter);
     }
 
+    /* 7/11 quantity-stream evidence.  The hook points are deliberately
+     * immediately before/after the CBE reader calls, so this records the
+     * parser's interpretation without changing the reader, item manager, or
+     * response bytes.  This is needed to distinguish a malformed stream from
+     * a valid stream whose sequence resolves to a different client row. */
+    if ((pc == 0x01033626 || pc == 0x010336AE || pc == 0x010336B6 ||
+         pc == 0x010336C4 || pc == 0x01033728) &&
+        seenItemCountStream < 96)
+    {
+        u32 sp = 0;
+        u32 r0 = 0;
+        u32 r1 = 0;
+        u32 r2 = 0;
+        u32 r3 = 0;
+        u32 rowCount = 0;
+        u32 rowIndex = 0;
+        u32 streamSeq = 0;
+        u32 streamCount = 0;
+        u32 item = 0;
+        u32 itemType = 0;
+        u32 itemCategory = 0;
+        u16 stack242 = 0;
+        u16 stack272 = 0;
+
+        ++seenItemCountStream;
+        uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+        uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+        uc_reg_read(MTK, UC_ARM_REG_R1, &r1);
+        uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+        uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+        /* var_450 is at SP, var_44C at SP+4, and the loop index is R6. */
+        uc_mem_read(MTK, sp, &rowCount, sizeof(rowCount));
+        uc_mem_read(MTK, sp + 4, &streamSeq, sizeof(streamSeq));
+        uc_reg_read(MTK, UC_ARM_REG_R6, &rowIndex);
+        if (pc == 0x010336AE)
+            streamSeq = r0;
+        if (pc == 0x010336B6)
+            streamCount = r0;
+        if (pc == 0x010336C4)
+        {
+            item = r0;
+            if (item != 0)
+            {
+                uc_mem_read(MTK, item, &itemType, sizeof(itemType));
+                uc_mem_read(MTK, item + 0x11A, &itemCategory,
+                            sizeof(itemCategory));
+                uc_mem_read(MTK, item + 242, &stack242, sizeof(stack242));
+                uc_mem_read(MTK, item + 272, &stack272, sizeof(stack272));
+            }
+        }
+        if (pc == 0x01033728)
+        {
+            item = r0;
+            if (item != 0)
+            {
+                uc_mem_read(MTK, item, &itemType, sizeof(itemType));
+                uc_mem_read(MTK, item + 0x11A, &itemCategory,
+                            sizeof(itemCategory));
+                uc_mem_read(MTK, item + 242, &stack242, sizeof(stack242));
+                uc_mem_read(MTK, item + 272, &stack272, sizeof(stack272));
+            }
+        }
+        vm_autotest_note("backpack_7_11_parser pc=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x row_count=%u row_index=%u seq=%u count=%u item=%08x item_type=%08x category=%u stack242=%u stack272=%u seen=%u\n",
+                         pc, sp, r0, r1, r2, r3, rowCount, rowIndex,
+                         streamSeq, streamCount, item, itemType,
+                         itemCategory, stack242, stack272,
+                         seenItemCountStream);
+    }
+
 #define READ_MAIN_BACKPACK_STATE(manager_, count_, cap_, list_, item0_, seq0_, stack242_, stack272_) \
     do                                                                                              \
     {                                                                                               \
@@ -9363,6 +9436,62 @@ static void vm_autotest_note_backpack_parser_pc(u32 pc)
             }                                                                                       \
         }                                                                                           \
     } while (0)
+
+    /* Keep a complete, bounded snapshot of the client main-item manager.  A
+     * single item0 observation cannot reveal whether the server sequence is
+     * resolving to the wrong physical row when two stacks share an item id. */
+    if ((pc == 0x01033544 || pc == 0x0103374E || pc == 0x01039952 ||
+         pc == 0x01039AF8) && seenItemCountStream < 96)
+    {
+        u32 manager = 0;
+        u32 list = 0;
+        u16 count = 0;
+        u16 cap = 0;
+        u32 scanCount = 0;
+        u32 scanCap = 0;
+
+        if (pc == 0x01033544)
+            uc_reg_read(MTK, UC_ARM_REG_R0, &manager);
+        else if (Global_R9 != 0)
+            manager = Global_R9 + 24640;
+        if (manager != 0)
+        {
+            uc_mem_read(MTK, manager + 32, &list, sizeof(list));
+            uc_mem_read(MTK, manager + 36, &count, sizeof(count));
+            uc_mem_read(MTK, manager + 40, &cap, sizeof(cap));
+        }
+        scanCount = count;
+        scanCap = cap;
+        if (scanCount > 80)
+            scanCount = 80;
+        vm_autotest_note("backpack_main_rows phase=%s pc=%08x manager=%08x list=%08x count=%u cap=%u\n",
+                         pc == 0x01033544 ? "item-op" :
+                         (pc == 0x01039952 ? "grid-parser" : "grid-done"),
+                         pc, manager, list, count, cap);
+        for (u32 i = 0; i < scanCount; ++i)
+        {
+            u32 item = 0;
+            u32 itemId = 0;
+            u16 itemCount = 0;
+            u16 itemSeq = 0;
+            u8 itemCategory = 0;
+            /* The manager's +32 value is the base of a contiguous array of
+             * 324-byte item records, not an array of pointers.  Treating it
+             * as list+i*4 reads the first four bytes of each record as an
+             * address and makes the evidence unusable (and can itself hit
+             * unmapped memory near the parser). */
+            item = list + i * 324u;
+            if (list == 0 ||
+                uc_mem_read(MTK, item, &itemId, sizeof(itemId)) != UC_ERR_OK ||
+                itemId == 0)
+                continue;
+            (void)uc_mem_read(MTK, item + 242, &itemCount, sizeof(itemCount));
+            (void)uc_mem_read(MTK, item + 276, &itemSeq, sizeof(itemSeq));
+            (void)uc_mem_read(MTK, item + 282, &itemCategory, sizeof(itemCategory));
+            vm_autotest_note("backpack_main_row index=%u ptr=%08x item=%u seq=%u count=%u category=%u\n",
+                             i, item, itemId, itemSeq, itemCount, itemCategory);
+        }
+    }
 
     if (pc == 0x01012F7E && seenBusinessFollowup < 16)
     {

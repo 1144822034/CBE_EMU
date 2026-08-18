@@ -195,7 +195,9 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     u8 followCount = 0;
     u8 seenCount = 0;
     bool haveItemUse = false;
+    bool haveSilentCompletion = false;
     u8 itemListCount = 0;
+    u8 itemGridCount = 0;
     vm_client_item_followup_kind followupKind =
         VM_CLIENT_ITEM_FOLLOWUP_NONE;
     vm_client_wt_object object;
@@ -212,18 +214,33 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
     while (offset + 5 <= *responseLen &&
            vm_client_next_wt_object(response, *responseLen, &offset, &object))
     {
-        if (object.major == 1 && object.kind == 7 && object.subtype == 1)
+        /* The legacy acknowledgement is 7/1, while the silent completion
+         * contract used by ordinary recovery items is 7/4.  Both must be
+         * delivered before the full 17/1 list: the CBE operation handler
+         * clears its pending-use state in that acknowledgement branch, and
+         * the backpack screen owns the list replacement callback. */
+        if (object.major == 1 && object.kind == 7 &&
+            (object.subtype == 1 || object.subtype == 4))
+        {
             haveItemUse = true;
+            if (object.subtype == 4)
+                haveSilentCompletion = true;
+        }
         if (object.major == 1 && object.kind == 17 && object.subtype == 1)
             ++itemListCount;
+        if (object.major == 1 && object.kind == 30 && object.subtype == 21)
+            ++itemGridCount;
         ++seenCount;
     }
     if (offset != *responseLen || seenCount != response[4])
         return false;
 
     /* Existing item-use flow: the business acknowledgement must complete
-     * before its full backpack-list follow-up reaches the list owner. */
-    if (haveItemUse && itemListCount != 0)
+     * before its full backpack-list follow-up reaches the list owner.  The
+     * silent 7/4 completion is a stronger boundary: unlike the legacy 7/1
+     * response, every object after it belongs to the same refresh transaction
+     * and must retain its wire order (30/21 -> 7/42 -> 7/11 -> 7/37). */
+    if (haveItemUse && (itemListCount != 0 || itemGridCount != 0))
     {
         followupKind = VM_CLIENT_ITEM_FOLLOWUP_USE_LIST;
     }
@@ -244,9 +261,29 @@ static bool vm_client_extract_item_followup(u8 *response, u32 *responseLen,
         if (!vm_client_next_wt_object(response, *responseLen, &offset, &object))
             return false;
         objectLen = offset - start;
-        bool isFollowup =
-            followupKind == VM_CLIENT_ITEM_FOLLOWUP_USE_LIST &&
-            object.major == 1 && object.kind == 17 && object.subtype == 1;
+        bool isCompletion = object.major == 1 && object.kind == 7 &&
+                            object.subtype == 4;
+        bool isFollowup = false;
+
+        if (followupKind == VM_CLIENT_ITEM_FOLLOWUP_USE_LIST)
+        {
+            if (haveSilentCompletion)
+            {
+                /* Remote transport delivers the primary frame first.  Keep
+                 * only the silent completion in that frame; moving the
+                 * selected-row 7/11 ahead of 30/21 was the source of the
+                 * stale/single-stack quantity (20 -> 9) seen remotely. */
+                isFollowup = !isCompletion;
+            }
+            else
+            {
+                isFollowup =
+                    (object.major == 1 && object.kind == 17 &&
+                     object.subtype == 1) ||
+                    (object.major == 1 && object.kind == 30 &&
+                     object.subtype == 21);
+            }
+        }
         if (isFollowup)
         {
             if (followPos + objectLen > followupCap || followCount == 0xff)

@@ -27,12 +27,15 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
                                                            u32 followCap,
                                                            u32 *followLenOut)
 {
-    u32 offset = 4;
+    /* Responses use the five-byte WT header (object length at +4), unlike
+     * request objects parsed by vm_net_mock_next_request_object(). */
+    u32 offset = 5;
     u32 primaryPos = 5;
     u32 followPos = 5;
     u8 primaryCount = 0;
     u8 followCount = 0;
     bool haveItemUse = false;
+    bool haveSilentCompletion = false;
     vm_net_mock_request_object object;
 
     if (followLenOut)
@@ -43,11 +46,28 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
         return false;
     }
 
-    while (offset + 5 <= *responseLen && vm_net_mock_next_request_object(response, *responseLen, &offset, &object))
+    while (offset + 6 <= *responseLen)
     {
-        if (object.major == 1 && object.kind == 7 && object.subtype == 1)
+        u32 objectStart = offset;
+        u16 objectLen = (u16)(((u16)response[offset + 4] << 8) |
+                               response[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > *responseLen)
+            return false;
+        object.major = response[offset];
+        object.kind = response[offset + 1];
+        object.subtype = response[offset + 2];
+        offset += objectLen;
+        if (object.major == 1 && object.kind == 7 &&
+            (object.subtype == 1 || object.subtype == 4))
+        {
             haveItemUse = true;
-        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+            if (object.subtype == 4)
+                haveSilentCompletion = true;
+        }
+        if ((object.major == 1 && object.kind == 17 && object.subtype == 1) ||
+            (object.major == 1 && object.kind == 30 && object.subtype == 21) ||
+            (haveSilentCompletion && object.major == 1 && object.kind == 7 &&
+             object.subtype == 42))
             ++followCount;
         else
             ++primaryCount;
@@ -55,19 +75,42 @@ static bool vm_net_mock_extract_item_use_backpack_followup(u8 *response,
     if (offset != *responseLen || !haveItemUse || followCount == 0 || primaryCount == 0)
         return false;
 
-    offset = 4;
+    offset = 5;
     primaryPos = 5;
     followPos = 5;
     primaryCount = 0;
     followCount = 0;
-    while (offset + 5 <= *responseLen)
+    while (offset + 6 <= *responseLen)
     {
         u32 objectStart = offset;
-        u32 objectLen = 0;
-        if (!vm_net_mock_next_request_object(response, *responseLen, &offset, &object))
+        u16 objectLen = (u16)(((u16)response[offset + 4] << 8) |
+                               response[offset + 5]);
+        if (objectLen < 6 || offset + objectLen > *responseLen)
             return false;
-        objectLen = offset - objectStart;
-        if (object.major == 1 && object.kind == 17 && object.subtype == 1)
+        object.major = response[offset];
+        object.kind = response[offset + 1];
+        object.subtype = response[offset + 2];
+        offset += objectLen;
+        if (haveSilentCompletion)
+        {
+            /* Preserve the complete post-7/4 transaction in one follow-up
+             * frame.  Previously 7/11 and 7/37 stayed in the primary frame,
+             * so a remote client updated the selected row before rebuilding
+             * the grid and exposed 9 instead of the remaining 19. */
+            if (!(object.major == 1 && object.kind == 7 && object.subtype == 4))
+            {
+                if (followPos + objectLen > followCap || followCount == 0xff)
+                    return false;
+                memcpy(followOut + followPos, response + objectStart, objectLen);
+                followPos += objectLen;
+                ++followCount;
+                continue;
+            }
+        }
+        else if ((object.major == 1 && object.kind == 17 && object.subtype == 1) ||
+                 (object.major == 1 && object.kind == 30 && object.subtype == 21) ||
+                 (haveSilentCompletion && object.major == 1 && object.kind == 7 &&
+                  object.subtype == 42))
         {
             if (followPos + objectLen > followCap || followCount == 0xff)
                 return false;

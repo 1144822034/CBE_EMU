@@ -635,9 +635,10 @@ enum
      * More rows are requested only when its own scroll viewport needs them. */
     VM_MOCK_ADMIN_ACCOUNT_PAGE_SIZE = 40,
     /* Risk records are already a server-side subset (only <=3 second battle
-     * intervals are inserted).  Bound one admin render without hiding the
-     * newest evidence behind a synthetic pager contract. */
-    VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 100
+     * intervals are inserted), but the trail still grows without bound.  Keep
+     * one render at a fixed row budget and page the audit_id DESC order with
+     * an explicit offset so every historical record stays reachable. */
+    VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE = 50
 };
 
 typedef struct
@@ -7266,6 +7267,34 @@ static void vm_mock_admin_render_servers_page(char *response,
     }
 }
 
+/* Single-column COUNT(*) row shared by the account directory and the risk
+ * audit pager. */
+typedef struct
+{
+    u32 value;
+    bool found;
+    bool invalid;
+} vm_mock_admin_count;
+
+static bool vm_mock_admin_count_row(void *contextValue,
+                                    unsigned int columnCount,
+                                    const char *const *values,
+                                    const size_t *lengths)
+{
+    vm_mock_admin_count *count =
+        (vm_mock_admin_count *)contextValue;
+
+    if (count == NULL || count->found || columnCount != 1 ||
+        !vm_mock_mysql_parse_u32(values[0], lengths[0], &count->value))
+    {
+        if (count != NULL)
+            count->invalid = true;
+        return true;
+    }
+    count->found = true;
+    return true;
+}
+
 /* The rapid-entry table only contains events whose adjacent battle starts
  * were inside VM_NET_MOCK_RAPID_BATTLE_ENTRY_WINDOW_MS.  This admin view does
  * not infer risk from scene movement or packet count; it exposes that exact
@@ -7351,20 +7380,10 @@ static bool vm_mock_admin_risk_audit_row_callback(
     return true;
 }
 
-static bool vm_mock_admin_risk_audit_query(vm_mock_admin_risk_audit_page *page)
+static bool vm_mock_admin_risk_audit_query(u32 offset, u32 limit,
+                                           vm_mock_admin_risk_audit_page *page)
 {
-    static const char sql[] =
-        "SELECT a.audit_id,a.account_id,a.role_id,"
-        "HEX(COALESCE(r.role_name,X'')),a.interval_ms,HEX(a.source),"
-        "HEX(a.scene_name),a.enemy_id,"
-        "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f'),"
-        "IF(b.account_id IS NULL,0,1) "
-        "FROM account_role_rapid_battle_entry_audit a "
-        "LEFT JOIN account_roles r ON r.account_id=a.account_id "
-        "AND r.role_id=a.role_id "
-        "LEFT JOIN account_access_bans b ON b.account_id=a.account_id "
-        "WHERE a.interval_ms<=3000 "
-        "ORDER BY a.audit_id DESC LIMIT 100";
+    char sql[768];
 
     if (page == NULL || !vm_net_mock_role_prepare_rapid_battle_entry_schema() ||
         !vm_mock_service_account_ban_schema_prepare())
@@ -7372,8 +7391,43 @@ static bool vm_mock_admin_risk_audit_query(vm_mock_admin_risk_audit_page *page)
         return false;
     }
     memset(page, 0, sizeof(*page));
+    snprintf(sql, sizeof(sql),
+             "SELECT a.audit_id,a.account_id,a.role_id,"
+             "HEX(COALESCE(r.role_name,X'')),a.interval_ms,HEX(a.source),"
+             "HEX(a.scene_name),a.enemy_id,"
+             "DATE_FORMAT(a.created_at,'%Y-%m-%d %H:%i:%s.%f'),"
+             "IF(b.account_id IS NULL,0,1) "
+             "FROM account_role_rapid_battle_entry_audit a "
+             "LEFT JOIN account_roles r ON r.account_id=a.account_id "
+             "AND r.role_id=a.role_id "
+             "LEFT JOIN account_access_bans b ON b.account_id=a.account_id "
+             "WHERE a.interval_ms<=3000 "
+             "ORDER BY a.audit_id DESC LIMIT %u,%u",
+             offset, limit);
     return vm_mysql_query(sql, vm_mock_admin_risk_audit_row_callback, page) &&
            !page->invalid;
+}
+
+static bool vm_mock_admin_risk_audit_query_count(u32 *countOut)
+{
+    static const char sql[] =
+        "SELECT COUNT(*) FROM account_role_rapid_battle_entry_audit "
+        "WHERE interval_ms<=3000";
+    vm_mock_admin_count count;
+
+    if (countOut != NULL)
+        *countOut = 0;
+    if (!vm_net_mock_role_prepare_rapid_battle_entry_schema())
+        return false;
+    memset(&count, 0, sizeof(count));
+    if (!vm_mysql_query(sql, vm_mock_admin_count_row, &count) ||
+        count.invalid || !count.found)
+    {
+        return false;
+    }
+    if (countOut != NULL)
+        *countOut = count.value;
+    return true;
 }
 
 static void vm_mock_admin_render_risk_page(char *response,
@@ -7384,14 +7438,37 @@ static void vm_mock_admin_render_risk_page(char *response,
     vm_mock_admin_risk_audit_page auditPage;
     char status[16];
     char message[256];
+    char pageText[16];
+    u32 totalCount = 0;
+    u32 pageNumber = 1;
+    u32 pageCount = 1;
+    u32 offset = 0;
     bool queryOk = false;
 
     memset(&auditPage, 0, sizeof(auditPage));
     memset(status, 0, sizeof(status));
     memset(message, 0, sizeof(message));
+    memset(pageText, 0, sizeof(pageText));
     (void)vm_mock_admin_form_value(query, "status", status, sizeof(status));
     (void)vm_mock_admin_form_value(query, "message", message, sizeof(message));
-    queryOk = vm_mock_admin_risk_audit_query(&auditPage);
+    (void)vm_mock_admin_form_value(query, "page", pageText, sizeof(pageText));
+    if (pageText[0] != 0 &&
+        (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) || pageNumber == 0))
+    {
+        pageNumber = 1;
+    }
+    queryOk = vm_mock_admin_risk_audit_query_count(&totalCount);
+    if (queryOk)
+    {
+        if (totalCount != 0)
+            pageCount = (totalCount + VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE - 1) /
+                        VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE;
+        if (pageNumber > pageCount)
+            pageNumber = pageCount;
+        offset = (pageNumber - 1) * VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE;
+        queryOk = vm_mock_admin_risk_audit_query(
+            offset, VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE, &auditPage);
+    }
 
     vm_mock_admin_text_init(&page, response, responseCap);
     vm_mock_admin_text_appendf(
@@ -7399,7 +7476,7 @@ static void vm_mock_admin_render_risk_page(char *response,
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>江湖OL 风险角色管理</title><style>"
-        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:1050px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
+        "*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#1f2937;font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1360px;margin:0 auto;padding:24px 18px 42px}header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}.sub,.muted{color:#667085}.sub{margin:4px 0 16px}.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.tab{padding:9px 14px;border-radius:7px;color:#475467;text-decoration:none;background:#fff;border:1px solid #e4e7ec}.tab.on{background:#175cd3;color:#fff;border-color:#175cd3}.logout{background:none;color:#667085;border:1px solid #d0d5dd}.card{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:16px;box-shadow:0 1px 2px #1018280d;margin-bottom:16px}.notice{padding:10px 12px;border-radius:7px;margin-bottom:14px}.ok{background:#ecfdf3;color:#027a48}.error{background:#fef3f2;color:#b42318}.rule{margin:0;color:#475467}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#fff1f3;color:#c01048;font-size:12px;font-weight:650}.state{font-size:12px;font-weight:650}.state.banned{color:#b42318}.state.open{color:#b54708}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:1050px}th,td{text-align:left;padding:10px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{color:#667085;font-weight:600;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.role{font-weight:650}.pages{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px}.page-links{display:flex;gap:7px}.page-links a{padding:6px 10px;border:1px solid #d0d5dd;border-radius:6px;color:#344054;text-decoration:none}button{border:0;border-radius:6px;padding:8px 11px;background:#b42318;color:#fff;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{background:#d0d5dd;color:#667085;cursor:not-allowed}@media(max-width:680px){.wrap{padding:16px 10px}header{display:block}.logout{margin-top:9px}}</style>"
         "</head><body><main class=\"wrap\"><header><div><h1>江湖OL 后台管理</h1><p class=\"sub\">风险角色管理 · 三秒内连续进入战斗审计</p></div><form method=\"post\" action=\"/logout\"><button class=\"logout\" type=\"submit\">退出登录</button></form></header>"
         "<nav class=\"tabs\"><a class=\"tab\" href=\"/?tab=accounts\">账号管理</a><a class=\"tab\" href=\"/?tab=content\">游戏内容管理</a><a class=\"tab\" href=\"/?tab=tasks\">任务管理</a><a class=\"tab\" href=\"/?tab=monsters\">怪物管理</a><a class=\"tab\" href=\"/?tab=scene-monsters\">场景战斗怪</a><a class=\"tab\" href=\"/?tab=actors\">Actor 资源</a><a class=\"tab\" href=\"/?tab=shop\">商品管理</a><a class=\"tab\" href=\"/?tab=chests\">宝箱管理</a><a class=\"tab\" href=\"/?tab=updates\">游戏内容更新管理</a><a class=\"tab\" href=\"/?tab=servers\">服务器列表</a><a class=\"tab on\" href=\"/?tab=risk\">风险角色管理</a></nav>"
         "<section class=\"card\"><h2>审计条件 <span class=\"badge\">相邻进入战斗 ≤ 3000 ms</span></h2><p class=\"rule\">记录来自挑战和挂机两条真实战斗入口。封号是账号级永久访问限制：保存后立即注销该账号所有游戏会话与用户中心会话；之后的登录认证将被拒绝。</p></section>");
@@ -7410,8 +7487,8 @@ static void vm_mock_admin_render_risk_page(char *response,
         vm_mock_admin_text_append_html(&page, message);
         vm_mock_admin_text_appendf(&page, "</div>");
     }
-    vm_mock_admin_text_appendf(&page, "<section class=\"card\"><h2>最近 %u 条风险审计</h2>",
-                               VM_MOCK_ADMIN_RISK_AUDIT_PAGE_SIZE);
+    vm_mock_admin_text_appendf(&page,
+        "<section class=\"card\"><h2>风险审计列表</h2>");
     if (!queryOk)
     {
         vm_mock_admin_text_appendf(&page,
@@ -7471,12 +7548,24 @@ static void vm_mock_admin_render_risk_page(char *response,
                     "<form method=\"post\" action=\"/action\" onsubmit=\"return confirm('确认封禁该账号并立即断开所有连接？此操作会拒绝后续登录。');\"><input type=\"hidden\" name=\"action\" value=\"ban-risk-account\"><input type=\"hidden\" name=\"account\" value=\"");
                 vm_mock_admin_text_append_html(&page, row->accountId);
                 vm_mock_admin_text_appendf(&page,
-                    "\"><button type=\"submit\">封号并断开</button></form>");
+                    "\"><input type=\"hidden\" name=\"page\" value=\"%u\"><button type=\"submit\">封号并断开</button></form>",
+                    pageNumber);
             }
             vm_mock_admin_text_appendf(&page, "</td></tr>");
         }
         vm_mock_admin_text_appendf(&page,
-            "</tbody></table></div></section></main></body></html>");
+            "</tbody></table></div><div class=\"pages\"><span>第 %u / %u 页 · 共 %u 条</span><div class=\"page-links\">",
+            pageNumber, pageCount, totalCount);
+        if (pageNumber > 1)
+            vm_mock_admin_text_appendf(
+                &page, "<a href=\"/?tab=risk&amp;page=%u\">上一页</a>",
+                pageNumber - 1);
+        if (pageNumber < pageCount)
+            vm_mock_admin_text_appendf(
+                &page, "<a href=\"/?tab=risk&amp;page=%u\">下一页</a>",
+                pageNumber + 1);
+        vm_mock_admin_text_appendf(&page,
+            "</div></div></section></main></body></html>");
     }
     if (page.truncated)
     {
@@ -7497,13 +7586,6 @@ typedef struct
     bool invalid;
 } vm_mock_admin_account_page;
 
-typedef struct
-{
-    u32 value;
-    bool found;
-    bool invalid;
-} vm_mock_admin_account_count;
-
 static bool vm_mock_admin_account_page_row(void *contextValue,
                                            unsigned int columnCount,
                                            const char *const *values,
@@ -7523,25 +7605,6 @@ static bool vm_mock_admin_account_page_row(void *contextValue,
         return true;
     }
     ++page->count;
-    return true;
-}
-
-static bool vm_mock_admin_account_count_row(void *contextValue,
-                                            unsigned int columnCount,
-                                            const char *const *values,
-                                            const size_t *lengths)
-{
-    vm_mock_admin_account_count *count =
-        (vm_mock_admin_account_count *)contextValue;
-
-    if (count == NULL || count->found || columnCount != 1 ||
-        !vm_mock_mysql_parse_u32(values[0], lengths[0], &count->value))
-    {
-        if (count != NULL)
-            count->invalid = true;
-        return true;
-    }
-    count->found = true;
     return true;
 }
 
@@ -7585,7 +7648,7 @@ static bool vm_mock_admin_account_query_page(const char *search, u32 cursor,
 
 static bool vm_mock_admin_account_query_count(const char *search, u32 *countOut)
 {
-    vm_mock_admin_account_count count;
+    vm_mock_admin_count count;
     char searchHex[128];
     char query[640];
     size_t searchLen = search ? strlen(search) : 0;
@@ -7610,7 +7673,7 @@ static bool vm_mock_admin_account_query_count(const char *search, u32 *countOut)
                  "WHERE LOCATE(LOWER(CAST(X'%s' AS CHAR)),LOWER(account_id))>0",
                  searchHex);
     }
-    if (!vm_mysql_query(query, vm_mock_admin_account_count_row, &count) ||
+    if (!vm_mysql_query(query, vm_mock_admin_count_row, &count) ||
         count.invalid || !count.found)
     {
         return false;
@@ -9097,6 +9160,7 @@ static void vm_mock_admin_redirect_servers(vm_mock_service_socket client,
 }
 
 static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
+                                        u32 page,
                                         const char *status,
                                         const char *message)
 {
@@ -9110,8 +9174,8 @@ static void vm_mock_admin_redirect_risk(vm_mock_service_socket client,
                              sizeof(messageEncoded));
     snprintf(location, sizeof(location),
              VM_MOCK_ADMIN_ROOT_PATH
-             "?tab=risk&status=%s&message=%s",
-             statusEncoded, messageEncoded);
+             "?tab=risk&page=%u&status=%s&message=%s",
+             page ? page : 1, statusEncoded, messageEncoded);
     vm_mock_admin_send_location(client, location, NULL);
 }
 
@@ -11401,11 +11465,22 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
     {
         u32 disconnected = 0;
         u32 userSessions = 0;
+        u32 pageNumber = 1;
+        char pageText[16];
 
+        memset(pageText, 0, sizeof(pageText));
+        (void)vm_mock_admin_form_value(body, "page", pageText, sizeof(pageText));
+        if (pageText[0] != 0 &&
+            (!vm_net_mock_parse_u32_strict(pageText, &pageNumber) ||
+             pageNumber == 0))
+        {
+            pageNumber = 1;
+        }
         if (!vm_mock_admin_form_value(body, "account", account,
                                       sizeof(account)) || account[0] == 0)
         {
-            vm_mock_admin_redirect_risk(client, "error", "账号参数不完整");
+            vm_mock_admin_redirect_risk(client, pageNumber, "error",
+                                        "账号参数不完整");
             return;
         }
         ok = vm_mock_service_account_ban_for_rapid_battle(
@@ -11419,12 +11494,12 @@ static void vm_mock_admin_handle_action(vm_mock_service_socket client, const cha
             snprintf(message, sizeof(message),
                      "账号已封禁：已立即断开 %u 个游戏会话、注销 %u 个用户中心会话；后续登录将被拒绝",
                      disconnected, userSessions);
-            vm_mock_admin_redirect_risk(client, "ok", message);
+            vm_mock_admin_redirect_risk(client, pageNumber, "ok", message);
         }
         else
         {
             vm_mock_admin_redirect_risk(
-                client, "error", error ? error : "账号封禁失败");
+                client, pageNumber, "error", error ? error : "账号封禁失败");
         }
         return;
     }
