@@ -25,7 +25,7 @@ WT21/5 请求 (sourceSeq,count)
 
 `tmp/ida_full_jh_actor_update/decompiled.c` 中 `HandleShopBuyItem`（`WT21/6`）在每个报价行的 `itemId/count` 后调用 `ParseEquipAttributes`。该共同扩展的前两个 `i16` 依次是当前强化等级和强化上限；因此 `WT21/6` 必须在第一个 `i16` 写入来源装备实例的真实 `enhanceLevel`，并在第二个 `i16` 写入该装备的上限。
 
-同一反编译文件中 `BuildShopBuyList`（`WT21/8`）每行仅读取 `destinationSeq`、`itemId`、`count`。该回执不能附加装备扩展字段；接收端必须以新背包实例序号在后续背包刷新中获得状态。
+同一反编译文件中 `BuildShopBuyList`（`WT21/8`）每行仅读取 `destinationSeq:i16`、`itemId:i32`、`count:i32`。该回执不能附加装备扩展字段。2026-08-18 复核发现旧 builder 错把 `count` 写成 `i16`，多行结算会从第一行开始破坏 parser 边界；修复和逐字节回归见 `2026-08-18-trade-terminal-iteminfo-width.md`。
 
 ## 首次偏离与根因
 
