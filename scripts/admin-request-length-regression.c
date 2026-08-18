@@ -5,10 +5,14 @@
  * Build from the repository root (Windows MinGW example):
  *   gcc -DNETWORK_SUPPORT -DCBE_SERVER_ONLY -g -O2 -std=gnu11 -ffunction-sections
  *       -fdata-sections scripts/admin-request-length-regression.c
- *       obj/server/gifDecode.o obj/server/mystd.o obj/server/mysql-client.o
- *       obj/server/md5.o -Wl,--gc-sections -o
+ *       obj/client/gifDecode.o obj/client/cbeParser.o obj/client/mystd.o
+ *       obj/client/fontEngine.o obj/client/vmMalloc.o obj/client/fileIoEngine.o
+ *       obj/client/lcd.o obj/client/automation_png.o obj/client/md5.o
+ *       obj/server/mysql-client.o -Wl,--gc-sections -o
  *       tmp/admin-request-length-regression.exe -lpthread -liconv -lm
- *       -lkernel32 -lws2_32
+ *       -lmingw32 -lkernel32 -lws2_32
+ *       Lib/unicorn-2.1.4/unicorn-import.lib -LLib/sdl2-2.0.10/lib
+ *       -lSDL2main -lSDL2
  *
  * This only invokes pure request-length and embedded-script checks; it does
  * not open a listener, connect to MySQL, or modify application state.
@@ -30,6 +34,50 @@ int main(int argc, char **argv)
         "Content-Length: 24576\r\n\r\n";
     u32 contentLength = 0;
     size_t totalLength = 0;
+    char emptyUtf8[8];
+    char serviceForm[2048];
+    size_t serviceFormLen = 0;
+    vm_net_mock_npc_service_option
+        serviceOptions[VM_NET_MOCK_NPC_SERVICE_OPTION_MAX];
+    u32 serviceOptionCount = 0;
+
+    memset(emptyUtf8, 0, sizeof(emptyUtf8));
+    vm_net_mock_gbk_label_to_utf8("", emptyUtf8, sizeof(emptyUtf8));
+    if (emptyUtf8[0] != 0)
+    {
+        fprintf(stderr, "empty admin display text still has a placeholder\n");
+        return 1;
+    }
+    memset(serviceForm, 0, sizeof(serviceForm));
+    for (u32 kind = VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT;
+         kind <= VM_NET_MOCK_NPC_KIND_MAX; ++kind)
+    {
+        int written = snprintf(
+            serviceForm + serviceFormLen,
+            sizeof(serviceForm) - serviceFormLen,
+            "%sservice_option_name_%u=%s&service_option_description_%u=%s",
+            serviceFormLen == 0 ? "service_enabled_1=1&" : "&", kind,
+            kind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT ? "-" : "", kind,
+            kind == VM_NET_MOCK_NPC_KIND_WEAPON_MERCHANT ? "-" : "");
+
+        if (written <= 0 || (size_t)written >= sizeof(serviceForm) - serviceFormLen)
+        {
+            fprintf(stderr, "NPC service form fixture overflowed\n");
+            return 1;
+        }
+        serviceFormLen += (size_t)written;
+    }
+    memset(serviceOptions, 0, sizeof(serviceOptions));
+    if (!vm_mock_admin_form_npc_service_options(
+            serviceForm, true, serviceOptions,
+            VM_NET_MOCK_NPC_SERVICE_OPTION_MAX, &serviceOptionCount) ||
+        serviceOptionCount != 1 || serviceOptions[0].kind != 1 ||
+        serviceOptions[0].optionName[0] != 0 ||
+        serviceOptions[0].optionDescription[0] != 0)
+    {
+        fprintf(stderr, "NPC service optional dash was not normalized to empty\n");
+        return 1;
+    }
 
     if (!vm_mock_admin_parse_content_length(requestHeader,
                                             strlen(requestHeader),
@@ -83,6 +131,6 @@ int main(int argc, char **argv)
         }
         fclose(file);
     }
-    puts("admin request-length regression passed: 24KiB body + monster search + bulk drops");
+    puts("admin request-length regression passed: empty display + NPC optional text + 24KiB body + monster search + bulk drops");
     return 0;
 }

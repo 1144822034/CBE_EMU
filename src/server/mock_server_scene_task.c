@@ -1679,6 +1679,11 @@ static bool vm_net_mock_npc_service_options_row(
         context->invalid = true;
         return true;
     }
+    /* Older admin pages rendered empty optional text as a literal dash. */
+    if (strcmp(option.optionName, "-") == 0)
+        option.optionName[0] = 0;
+    if (strcmp(option.optionDescription, "-") == 0)
+        option.optionDescription[0] = 0;
     for (u32 i = 0; i < context->count; ++i)
     {
         if (context->options[i].kind == (u16)kind)
@@ -1737,10 +1742,10 @@ static bool vm_net_mock_npc_service_options_resolve(
             return false;
         memset(&legacy, 0, sizeof(legacy));
         legacy.kind = legacyKind;
-        if (legacyName != NULL)
+        if (legacyName != NULL && strcmp(legacyName, "-") != 0)
             snprintf(legacy.optionName, sizeof(legacy.optionName), "%s",
                      legacyName);
-        if (legacyDescription != NULL)
+        if (legacyDescription != NULL && strcmp(legacyDescription, "-") != 0)
             snprintf(legacy.optionDescription,
                      sizeof(legacy.optionDescription), "%s",
                      legacyDescription);
