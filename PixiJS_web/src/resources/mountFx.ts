@@ -10,6 +10,7 @@
 import { Container, Sprite } from "pixi.js";
 import {
   loadPlistAtlas,
+  rebindPlistAtlas,
   type LoadedPlistAtlas,
   type PlistFrame,
 } from "./plistAtlas";
@@ -152,7 +153,7 @@ export class MountOverlay {
   clear(): void {
     this.loadGen++;
     this.mountId = 0;
-    this.atlas = null;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
     this.phase = 0;
     this.animAcc = 0;
     this.faceDir = 3;
@@ -294,7 +295,7 @@ export class MountOverlay {
         atlas = await loadDirFacingAtlas(spec, act, face);
       }
       if (gen !== this.loadGen) return;
-      this.atlas = atlas;
+      this.atlas = rebindPlistAtlas(this.atlas, atlas);
       this.sheetKey = key;
       this.phase = 0;
       this.animAcc = 0;

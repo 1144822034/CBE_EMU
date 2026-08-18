@@ -24,6 +24,8 @@ import {
 import { openPayUrl } from "./net/openPayUrl";
 import { SceneView } from "./render/SceneView";
 import { countPlus16Worn } from "./render/Plus16Sparkles";
+import { poseTextureCacheStats } from "./render/poseTextureCache";
+import { plistAtlasGpuStats } from "./resources/plistAtlas";
 import { GameSession } from "./game/GameSession";
 import { PhoneShell } from "./ui/PhoneShell";
 import { TitleScreen } from "./ui/TitleScreen";
@@ -106,6 +108,7 @@ import {
   toggleSoundEnabled,
   unlockAndResumeBgm,
 } from "./audio/GameBgm";
+import { togglePeerCosmeticsVisible } from "./resources/peerCosmeticsPref";
 import {
   playKillStreakTitle,
   preloadKillStreakSfx,
@@ -537,6 +540,13 @@ async function main(): Promise<void> {
   setLcdDisplayScale(bootScale);
   // Buffer resolution tracks CSS scale so UI Text ≈ HTML #sk-left sharpness.
   // Avoid resizeTo+lcd.scale coupling — skill FX texture churn was perceived as zoom.
+  const nativeGl =
+    typeof (globalThis as { Capacitor?: { isNativePlatform?: () => boolean } })
+      .Capacitor?.isNativePlatform === "function" &&
+    !!(globalThis as { Capacitor?: { isNativePlatform?: () => boolean } })
+      .Capacitor?.isNativePlatform?.();
+  // Pixi 8.9+: GCSystem (time-based). textureGC* still maps via TextureGCSystem shim.
+  // Native WebView: reclaim idle GPU sooner. Displayed sprites keep sources "touched".
   await app.init({
     background: "#05070a",
     antialias: false,
@@ -546,8 +556,21 @@ async function main(): Promise<void> {
     height: LCD_HEIGHT,
     // Prefer discrete GPU retention hints on some WebViews (still may lose ctx).
     powerPreference: "high-performance",
+    gcActive: true,
+    gcMaxUnusedTime: nativeGl ? 20_000 : 60_000,
+    gcFrequency: nativeGl ? 10_000 : 30_000,
+    textureGCActive: true,
+    textureGCMaxIdle: nativeGl ? 1200 : 3600,
   });
   rendererReady = true;
+  console.info(
+    "[gl] TextureGC/GC",
+    nativeGl ? "native" : "browser",
+    "maxUnusedMs=",
+    nativeGl ? 20_000 : 60_000,
+    "freqMs=",
+    nativeGl ? 10_000 : 30_000,
+  );
   wrap.appendChild(app.canvas);
 
   const shell = new PhoneShell(app);
@@ -3305,6 +3328,14 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (leaf === "peer_fx") {
+      const on = togglePeerCosmeticsVisible();
+      view.actors.refreshPeerCosmeticsVisibility();
+      showPhase("world");
+      showGameTip(on ? "已显示附近特效" : "已屏蔽附近特效");
+      setChromeStatus(on ? "附近翅/骑/称号：显示" : "附近翅/骑/称号：屏蔽");
+      return;
+    }
     setChromeStatus(`菜单: ${label}`);
     showPhase("world");
   };
@@ -5683,6 +5714,36 @@ dialog.hide();
    */
   let recoverInFlight = false;
   let lastRecoverAt = 0;
+  /** Consecutive recovers that left GL still lost — triggers soft reload. */
+  let consecutiveLostRecovers = 0;
+  const GL_SOFT_RELOAD_AFTER = 3;
+
+  /** Forensic: black screen happens with or without self wing/mount. */
+  const glPressureSnapshot = (): Record<string, unknown> => {
+    try {
+      const cos = session.cosmetics;
+      const probe = view.actors.debugPeerCosmetics();
+      const peersWithCos = probe.peers.filter(
+        (p) => p.eqWing || p.eqMount || p.eqChenghao,
+      ).length;
+      return {
+        phase,
+        self: {
+          ch: cos.eqChenghao,
+          wing: cos.eqWing,
+          mount: cos.eqMount,
+        },
+        peers: probe.peers.length,
+        peersWithCos,
+        pendingCos: probe.pending.length,
+        pose: poseTextureCacheStats(),
+        plist: plistAtlasGpuStats(),
+      };
+    } catch (e) {
+      return { err: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
   const recoverDisplayAfterForeground = async (why: string): Promise<void> => {
     if (!rendererReady || recoverInFlight) return;
     const now = performance.now();
@@ -5693,7 +5754,14 @@ dialog.hide();
     recoverInFlight = true;
     lastRecoverAt = now;
     try {
-      console.info("[gl] recover display", why, "lost=", isGlContextLost());
+      const stillLostBefore = isGlContextLost();
+      console.info(
+        "[gl] recover display",
+        why,
+        "lost=",
+        stillLostBefore,
+        glPressureSnapshot(),
+      );
       wrap.dataset.fitW = "0";
       wrap.dataset.fitH = "0";
       fitPhoneWrap();
@@ -5718,6 +5786,24 @@ dialog.hide();
       } catch (e) {
         console.warn("[gl] render after resume", e);
       }
+      if (isGlContextLost()) {
+        consecutiveLostRecovers += 1;
+        console.warn(
+          "[gl] recover still lost",
+          consecutiveLostRecovers,
+          "/",
+          GL_SOFT_RELOAD_AFTER,
+          glPressureSnapshot(),
+        );
+        if (consecutiveLostRecovers >= GL_SOFT_RELOAD_AFTER) {
+          // Industry fallback when WebView never restores: soft reload LCD.
+          // Gateway keepalive may keep the account online; player re-enters UI.
+          console.error("[gl] soft reload after failed recover");
+          window.location.reload();
+        }
+      } else {
+        consecutiveLostRecovers = 0;
+      }
     } finally {
       recoverInFlight = false;
     }
@@ -5727,7 +5813,7 @@ dialog.hide();
     "webglcontextlost",
     (ev) => {
       ev.preventDefault();
-      console.warn("[gl] webglcontextlost");
+      console.warn("[gl] webglcontextlost", glPressureSnapshot());
       // Screen-on hangup can lose GL without a visibility flip — arm restore.
       window.setTimeout(() => {
         void recoverDisplayAfterForeground("contextlost-deferred");

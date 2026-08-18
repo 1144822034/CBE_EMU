@@ -5,6 +5,7 @@
 import { Container, Sprite } from "pixi.js";
 import {
   loadPlistAtlas,
+  rebindPlistAtlas,
   type LoadedPlistAtlas,
   type PlistFrame,
 } from "./plistAtlas";
@@ -163,7 +164,7 @@ export class ChenghaoOverlay {
   clear(): void {
     this.loadGen++;
     this.titleId = 0;
-    this.atlas = null;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
     this.phase = 0;
     this.animAcc = 0;
     this.root.visible = false;
@@ -196,7 +197,7 @@ export class ChenghaoOverlay {
         stableFace: true,
       });
       if (gen !== this.loadGen) return;
-      this.atlas = atlas;
+      this.atlas = rebindPlistAtlas(this.atlas, atlas);
       this.phase = 0;
       this.animAcc = 0;
       if (!this.sprite) {

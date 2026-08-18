@@ -5,6 +5,7 @@
 import { Container, Sprite } from "pixi.js";
 import {
   loadPlistAtlas,
+  rebindPlistAtlas,
   type LoadedPlistAtlas,
   type PlistFrame,
 } from "./plistAtlas";
@@ -106,7 +107,7 @@ export class WingOverlay {
   clear(): void {
     this.loadGen++;
     this.wingId = 0;
-    this.atlas = null;
+    this.atlas = rebindPlistAtlas(this.atlas, null);
     this.phase = 0;
     this.animAcc = 0;
     this.faceDir = 3;
@@ -139,7 +140,7 @@ export class WingOverlay {
     try {
       const atlas = await loadPlistAtlas(wingAtlasPath(id));
       if (gen !== this.loadGen) return;
-      this.atlas = atlas;
+      this.atlas = rebindPlistAtlas(this.atlas, atlas);
       this.phase = 0;
       this.animAcc = 0;
       if (!this.sprite) {

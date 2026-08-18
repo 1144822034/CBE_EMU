@@ -13,6 +13,7 @@ import {
 } from "./constants";
 import { BitmapLabel } from "./BitmapLabel";
 import { isSoundEnabled } from "../audio/GameBgm";
+import { isPeerCosmeticsVisible } from "../resources/peerCosmeticsPref";
 import { attachRowPointerHit, clearPointerHits } from "./pointerHit";
 
 export type MenuLeaf =
@@ -34,7 +35,8 @@ export type MenuLeaf =
   | "quick_repair"
   | "hangup"
   | "font"
-  | "sound";
+  | "sound"
+  | "peer_fx";
 
 type MenuNode = {
   label: string;
@@ -74,6 +76,7 @@ const ROOT: MenuNode[] = [
       { label: "离开队伍", leaf: "leave_team" },
       { label: "快速修理", leaf: "quick_repair" },
       { label: "开关声音", leaf: "sound" },
+      { label: "屏蔽特效", leaf: "peer_fx" },
       { label: "字体切换", leaf: "font" },
       { label: "挂机战斗", leaf: "hangup" },
     ],
@@ -167,7 +170,11 @@ export class MenuScreen extends Container {
           ? isSoundEnabled()
             ? "关闭声音"
             : "开启声音"
-          : c.label,
+          : c.leaf === "peer_fx"
+            ? isPeerCosmeticsVisible()
+              ? "屏蔽特效"
+              : "显示特效"
+            : c.label,
       ),
       "返回",
     ];

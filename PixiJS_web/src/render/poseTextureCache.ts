@@ -77,6 +77,14 @@ export function evictPoseTextures(inUseKeys?: ReadonlySet<string>): void {
   }
 }
 
+/** Forensic: GPU pressure probe (APK black-screen / contextlost). */
+export function poseTextureCacheStats(): {
+  cached: number;
+  liveKeys: number;
+} {
+  return { cached: poseTexCache.size, liveKeys: livePoseKeys.size };
+}
+
 export function clearPoseTextureCache(): void {
   for (const tex of poseTexCache.values()) {
     try {

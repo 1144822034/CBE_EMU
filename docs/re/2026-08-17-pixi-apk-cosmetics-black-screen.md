@@ -92,3 +92,24 @@
 黑屏需另开、更窄的 native-only 方案（跳过采样即可，禁止 unload 共享图）。
 
 客户端补充：忽略「尚无缓存时的全 0 `31/5`」，避免 visibility enqueue 早于 `onlineEq*` 同步时冲掉后续真妆容。
+
+## 2026-08-18 试跑 Pixi 官方 GC / unload（保留妆容）
+
+落地（对照官方 [Garbage Collection](https://pixijs.download/dev/docs/core-concepts-6.html)；本仓 Pixi **8.9** 实际以 `GCSystem` 为准，`textureGC*` 为 shim）：
+
+| API | 用法 |
+|-----|------|
+| `destroy({ texture: false })` | 卸下翅/骑 sprite 时**不**销毁共享图集 |
+| `texture.source.unload()` | PNG **refcount=0** 且延迟 2.5s 后卸 GPU；**保留** Assets / 帧 Texture |
+| `Assets.unload` | **仅** `Assets.load` 自身失败；成功路径禁止（坐骑多 face 共享 PNG） |
+| `gcActive` / `gcMaxUnusedTime` / `gcFrequency` | native 20s / 10s；浏览器默认级 60s / 30s |
+| `textureGCActive` / `textureGCMaxIdle` | 同步写入（8.9 shim → `gc.maxUnusedTime`） |
+| `autoGarbageCollect` | 化妆品 ImageSource=`true`；姿态 BufferImageSource=`false`（本仓 cache 管） |
+
+另：native 翅膀/坐骑跳过全图像素质心采样；`nudgePlistAtlasesAfterGpuResume` 在 GL recover 时 `source.update`。
+
+验收：浏览器附近妆容不空白；APK 控制台可见 `[gl] TextureGC/GC native`、换装后空闲可见 `[plist] source.unload (idle)`；黑屏频率应下降。
+
+## 2026-08-18 玩家反馈：无本机翅/骑也会黑屏
+
+「自己没装」≠「场景无图集」（附近 peer 仍加载）。非妆容路径（姿态/UC3/战斗 FX）与「丢 GL 回不来」仍可能黑屏。取证快照含 `peersWithCos` / `plist`；连续 3 次 recover 仍 lost → 软重载。

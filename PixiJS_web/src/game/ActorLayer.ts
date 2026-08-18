@@ -17,6 +17,7 @@ import {
   MOUNT_NAMEPLATE_EXTRA,
 } from "../resources/mountFx";
 import { WingOverlay } from "../resources/wingFx";
+import { isPeerCosmeticsVisible } from "../resources/peerCosmeticsPref";
 import type { NpcTaskPromptType } from "../net/protocolExtras";
 import {
   actorResourceForJobSex,
@@ -508,6 +509,29 @@ export class ActorLayer {
     console.info(
       `[actors] cosmetics paint peer=${id} name=${m.nameLabel} ch=${m.eqChenghao} wing=${m.eqWing} mount=${m.eqMount}`,
     );
+    this.applyPeerCosmeticsVisual(m);
+  }
+
+  /**
+   * Re-apply peer wing/mount/title after client「屏蔽/显示特效」toggles.
+   * Stored eq* ids are kept; overlays only mount when preference is on.
+   */
+  refreshPeerCosmeticsVisibility(): void {
+    for (const m of this.markers.values()) {
+      if (m.kind !== "peer") continue;
+      this.applyPeerCosmeticsVisual(m);
+    }
+  }
+
+  private applyPeerCosmeticsVisual(m: Marker): void {
+    if (!isPeerCosmeticsVisible()) {
+      m.wing?.clear();
+      m.mount?.clear();
+      if (m.sprite) m.sprite.y = 0;
+      void this.refreshTitleBadge(m, m.classicTitle, m.classicTitleGif);
+      this.layoutNameplate(m);
+      return;
+    }
     void this.refreshPeerTitle(m);
     void this.refreshPeerWing(m);
     void this.refreshPeerMount(m);
@@ -1312,6 +1336,7 @@ export class ActorLayer {
   /**
    * After WebGL context restore (Android screen-off): rebuild sprites from
    * CPU RGBA so GPU uploads are fresh. Nameplates rebake via BitmapLabel.
+   * Cosmetics atlases: source.update via SceneView → nudgePlistAtlases.
    */
   nudgeAfterGpuResume(): void {
     for (const m of this.markers.values()) {
@@ -1323,6 +1348,33 @@ export class ActorLayer {
         } catch {
           /* ignore */
         }
+      }
+      try {
+        m.wing?.root.visible &&
+          m.wing.root.children.forEach((c) => {
+            const spr = c as { texture?: { source?: { update?: () => void } } };
+            spr.texture?.source?.update?.();
+          });
+      } catch {
+        /* ignore */
+      }
+      try {
+        m.mount?.root.visible &&
+          m.mount.root.children.forEach((c) => {
+            const spr = c as { texture?: { source?: { update?: () => void } } };
+            spr.texture?.source?.update?.();
+          });
+      } catch {
+        /* ignore */
+      }
+      try {
+        m.chenghao?.root.visible &&
+          m.chenghao.root.children.forEach((c) => {
+            const spr = c as { texture?: { source?: { update?: () => void } } };
+            spr.texture?.source?.update?.();
+          });
+      } catch {
+        /* ignore */
       }
     }
   }

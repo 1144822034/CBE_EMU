@@ -28,6 +28,7 @@ import {
   rebindPoseTextureKey,
   releasePoseTextureKey,
 } from "./poseTextureCache";
+import { nudgePlistAtlasesAfterGpuResume } from "../resources/plistAtlas";
 import {
   WingOverlay,
   writeWingIdPreference,
@@ -42,6 +43,10 @@ import {
   ChenghaoOverlay,
   parseChenghaoId,
 } from "../resources/chenghaoFx";
+import {
+  isStatusStripCollapsed,
+  toggleStatusStripCollapsed,
+} from "../resources/statusStripPref";
 
 /** CBE map nameplate colors (sampled from reference-shots). */
 const NAME_YELLOW = 0xf8dc00;
@@ -173,6 +178,11 @@ export class SceneView {
   private qiBadge = new Container();
   /** Title list 「称」— after 骑. */
   private chenBadge = new Container();
+  /** Collapsible host for 修…称 (toggle sits outside). */
+  private statusStripHost = new Container();
+  /** Left「收/展」control for the map-corner status strip. */
+  private statusToggleBadge = new Container();
+  private statusStripCollapsed = isStatusStripCollapsed();
   private paiBlink = false;
   private paiBlinkPhase = 0;
   private leiBlink = false;
@@ -236,13 +246,25 @@ export class SceneView {
     this.world.addChild(this.player);
     this.root.addChild(this.clip);
 
-    // Status strip on map top-left: 修 → 拍 → 擂 → (斗) → (练) → 娱.
+    // Status strip on map top-left: [收/展] → 修 → 拍 → 擂 → (斗) → (练) → 娱 → 翅 → 骑 → 称.
+    this.statusStripHost.eventMode = "passive";
+    this.root.addChild(this.statusStripHost);
+
+    this.mountStatusBadgeSlot(this.statusToggleBadge, 0);
+    this.statusToggleBadge.on("pointertap", (e) => {
+      e.stopPropagation();
+      this.statusStripCollapsed = toggleStatusStripCollapsed();
+      this.layoutStatusBadges();
+    });
+    this.root.addChild(this.statusToggleBadge);
+    this.mountStatusToggleArt();
+
     this.mountStatusBadgeSlot(this.xiuBadge, 0);
     this.xiuBadge.on("pointertap", (e) => {
       e.stopPropagation();
       this.onXiuTap?.();
     });
-    this.root.addChild(this.xiuBadge);
+    this.statusStripHost.addChild(this.xiuBadge);
     void this.mountXiuArt();
 
     this.mountStatusBadgeSlot(this.paiBadge, 1);
@@ -250,7 +272,7 @@ export class SceneView {
       e.stopPropagation();
       this.onPaiTap?.();
     });
-    this.root.addChild(this.paiBadge);
+    this.statusStripHost.addChild(this.paiBadge);
     void this.mountPaiArt();
 
     this.mountStatusBadgeSlot(this.leiBadge, 2);
@@ -258,19 +280,19 @@ export class SceneView {
       e.stopPropagation();
       this.onLeiTap?.();
     });
-    this.root.addChild(this.leiBadge);
+    this.statusStripHost.addChild(this.leiBadge);
     void this.mountLeiArt();
 
     this.mountStatusBadgeSlot(this.douBadge, 3);
     this.douBadge.visible = false;
     this.douBadge.eventMode = "none";
-    this.root.addChild(this.douBadge);
+    this.statusStripHost.addChild(this.douBadge);
     void this.mountGifBadge(this.douBadge, "vip_effect.gif");
 
     this.mountStatusBadgeSlot(this.lianBadge, 4);
     this.lianBadge.visible = false;
     this.lianBadge.eventMode = "none";
-    this.root.addChild(this.lianBadge);
+    this.statusStripHost.addChild(this.lianBadge);
     void this.mountGifBadge(this.lianBadge, "training.gif");
 
     this.mountStatusBadgeSlot(this.yuBadge, 3);
@@ -278,7 +300,7 @@ export class SceneView {
       e.stopPropagation();
       this.onYuTap?.();
     });
-    this.root.addChild(this.yuBadge);
+    this.statusStripHost.addChild(this.yuBadge);
     void this.mountYuArt();
 
     this.mountStatusBadgeSlot(this.chiBadge, 4);
@@ -286,7 +308,7 @@ export class SceneView {
       e.stopPropagation();
       this.onChiTap?.();
     });
-    this.root.addChild(this.chiBadge);
+    this.statusStripHost.addChild(this.chiBadge);
     void this.mountChiArt();
 
     this.mountStatusBadgeSlot(this.qiBadge, 5);
@@ -294,7 +316,7 @@ export class SceneView {
       e.stopPropagation();
       this.onQiTap?.();
     });
-    this.root.addChild(this.qiBadge);
+    this.statusStripHost.addChild(this.qiBadge);
     void this.mountQiArt();
 
     this.mountStatusBadgeSlot(this.chenBadge, 6);
@@ -302,7 +324,7 @@ export class SceneView {
       e.stopPropagation();
       this.onChenTap?.();
     });
-    this.root.addChild(this.chenBadge);
+    this.statusStripHost.addChild(this.chenBadge);
     void this.mountChenArt();
     this.layoutStatusBadges();
 
@@ -961,11 +983,23 @@ export class SceneView {
   }
 
   /**
-   * Compact strip: 修/拍/擂 fixed; 斗/练 only occupy slots while visible;
-   * 娱 → 翅 → 骑 → 称 sit in the next free slots.
+   * Compact strip: [收/展] fixed left; when expanded, 修/拍/擂 + optional 斗/练
+   * then 娱 → 翅 → 骑 → 称. Collapsed: only the toggle remains on the left.
    */
   private layoutStatusBadges(): void {
-    let next = 3;
+    this.mountStatusBadgeSlot(this.statusToggleBadge, 0);
+    this.mountStatusToggleArt();
+
+    this.statusStripHost.visible = !this.statusStripCollapsed;
+    if (this.statusStripCollapsed) return;
+
+    // Strip starts one slot to the right of the toggle.
+    this.statusStripHost.position.set(STATUS_BADGE_PITCH, 0);
+
+    let next = 0;
+    this.mountStatusBadgeSlot(this.xiuBadge, next++);
+    this.mountStatusBadgeSlot(this.paiBadge, next++);
+    this.mountStatusBadgeSlot(this.leiBadge, next++);
     if (this.douBadge.visible) {
       this.mountStatusBadgeSlot(this.douBadge, next++);
     }
@@ -976,6 +1010,49 @@ export class SceneView {
     this.mountStatusBadgeSlot(this.chiBadge, next++);
     this.mountStatusBadgeSlot(this.qiBadge, next++);
     this.mountStatusBadgeSlot(this.chenBadge, next);
+  }
+
+  private mountStatusToggleArt(): void {
+    this.mountChevronStatusBadge(
+      this.statusToggleBadge,
+      /* pointRight = expand affordance when collapsed */
+      this.statusStripCollapsed,
+    );
+  }
+
+  /** Pixel chevron on the same 17×17 plate as 修/拍/… */
+  private mountChevronStatusBadge(host: Container, pointRight: boolean): void {
+    host.removeChildren().forEach((c) => {
+      c.destroy({ children: true });
+    });
+    const fill = pointRight ? 0x182818 : 0x281818;
+    const border = pointRight ? 0xb8e8b0 : 0xe8c8b0;
+    const ink = pointRight ? 0xc8f0c0 : 0xf0d8c0;
+    const plate = new Graphics()
+      .rect(0, 0, STATUS_BADGE_SIZE, STATUS_BADGE_SIZE)
+      .fill({ color: fill })
+      .stroke({ width: 1, color: border });
+    host.addChild(plate);
+
+    const g = new Graphics();
+    const cx = STATUS_BADGE_SIZE / 2;
+    const cy = STATUS_BADGE_SIZE / 2;
+    // Two-bar chevron « or » (1px strokes) — readable at 17×17.
+    const drawChevron = (ox: number) => {
+      if (pointRight) {
+        g.moveTo(cx + ox - 2.5, cy - 4.5)
+          .lineTo(cx + ox + 1.5, cy)
+          .lineTo(cx + ox - 2.5, cy + 4.5);
+      } else {
+        g.moveTo(cx + ox + 2.5, cy - 4.5)
+          .lineTo(cx + ox - 1.5, cy)
+          .lineTo(cx + ox + 2.5, cy + 4.5);
+      }
+    };
+    drawChevron(pointRight ? -1.5 : 1.5);
+    drawChevron(pointRight ? 1.5 : -1.5);
+    g.stroke({ width: 1.5, color: ink, join: "miter", cap: "square" });
+    host.addChild(g);
   }
 
   private mountStatusBadgeSlot(host: Container, index: number): void {
@@ -1246,6 +1323,7 @@ export class SceneView {
         /* ignore */
       }
     }
+    nudgePlistAtlasesAfterGpuResume();
     this.applyPlayerFrame(true);
     this.actors.nudgeAfterGpuResume();
   }

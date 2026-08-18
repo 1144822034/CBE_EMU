@@ -23,6 +23,8 @@ export function rgbaToTexture(
     width,
     height,
     format: "rgba8unorm",
+    // Pose lifecycle is poseTextureCache — do not let TextureGC unload mid-frame.
+    autoGarbageCollect: false,
   });
   source.scaleMode = scaleMode;
   return new Texture({ source });

@@ -19,6 +19,8 @@ export type PlistFrame = {
 export type LoadedPlistAtlas = {
   key: string;
   textureFileName: string;
+  /** Absolute-or-app URL passed to Assets.load (refcount / unload key). */
+  pngUrl: string;
   metaSize: { w: number; h: number };
   frames: PlistFrame[];
   /** Textures sorted by frame name (animation order). */
@@ -33,6 +35,121 @@ const ATLAS_CACHE_VER = "centroid-v3-face";
 
 const cache = new Map<string, Promise<LoadedPlistAtlas>>();
 
+/**
+ * Display retain count per PNG URL (not per plist prefix).
+ * Mount dir packs share one PNG across face/prefix atlas entries — refcount
+ * must follow the shared Assets texture, never unload while peers still paint.
+ */
+const pngRetain = new Map<string, number>();
+const pngBase = new Map<string, Texture>();
+const unloadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Delay so brief face/act churn does not thrash GPU re-upload. */
+const UNLOAD_DELAY_MS = 2500;
+
+function isNativePlatform(): boolean {
+  try {
+    const cap = (
+      globalThis as unknown as {
+        Capacitor?: { isNativePlatform?: () => boolean };
+      }
+    ).Capacitor;
+    return !!cap?.isNativePlatform?.();
+  } catch {
+    return false;
+  }
+}
+
+function cancelScheduledUnload(pngUrl: string): void {
+  const t = unloadTimers.get(pngUrl);
+  if (t != null) {
+    clearTimeout(t);
+    unloadTimers.delete(pngUrl);
+  }
+}
+
+/**
+ * Pixi official: `texture.source.unload()` frees GPU, keeps JS / Assets cache.
+ * Never `Assets.unload` here — shared multi-face sheets went blank last time.
+ */
+function scheduleGpuUnload(pngUrl: string): void {
+  cancelScheduledUnload(pngUrl);
+  unloadTimers.set(
+    pngUrl,
+    setTimeout(() => {
+      unloadTimers.delete(pngUrl);
+      if ((pngRetain.get(pngUrl) ?? 0) > 0) return;
+      const base = pngBase.get(pngUrl);
+      if (!base || base.destroyed) return;
+      try {
+        base.source.unload();
+        console.info("[plist] source.unload (idle)", pngUrl.replace(/^.*\//, ""));
+      } catch (e) {
+        console.warn("[plist] source.unload", e);
+      }
+    }, UNLOAD_DELAY_MS),
+  );
+}
+
+/** Retain shared PNG while an overlay displays frames from this atlas. */
+export function retainPlistAtlas(atlas: LoadedPlistAtlas | null | undefined): void {
+  if (!atlas?.pngUrl) return;
+  const url = atlas.pngUrl;
+  cancelScheduledUnload(url);
+  pngBase.set(url, atlas.base);
+  pngRetain.set(url, (pngRetain.get(url) ?? 0) + 1);
+}
+
+/** Drop one display hold; GPU unload only when nobody retains the PNG. */
+export function releasePlistAtlas(atlas: LoadedPlistAtlas | null | undefined): void {
+  if (!atlas?.pngUrl) return;
+  const url = atlas.pngUrl;
+  const n = (pngRetain.get(url) ?? 0) - 1;
+  if (n <= 0) {
+    pngRetain.delete(url);
+    scheduleGpuUnload(url);
+  } else {
+    pngRetain.set(url, n);
+  }
+}
+
+/** Swap overlay atlas: retain next then release prev (same PNG is a no-op net). */
+export function rebindPlistAtlas(
+  prev: LoadedPlistAtlas | null | undefined,
+  next: LoadedPlistAtlas | null | undefined,
+): LoadedPlistAtlas | null {
+  if (prev === next) return next ?? null;
+  if (next) retainPlistAtlas(next);
+  if (prev) releasePlistAtlas(prev);
+  return next ?? null;
+}
+
+/** After webglcontextrestored: re-touch GPU for atlases still in Promise cache. */
+export function nudgePlistAtlasesAfterGpuResume(): void {
+  for (const p of cache.values()) {
+    void p.then((atlas) => {
+      try {
+        atlas.base.source.update?.();
+      } catch {
+        /* ignore */
+      }
+    }).catch(() => {
+      /* ignore */
+    });
+  }
+}
+
+/** Forensic / DevTools. */
+export function plistAtlasGpuStats(): {
+  cachedSheets: number;
+  retainedPngs: number;
+  pendingUnload: number;
+} {
+  return {
+    cachedSheets: cache.size,
+    retainedPngs: pngRetain.size,
+    pendingUnload: unloadTimers.size,
+  };
+}
 function parseBracePair(s: string): { a: number; b: number } | null {
   const m = String(s || "")
     .trim()
@@ -293,8 +410,24 @@ export function loadPlistAtlas(
       : "";
     const pngPath = `${dir}${parsed.textureFileName}`;
     const pngUrl = jhOnlineDataPathUrl(pngPath);
-    const base = (await Assets.load(pngUrl)) as Texture;
+    let base: Texture;
+    try {
+      base = (await Assets.load(pngUrl)) as Texture;
+    } catch (e) {
+      // Load never succeeded — safe to drop Assets cache entry.
+      try {
+        await Assets.unload(pngUrl);
+      } catch {
+        /* ignore */
+      }
+      throw e;
+    }
     base.source.scaleMode = "nearest";
+    // ImageSource defaults true; keep explicit so TextureGC/GCSystem can reclaim idle GPU.
+    base.source.autoGarbageCollect = true;
+    if (isNativePlatform()) {
+      base.source.autoGenerateMipmaps = false;
+    }
     let frames = parsed.frames.filter(
       (fr) =>
         fr.frame.w > 2 &&
@@ -306,6 +439,7 @@ export function loadPlistAtlas(
       frames = frames.filter((fr) => fr.name.startsWith(prefix));
     }
     if (!frames.length) {
+      // Do NOT Assets.unload(pngUrl): other prefixes/faces may share this PNG.
       throw new Error(
         prefix
           ? `plist has no frames for prefix ${prefix}: ${sheetKey}`
@@ -318,7 +452,13 @@ export function loadPlistAtlas(
       );
     }
 
-    const pixels = await loadAtlasPixels(pngUrl);
+    // Native: skip full-sheet getImageData for wing/mount (CPU/RAM spike).
+    // Chenghao stableFace still samples (sheets are small).
+    const skipPixelSample = isNativePlatform() && !stableFace;
+    if (skipPixelSample) {
+      console.info("[plist] skip pixel sample (native)", sheetKey);
+    }
+    const pixels = skipPixelSample ? null : await loadAtlasPixels(pngUrl);
     let cents: OpaqueMetrics[] = pixels
       ? frames.map((fr) => opaqueCentroid(pixels, fr))
       : frames.map((fr) => ({
@@ -427,6 +567,7 @@ export function loadPlistAtlas(
     return {
       key: prefix ? `${sheetKey}#${prefix}` : sheetKey,
       textureFileName: parsed.textureFileName,
+      pngUrl,
       metaSize: parsed.metaSize,
       frames,
       textures,
