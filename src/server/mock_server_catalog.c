@@ -6062,12 +6062,14 @@ static bool vm_net_mock_append_chest_open_reward_notice_object(
  *   consumes the next backpack input even when a later non-modal notice is
  *   drawn over it.
  * - Chest opening therefore deliberately omits 1/7/1.  The following 7/11
- *   quantity stream reaches the same handler and clears the pending item
- *   operation after the 7/7 row update, without creating the success modal.
+ *   quantity stream reaches the same handler, updates/deletes the existing
+ *   row by sequence, and clears the pending item operation without creating
+ *   the success modal.
  *   This is the same no-popup contract already used for the small-horn item
  *   path in vm_net_mock_build_item_use_response().
- * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=2 as a selected-row update
- *   and type=1 as a one-shot additive reward row.
+ * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=1 as a one-shot additive
+ *   reward row.  A type=2 row is also fed to the additive item manager, so it
+ *   must not be emitted for consumed stacks.
  * - the same CBE parser consumes 1/7/11 to synchronize the item count.
  * - JianghuOL.CBE:HandleItemAcquire(0x0101191A) consumes 1/7/37.  It always
  *   submits the length-delimited `msg` to the timed acquire-notice UI first;
@@ -6171,10 +6173,10 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     /* Do not prepend 7/1 here.  Its success branch is a modal message-box
      * side effect, not a required state transition; 7/11 below owns the
      * pending-operation cleanup for this multi-row chest transaction. */
-    if (!vm_net_mock_append_backpack_item_remove7_objects(
+    if (!vm_net_mock_append_backpack_item_count11_object(
             out, outCap, &pos, &objectCount, chestItem->seq,
             chest->chestItemId, chestRemaining) ||
-        !vm_net_mock_append_backpack_item_remove7_objects(
+        !vm_net_mock_append_backpack_item_count11_object(
             out, outCap, &pos, &objectCount, keyItem->seq,
             chest->keyItemId, keyRemaining) ||
         !vm_net_mock_append_backpack_item_add7_object(
@@ -6213,12 +6215,12 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=2x(7/7-type2+7/11)+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544/0x0101191A\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=2x(7/11-count-by-seq)+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/7-type2+7/11+7/7-type2+7/11+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544/0x0101191A\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/11-count-by-seq+7/11-count-by-seq+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
                      reward->count, reward->weight, totalWeight,

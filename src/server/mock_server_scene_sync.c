@@ -4773,42 +4773,27 @@ static u32 vm_net_mock_npc_sell_equipment_item_page(
     return 0;
 }
 
-/* JianghuOL.CBE:0x01033544 consumes the same type=2 row update after a
- * regular item use.  The 7/7 row removes/updates the visible entry and the
- * 7/11 count stream keeps the item's sequence manager coherent.  This avoids
- * appending 17/1 here: that full-list response is only valid while the
- * backpack module owns the callback, not while a 26/1 dialog is active. */
-static bool vm_net_mock_append_backpack_item_remove7_objects(
+/* JianghuOL.CBE:0x01033544 consumes 7/11 by sequence.  It updates the
+ * existing row for a positive count and calls the item manager's delete path
+ * when the count reaches zero.  A 7/7 type=2 iteminfo row must not accompany
+ * it: mmGame:sub_D04 feeds that row to the additive item manager, which leaks
+ * physical category-15 slots when the supplied count is the remaining stack. */
+static bool vm_net_mock_append_backpack_item_count11_object(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u16 seq, u32 itemId,
     u32 remaining)
 {
-    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
     u8 countInfo[32];
-    u32 itemInfoLen = 0;
     u32 countInfoLen = 0;
     u32 objectStart = 0;
 
     if (out == NULL || pos == NULL || objectCount == NULL || seq == 0 ||
         itemId == 0 ||
-        !vm_net_mock_build_item_use_iteminfo_blob(
-            itemInfo, sizeof(itemInfo), seq, itemId, remaining, &itemInfoLen) ||
-        itemInfoLen == 0 || itemInfoLen > 0xffffu ||
         !vm_net_mock_build_item_use_count_info_blob(
             countInfo, sizeof(countInfo), seq, remaining, &countInfoLen) ||
         countInfoLen == 0 || countInfoLen > 0xffffu)
     {
         return false;
     }
-    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7,
-                                     &objectStart) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 2) ||
-        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
-                                    (u16)itemInfoLen))
-    {
-        return false;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    ++*objectCount;
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 11,
                                      &objectStart) ||
         !vm_net_mock_put_object_raw(out, outCap, pos, "info", countInfo,

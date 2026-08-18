@@ -6088,10 +6088,10 @@ static bool vm_net_mock_role_consume_backpack_item(vm_net_mock_role_state *role,
                                                    u16 seq,
                                                    u32 count,
                                                    u32 *remainingOut);
-/* The same parser-proven 7/7 type=2 + 7/11 removal pair is used by NPC
- * services and item use.  Chest opening needs it once for the chest and once
- * for its matching key. */
-static bool vm_net_mock_append_backpack_item_remove7_objects(
+/* Chest opening uses the sequence-keyed 7/11 quantity stream.  Do not add a
+ * 7/7 type=2 iteminfo row here: mmGame parses that row through its additive
+ * item manager and treats the supplied quantity as a new stack contribution. */
+static bool vm_net_mock_append_backpack_item_count11_object(
     u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u16 seq, u32 itemId,
     u32 remaining);
 static bool vm_net_mock_role_consume_backpack_item_with_timed_effect(
