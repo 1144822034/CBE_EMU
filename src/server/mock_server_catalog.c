@@ -1349,6 +1349,12 @@ static bool vm_net_mock_role_service_persist_skill(
     return vm_mysql_exec(query);
 }
 
+/* Defined with the other backpack response builders below.  The item-use
+ * response is earlier in this translation unit and needs the declaration for
+ * its authoritative 30/21 refresh path. */
+static bool vm_net_mock_append_backpack_grid_refresh_object(
+    u8 *out, u32 outCap, u32 *pos);
+
 static bool vm_net_mock_role_service_delete_skill(
     const vm_net_mock_role_service_state *state, u32 skillId)
 {
@@ -5082,6 +5088,232 @@ static bool vm_net_mock_item_is_backpack_expand_card(u32 itemId,
            (effect != NULL && effect->itemId == VM_NET_MOCK_BACKPACK_EXPAND_ITEM_ID);
 }
 
+/*
+ * HandleItemOperationResponse(0x01033544) treats a successful 1/7/1 as a
+ * modal "item used" acknowledgement.  That modal is not a timed scene toast.
+ * The first attempt to omit only that acknowledgement still emitted 7/7
+ * type=2.  mmGame:sub_D04(0x0D04) sets its item notification state for every
+ * parsed 7/7 row, while its type=2 branch has no matching clear path.  A
+ * normal immediate recovery item must instead use the silent operation
+ * completion stream: 7/4 result followed by the sequence-keyed 7/11 stream.
+ * The server first reconciles the source rows through the same client-side
+ * merge/split operation as the 30/21 grid parser; this makes 7/11 the sole
+ * quantity authority without rebuilding the live item manager.
+ *
+ * Keep reservoir flasks on their established 7/1 + 7/11 path.  They are a
+ * distinct consumeMode=2 contract whose quantity is an HP/MP reservoir, not
+ * an ordinary stack decrement.  Likewise, do not fold special items or the
+ * small-horn exception into this resource-derived predicate.
+ */
+static bool vm_net_mock_item_use_uses_backpack_refresh_completion(
+    u32 itemId, const vm_net_mock_item_effect_catalog_item *effect,
+    bool reservoirItem)
+{
+    return itemId != VM_NET_MOCK_SMALL_HORN_ITEM_ID &&
+           !reservoirItem && effect != NULL &&
+           vm_net_mock_item_effect_is_usable(effect) &&
+           (effect->hp != 0 || effect->mp != 0);
+}
+
+/*
+ * The server stores every physical grant row, while the CBE's
+ * TimerControl_ProcessItem (0x01032EB8) immediately merges equal item ids.
+ * On overflow it also swaps the incoming and existing sequence numbers before
+ * retrying.  Consequently a source set such as
+ *
+ *     seq16=9, seq17=10, seq18=13, seq19=4
+ *
+ * is presented by the client as seq18=20 and seq16=16.  Consuming the
+ * persisted seq18 row directly therefore changes the visible stacks to
+ * 12 and 9 when 7/11 is applied.  Reproduce that small, deterministic client
+ * operation before a normal medicine mutation, then persist the resulting
+ * client-visible rows.  This keeps the authoritative role snapshot and the
+ * sequence-keyed 7/11 stream on the same identity namespace.
+ */
+static bool vm_net_mock_role_consume_client_visible_stack(
+    vm_net_mock_role_state *role, u32 itemId, u16 selectedSeq, u32 count,
+    u32 *remainingOut)
+{
+    vm_net_mock_backpack_item_state logical[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    vm_net_mock_backpack_item_state rebuilt[VM_NET_MOCK_BACKPACK_MAX_ITEMS];
+    u8 itemCount = 0;
+    u32 stackLimit = 0;
+    u32 logicalCount = 0;
+    u32 sourceCount = 0;
+    u32 firstTarget = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    u32 selectedLogical = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+    u32 rebuiltCount = 0;
+    u32 selectedBefore = 0;
+
+    if (remainingOut)
+        *remainingOut = 0;
+    if (role == NULL || itemId == 0 || selectedSeq == 0 || count == 0)
+        return false;
+    stackLimit = vm_net_mock_item_effect_stack_limit(itemId);
+    if (stackLimit <= 1)
+        return false;
+    itemCount = vm_net_mock_role_backpack_count(role);
+    memset(logical, 0, sizeof(logical));
+
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *source =
+            &role->backpackItems[i];
+        vm_net_mock_backpack_item_state incoming;
+
+        if (source->itemId != itemId || source->seq == 0 || source->count == 0)
+            continue;
+        if (firstTarget == VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+            firstTarget = i;
+        ++sourceCount;
+        incoming = *source;
+        /* role normalization normally guarantees this.  Do not invent a
+         * split for an unresolved legacy row: the firmware copies one
+         * incoming record and leaves its over-limit quantity observable. */
+        if (incoming.count > stackLimit)
+            return false;
+        while (incoming.count != 0)
+        {
+            u32 mergeIndex = VM_NET_MOCK_BACKPACK_MAX_ITEMS;
+            for (u32 j = 0; j < logicalCount; ++j)
+            {
+                if (logical[j].itemId == itemId && logical[j].count < stackLimit)
+                {
+                    mergeIndex = j;
+                    break;
+                }
+            }
+            if (mergeIndex == VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+            {
+                if (logicalCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                    return false;
+                logical[logicalCount] = incoming;
+                if (logical[logicalCount].count > stackLimit)
+                    logical[logicalCount].count = stackLimit;
+                incoming.count -= logical[logicalCount].count;
+                ++logicalCount;
+                continue;
+            }
+            {
+                vm_net_mock_backpack_item_state *existing =
+                    &logical[mergeIndex];
+                u32 freeCount = stackLimit - existing->count;
+                if (incoming.count <= freeCount)
+                {
+                    existing->count += incoming.count;
+                    incoming.count = 0;
+                }
+                else
+                {
+                    incoming.count -= freeCount;
+                    existing->count = stackLimit;
+                    /* This is the exact swap at 0x01032F76..0x01032F82. */
+                    {
+                        u16 sequence = incoming.seq;
+                        incoming.seq = existing->seq;
+                        existing->seq = sequence;
+                    }
+                }
+            }
+        }
+    }
+    if (sourceCount == 0 || firstTarget == VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+        return false;
+    for (u32 i = 0; i < logicalCount; ++i)
+    {
+        if (logical[i].seq == selectedSeq)
+        {
+            selectedLogical = i;
+            break;
+        }
+    }
+    if (selectedLogical == VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+    {
+        printf("[warn][item-use] client_stack_reconcile_unresolved item=%u selected_seq=%u source_rows=%u logical_rows=%u reason=sequence-merged-away\n",
+               itemId, selectedSeq, sourceCount, logicalCount);
+        return false;
+    }
+    selectedBefore = logical[selectedLogical].count;
+    if (selectedBefore < count)
+        return false;
+    logical[selectedLogical].count -= count;
+    if (remainingOut)
+        *remainingOut = logical[selectedLogical].count;
+
+    memset(rebuilt, 0, sizeof(rebuilt));
+    for (u32 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *source =
+            &role->backpackItems[i];
+        if (source->itemId == itemId)
+        {
+            if (i == firstTarget)
+            {
+                for (u32 j = 0; j < logicalCount; ++j)
+                {
+                    if (logical[j].count == 0)
+                        continue;
+                    if (rebuiltCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+                        return false;
+                    rebuilt[rebuiltCount++] = logical[j];
+                }
+            }
+            continue;
+        }
+        if (rebuiltCount >= VM_NET_MOCK_BACKPACK_MAX_ITEMS)
+            return false;
+        rebuilt[rebuiltCount++] = *source;
+    }
+    memset(role->backpackItems, 0, sizeof(role->backpackItems));
+    if (rebuiltCount != 0)
+        memcpy(role->backpackItems, rebuilt,
+               sizeof(rebuilt[0]) * rebuiltCount);
+    role->backpackItemCount = (u8)rebuiltCount;
+    printf("[info][item-use] client_stack_reconcile item=%u selected_seq=%u source_rows=%u logical_rows=%u selected_before=%u selected_after=%u action=timer-control-merge-swap\n",
+           itemId, selectedSeq, sourceCount, logicalCount, selectedBefore,
+           remainingOut ? *remainingOut : logical[selectedLogical].count);
+    vm_autotest_note("client_stack_reconcile item=%u selected_seq=%u source_rows=%u logical_rows=%u selected_before=%u selected_after=%u action=timer-control-merge-swap evidence=JianghuOL.CBE:0x01032EB8\n",
+                     itemId, selectedSeq, sourceCount, logicalCount,
+                     selectedBefore,
+                     remainingOut ? *remainingOut : logical[selectedLogical].count);
+    return true;
+}
+
+/* Keep one bounded before/after snapshot at the protocol owner.  A medicine
+ * request identifies an instance by sequence; logging every row with the
+ * same item id makes it possible to distinguish a wrong stack selection from
+ * a bad client refresh without changing role state. */
+static void vm_net_mock_log_item_use_rows(
+    const vm_net_mock_role_state *role, u32 itemId, u16 selectedSeq,
+    const char *phase, u32 requestCount, u32 requestNum)
+{
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
+    u8 matches = 0;
+
+    if (role == NULL || itemId == 0 || phase == NULL)
+        return;
+    for (u8 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *row = &role->backpackItems[i];
+        if (row->itemId != itemId)
+            continue;
+        ++matches;
+        printf("[info][item-use] rows phase=%s item=%u selected_seq=%u "
+               "row_seq=%u row_count=%u row_index=%u total_rows=%u "
+               "request_count=%u request_num=%u\n",
+               phase, itemId, selectedSeq, row->seq, row->count, i,
+               itemCount, requestCount, requestNum);
+        if (matches >= 16)
+            break;
+    }
+    if (matches == 0)
+    {
+        printf("[info][item-use] rows phase=%s item=%u selected_seq=%u "
+               "row_count=0 total_rows=%u request_count=%u request_num=%u\n",
+               phase, itemId, selectedSeq, itemCount, requestCount, requestNum);
+    }
+}
+
 static bool vm_net_mock_shop_item_is_direct_backpack_expand(u8 type, u32 itemId)
 {
     /*
@@ -5883,6 +6115,73 @@ static u32 vm_net_mock_build_item_use_hint_response(u8 *out, u32 outCap, const c
     return pos;
 }
 
+static bool vm_net_mock_append_item_use_success_notice_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, const char *msg)
+{
+    u32 objectStart = 0;
+
+    if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xff)
+        return false;
+    if (msg == NULL || msg[0] == 0)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 37,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_string(out, outCap, pos, "msg", msg) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    ++*objectCount;
+    return true;
+}
+
+/* 7/11 is an in-place quantity stream, not a single-row acknowledgement.
+ * A role can legitimately have several physical rows for one stackable item
+ * after prior grants (for example 9+10).  Updating only the selected seq makes
+ * the UI show 9 and leaves the other rows stale.  Emit every surviving row,
+ * plus the selected seq at zero when that row was consumed completely. */
+static bool vm_net_mock_build_item_use_count_rows_blob(
+    u8 *out, u32 outCap, const vm_net_mock_role_state *role,
+    u32 itemId, u16 selectedSeq, u32 selectedRemaining, u32 *blobLenOut)
+{
+    u32 pos = 0;
+    u8 rowCount = 0;
+    bool selectedSeen = false;
+    u8 itemCount = vm_net_mock_role_backpack_count(role);
+
+    if (blobLenOut)
+        *blobLenOut = 0;
+    if (out == NULL || blobLenOut == NULL || role == NULL || itemId == 0)
+        return false;
+    if (!vm_net_mock_seq_put_u8(out, outCap, &pos, 0))
+        return false;
+
+    if (selectedSeq != 0)
+    {
+        if (!vm_net_mock_seq_put_i16(out, outCap, &pos, selectedSeq) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, selectedRemaining))
+            return false;
+        rowCount = 1;
+        selectedSeen = true;
+    }
+    for (u8 i = 0; i < itemCount; ++i)
+    {
+        const vm_net_mock_backpack_item_state *row = &role->backpackItems[i];
+        if (row->itemId != itemId || row->seq == 0 ||
+            (selectedSeen && row->seq == selectedSeq))
+            continue;
+        if (rowCount == 0xff ||
+            !vm_net_mock_seq_put_i16(out, outCap, &pos, row->seq) ||
+            !vm_net_mock_seq_put_u32(out, outCap, &pos, row->count))
+            return false;
+        ++rowCount;
+    }
+    out[2] = rowCount;
+    *blobLenOut = pos;
+    return rowCount != 0;
+}
+
 typedef struct
 {
     u32 chestItemId;
@@ -6304,10 +6603,11 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     bool capacityExpanded = false;
     u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
     u32 itemInfoLen = 0;
-    u8 countInfo[32];
+    u8 countInfo[2048];
     u32 countInfoLen = 0;
     u8 itemUseType = 1;
     bool suppressUseSuccessPopup = false;
+    bool useBackpackRefreshCompletion = false;
     u32 pos = 5;
     u32 objectStart = 0;
     u8 objectCount = 0;
@@ -6336,6 +6636,9 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
         itemId = parsed.itemId;
         seq = parsed.seq;
     }
+
+    vm_net_mock_log_item_use_rows(role, itemId, seq, "before",
+                                  parsed.count, parsed.num);
 
     /* A selected special item must be handled by its own client contract.
      * Returning no generic response here intentionally leaves an unexpected
@@ -6406,7 +6709,40 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
 
     if (!reservoirItem && itemId != 0 && consumedCount != 0)
-        consumed = vm_net_mock_role_consume_backpack_item(role, itemId, seq, consumedCount, &remaining);
+    {
+        if (vm_net_mock_item_use_uses_backpack_refresh_completion(
+                itemId, effect, false))
+        {
+            /* The selected sequence is the CBE-visible sequence after the
+             * 30/21 grid insertion has merged/split equal item ids.  Resolve
+             * that identity before mutating the durable row; a direct DB
+             * lookup would consume the pre-merge source row instead. */
+            if (vm_net_mock_item_effect_stack_limit(itemId) > 1u)
+            {
+                consumed = vm_net_mock_role_consume_client_visible_stack(
+                    role, itemId, seq, consumedCount, &remaining);
+                if (!consumed)
+                {
+                    printf("[warn][item-use] client_stack_reconcile_failed item=%u selected_seq=%u count=%u action=reject-before-mutation\n",
+                           itemId, seq, consumedCount);
+                    vm_autotest_note("client_stack_reconcile_failed item=%u selected_seq=%u count=%u action=reject-before-mutation evidence=JianghuOL.CBE:0x01032EB8\n",
+                                     itemId, seq, consumedCount);
+                    return vm_net_mock_build_item_use_hint_response(
+                        out, outCap, "item stack unavailable");
+                }
+            }
+            else
+            {
+                consumed = vm_net_mock_role_consume_backpack_item(
+                    role, itemId, seq, consumedCount, &remaining);
+            }
+        }
+        else
+        {
+            consumed = vm_net_mock_role_consume_backpack_item(
+                role, itemId, seq, consumedCount, &remaining);
+        }
+    }
 
     if (consumed && vm_net_mock_item_is_backpack_expand_card(itemId, effect))
     {
@@ -6431,6 +6767,9 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     if (applied || consumed)
         vm_net_mock_role_db_save("item-use");
 
+    vm_net_mock_log_item_use_rows(role, itemId, seq, "after",
+                                  parsed.count, parsed.num);
+
     if (itemId == 0)
     {
         u32 hintLen = vm_net_mock_build_item_use_hint_response(out, outCap,
@@ -6441,20 +6780,79 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
     }
 
     itemUseType = parsed.type ? parsed.type : 1;
-    suppressUseSuccessPopup = itemId == VM_NET_MOCK_SMALL_HORN_ITEM_ID;
+    useBackpackRefreshCompletion =
+        vm_net_mock_item_use_uses_backpack_refresh_completion(
+            itemId, effect, reservoirItem);
+    suppressUseSuccessPopup = itemId == VM_NET_MOCK_SMALL_HORN_ITEM_ID ||
+                              useBackpackRefreshCompletion;
     /*
      * JianghuOL.CBE:0x1033544 handles 7/1 as the original item-use success
      * acknowledgement.  When the client has a pending use row, result=1 calls
      * the item-manager operation at +56 with type/id/count=1; this is the path
      * that also updates the occupied-slot counter when the stack reaches zero.
      *
-     * Small-horn chat is submitted while the message screen is active.  The
-     * same 7/1 success branch also calls ui_show_message_box("使用成功",...,10).
+     * The success branch also calls ui_show_message_box("使用成功",...,10).
      * That screen does not run the scene toast countdown, leaving the bar on
-     * screen indefinitely.  Its following 7/11 refresh already clears the
-     * pending-use flag at R9+38036, while 7/7 performs the row refresh/removal,
-     * so item 807 must omit only this popup-producing acknowledgement.
+     * screen indefinitely.  For an ordinary immediate HP/MP medicine (such
+     * as 301 小回春散), do not substitute a 7/7 type=2 row: the mmGame parser
+     * leaves its item notification state set for that type.  Use the same
+     * silent completion plus full backpack refresh contract as item discard.
+     * The small-horn path has the same modal incompatibility, but is selected
+     * separately above because it is not a recovery medicine.
      */
+    if (useBackpackRefreshCompletion)
+    {
+        /* 7/4 clears the operation wait state.  Rebuild the owning backpack
+         * list exactly as the discard path does.  The grid is the sole
+         * quantity authority: the client merges split rows with the same
+         * item id while inserting 30/21, so a later sequence-keyed 7/11 would
+         * overwrite the merged total (for example, 9+10 becomes 9). */
+        if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 4,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "result",
+                                       consumed ? 1 : 2))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        /* 30/21 is a login/grid bootstrap and its parser destroys the live
+         * item manager; 17/1 is a display-list response owned by the screen,
+         * not an in-place main-row mutation.  Keep this operation on the
+         * native 7/11 quantity stream.  The role was already reconciled to
+         * the client-visible physical rows above, so this blob contains those
+         * rows rather than the pre-merge database rows. */
+        if (!vm_net_mock_build_item_use_count_rows_blob(
+                countInfo, sizeof(countInfo), role, itemId, seq, remaining,
+                &countInfoLen) ||
+            !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 11,
+                                         &objectStart) ||
+            !vm_net_mock_put_object_raw(out, outCap, &pos, "info",
+                                        countInfo, (u16)countInfoLen))
+            return 0;
+        vm_net_mock_finish_wt_object(out, objectStart, pos);
+        objectCount += 1;
+        if (!vm_net_mock_append_item_use_success_notice_object(
+                out, outCap, &pos, &objectCount,
+                "\xCA\xB9\xD3\xC3\xB3\xC9\xB9\xA6\xA1\xA3"))
+        {
+            return 0;
+        }
+        vm_net_mock_finish_wt_packet(out, pos, objectCount);
+
+        printf("[info][network] mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u refresh=7/4+7/11(all-rows)+7/37 resp=%u evidence=JianghuOL.CBE:0x1033544(7/4,7/11,7/37)\n",
+               itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+               reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
+               oldCapacity, newCapacity, expandedCount,
+               applied ? 1 : 0, consumed ? 1 : 0, pos);
+        vm_autotest_note("mock_item_use item=%u seq=%u count=%u mode=%u reserve=%u->%u consumed=%u hp=%u/%u mp=%u/%u exp=%u cap=%u->%u expand=%u applied=%u consumed_ok=%u response=7/4-result+7/11-all-rows+7/37 evidence=runtime:wt7/1 JianghuOL.CBE:0x1033544(7/4,7/11)+JianghuOL.CBE:0x101191A(7/37-msg-result)\n",
+                         itemId, seq, parsed.count, reservoirItem ? 2u : (effect ? effect->consumeMode : 0u),
+                         reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
+                         oldCapacity, newCapacity, expandedCount,
+                         applied ? 1 : 0, consumed ? 1 : 0);
+        return pos;
+    }
+
     if (!suppressUseSuccessPopup)
     {
         if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 1, &objectStart))
@@ -6530,7 +6928,7 @@ static u32 vm_net_mock_build_item_use_response(const u8 *request, u32 requestLen
                      reservoirBefore, remaining, consumedCount, hpApplied, hp, mpApplied, mp, exp,
                      oldCapacity, newCapacity, expandedCount,
                      applied ? 1 : 0, consumed ? 1 : 0,
-                      suppressUseSuccessPopup ? "7/7-type2+7/11-info-small-horn-no-popup" :
+                     suppressUseSuccessPopup ? "7/7-type2+7/11-info-small-horn-no-popup" :
                        (capacityExpanded ? "7/1-use-ok+7/7-type2+7/11-info+17/1-followup" :
                            (reservoirItem ? "7/1-use-ok+7/11-reservoir" :
                                            "7/1-use-ok+7/7-type2+7/11-info")));
@@ -6724,7 +7122,8 @@ static bool vm_net_mock_append_shop17_items_object(u8 *out, u32 outCap, u32 *pos
     return true;
 }
 
-static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
+static bool vm_net_mock_append_backpack_grid_object_ex(
+    u8 *out, u32 outCap, u32 *pos, bool allowEmpty)
 {
     u32 objectStart = 0;
     u8 itemInfo[VM_NET_MOCK_BACKPACK_GRID_ITEMINFO_MAX_BYTES];
@@ -6738,7 +7137,12 @@ static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *po
     if (!vm_net_mock_build_backpack_grid_iteminfo_blob(itemInfo, sizeof(itemInfo), role,
                                                       &itemInfoLen, &gridCount))
         return false;
-    if (gridCount == 0 || itemInfoLen > 0xffff)
+    /* A bootstrap with no rows is intentionally suppressed because the
+     * client has not created its item manager yet.  A post-mutation refresh
+     * must still be able to send gridnum=0: HandleItemGridResponse first
+     * frees the old manager and therefore needs an authoritative empty
+     * snapshot when the last stack is consumed. */
+    if ((!allowEmpty && gridCount == 0) || itemInfoLen > 0xffff)
         return false;
 
     if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 30, 21, &objectStart))
@@ -6762,6 +7166,17 @@ static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *po
                      vm_net_mock_role_backpack_count(role),
                      itemInfoLen);
     return true;
+}
+
+static bool vm_net_mock_append_backpack_grid_object(u8 *out, u32 outCap, u32 *pos)
+{
+    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, false);
+}
+
+static bool vm_net_mock_append_backpack_grid_refresh_object(
+    u8 *out, u32 outCap, u32 *pos)
+{
+    return vm_net_mock_append_backpack_grid_object_ex(out, outCap, pos, true);
 }
 
 static bool vm_net_mock_append_backpack_reservoir_counts_object(
