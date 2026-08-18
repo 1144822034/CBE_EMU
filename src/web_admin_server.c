@@ -8416,9 +8416,9 @@ static void vm_mock_admin_render_page(char *response, size_t responseCap,
             u32 copper = role->money % 100u;
             bool active = role->roleId == g_vm_net_mock_role_db.activeRoleId;
 
-            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+            vm_net_mock_gbk_label_to_utf8(role->name,
                                           roleNameUtf8, sizeof(roleNameUtf8));
-            vm_net_mock_gbk_label_to_utf8(role->scene[0] ? role->scene : "-",
+            vm_net_mock_gbk_label_to_utf8(role->scene,
                                           sceneUtf8, sizeof(sceneUtf8));
             if (managedRoleCount < VM_NET_MOCK_ROLE_DB_MAX_ROLES)
             {
@@ -9793,6 +9793,10 @@ static bool vm_mock_admin_form_npc_service_options(
         {
             return false;
         }
+        if (strcmp(nameUtf8, "-") == 0)
+            nameUtf8[0] = 0;
+        if (strcmp(descriptionUtf8, "-") == 0)
+            descriptionUtf8[0] = 0;
         if (!enabled)
             continue;
         if ((!allowInstance && kind == VM_NET_MOCK_NPC_KIND_INSTANCE_GUIDE) ||
@@ -12339,7 +12343,7 @@ static void vm_mock_user_render_role_transfer_card(vm_mock_admin_text *page,
             const vm_net_mock_role_state *role = &g_vm_net_mock_role_db.roles[i];
             char roleNameUtf8[128];
             memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
-            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+            vm_net_mock_gbk_label_to_utf8(role->name,
                                           roleNameUtf8, sizeof(roleNameUtf8));
             vm_mock_admin_text_appendf(page, "<option value=\"%u\">", role->roleId);
             vm_mock_admin_text_append_html(page, roleNameUtf8);
@@ -12425,9 +12429,9 @@ static void vm_mock_user_render_dashboard(char *response, size_t responseCap,
 
             memset(roleNameUtf8, 0, sizeof(roleNameUtf8));
             memset(sceneUtf8, 0, sizeof(sceneUtf8));
-            vm_net_mock_gbk_label_to_utf8(role->name[0] ? role->name : "-",
+            vm_net_mock_gbk_label_to_utf8(role->name,
                                           roleNameUtf8, sizeof(roleNameUtf8));
-            vm_net_mock_gbk_label_to_utf8(role->scene[0] ? role->scene : "-",
+            vm_net_mock_gbk_label_to_utf8(role->scene,
                                           sceneUtf8, sizeof(sceneUtf8));
             vm_mock_admin_text_appendf(&page, "<article class=\"role\"><div class=\"role-head\"><div><h3>");
             vm_mock_admin_text_append_html(&page, roleNameUtf8);

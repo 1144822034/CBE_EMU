@@ -3489,10 +3489,7 @@ static void vm_net_mock_gbk_label_to_utf8(const char *gbk, char *out, size_t out
         return;
     out[0] = 0;
     if (gbk == NULL || gbk[0] == 0)
-    {
-        snprintf(out, outCap, "-");
         return;
-    }
 
     for (const unsigned char *p = (const unsigned char *)gbk; *p; ++p)
     {
