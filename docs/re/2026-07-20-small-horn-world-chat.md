@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS world_chat_messages (
   source_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   source_role_id INT UNSIGNED NOT NULL,
   source_name VARBINARY(15) NOT NULL,
-  message VARBINARY(81) NOT NULL,
+  message VARBINARY(79) NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (message_id),
   KEY idx_world_chat_source (source_account_id, source_role_id)
@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS world_chat_messages (
 
 - session 首次进入可见场景时查询 `message_id DESC LIMIT 30`，再按
   `message_id ASC` 入队，所以客户端看到的是最近 30 条、旧到新的顺序。
+- 旧表可能仍有 80/81 字节正文。历史回放在下发前按完整 GBK 字符裁到 79 字节并记录
+  `world_chat_history_normalize`；新写入先按同一契约规范化。该上限来自
+  `net_handle_type_payload_detail(0x010126C6)` 的 80 字节临时区和不复制 NUL 的行为。
 - 历史项保留持久角色 id、发送者 GBK 名字和正文，通过现有
   `1/3/3 type=0` 场景轮询分批下发。
 - 每个登录生命周期只加载一次；返回标题重新登录时 offline reset 会重新

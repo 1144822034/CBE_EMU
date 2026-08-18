@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS `world_chat_messages` (
   `source_account_id` VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `source_role_id` INT UNSIGNED NOT NULL,
   `source_name` VARBINARY(15) NOT NULL,
-  `message` VARBINARY(81) NOT NULL,
+  `message` VARBINARY(79) NOT NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`message_id`),
   KEY `idx_world_chat_source` (`source_account_id`, `source_role_id`)

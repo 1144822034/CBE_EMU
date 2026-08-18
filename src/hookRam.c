@@ -39,6 +39,87 @@ extern void vm_shop_return_forensics_note_gate_write(uc_engine *uc,
 extern u32 g_vmEquipmentEnhanceRulesWatchAddress;
 extern u32 g_vmEquipmentEnhanceRulesWatchWriteCount;
 
+/* The scene movement ticker loads its map controller from Global_R9+0x9540.
+ * Keep this diagnosis read-only: an invalid pointer here crashes later in
+ * UpdateSpriteMovement and otherwise loses the instruction that first wrote
+ * the bad state. */
+static u32 g_vmMapControllerWatchWriteCount;
+
+static void vm_trace_map_controller_writer_context(uc_engine *uc, u32 pc,
+                                                   u32 cursorRef)
+{
+    u32 outerSp;
+    u32 caller = 0;
+    u32 destination = 0;
+    u32 cursor = 0;
+    u32 format = 0;
+    u32 arg2 = 0;
+    u32 arg3 = 0;
+    u8 formatBytes[48] = {0};
+    u32 formatLength = 0;
+    FILE *trace;
+
+    /* fmt_sprintf_like builds its cursor cell at outer_sp+0x3c. Its entry
+     * PUSH {R0-R3} values and saved LR remain at fixed offsets while the
+     * formatter calls WriteByteToStream. */
+    if (pc != 0x0104E0FEu || cursorRef < 0x3cu)
+        return;
+    outerSp = cursorRef - 0x3cu;
+    if (uc_mem_read(uc, cursorRef, &cursor, sizeof(cursor)) != UC_ERR_OK ||
+        uc_mem_read(uc, outerSp + 0x4cu, &caller, sizeof(caller)) != UC_ERR_OK ||
+        uc_mem_read(uc, outerSp + 0x50u, &destination,
+                    sizeof(destination)) != UC_ERR_OK ||
+        uc_mem_read(uc, outerSp + 0x54u, &format, sizeof(format)) != UC_ERR_OK ||
+        uc_mem_read(uc, outerSp + 0x58u, &arg2, sizeof(arg2)) != UC_ERR_OK ||
+        uc_mem_read(uc, outerSp + 0x5cu, &arg3, sizeof(arg3)) != UC_ERR_OK)
+    {
+        return;
+    }
+    if (format != 0 &&
+        uc_mem_read(uc, format, formatBytes, sizeof(formatBytes)) == UC_ERR_OK)
+    {
+        formatLength = (u32)sizeof(formatBytes);
+    }
+    trace = fopen("logs/map-controller-forensics.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "map_controller_writer_context pc=%08x caller=%08x "
+            "dest_initial=%08x cursor=%08x cursor_ref=%08x format=%08x "
+            "arg2=%08x arg3=%08x format_head=",
+            pc, caller, destination, cursor, cursorRef, format, arg2, arg3);
+    for (u32 i = 0; i < formatLength; ++i)
+        fprintf(trace, "%02x%s", formatBytes[i],
+                i + 1u < formatLength ? "-" : "");
+    fputc('\n', trace);
+    fflush(trace);
+    fclose(trace);
+}
+
+static void vm_trace_map_controller_write(u32 count, u32 pc, u32 lr,
+                                          u32 address, u32 size,
+                                          uint64_t value, u32 previous,
+                                          u32 r0, u32 r1, u32 r2, u32 r3,
+                                          u32 sp, const u32 *stackWords,
+                                          u32 stackWordCount)
+{
+    FILE *trace = fopen("logs/map-controller-forensics.log", "ab");
+
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "map_controller_write count=%u pc=%08x lr=%08x last=%08x "
+            "addr=%08x size=%u value=%llx previous=%08x "
+            "r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x",
+            count, pc, lr, lastAddress, address, size, value, previous,
+            r0, r1, r2, r3, sp);
+    for (u32 i = 0; i < stackWordCount; ++i)
+        fprintf(trace, " stack%u=%08x", i, stackWords[i]);
+    fputc('\n', trace);
+    fflush(trace);
+    fclose(trace);
+}
+
 #ifdef GDB_SERVER_SUPPORT
 /* 前向声明 - 这些在gdb_client.c中定义 */
 extern TargetSystem gdbTarget;
@@ -104,6 +185,51 @@ void hookRamCallBack(uc_engine *uc, uc_mem_type type, uint64_t address, uint32_t
             ;
     }
 #endif
+    if (type == UC_MEM_WRITE && Global_R9 != 0)
+    {
+        u32 start = (u32)address;
+        u32 end = start + size;
+        u32 watchStart = Global_R9 + 0x9540u;
+
+        if (start < watchStart + sizeof(u32) && end > watchStart &&
+            g_vmMapControllerWatchWriteCount < 32u)
+        {
+            u32 pc = 0;
+            u32 lr = 0;
+            u32 previous = 0;
+            u32 r0 = 0;
+            u32 r1 = 0;
+            u32 r2 = 0;
+            u32 r3 = 0;
+            u32 sp = 0;
+            u32 stackWords[12] = {0};
+            u32 stackWordCount = 0;
+
+            (void)uc_mem_read(uc, watchStart, &previous, sizeof(previous));
+            uc_reg_read(uc, UC_ARM_REG_PC, &pc);
+            uc_reg_read(uc, UC_ARM_REG_LR, &lr);
+            uc_reg_read(uc, UC_ARM_REG_R0, &r0);
+            uc_reg_read(uc, UC_ARM_REG_R1, &r1);
+            uc_reg_read(uc, UC_ARM_REG_R2, &r2);
+            uc_reg_read(uc, UC_ARM_REG_R3, &r3);
+            uc_reg_read(uc, UC_ARM_REG_SP, &sp);
+            vm_trace_map_controller_writer_context(uc, pc, r1);
+            if (sp != 0 &&
+                uc_mem_read(uc, sp, stackWords, sizeof(stackWords)) == UC_ERR_OK)
+            {
+                stackWordCount = (u32)(sizeof(stackWords) / sizeof(stackWords[0]));
+            }
+            ++g_vmMapControllerWatchWriteCount;
+            printf("[info][map-controller] pointer_write count=%u pc=%08x lr=%08x last=%08x addr=%08x size=%u value=%llx previous=%08x r0=%08x r1=%08x r2=%08x r3=%08x sp=%08x\\n",
+                   g_vmMapControllerWatchWriteCount, pc, lr, lastAddress,
+                   start, size, value, previous, r0, r1, r2, r3, sp);
+            vm_trace_map_controller_write(g_vmMapControllerWatchWriteCount,
+                                          pc, lr, start, size,
+                                          (uint64_t)value, previous,
+                                          r0, r1, r2, r3, sp,
+                                          stackWords, stackWordCount);
+        }
+    }
     if (type == UC_MEM_WRITE && g_shopReturnForensicsActive &&
         g_shopReturnForensicsGateWatchAddress != 0)
     {

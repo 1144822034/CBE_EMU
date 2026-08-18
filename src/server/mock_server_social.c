@@ -3801,7 +3801,8 @@ static bool vm_net_mock_append_chat_message_object(
     if (out == NULL || pos == NULL || sourceName == NULL || message == NULL ||
         (type != VM_MOCK_CHAT_TYPE_WORLD &&
          (type < VM_MOCK_CHAT_TYPE_TEAM || type > VM_MOCK_CHAT_TYPE_TEAM_NOTICE)) ||
-        strlen(sourceName) > 15 || strlen(message) > 81)
+        strlen(sourceName) > 15 ||
+        strlen(message) > VM_MOCK_CHAT_MESSAGE_MAX_BYTES)
     {
         return false;
     }
@@ -4850,6 +4851,8 @@ typedef struct
     u8 requestSubtype;
     u8 requestType;
     u32 sendTo;
+    /* Accept the legacy client request width; the response path normalizes
+     * this value to VM_MOCK_CHAT_MESSAGE_MAX_BYTES before any delivery. */
     char message[82];
 } vm_net_mock_chat_request;
 
@@ -4984,8 +4987,12 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
     const char *systemMessage = NULL;
     u8 deliveryType = VM_MOCK_CHAT_TYPE_INVALID;
     char sourceName[16];
+    char wireMessage[VM_MOCK_CHAT_MESSAGE_MAX_BYTES + 1];
     u32 pos = 5;
     u32 recipientCount = 0;
+    size_t sourceMessageLen = 0;
+    size_t wireMessageLen = 0;
+    bool messageTruncated = false;
     bool senderEcho = false;
 
     if (out == NULL || outCap < pos || source == NULL || source->onlineRoleId == 0 ||
@@ -4996,6 +5003,11 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
     memset(sourceName, 0, sizeof(sourceName));
     snprintf(sourceName, sizeof(sourceName), "%s",
              source->onlineRoleName[0] ? source->onlineRoleName : "Player");
+    sourceMessageLen = strlen(chat.message);
+    wireMessageLen = vm_mock_chat_copy_wire_message(
+        wireMessage, sizeof(wireMessage), chat.message, &messageTruncated);
+    if (wireMessageLen == 0)
+        return 0;
 
     if (chat.requestSubtype == 2)
     {
@@ -5022,7 +5034,7 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
         return 0;
     }
     if (systemMessage == NULL && deliveryType == VM_MOCK_CHAT_TYPE_WORLD &&
-        !vm_mock_world_chat_store(source, sourceName, chat.message))
+        !vm_mock_world_chat_store(source, sourceName, wireMessage))
     {
         systemMessage = worldStoreFailedGbk;
     }
@@ -5047,7 +5059,7 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
                                                     deliveryType,
                                                     source->onlineRoleId,
                                                     sourceName,
-                                                    chat.message))
+                                                    wireMessage))
         {
             return 0;
         }
@@ -5091,7 +5103,7 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
                 }
             }
             if (selected && vm_mock_service_session_enqueue_chat_notice(
-                                target, deliveryType, source, sourceName, chat.message))
+                                target, deliveryType, source, sourceName, wireMessage))
             {
                 ++recipientCount;
             }
@@ -5101,12 +5113,12 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
     else if (systemMessage == NULL && deliveryType == VM_MOCK_CHAT_TYPE_PRIVATE &&
              privateTarget != NULL &&
              vm_mock_service_session_enqueue_chat_notice(
-                 privateTarget, deliveryType, source, sourceName, chat.message))
+                 privateTarget, deliveryType, source, sourceName, wireMessage))
     {
         recipientCount = 1;
     }
 
-    printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s sender_echo=%u send_to=%u recipients=%u bytes=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",
+    printf("[info][network] mock_chat_send source=%08x/%u request=%u/%u delivery_type=%s ack=%s sender_echo=%u send_to=%u recipients=%u bytes=%u source_bytes=%u truncated=%u resp=%u evidence=JianghuOL.CBE:0x01015FAC/0x010126C6\n",
            source->clientId,
            source->onlineRoleId,
            chat.requestSubtype,
@@ -5117,7 +5129,9 @@ static u32 vm_net_mock_build_chat_response(const u8 *request,
            senderEcho ? 1u : 0u,
            chat.sendTo,
            recipientCount,
-           (u32)strlen(chat.message),
+           (u32)wireMessageLen,
+           (u32)sourceMessageLen,
+           messageTruncated ? 1u : 0u,
            pos);
     return pos;
 }
