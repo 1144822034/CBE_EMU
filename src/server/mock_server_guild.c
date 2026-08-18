@@ -2363,8 +2363,8 @@ static bool vm_net_mock_append_trade_terminal_object(
                                          item->destinationSeq) ||
                 !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
                                          item->itemId) ||
-                !vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
-                                         (u16)SDL_min(item->count, 0xffffu)))
+                !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                         item->count))
             {
                 return false;
             }
