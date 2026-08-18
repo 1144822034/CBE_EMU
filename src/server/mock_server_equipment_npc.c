@@ -1952,6 +1952,7 @@ enum
     VM_MOCK_SERVICE_CHAT_NOTICE_MAX = 64,
     VM_MOCK_SERVICE_CHAT_POLL_MAX = 4,
     VM_MOCK_SERVICE_WORLD_CHAT_HISTORY_MAX = 30,
+    VM_MOCK_CHAT_MESSAGE_MAX_BYTES = 79,
     VM_NET_MOCK_MAIN_BUSINESS_OBJECT_MAX = 10,
     VM_MOCK_SERVICE_TEAM_MAX = 16,
     VM_MOCK_SERVICE_TEAM_MEMBER_MAX = 3,
@@ -2035,7 +2036,7 @@ typedef struct
     u32 sourceClientId;
     u32 sourceRoleId;
     char sourceName[16];
-    char message[82];
+    char message[VM_MOCK_CHAT_MESSAGE_MAX_BYTES + 1];
     u32 queuedTick;
 } vm_mock_service_chat_notice;
 
@@ -3521,6 +3522,44 @@ static const char *vm_mock_service_chat_type_name(u8 type)
     }
 }
 
+/* net_handle_type_payload_detail(0x010126C6) copies the wire message into an
+ * 80-byte temporary buffer without copying a terminator.  Keep at least one
+ * zero byte in that buffer and never split a two-byte GBK character. */
+static size_t vm_mock_chat_copy_wire_message(char *out, size_t outCap,
+                                             const char *message,
+                                             bool *truncatedOut)
+{
+    size_t sourceLen = 0;
+    size_t limit = 0;
+    size_t copyLen = 0;
+
+    if (truncatedOut != NULL)
+        *truncatedOut = false;
+    if (out == NULL || outCap == 0)
+        return 0;
+    out[0] = 0;
+    if (message == NULL || message[0] == 0)
+        return 0;
+    sourceLen = strlen(message);
+    limit = sourceLen;
+    if (limit > VM_MOCK_CHAT_MESSAGE_MAX_BYTES)
+        limit = VM_MOCK_CHAT_MESSAGE_MAX_BYTES;
+    if (limit >= outCap)
+        limit = outCap - 1;
+    while (copyLen < limit)
+    {
+        size_t charBytes = (unsigned char)message[copyLen] >= 0x81u ? 2u : 1u;
+        if (copyLen + charBytes > limit || copyLen + charBytes > sourceLen)
+            break;
+        copyLen += charBytes;
+    }
+    memcpy(out, message, copyLen);
+    out[copyLen] = 0;
+    if (truncatedOut != NULL)
+        *truncatedOut = copyLen < sourceLen;
+    return copyLen;
+}
+
 static bool vm_mock_service_session_enqueue_chat_notice_identity(
     vm_mock_service_client_session *target,
     u8 type,
@@ -3531,6 +3570,9 @@ static bool vm_mock_service_session_enqueue_chat_notice_identity(
 {
     vm_mock_service_chat_notice *slot = NULL;
     u8 slotIndex = 0;
+    size_t sourceMessageLen = 0;
+    size_t wireMessageLen = 0;
+    bool messageTruncated = false;
 
     if (target == NULL || message == NULL || message[0] == 0 ||
         (type != VM_MOCK_CHAT_TYPE_WORLD &&
@@ -3555,15 +3597,24 @@ static bool vm_mock_service_session_enqueue_chat_notice_identity(
     slot->sourceRoleId = sourceRoleId;
     snprintf(slot->sourceName, sizeof(slot->sourceName), "%s",
              sourceName && sourceName[0] ? sourceName : "System");
-    snprintf(slot->message, sizeof(slot->message), "%s", message);
+    sourceMessageLen = strlen(message);
+    wireMessageLen = vm_mock_chat_copy_wire_message(
+        slot->message, sizeof(slot->message), message, &messageTruncated);
+    if (wireMessageLen == 0)
+    {
+        memset(slot, 0, sizeof(*slot));
+        return false;
+    }
     slot->queuedTick = g_schedulerTick;
     ++target->chatNoticeCount;
-    printf("[info][mock-service] chat_notice_queue target=%08x type=%s source=%08x/%u bytes=%u depth=%u\n",
+    printf("[info][mock-service] chat_notice_queue target=%08x type=%s source=%08x/%u bytes=%u source_bytes=%u truncated=%u depth=%u\n",
            target->clientId,
            vm_mock_service_chat_type_name(type),
            slot->sourceClientId,
            slot->sourceRoleId,
-           (u32)strlen(slot->message),
+           (u32)wireMessageLen,
+           (u32)sourceMessageLen,
+           messageTruncated ? 1u : 0u,
            target->chatNoticeCount);
     return true;
 }
@@ -3615,7 +3666,7 @@ static bool vm_mock_world_chat_table_ensure(void)
         "source_account_id VARCHAR(63) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,"
         "source_role_id INT UNSIGNED NOT NULL,"
         "source_name VARBINARY(15) NOT NULL,"
-        "message VARBINARY(81) NOT NULL,"
+        "message VARBINARY(79) NOT NULL,"
         "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "PRIMARY KEY(message_id),"
         "KEY idx_world_chat_source(source_account_id,source_role_id)) ENGINE=InnoDB");
@@ -3635,11 +3686,14 @@ static bool vm_mock_world_chat_store(
     char accountHex[129];
     char sourceNameHex[31];
     char messageHex[163];
+    char wireMessage[VM_MOCK_CHAT_MESSAGE_MAX_BYTES + 1];
     char query[768];
     const char *accountId = NULL;
     size_t accountLen = 0;
     size_t sourceNameLen = 0;
     size_t messageLen = 0;
+    size_t sourceMessageLen = 0;
+    bool messageTruncated = false;
 
     if (source == NULL || source->onlineRoleId == 0 || sourceName == NULL ||
         message == NULL)
@@ -3649,16 +3703,18 @@ static bool vm_mock_world_chat_store(
     accountId = source->accountId[0] ? source->accountId : "-";
     accountLen = strlen(accountId);
     sourceNameLen = strlen(sourceName);
-    messageLen = strlen(message);
+    sourceMessageLen = strlen(message);
+    messageLen = vm_mock_chat_copy_wire_message(
+        wireMessage, sizeof(wireMessage), message, &messageTruncated);
     if (accountLen == 0 || accountLen >= sizeof(source->accountId) ||
         sourceNameLen == 0 || sourceNameLen > 15 ||
-        messageLen == 0 || messageLen > 81 ||
+        messageLen == 0 ||
         !vm_mock_world_chat_table_ensure() ||
         vm_mysql_hex_encode(accountId, accountLen,
                             accountHex, sizeof(accountHex)) == 0 ||
         vm_mysql_hex_encode(sourceName, sourceNameLen,
                             sourceNameHex, sizeof(sourceNameHex)) == 0 ||
-        vm_mysql_hex_encode(message, messageLen,
+        vm_mysql_hex_encode(wireMessage, messageLen,
                             messageHex, sizeof(messageHex)) == 0)
     {
         return false;
@@ -3674,8 +3730,9 @@ static bool vm_mock_world_chat_store(
                source->clientId, source->onlineRoleId, vm_mysql_last_error());
         return false;
     }
-    printf("[info][mock-service] world_chat_store source=%08x/%u bytes=%u storage=mysql\n",
-           source->clientId, source->onlineRoleId, (u32)messageLen);
+    printf("[info][mock-service] world_chat_store source=%08x/%u bytes=%u source_bytes=%u truncated=%u storage=mysql\n",
+           source->clientId, source->onlineRoleId, (u32)messageLen,
+           (u32)sourceMessageLen, messageTruncated ? 1u : 0u);
     return true;
 }
 
@@ -3745,7 +3802,7 @@ static bool vm_mock_world_chat_publish_chest_reward(
         vm_mock_service_get_active_client_session();
     vm_mock_service_client_session *target =
         g_vm_mock_service_client_sessions;
-    char message[82];
+    char message[256];
     u32 recipients = 0;
 
     if (source == NULL || source->onlineRoleId == 0 ||
@@ -3790,9 +3847,14 @@ static bool vm_mock_world_chat_history_row(
         (vm_mock_world_chat_history_context *)contextValue;
     char roleIdText[32];
     char sourceName[16];
-    char message[82];
+    /* Existing deployments may still contain rows written under the old
+     * 81-byte schema.  Decode those rows, then normalize before enqueue. */
+    char storedMessage[82];
+    char message[VM_MOCK_CHAT_MESSAGE_MAX_BYTES + 1];
     size_t decodedLen = 0;
+    size_t wireMessageLen = 0;
     u32 sourceRoleId = 0;
+    bool messageTruncated = false;
 
     if (context == NULL || context->target == NULL || columnCount < 3 ||
         values == NULL || lengths == NULL || values[0] == NULL ||
@@ -3816,15 +3878,28 @@ static bool vm_mock_world_chat_history_row(
         return true;
     }
     sourceName[decodedLen] = 0;
-    memset(message, 0, sizeof(message));
-    if (!vm_mysql_hex_decode(values[2], lengths[2], message,
-                             sizeof(message) - 1, &decodedLen) ||
+    memset(storedMessage, 0, sizeof(storedMessage));
+    if (!vm_mysql_hex_decode(values[2], lengths[2], storedMessage,
+                             sizeof(storedMessage) - 1, &decodedLen) ||
         decodedLen == 0 || decodedLen > 81)
     {
         ++context->skipped;
         return true;
     }
-    message[decodedLen] = 0;
+    storedMessage[decodedLen] = 0;
+    wireMessageLen = vm_mock_chat_copy_wire_message(
+        message, sizeof(message), storedMessage, &messageTruncated);
+    if (wireMessageLen == 0)
+    {
+        ++context->skipped;
+        return true;
+    }
+    if (messageTruncated)
+    {
+        printf("[warn][mock-service] world_chat_history_normalize role=%u source_bytes=%u bytes=%u max=%u evidence=JianghuOL.CBE:0x010126C6\n",
+               sourceRoleId, (u32)decodedLen, (u32)wireMessageLen,
+               VM_MOCK_CHAT_MESSAGE_MAX_BYTES);
+    }
     if (!vm_mock_service_session_enqueue_chat_notice_identity(
             context->target, VM_MOCK_CHAT_TYPE_WORLD, 0, sourceRoleId,
             sourceName, message))

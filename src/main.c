@@ -10271,6 +10271,153 @@ static void vm_trace_mmgame_transfer_image_at_crash(void)
     vm_autotest_note("mmgame_transfer_image crash_scan_done matches=%u\n", matches);
 }
 
+/*
+ * A category-15 item bypasses TimerControl_ProcessItem's logical backpack
+ * capacity check.  When its 74 physical records are already full, the
+ * firmware calls UpdateActorHpMpDisplay(NULL).  This bounded, read-only probe
+ * records the source row and manager occupancy before that decision so a
+ * protocol response can be attributed without changing client state.
+ */
+static void vm_note_timer_control_item_pc(u32 pc)
+{
+    static u32 observations = 0;
+    u32 manager = 0;
+    u32 item = 0;
+    u32 slots = 0;
+    u32 itemId = 0;
+    u16 logicalCount = 0;
+    u16 logicalCapacity = 0;
+    u16 physicalCapacity = 0;
+    u16 amount = 0;
+    u16 maxAmount = 0;
+    u16 seq = 0;
+    u8 itemType = 0;
+    u32 occupied = 0;
+    u32 empty = 0;
+
+    if (pc != 0x01032EB8u || observations >= 24u)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &manager);
+    uc_reg_read(MTK, UC_ARM_REG_R1, &item);
+    if (manager == 0 || item == 0 ||
+        uc_mem_read(MTK, item, &itemId, sizeof(itemId)) != UC_ERR_OK ||
+        uc_mem_read(MTK, item + 242u, &amount, sizeof(amount)) != UC_ERR_OK ||
+        uc_mem_read(MTK, item + 244u, &maxAmount, sizeof(maxAmount)) != UC_ERR_OK ||
+        uc_mem_read(MTK, item + 276u, &seq, sizeof(seq)) != UC_ERR_OK ||
+        uc_mem_read(MTK, item + 282u, &itemType, sizeof(itemType)) != UC_ERR_OK ||
+        itemType != 15u ||
+        uc_mem_read(MTK, manager + 32u, &slots, sizeof(slots)) != UC_ERR_OK ||
+        uc_mem_read(MTK, manager + 36u, &logicalCount,
+                    sizeof(logicalCount)) != UC_ERR_OK ||
+        uc_mem_read(MTK, manager + 38u, &logicalCapacity,
+                    sizeof(logicalCapacity)) != UC_ERR_OK ||
+        uc_mem_read(MTK, manager + 40u, &physicalCapacity,
+                    sizeof(physicalCapacity)) != UC_ERR_OK)
+    {
+        return;
+    }
+    if (physicalCapacity > 128u)
+        return;
+    for (u32 slot = 0; slot < physicalCapacity; ++slot)
+    {
+        u32 slotId = 0;
+
+        if (uc_mem_read(MTK, slots + slot * 324u, &slotId,
+                        sizeof(slotId)) != UC_ERR_OK)
+        {
+            return;
+        }
+        if ((int32_t)slotId < 0)
+            ++empty;
+        else
+            ++occupied;
+    }
+    ++observations;
+    printf("[info][item-timer] category15_insert count=%u item=%u seq=%u amount=%u max=%u manager=%08x logical=%u/%u physical=%u occupied=%u empty=%u\\n",
+           observations, itemId, seq, amount, maxAmount, manager,
+           logicalCount, logicalCapacity, physicalCapacity, occupied, empty);
+    vm_autotest_note("item_timer_category15_insert count=%u item=%u seq=%u amount=%u max=%u logical=%u/%u physical=%u occupied=%u empty=%u evidence=JianghuOL.CBE:0x01032EB8\\n",
+                     observations, itemId, seq, amount, maxAmount,
+                     logicalCount, logicalCapacity, physicalCapacity,
+                     occupied, empty);
+}
+
+/* UpdateSpriteMovement reads this shared scene controller every frame.  Keep
+ * the snapshot bounded and observation-only so a crash can be attributed to
+ * the first pointer producer rather than this later dereference. */
+static void vm_note_map_controller_tick_pc(u32 pc)
+{
+    static u32 observations = 0;
+    u32 controllerAddress = 0;
+    u32 controller = 0;
+    u32 r0 = 0;
+    FILE *trace = NULL;
+
+    if (pc != 0x010469ACu || observations >= 32u || Global_R9 == 0)
+        return;
+    controllerAddress = Global_R9 + 0x9540u;
+    if (uc_mem_read(MTK, controllerAddress, &controller,
+                    sizeof(controller)) != UC_ERR_OK)
+    {
+        return;
+    }
+    uc_reg_read(MTK, UC_ARM_REG_R0, &r0);
+    ++observations;
+    trace = fopen("logs/map-controller-forensics.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "map_controller_tick count=%u pc=%08x r0=%08x slot=%08x value=%08x\n",
+            observations, pc, r0, controllerAddress, controller);
+    fflush(trace);
+    fclose(trace);
+}
+
+/* fmt_sprintf_like(0x0104D744) treats R0 as the output buffer.  If its
+ * destination is the scene controller slot, capture the format pointer and
+ * caller before the generic byte writer obscures the original business path.
+ * This is read-only and bounded; it does not validate, redirect, or suppress
+ * the client call. */
+static void vm_note_map_controller_format_pc(u32 pc)
+{
+    static u32 observations = 0;
+    u32 controllerAddress = 0;
+    u32 destination = 0;
+    u32 format = 0;
+    u32 caller = 0;
+    u32 r2 = 0;
+    u32 r3 = 0;
+    u32 sp = 0;
+    char formatHead[192];
+    FILE *trace = NULL;
+
+    if (pc != 0x0104D744u || observations >= 8u || Global_R9 == 0)
+        return;
+    controllerAddress = Global_R9 + 0x9540u;
+    uc_reg_read(MTK, UC_ARM_REG_R0, &destination);
+    if (destination != controllerAddress)
+        return;
+    uc_reg_read(MTK, UC_ARM_REG_R1, &format);
+    uc_reg_read(MTK, UC_ARM_REG_R2, &r2);
+    uc_reg_read(MTK, UC_ARM_REG_R3, &r3);
+    uc_reg_read(MTK, UC_ARM_REG_LR, &caller);
+    uc_reg_read(MTK, UC_ARM_REG_SP, &sp);
+    formatHead[0] = 0;
+    if (format != 0)
+        vm_autotest_format_mem_hex(format, 96, formatHead, sizeof(formatHead));
+    ++observations;
+    trace = fopen("logs/map-controller-forensics.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "map_controller_format count=%u pc=%08x caller=%08x dest=%08x "
+            "format=%08x r2=%08x r3=%08x sp=%08x format_head=%s\n",
+            observations, pc, caller, destination, format, r2, r3, sp,
+            formatHead);
+    fflush(trace);
+    fclose(trace);
+}
+
 static void vm_note_stream_read_i16_pc(u32 pc)
 {
     static u32 seenNullBlob = 0;
@@ -19833,6 +19980,9 @@ void hookCodeCallBack(uc_engine *uc, uint64_t address, uint32_t size, void *user
     vm_autotest_note_role_attr_page_pc((u32)address & ~1u);
     vm_autotest_note_equipment_enhance_rules_pc((u32)address & ~1u);
     vm_note_mmgame_transfer_parser_pc((u32)address & ~1u);
+    vm_note_timer_control_item_pc((u32)address & ~1u);
+    vm_note_map_controller_tick_pc((u32)address & ~1u);
+    vm_note_map_controller_format_pc((u32)address & ~1u);
     vm_note_stream_read_i16_pc((u32)address & ~1u);
     vm_note_net_wrapper_pc((u32)address & ~1u);
     vm_shop_return_forensics_note_pc((u32)address & ~1u);
