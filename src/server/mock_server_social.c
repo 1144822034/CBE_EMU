@@ -1290,8 +1290,11 @@ static u32 vm_net_mock_build_scene_default_event_response(u8 *out, u32 outCap)
      * the scene.  Ordinary rewarded battles release their terminal state at
      * this native boundary.  Scene hangup retains ownership of the same
      * acknowledgement and arms a later poll; never append a new 4/5 here. */
-    vm_net_mock_battle_on_scene_default_event();
-    vm_net_mock_scene_hangup_on_scene_default_event();
+    if (!vm_net_mock_duel_on_scene_default_event())
+    {
+        vm_net_mock_battle_on_scene_default_event();
+        vm_net_mock_scene_hangup_on_scene_default_event();
+    }
     if (g_mockBattleOperateSessionFinished != 0)
     {
         g_mockBattleOperateSessionFinished = 0;
@@ -4043,6 +4046,8 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
         vm_mock_service_client_session *source =
             vm_mock_service_find_client_session(notice->sourceClientId);
         u32 sourceWireId = 0;
+        size_t sourceNameLen = 0;
+        char sourceNameHex[sizeof(notice->sourceName) * 2 + 1];
 
         if (source == NULL || !source->roleOnline ||
             source->onlineRoleId != notice->sourceRoleId ||
@@ -4059,12 +4064,31 @@ static int vm_net_mock_append_scene_sync_social_notice_object(
             return 0;
         }
         /* net_handle_login_or_name_result(0x0101258A), subtype 15, stores id
-         * and name then opens the native duel confirmation dialog. */
+         * and name then opens the native duel confirmation dialog.  The
+         * parser passes the returned pointer to a C-string formatter, so the
+         * field must include its terminating NUL. */
+        while (sourceNameLen < sizeof(notice->sourceName) &&
+               notice->sourceName[sourceNameLen] != '\0')
+        {
+            ++sourceNameLen;
+        }
+        if (sourceNameLen == sizeof(notice->sourceName) ||
+            !vm_mysql_hex_encode(notice->sourceName, sourceNameLen,
+                                 sourceNameHex, sizeof(sourceNameHex)))
+        {
+            snprintf(sourceNameHex, sizeof(sourceNameHex), "invalid-c-string");
+        }
+        printf("[info][mock-service] spar_invite_name_wire observer=%08x "
+               "source=%08x/%u wire_id=%u wt=4/15 field=name "
+               "encoding=cstring bytes=%u hex=%s\n",
+               observer->clientId, notice->sourceClientId,
+               notice->sourceRoleId, sourceWireId, (u32)sourceNameLen,
+               sourceNameHex);
         if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 15,
                                          &objectStart) ||
             !vm_net_mock_put_object_u32(out, outCap, pos, "id", sourceWireId) ||
-            !vm_net_mock_put_object_string(out, outCap, pos, "name",
-                                           notice->sourceName))
+            !vm_net_mock_put_object_cstring(out, outCap, pos, "name",
+                                            notice->sourceName))
         {
             return -1;
         }
