@@ -303,6 +303,7 @@ static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
  */
 #define VM_MOCK_MYSQL_AUTHORITY_MIGRATION "mysql-authoritative-v1"
 #define VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION "account-wcoin-wallet-v1"
+#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v1"
 
 static bool g_vm_mock_mysql_authority_prepared = false;
 static bool g_vm_mock_mysql_authority_sealed = false;
@@ -507,6 +508,154 @@ static bool vm_mock_service_mysql_authority_seal(void)
 static bool vm_mock_service_mysql_authority_is_sealed(void)
 {
     return g_vm_mock_mysql_authority_prepared && g_vm_mock_mysql_authority_sealed;
+}
+
+static bool vm_mock_service_role_count_query_u32(const char *query, u32 *valueOut)
+{
+    vm_mock_mysql_authority_count_context context;
+
+    if (valueOut)
+        *valueOut = 0;
+    if (query == NULL || query[0] == 0)
+        return false;
+    memset(&context, 0, sizeof(context));
+    if (!vm_mysql_query(query, vm_mock_mysql_authority_count_row, &context) ||
+        context.invalid || !context.found)
+    {
+        return false;
+    }
+    if (valueOut)
+        *valueOut = context.value;
+    return true;
+}
+
+/* account_roles owns role identity; account_role_state.role_count is only a
+ * cached aggregate.  Repair that aggregate before any client can observe the
+ * database, and couple the one-time marker to the same InnoDB transaction. */
+static bool vm_mock_service_role_count_authority_prepare_and_migrate(void)
+{
+    char mysqlError[512];
+    u32 markerCount = 0;
+    u32 mismatchCount = 0;
+    u32 verifiedMismatchCount = 0;
+    u32 maximumRoleCount = 0;
+    u32 invalidIndexAccounts = 0;
+    u32 invalidActiveAccounts = 0;
+    bool transaction = false;
+
+    mysqlError[0] = 0;
+    if (!vm_mock_service_mysql_authority_prepare() ||
+        !vm_mysql_exec("START TRANSACTION"))
+    {
+        snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+        goto failed;
+    }
+    transaction = true;
+    if (!vm_mock_service_role_count_query_u32(
+            "SELECT COUNT(*) FROM server_data_migrations "
+            "WHERE migration_name='" VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION
+            "' FOR UPDATE",
+            &markerCount))
+    {
+        goto failed;
+    }
+    if (markerCount != 0)
+    {
+        if (!vm_mysql_exec("COMMIT"))
+            goto failed;
+        transaction = false;
+        printf("[info][mock-service] role_count_authority_migration marker=%s action=already-applied\n",
+               VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION);
+        return true;
+    }
+
+    if (!vm_mock_service_role_count_query_u32(
+            "SELECT COALESCE(MAX(actual_count),0) FROM "
+            "(SELECT COUNT(*) AS actual_count FROM account_roles GROUP BY account_id) "
+            "AS role_totals",
+            &maximumRoleCount) ||
+        !vm_mock_service_role_count_query_u32(
+            "SELECT COUNT(*) FROM "
+            "(SELECT account_id FROM account_roles GROUP BY account_id "
+            "HAVING MIN(role_index)<>0 OR MAX(role_index)<>COUNT(*)-1) "
+            "AS invalid_role_indexes",
+            &invalidIndexAccounts) ||
+        !vm_mock_service_role_count_query_u32(
+            "SELECT COUNT(*) FROM account_role_state AS state WHERE "
+            "(EXISTS(SELECT 1 FROM account_roles AS any_role "
+            "WHERE any_role.account_id=state.account_id) "
+            "AND NOT EXISTS(SELECT 1 FROM account_roles AS active_role "
+            "WHERE active_role.account_id=state.account_id "
+            "AND active_role.role_id=state.active_role_id)) OR "
+            "(NOT EXISTS(SELECT 1 FROM account_roles AS no_role "
+            "WHERE no_role.account_id=state.account_id) "
+            "AND state.active_role_id<>0)",
+            &invalidActiveAccounts) ||
+        !vm_mock_service_role_count_query_u32(
+            "SELECT COUNT(*) FROM "
+            "(SELECT state.account_id FROM account_role_state AS state "
+            "LEFT JOIN account_roles AS role ON role.account_id=state.account_id "
+            "GROUP BY state.account_id,state.role_count "
+            "HAVING state.role_count<>COUNT(role.role_id)) AS inconsistent_role_counts",
+            &mismatchCount))
+    {
+        goto failed;
+    }
+    if (maximumRoleCount > VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
+        invalidIndexAccounts != 0 || invalidActiveAccounts != 0)
+    {
+        snprintf(mysqlError, sizeof(mysqlError),
+                 "role relation preflight rejected max=%u/%u invalid_index=%u invalid_active=%u",
+                 maximumRoleCount, VM_NET_MOCK_ROLE_DB_MAX_ROLES,
+                 invalidIndexAccounts, invalidActiveAccounts);
+        goto failed;
+    }
+    if (!vm_mysql_exec(
+            "UPDATE account_role_state AS state LEFT JOIN "
+            "(SELECT account_id,COUNT(*) AS actual_count FROM account_roles "
+            "GROUP BY account_id) AS roles ON roles.account_id=state.account_id "
+            "SET state.role_count=COALESCE(roles.actual_count,0) "
+            "WHERE state.role_count<>COALESCE(roles.actual_count,0)") ||
+        !vm_mock_service_role_count_query_u32(
+            "SELECT COUNT(*) FROM "
+            "(SELECT state.account_id FROM account_role_state AS state "
+            "LEFT JOIN account_roles AS role ON role.account_id=state.account_id "
+            "GROUP BY state.account_id,state.role_count "
+            "HAVING state.role_count<>COUNT(role.role_id)) AS inconsistent_role_counts",
+            &verifiedMismatchCount))
+    {
+        goto failed;
+    }
+    if (verifiedMismatchCount != 0)
+    {
+        snprintf(mysqlError, sizeof(mysqlError),
+                 "role count verification retained %u mismatches",
+                 verifiedMismatchCount);
+        goto failed;
+    }
+    if (!vm_mysql_exec(
+            "INSERT INTO server_data_migrations(migration_name) VALUES('"
+            VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "')") ||
+        !vm_mysql_exec("COMMIT"))
+    {
+        goto failed;
+    }
+    transaction = false;
+    printf("[info][mock-service] role_count_authority_migration marker=%s corrected_accounts=%u max_roles=%u action=committed\n",
+           VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION, mismatchCount,
+           maximumRoleCount);
+    return true;
+
+failed:
+    if (mysqlError[0] == 0)
+        snprintf(mysqlError, sizeof(mysqlError), "%s",
+                 vm_mysql_last_error()[0] ? vm_mysql_last_error() :
+                                            "invalid migration query result");
+    if (transaction)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] role_count_authority_migration_failed marker=%s error=%s\n",
+           VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION, mysqlError);
+    return false;
 }
 
 static bool vm_mock_service_mysql_has_role_data(bool *has_data_out)
