@@ -2138,6 +2138,7 @@ static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
                                                   bool *isTaskMaterialOut,
                                                   u32 *remainingOut)
 {
+    const vm_net_mock_shop_catalog_item *catalogItem = NULL;
     vm_net_mock_task_state_list_row states[VM_NET_MOCK_TASK_CATALOG_MAX];
     u32 stateCount = 0;
     bool isTaskMaterial = false;
@@ -2150,12 +2151,16 @@ static bool vm_net_mock_task_material_drop_policy(u32 roleId, u32 itemId,
     if (roleId == 0 || itemId == 0 || !vm_net_mock_load_task_catalog())
         return false;
 
+    /* The item resource owns the base classification.  Requirement rows are
+     * an additional compatibility source for custom collection tasks whose
+     * administrator intentionally uses an item from another category. */
+    catalogItem = vm_net_mock_find_shop_catalog_item(itemId);
+    isTaskMaterial = catalogItem != NULL && !catalogItem->isEquip &&
+                     catalogItem->category == VM_NET_MOCK_ITEM_CATEGORY_TASK;
     for (u32 i = 0; i < g_vm_net_mock_task_catalog_count; ++i)
     {
         const vm_net_mock_task_definition *task = &g_vm_net_mock_task_catalog[i];
 
-        if (!task->enabled)
-            continue;
         if ((task->requirementType1 == 1 &&
              task->requirementId1 == itemId && task->requirementCount1 != 0) ||
             (task->requirementType2 == 1 &&

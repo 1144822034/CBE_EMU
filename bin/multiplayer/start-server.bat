@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 for %%I in ("%~dp0..") do set "BIN_DIR=%%~fI"
 set "PORT=%CBE_MULTIPLAYER_SERVER_PORT%"
-set "CBE_MYSQL_DATABASE=jh_online_release"
+set "CBE_MYSQL_DATABASE=jh_online"
 if "%PORT%"=="" set "PORT=19090"
 
 title CBE Mock Service - %PORT%
