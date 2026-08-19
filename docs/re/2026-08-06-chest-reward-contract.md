@@ -4,6 +4,12 @@
 > below was disproved by repeated-open runtime evidence.  Current chest
 > consumption uses sequence-keyed `7/11` only; see
 > [黄金宝箱连续开启耗尽物品物理槽](2026-08-18-chest-open-category15-slot-leak.md).
+>
+> 2026-08-19 correction: the earlier response investigation missed
+> `HandleShopBuyItem(0x01025AE6)`.  The current reward uses its native
+> `7/15 { result,total,iteminfo }` success branch, which inserts the reward and
+> displays the firmware prompt; see
+> [宝箱开启奖励提示](2026-08-13-chest-open-reward-notice.md#16-原生-1715-奖励提示契约2026-08-19).
 
 ## 结论
 

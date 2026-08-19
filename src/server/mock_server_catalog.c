@@ -6366,34 +6366,55 @@ static const char *vm_net_mock_chest_world_broadcast_name_gbk(u32 chestItemId)
     }
 }
 
-static bool vm_net_mock_append_chest_open_reward_notice_object(
-    u8 *out, u32 outCap, u32 *pos, u8 *objectCount, u32 chestItemId,
-    const char *rewardNameGbk, u32 rewardCount)
+/*
+ * JianghuOL.CBE:HandleShopBuyItem(0x01025AE6), kind 7/subtype 15, reads
+ * result:u8, total:u8 and an iteminfo blob.  Unlike mmGame's 7/7 stream, the
+ * blob has no leading row count; every row is itemId:u32, seq:i16, count:u32,
+ * then the common item/equipment extension.  On the last successful row the
+ * same handler formats the firmware-owned "获得%d个%s" text and opens the
+ * normal chest-result message box.
+ */
+static bool vm_net_mock_append_chest_open_reward15_object(
+    u8 *out, u32 outCap, u32 *pos, u8 *objectCount,
+    const vm_net_mock_backpack_item_state *rewardItem, u32 acquiredCount)
 {
-    static const char openedGbk[] = "\xBF\xAA\xC6\xF4";
-    static const char receivedGbk[] = "\xA3\xAC\xBB\xF1\xB5\xC3";
-    static const char multiplierGbk[] = "\xA1\xC1";
-    const char *chestNameGbk = vm_net_mock_chest_world_broadcast_name_gbk(chestItemId);
-    char hint[192];
+    u8 itemInfo[VM_NET_MOCK_ITEM_USE_ITEMINFO_MAX_BYTES];
+    u32 itemInfoLen = 0;
     u32 objectStart = 0;
-    int written;
+    u8 enhanceLevel = 0;
+    const vm_net_mock_equipment_enhance_affix_state *affixes = NULL;
 
-    if (out == NULL || pos == NULL || objectCount == NULL || *objectCount == 0xff ||
-        chestNameGbk == NULL || chestNameGbk[0] == 0 ||
-        rewardNameGbk == NULL || rewardNameGbk[0] == 0 || rewardCount == 0)
+    if (out == NULL || pos == NULL || objectCount == NULL ||
+        *objectCount == 0xff || rewardItem == NULL ||
+        rewardItem->itemId == 0 || rewardItem->seq == 0 ||
+        acquiredCount == 0)
     {
         return false;
     }
-    written = rewardCount == 1 ?
-        snprintf(hint, sizeof(hint), "%s%s%s%s", openedGbk, chestNameGbk,
-                 receivedGbk, rewardNameGbk) :
-        snprintf(hint, sizeof(hint), "%s%s%s%s%s%u", openedGbk, chestNameGbk,
-                 receivedGbk, rewardNameGbk, multiplierGbk, rewardCount);
-    if (written <= 0 || (size_t)written >= sizeof(hint) ||
-        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 37,
+    if (vm_net_mock_find_equipment_catalog_item(rewardItem->itemId) != NULL)
+    {
+        enhanceLevel = (u8)SDL_min(
+            rewardItem->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+        affixes = &rewardItem->enhanceAffixes;
+    }
+    if (!vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                 rewardItem->itemId) ||
+        !vm_net_mock_seq_put_i16(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                 rewardItem->seq) ||
+        !vm_net_mock_seq_put_u32(itemInfo, sizeof(itemInfo), &itemInfoLen,
+                                 acquiredCount) ||
+        !vm_net_mock_seq_put_item_common_extra(
+            itemInfo, sizeof(itemInfo), &itemInfoLen, rewardItem->itemId,
+            enhanceLevel,
+            vm_net_mock_item_common_extra_enhance_cap(rewardItem->itemId),
+            affixes) ||
+        itemInfoLen == 0 || itemInfoLen > 0xffffu ||
+        !vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 15,
                                      &objectStart) ||
-        !vm_net_mock_put_object_string(out, outCap, pos, "msg", hint) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1))
+        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "total", 1) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", itemInfo,
+                                    (u16)itemInfoLen))
     {
         return false;
     }
@@ -6409,24 +6430,26 @@ static bool vm_net_mock_append_chest_open_reward_notice_object(
  *   ui_show_message_box("使用成功", 0, 0, 10).  That modal has no timer and
  *   consumes the next backpack input even when a later non-modal notice is
  *   drawn over it.
- * - Chest opening therefore deliberately omits 1/7/1.  The following 7/11
- *   quantity stream reaches the same handler, updates/deletes the existing
- *   row by sequence, and clears the pending item operation without creating
- *   the success modal.
+ * - Chest opening therefore deliberately omits 1/7/1.  Its silent 1/7/4
+ *   completion first clears the operation wait state; the following 7/11
+ *   quantity stream reaches the same handler and updates/deletes the existing
+ *   rows by sequence without creating the success modal.
  *   This is the same no-popup contract already used for the small-horn item
  *   path in vm_net_mock_build_item_use_response().
- * - mmGame sub_11CE/sub_D04 consumes 1/7/7 type=1 as a one-shot additive
- *   reward row.  A type=2 row is also fed to the additive item manager, so it
- *   must not be emitted for consumed stacks.
  * - the same CBE parser consumes 1/7/11 to synchronize the item count.
- * - JianghuOL.CBE:HandleItemAcquire(0x0101191A) consumes 1/7/37.  It always
- *   submits the length-delimited `msg` to the timed acquire-notice UI first;
- *   it reads `result` afterwards and inserts an item only for result=0.
- *   Chest opening sends result=1, so this is a display-only acquire notice:
- *   it cannot duplicate the separately proven 7/7 type=1 reward update.
- *   This handler does not call ui_show_message_box or install a scene/back-key
- *   callback.  The fields itemid/seq/itemname are intentionally absent because
- *   they are read only by its result=0 item-insertion branch.
+ * - JianghuOL.CBE:HandleShopBuyItem(0x01025AE6) has the native chest result
+ *   branch at 0x01026152.  Its 1/7/15 success object both inserts the reward
+ *   delta and formats the firmware-owned "获得%d个%s" prompt.  It replaces,
+ *   rather than accompanies, mmGame's 7/7 additive row so the reward is
+ *   inserted exactly once.
+ * - JianghuOL.CBE:HandleItemAcquire(0x0101191A) consumes 1/7/37.  It submits
+ *   `msg` through manager method +140 before reading `result`; +140 is
+ *   ui_show_message_box(0x010103F4), and its fourth argument is a mode rather
+ *   than a timer.  result=1 avoids a second insertion but still creates a
+ *   blocking message box, so 7/37 cannot carry the chest notice.
+ * - The native 7/15 branch does not own operation-wait cleanup.  The leading
+ *   7/4 therefore remains mandatory, while the former 7/7 type=3 terminal is
+ *   removed together with the 7/7 type=1 row that re-armed mmGame's wait.
  */
 static u32 vm_net_mock_build_chest_open_response(const u8 *request,
                                                  u32 requestLen,
@@ -6446,7 +6469,6 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     u16 rewardSeq = 0;
     u32 chestRemaining = 0;
     u32 keyRemaining = 0;
-    u32 rewardWireCount = 0;
     u32 totalWeight = 0;
     u32 draw = 0;
     u32 pos = 5;
@@ -6510,32 +6532,29 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
     }
     rewardItem = vm_net_mock_role_find_backpack_item(&projected,
                                                       reward->itemId, rewardSeq);
-    rewardWireCount = vm_net_mock_backpack_item_id_uses_reservoir_count(
-                          reward->itemId)
-                          ? (rewardItem ? rewardItem->count : 0)
-                          : reward->count;
-    if (rewardItem == NULL || rewardWireCount == 0)
+    if (rewardItem == NULL)
         return vm_net_mock_build_item_use_hint_response(
             out, outCap, "Chest reward state is invalid");
 
-    /* Do not prepend 7/1 here.  Its success branch is a modal message-box
-     * side effect, not a required state transition; 7/11 below owns the
-     * pending-operation cleanup for this multi-row chest transaction. */
+    /* 7/4 is the native, non-modal completion for an item operation.  The
+     * main CBE clears its wait/progress state only in this branch; 7/11 is a
+     * quantity update and cannot substitute for that lifecycle transition. */
+    if (!vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 7, 4,
+                                     &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result", 1))
+    {
+        return 0;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    ++objectCount;
     if (!vm_net_mock_append_backpack_item_count11_object(
             out, outCap, &pos, &objectCount, chestItem->seq,
             chest->chestItemId, chestRemaining) ||
         !vm_net_mock_append_backpack_item_count11_object(
             out, outCap, &pos, &objectCount, keyItem->seq,
             chest->keyItemId, keyRemaining) ||
-        !vm_net_mock_append_backpack_item_add7_object(
-            out, outCap, &pos, rewardSeq, reward->itemId, rewardWireCount))
-    {
-        return 0;
-    }
-    ++objectCount;
-    if (!vm_net_mock_append_chest_open_reward_notice_object(
-            out, outCap, &pos, &objectCount, chest->chestItemId,
-            rewardCatalogItem->name, reward->count))
+        !vm_net_mock_append_chest_open_reward15_object(
+            out, outCap, &pos, &objectCount, rewardItem, reward->count))
     {
         return 0;
     }
@@ -6563,15 +6582,15 @@ static u32 vm_net_mock_build_chest_open_response(const u8 *request,
         printf("[warn][mock-service] chest_world_broadcast_failed chest=%u reward=%u role=%u reason=world-chat-store-or-delivery\n",
                chest->chestItemId, reward->itemId, role->roleId);
     }
-    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=2x(7/11-count-by-seq)+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+    printf("[info][network] mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u/%u draw=%u world_broadcast=%u response=7/4-complete+2x(7/11-count-by-seq)+7/15-native-reward-notice evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
            requestSubtype, chest->chestItemId, chest->keyItemId, chestItem->seq,
            keyItem->seq, reward->itemId, rewardSeq, reward->count,
            reward->weight, totalWeight, draw,
            reward->worldBroadcast ? 1u : 0u);
-    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u world_broadcast=%u response=7/11-count-by-seq+7/11-count-by-seq+7/7-type1+7/37-display-only-acquire-notice-no-7/1 evidence=JianghuOL.CBE:0x01033544+mmGame:0x11CE/0x0D04\n",
+    vm_autotest_note("mock_chest_open request=7/%u chest=%u key=%u chest_seq=%u key_seq=%u reward=%u reward_seq=%u count=%u weight=%u total_weight=%u draw=%u world_broadcast=%u response=7/4-complete+7/11-count-by-seq+7/11-count-by-seq+7/15-native-reward-notice evidence=JianghuOL.CBE:0x01033544+0x01025AE6@0x01026152-0x010262EC\n",
                      requestSubtype, chest->chestItemId, chest->keyItemId,
                      chestItem->seq, keyItem->seq, reward->itemId, rewardSeq,
-                     reward->count, reward->weight, totalWeight,
+                     reward->count, reward->weight, totalWeight, draw,
                      reward->worldBroadcast ? 1u : 0u);
     return pos;
 }

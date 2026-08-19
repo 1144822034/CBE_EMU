@@ -1,5 +1,13 @@
 # 黄金宝箱开启卡住：原生 `WT 7/15` 请求契约
 
+> 2026-08-19 correction: `HandleItemOperationResponse(0x01033544)` itself
+> indeed has no `7/15` response case, but that did not prove `7/15` was
+> request-only. `HandleShopBuyItem(0x01025AE6)` contains the native downstream
+> `7/15 { result,total,iteminfo }` chest-result branch and firmware reward
+> prompt. The request evidence below remains valid; the request-only response
+> conclusion is superseded by
+> [宝箱开启奖励提示](2026-08-13-chest-open-reward-notice.md#16-原生-1715-奖励提示契约2026-08-19).
+
 > 2026-08-18 correction: the request contract in this record remains valid,
 > but the earlier `7/7 type=2` consumption response does not.  Current chest
 > and key synchronization uses `7/11` only; see

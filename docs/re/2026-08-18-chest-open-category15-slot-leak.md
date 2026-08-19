@@ -2,6 +2,10 @@
 
 Date: 2026-08-18
 
+> 2026-08-19 correction: the chest/key slot-leak fix remains unchanged, but
+> the reward is now delivered by the firmware's native `7/15` result instead
+> of mmGame `7/7 type=1`; see the final response below.
+
 ## 触发与证据
 
 角色进入场景已经稳定后，连续开启黄金宝箱。每次成功响应后，运行时只读探针都记录
@@ -16,7 +20,7 @@ category15_insert item=815 seq=258 amount=42 physical=74 occupied=74 empty=0
 `0x01031EEA`，在 `0x01031EF4` 读取偏移 `0x11A` 时崩溃。该 PC 是耗尽后的
 最终症状，不是修复点。
 
-服务端同一请求发送 280 字节、六对象响应：
+当时服务端同一请求发送 280 字节、六对象响应：
 
 ```text
 7/7 type=2 + 7/11  宝箱
@@ -51,22 +55,23 @@ category15_insert item=815 seq=258 amount=42 physical=74 occupied=74 empty=0
 开箱成功响应改为：
 
 ```text
+7/4  result=1                 静默完成并清除操作等待状态
 7/11 { info = chest_seq, chest_remaining }
 7/11 { info = key_seq, key_remaining }
-7/7 type=1  奖励增量
-7/37 result=1  可见奖励提示
+7/15 result=1,total=1  原生奖励增量与提示
 ```
 
-删除的只是两个违反客户端契约的 `7/7 type=2` 对象。服务端事务、宝箱和钥匙
-持久化扣除、奖励 `type=1` 增量及提示通道保持不变；数量归零仍由客户端原生
-`7/11` 删除分支释放物理记录。
+删除的只是两个违反客户端契约的消费项 `7/7 type=2` 对象。服务端事务、宝箱和钥匙
+持久化扣除保持不变；数量归零仍由客户端原生 `7/11` 删除分支释放物理记录。奖励
+后来改由主固件 `HandleShopBuyItem(0x01025AE6)` 的原生 `7/15` 分支一次性插入并显示
+“获得%d个%s”，不再使用 `7/7 type=1` 或系统聊天绕行。
 
 ## 回归边界
 
 `scripts/chest-open-reward-notice-regression.c` 现在断言成功包只有四个对象，顺序为
-`7/11, 7/11, 7/7, 7/37`，并明确拒绝消费项的 `7/7 type=2`。运行时复测还需确认：
+`7/4, 7/11, 7/11, 7/15`，并明确拒绝消费项的 `7/7 type=2`。运行时复测还需确认：
 
 - 连续开箱时不再出现 `category15_insert item=524/815`；
-- 奖励物品仍按 `7/7 type=1` 正常加入；
+- 奖励物品按原生 `7/15` 正常加入且只加入一次；
 - 宝箱或钥匙归零时对应物理记录被释放；
 - 不再到达 `pc=0x01031EF4`。

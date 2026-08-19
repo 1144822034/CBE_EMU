@@ -2,14 +2,21 @@
 
 Date: 2026-08-13
 
-Status: `1/18/1` rejected in backpack; `1/7/37 result=1` display-only acquire
-notice implemented, runtime acceptance pending
+Status: native `1/7/15` reward/prompt response implemented; runtime acceptance
+pending
 
-> 2026-08-18 correction: the notice conclusion remains applicable, but the
-> two consumption-side `7/7 type=2` objects documented in earlier sections
-> caused category-15 physical-slot leaks.  They have been removed; current
-> consumption uses two sequence-keyed `7/11` objects.  See
-> [黄金宝箱连续开启耗尽物品物理槽](2026-08-18-chest-open-category15-slot-leak.md).
+> 2026-08-18 correction: sections 1-14 preserve the investigation history, but
+> their `7/37` "timed/display-only" conclusion is superseded.  Runtime and IDA
+> evidence proved it calls the same blocking message-box method before reading
+> `result`.  Current consumption uses two sequence-keyed `7/11` objects and the
+> reward text is queued as system chat after commit.  See
+> [黄金宝箱开启进度状态](2026-08-18-chest-open-progress-state.md).
+
+> 2026-08-19 correction: the former conclusion that `7/15` only exists as a
+> request inspected `HandleItemOperationResponse(0x01033544)` but missed the
+> backpack business handler `HandleShopBuyItem(0x01025AE6)`.  That handler has
+> the firmware's native `1/7/15` chest-result branch and owns both reward
+> insertion and the visible `获得%d个%s` prompt.  Section 16 is authoritative.
 
 ## 1. 当前目标
 
@@ -219,7 +226,10 @@ notice implemented, runtime acceptance pending
 成功框确认，不丢弃 `7/11`，也不自动注入输入事件。该中间回归曾断言对象顺序为
 `7/7,7/11,7/7,7/11,7/7,18/1`；该最后对象已由第 14 节替换。
 
-## 14. `1/18/1` 不可见后的正确候选（2026-08-17）
+## 14. `1/18/1` 不可见后的候选（已否定，2026-08-17）
+
+> 本节记录当时的候选推断。2026-08-18 的反编译与复测证明 `7/37` 会调用
+> `ui_show_message_box`，并非定时、非模态提示；最终结论见第 15 节。
 
 用户在背包内复测证明 `1/18/1 { msg }` 没有可见文本，同时不再有输入拦截层。它的
 `net_handle_msg_popup(0x01010D54)` 虽然是非模态、30 帧的长度定界文本通道，但在背包
@@ -255,3 +265,63 @@ JianghuOL.CBE:net_handle_misc_player_fields(0x01011D16)
 `result=00-01-01`，并断言没有 `1/7/1`、`1/20/1`、`1/25/11` 或 `1/18/1`。若该通道
 在背包同样不可见，必须记录实际 render 生命周期；不得把 `result` 改为 0 或叠加
 `7/37`，否则会违背“单次奖励增量”的背包契约。
+
+## 15. `7/4` 复测与 `7/37` 最终根因（2026-08-18）
+
+后续复现明确收到 `7/4 + 7/11 + 7/11 + 7/7 + 7/37`，界面仍被阻塞。这证明
+`7/4` 已经完成物品操作等待，但末尾对象又建立了新的 UI 状态。
+
+`HandleItemAcquire(0x0101191A)` 在检查 `result` 之前无条件调用 manager 方法
+`+140`；该方法就是 `ui_show_message_box(0x010103F4)`，第四参数 `20` 是模式而非
+倒计时。`result=1` 只跳过奖励插入，无法避免阻塞框。因此 `7/37` 已从开箱成功包移除。
+
+最终成功包只有 `7/4, 7/11, 7/11, 7/7`。奖励 GBK 文案在角色保存成功后进入当前
+session 的系统聊天队列，通过正常场景同步轮询下发为 `1/3/3 type=system`；客户端
+`net_handle_type_payload_detail(0x010126C6)` 将其加入聊天列表，不创建消息框。完整证据、
+失败边界和回归结果见
+[黄金宝箱开启进度状态](2026-08-18-chest-open-progress-state.md)。
+
+## 16. 原生 `1/7/15` 奖励提示契约（2026-08-19）
+
+用户复测证明系统聊天对象虽已入队，却不会在当前背包界面即时显示奖励文字。第一次
+偏离是服务端将开箱奖励拆成 mmGame `7/7` 增量和延后的聊天消息，绕开了固件已经存在
+的宝箱专用成功响应。
+
+`JianghuOL.CBE:HandleShopBuyItem(0x01025AE6)` 在 kind `7`、subtype `15` 时读取：
+
+```text
+result:u8
+total:u8
+iteminfo:blob
+```
+
+`result=1` 时，`0x010261F4-0x010262C4` 按 `total` 解析每行：
+
+```text
+itemId:u32, seq:i16, count:u32, common item/equipment extra
+```
+
+该 blob 不含 mmGame `7/7` 使用的前置行数。每行由
+`MoveBattleActorStep(0x0101918E)` 送入 `TimerControl_ProcessItem(0x01032EB8)`；
+最后一行成功后，`0x010262DA-0x010262EC` 使用固件内置模板
+`0x01026620 "获得%d个%s"` 调用正常消息框。这里的 `count` 是本次获得的增量，既用于
+背包合并，也用于提示数量。
+
+修复后的成功对象顺序是：
+
+```text
+1/7/4   result=1              结束物品操作等待
+1/7/11  chest seq/count       原地同步或删除宝箱行
+1/7/11  key seq/count         原地同步或删除钥匙行
+1/7/15  result=1,total=1      原生奖励增量并显示“获得N个物品”
+```
+
+`7/15` 替换 `7/7 type=1 + 7/7 type=3`，而不是与它们叠加，因此奖励只进入客户端
+一次。mmGame 的 `type=1` 已移除，也就不会重新置位其等待状态，不再需要 `type=3`
+终结对象。提交后的系统聊天奖励消息同步移除；世界公告仍是独立、仅按后台配置启用的
+通道。宝箱和钥匙继续只用 `7/11`，不会重新引入 category 15 物理槽泄漏。
+
+定向回归 `scripts/chest-open-reward-notice-regression.c` 已验证四对象顺序、字段类型、
+`total=1`，以及无前置行数的 `itemId -> seq -> count -> common extra` 字节顺序。
+`make -j2` 和回归均通过。真实客户端仍需确认提示可见、确认键只关闭游戏提示、奖励与
+消耗各发生一次，以及连续开箱不再出现等待层。

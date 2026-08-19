@@ -21,6 +21,12 @@ mysql -h 127.0.0.1 -P 3306 -u root -p < server/mysql/migrate_payload_to_relation
 
 该脚本不会删除旧数据，而是把旧表重命名为 `account_role_state_payload_backup`。服务下次启动时会完成字段拆分和全服唯一角色 ID 的分配。
 
+服务升级到角色数量权威迁移后无需手工执行 SQL。新服务会在监听客户端端口前，按
+`account_roles` 的实际行数事务化修正 `account_role_state.role_count`，并写入
+`server_data_migrations.role-count-authority-v1`。迁移前会校验每个账号最多 5 个角色、
+角色索引连续且活动角色仍然存在；发现真实角色结构损坏时服务拒绝启动，不会伪造角色
+或回放旧 payload。迁移提交后重复启动只检查标记，不会重复修改。
+
 已有数据库升级到帮派功能时，停止 mock-service 后执行：
 
 ```powershell
