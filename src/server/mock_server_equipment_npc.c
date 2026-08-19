@@ -2430,14 +2430,33 @@ typedef struct
 typedef struct
 {
     bool valid;
-    bool terminal;
-    u32 serial;
     u8 sourceIndex;
-    u8 deliveredMask;
     u32 operate;
     u32 damage;
     u32 sourceMpAfter;
     u32 targetHpAfter;
+    bool terminal;
+} vm_mock_service_duel_action;
+
+typedef struct
+{
+    bool valid;
+    u32 serial;
+    u32 submitSerial;
+    u32 index;
+    u32 operate;
+} vm_mock_service_duel_intent;
+
+typedef struct
+{
+    bool valid;
+    bool terminal;
+    u32 serial;
+    u8 deliveredMask;
+    u8 actionCount;
+    u32 hpAfter[2];
+    u32 mpAfter[2];
+    vm_mock_service_duel_action actions[2];
 } vm_mock_service_duel_event;
 
 typedef struct
@@ -2737,6 +2756,13 @@ typedef struct
     vm_mock_service_team_battle_event battleEvents[VM_MOCK_SERVICE_TEAM_BATTLE_EVENT_MAX];
 } vm_mock_service_team;
 
+enum
+{
+    VM_MOCK_SERVICE_DUEL_TERMINAL_NONE = 0,
+    VM_MOCK_SERVICE_DUEL_TERMINAL_SETTLEMENT_PANEL = 1,
+    VM_MOCK_SERVICE_DUEL_TERMINAL_ESCAPE = 2
+};
+
 /* A spar is service-local and intentionally keeps its combat HP/MP separate
  * from durable role HP/MP.  A friendly duel must not leave either player dead
  * or consume persistent MP after the battle screen closes. */
@@ -2756,10 +2782,16 @@ typedef struct
     u32 mpMax[2];
     u8 startPendingMask;
     u8 startedMask;
-    u8 turnIndex;
+    u8 roundSubmittedMask;
     u8 terminalPendingMask;
+    u8 terminalDeliveredMask;
+    u8 terminalExitPendingMask;
+    u8 terminalKind;
     u32 terminalNotBeforeTick;
+    u32 roundSerial;
+    u32 roundIntentSerial;
     u32 actionSerial;
+    vm_mock_service_duel_intent intents[2];
     vm_mock_service_duel_event events[VM_MOCK_SERVICE_DUEL_EVENT_MAX];
 } vm_mock_service_duel;
 
@@ -3187,7 +3219,8 @@ static vm_mock_service_duel *vm_mock_service_duel_find_for_client(u32 clientId,
 static void vm_mock_service_duel_release_if_done(vm_mock_service_duel *duel)
 {
     if (duel != NULL && duel->active && duel->finished &&
-        duel->startPendingMask == 0 && duel->terminalPendingMask == 0)
+        duel->startPendingMask == 0 && duel->terminalPendingMask == 0 &&
+        duel->terminalExitPendingMask == 0)
     {
         for (u8 i = 0; i < VM_MOCK_SERVICE_DUEL_EVENT_MAX; ++i)
         {
@@ -3213,6 +3246,30 @@ static void vm_mock_service_duel_cancel_for_client(u32 clientId,
     if (duel == NULL || index < 0)
         return;
     peerBit = (u8)(1u << (1 - index));
+    if (duel->finished)
+    {
+        u8 sourceBit = (u8)(1u << index);
+
+        duel->startPendingMask &= (u8)~sourceBit;
+        duel->terminalPendingMask &= (u8)~sourceBit;
+        duel->terminalExitPendingMask &= (u8)~sourceBit;
+        for (u8 i = 0; i < VM_MOCK_SERVICE_DUEL_EVENT_MAX; ++i)
+        {
+            vm_mock_service_duel_event *event = &duel->events[i];
+
+            if (!event->valid)
+                continue;
+            event->deliveredMask |= sourceBit;
+            if (event->deliveredMask == 3)
+                memset(event, 0, sizeof(*event));
+        }
+        printf("[info][mock-service] duel_terminal_disconnect serial=%u "
+               "client=%08x actor=%d terminal=%02x exit=%02x reason=%s\n",
+               duel->serial, clientId, index, duel->terminalPendingMask,
+               duel->terminalExitPendingMask, reason ? reason : "offline");
+        vm_mock_service_duel_release_if_done(duel);
+        return;
+    }
     printf("[info][mock-service] duel_cancel serial=%u client=%08x peer=%08x "
            "started=%02x reason=%s\n",
            duel->serial, clientId, duel->clientIds[1 - index],
@@ -3221,6 +3278,8 @@ static void vm_mock_service_duel_cancel_for_client(u32 clientId,
     duel->startPendingMask = 0;
     memset(duel->events, 0, sizeof(duel->events));
     duel->terminalPendingMask = (u8)(duel->startedMask & peerBit);
+    duel->terminalExitPendingMask = duel->terminalPendingMask;
+    duel->terminalKind = VM_MOCK_SERVICE_DUEL_TERMINAL_ESCAPE;
     duel->terminalNotBeforeTick = g_schedulerTick;
     vm_mock_service_duel_release_if_done(duel);
 }

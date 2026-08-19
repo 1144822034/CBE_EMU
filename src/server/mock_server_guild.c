@@ -1441,7 +1441,7 @@ static vm_mock_service_duel *vm_mock_service_duel_begin_ex(
     slot->mp[0] = vm_net_mock_min_u32(inviter->onlineMp, slot->mpMax[0]);
     slot->mp[1] = vm_net_mock_min_u32(responder->onlineMp, slot->mpMax[1]);
     slot->startPendingMask = 3;
-    slot->turnIndex = 0xff;
+    slot->roundSerial = 1;
     printf("[info][mock-service] duel_begin serial=%u mode=%s arena_room=%u "
            "inviter=%08x/%u responder=%08x/%u scene=%s hp=%u/%u,%u/%u "
            "mp=%u/%u,%u/%u\n",
@@ -1545,9 +1545,9 @@ static bool vm_net_mock_append_duel_start_object(
                                     peer->onlineRoleName[0] ?
                                         peer->onlineRoleName : "Player") ||
         !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
-                                vm_mock_service_team_member_job_code(peer)) ||
-        !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
                                 vm_mock_service_team_member_sex_code(peer)) ||
+        !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen,
+                                vm_mock_service_team_member_job_code(peer)) ||
         !vm_net_mock_seq_put_u8(battleInfo, sizeof(battleInfo), &battleInfoLen, 1) ||
         !vm_net_mock_seq_put_u32(battleInfo, sizeof(battleInfo), &battleInfoLen,
                                  observerWireId) ||
