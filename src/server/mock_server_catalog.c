@@ -4418,6 +4418,13 @@ typedef struct
 
 typedef struct
 {
+    u8 subtype;
+    u16 destinationSeq;
+    u16 sourceSeq;
+} vm_net_mock_equipment_transfer_request;
+
+typedef struct
+{
     u32 index;
     u16 seq;
 } vm_net_mock_battle_item_use_request;
@@ -7854,6 +7861,107 @@ static bool vm_net_mock_parse_equipment_enhance_request(
         parsed.materialRows = (u8)(parsed.occultInfoLen / 9);
     }
 
+    if (parsedOut)
+        *parsedOut = parsed;
+    return true;
+}
+
+static bool vm_net_mock_equipment_transfer_has_exact_fields(
+    const u8 *payload, u32 payloadLen, u32 *destinationOut, u32 *sourceOut)
+{
+    u32 offset = 0;
+    u8 seen = 0;
+
+    if (destinationOut)
+        *destinationOut = 0;
+    if (sourceOut)
+        *sourceOut = 0;
+    if (payload == NULL || payloadLen == 0)
+        return false;
+    while (offset < payloadLen)
+    {
+        u8 nameLen = payload[offset++];
+        u8 field = 0;
+        u32 value = 0;
+
+        if (nameLen == 0 || offset + nameLen + 6u > payloadLen)
+            return false;
+        if (nameLen == 4 && memcmp(payload + offset, "seqd", 4) == 0)
+            field = 1;
+        else if (nameLen == 4 && memcmp(payload + offset, "seqs", 4) == 0)
+            field = 2;
+        else
+            return false;
+        offset += nameLen;
+        if (payload[offset] != 0 || payload[offset + 1] != 4 ||
+            (seen & field) != 0)
+        {
+            return false;
+        }
+        /* SendBattleSeqEvent has appeared with both numeric writers in the
+         * shipped clients.  The legacy writer stores a big-endian u32 in the
+         * six-byte entry.  The object-u16 writer stores the same outer length
+         * followed by its tagged value {0,2,u16}.  Preserve the legacy value
+         * whenever it is a valid sequence; only use the tagged form when the
+         * legacy interpretation is outside the u16 contract. */
+        value = ((u32)payload[offset + 2] << 24) |
+                ((u32)payload[offset + 3] << 16) |
+                ((u32)payload[offset + 4] << 8) |
+                (u32)payload[offset + 5];
+        if (value > 0xffffu && payload[offset + 2] == 0 &&
+            payload[offset + 3] == 2)
+        {
+            value = ((u32)payload[offset + 4] << 8) |
+                    (u32)payload[offset + 5];
+        }
+        if (value > 0xffffu)
+            return false;
+        seen |= field;
+        if (field == 1 && destinationOut)
+            *destinationOut = value;
+        if (field == 2 && sourceOut)
+            *sourceOut = value;
+        offset += 6;
+    }
+    return offset == payloadLen && seen == 3;
+}
+
+/* SendBattleSeqEvent(0x0101DAA0) owns both transfer phases.  Keep this
+ * detector separate from 29/1..3: those requests use seq/equipseq and the
+ * latter two also own an occultinfo material stream. */
+static bool vm_net_mock_parse_equipment_transfer_request(
+    const u8 *request,
+    u32 requestLen,
+    vm_net_mock_equipment_transfer_request *parsedOut)
+{
+    u32 offset = 4;
+    u32 destinationValue = 0;
+    u32 sourceValue = 0;
+    vm_net_mock_request_object object;
+    vm_net_mock_equipment_transfer_request parsed;
+
+    if (parsedOut)
+        memset(parsedOut, 0, sizeof(*parsedOut));
+    memset(&parsed, 0, sizeof(parsed));
+    if (request == NULL || requestLen < 9 ||
+        request[0] != 'W' || request[1] != 'T' ||
+        !vm_net_mock_next_request_object(request, requestLen, &offset, &object) ||
+        offset != requestLen || object.major != 1 || object.kind != 29 ||
+        (object.subtype != 5 && object.subtype != 6) ||
+        !vm_net_mock_equipment_transfer_has_exact_fields(object.payload,
+                                                         object.payloadLen,
+                                                         &destinationValue,
+                                                         &sourceValue) ||
+        destinationValue == 0 || destinationValue > 0xffffu ||
+        sourceValue == 0 || sourceValue > 0xffffu ||
+        destinationValue == sourceValue)
+    {
+        return false;
+    }
+
+    parsed.subtype = object.subtype;
+    parsed.destinationSeq = (u16)destinationValue;
+    parsed.sourceSeq = (u16)sourceValue;
     if (parsedOut)
         *parsedOut = parsed;
     return true;

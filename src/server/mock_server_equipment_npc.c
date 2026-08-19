@@ -833,6 +833,366 @@ static u32 vm_net_mock_build_equipment_enhance_response(
     return pos;
 }
 
+typedef struct
+{
+    u8 result;
+    u8 sourceLevel;
+    u8 destinationLevel;
+    u8 crystalFlag;
+    u8 crystalConsumed;
+    u32 destinationItemId;
+    u32 sourceItemId;
+    u32 crystalItemId;
+    u32 moneyCost;
+    u16 crystalSeq;
+    const char *crystalName;
+    const char *reason;
+} vm_net_mock_equipment_transfer_result;
+
+typedef bool (*vm_net_mock_equipment_transfer_save_callback)(const char *reason);
+
+static u32 vm_net_mock_equipment_transfer_money_cost(u8 sourceLevel)
+{
+    /* The firmware receives, stores and later subtracts this server field; it
+     * contains no native price table.  Keep the policy explicit and on the
+     * same 100-copper scale as ordinary enhancement. */
+    return (u32)sourceLevel * 100u;
+}
+
+static u8 vm_net_mock_equipment_transfer_preview(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_equipment_transfer_request *parsed,
+    vm_net_mock_equipment_transfer_result *state)
+{
+    vm_net_mock_backpack_item_state *destination = NULL;
+    vm_net_mock_backpack_item_state *source = NULL;
+    vm_net_mock_backpack_item_state *crystal = NULL;
+    const vm_net_mock_shop_catalog_item *crystalCatalog = NULL;
+
+    if (state == NULL)
+        return 0;
+    memset(state, 0, sizeof(*state));
+    state->result = 2;
+    state->reason = "equipment-not-found";
+    if (role == NULL || parsed == NULL)
+        return state->result;
+
+    destination = vm_net_mock_role_find_backpack_item(
+        role, 0, parsed->destinationSeq);
+    source = vm_net_mock_role_find_backpack_item(role, 0, parsed->sourceSeq);
+    if (destination == NULL || source == NULL ||
+        vm_net_mock_find_equipment_catalog_item(destination->itemId) == NULL ||
+        vm_net_mock_find_equipment_catalog_item(source->itemId) == NULL)
+    {
+        return state->result;
+    }
+    state->destinationItemId = destination->itemId;
+    state->sourceItemId = source->itemId;
+    if (source->enhanceLevel == 0 ||
+        source->enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL ||
+        destination->enhanceLevel >= source->enhanceLevel)
+    {
+        state->reason = "not-transferable-preview";
+        return state->result;
+    }
+
+    state->sourceLevel = (u8)source->enhanceLevel;
+    state->destinationLevel = (u8)destination->enhanceLevel;
+    state->moneyCost =
+        vm_net_mock_equipment_transfer_money_cost(state->sourceLevel);
+    if (state->sourceLevel == 1)
+    {
+        /* HandleItemUseAndEquip treats result 3 as the normal no-crystal
+         * preview and still reads money/level. */
+        state->result = 3;
+        state->reason = "no-crystal-required";
+        return state->result;
+    }
+
+    state->crystalItemId = 900u + state->sourceLevel;
+    crystalCatalog =
+        vm_net_mock_find_shop_catalog_item(state->crystalItemId);
+    if (crystalCatalog == NULL)
+    {
+        state->result = 0;
+        state->reason = "crystal-catalog-unresolved";
+        return 0;
+    }
+    crystal = vm_net_mock_role_find_backpack_item(
+        role, state->crystalItemId, 0);
+    state->crystalFlag = crystal != NULL && crystal->count != 0 ? 1 : 2;
+    state->crystalSeq = state->crystalFlag == 1 ? crystal->seq : 0;
+    state->crystalName = crystalCatalog->name;
+    state->result = 1;
+    state->reason = state->crystalFlag == 1 ? "ok" : "crystal-missing-preview";
+    return state->result;
+}
+
+/* Apply one transfer to a role snapshot.  This helper owns no persistence so
+ * deterministic regressions can exercise the exact mutation without opening
+ * a database connection; the production wrapper below always persists. */
+static u8 vm_net_mock_equipment_transfer_commit_in_memory(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_equipment_transfer_request *parsed,
+    vm_net_mock_equipment_transfer_result *state)
+{
+    vm_net_mock_backpack_item_state *destination = NULL;
+    vm_net_mock_backpack_item_state *source = NULL;
+    vm_net_mock_backpack_item_state *crystal = NULL;
+    const vm_net_mock_equipment_catalog_item *destinationCatalog = NULL;
+    const vm_net_mock_equipment_catalog_item *sourceCatalog = NULL;
+    vm_net_mock_role_state before;
+    u32 crystalRemaining = 0;
+    bool crystalRequired = false;
+
+    if (state == NULL)
+        return 0;
+    memset(state, 0, sizeof(*state));
+    state->result = 2;
+    state->reason = "equipment-not-found";
+    if (role == NULL || parsed == NULL)
+        return state->result;
+
+    destination = vm_net_mock_role_find_backpack_item(
+        role, 0, parsed->destinationSeq);
+    source = vm_net_mock_role_find_backpack_item(role, 0, parsed->sourceSeq);
+    if (destination != NULL)
+        destinationCatalog =
+            vm_net_mock_find_equipment_catalog_item(destination->itemId);
+    if (source != NULL)
+        sourceCatalog = vm_net_mock_find_equipment_catalog_item(source->itemId);
+    if (destination == NULL || source == NULL ||
+        destinationCatalog == NULL || sourceCatalog == NULL)
+    {
+        return state->result;
+    }
+
+    state->destinationItemId = destination->itemId;
+    state->sourceItemId = source->itemId;
+    state->destinationLevel = (u8)SDL_min(
+        destination->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    state->sourceLevel = (u8)SDL_min(
+        source->enhanceLevel, VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL);
+    if (source->enhanceLevel == 0 ||
+        source->enhanceLevel > VM_NET_MOCK_EQUIP_ENHANCE_MAX_LEVEL ||
+        destination->enhanceLevel >= source->enhanceLevel)
+    {
+        state->result = 5;
+        state->reason = "not-transferable";
+        return state->result;
+    }
+
+    state->moneyCost =
+        vm_net_mock_equipment_transfer_money_cost(state->sourceLevel);
+    if (state->sourceLevel > 1)
+    {
+        state->crystalItemId = 900u + state->sourceLevel;
+        crystal = vm_net_mock_role_find_backpack_item(
+            role, state->crystalItemId, 0);
+        if (crystal == NULL || crystal->count == 0)
+        {
+            state->result = 3;
+            state->reason = "crystal-insufficient";
+            return state->result;
+        }
+        state->crystalSeq = crystal->seq;
+        crystalRequired = true;
+    }
+    if (role->money < state->moneyCost)
+    {
+        state->result = 4;
+        state->reason = "money-insufficient";
+        return state->result;
+    }
+
+    before = *role;
+    if (crystalRequired &&
+        !vm_net_mock_role_consume_backpack_item(
+            role, state->crystalItemId, state->crystalSeq, 1,
+            &crystalRemaining))
+    {
+        *role = before;
+        state->result = 3;
+        state->reason = "crystal-consume-failed";
+        return state->result;
+    }
+    state->crystalConsumed = crystalRequired ? 1 : 0;
+
+    /* Consuming a one-item crystal row compacts backpackItems and invalidates
+     * all earlier pointers.  Resolve both equipment instances again by their
+     * stable sequences before changing either level. */
+    destination = vm_net_mock_role_find_backpack_item(
+        role, 0, parsed->destinationSeq);
+    source = vm_net_mock_role_find_backpack_item(role, 0, parsed->sourceSeq);
+    if (destination == NULL || source == NULL)
+    {
+        *role = before;
+        state->result = 6;
+        state->reason = "equipment-reacquire-failed";
+        return state->result;
+    }
+
+    role->money -= state->moneyCost;
+    destination->enhanceLevel = state->sourceLevel;
+    source->enhanceLevel = 0;
+    (void)vm_net_mock_equipment_enhancement_ensure_affixes(
+        destinationCatalog, state->sourceLevel, &destination->enhanceAffixes,
+        role->roleId ^ destination->itemId ^
+            ((u32)destination->seq * 0x9e3779b9u));
+    state->result = 1;
+    state->reason = "success";
+    return state->result;
+}
+
+static u8 vm_net_mock_equipment_transfer_commit(
+    vm_net_mock_role_state *role,
+    const vm_net_mock_equipment_transfer_request *parsed,
+    vm_net_mock_equipment_transfer_result *state,
+    vm_net_mock_equipment_transfer_save_callback saveCallback)
+{
+    vm_net_mock_role_state before;
+    u8 result = 0;
+
+    if (role == NULL)
+        return vm_net_mock_equipment_transfer_commit_in_memory(
+            role, parsed, state);
+    before = *role;
+    result = vm_net_mock_equipment_transfer_commit_in_memory(
+        role, parsed, state);
+    if (result == 1 &&
+        (saveCallback == NULL || !saveCallback("equipment-transfer")))
+    {
+        *role = before;
+        state->result = 6;
+        state->reason = "persistence-failed";
+        result = state->result;
+    }
+    return result;
+}
+
+static u32 vm_net_mock_build_equipment_transfer_packet(
+    const vm_net_mock_equipment_transfer_request *parsed,
+    const vm_net_mock_equipment_transfer_result *state,
+    u8 *out,
+    u32 outCap)
+{
+    u32 pos = 5;
+    u32 objectStart = 0;
+
+    if (parsed == NULL || state == NULL || state->result == 0 ||
+        out == NULL || outCap < pos ||
+        !vm_net_mock_begin_wt_object(out, outCap, &pos, 1, 29,
+                                     parsed->subtype, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, &pos, "result",
+                                   state->result))
+    {
+        return 0;
+    }
+    if (parsed->subtype == 5 && state->result == 1)
+    {
+        if (!vm_net_mock_put_object_u8(out, outCap, &pos, "flag",
+                                       state->crystalFlag) ||
+            !vm_net_mock_put_object_u16(out, outCap, &pos, "id",
+                                        (u16)state->crystalItemId) ||
+            !vm_net_mock_put_object_u32(out, outCap, &pos, "seq",
+                                        state->crystalSeq) ||
+            !vm_net_mock_put_object_string(
+                out, outCap, &pos, "name",
+                state->crystalName ? state->crystalName : ""))
+        {
+            return 0;
+        }
+    }
+    if (parsed->subtype == 5 &&
+        (state->result == 1 || state->result == 3))
+    {
+        if (!vm_net_mock_put_object_u32(out, outCap, &pos, "money",
+                                        state->moneyCost) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "level",
+                                       state->sourceLevel))
+        {
+            return 0;
+        }
+    }
+    if (parsed->subtype == 6 && state->result == 1)
+    {
+        if (!vm_net_mock_put_object_u16(out, outCap, &pos, "seq",
+                                        state->crystalSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "num",
+                                       state->crystalConsumed) ||
+            !vm_net_mock_put_object_u16(out, outCap, &pos, "seqd",
+                                        parsed->destinationSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "curleveld",
+                                       state->sourceLevel) ||
+            !vm_net_mock_put_object_u16(out, outCap, &pos, "seqs",
+                                        parsed->sourceSeq) ||
+            !vm_net_mock_put_object_u8(out, outCap, &pos, "curlevels", 0))
+        {
+            return 0;
+        }
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, pos);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
+    return pos;
+}
+
+static u32 vm_net_mock_build_equipment_transfer_response(
+    const u8 *request,
+    u32 requestLen,
+    u8 *out,
+    u32 outCap)
+{
+    vm_net_mock_equipment_transfer_request parsed;
+    vm_net_mock_equipment_transfer_result state;
+    vm_net_mock_role_state *role = NULL;
+    u32 pos = 0;
+    u8 result = 0;
+
+    memset(&parsed, 0, sizeof(parsed));
+    memset(&state, 0, sizeof(state));
+    if (out == NULL || outCap < 5 ||
+        !vm_net_mock_parse_equipment_transfer_request(
+            request, requestLen, &parsed))
+    {
+        return 0;
+    }
+
+    role = vm_net_mock_active_role();
+    result = parsed.subtype == 5
+                 ? vm_net_mock_equipment_transfer_preview(role, &parsed,
+                                                          &state)
+                 : vm_net_mock_equipment_transfer_commit(
+                       role, &parsed, &state, vm_net_mock_role_db_save);
+    if (result == 0)
+    {
+        printf("[error][network] mock_equipment_transfer phase=%u seqd=%u seqs=%u result=0 reason=%s action=unresolved-no-response evidence=JianghuOL.CBE:0x0101DAA0+0x01028C7C\n",
+               parsed.subtype, parsed.destinationSeq, parsed.sourceSeq,
+               state.reason ? state.reason : "builder-failed");
+        return 0;
+    }
+
+    pos = vm_net_mock_build_equipment_transfer_packet(
+        &parsed, &state, out, outCap);
+    if (pos == 0)
+        return 0;
+
+    printf("[info][network] mock_equipment_transfer phase=%u seqd=%u itemd=%u leveld=%u seqs=%u items=%u levels=%u crystal=%u crystal_seq=%u crystal_flag=%u crystal_num=%u money=%u result=%u reason=%s resp=29/%u evidence=JianghuOL.CBE:0x0101DAA0+0x0101E54C+0x01028C7C\n",
+           parsed.subtype, parsed.destinationSeq, state.destinationItemId,
+           state.destinationLevel, parsed.sourceSeq, state.sourceItemId,
+           state.sourceLevel, state.crystalItemId, state.crystalSeq,
+           state.crystalFlag, state.crystalConsumed, state.moneyCost, result,
+           state.reason ? state.reason : "-", parsed.subtype);
+    vm_autotest_note("mock_equipment_transfer phase=%u seqd=%u itemd=%u leveld=%u seqs=%u items=%u levels=%u crystal=%u crystal_seq=%u crystal_flag=%u crystal_num=%u money=%u result=%u reason=%s response=29/%u evidence=JianghuOL.CBE:0x0101DAA0+0x0101E54C+0x01028C7C\n",
+                     parsed.subtype, parsed.destinationSeq,
+                     state.destinationItemId, state.destinationLevel,
+                     parsed.sourceSeq, state.sourceItemId, state.sourceLevel,
+                     state.crystalItemId, state.crystalSeq,
+                     state.crystalFlag, state.crystalConsumed,
+                     state.moneyCost, result,
+                     state.reason ? state.reason : "-", parsed.subtype);
+    return pos;
+}
+
 static u32 vm_net_mock_battle_reward_rand(void)
 {
     if (g_vm_net_mock_battle_reward_rng == 0)
