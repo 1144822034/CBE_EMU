@@ -1,5 +1,24 @@
 # 角色数量权威迁移（2026-08-19）
 
+## v2 后续修复
+
+本地 `jh_online_release` 的后续取证发现，历史 `role-count-authority-v1`
+标记已经存在时，仍有 487 个账号的缓存数量与 `account_roles` 实际行数不一致。
+其中 `21642502` 的 `format_version=8`，`role_count=2`，但连续的
+`role_index=0,1,2` 主行有 3 条。实际标题链路
+`1/1/12 -> 1/1/16 -> 1/1/4` 记录：关系 loader 失败后
+`actorinfo.count=0`，客户端正常进入空角色页。
+
+这证明 v1 的一次性标记无法覆盖标记提交之后导入或遗留的陈旧缓存。当前启动迁移改用
+`role-count-authority-v2`：保留原有 InnoDB 事务、角色上限、连续索引和活动角色预检，
+以 `COUNT(account_roles)` 更新 `account_role_state.role_count`，随后复核并写入 v2 标记。
+它不创建、删除或移动角色，也不变更 `format_version`、角色属性、装备或背包。
+
+隔离回归显式预先写入 v1 标记，再验证 v2 仍会修复 `3 -> 2` 和 `1 -> 0` 的缓存偏差；
+因此服务器升级时可修复已有 v1 标记的数据库。实际客户端线包回归以
+`guest00723` 和 `21642502` 运行，验证 `1/1/4.actorinfo` 的计数和角色 ID 与
+`account_roles` 一致。
+
 ## 触发与业务链路
 
 本地 `jh_online_release` 中账号 `202804723` 登录后，后台角色数据库打开路径返回
@@ -89,3 +108,18 @@ MySQL 的 `general_log` 与 `log_bin` 均关闭，数据库中没有相关 trigg
 - 删除测试标记并制造非连续索引后，迁移以 `invalid_index=1` 拒绝，错误计数与标记均
   未被部分提交；
 - 测试脚本完成后删除了隔离数据库，没有写入 `jh_online` 或 `jh_online_release`。
+
+### v2 实测结果
+
+- 修改前，`jh_online_release` 有 487 个 `role_count <> COUNT(account_roles)`；
+  所有角色索引连续、活动角色引用有效、单账号角色数不超过 5。`21642502` 是其中
+  唯一的 `2 -> 3` 账号，另有 484 个 `1 -> 0` 和 2 个 `1 -> 2` 缓存偏差；
+- 新二进制启动时记录
+  `role_count_authority_migration marker=role-count-authority-v2 corrected_accounts=487 max_roles=5 action=committed`；
+  事务后复核不一致数为 0，`server_data_migrations` 同时保留 v1 与 v2 标记；
+- `scripts/role-count-authority-migration-regression.c` 在临时 `cbe_auto_*` 数据库中通过，
+  其中预先写入 v1 标记，证明 v2 的升级路径不会被旧标记跳过；
+- `scripts/run-title-role-list-account-regression.ps1` 在自启的 `127.0.0.1:19342`
+  服务上完成两个账号的真实 CBMS 序列。服务日志记录 `guest00723` 关系加载 2 角色、
+  `21642502` 关系加载 3 角色；对应的 `1/1/4.actorinfo` 角色 ID 分别为
+  `10550,10650` 和 `10036,10311,10384`，无 `mock_role_db_mysql_load_failed`。

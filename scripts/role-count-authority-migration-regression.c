@@ -1,9 +1,10 @@
 /*
- * Isolated persistence regression for role-count-authority-v1.
+ * Isolated persistence regression for role-count-authority-v2.
  *
- * The launcher owns a disposable cbe_auto_* database. This test reproduces
- * account_role_state.role_count being one greater than account_roles, runs the
- * real startup migration twice, and then exercises the relational role loader.
+ * The launcher owns a disposable cbe_auto_* database. It first records the
+ * historical v1 marker, then reproduces stale account_role_state.role_count,
+ * runs the real v2 startup migration twice, and exercises the relational role
+ * loader.
  */
 
 #include <stdio.h>
@@ -107,7 +108,11 @@ int main(void)
         fprintf(stderr, "fixture setup failed: %s\n", vm_mysql_last_error());
         return 1;
     }
-    if (!vm_mock_service_role_count_authority_prepare_and_migrate())
+    if (!vm_mock_service_mysql_authority_prepare() ||
+        !vm_mysql_exec(
+            "INSERT INTO server_data_migrations(migration_name) VALUES"
+            "('role-count-authority-v1')") ||
+        !vm_mock_service_role_count_authority_prepare_and_migrate())
     {
         fprintf(stderr, "role-count migration failed: %s\n", vm_mysql_last_error());
         return 1;
@@ -121,6 +126,10 @@ int main(void)
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
             "WHERE migration_name='role-count-authority-v1'", &value) ||
+        value != 1u ||
+        !role_count_test_query_u32(
+            "SELECT COUNT(*) FROM server_data_migrations "
+            "WHERE migration_name='role-count-authority-v2'", &value) ||
         value != 1u ||
         !role_count_test_query_u32("SELECT COUNT(*) FROM account_roles", &value) ||
         value != 3u)
@@ -144,7 +153,7 @@ int main(void)
     if (!vm_mock_service_role_count_authority_prepare_and_migrate() ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v1'", &value) ||
+            "WHERE migration_name='role-count-authority-v2'", &value) ||
         value != 1u)
     {
         fputs("migration marker was not idempotent\n", stderr);
@@ -152,7 +161,7 @@ int main(void)
     }
     if (!vm_mysql_exec(
             "DELETE FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v1'") ||
+            "WHERE migration_name='role-count-authority-v2'") ||
         !vm_mysql_exec(
             "UPDATE account_role_state SET role_count=1 WHERE account_id='empty'") ||
         !vm_mysql_exec(
@@ -160,7 +169,7 @@ int main(void)
         vm_mock_service_role_count_authority_prepare_and_migrate() ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v1'", &value) ||
+            "WHERE migration_name='role-count-authority-v2'", &value) ||
         value != 0u ||
         !role_count_test_query_u32(
             "SELECT role_count FROM account_role_state WHERE account_id='empty'",
@@ -170,6 +179,6 @@ int main(void)
         return 1;
     }
     vm_mysql_close();
-    puts("role-count authority migration regression passed: counts repaired, roles preserved, loader accepted, rerun idempotent, invalid structure rejected");
+    puts("role-count authority migration regression passed: v1-to-v2 counts repaired, roles preserved, loader accepted, rerun idempotent, invalid structure rejected");
     return 0;
 }

@@ -303,7 +303,10 @@ static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
  */
 #define VM_MOCK_MYSQL_AUTHORITY_MIGRATION "mysql-authoritative-v1"
 #define VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION "account-wcoin-wallet-v1"
-#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v1"
+/* v1 repaired the original import, but a later database restore reintroduced
+ * stale cached counts after its marker had already been committed. v2 repeats
+ * the relation-authority repair under a new transactional marker. */
+#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v2"
 
 static bool g_vm_mock_mysql_authority_prepared = false;
 static bool g_vm_mock_mysql_authority_sealed = false;
