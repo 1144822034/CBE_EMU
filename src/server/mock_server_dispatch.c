@@ -977,6 +977,15 @@ static u32 vm_net_mock_build_response(const u8 *request, u32 requestLen, u8 *out
         return hookedLen;
     }
 
+    hookedLen = vm_net_mock_build_equipment_transfer_response(
+        request, requestLen, out, outCap);
+    if (hookedLen)
+    {
+        vm_net_log_handled_packet("builtin-equipment-transfer", request,
+                                  requestLen, hookedLen);
+        return hookedLen;
+    }
+
     if (vm_net_mock_is_backpack_open_request(request, requestLen))
     {
         hookedLen = vm_net_mock_build_backpack_open_response(out, outCap);

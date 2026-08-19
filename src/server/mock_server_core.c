@@ -3763,6 +3763,23 @@ static void vm_net_log_unhandled_packet(const u8 *request, u32 requestLen)
                objects[0] ? objects : "-",
                g_netLastHandledValid ? g_netLastHandledSource : "-",
                g_netLastHandledResponseLen);
+        if (wtKind == 29 && wtSubtype == 5 && request != NULL &&
+            requestLen <= 256)
+        {
+            char hex[769];
+            u32 hexUsed = 0;
+            for (u32 i = 0; i < requestLen && hexUsed + 3 < sizeof(hex); ++i)
+            {
+                int wrote = snprintf(hex + hexUsed, sizeof(hex) - hexUsed,
+                                     "%02X%s", request[i],
+                                     (i + 1u == requestLen) ? "" : " ");
+                if (wrote < 0 || (u32)wrote >= sizeof(hex) - hexUsed)
+                    break;
+                hexUsed += (u32)wrote;
+            }
+            printf("[debug][network] unhandled_29_5_hex len=%u bytes=%s\n",
+                   requestLen, hex);
+        }
     }
     else
     {
