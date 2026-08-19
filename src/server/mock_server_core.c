@@ -5296,6 +5296,9 @@ enum
     VM_NET_MOCK_SHOP_EQUIP_CATEGORY_MAX_ITEMS = 80,
     VM_NET_MOCK_SHOP17_MAX_CATALOG_ITEMS = 10,
     VM_NET_MOCK_SHOP_MAX_CATALOG_ITEMS = 2048,
+    /* item.dsh `类别=11` is the shipped task-item identity.  Task acceptance
+     * controls whether these items may enter battle rewards. */
+    VM_NET_MOCK_ITEM_CATEGORY_TASK = 11,
     VM_NET_MOCK_ITEM_EFFECT_CATALOG_MAX_ITEMS = 2048,
     VM_NET_MOCK_SKILL_CATALOG_MAX_ITEMS = 256,
     VM_NET_MOCK_LEARNED_SKILL_MAX_ITEMS = 64,
