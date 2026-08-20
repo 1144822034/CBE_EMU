@@ -1,9 +1,9 @@
 /*
- * Isolated persistence regression for role-count-authority-v2.
+ * Isolated persistence regression for role-count-authority-v3.
  *
  * The launcher owns a disposable cbe_auto_* database. It first records the
- * historical v1 marker, then reproduces stale account_role_state.role_count,
- * runs the real v2 startup migration twice, and exercises the relational role
+ * historical v2 marker, then reproduces stale account_role_state.role_count,
+ * runs the real v3 startup migration twice, and exercises the relational role
  * loader.
  */
 
@@ -111,7 +111,7 @@ int main(void)
     if (!vm_mock_service_mysql_authority_prepare() ||
         !vm_mysql_exec(
             "INSERT INTO server_data_migrations(migration_name) VALUES"
-            "('role-count-authority-v1')") ||
+            "('role-count-authority-v2')") ||
         !vm_mock_service_role_count_authority_prepare_and_migrate())
     {
         fprintf(stderr, "role-count migration failed: %s\n", vm_mysql_last_error());
@@ -125,11 +125,11 @@ int main(void)
         value != 3u ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v1'", &value) ||
+            "WHERE migration_name='role-count-authority-v2'", &value) ||
         value != 1u ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v2'", &value) ||
+            "WHERE migration_name='role-count-authority-v3'", &value) ||
         value != 1u ||
         !role_count_test_query_u32("SELECT COUNT(*) FROM account_roles", &value) ||
         value != 3u)
@@ -153,15 +153,49 @@ int main(void)
     if (!vm_mock_service_role_count_authority_prepare_and_migrate() ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v2'", &value) ||
+            "WHERE migration_name='role-count-authority-v3'", &value) ||
         value != 1u)
     {
         fputs("migration marker was not idempotent\n", stderr);
         return 1;
     }
+
+    /* A role move/admin change can alter account_roles while an existing
+     * session still has an older in-memory role list.  An unrelated active
+     * role save must repair the cached aggregate and refuse that stale cache,
+     * rather than writing its old count back to account_role_state. */
+    g_vm_net_mock_role_db_valid = true;
+    if (!vm_mysql_exec(
+            "INSERT INTO account_roles(account_id,role_id,role_index,role_name,job,sex,"
+            "backpack_capacity,level,exp,hp,hp_max,mp,mp_max,money,wcoin,scene,pos_x,pos_y,"
+            "backpack_item_count,designation_id,next_backpack_seq) VALUES "
+            "('broken',103,2,X'43',1,0,20,1,0,100,100,50,50,10,0,"
+            "X'746573742E736365',5,6,0,0,1)") ||
+        !vm_mysql_exec(
+            "UPDATE account_role_state SET role_count=2 WHERE account_id='broken'") ||
+        vm_net_mock_role_db_save_relational("stale-cache-regression", NULL, NULL,
+                                            0, false, NULL, NULL, NULL) ||
+        !role_count_test_query_u32(
+            "SELECT COUNT(*) FROM account_role_state "
+            "WHERE account_id='broken' AND role_count=3", &value) ||
+        value != 1u || g_vm_net_mock_role_db_loaded || g_vm_net_mock_role_db_valid)
+    {
+        fputs("stale role cache rewrote role_count instead of repairing and invalidating\n", stderr);
+        return 1;
+    }
+    memset(&g_vm_net_mock_role_db, 0, sizeof(g_vm_net_mock_role_db));
+    if (!vm_net_mock_role_db_load_mysql_relational(
+            &found, &backfill, &expMigration, &affixMigration) || !found ||
+        g_vm_net_mock_role_db.roleCount != 3u ||
+        g_vm_net_mock_role_db.roles[2].roleId != 103u)
+    {
+        fputs("repaired role count did not reload from account_roles\n", stderr);
+        return 1;
+    }
+
     if (!vm_mysql_exec(
             "DELETE FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v2'") ||
+            "WHERE migration_name='role-count-authority-v3'") ||
         !vm_mysql_exec(
             "UPDATE account_role_state SET role_count=1 WHERE account_id='empty'") ||
         !vm_mysql_exec(
@@ -169,7 +203,7 @@ int main(void)
         vm_mock_service_role_count_authority_prepare_and_migrate() ||
         !role_count_test_query_u32(
             "SELECT COUNT(*) FROM server_data_migrations "
-            "WHERE migration_name='role-count-authority-v2'", &value) ||
+            "WHERE migration_name='role-count-authority-v3'", &value) ||
         value != 0u ||
         !role_count_test_query_u32(
             "SELECT role_count FROM account_role_state WHERE account_id='empty'",
@@ -179,6 +213,6 @@ int main(void)
         return 1;
     }
     vm_mysql_close();
-    puts("role-count authority migration regression passed: v1-to-v2 counts repaired, roles preserved, loader accepted, rerun idempotent, invalid structure rejected");
+    puts("role-count authority migration regression passed: v2-to-v3 counts repaired, stale active-save cache repaired and invalidated, roles preserved, loader accepted, rerun idempotent, invalid structure rejected");
     return 0;
 }

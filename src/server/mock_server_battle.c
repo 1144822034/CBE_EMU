@@ -6189,58 +6189,36 @@ static u32 vm_mock_service_duel_damage(vm_mock_service_duel *duel,
     return vm_net_mock_min_u32(rawDamage, duel->hp[1 - sourceIndex]);
 }
 
-/* HandleBattleSettleMsg(0x743C) owns the post-action result panel. A friendly
- * duel supplies its required snapshot fields without invoking the ordinary
- * battle reward, item, durability, recovery, or persistent-vitals paths. */
-static bool vm_net_mock_append_duel_settlement7_object(
-    u8 *out,
-    u32 outCap,
-    u32 *pos,
+/* Keep the terminal response available for packet-forensics without changing
+ * the event payload, scheduler delivery, or client state. */
+static void vm_net_mock_trace_duel_terminal_wire(
+    const u8 *packet,
+    u32 packetLen,
+    const vm_mock_service_duel *duel,
+    const vm_mock_service_duel_event *event,
     const vm_mock_service_client_session *observer)
 {
-    vm_net_mock_role_state *role = NULL;
-    u32 objectStart = 0;
-    u32 totalExp = 0;
-    u32 vitality = 0;
-    u32 vitalityMax = 0;
+    FILE *trace = NULL;
 
-    if (out == NULL || pos == NULL || observer == NULL)
-        return false;
-    role = vm_mock_service_trade_role_for_session(observer, NULL);
-    if (role == NULL ||
-        !vm_net_mock_vitality_snapshot(role, &vitality, &vitalityMax))
+    if (packet == NULL || packetLen < 5 || duel == NULL || event == NULL ||
+        observer == NULL || packet[0] != 'W' || packet[1] != 'T' ||
+        packet[4] != 3)
     {
-        printf("[error][mock-service] duel_settlement_snapshot_failed observer=%08x "
-               "role=%u error=%s\n",
-               observer->clientId, role ? role->roleId : 0,
-               vm_mysql_last_error());
-        return false;
+        return;
     }
-    totalExp = role->exp;
-    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 4, 7, &objectStart) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "exp", totalExp) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "lastexp",
-                                    vm_net_mock_role_last_level_exp(totalExp)) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "curexp",
-                                    vm_net_mock_role_next_level_start_exp(totalExp)) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "persentexp",
-                                    vm_net_mock_role_exp_percent(totalExp)) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "energy", vitality) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "energymax", vitalityMax) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "gold", role->money) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "level", role->level) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "result", 1) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "bagstatus", 0) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "hp", 0) ||
-        !vm_net_mock_put_object_u32(out, outCap, pos, "mp", 0) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "itemnum", 0) ||
-        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo", NULL, 0) ||
-        !vm_net_mock_put_object_u8(out, outCap, pos, "autorevive", 0))
-    {
-        return false;
-    }
-    vm_net_mock_finish_wt_object(out, objectStart, *pos);
-    return true;
+    trace = fopen("logs/duel-terminal-wire.log", "ab");
+    if (trace == NULL)
+        return;
+    fprintf(trace,
+            "duel_terminal_wire serial=%u action=%u observer=%08x len=%u "
+            "objects=%u bytes=",
+            duel->serial, event->serial, observer->clientId, packetLen,
+            packet[4]);
+    for (u32 i = 0; i < packetLen; ++i)
+        fprintf(trace, "%02X", packet[i]);
+    fputc('\n', trace);
+    fflush(trace);
+    fclose(trace);
 }
 
 static u32 vm_net_mock_build_duel_action_packet(
@@ -6256,7 +6234,7 @@ static u32 vm_net_mock_build_duel_action_packet(
     u32 pos = 5;
     u8 actionCount = 0;
     u32 observerWireId = 0;
-    bool includeTeamInfo = false;
+    bool includeLocalSkillTeamInfo = false;
 
     if (out == NULL || outCap < pos || duel == NULL || event == NULL ||
         !event->valid || event->actionCount == 0 || event->actionCount > 2 ||
@@ -6291,24 +6269,33 @@ static u32 vm_net_mock_build_duel_action_packet(
         }
         ++actionCount;
         if (actionType == 1 && action->sourceIndex == observerIndex)
-            includeTeamInfo = true;
+            includeLocalSkillTeamInfo = true;
     }
     observerWireId = vm_mock_service_team_member_wire_id(observer, observer);
     if (observerWireId == 0)
         return 0;
     if (!vm_net_mock_append_battle_action6_object_ex(
             out, outCap, &pos, actionInfo, actionInfoLen, actionCount,
-            includeTeamInfo, observerWireId,
+            includeLocalSkillTeamInfo, observerWireId,
             event->hpAfter[observerIndex], event->mpAfter[observerIndex]))
     {
         return 0;
     }
     if (event->terminal &&
-        !vm_net_mock_append_duel_settlement7_object(out, outCap, &pos, observer))
+        (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
+         !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos)))
     {
         return 0;
     }
-    vm_net_mock_finish_wt_packet(out, pos, event->terminal ? 2 : 1);
+    vm_net_mock_finish_wt_packet(out, pos, event->terminal ? 3 : 1);
+    if (event->terminal)
+    {
+        printf("[info][mock-service] duel_terminal_packet serial=%u action=%u "
+               "observer=%08x objects=3 source=4/6-before-4/11-4/9 "
+               "evidence=mmBattle:0x6EB0+0x7C16+0x7CB2\n",
+               duel->serial, event->serial, observer->clientId);
+        vm_net_mock_trace_duel_terminal_wire(out, pos, duel, event, observer);
+    }
     return pos;
 }
 
@@ -6331,6 +6318,7 @@ static u32 vm_net_mock_build_duel_operate_response(
     u32 nextSerial = 0;
     u8 sourceBit = 0;
     u8 sourceSlot = 0;
+    u8 suppressedPostDefeatActionCount = 0;
 
     if (out == NULL || outCap < 5 || source == NULL ||
         !vm_net_mock_is_battle_operate_request(request, requestLen))
@@ -6441,7 +6429,6 @@ static u32 vm_net_mock_build_duel_operate_response(
     memset(event, 0, sizeof(*event));
     event->valid = true;
     event->serial = nextSerial;
-    event->actionCount = 2;
     memcpy(event->hpAfter, duel->hp, sizeof(event->hpAfter));
     memcpy(event->mpAfter, duel->mp, sizeof(event->mpAfter));
     for (u8 actionIndex = 0; actionIndex < 2; ++actionIndex)
@@ -6474,7 +6461,31 @@ static u32 vm_net_mock_build_duel_operate_response(
         action->terminal = action->targetHpAfter == 0;
         event->hpAfter[targetIndex] = action->targetHpAfter;
         event->mpAfter[actorIndex] = sourceMpAfter;
-        event->terminal = event->terminal || action->terminal;
+        ++event->actionCount;
+        if (action->terminal)
+        {
+            /* `4/6.actioninfo` is a sequential playback queue.  Once an
+             * action reduces its target to zero, queuing that target's
+             * already-submitted intent after it violates the battle screen's
+             * live-unit contract.  The next slot then runs while its source
+             * has been removed from the active roster.  This is an
+             * independent malformed action queue; both clients did submit
+             * before the round was released, and this only stops the
+             * post-defeat playback record. */
+            event->terminal = true;
+            suppressedPostDefeatActionCount = (u8)(1u - actionIndex);
+            break;
+        }
+    }
+
+    if (event->actionCount == 0)
+    {
+        memset(event, 0, sizeof(*event));
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        printf("[error][mock-service] duel_action_round_invalid serial=%u "
+               "round=%u reason=no-playable-actions action=empty-ack\n",
+               duel->serial, duel->roundSerial);
+        return 5;
     }
 
     responseLen = vm_net_mock_build_duel_action_packet(
@@ -6505,13 +6516,14 @@ static u32 vm_net_mock_build_duel_operate_response(
         duel->terminalPendingMask = 0;
         duel->terminalDeliveredMask = sourceBit;
         duel->terminalExitPendingMask = duel->startedMask;
-        duel->terminalKind = VM_MOCK_SERVICE_DUEL_TERMINAL_SETTLEMENT_PANEL;
+        duel->terminalKind = VM_MOCK_SERVICE_DUEL_TERMINAL_NO_REWARD_CLOSE;
         duel->terminalNotBeforeTick = g_schedulerTick;
     }
     printf("[info][mock-service] duel_action_round_release serial=%u "
            "action=%u round=%u source=%08x actions=%u order=submit "
            "actors=%u,%u operates=%u,%u damage=%u,%u hp=%u/%u,%u/%u "
-           "mp=%u/%u,%u/%u terminal=%u delivered=%02x resp=%u "
+           "mp=%u/%u,%u/%u terminal=%u post_defeat_actions=0 "
+           "suppressed_post_defeat_actions=%u delivered=%02x resp=%u "
            "mapping=local(0)->peer(1),peer(1)->local(0) "
            "evidence=mmBattle:0x7F64/0x6EB0\n",
            duel->serial, event->serial, duel->roundSerial - 1,
@@ -6521,12 +6533,13 @@ static u32 vm_net_mock_build_duel_operate_response(
            event->actions[0].damage, event->actions[1].damage,
            duel->hp[0], duel->hpMax[0], duel->hp[1], duel->hpMax[1],
            duel->mp[0], duel->mpMax[0], duel->mp[1], duel->mpMax[1],
-           event->terminal ? 1u : 0u, event->deliveredMask, responseLen);
+           event->terminal ? 1u : 0u, suppressedPostDefeatActionCount,
+           event->deliveredMask, responseLen);
     if (event->terminal)
     {
         printf("[info][mock-service] duel_terminal_arm serial=%u delivered=%02x "
-               "exit=%02x response=4/6+4/7 kind=settlement-panel "
-               "evidence=mmBattle:0x6EB0+0x743C\n",
+               "exit=%02x response=4/6+4/11+4/9 kind=no-reward-close "
+               "evidence=mmBattle:0x6EB0+0x7C16+0x7CB2\n",
                duel->serial, duel->terminalDeliveredMask,
                duel->terminalExitPendingMask);
     }

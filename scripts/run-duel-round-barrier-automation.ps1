@@ -57,12 +57,13 @@ $database = 'jh_online_autotest_' + ([Guid]::NewGuid().ToString('N'))
     failure_conditions = @('duel visual row mismatch', 'early 4/6', 'duplicate intent overwrite',
         'missing combined round', 'wrong mirror delivery', '4/12 bypasses barrier',
         'terminal round bypasses barrier', 'ordinary death action in friendly duel',
-        'wrong duel settlement object', 'duel released before both native exits',
+        'terminal duel action queued after its target reached zero',
+        'wrong duel terminal object', 'duel released before both native exits',
         'durable role vitals changed')
     input = @('two CBMS logins', 'two scene-ready six-object WT subset requests', '4/14 invite',
         'scene-poll 4/15', '4/16+4/9 accept', 'two mirrored 4/10 starts',
         'manual 4/2 rounds', 'duplicate 4/2', 'automatic 4/12 rounds through terminal',
-        'two terminal 4/6+4/7 settlement-panel deliveries', 'late 4/2 and 4/12 ownership checks',
+        'two terminal 4/6+4/11+4/9 no-reward-close deliveries', 'late 4/2 and 4/12 ownership checks',
         'two native 25/5 exit acknowledgements', 'post-exit reinvite',
         'second duel active 4/4 escape and two 25/5 acknowledgements',
         'durable vital checks')
@@ -106,12 +107,12 @@ try {
     Stop-OwnedProcess $serverProcess
     $serverProcess = $null
     $serverLog = Get-Content -LiteralPath (Join-Path $runDir 'server.stdout.log') -Raw
-    foreach ($required in @('response=4/6+4/7 kind=settlement-panel',
+    foreach ($required in @('response=4/6+4/11+4/9 kind=no-reward-close',
                              'duel_escape', 'response=4/4(result=1) kind=escape',
                              'duel_terminal_exit_ack', 'duel_release')) {
         if (-not $serverLog.Contains($required)) { throw "missing server evidence: $required" }
     }
-    foreach ($forbidden in @('response=4/8', 'kind=auto-restore', 'response=4/11+4/9',
+    foreach ($forbidden in @('response=4/8', 'kind=auto-restore', 'response=4/6+4/7',
                               'source=builtin-battle-operate',
                               'mock_battle_death_prompt_choice')) {
         if ($serverLog.Contains($forbidden)) { throw "forbidden terminal path reached: $forbidden" }
@@ -121,6 +122,12 @@ try {
     $naturalLog = $serverLog.Substring(0, $firstRelease)
     if ($naturalLog.Contains('kind=escape') -or $naturalLog.Contains('response=4/4')) {
         throw 'natural duel terminal entered the active escape path'
+    }
+    if ($naturalLog -notmatch 'duel_action_round_release[^\r\n]*terminal=1 post_defeat_actions=0') {
+        throw 'terminal duel did not prove that no action followed a defeated target'
+    }
+    if ([regex]::Matches($naturalLog, 'duel_terminal_packet .*objects=3 .*source=4/6-before-4/11-4/9').Count -ne 2) {
+        throw 'terminal duel did not deliver the expected no-reward close packet to both observers'
     }
     $lastExitAck = $serverLog.LastIndexOf('duel_terminal_exit_ack')
     $release = $serverLog.IndexOf('duel_release', $lastExitAck)

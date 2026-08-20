@@ -303,10 +303,11 @@ static bool vm_mock_mysql_parse_u64(const char *value, size_t value_len,
  */
 #define VM_MOCK_MYSQL_AUTHORITY_MIGRATION "mysql-authoritative-v1"
 #define VM_MOCK_ACCOUNT_WCOIN_WALLET_MIGRATION "account-wcoin-wallet-v1"
-/* v1 repaired the original import, but a later database restore reintroduced
- * stale cached counts after its marker had already been committed. v2 repeats
- * the relation-authority repair under a new transactional marker. */
-#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v2"
+/* v1 repaired the original import and v2 covered a later database restore.
+ * Older active-role saves could still reintroduce stale cached counts after
+ * either marker had committed, so v3 performs one final relation-authority
+ * repair before the save path below prevents further writeback. */
+#define VM_MOCK_ROLE_COUNT_AUTHORITY_MIGRATION "role-count-authority-v3"
 
 static bool g_vm_mock_mysql_authority_prepared = false;
 static bool g_vm_mock_mysql_authority_sealed = false;
@@ -7401,6 +7402,7 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     bool transaction_started = false;
     u32 scoped_role_id = 0;
     u32 wallet_balance = 0;
+    u32 durable_role_count = 0;
     mysql_error[0] = 0;
 
     if (!g_vm_net_mock_role_db_valid || !vm_net_mock_mysql_account_hex(account_hex))
@@ -7459,6 +7461,48 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
         goto failed;
     }
     transaction_started = true;
+    /* account_roles owns the membership set.  A non-full save only changes
+     * one existing role's detail rows, so a different durable count proves
+     * that this account cache is stale.  Repair the cached aggregate, reject
+     * the old snapshot, and reload it on the next request instead of letting
+     * an item, position, or role-select save overwrite role_count again. */
+    if (!full_snapshot)
+    {
+        snprintf(query, sizeof(query),
+                 "SELECT COUNT(*) FROM account_roles "
+                 "WHERE account_id=CAST(X'%s' AS CHAR)", account_hex);
+        if (!vm_mock_service_role_count_query_u32(query, &durable_role_count))
+        {
+            snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+            goto failed;
+        }
+        if (durable_role_count != g_vm_net_mock_role_db.roleCount)
+        {
+            snprintf(query, sizeof(query),
+                     "UPDATE account_role_state SET role_count=%u "
+                     "WHERE account_id=CAST(X'%s' AS CHAR) AND role_count<>%u",
+                     durable_role_count, account_hex, durable_role_count);
+            if (!vm_mysql_exec(query) || !vm_mysql_exec("COMMIT"))
+            {
+                snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+                goto failed;
+            }
+            transaction_started = false;
+            printf("[warn][mock-service] role_count_cache_repaired account=%s "
+                   "reason=%s cached=%u durable=%u action=invalidate-cache\n",
+                   account_id ? account_id : "-", reason ? reason : "state",
+                   g_vm_net_mock_role_db.roleCount, durable_role_count);
+            vm_autotest_note("mock_role_count_cache_repaired account=%s reason=%s "
+                             "cached=%u durable=%u action=invalidate-cache\n",
+                             account_id ? account_id : "-", reason ? reason : "state",
+                             g_vm_net_mock_role_db.roleCount, durable_role_count);
+            g_vm_net_mock_role_db_loaded = false;
+            g_vm_net_mock_role_db_valid = false;
+            g_vm_net_mock_role_position_dirty = false;
+            free(bulk_query);
+            return false;
+        }
+    }
     if (wallet_debit != NULL)
     {
         wallet_debit->committedBalance = 0;
@@ -7478,9 +7522,9 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
     snprintf(query, sizeof(query),
              "INSERT INTO account_role_state(account_id,format_version,active_role_id,role_count) "
              "VALUES(CAST(X'%s' AS CHAR),%u,%u,%u) ON DUPLICATE KEY UPDATE "
-             "format_version=VALUES(format_version),active_role_id=VALUES(active_role_id),role_count=VALUES(role_count)",
+             "format_version=VALUES(format_version),active_role_id=VALUES(active_role_id)",
              account_hex, VM_NET_MOCK_ROLE_DB_VERSION,
-             g_vm_net_mock_role_db.activeRoleId, g_vm_net_mock_role_db.roleCount);
+             g_vm_net_mock_role_db.activeRoleId, 0u);
     if (!vm_mysql_exec(query))
     {
         snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
@@ -7797,6 +7841,32 @@ static bool vm_net_mock_role_db_save_relational(const char *reason,
             snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
             goto failed;
         }
+    }
+    snprintf(query, sizeof(query),
+             "SELECT COUNT(*) FROM account_roles "
+             "WHERE account_id=CAST(X'%s' AS CHAR)", account_hex);
+    if (!vm_mock_service_role_count_query_u32(query, &durable_role_count))
+    {
+        snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+        goto failed;
+    }
+    if (durable_role_count > VM_NET_MOCK_ROLE_DB_MAX_ROLES ||
+        durable_role_count != g_vm_net_mock_role_db.roleCount)
+    {
+        snprintf(mysql_error, sizeof(mysql_error),
+                 "role membership/count mismatch cached=%u durable=%u full=%u",
+                 g_vm_net_mock_role_db.roleCount, durable_role_count,
+                 full_snapshot ? 1u : 0u);
+        goto failed;
+    }
+    snprintf(query, sizeof(query),
+             "UPDATE account_role_state SET role_count=%u "
+             "WHERE account_id=CAST(X'%s' AS CHAR) AND role_count<>%u",
+             durable_role_count, account_hex, durable_role_count);
+    if (!vm_mysql_exec(query))
+    {
+        snprintf(mysql_error, sizeof(mysql_error), "%s", vm_mysql_last_error());
+        goto failed;
     }
     if (!vm_mysql_exec("COMMIT"))
     {

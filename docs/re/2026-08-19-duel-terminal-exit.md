@@ -2,7 +2,7 @@
 
 Date: 2026-08-19
 
-Status: implemented-pending-regression
+Status: implemented-pending-runtime-regression
 
 ## 1. 复现与预期
 
@@ -139,3 +139,187 @@ $env:CBE_AUTOMATION_MYSQL_PASSWORD='123456'
 自然胜负只使用最终 `4/6 + 4/7` 的结算面板语义；主动点击逃跑、对局取消或对端
 断线通知仍使用 subtype 4。测试必须分别检查终局对象、结果字段和客户端原生 `25/5`
 生命周期，不能仅以“退出了 Battle screen”作为两条路径都正确的证据。
+
+## 10. 终局 action 队列修正（2026-08-19）
+
+### 新复现
+
+切磋终局客户端崩溃：
+
+```text
+pc=05036198 lr=05036951 r0=4255de4c
+address unavailable: 4255de5a
+```
+
+同次 `bin/server_out.txt` 的最后一个服务端动作事件为：
+
+```text
+duel_action_round_release ... actions=2 order=submit actors=0,1
+damage=17,6 hp=6060/6078,0/1845 terminal=1 response=4/6+4/7
+```
+
+第一条 action 已将 actor 1 的 HP 降为零，第二条 action 却仍以 actor 1 为来源。
+这说明异常发生前，服务端已经向 `4/6.actioninfo` 写入一个不再存活单位的后续动作。
+它是需要修正的独立队列违规，但在第 11 节的复现中，修正后崩溃仍存在，故不能把它
+当作本次退出崩溃的根因。
+
+### 固件交叉证据
+
+- `mmBattleMstarWqvga.cbm:sub_6EB0 (0x6EB0)` 按 actioninfo 顺序建立本地动作槽，
+  不会在解析时跳过随后已失效的来源单位。
+- `sub_7BD0 (0x7F64)` 会在同一网络事件中先调用 `sub_6EB0`，随后才由 case 7
+  调用 `sub_743C` 解析结算。
+- 崩溃 PC `0x05036198` 映射到 `sub_60C8+0xD0` 的清理回调区间；它位于结果面板的
+  退出路径，不能作为绕过协议错误的修复落点。
+
+### 修复
+
+`vm_net_mock_build_duel_operate_response()` 现在依提交顺序解析双方 intent，但每次
+写入 action 后立即检查目标 HP。若该 action 致死：
+
+1. 保留这一条伤害 action 和最终 `4/7`；
+2. 不再把已归零目标的待执行 intent 写入同一个 `actioninfo`；
+3. 不扣除被跳过 action 的 MP；
+4. 仍等待双方在本回合先提交 intent，且双方都收到同一个镜像终局包；
+5. 结果面板关闭后继续由双方原生 `25/5` 释放 duel。
+
+这不是按固定时间延迟结算，也不改变客户端状态。终局日志会记录
+`post_defeat_actions=0`（另记被抑制的数量）；回归脚本要求该证据，确保致死之后
+不存在后续播放 action。
+
+## 11. 终局观察端快照不对称（2026-08-19）
+
+### 新证据与修正后的根因陈述
+
+在第 10 节的动作截断已生效后，两端仍稳定崩溃：
+
+```text
+pc=05036198 lr=05036951 r0=4255de4c
+address unavailable: 4255de5a
+```
+
+该 PC 是 `BattleScene_ExitAndCleanup(0x60C8)` 的切磋退出分支，而不是 action
+解包器。最新运行日志已证明终局仅有一条有效 action，且
+`suppressed_post_defeat_actions=1`；因此“已死亡单位仍有后续 action”是已排除的
+异常输入，不能继续当作本次崩溃的根因。
+
+首个仍可观测的包契约差异是 `vm_net_mock_build_duel_action_packet()` 仅在
+**观察端自己施放技能**时附带 `4/6.teaminfo`。终局中最后提交、已经被击败的一端
+直连包为 304 字节，攻击方轮询包为 329 字节；这正是单行 `teaminfo` 的字段差异。两端随后都进入同一
+`4/7` 结果路径，但一端带局部 MP 快照，另一端完全没有。这违反了
+`InitActionSlot_B(0x6DBC) -> HandleBattleSettleMsg(0x743C)` 的终局共享缓存边界。
+
+`sub_6DBC` 会按 battle actor 的 wire id 写入每个匹配单位的 MP 缓存；它支持多行
+`teaminfo`，并不要求该字段只能描述本机施法者。普通非终局回合继续保留原有的最小
+本机施法者行，避免扩张已验证路径。仅终局 `4/6` 现在为两个观察端都构造相同的两行
+快照：双方 wire id、终局 HP 和终局 MP。随后同包 `4/7` 仍为无奖励结算，`hp/mp=0`
+继续表示不修改持久角色；新增的 `fdata=切磋结束` 仅提供结果面板的正常文本行，
+不发经验、铜钱、掉落、耐久或持久 HP/MP 写入。
+
+### 验证边界
+
+- `duel_terminal_packet` 必须对两端各记录一次，且 `teaminfo_rows=2`、长度为 28。
+- 回归脚本直接解码两份 `teaminfo`，要求两个 14 字节重叠 tagged-i32 行、两个非零且
+  不重复的 wire id，及两端原始快照完全一致。
+- 仍须在真实双客户端复现终局和确认结果面板，确认两端均进入场景并发出原生 `25/5`；
+  在此之前本节状态为 `implemented-pending-runtime-regression`。
+
+## 12. 终局清理控制器失效取证（2026-08-20）
+
+最新的双端复现确认第 11 节的终局快照已经实际下发，但仍在相同位置失败：
+
+```text
+duel_terminal_packet ... observer=<A> teaminfo_rows=2
+duel_terminal_packet ... observer=<B> teaminfo_rows=2
+pc=05036198 lr=05036951 r0=4255de4c
+address unavailable: 4255de5a
+```
+
+`mmBattleMstarWqvga.cbm:sub_60C8` 的本地 `0x6198` 是退出清理分支，不是
+`4/6` 或 `4/7` 的解包器。该分支在 `sub_259A(0)` 时已成功读取
+`main-R9 + 0x285c`，而在中间的 battle-state 虚调用完成后，随后的
+`STRB [controller+0x10]` 使用了无效控制器 `0x4255de4c`。因此：
+
+- 完整两行 `teaminfo` 和 `fdata` 的试验没有修复本次崩溃，不能再将二者当根因；
+- 当前已知的第一处损坏位于 `sub_60C8` 内两个正常清理步骤之间；
+- 尚未确认是错误的 `4/7` 字段组合、切磋开始状态，还是结果面板路径选择使该清理
+  回调释放/覆写了这个控制器，故不得在协议层继续猜测性修改。
+
+为把损坏归属到最早的回调，当前构建加入了两项不改变客户状态的临时取证：
+
+1. 服务端把每个终局 `4/6 + 4/7` 的完整 WT 字节写入
+   `logs/duel-terminal-wire.log`，含 observer、duel serial 和 action serial；
+2. 客户端会在 Battle `4/7` parser 入口自动监视 `R9+0x285c`，把 `sub_60C8` 的入口、
+   `sub_259A(0)` 后、三个 battle-state 虚调用前后以及 `0x6198` 前后的控制器快照写入
+   `logs/duel-exit-forensics.log`。同一文件还会记录三个虚调用的实际目标地址，以及该
+   控制器槽的首次 guest write（PC、LR、调用栈顶部和旧/新值）。监视可用
+   `CBE_TRACE_DUEL_EXIT=0` 明确关闭；它只读地记录已发生的写入，不修改客户内存、
+   寄存器、PC/LR、响应字节或调度时序。
+
+这些探针仅使用 `uc_mem_read`、寄存器读取和文件日志；不会修改 CBE/CBM 内存、
+寄存器、PC/LR、响应字节或调度时序。下一次复现必须同时保存这两个文件和
+`bin/server_out.txt` 的终局片段，再按控制器首次变化的边界回溯对应的 client state
+和 WT 字段。
+
+## 13. 零奖励结算渲染契约（2026-08-20）
+
+### 更正后的 PC 映射与根因
+
+前一节把 `0x05036198` 直接按固定 `0x05030000` 装载基址换算为
+`sub_60C8+0xD0`，该换算错误。Battle CBM 由内存池动态装载；本次 player-1/
+player-3 的 `hangup-protocol.log` 已记录实际 `code_base=0x0502EF40`，所以：
+
+```text
+0x05036198 - 0x0502EF40 = 0x7258
+```
+
+`mmBattleMstarWqvga.cbm:sub_7228+0x30` 的实际指令是：
+
+```text
+7252  LSLS R0, R1, #6
+7254  ADDS R0, R0, R5
+7256  ADDS R0, #0x90
+7258  LDRB R0, [R0,#0xE]
+```
+
+崩溃寄存器与该调用点逐项吻合：`R5=0x0105493C` 是
+`R9+0x3D6C` 的结算临时行，`R1=R4=0x01054252` 是
+`R9+0x3682` 的文本缓冲区，左移后的访问地址正是
+`0x4255DE5A`。调用者 `sub_7794:0x7A0C` 以这两个地址调用
+`sub_7228`，因此这不是控制器释放或 `teaminfo` 缓存损坏。
+
+`HandleBattleSettleMsg(0x743C)` 每次先清零 `R9+0x3D6C`，再将
+`4/7.exp`、`4/7.gold` 与客户端旧总值相减，把增量写到 `+8`、`+12`。
+当前切磋包发送角色当前总 EXP/铜钱，即两个增量皆为零；`sub_7228` 在两项都不为正时
+进入上面的错误索引分支。此前增加两行 `teaminfo` 或 `fdata` 无法改变这两个增量，故
+不可能修复本次崩溃。`docs/re/2026-07-27-monster-reward-cooldown.md` 已记录了相同的
+PC、寄存器形状和固件渲染契约。
+
+### 修复契约
+
+友好切磋是无持久奖励的临时对局，不能为规避渲染错误伪造 EXP 或铜钱，也不能把
+`4/7` 用作零奖励结果面板。终局包改为按既有无奖励控制路径构造：
+
+```text
+4/6 final actioninfo
+4/11 { result=1, type=0 }
+4/9  { result=1 }
+```
+
+三个对象保持同一 WT 事件中的上述顺序，`4/6` 仍先让客户端登记最终伤害动画；不再
+附加 `4/7`、`4/8`、`4/4` 或普通 type-3 死亡动作。`4/11/4/9` 不读取结算数值或
+`fdata`，因此不会触发 `sub_7228`。此前为错误的结算面板假设附带的 terminal-only
+`teaminfo` 快照也已移除，最终 `4/6` 回到常规动作对象格式。服务端继续仅在两端各自
+原生空 `25/5` 到达后释放 duel，持久 HP/MP、经验、铜钱、掉落和耐久均不变。
+
+此前按固定基址监视 `sub_60C8` 的临时探针不会命中实际 `0x7258`，已移除，避免留下
+不能回答当前根因的常驻观测。
+
+### 验证边界
+
+- 两端终局 WT 都应为 `4/6 + 4/11 + 4/9`，不得包含 `4/7`。
+- 两端均不再到达 `sub_7228+0x30` 的零增量结算路径，不出现
+  `0x4255DE5A` 访问。
+- 最终动作播放完成后，两端客户端各自发出原生 `25/5`；服务端第二个确认后才释放
+  duel。
+- 失败方不进入 `7/14` 复活选择，双方持久角色的 HP/MP、EXP、铜钱不改变。

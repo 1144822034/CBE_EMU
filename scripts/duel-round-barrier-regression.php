@@ -198,32 +198,35 @@ function assert_scene_default_ack(string $reply, string $phase): void {
         throw new RuntimeException("$phase did not receive native 25/5 scene ack: " . bin2hex($reply));
     }
 }
+function is_duel_terminal_reply(string $reply): bool {
+    $objects = response_objects($reply);
+    return count($objects) === 3 && $objects[0]['major'] === 1 &&
+        $objects[0]['kind'] === 4 && $objects[0]['subtype'] === 6 &&
+        $objects[1]['major'] === 1 && $objects[1]['kind'] === 4 &&
+        $objects[1]['subtype'] === 11 && $objects[2]['major'] === 1 &&
+        $objects[2]['kind'] === 4 && $objects[2]['subtype'] === 9;
+}
 function assert_duel_terminal(string $reply, string $phase): array {
     $objects = response_objects($reply);
-    if (count($objects) !== 2 || $objects[0]['major'] !== 1 ||
+    if (!is_duel_terminal_reply($reply) || $objects[0]['major'] !== 1 ||
         $objects[0]['kind'] !== 4 || $objects[0]['subtype'] !== 6 ||
-        $objects[1]['major'] !== 1 || $objects[1]['kind'] !== 4 ||
-        $objects[1]['subtype'] !== 7 ||
-        tagged_u32(object_field($objects[1], 'exp')) === null ||
-        tagged_u32(object_field($objects[1], 'lastexp')) === null ||
-        tagged_u32(object_field($objects[1], 'curexp')) === null ||
-        tagged_u32(object_field($objects[1], 'persentexp')) === null ||
-        tagged_u32(object_field($objects[1], 'energy')) === null ||
-        tagged_u32(object_field($objects[1], 'energymax')) === null ||
-        tagged_u32(object_field($objects[1], 'gold')) === null ||
-        tagged_u32(object_field($objects[1], 'level')) === null ||
         tagged_u8(object_field($objects[1], 'result')) !== 1 ||
-        tagged_u8(object_field($objects[1], 'bagstatus')) !== 0 ||
-        tagged_u32(object_field($objects[1], 'hp')) !== 0 ||
-        tagged_u32(object_field($objects[1], 'mp')) !== 0 ||
-        tagged_u8(object_field($objects[1], 'itemnum')) !== 0 ||
-        object_field($objects[1], 'iteminfo') !== '' ||
-        object_field($objects[1], 'fdata') !== null ||
-        tagged_u8(object_field($objects[1], 'autorevive')) !== 0) {
+        tagged_u8(object_field($objects[1], 'type')) !== 0 ||
+        tagged_u8(object_field($objects[2], 'result')) !== 1 ||
+        find_object($reply, 4, 7) !== null) {
         throw new RuntimeException(
-            "$phase was not one native 4/6+4/7 settlement packet: " . bin2hex($reply));
+            "$phase was not one native 4/6+4/11+4/9 no-reward close packet: " . bin2hex($reply));
     }
-    return assert_round($reply, $phase);
+    $actions = decode_round_actions($reply, $phase);
+    if (count($actions) < 1 || count($actions) > 2) {
+        throw new RuntimeException("$phase has an invalid terminal action count " . count($actions));
+    }
+    foreach ($actions as $i => $action) {
+        if ($action['type'] === 3 || $action['type'] === 4) {
+            throw new RuntimeException("$phase action $i entered the ordinary death-action family");
+        }
+    }
+    return $actions;
 }
 function assert_duel_escape(string $reply, string $phase): void {
     $objects = response_objects($reply);
@@ -435,14 +438,14 @@ try {
     $terminalActions = [null, null];
     for ($round = 4; $round <= 20; ++$round) {
         $first = call_service($port, $clients[0], wt(4, 12));
-        if (find_object($first, 4, 7) !== null) {
+        if (is_duel_terminal_reply($first)) {
             $terminalActions[0] = assert_duel_terminal($first, "round$round first terminal");
             $terminalReplies[0] = $first;
             break;
         }
         assert_empty_ack($first, "round$round first auto submit");
         $second = call_service($port, $clients[1], wt(4, 12));
-        if (find_object($second, 4, 7) !== null) {
+        if (is_duel_terminal_reply($second)) {
             $terminalActions[1] = assert_duel_terminal($second, "round$round second terminal");
             $terminalReplies[1] = $second;
             break;
@@ -467,8 +470,8 @@ try {
         'late 4/12 after both terminal deliveries');
 
     /* This is only a protocol-lifecycle assertion: the real CBE sends 25/5
-     * after a user dismisses its 4/7 result panel. The packet test does not
-     * claim to prove animation or panel presentation completion. */
+     * after its no-reward terminal action closes. The packet test does not
+     * claim to prove animation or presentation completion. */
     assert_scene_default_ack(call_service($port, $clients[0], wt(25, 5)),
         'first native duel exit');
     assert_empty_ack(call_service($port, $clients[1], $physical),
@@ -519,7 +522,7 @@ try {
         (int)$rows[1]['mp'] !== (int)$rows[1]['mp_max']) {
         throw new RuntimeException('friendly duel polluted durable role HP/MP: ' . json_encode($rows));
     }
-    echo "duel-round-barrier-v1 passed: barrier + native 4/6+4/7 settlement panel + isolated 4/4 active escape\n";
+    echo "duel-round-barrier-v1 passed: barrier + native 4/6+4/11+4/9 no-reward close + isolated 4/4 active escape\n";
 } finally {
     foreach ($clients as $client) {
         try { call_service($port, $client, '', 4); } catch (Throwable $ignored) {}
