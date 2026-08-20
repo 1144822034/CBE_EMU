@@ -6221,6 +6221,122 @@ static void vm_net_mock_trace_duel_terminal_wire(
     fclose(trace);
 }
 
+/* A friendly duel still uses the normal Battle death callback. The client
+ * later sends 1/7/14 for the defeated side, so its server-owned role must
+ * already carry the HP/MP state established by the delivered 4/6 action.
+ * Both account caches are live but only the requester's cache is active here;
+ * update exact account/role rows instead of saving through the active role. */
+static bool vm_mock_service_duel_commit_terminal_vitals(
+    const vm_mock_service_duel *duel,
+    const vm_mock_service_duel_event *event)
+{
+    vm_mock_service_client_session *sessions[2] = {NULL, NULL};
+    vm_net_mock_role_state *liveRoles[2] = {NULL, NULL};
+    vm_net_mock_role_state projected[2];
+    char accountHex[2][129];
+    char query[512];
+    char mysqlError[256];
+    const char *stage = "prepare";
+    bool transactionStarted = false;
+    u8 defeatedCount = 0;
+
+    memset(projected, 0, sizeof(projected));
+    memset(accountHex, 0, sizeof(accountHex));
+    memset(mysqlError, 0, sizeof(mysqlError));
+    if (duel == NULL || event == NULL || !event->valid || !event->terminal)
+        return false;
+    for (u8 side = 0; side < 2; ++side)
+    {
+        sessions[side] = vm_mock_service_find_client_session(duel->clientIds[side]);
+        liveRoles[side] = vm_mock_service_trade_role_for_session(sessions[side], NULL);
+        if (sessions[side] == NULL || !sessions[side]->roleOnline ||
+            liveRoles[side] == NULL ||
+            liveRoles[side]->roleId != sessions[side]->onlineRoleId)
+        {
+            printf("[error][mock-service] duel_terminal_vitals_rejected serial=%u "
+                   "side=%u reason=live-role-unavailable\n",
+                   duel->serial, side);
+            return false;
+        }
+        projected[side] = *liveRoles[side];
+        vm_net_mock_role_sync_derived_vitals(&projected[side]);
+        if (projected[side].hpMax == 0)
+        {
+            printf("[error][mock-service] duel_terminal_vitals_rejected serial=%u "
+                   "side=%u role=%u reason=zero-hp-max\n",
+                   duel->serial, side, projected[side].roleId);
+            return false;
+        }
+        projected[side].hp = vm_net_mock_min_u32(event->hpAfter[side],
+                                                 projected[side].hpMax);
+        projected[side].mp = vm_net_mock_min_u32(event->mpAfter[side],
+                                                 projected[side].mpMax);
+        if (projected[side].hp == 0)
+            ++defeatedCount;
+        if (!vm_mock_service_trade_account_hex(sessions[side]->accountId,
+                                               accountHex[side],
+                                               sizeof(accountHex[side])))
+        {
+            printf("[error][mock-service] duel_terminal_vitals_rejected serial=%u "
+                   "side=%u role=%u reason=invalid-account\n",
+                   duel->serial, side, projected[side].roleId);
+            return false;
+        }
+    }
+    if (defeatedCount != 1)
+    {
+        printf("[error][mock-service] duel_terminal_vitals_rejected serial=%u "
+               "defeated=%u reason=terminal-must-have-one-defeated-role\n",
+               duel->serial, defeatedCount);
+        return false;
+    }
+    stage = "start";
+    if (!vm_mysql_exec("START TRANSACTION"))
+        goto failed;
+    transactionStarted = true;
+    for (u8 side = 0; side < 2; ++side)
+    {
+        snprintf(query, sizeof(query),
+                 "UPDATE account_roles SET hp=%u,mp=%u "
+                 "WHERE account_id=CAST(X'%s' AS CHAR) AND role_id=%u",
+                 projected[side].hp, projected[side].mp,
+                 accountHex[side], projected[side].roleId);
+        stage = side == 0 ? "vitals-first" : "vitals-second";
+        if (!vm_mysql_exec(query))
+            goto failed;
+    }
+    stage = "commit";
+    if (!vm_mysql_exec("COMMIT"))
+        goto failed;
+    transactionStarted = false;
+    for (u8 side = 0; side < 2; ++side)
+    {
+        *liveRoles[side] = projected[side];
+        sessions[side]->onlineHp = projected[side].hp;
+        sessions[side]->onlineHpMax = projected[side].hpMax;
+        sessions[side]->onlineMp = projected[side].mp;
+        sessions[side]->onlineMpMax = projected[side].mpMax;
+    }
+    printf("[info][mock-service] duel_terminal_vitals_commit serial=%u "
+           "first=%08x/%u hp=%u/%u mp=%u/%u second=%08x/%u hp=%u/%u mp=%u/%u "
+           "storage=account_roles-hp-mp-transaction\n",
+           duel->serial,
+           sessions[0]->clientId, projected[0].roleId,
+           projected[0].hp, projected[0].hpMax, projected[0].mp, projected[0].mpMax,
+           sessions[1]->clientId, projected[1].roleId,
+           projected[1].hp, projected[1].hpMax, projected[1].mp, projected[1].mpMax);
+    return true;
+
+failed:
+    snprintf(mysqlError, sizeof(mysqlError), "%s", vm_mysql_last_error());
+    if (transactionStarted)
+        (void)vm_mysql_exec("ROLLBACK");
+    printf("[error][mock-service] duel_terminal_vitals_commit_failed serial=%u "
+           "stage=%s error=%s\n",
+           duel->serial, stage, mysqlError[0] ? mysqlError : "unknown");
+    return false;
+}
+
 static u32 vm_net_mock_build_duel_action_packet(
     u8 *out,
     u32 outCap,
@@ -6272,17 +6388,14 @@ static u32 vm_net_mock_build_duel_action_packet(
         if (actionType == 1 && action->sourceIndex == observerIndex)
             includeLocalSkillTeamInfo = true;
 
-        /* A 4/6 round is an ordered action queue.  The regular battle path
-         * follows a lethal delta with a type-3 record for the defeated slot;
-         * sub_4BE8 consumes that record and writes phase 7 after its native
-         * death animation completes.  Previously the duel path omitted it
-         * and appended 4/11+4/9 instead.  Those objects immediately replaced
-         * phase 5 with phase 8, so the queued terminal action could not reach
-         * its completion branch and either client could remain in Battle.
+        /* A defeated duelist must use type 3. It enters sub_30D4 -> sub_3008,
+         * whose 1/7/14 response is backed by the committed zero-HP role.
+         * Type 4 calls sub_4B38's modal UI vtable with a fixed, unpopulated
+         * text buffer and therefore creates an unavoidable blank dialog.
          *
-         * The death record has no child/value payload.  Its actor is the
+         * The death record has no child/value payload. Its actor is the
          * already calculated target wire slot and is mirrored for each
-         * observer exactly like the preceding damage record. */
+         * observer exactly like the preceding lethal damage record. */
         if (event->terminal && action->terminal)
         {
             if (actionCount >= 6 ||
@@ -6510,6 +6623,15 @@ static u32 vm_net_mock_build_duel_operate_response(
         return 5;
     }
 
+    if (event->terminal && !vm_mock_service_duel_commit_terminal_vitals(duel, event))
+    {
+        memset(event, 0, sizeof(*event));
+        vm_net_mock_finish_wt_packet(out, 5, 0);
+        printf("[error][mock-service] duel_action_round_persist_failed serial=%u "
+               "round=%u source=%08x action=retain-intents-empty-ack\n",
+               duel->serial, duel->roundSerial, source->clientId);
+        return 5;
+    }
     responseLen = vm_net_mock_build_duel_action_packet(
         out, outCap, duel, event, source, sourceIndex);
     if (responseLen == 0)

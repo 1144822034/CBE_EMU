@@ -210,16 +210,22 @@ function assert_duel_terminal(string $reply, string $phase): array {
         find_object($reply, 4, 7) !== null || find_object($reply, 4, 8) !== null ||
         find_object($reply, 4, 9) !== null || find_object($reply, 4, 11) !== null) {
         throw new RuntimeException(
-            "$phase was not one native 4/6 damage+death no-reward close packet: " . bin2hex($reply));
+            "$phase was not one native 4/6 damage+death no-reward packet: " . bin2hex($reply));
     }
     $actions = decode_round_actions($reply, $phase);
-    if (count($actions) !== 2) {
+    if (count($actions) < 2 || count($actions) > 3) {
         throw new RuntimeException("$phase has an invalid terminal action count " . count($actions));
     }
-    if (($actions[0]['type'] !== 0 && $actions[0]['type'] !== 1) ||
-        count($actions[0]['targets']) !== 1 ||
-        $actions[1]['type'] !== 3 || count($actions[1]['targets']) !== 0 ||
-        $actions[1]['actor'] !== $actions[0]['targets'][0]) {
+    $last = count($actions) - 1;
+    for ($i = 0; $i < $last; ++$i) {
+        if (($actions[$i]['type'] !== 0 && $actions[$i]['type'] !== 1) ||
+            count($actions[$i]['targets']) !== 1) {
+            throw new RuntimeException(
+                "$phase encoded a non-damage action before its terminal death action");
+        }
+    }
+    if ($actions[$last]['type'] !== 3 || count($actions[$last]['targets']) !== 0 ||
+        $actions[$last]['actor'] !== $actions[$last - 1]['targets'][0]) {
         throw new RuntimeException(
             "$phase did not encode damage followed by the matching native death action");
     }
@@ -466,15 +472,40 @@ try {
     assert_empty_ack(call_service($port, $clients[1], wt(4, 12)),
         'late 4/12 after both terminal deliveries');
 
+    $defeatedIndex = $terminalActions[0][count($terminalActions[0]) - 1]['actor'];
+    if ($defeatedIndex !== 0 && $defeatedIndex !== 1) {
+        throw new RuntimeException('terminal death action did not identify one defeated observer slot');
+    }
+    $terminalRows = pdo()->query(
+        'SELECT role_id,hp,hp_max,mp,mp_max FROM account_roles ' .
+        'WHERE role_id IN (881901,881902) ORDER BY role_id'
+    )->fetchAll(PDO::FETCH_ASSOC);
+    if (count($terminalRows) !== 2 ||
+        (int)$terminalRows[$defeatedIndex]['hp'] !== 0 ||
+        (int)$terminalRows[1 - $defeatedIndex]['hp'] === 0 ||
+        (int)$terminalRows[0]['mp'] > (int)$terminalRows[0]['mp_max'] ||
+        (int)$terminalRows[1]['mp'] > (int)$terminalRows[1]['mp_max']) {
+        throw new RuntimeException('terminal duel vitals were not committed before native death handling: ' .
+            json_encode($terminalRows));
+    }
+
     /* This is only a protocol-lifecycle assertion: the real CBE sends 25/5
-     * after its no-reward terminal action closes. The packet test does not
-     * claim to prove animation or presentation completion. */
+     * after its terminal action closes. The packet test does not claim to
+     * prove animation or presentation completion. */
     assert_scene_default_ack(call_service($port, $clients[0], wt(25, 5)),
         'first native duel exit');
     assert_empty_ack(call_service($port, $clients[1], $physical),
         'peer late 4/2 before its native exit');
     assert_scene_default_ack(call_service($port, $clients[1], wt(25, 5)),
         'second native duel exit');
+
+    $respawn = call_service($port, $clients[$defeatedIndex], wt(7, 14, u8('result', 2)));
+    $respawnResult = find_object($respawn, 20, 1);
+    if ($respawnResult === null || tagged_u8(object_field($respawnResult, 'result')) !== 0 ||
+        find_object($respawn, 30, 1) === null) {
+        throw new RuntimeException('native death-prompt refusal did not enter the ordinary respawn path: ' .
+            bin2hex($respawn));
+    }
 
     $reinvite = call_service($port, $clients[0], wt(4, 14, u32('id', $roles[1])));
     $reinviteObject = find_object($reinvite, 4, 14);
@@ -513,13 +544,15 @@ try {
         'WHERE role_id IN (881901,881902) ORDER BY role_id'
     )->fetchAll(PDO::FETCH_ASSOC);
     if (count($rows) !== 2 ||
-        (int)$rows[0]['hp'] === 0 || (int)$rows[0]['hp'] !== (int)$rows[0]['hp_max'] ||
-        (int)$rows[0]['mp'] !== (int)$rows[0]['mp_max'] ||
-        (int)$rows[1]['hp'] === 0 || (int)$rows[1]['hp'] !== (int)$rows[1]['hp_max'] ||
-        (int)$rows[1]['mp'] !== (int)$rows[1]['mp_max']) {
-        throw new RuntimeException('friendly duel polluted durable role HP/MP: ' . json_encode($rows));
+        (int)$rows[$defeatedIndex]['hp'] === 0 ||
+        (int)$rows[$defeatedIndex]['hp'] > (int)$rows[$defeatedIndex]['hp_max'] ||
+        (int)$rows[1 - $defeatedIndex]['hp'] === 0 ||
+        (int)$rows[1 - $defeatedIndex]['hp'] > (int)$rows[1 - $defeatedIndex]['hp_max'] ||
+        (int)$rows[0]['mp'] > (int)$rows[0]['mp_max'] ||
+        (int)$rows[1]['mp'] > (int)$rows[1]['mp_max']) {
+        throw new RuntimeException('duel terminal/respawn vitals are not durable and in range: ' . json_encode($rows));
     }
-    echo "duel-round-barrier-v1 passed: barrier + native 4/6(damage+death) no-reward close + isolated 4/4 active escape\n";
+    echo "duel-round-barrier-v1 passed: barrier + native 4/6(damage+death) + durable terminal vitals + ordinary respawn + isolated 4/4 active escape\n";
 } finally {
     foreach ($clients as $client) {
         try { call_service($port, $client, '', 4); } catch (Throwable $ignored) {}

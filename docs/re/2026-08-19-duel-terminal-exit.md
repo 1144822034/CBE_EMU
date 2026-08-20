@@ -397,3 +397,122 @@ action 1: type=3，actor 为同一被击败者
 服务端仍只在双方客户端各自原生 `25/5` 到达后释放 duel，且不写入持久 HP/MP、经验、
 铜钱、掉落或耐久。回归更新为验证单一 `4/6`、两条 action、第二条为匹配第一条目标的
 type-3，及两端镜像编码；同时继续禁止零奖励 `4/7`、复活和逃跑路径。
+
+## 16. 切磋终局与普通复活链隔离，已否决（2026-08-20）
+
+### 复现与首个偏离
+
+第 15 节的 type-3 收尾虽然能让双方播放死亡动画并结束战斗，但失败方随后仍打开
+“是否复活”提示。选择“否”后客户端发出 `WT 1/7/14 {result=2}`；友好切磋没有把
+持久角色 HP 写为 0，`mock_battle_death_prompt_choice` 因而正确返回“当前无需复活”。
+客户端已经处在这个过期复活回调中，继续确认该提示会使 SDL 窗口关闭。该提示本身是
+终局 action 类型错误的后果，不能通过篡改通用 `7/14` handler 来掩盖。
+
+最新运行时顺序：
+
+```text
+duel_terminal_packet ... actionnum=3 ... damage-before-death(type=3)
+duel_terminal_exit_ack ... source=native-25/5
+mock_battle_death_prompt_choice result=2 ... reason=not-dead-or-state-unavailable
+net_send ... wt=7/14 ... source=builtin-battle-death-prompt-choice
+```
+
+### IDA 证据与修复契约
+
+`mmBattleMstarWqvga.cbm:sub_4B38` 以 action record 的 `+0xD` 分支：
+
+- type 3 调用 record `+0xA14` 回调；终局会进入 `sub_30D4 -> sub_3008 -> sub_2F10`，
+  后者展示复活石/商城提示并由用户选择发送 `1/7/14`。
+- type 4 先结算临时动作值，设置 `battle+986`，调用 `sub_2C50`，再清除该标记并继续
+  Battle screen 的原生清理路径。它不会调用 `sub_3008`。
+
+当时据此尝试让自然终局仍只下发一个 `4/6`，但最后一条零载荷收尾动作改为 type 4：
+
+```text
+action 0..n: 本回合的一至两条普通 type-0/type-1 动作
+action n+1: type=4，actor 为最后一条致命伤害的目标
+```
+
+不附加 `4/7`、`4/8`、`4/11`、`4/9` 或 `4/4`。服务端只在双方分别发送客户端原生
+`25/5` 后释放 duel；持久角色 HP/MP、经验、铜钱、掉落和耐久不变。普通战斗死亡的
+type-3 和 `7/14` handler 不在本次变更范围内。
+
+### 否决理由
+
+- 该方案虽然没有普通复活选择，但新复现表明 type-4 必然显示空白模态窗口，故不能保留。
+- 第 17 节以 type-3 加权威 vital 提交取代本节方案；本节只保留为已排除的协议假设。
+
+## 17. Type-4 空白模态与死亡状态权威性（2026-08-20）
+
+### 复现与首个偏离
+
+第 16 节把最后一条动作改成 type-4 后，双方都能离开 Battle，且日志确认每端都发送了
+原生 `25/5`，但终局后双方都会显示一个内容为空的模态窗口。最新 `server_out.txt` 和
+`logs/duel-terminal-wire.log` 均记录：
+
+```text
+duel_terminal_packet ... actionnum=3
+source=4/6(damage-before-close(type=4))
+duel_terminal_exit_ack ... source=native-25/5
+```
+
+这说明空白窗口发生在 type-4 的客户端动作回调中，而不是退出确认、第二端镜像投递或
+`25/5` handler 产生的响应文本。
+
+### IDA 证据
+
+`mmBattleMstarWqvga.cbm:sub_4B38(0x4B38)` 直接按 action record 的 `+0xD` 分支：
+
+- type 3 调用 record `+0xA14` 的死亡完成回调。
+- type 4 累积临时值，设置 battle `+986`，调用 `sub_2C50`，随后调用 Battle UI vtable
+  `+144`，参数中的文本缓冲是固定的 `R9+0x3682`；type-4 record 没有服务端可传入的文本
+  字段。
+
+因而 type-4 不是“没有复活提示的切磋终局”协议。它必定把未准备的固定缓冲交给模态
+接口，运行时看到的空白窗口正是这个分支的可见结果，不能通过填充 `4/6.actioninfo` 或
+在 `25/5` 后附加另一个响应来纠正。
+
+`sub_30D4(0x30D4)` 证实 type-3 的 callback 在目标死亡时设置原生复活选择状态，并经
+`sub_3008 -> sub_2F10` 发送 `WT 1/7/14 {result}`。此前失败方在这个选择中得到
+“当前无需复活”，其首个错误状态不是该 handler 的文本，而是服务端只更新了
+`vm_mock_service_duel.hp[]`，没有将失败角色的权威 `account_roles.hp` / live role
+snapshot 写为 0。
+
+### 修复契约
+
+自然切磋终局继续只发送单一 `4/6`：最后一条致命伤害后紧跟 type-3，actor 是同一
+被击败 wire slot。不得再发送 type-4、`4/7`、`4/8`、`4/11`、`4/9` 或 `4/4`。
+
+在该 `4/6` 被任一观察端获得前，服务端必须以一个 MySQL 事务提交两个参赛角色的最终
+HP/MP；两条角色行都以各自 session 的 account id 和 online role id 精确限定。这样失败
+方的 `hp=0` 与已经播放的客户端死亡动作一致，后续原生 `1/7/14`：
+
+- `result=1` 可由既有复活石 handler 消耗复活石并经原生终局状态恢复生命；
+- `result=2` 可由既有普通复活 handler 扣除其已有的死亡惩罚、重生并下发场景进入；
+- 无论哪种选择，都不能再返回“当前无需复活”，也不能以 SDL 窗口退出收尾。
+
+事务成功后才更新两个 live role snapshot 和 online presence vitals；失败则不下发死亡
+`4/6`，保留本轮等待状态并记录精确持久化错误。这个状态提交只处理切磋已经在 action
+event 中计算出的 HP/MP，不写 CBE/CBM 内存、寄存器或 screen 状态。
+
+### 验证边界
+
+- 两端终局包均只有一个 `4/6`，末条为匹配致命目标的 type-3，绝不含 type-4。
+- 每个 observer 仍在动作完成后发送一个原生 `25/5`，第二个确认后才 `duel_release`。
+- 失败方选择复活石、选择不复活两条路径都由 `1/7/14` 正常处理，且不会显示空白模态、
+  “当前无需复活”或关闭 SDL 窗口。
+- MySQL 任一角色 vital 更新失败时，不改变两个 account cache 的 role snapshot，也不把
+  终局事件标记为已交付。
+
+### 实现与当前验证
+
+- 已在 `mock_server_battle.c` 实现 `vm_mock_service_duel_commit_terminal_vitals()`：先解析两个
+  live role snapshot，在一个事务内精确更新 `account_roles.hp/mp`，提交成功后才替换 cache 和
+  presence vitals；失败则清除未投递 event、保留已提交 intent，返回空确认等待下一次重放。
+- 已将终局 action 改回 type-3，并更新 packet regression，断言 type-3、终局死亡状态已持久化、
+  两个原生 `25/5` 以及失败方 `1/7/14(result=2)` 返回 `20/1 + 30/1` 普通重生。
+- `make -j2` 已通过。由于 Makefile 的聚合分片依赖不会触发 `server_main.o` 重编译，另以其
+  原始编译参数重编译 `src/server_main.c` 后再次执行 `make -j2`，服务端已重新链接。
+- `php -l scripts/duel-round-barrier-regression.php` 和 PowerShell AST 语法检查均已通过。
+- 隔离双端回归尚未运行：当前环境未设置 `CBE_AUTOMATION_MYSQL_PASSWORD`，运行器会在创建
+  隔离数据库前停止，未触碰用户数据库或端口。
