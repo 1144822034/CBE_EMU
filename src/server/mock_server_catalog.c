@@ -7302,6 +7302,50 @@ static bool vm_net_mock_append_equipment_login_object(
     return true;
 }
 
+/*
+ * Completion object for the first-login equipment bootstrap.
+ *
+ * Firmware evidence (mmGameMstarWqvga.cbm:sub_D04 0x1168..0x1190) shows
+ * that a 1/7/7 type=3 object has no item-manager or pending-item dependency:
+ * after the normal parser tail it calls the same shared +0x101/+0x14 slot
+ * used by the battle-path scene attribute rebuild, then clears its own
+ * notification wait state.  The zero byte is the iteminfo row count, so this
+ * object installs or consumes no item.
+ *
+ * Runtime verification with player-3 showed this is the missing terminal
+ * object for the login equipment bootstrap: type-2 installs all equipment,
+ * then this zero-row type-3 invokes the same scene attribute rebuild callback
+ * used by battle.  Restrict it to the existing exact group/type-1 bootstrap;
+ * it is not a generic 7/7 or item-operation reply.
+ */
+static bool vm_net_mock_append_equipment_login_type3_completion_object(
+    u8 *out, u32 outCap, u32 *pos, u8 equipmentRows)
+{
+    static const u8 emptyItemInfo[] = {0};
+    vm_net_mock_role_state *role = vm_net_mock_active_role();
+    u32 objectStart = 0;
+
+    if (equipmentRows == 0)
+    {
+        return true;
+    }
+    if (out == NULL || pos == NULL || role == NULL)
+        return false;
+    if (!vm_net_mock_begin_wt_object(out, outCap, pos, 1, 7, 7, &objectStart) ||
+        !vm_net_mock_put_object_u8(out, outCap, pos, "type", 3) ||
+        !vm_net_mock_put_object_raw(out, outCap, pos, "iteminfo",
+                                    emptyItemInfo, sizeof(emptyItemInfo)))
+    {
+        return false;
+    }
+    vm_net_mock_finish_wt_object(out, objectStart, *pos);
+    printf("[info][network] mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+           role->roleId, equipmentRows);
+    vm_autotest_note("mock_login_equipment_type3_completion role=%u rows=%u response=7/7-type3-empty evidence=mmGameMstarWqvga:0x1168-0x1190\n",
+                     role->roleId, equipmentRows);
+    return true;
+}
+
 static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outCap, u32 *pos, u8 *objectCount)
 {
     vm_net_mock_role_state *role = vm_net_mock_active_role();
@@ -7345,7 +7389,15 @@ static bool vm_net_mock_append_backpack_role_grid_main_objects(u8 *out, u32 outC
                 out, outCap, pos, &equipmentRows))
             return false;
         if (equipmentRows != 0)
+        {
             *objectCount = (u8)(*objectCount + 1);
+            if (!vm_net_mock_append_equipment_login_type3_completion_object(
+                    out, outCap, pos, equipmentRows))
+            {
+                return false;
+            }
+            *objectCount = (u8)(*objectCount + 1);
+        }
         g_netMockBackpackGridSeededRoleId = role->roleId;
     }
     return true;
