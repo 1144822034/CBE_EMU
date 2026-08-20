@@ -38,7 +38,6 @@ extern void vm_shop_return_forensics_note_gate_write(uc_engine *uc,
  * controller.  This remains an observation-only memory watch. */
 extern u32 g_vmEquipmentEnhanceRulesWatchAddress;
 extern u32 g_vmEquipmentEnhanceRulesWatchWriteCount;
-
 /* The scene movement ticker loads its map controller from Global_R9+0x9540.
  * Keep this diagnosis read-only: an invalid pointer here crashes later in
  * UpdateSpriteMovement and otherwise loses the instruction that first wrote
