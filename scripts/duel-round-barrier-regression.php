@@ -200,31 +200,28 @@ function assert_scene_default_ack(string $reply, string $phase): void {
 }
 function is_duel_terminal_reply(string $reply): bool {
     $objects = response_objects($reply);
-    return count($objects) === 3 && $objects[0]['major'] === 1 &&
-        $objects[0]['kind'] === 4 && $objects[0]['subtype'] === 6 &&
-        $objects[1]['major'] === 1 && $objects[1]['kind'] === 4 &&
-        $objects[1]['subtype'] === 11 && $objects[2]['major'] === 1 &&
-        $objects[2]['kind'] === 4 && $objects[2]['subtype'] === 9;
+    return count($objects) === 1 && $objects[0]['major'] === 1 &&
+        $objects[0]['kind'] === 4 && $objects[0]['subtype'] === 6;
 }
 function assert_duel_terminal(string $reply, string $phase): array {
     $objects = response_objects($reply);
     if (!is_duel_terminal_reply($reply) || $objects[0]['major'] !== 1 ||
         $objects[0]['kind'] !== 4 || $objects[0]['subtype'] !== 6 ||
-        tagged_u8(object_field($objects[1], 'result')) !== 1 ||
-        tagged_u8(object_field($objects[1], 'type')) !== 0 ||
-        tagged_u8(object_field($objects[2], 'result')) !== 1 ||
-        find_object($reply, 4, 7) !== null) {
+        find_object($reply, 4, 7) !== null || find_object($reply, 4, 8) !== null ||
+        find_object($reply, 4, 9) !== null || find_object($reply, 4, 11) !== null) {
         throw new RuntimeException(
-            "$phase was not one native 4/6+4/11+4/9 no-reward close packet: " . bin2hex($reply));
+            "$phase was not one native 4/6 damage+death no-reward close packet: " . bin2hex($reply));
     }
     $actions = decode_round_actions($reply, $phase);
-    if (count($actions) < 1 || count($actions) > 2) {
+    if (count($actions) !== 2) {
         throw new RuntimeException("$phase has an invalid terminal action count " . count($actions));
     }
-    foreach ($actions as $i => $action) {
-        if ($action['type'] === 3 || $action['type'] === 4) {
-            throw new RuntimeException("$phase action $i entered the ordinary death-action family");
-        }
+    if (($actions[0]['type'] !== 0 && $actions[0]['type'] !== 1) ||
+        count($actions[0]['targets']) !== 1 ||
+        $actions[1]['type'] !== 3 || count($actions[1]['targets']) !== 0 ||
+        $actions[1]['actor'] !== $actions[0]['targets'][0]) {
+        throw new RuntimeException(
+            "$phase did not encode damage followed by the matching native death action");
     }
     return $actions;
 }
@@ -522,7 +519,7 @@ try {
         (int)$rows[1]['mp'] !== (int)$rows[1]['mp_max']) {
         throw new RuntimeException('friendly duel polluted durable role HP/MP: ' . json_encode($rows));
     }
-    echo "duel-round-barrier-v1 passed: barrier + native 4/6+4/11+4/9 no-reward close + isolated 4/4 active escape\n";
+    echo "duel-round-barrier-v1 passed: barrier + native 4/6(damage+death) no-reward close + isolated 4/4 active escape\n";
 } finally {
     foreach ($clients as $client) {
         try { call_service($port, $client, '', 4); } catch (Throwable $ignored) {}
