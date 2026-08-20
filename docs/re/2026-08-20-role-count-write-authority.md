@@ -2,7 +2,7 @@
 
 Date: 2026-08-20
 
-Status: implemented-build-validated; isolated-DB runtime regression pending automation credentials
+Status: validated
 
 ## 触发与首个错误状态
 
@@ -56,6 +56,18 @@ Status: implemented-build-validated; isolated-DB runtime regression pending auto
 再模拟关系表新增第三角色，然后执行普通 active-role 保存。断言保存返回失败、状态表
 计数修正为 3、缓存被失效，随后关系 loader 能重新读取三条角色主行。
 
-2026-08-20 验证：`make -j2` 及该回归程序的独立编译均通过。运行隔离数据库场景需要
-`CBE_AUTOMATION_MYSQL_PASSWORD`；当前执行环境没有配置该变量，因此没有改用
-`jh_online_release` 或任何用户数据库进行替代测试。
+2026-08-20 验证：
+
+- `make -j2` 通过；
+- `scripts/run-role-count-authority-migration-regression.ps1` 使用其唯一命名的
+  `cbe_auto_role_count_*` 临时库通过，并在结束时删除该库。场景先放置 v2 标记和
+  错误缓存，再验证 v3 仍校正历史 `3 -> 2`、`1 -> 0`；随后把关系表扩为 3 条、保持
+  会话缓存为 2 并触发普通保存，确认保存不会写回 2，而是把状态表校正为 3、失效缓存并
+  使下一次关系 loader 重新读取三条主行。该场景还确认预检失败会回滚、不写入 v3 标记。
+- 在用户明确指定的本地 `jh_online_release` 上，
+  `scripts/run-title-role-list-account-regression.ps1 -Account guest00723` 通过。
+  服务启动时记录 `role-count-authority-v3 corrected_accounts=0`，随后
+  `mock_role_db_mysql_load` 以关系表加载 2 名角色（活动角色 `10650`）；正常
+  `1/1/12 -> 1/1/16 -> 1/1/4` 请求链的 `actorinfo` 亦恰为 2 名角色，ID 为
+  `10550`、`10650`，与 `account_roles` 相同。证据目录为
+  `artifacts/automation/title-role-list-account-v1-20260820T074947287Z-12876/`。
