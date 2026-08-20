@@ -6202,7 +6202,7 @@ static void vm_net_mock_trace_duel_terminal_wire(
 
     if (packet == NULL || packetLen < 5 || duel == NULL || event == NULL ||
         observer == NULL || packet[0] != 'W' || packet[1] != 'T' ||
-        packet[4] != 3)
+        packet[4] != 1)
     {
         return;
     }
@@ -6235,6 +6235,7 @@ static u32 vm_net_mock_build_duel_action_packet(
     u8 actionCount = 0;
     u32 observerWireId = 0;
     bool includeLocalSkillTeamInfo = false;
+    bool terminalDeathActionAppended = false;
 
     if (out == NULL || outCap < pos || duel == NULL || event == NULL ||
         !event->valid || event->actionCount == 0 || event->actionCount > 2 ||
@@ -6270,7 +6271,33 @@ static u32 vm_net_mock_build_duel_action_packet(
         ++actionCount;
         if (actionType == 1 && action->sourceIndex == observerIndex)
             includeLocalSkillTeamInfo = true;
+
+        /* A 4/6 round is an ordered action queue.  The regular battle path
+         * follows a lethal delta with a type-3 record for the defeated slot;
+         * sub_4BE8 consumes that record and writes phase 7 after its native
+         * death animation completes.  Previously the duel path omitted it
+         * and appended 4/11+4/9 instead.  Those objects immediately replaced
+         * phase 5 with phase 8, so the queued terminal action could not reach
+         * its completion branch and either client could remain in Battle.
+         *
+         * The death record has no child/value payload.  Its actor is the
+         * already calculated target wire slot and is mirrored for each
+         * observer exactly like the preceding damage record. */
+        if (event->terminal && action->terminal)
+        {
+            if (actionCount >= 6 ||
+                !vm_net_mock_append_battle_actioninfo_record(
+                    actionInfo, sizeof(actionInfo), &actionInfoLen,
+                    3, targetWire, 0, 0, 0, 0, 0, 0, 0, 0))
+            {
+                return 0;
+            }
+            ++actionCount;
+            terminalDeathActionAppended = true;
+        }
     }
+    if (event->terminal && !terminalDeathActionAppended)
+        return 0;
     observerWireId = vm_mock_service_team_member_wire_id(observer, observer);
     if (observerWireId == 0)
         return 0;
@@ -6281,19 +6308,14 @@ static u32 vm_net_mock_build_duel_action_packet(
     {
         return 0;
     }
-    if (event->terminal &&
-        (!vm_net_mock_append_battle_terminal_case11_object(out, outCap, &pos) ||
-         !vm_net_mock_append_battle_terminal_case9_object(out, outCap, &pos)))
-    {
-        return 0;
-    }
-    vm_net_mock_finish_wt_packet(out, pos, event->terminal ? 3 : 1);
+    vm_net_mock_finish_wt_packet(out, pos, 1);
     if (event->terminal)
     {
         printf("[info][mock-service] duel_terminal_packet serial=%u action=%u "
-               "observer=%08x objects=3 source=4/6-before-4/11-4/9 "
-               "evidence=mmBattle:0x6EB0+0x7C16+0x7CB2\n",
-               duel->serial, event->serial, observer->clientId);
+               "observer=%08x objects=1 actionnum=%u "
+               "source=4/6(damage-before-death(type=3)) "
+               "evidence=mmBattle:0x6EB0->0x4BE8+0x4C64\n",
+               duel->serial, event->serial, observer->clientId, actionCount);
         vm_net_mock_trace_duel_terminal_wire(out, pos, duel, event, observer);
     }
     return pos;
@@ -6538,8 +6560,8 @@ static u32 vm_net_mock_build_duel_operate_response(
     if (event->terminal)
     {
         printf("[info][mock-service] duel_terminal_arm serial=%u delivered=%02x "
-               "exit=%02x response=4/6+4/11+4/9 kind=no-reward-close "
-               "evidence=mmBattle:0x6EB0+0x7C16+0x7CB2\n",
+               "exit=%02x response=4/6(damage+death(type=3)) "
+               "kind=native-death-close evidence=mmBattle:0x6EB0->0x4BE8+0x4C64\n",
                duel->serial, duel->terminalDeliveredMask,
                duel->terminalExitPendingMask);
     }

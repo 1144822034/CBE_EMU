@@ -56,14 +56,14 @@ $database = 'jh_online_autotest_' + ([Guid]::NewGuid().ToString('N'))
     trigger_rule = 'once'; max_repetitions = 1
     failure_conditions = @('duel visual row mismatch', 'early 4/6', 'duplicate intent overwrite',
         'missing combined round', 'wrong mirror delivery', '4/12 bypasses barrier',
-        'terminal round bypasses barrier', 'ordinary death action in friendly duel',
+        'terminal round bypasses barrier', 'missing native death action in friendly duel',
         'terminal duel action queued after its target reached zero',
         'wrong duel terminal object', 'duel released before both native exits',
         'durable role vitals changed')
     input = @('two CBMS logins', 'two scene-ready six-object WT subset requests', '4/14 invite',
         'scene-poll 4/15', '4/16+4/9 accept', 'two mirrored 4/10 starts',
         'manual 4/2 rounds', 'duplicate 4/2', 'automatic 4/12 rounds through terminal',
-        'two terminal 4/6+4/11+4/9 no-reward-close deliveries', 'late 4/2 and 4/12 ownership checks',
+        'two terminal 4/6(damage+death(type=3)) no-reward-close deliveries', 'late 4/2 and 4/12 ownership checks',
         'two native 25/5 exit acknowledgements', 'post-exit reinvite',
         'second duel active 4/4 escape and two 25/5 acknowledgements',
         'durable vital checks')
@@ -107,7 +107,7 @@ try {
     Stop-OwnedProcess $serverProcess
     $serverProcess = $null
     $serverLog = Get-Content -LiteralPath (Join-Path $runDir 'server.stdout.log') -Raw
-    foreach ($required in @('response=4/6+4/11+4/9 kind=no-reward-close',
+    foreach ($required in @('response=4/6(damage+death(type=3)) kind=native-death-close',
                              'duel_escape', 'response=4/4(result=1) kind=escape',
                              'duel_terminal_exit_ack', 'duel_release')) {
         if (-not $serverLog.Contains($required)) { throw "missing server evidence: $required" }
@@ -126,8 +126,8 @@ try {
     if ($naturalLog -notmatch 'duel_action_round_release[^\r\n]*terminal=1 post_defeat_actions=0') {
         throw 'terminal duel did not prove that no action followed a defeated target'
     }
-    if ([regex]::Matches($naturalLog, 'duel_terminal_packet .*objects=3 .*source=4/6-before-4/11-4/9').Count -ne 2) {
-        throw 'terminal duel did not deliver the expected no-reward close packet to both observers'
+    if ([regex]::Matches($naturalLog, 'duel_terminal_packet .*objects=1 .*actionnum=2 .*source=4/6\(damage-before-death\(type=3\)\)').Count -ne 2) {
+        throw 'terminal duel did not deliver the expected damage-plus-death close packet to both observers'
     }
     $lastExitAck = $serverLog.LastIndexOf('duel_terminal_exit_ack')
     $release = $serverLog.IndexOf('duel_release', $lastExitAck)
