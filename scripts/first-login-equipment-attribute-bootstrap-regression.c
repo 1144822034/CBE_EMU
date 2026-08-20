@@ -2,7 +2,7 @@
  * Deterministic server-only regression for the first-login equipment seed.
  *
  * It neither starts a listener nor connects to MySQL.  A role with one normal
- * backpack row and one durable equipped item must receive the existing
+ * backpack row and durable HP/MP-raising equipment must receive the existing
  * 30/21 -> 7/7(type=2) initializers in the first 5/10 + 7/7(type=1)
  * bootstrap response.  The title 1/1/6 + 1/1/15 acknowledgement must not
  * consume that one-shot; a repeated group poll must not duplicate it, and a
@@ -138,12 +138,104 @@ static bool response_object_at(const u8 *packet, u32 length, u8 index,
     return false;
 }
 
+static bool actorinfo_read_u32(const u8 *actorInfo, u32 actorInfoLen,
+                               u32 *pos, u32 *valueOut)
+{
+    if (actorInfo == NULL || pos == NULL || *pos + 6 > actorInfoLen ||
+        actorInfo[*pos] != 0 || actorInfo[*pos + 1] != 4)
+    {
+        return false;
+    }
+    if (valueOut)
+    {
+        *valueOut = ((u32)actorInfo[*pos + 2] << 24) |
+                    ((u32)actorInfo[*pos + 3] << 16) |
+                    ((u32)actorInfo[*pos + 4] << 8) |
+                    actorInfo[*pos + 5];
+    }
+    *pos += 6;
+    return true;
+}
+
+static bool actorinfo_skip_u8(const u8 *actorInfo, u32 actorInfoLen,
+                              u32 *pos)
+{
+    if (actorInfo == NULL || pos == NULL || *pos + 3 > actorInfoLen ||
+        actorInfo[*pos] != 0 || actorInfo[*pos + 1] != 1)
+    {
+        return false;
+    }
+    *pos += 3;
+    return true;
+}
+
+static bool actorinfo_skip_string(const u8 *actorInfo, u32 actorInfoLen,
+                                  u32 *pos)
+{
+    u16 length = 0;
+
+    if (actorInfo == NULL || pos == NULL || *pos + 2 > actorInfoLen)
+        return false;
+    length = (u16)(((u16)actorInfo[*pos] << 8) | actorInfo[*pos + 1]);
+    *pos += 2;
+    if (length == 0 || *pos + length > actorInfoLen)
+        return false;
+    *pos += length;
+    return true;
+}
+
+static bool actorinfo_read_vitals(const u8 *actorInfo, u32 actorInfoLen,
+                                  u32 *hpCurrentOut, u32 *hpBaseMaxOut,
+                                  u32 *mpCurrentOut, u32 *mpBaseMaxOut,
+                                  u32 *hpDisplayMaxOut, u32 *mpDisplayMaxOut)
+{
+    u32 pos = 0;
+    u32 ignored = 0;
+
+    if (!actorinfo_read_u32(actorInfo, actorInfoLen, &pos, &ignored) ||
+        !actorinfo_skip_u8(actorInfo, actorInfoLen, &pos) ||
+        !actorinfo_skip_u8(actorInfo, actorInfoLen, &pos) ||
+        !actorinfo_skip_string(actorInfo, actorInfoLen, &pos) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, &ignored) ||
+        !actorinfo_skip_string(actorInfo, actorInfoLen, &pos) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, &ignored) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, hpCurrentOut) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, hpBaseMaxOut) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, mpCurrentOut) ||
+        !actorinfo_read_u32(actorInfo, actorInfoLen, &pos, mpBaseMaxOut))
+    {
+        return false;
+    }
+    /* strength, six secondary attributes, total EXP and the documented gap. */
+    for (u32 i = 0; i < 9; ++i)
+    {
+        if (!actorinfo_read_u32(actorInfo, actorInfoLen, &pos, &ignored))
+            return false;
+    }
+    return actorinfo_skip_u8(actorInfo, actorInfoLen, &pos) &&
+           actorinfo_skip_u8(actorInfo, actorInfoLen, &pos) &&
+           actorinfo_read_u32(actorInfo, actorInfoLen, &pos, hpDisplayMaxOut) &&
+           actorinfo_read_u32(actorInfo, actorInfoLen, &pos, mpDisplayMaxOut);
+}
+
 static int assert_title_role_select_reply(const u8 *packet, u32 length,
-                                          u32 expectedRoleId)
+                                          u32 expectedRoleId,
+                                          const vm_net_mock_player_stats *baseStats,
+                                          const vm_net_mock_player_stats *fullStats)
 {
     u8 major = 0;
     u8 kind = 0;
     u8 subtype = 0;
+    const u8 *titlePayload = NULL;
+    const u8 *actorInfo = NULL;
+    u16 titlePayloadLen = 0;
+    u16 actorInfoLen = 0;
+    u32 hpCurrent = 0;
+    u32 hpBaseMax = 0;
+    u32 mpCurrent = 0;
+    u32 mpBaseMax = 0;
+    u32 hpDisplayMax = 0;
+    u32 mpDisplayMax = 0;
 
     if (packet == NULL || length < 5 || packet[4] != 2 ||
         g_netMockBackpackGridSeededRoleId != 0)
@@ -173,7 +265,72 @@ static int assert_title_role_select_reply(const u8 *packet, u32 length,
     {
         return 1;
     }
+    if (baseStats == NULL || fullStats == NULL ||
+        !response_object_at(packet, length, 0, &major, &kind, &subtype,
+                            &titlePayload, &titlePayloadLen) ||
+        !vm_net_mock_get_object_entry_bytes(titlePayload, titlePayloadLen,
+                                            "actorinfo", &actorInfo,
+                                            &actorInfoLen) ||
+        !actorinfo_read_vitals(actorInfo, actorInfoLen,
+                               &hpCurrent, &hpBaseMax,
+                               &mpCurrent, &mpBaseMax,
+                               &hpDisplayMax, &mpDisplayMax) ||
+        hpCurrent != fullStats->maxHp || mpCurrent != fullStats->maxMp ||
+        hpBaseMax != baseStats->maxHp || mpBaseMax != baseStats->maxMp ||
+        hpDisplayMax != fullStats->maxHp ||
+        mpDisplayMax != fullStats->maxMp)
+    {
+        fprintf(stderr,
+                "ActorInfo vitals mismatch: current=%u/%u base=%u/%u "
+                "display=%u/%u expected-full=%u/%u expected-base=%u/%u\n",
+                hpCurrent, mpCurrent, hpBaseMax, mpBaseMax,
+                hpDisplayMax, mpDisplayMax,
+                fullStats ? fullStats->maxHp : 0,
+                fullStats ? fullStats->maxMp : 0,
+                baseStats ? baseStats->maxHp : 0,
+                baseStats ? baseStats->maxMp : 0);
+        return 1;
+    }
     return 0;
+}
+
+static bool equip_vital_bonus_pair(vm_net_mock_role_state *role)
+{
+    u32 catalogCount = vm_net_mock_load_equipment_catalog();
+
+    if (role == NULL)
+        return false;
+    for (u32 hpIndex = 0; hpIndex < catalogCount; ++hpIndex)
+    {
+        const vm_net_mock_equipment_catalog_item *hpItem =
+            &g_vm_net_mock_equipment_catalog[hpIndex];
+
+        if (hpItem->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+            hpItem->levelRequired > role->level || hpItem->bonus.hp == 0)
+        {
+            continue;
+        }
+        for (u32 mpIndex = 0; mpIndex < catalogCount; ++mpIndex)
+        {
+            const vm_net_mock_equipment_catalog_item *mpItem =
+                &g_vm_net_mock_equipment_catalog[mpIndex];
+
+            if (mpItem->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT ||
+                mpItem->levelRequired > role->level || mpItem->bonus.mp == 0 ||
+                (mpItem != hpItem && mpItem->slot == hpItem->slot))
+            {
+                continue;
+            }
+            role->equippedItems[hpItem->slot].itemId = hpItem->itemId;
+            role->equippedItems[hpItem->slot].durability = hpItem->durabilityMax;
+            role->equippedItems[hpItem->slot].durabilityMax = hpItem->durabilityMax;
+            role->equippedItems[mpItem->slot].itemId = mpItem->itemId;
+            role->equippedItems[mpItem->slot].durability = mpItem->durabilityMax;
+            role->equippedItems[mpItem->slot].durabilityMax = mpItem->durabilityMax;
+            return true;
+        }
+    }
+    return false;
 }
 
 static int assert_group_equipment_seed(const u8 *packet, u32 length,
@@ -271,7 +428,7 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
                                             equipmentPayloadLen, "iteminfo",
                                             &itemInfo, &itemInfoLen) ||
         itemInfo == NULL || itemInfoLen < 3 || itemInfo[0] != 0 ||
-        itemInfo[1] != 1 || itemInfo[2] != 1)
+        itemInfo[1] != 1 || itemInfo[2] == 0)
     {
         fputs("group bootstrap lacks the ordered durable equipment instance\n",
               stderr);
@@ -301,9 +458,10 @@ static int assert_group_equipment_seed(const u8 *packet, u32 length,
 int main(void)
 {
     const u32 roleId = 910001;
-    const vm_net_mock_equipment_catalog_item *sword = NULL;
     vm_net_mock_role_state *role = NULL;
     vm_mock_service_client_session *session = NULL;
+    vm_net_mock_player_stats baseStats;
+    vm_net_mock_player_stats fullStats;
     u8 selectRequest[128];
     u8 groupRequest[128];
     u8 response[16384];
@@ -321,12 +479,6 @@ int main(void)
     g_netMockBackpackGridSeededRoleId = 0;
     g_netMockBackpackGridReseedPendingRoleId = 0;
 
-    sword = vm_net_mock_find_equipment_catalog_item(1001);
-    if (sword == NULL || sword->slot >= VM_NET_MOCK_EQUIP_SLOT_COUNT)
-    {
-        fputs("required equipment catalog item 1001 is unavailable\n", stderr);
-        return 1;
-    }
     role = &g_vm_net_mock_role_db.roles[0];
     role->roleId = roleId;
     role->job = 1;
@@ -342,9 +494,25 @@ int main(void)
     role->backpackItems[0].itemId = 801;
     role->backpackItems[0].seq = 1;
     role->backpackItems[0].count = 1;
-    role->equippedItems[sword->slot].itemId = sword->itemId;
-    role->equippedItems[sword->slot].durability = 50;
-    role->equippedItems[sword->slot].durabilityMax = 50;
+    if (!equip_vital_bonus_pair(role))
+    {
+        fputs("could not find usable HP/MP equipment pair in catalog\n", stderr);
+        return 1;
+    }
+    vm_net_mock_role_build_base_player_stats(role, &baseStats);
+    vm_net_mock_role_build_player_stats(role, &fullStats);
+    if (fullStats.maxHp <= baseStats.maxHp || fullStats.maxMp <= baseStats.maxMp)
+    {
+        fprintf(stderr,
+                "selected equipment did not raise both vitals: base=%u/%u full=%u/%u\n",
+                baseStats.maxHp, baseStats.maxMp,
+                fullStats.maxHp, fullStats.maxMp);
+        return 1;
+    }
+    /* Model the user's regression exactly: durable current values have been
+     * restored to the full equipped maxima before a new login. */
+    role->hp = role->hpMax = fullStats.maxHp;
+    role->mp = role->mpMax = fullStats.maxMp;
 
     /* The real 5/10 builder also initializes the client-owned solo roster.
      * Give this no-network fixture one ordinary active session so it exercises
@@ -385,7 +553,8 @@ int main(void)
     }
     responseLen = vm_net_mock_build_title_role_select_response(
         selectRequest, selectRequestLen, response, sizeof(response));
-    if (assert_title_role_select_reply(response, responseLen, roleId) != 0)
+    if (assert_title_role_select_reply(response, responseLen, roleId,
+                                       &baseStats, &fullStats) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(
@@ -402,7 +571,8 @@ int main(void)
 
     responseLen = vm_net_mock_build_title_role_select_response(
         selectRequest, selectRequestLen, response, sizeof(response));
-    if (assert_title_role_select_reply(response, responseLen, roleId) != 0)
+    if (assert_title_role_select_reply(response, responseLen, roleId,
+                                       &baseStats, &fullStats) != 0)
         return 1;
 
     responseLen = vm_net_mock_build_group_type1_response(

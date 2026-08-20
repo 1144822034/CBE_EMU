@@ -105,14 +105,15 @@ helper 发送：
 ActorInfo 数据来源。
 
 新增 `scripts/first-login-equipment-attribute-bootstrap-regression.c`。它在内存中创建
-一个具有普通背包行和耐久装备的角色，不启动监听器且不连接 MySQL，直接调用真实选角
-和组同步 builder，断言：
+一个具有普通背包行及会同时提高 HP/MP 的耐久装备的角色，不启动监听器且不连接 MySQL，直接
+调用真实选角和组同步 builder，断言：
 
 1. 选角对象严格为 `1/1/6 -> 1/1/15`，且没有消耗种子；
 2. 第一个组同步回复按顺序含一次 `30/21 -> 7/7(type=2) -> 7/7(type=3)`，其 type-2
-   `iteminfo` 含一条已穿戴耐久实例，type-3 的 `iteminfo` 精确为零行字节 `00`；
+   `iteminfo` 含至少一条已穿戴耐久实例，type-3 的 `iteminfo` 精确为零行字节 `00`；
 3. 同一生命周期的重复组同步不会再次追加该三个对象；
 4. 再次选角后，第一个组同步重新发出一次完整种子。
+5. ActorInfo 的 HP/MP base-max 保持裸装，而当前值和 HUD display-max 保持全装备最大值。
 
 该夹具断言 type-3 终结对象为默认协议：它紧邻 type-2 装备对象，且 `iteminfo` 精确为一个
 零行计数字节 `00`。重复组同步仍不得重放这三个对象。
