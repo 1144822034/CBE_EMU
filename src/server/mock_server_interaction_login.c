@@ -3035,8 +3035,15 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     secondaryCurrent = vm_net_mock_env_u32("CBE_ACTOR_MP_CURRENT",
                                            vm_net_mock_env_u32("CBE_ACTOR_MP", roleMpDefault));
     secondaryBaseMax = vm_net_mock_env_u32("CBE_ACTOR_MP_MAX", playerStats.maxMp);
-    primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX", primaryBaseMax);
-    secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX", secondaryBaseMax);
+    /* These two later ActorInfo fields populate the HUD meter caps.  Unlike
+     * primary/secondaryBaseMax, they are not fed back through the client's
+     * 1/7/7 equipment reconstruction.  They must therefore carry the full
+     * durable maximum; otherwise a full role is rendered as though it still
+     * had its pre-equipment HP/MP after every login. */
+    primaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_HP_DISPLAY_MAX",
+                                            roleMaxHpDefault);
+    secondaryDisplayMax = vm_net_mock_env_u32("CBE_ACTOR_MP_DISPLAY_MAX",
+                                              roleMaxMpDefault);
     if (roleLevel == 0)
         roleLevel = 1;
     if (actorJob == 0 || actorJob > 3)
@@ -3055,9 +3062,15 @@ static u32 vm_net_mock_build_actor_info(u8 *out, u32 outCap)
     if (secondaryCurrent > roleMaxMpDefault)
         secondaryCurrent = roleMaxMpDefault;
     if (primaryDisplayMax == 0)
-        primaryDisplayMax = primaryBaseMax;
+        primaryDisplayMax = roleMaxHpDefault ? roleMaxHpDefault : primaryBaseMax;
     if (secondaryDisplayMax == 0)
-        secondaryDisplayMax = secondaryBaseMax;
+        secondaryDisplayMax = roleMaxMpDefault ? roleMaxMpDefault : secondaryBaseMax;
+    /* Preserve a valid meter if a diagnostic override is lower than the
+     * persisted current value.  Normal service uses the full maxima above. */
+    if (primaryDisplayMax < primaryCurrent)
+        primaryDisplayMax = primaryCurrent;
+    if (secondaryDisplayMax < secondaryCurrent)
+        secondaryDisplayMax = secondaryCurrent;
 
     vm_net_mock_build_actorinfo_status_fields(&playerStats, &actorStatusFields);
     actorStatusFields.strength = vm_net_mock_env_u32("CBE_ACTOR_ATTR_STRENGTH",
